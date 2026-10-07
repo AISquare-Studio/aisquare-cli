@@ -1055,7 +1055,27 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     async def on_project_onboarded(self, event: ProjectOnboarded) -> None:
         self.refresh_data()
-        self.post_message(ProjectSelected(event.project_id))
+        await self.on_project_selected(ProjectSelected(event.project_id))
+        self.call_after_refresh(self._hand_on_after_onboarding, f"project-{event.project_id}")
+
+    def _hand_on_after_onboarding(self, view_id: str) -> None:
+        """The Onboard view kept the keyboard on its path box, hidden now: give it the next step.
+
+        Keys typed there went nowhere anyone could see, and the footer had nothing
+        to offer. The project's *Start manager* takes it, else the sidebar; a
+        keyboard the user put somewhere visible meanwhile is left where it is.
+        """
+        chain = self.screen.focus_chain
+        if self.focused is not None and self.focused in chain:
+            return
+        try:
+            view = self.content.get_child_by_id(view_id)
+        except NoMatches:
+            view = None
+        start = (
+            next((w for w in view.query("#start-manager") if w in chain), None) if view else None
+        )
+        (start or self.sidebar).focus()
 
     def on_onboard_failed(self, event: OnboardFailed) -> None:
         # markup=False: the message carries a path the user chose, and a toast

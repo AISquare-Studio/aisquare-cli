@@ -311,6 +311,9 @@ class WelcomeView(VerticalScroll):
         self.steps: dict[str, FleetStep] = {}
         """Per label, what the last start said about the chosen project's agents."""
         self.fleet_error: str | None = None
+        self.opened: str | None = None
+        """The manager whose pane *Open the manager* last opened: the trust question's turn
+        is over, and the coders are next."""
         self._shown = False
         self._keyboard = False
         """Whether the keyboard was on this page at the last paint (see :meth:`paint`)."""
@@ -340,7 +343,7 @@ class WelcomeView(VerticalScroll):
             yield Static(id="fleet-status")
             with Horizontal(id="fleet-actions", classes="row"):
                 yield Button("Start manager", id="fleet-manager", variant="primary")
-                yield Button("Open the manager", id="fleet-open")
+                yield Button("Open the manager", id="fleet-open", variant="primary")
                 yield Button("Start the coders", id="fleet-coders", variant="primary")
         yield Static(self._keys(), id="welcome-keys")
 
@@ -638,7 +641,9 @@ class WelcomeView(VerticalScroll):
         elif button.id == "fleet-open":
             manager = self._live().get("manager")
             if manager is not None:
+                self.opened = manager.id
                 self.post_message(AgentSelected(manager.project_id, manager.id))
+                self.paint()
 
     def _start_work(self, name: str, work: Callable[[], object]) -> None:
         if self.busy is not None:
@@ -880,10 +885,18 @@ class WelcomeView(VerticalScroll):
         start = self.query_one("#fleet-manager", Button)
         start.display = manager is None
         start.disabled = not ready
-        self.query_one("#fleet-open", Button).display = manager is not None
+        # Before the coders, the next step is the manager's pane (the trust question),
+        # so Open is the primary and takes the keyboard; once it has been opened the
+        # coders are, and Open leaves the Tab order until the fleet is up.
+        opened = manager is not None and self.opened == manager.id
+        open_button = self.query_one("#fleet-open", Button)
+        open_button.display = manager is not None
+        open_button.variant = "default" if opened and not up else "primary"
+        open_button.can_focus = up or not opened
         coders_button = self.query_one("#fleet-coders", Button)
         coders_button.display = manager is not None and not up
         coders_button.disabled = not ready
+        coders_button.variant = "primary" if opened else "default"
         self._card("step-fleet", done=up, waiting=waiting, keep_keys=True)
 
     def _fleet_lines(self, live: dict[str, FleetAgent]) -> list[Text]:

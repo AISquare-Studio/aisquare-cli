@@ -36,6 +36,7 @@ from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected
 from aisquare.cli.ui.views import welcome
+from aisquare.cli.ui.views.onboard import ProjectOnboarded
 from aisquare.cli.ui.views.welcome import FLEET_UP, Seams, WelcomeView
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import tmux as tmux_core
@@ -569,6 +570,33 @@ def test_open_the_manager_selects_its_row(tmp_path: Path) -> None:
     assert hosted(machine, go) == [("prj_demo", "agt_manager")]
 
 
+def test_the_keyboard_follows_the_trust_question_then_the_coders(tmp_path: Path) -> None:
+    """After Start manager the manager's pane is next (Claude Code's trust question), then
+    the coders: focus is on each in turn, and on the visible primary button each time."""
+    machine, _ = _ready_machine(tmp_path)
+
+    async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> list[tuple[str, str]]:
+        seen: list[tuple[str, str]] = []
+
+        def where() -> tuple[str, str]:
+            focused = host.focused
+            assert isinstance(focused, Button) and focused in host.screen.focus_chain
+            return str(focused.id), str(focused.variant)
+
+        page.query_one("#fleet-manager", Button).focus()
+        for _ in range(3):  # Start manager; Open the manager; Start the coders
+            await pilot.press("enter")
+            await settle_page(host)
+            seen.append(where())
+        return seen
+
+    after_start, after_open, after_coders = hosted(machine, go)
+    assert after_start == ("fleet-open", "primary")  # the trust question comes first
+    assert after_open == ("fleet-coders", "primary")  # then the coders
+    assert after_coders == ("fleet-open", "primary")  # and with the fleet up, the manager
+    assert [m for m in machine.starts] == [("prj_demo", True, 0), ("prj_demo", False, 2)]
+
+
 def test_gh_missing_is_a_note_not_a_block(tmp_path: Path) -> None:
     machine, _ = _ready_machine(tmp_path, gh=False)
 
@@ -713,6 +741,78 @@ def test_the_keyboard_alone_gets_from_a_new_folder_to_a_fleet(
     ]
     assert FLEET_UP in (status or "")
     assert focus == ["claude-connect", "fleet-manager", "fleet-open", "fleet-open"]
+
+
+def test_a_typed_folder_hands_the_keyboard_to_the_next_step(
+    captain: str | None,
+    fleet_rows: dict[str, list[FleetAgentStatus]],
+    scripted: Callable[[Machine], None],
+    tmp_path: Path,
+) -> None:
+    """The path box hides once its folder is set up; the keyboard must not stay in it."""
+    folder = tmp_path / "typed-app"
+    folder.mkdir()
+    machine = Machine(claude=[UNHOOKED])
+    scripted(machine)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> tuple[str | None, bool]:
+        field_ = page.query_one("#welcome-path", Input)
+        field_.focus()
+        field_.value = str(folder)
+        await settle_page(app)
+        await pilot.press("enter")
+        await settle_page(app)
+        focused = app.focused
+        return (focused.id if focused else None), focused in app.screen.focus_chain
+
+    focused, on_screen = in_shell(machine, go)
+    assert machine.onboarded == [folder]
+    assert (focused, on_screen) == ("claude-connect", True)
+
+
+def test_after_onboarding_through_plus_the_keyboard_lands_on_start_manager(
+    captain: str | None,
+    fleet_rows: dict[str, list[FleetAgentStatus]],
+    scripted: Callable[[Machine], None],
+    tmp_path: Path,
+) -> None:
+    """Today's ``+`` flow: the Onboard view's path box is hidden once the project opens.
+
+    It kept the keyboard, so keys went into a box nobody could see and the footer
+    offered nothing (lane F's demo tape needed Tab three times to reach Start
+    manager). The shell hands it to the project's Start manager instead; a keyboard
+    the user put somewhere visible is left alone (the control).
+    """
+    scripted(Machine())
+    root = tmp_path / "acme-api"
+
+    async def onboarded(
+        pilot: Pilot[None], app: FleetApp, *, from_sidebar: bool
+    ) -> tuple[str, str | None]:
+        await pilot.press("plus")
+        await settle_page(app)
+        if from_sidebar:
+            app.sidebar.focus()
+        else:
+            app.query_one("#onboard-path", Input).focus()
+        await settle_page(app)
+        with store_session() as store:  # what the Onboard view's `init` did
+            project = store.onboard_project(ProjectInfo(id=project_id_for(root), root=root))
+        app.post_message(ProjectOnboarded(project.id, root))
+        await settle_page(app)
+        focused = app.focused
+        return str(app.content.current), (focused.id if focused is not None else None)
+
+    async def from_box(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> Any:
+        return await onboarded(pilot, app, from_sidebar=False)
+
+    async def from_sidebar(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> Any:
+        return await onboarded(pilot, app, from_sidebar=True)
+
+    current, focused = in_shell(Machine(), from_box)
+    assert current == f"project-{project_id_for(root)}"
+    assert focused == "start-manager"
+    assert in_shell(Machine(), from_sidebar) == (current, "sidebar")
 
 
 def test_plus_from_the_sidebar_opens_onboarding_and_w_comes_back(

@@ -2184,6 +2184,13 @@ const PAD_MORE = [
   ["F8", "F8"], ["F9", "F9"], ["F10", "F10"], ["F11", "F11"], ["F12", "F12"],
   ["^L", "C-l"], ["^R", "C-r"], ["^U", "C-u"], ["^O", "C-o"], ["^C", "C-c"], ["^D", "C-d"],
 ];
+/* What a screen reader says for a key whose label is a glyph or a short form: "⏎" was
+ * read out as a symbol, or not at all, never as the Enter it sends. */
+const KEY_SPOKEN = Object.freeze({
+  Escape: "Escape", Enter: "Enter", Up: "Up arrow", Down: "Down arrow", Left: "Left arrow", Right: "Right arrow",
+  BTab: "Shift Tab", BSpace: "Backspace", PageUp: "Page up", PageDown: "Page down",
+  "C-l": "Control L", "C-r": "Control R", "C-u": "Control U", "C-o": "Control O", "C-c": "Control C", "C-d": "Control D",
+});
 
 VIEWS.agent = (route, main) => {
   const pid = route.pid;
@@ -2322,14 +2329,20 @@ function inputBar(pid, label, cleanups) {
   text.setAttribute("aria-label", "Type to the agent");
   text.maxLength = TEXT_MAX.keys;
   const enter = checkbox("⏎", true);
+  enter.box.setAttribute("aria-label", "Press Enter after the text");
   const send = button("w primary", "Send", () => sendText());
   const padToggle = button("ghost", "Keys", () => setPad(!pad.classList.contains("open")));
   line.append(text, enter.label, send, padToggle);
   const pad = el("div", "pad");
   const more = el("div", "pad-more");
-  for (const key of PAD_ROW) pad.appendChild(button("w key", key[0], () => sendKey(key[1])));
+  const keyButton = (key) => {
+    const control = button("w key", key[0], () => sendKey(key[1]));
+    if (Object.prototype.hasOwnProperty.call(KEY_SPOKEN, key[1])) control.setAttribute("aria-label", KEY_SPOKEN[key[1]]);
+    return control;
+  };
+  for (const key of PAD_ROW) pad.appendChild(keyButton(key));
   pad.appendChild(button("ghost key", "More", () => more.classList.toggle("open")));
-  for (const key of PAD_MORE) more.appendChild(button("w key", key[0], () => sendKey(key[1])));
+  for (const key of PAD_MORE) more.appendChild(keyButton(key));
   pad.appendChild(more);
   bar.append(line, pad);
   const setPad = (open) => {

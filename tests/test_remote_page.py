@@ -1066,6 +1066,24 @@ def test_a_write_refused_read_only_shuts_every_write_button_at_once(
     assert "can watch but not act" in refused["sheet"]
 
 
+def test_every_key_of_the_pad_has_a_name_a_screen_reader_can_say(
+    boot_report: dict[str, Any],
+) -> None:
+    """A glyph key (⏎ ↑ ↓ ← → ⌫ ⇧Tab) had no accessible name, so a screen reader read the
+    symbol, or nothing, never the Enter or the arrow it sends; nor did ``^C`` or the ⏎
+    toggle beside Send. A key whose label is a word or a digit is its own name."""
+    names = boot_report["keyNames"]
+    spoken = dict(names["keys"])
+    assert len(spoken) == len(names["keys"]) > 40, "every key, each label once"
+    assert (spoken["⏎"], spoken["↑"], spoken["↓"]) == ("Enter", "Up arrow", "Down arrow")
+    assert (spoken["←"], spoken["→"], spoken["⌫"]) == ("Left arrow", "Right arrow", "Backspace")
+    assert (spoken["⇧Tab"], spoken["^C"], spoken["PgUp"]) == ("Shift Tab", "Control C", "Page up")
+    unnamed = [label for label, name in spoken.items() if name is None]
+    assert [label for label in unnamed if not re.fullmatch(r"[A-Za-z0-9]+", label)] == []
+    assert {"1", "Space", "More", "F12"} <= set(unnamed), "words and digits say themselves"
+    assert names["enterToggle"] == "Press Enter after the text"
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

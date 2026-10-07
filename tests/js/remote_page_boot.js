@@ -788,6 +788,14 @@ async function refusedReadOnly() {
   };
 }
 
+/* What a screen reader is given for each key of the pad, and for the ⏎ toggle beside Send. */
+async function keyNames() {
+  const page = await agentView();
+  const keys = page.main().querySelectorAll("button.key").map((key) => [key.textContent, key.attrs["aria-label"] || null]);
+  const toggle = find(page.main(), (node) => node.tagName === "INPUT" && node.type === "checkbox" && node.parentNode.textContent === "⏎");
+  return { keys, enterToggle: toggle ? toggle.attrs["aria-label"] || null : null };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -814,6 +822,7 @@ async function main() {
     paneCursor: await paneCursor(),
     stopAtAPrompt: await stopAtAPrompt(),
     refusedReadOnly: await refusedReadOnly(),
+    keyNames: await keyNames(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

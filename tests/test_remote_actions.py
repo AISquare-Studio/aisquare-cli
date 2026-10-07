@@ -617,11 +617,14 @@ class FakeNeeds:
     closes the dialog, or stops a working agent at its prompt. Each change shows from the
     ``lag``-th read after the Escape, as a pane shows it a moment later.
 
-    Its predicates answer as SPEC §4.5's do for what it shows. A dialog is open while it
-    draws one, while the row reads ``attention`` that no Escape has answered, and while one
-    of the agent's current items is a dialog (:func:`_a_dialog`). A test that wants an
-    agent with no dialog must therefore show one with none: a card's ``limited`` item on a
-    row that reads ``limited``, say, not on one that reads ``working``."""
+    ``needs_dialog_open`` answers as SPEC §4.5's does for what the fake shows. A dialog is
+    open while the fake draws one, while the row reads ``attention`` that no Escape has
+    answered, and while one of the agent's current items is a dialog (:func:`_a_dialog`). A
+    test that wants an agent with no dialog must therefore show one with none: a card's
+    ``limited`` item on a row that reads ``limited``, say, not on one that reads
+    ``working``. ``at_prompt`` stands for the rest of what §4.5 reads for the prompt, a
+    quiet pane and a transcript whose newest record is an interruption or the agent's own
+    words, which the fake does not write out."""
 
     def __init__(self, pane: FakePane) -> None:
         self.pane = pane

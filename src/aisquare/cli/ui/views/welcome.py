@@ -472,7 +472,7 @@ class WelcomeView(VerticalScroll):
             listed = _frame_projects(app)
             waits = 0
             while shell and listed is None and waits < FRAME_WAITS and _frame_coming(app):
-                time.sleep(FRAME_WAIT_SECONDS)
+                _nap(FRAME_WAIT_SECONDS)
                 waits += 1
                 listed = _frame_projects(app)
             return seams.candidates(listed)
@@ -860,7 +860,8 @@ class WelcomeView(VerticalScroll):
             else:
                 status.append(
                     "\nOpen the manager and answer Claude Code's question about trusting this "
-                    "folder, then start the coders.",
+                    f"folder; then {self.escape_key.upper()} and w bring you back here to start "
+                    "the coders.",
                     style="dim",
                 )
         if up:
@@ -920,6 +921,11 @@ class WelcomeView(VerticalScroll):
             fix = f" — install it: {tmux.hint}" if tmux.hint else ""
             line = (line + "\n" if line else "") + f"✗ {tmux.problem}{fix}"
         return line or "Checking this machine…"
+
+
+def _nap(seconds: float) -> None:
+    """The frame wait's sleep: a seam, so a test counts the naps instead of timing a run."""
+    time.sleep(seconds)
 
 
 def _frame_coming(app: object) -> bool:

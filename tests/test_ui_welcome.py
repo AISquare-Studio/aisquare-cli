@@ -833,6 +833,13 @@ def test_a_shell_whose_store_will_not_open_still_shows_the_page(
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(app_mod, "store_session", locked)
+    naps: list[float] = []
+
+    def nap(seconds: float) -> None:
+        naps.append(seconds)
+        time.sleep(seconds)
+
+    monkeypatch.setattr(welcome, "_nap", nap)
     machine = Machine(claude=[READY], found=sqlite3.OperationalError("database is locked"))
     scripted(machine)
 
@@ -840,12 +847,11 @@ def test_a_shell_whose_store_will_not_open_still_shows_the_page(
         failed = app.store_error is not None and app.snapshot is None
         return card(page, "project-status"), card(page, "claude-status"), failed
 
-    started = time.monotonic()
     project_text, claude_text, failed = in_shell(machine, go)
     assert failed  # the shell could not read its store, so it has no frame
-    assert machine.frames == [None]  # the page asked the store itself instead of waiting
+    assert machine.frames == [None]  # the page asked the store itself…
+    assert len(naps) < welcome.FRAME_WAITS  # …as soon as the shell said so, not after 5 s
     assert "database is locked" in project_text and "✓ Claude Code" in claude_text
-    assert time.monotonic() - started < welcome.FRAME_WAITS * welcome.FRAME_WAIT_SECONDS
 
 
 def test_the_page_hosted_alone_asks_the_store_itself() -> None:

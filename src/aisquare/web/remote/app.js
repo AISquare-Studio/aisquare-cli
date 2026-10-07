@@ -714,8 +714,20 @@ async function apiWrite(path, body, verb, onWait) {
   let res = await apiCall("POST", path, { body: pending.body });
   if (res.network) {
     if (onWait) onWait();
-    res = await new Promise((resolve) => { pending.resolve = resolve; });
+    res = await new Promise((resolve) => {
+      pending.resolve = resolve;
+      // The retry waits for a reconnect (flushRetries). A socket that still looks
+      // healthy would never give it one, and may be the half-open twin of the
+      // connection that lost this request: replace it now. Offline, the reconnect
+      // backs off until the phone is back.
+      wake(true);
+    });
+    if (res.network) res = Object.assign({}, res, { unconfirmed: true });
   }
+  // A retry lost too may still have run on the machine, and a retry answered
+  // in_progress is the first one still running: either way the ledger reports
+  // the result later, and the action frame then toasts it.
+  if (res.unconfirmed || (res.status === 409 && res.error === "in_progress")) S.orphans.set(id, { verb, at: Date.now() });
   S.pending.delete(id);
   savePending();
   return res;
@@ -785,9 +797,12 @@ function settleFromLedger(entries) {
   }
 }
 
-/* SPEC §6.4, as one sentence per refusal. */
+/* SPEC §6.4, as one sentence per refusal. A network error reaches here only
+ * once nothing will retry it: a write's one retry was lost as well, or a call
+ * that is never retried. */
 function failText(res, max) {
-  if (res.network) return "The phone is offline — this goes out again once it reconnects.";
+  if (res.unconfirmed) return "Not confirmed — the connection dropped again. If the machine got it, its result shows here.";
+  if (res.network) return "Could not reach the machine — try again once the phone is back online.";
   if (res.notJson) return OFF_OR_MOVED + ".";
   const message = plainText(res.message);
   if (res.status === 401) return "Unlock again to do that.";
@@ -847,6 +862,7 @@ function connect() {
     S.sockState = "open";
     S.backoff = 0;
     S.lastFrameAt = Date.now();
+    setOffline(false);
     resubscribe();
     flushRetries();
     drawStatus();
@@ -909,6 +925,7 @@ function onFrame(text) {
   }
   if (!frame || typeof frame !== "object" || typeof frame.type !== "string") return;
   S.lastFrameAt = Date.now();
+  setOffline(false); // a frame is the machine answering, whatever a lost fetch said
   if (S.stale) checkStale();
   const payload = frame.payload;
   if (frame.type === "remote") setRemote(payload);

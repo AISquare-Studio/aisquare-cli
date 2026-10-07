@@ -181,6 +181,16 @@ class FakeSocket {
     this.readyState = 3;
     setImmediate(() => this.fire("close", { code }));
   }
+
+  /* The handshake succeeds: what the scenario says the machine did. */
+  accept() {
+    this.readyState = 1;
+    this.fire("open");
+  }
+
+  frame(type, payload) {
+    this.fire("message", { data: JSON.stringify({ type, payload }) });
+  }
 }
 
 function storage() {
@@ -215,6 +225,7 @@ function bootPage(hash, answer) {
   doc.documentElement.appendChild(doc.body);
   doc.body.appendChild(app);
 
+  const requests = [];
   const sockets = [];
   let timers = 0;
   const hold = () => ++timers; // a timer is an id and nothing more: none ever fires
@@ -236,6 +247,7 @@ function bootPage(hash, answer) {
   const fetch = async (url, init) => {
     const where = String(url).split("?")[0];
     const body = typeof init.body === "string" ? JSON.parse(init.body) : null;
+    requests.push({ method: init.method, path: where, body });
     const reply = await answer(init.method, where, body);
     if (reply === "network") throw new TypeError("Failed to fetch");
     const text = JSON.stringify(reply.json);
@@ -267,9 +279,16 @@ function bootPage(hash, answer) {
   vm.runInContext(SOURCE, context, { filename: "app.js" });
 
   const page = {
-    location,
+    sockets, location,
     run: (code) => vm.runInContext(code, context),
     main: () => page.run("UI.main"),
+    toast: () => page.run("UI.toast.textContent"),
+    /* Every socket the page opened and the machine has not answered yet, accepted. */
+    acceptSockets() {
+      for (const sock of sockets) if (sock.readyState === 0) sock.accept();
+    },
+    live: () => sockets[sockets.length - 1],
+    sent: (where) => requests.filter((one) => one.method === "POST" && one.path === where).map((one) => one.body),
   };
   return page;
 }
@@ -281,6 +300,14 @@ async function settle() {
 
 function find(root, test) {
   return descendants(root).find(test) || null;
+}
+
+function buttonNamed(root, text) {
+  return find(root, (node) => node.tagName === "BUTTON" && node.textContent === text);
+}
+
+function click(control) {
+  if (control && !control.disabled) control.dispatch("click");
 }
 
 function unlockForm(page) {
@@ -362,12 +389,88 @@ async function unlockKept() {
   return { hash: page.location.hash, form: !!unlockForm(page) };
 }
 
+/* The agent view, live, with its socket open: where Send is. */
+async function agentView(extra) {
+  const page = bootPage("#/p/" + PROJECT + "/a/coder-1/live", signedIn(extra));
+  await settle();
+  page.acceptSockets();
+  page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  await settle();
+  return page;
+}
+
+async function typeAndSend(page, text) {
+  const say = find(page.main(), (node) => node.tagName === "TEXTAREA" && node.className === "say");
+  say.value = text;
+  click(buttonNamed(page.main(), "Send"));
+  await settle();
+  return say;
+}
+
+function sendState(page) {
+  const send = buttonNamed(page.main(), "Send");
+  return { busy: send.classList.contains("busy"), disabled: send.disabled };
+}
+
+/* The first send-keys never reaches the machine; the socket looks healthy throughout. */
+async function lostWrite() {
+  let calls = 0;
+  const page = await agentView({
+    "POST api/send-keys": () => {
+      calls += 1;
+      return calls === 1 ? "network" : { status: 200, json: { agent: "coder-1", project: PROJECT, sent: true } };
+    },
+  });
+  const say = await typeAndSend(page, "hello");
+  const waiting = { sockets: page.sockets.length, firstClosed: page.sockets[0].readyState === 3, send: sendState(page) };
+  page.acceptSockets();
+  await settle();
+  return {
+    waiting,
+    bodies: page.sent("api/send-keys"),
+    send: sendState(page),
+    pending: page.run("S.pending.size"),
+    offline: page.run("S.offline"),
+    bannerHidden: page.run("UI.banner.hidden"),
+    typed: say.value,
+  };
+}
+
+/* The retry is lost as well; the ledger reports later that the first one did run. */
+async function lostTwice() {
+  const page = await agentView({ "POST api/send-keys": () => "network" });
+  await typeAndSend(page, "hello");
+  page.acceptSockets();
+  await settle();
+  const bodies = page.sent("api/send-keys");
+  const said = page.toast();
+  const id = bodies.length ? bodies[0].request_id : null;
+  const orphaned = page.run("S.orphans.has(" + JSON.stringify(id) + ")");
+  page.live().frame("action", { actions: [{ request_id: id, endpoint: "send-keys", status: 200, body: { sent: true }, at: "2026-10-07T10:13:00+00:00" }] });
+  await settle();
+  return { bodies, said, orphaned, later: page.toast(), send: sendState(page) };
+}
+
+/* A read lost while the socket is fine: the next frame says the machine is there. */
+async function lostRead() {
+  const page = await agentView({ "GET api/projects": () => "network" });
+  click(buttonNamed(page.run("UI.nav"), "Projects"));
+  await settle();
+  const lost = { offline: page.run("S.offline"), banner: page.run("UI.banner.hidden") ? "" : page.run("UI.banner").textContent };
+  page.live().frame("heartbeat", { needs_scanned_at: null });
+  await settle();
+  return { lost, offline: page.run("S.offline"), bannerHidden: page.run("UI.banner.hidden") };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
     reloadAtUnlock: await openedSignedOut("#/unlock"),
     unlockNotKept: await unlockNotKept(),
     unlockKept: await unlockKept(),
+    lostWrite: await lostWrite(),
+    lostTwice: await lostTwice(),
+    lostRead: await lostRead(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

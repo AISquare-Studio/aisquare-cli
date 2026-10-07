@@ -785,6 +785,41 @@ def test_an_unlock_the_browser_did_not_keep_says_so_and_keeps_the_route(
     assert boot_report["unlockKept"] == {"hash": "#/p/prj_x/board", "form": False}
 
 
+def test_a_write_whose_request_was_lost_goes_out_again_once_on_a_new_socket(
+    boot_report: dict[str, Any],
+) -> None:
+    """SPEC §6.3: the retry follows the next reconnect, and a healthy socket never
+    reconnects on its own, so Send stayed busy and nothing reached the machine."""
+    lost = boot_report["lostWrite"]
+    assert lost["waiting"]["sockets"] == 2 and lost["waiting"]["firstClosed"]
+    assert lost["waiting"]["send"] == {"busy": True, "disabled": True}
+    first, retry = lost["bodies"]
+    assert first == retry and first["text"] == "hello"  # the same request_id: run at most once
+    assert lost["send"] == {"busy": False, "disabled": False} and lost["pending"] == 0
+    assert lost["typed"] == ""  # sent, so the box is cleared
+    assert lost["offline"] is False and lost["bannerHidden"] is True
+
+
+def test_a_retry_lost_too_is_not_confirmed_and_its_result_still_arrives(
+    boot_report: dict[str, Any],
+) -> None:
+    lost = boot_report["lostTwice"]
+    assert len(lost["bodies"]) == 2, "one retry, never more"
+    assert lost["bodies"][0]["request_id"] == lost["bodies"][1]["request_id"]
+    assert lost["said"].startswith("Not confirmed")
+    assert "once it reconnects" not in lost["said"]  # no third attempt is coming
+    assert lost["orphaned"] and lost["later"] == "Send: done"
+    assert lost["send"] == {"busy": False, "disabled": False}
+
+
+def test_a_frame_clears_the_offline_banner_a_lost_read_raised(
+    boot_report: dict[str, Any],
+) -> None:
+    lost = boot_report["lostRead"]
+    assert lost["lost"]["offline"] is True and "Offline" in lost["lost"]["banner"]
+    assert lost["offline"] is False and lost["bannerHidden"] is True
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

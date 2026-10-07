@@ -504,6 +504,8 @@ class AccountsView(Vertical):
         """The session the credits line was drawn (or emptied) for."""
         self.usage: dict[int, ClaudeUsage] = {}
         self.trends: dict[int, UsageTrend | None] = {}
+        self._asked: set[int] = set()
+        """The signed-in slots a usage reading has been started for (``show``)."""
         self.login: _ClaudeLogin | None = None
         self._login_timer: Timer | None = None
         self._usage_timer: Timer | None = None
@@ -596,14 +598,17 @@ class AccountsView(Vertical):
         in another terminal — re-reads the credits under the card at once
         rather than on the next minute tick: they are that session's.
 
-        The first frame reads the usage too, when the page is already on screen.
-        ``on_show`` reads it, and the shell hands the page its first frame after
-        the switch to the page has been awaited, so the ``Show`` could be handled
-        first: that reading found no frame and returned, and every row said
-        ``usage: …`` until the minute tick. Off screen this does nothing, and
-        ``on_show`` reads as before.
+        A frame that brings a signed-in slot the page has not asked about reads
+        the usage too, when the page is on screen. Only ``on_show`` and the minute
+        tick asked, so such a row said ``usage: …`` for up to a minute: the first
+        frame, when the ``Show`` was handled before it (the shell hands the page
+        its first frame after the switch to the page has been awaited), and a
+        later frame with a slot just signed in, by ``+ Add`` here or in another
+        terminal (review of #252). Keyed on the slots ASKED, not answered: this
+        runs on every shell tick, and a reading that failed leaves its slots out
+        of ``usage``, so keying on answers would ask again every tick. Off screen
+        this does nothing, and ``on_show`` reads as before.
         """
-        first = self.overview is None
         self.overview = overview
         previous, self.session = self.session, self._read_session()
         if not self.is_mounted:
@@ -612,7 +617,9 @@ class AccountsView(Vertical):
         self._paint_claude(overview)
         if self.session != previous:
             self.refresh_credits()
-        if first:
+        signed_in = {status.account.slot for status in overview.accounts if status.signed_in}
+        self._asked &= signed_in  # a slot that left or signed out is asked again on its return
+        if signed_in - self._asked:
             self.refresh_usage()
 
     def _env_token(self) -> bool:
@@ -706,6 +713,7 @@ class AccountsView(Vertical):
         accounts = [status.account for status in self.overview.accounts if status.signed_in]
         if not accounts:
             return
+        self._asked.update(account.slot for account in accounts)
         # Each reading RECORDED (#146) with the trend it implies, so the minute
         # tick is what builds the history the trend line reads: one concurrent
         # round trip and one store open for every account (review of #205,

@@ -715,6 +715,44 @@ def test_a_page_on_screen_before_its_first_frame_reads_the_usage_when_the_frame_
     assert "usage: scripted: no fetch" in first
 
 
+def test_a_slot_that_signs_in_on_a_later_frame_is_read_when_that_frame_comes(
+    no_network: dict[str, Any],
+) -> None:
+    """Review of #252, round 1: a slot that signed in while the page was open (``+ Add``
+    here, or ``accounts add`` in another terminal) came in a frame that asked nothing,
+    and its row said ``usage: …`` until the minute tick. A frame that brings a signed-in
+    slot the page has not asked about reads it, and a frame that brings none asks
+    nothing: the shell's tick does not become a request every two seconds."""
+    frames = [
+        _overview(_status(1, "me@example.com"), _status(2, None)),
+        _overview(_status(1, "me@example.com"), _status(2, "two@example.com")),
+    ]
+    calls: list[int] = no_network["usage_calls"]
+
+    async def run() -> tuple[list[int], list[int], list[int], str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: frames[0])
+        async with app.run_test(size=SIZE) as pilot:
+            await settle(app)  # the start-up doctor, painted before the click, as `drive` does
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: calls and painted(view, 1))
+            before = list(calls)
+            frames.pop(0)  # slot 2 signs in
+            app.refresh_accounts()
+            await accounts_read(app)
+            await settle_until(app, lambda: 2 in calls and painted(view, 2))
+            signed_in = list(calls)
+            app.refresh_accounts()  # the same slots again
+            await accounts_read(app)
+            await settle(app)
+            return before, signed_in, list(calls), line(view, 2)
+
+    before, signed_in, again, two = asyncio.run(run())
+    assert before == [1]
+    assert sorted(signed_in) == [1, 1, 2]  # every signed-in slot, read when slot 2 came
+    assert again == signed_in  # a frame with no new signed-in slot asked nothing
+    assert "usage: scripted: no fetch" in two
+
+
 # --- AISquare: the device flow as a card --------------------------------------------------------
 
 

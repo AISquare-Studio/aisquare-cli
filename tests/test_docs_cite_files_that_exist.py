@@ -45,6 +45,14 @@ DOCS = [
     Path("docs/store-migration-race.md"),
     Path("README.md"),
     Path("docs/fleet.md"),
+    # The README's long form since the README became a front page (roadmap 9.5).
+    # The CI test bed's pointers into `docs/ci-*.md` and the architecture
+    # paragraph's `src/aisquare/…` paths moved with it, so the check moves too.
+    Path("docs/install.md"),
+    Path("docs/memory.md"),
+    Path("docs/orchestration.md"),
+    Path("docs/reference.md"),
+    Path("docs/platform.md"),
 ]
 
 #: References that name a file OUTSIDE this repo, each with the reason it

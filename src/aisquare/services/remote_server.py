@@ -259,10 +259,11 @@ short answer is never mistaken for a short pane.
 
 INSTALL_HINT = "pip install 'aisquare-cli[remote]' (or: pipx inject aisquare-cli websockets)"
 
-NO_PAGE_HINT = "no remote page installed — run: aisquare remote install-page <dist>"
+NO_PAGE_HINT = "the bundled remote page is missing from this install — reinstall aisquare-cli"
 """Shown by the modal's status line, ``asq remote serve``'s exit, and the raise of
-``start_remote_server()`` — one sentence, so a fresh machine never sees a server that
-quietly answers with nothing."""
+``start_remote_server()`` — one sentence, so a broken install never runs a server that
+quietly answers with nothing. A fresh machine never sees it: aisquare-cli carries its
+own page (``services/remote_page.py``), served whenever none is installed."""
 
 PASSPHRASE_WORDS = 4
 """Words in a passphrase: four distinct ones of :mod:`remote_words`' 512, about 36 bits."""
@@ -3187,25 +3188,39 @@ def build_remote_app(
         return _json_error(404, "not_found")
 
     async def static(request: Request) -> Response:
+        """The page: ``--dist``, else the installed build, else the one aisquare-cli bundles.
+
+        Decided per request, so ``install-page`` takes over from the bundled page,
+        and removing what it installed hands back, without a restart. Every answer
+        carries the page headers (no referrer: the token is in the path); only the
+        bundled page also gets its CSP, since an installed build may need another.
+        """
+        from aisquare.services import remote_page
+
         rel = request.path_params.get("path", "")
-        if rel:
-            candidate = (dist / rel).resolve()
-            if candidate.is_relative_to(dist) and candidate.is_file():
-                return FileResponse(candidate, headers={"cache-control": _cache_control(rel)})
-        if rel and not _is_navigation(rel, request.headers.get("accept", "")):
+        index = dist / "index.html"
+        if dist_dir is None and not index.is_file():
+            bundled = remote_page.bundled_page_response(rel, request)
+            if bundled is not None:
+                return bundled
+            response = _json_error(404, "no_dist", NO_PAGE_HINT)
+        elif (
+            rel
+            and (candidate := (dist / rel).resolve()).is_relative_to(dist)
+            and candidate.is_file()
+        ):
+            response = FileResponse(candidate, headers={"cache-control": _cache_control(rel)})
+        elif rel and not _is_navigation(rel, request.headers.get("accept", "")):
             # A file was asked for and there is no such file. Saying so is the
             # whole point: the SPA document under a .js name is a boot failure
             # with no error, and the 200 hides which build is actually installed.
-            return _json_error(404, "not_found", f"no such file in the built page: {rel}")
-        index = dist / "index.html"
-        if index.is_file():
-            return FileResponse(index, headers={"cache-control": INDEX_CACHE_CONTROL})
-        return _json_error(
-            404,
-            "no_dist",
-            f"no built page at {dist} — build aisquare-remote and copy its dist/ there, "
-            "or pass --dist",
-        )
+            response = _json_error(404, "not_found", f"no such file in the built page: {rel}")
+        elif index.is_file():
+            response = FileResponse(index, headers={"cache-control": INDEX_CACHE_CONTROL})
+        else:
+            response = _json_error(404, "no_dist", f"no index.html in {dist}")
+        response.headers.update(remote_page.remote_page_headers())
+        return response
 
     async def stream(websocket: WebSocket) -> None:
         """``/ws``: every tick, each frame that changed (SPEC §1.6).
@@ -3548,19 +3563,26 @@ _flusher: threading.Timer | None = None
 
 
 def _page_missing(dist_dir: Path | None) -> str | None:
-    """``None`` when the directory ``build_app`` would serve has an ``index.html``.
+    """``None`` when there is a page to serve; otherwise the sentence that says why not.
 
-    Checked up front by :func:`start_remote_server` and :func:`run_foreground`, not by
-    :func:`build_app` itself: an explicit ``--dist``/``dist_dir`` that turns out
-    to be wrong is still a per-request 404 (``test_missing_dist_is_a_404_...``),
-    because the caller named that path on purpose and may still be building it.
-    What must never happen silently is the DEFAULT — ``dist_dir=None`` falling
-    back to :func:`remote_dist_dir`, which nothing populates until
-    :func:`install_page` runs — so a fresh machine's first ``R`` press gets a
-    sentence instead of a server that answers every request with nothing.
+    Checked up front by :func:`start_remote_server`, :func:`run_foreground` and
+    ``asq remote serve``, not by :func:`build_app` itself: an explicit
+    ``--dist``/``dist_dir`` that turns out to be wrong is still a per-request 404
+    there (``test_missing_dist_is_a_404_...``), because the caller named that path
+    on purpose and may still be building it. Without one, the installed build
+    (:func:`install_page`) is served, else the page aisquare-cli bundles, so a
+    fresh machine's first ``R`` press just works. Only an install that lost its
+    bundled page gets :data:`NO_PAGE_HINT` instead of a server that answers every
+    request with nothing.
     """
-    dist = (dist_dir or remote_dist_dir()).resolve()
-    return None if (dist / "index.html").is_file() else NO_PAGE_HINT
+    if dist_dir is not None:
+        dist = dist_dir.resolve()
+        return None if (dist / "index.html").is_file() else f"no index.html in {dist}"
+    if (remote_dist_dir().resolve() / "index.html").is_file():
+        return None
+    from aisquare.services import remote_page
+
+    return None if remote_page.bundled_page_present() else NO_PAGE_HINT
 
 
 def install_page(source: Path) -> Path:

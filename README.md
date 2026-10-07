@@ -529,6 +529,26 @@ The clock counts **inbound** messages only — it assumes request/response
 traffic, so a deadline shorter than your slowest tool call would cut a
 client mid-wait (at the 300s default no current tool comes anywhere close).
 
+### Phone control (`aisquare remote`)
+
+The fleet on your phone: one feed of everything waiting on you across every
+project (a permission prompt, a question, a crash, a usage limit), each agent's
+live screen and conversation, the board, and notifications when something needs
+you. Once you allow writes, the phone can answer a prompt, type to an agent, or
+stop, restart or switch it. It is one server on `127.0.0.1:8750` behind your own
+ngrok tunnel, and the page it serves ships inside aisquare-cli.
+
+```sh
+pipx install 'aisquare-cli[remote]'
+aisquare remote serve             # or press R in `aisquare ui`
+ngrok http 8750                   # in another terminal; a static domain is better
+aisquare remote allow-write on    # read-only until you say so
+```
+
+**[The phone control guide](docs/remote.md)** covers unlocking, the needs-you
+cards and quick answers, notifications on iPhone, the security model, and a
+checklist for before you leave the desk.
+
 ### Tuning (environment variables)
 
 Orchestration has no config files — a handful of env knobs:
@@ -759,6 +779,8 @@ aisquare
 │                   have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
 ├── ui              the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
+├── remote          serve · needs · status · allow-write on|off · revoke · regenerate-password
+│                   install-page <dist>   — the fleet on your phone (docs/remote.md)
 ├── fleet           spawn <role> [--label L] [--task ID] [--worktree/--no-worktree]
 │                             [--permission-mode M] [--bin B] [--prompt TEXT] [--account SLOT]
 │                             [-- agent args]

@@ -32,7 +32,7 @@ from aisquare.core.state_file import update_state
 from aisquare.core.tmux import Completed
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
-from aisquare.services import remote_server
+from aisquare.services import remote_page, remote_server
 from aisquare.services.ngrok_tunnel import INSTALL_HINT, NgrokTunnel, build_public_url
 from aisquare.services.remote_server import UNLOCK_GLOBAL_FAILURES, Runtime, UnlockBudget
 from tests.test_remote_control import FakeTunnel, fake_tunnel_factory
@@ -63,13 +63,12 @@ def fresh_remote_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def installed_page(isolated_home: Path) -> Path:
-    """Every test here starts from a machine where the page IS installed.
+    """Every test here starts from a machine where a page IS installed.
 
-    ``start_remote_server()`` refuses to serve a directory with no ``index.html`` (that is the
-    whole point of ``aisquare remote install-page``), so without this the tests
-    about the link, the QR and the password would all be testing the
-    no-page-installed path instead. The one test that wants that path deletes
-    this directory itself.
+    A fresh machine would serve the page aisquare-cli bundles anyway; an
+    installed one keeps these tests about the link, the QR and the password
+    independent of it. The one test that wants no page at all deletes this
+    directory and hides the bundled page itself.
     """
     dist = paths.remote_dist_dir()
     dist.mkdir(parents=True, exist_ok=True)
@@ -224,17 +223,19 @@ def test_with_ngrok_absent_the_modal_shows_the_install_hint_and_the_local_link()
     drive(go, tunnel=missing_ngrok)
 
 
-def test_with_no_page_installed_the_modal_says_how_to_install_it_and_remote_stays_off(
-    installed_page: Path,
+def test_with_no_page_to_serve_the_modal_says_to_reinstall_and_remote_stays_off(
+    installed_page: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The fresh-machine path: ``m``, Remote on, and nothing to serve.
+    """``R``, Remote on, and nothing to serve: no installed page and no bundled one either.
 
     Before ``install-page`` existed this turned Remote ON against an empty
     ``~/.aisquare/remote-dist`` and the phone got a 404 with no explanation
-    anywhere in the TUI. Now the switch comes back off and the status line
-    carries the command that fixes it.
+    anywhere in the TUI. A fresh machine now serves the page aisquare-cli
+    bundles; only an install that lost it gets here, and the switch comes back
+    off with the status line saying what fixes it.
     """
     shutil.rmtree(installed_page)
+    monkeypatch.setattr(remote_page, "bundled_page_files", dict)
 
     async def go(pilot: Pilot[None]) -> None:
         app = pilot.app
@@ -244,8 +245,8 @@ def test_with_no_page_installed_the_modal_says_how_to_install_it_and_remote_stay
         await pilot.pause()
 
         status = shown(modal.query_one("#remote-status", Static))
-        assert "no remote page installed" in status
-        assert "aisquare remote install-page" in status
+        assert "the bundled remote page is missing" in status
+        assert "reinstall aisquare-cli" in status
         assert not app.remote.running
         assert app.remote.info is None
         assert remote_server.remote_server_status()["running"] is False

@@ -72,15 +72,8 @@ Enter
 Wait+Screen /has no manager yet/
 Sleep 2.5s
 
-# Focus is still on the Onboard view's path box, hidden now, so Tab starts
-# again from the top: the sidebar, the tab strip, then Start manager. Measured;
-# Shift+Tab lands on the sidebar too, not on the button.
-Tab
-Sleep 300ms
-Tab
-Sleep 300ms
-Tab
-Sleep 600ms
+# Onboarding hands the keyboard to the project's next step, Start manager,
+# rather than leaving it on the hidden path box.
 Enter
 
 # The manager's window opens in tmux and runs the stand-in. The hold lets the

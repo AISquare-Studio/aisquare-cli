@@ -129,6 +129,12 @@ def _unlocked(app: Any, runtime: Runtime) -> Any:
     return client
 
 
+def _device_id(client: Any, runtime: Runtime) -> str:
+    """The id of the device this client unlocked (its cookie is a secret, not its id)."""
+    rows = client.get(f"{base(runtime)}/api/devices").json()
+    return str(next(row["id"] for row in rows if row["current"]))
+
+
 # --- the lifespan: lanes start with the server and stop with it ---------------------------
 
 
@@ -192,7 +198,7 @@ def test_a_lane_route_is_reached_before_the_write_catch_all(
         runtime, tmp_path, monkeypatch, dismiss, path="/api/needs/dismiss", write_gated=False
     )
     client = _unlocked(app, runtime)
-    device_id = client.cookies[remote_server.COOKIE]
+    device_id = _device_id(client, runtime)
     response = client.post(f"{base(runtime)}/api/needs/dismiss", json={"id": "ny_1"})
     assert response.status_code == 200, "the dispatcher would have answered 404 for this name"
     assert response.json() == {"dismissed": "ny_1"}
@@ -312,7 +318,7 @@ def test_a_request_id_still_running_is_409_in_progress(
     app = _lane_app(runtime, tmp_path, monkeypatch, answer)
     runtime.set_allow_write(True)
     client = _unlocked(app, runtime)
-    app.kit.ledger.running.add((client.cookies[remote_server.COOKIE], "slow-1"))
+    app.kit.ledger.running.add((_device_id(client, runtime), "slow-1"))
     response = client.post(f"{base(runtime)}/api/needs/answer", json={"request_id": "slow-1"})
     assert response.status_code == 409
     assert response.json() == {"error": "in_progress", "message": IN_PROGRESS}
@@ -425,7 +431,8 @@ def test_write_endpoint_names_are_the_plan_then_the_actions(
     response = client.post(f"{base(runtime)}/api/agent/tell", json={"agent": "c1"})
     assert response.status_code == 200 and response.json() == {"label": "c1", "delivered": True}
     assert told == [{"agent": "c1"}]
-    assert remote_audit_path().read_text().split(" ", 3)[2:] == ["agent/tell", "tell c1\n"]
+    last = remote_audit_path().read_text().splitlines()[-1]
+    assert last.split(" ", 3)[2:] == ["agent/tell", "tell c1"]
 
 
 def test_the_dispatcher_goes_through_the_ledger_and_audits_once(
@@ -448,7 +455,7 @@ def test_the_dispatcher_goes_through_the_ledger_and_audits_once(
     again = client.post(url, json={"text": "hi", "request_id": "n1"})
     assert first.json() == again.json() == {"event": 1}
     assert ran == [{"text": "hi"}], "the retry was answered from the ledger"
-    assert len(remote_audit_path().read_text().splitlines()) == 1
+    assert _audited("note") == 1
     refused = client.post(url, json={"refuse": True, "request_id": "n2"})
     replayed = client.post(url, json={"refuse": True, "request_id": "n2"})
     assert refused.status_code == replayed.status_code == 409
@@ -460,10 +467,16 @@ def test_the_dispatcher_goes_through_the_ledger_and_audits_once(
             "message": "another action on coder-1 is still running",
         }
     )
-    assert len(ran) == 2 and len(remote_audit_path().read_text().splitlines()) == 1
+    assert len(ran) == 2 and _audited("note") == 1
     assert ("begin", "n1", "note") in app.kit.ledger.calls
     bad = client.post(url, json={"text": "hi", "request_id": "../x"})
     assert bad.status_code == 400 and len(ran) == 2
+
+
+def _audited(endpoint: str) -> int:
+    """How many audit lines this endpoint has (the unlock has its own)."""
+    lines = remote_audit_path().read_text().splitlines()
+    return sum(line.split(" ")[2] == endpoint for line in lines)
 
 
 # --- the kit's own answers ---------------------------------------------------------------
@@ -607,7 +620,7 @@ def test_the_action_frame_shows_this_devices_ledger_only_when_it_has_entries(
     app, client = _stream_app(runtime, tmp_path, heartbeat=0)
     ledger = RecordingLedger()
     app.kit.ledger = ledger
-    device_id = client.cookies[remote_server.COOKIE]
+    device_id = _device_id(client, runtime)
     entry: LedgerEntry = {
         "request_id": "c0ffee",
         "endpoint": "agent/restart",
@@ -693,7 +706,7 @@ def test_a_fifth_socket_from_one_device_closes_its_oldest_with_4409(
     ``heartbeat=0``: a live socket gets a frame every tick, so "still open" is observable.
     """
     app, client = _stream_app(runtime, tmp_path, heartbeat=0)
-    device_id = client.cookies[remote_server.COOKIE]
+    device_id = _device_id(client, runtime)
     with contextlib.ExitStack() as stack:
         sockets = []
         for _ in range(remote_server.WS_SOCKETS_PER_DEVICE + 1):
@@ -919,15 +932,29 @@ def test_serve_hands_its_port_to_the_kit(
     isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Push discovery asks ngrok's local API for the tunnel to THIS port (SPEC §5.8)."""
+    import socket
+
     import uvicorn
 
     served: list[Any] = []
+
+    class Served:
+        def __init__(self, config: Any) -> None:
+            self.config = config
+            self.should_exit = False
+
+        def run(self, sockets: Any = None) -> None:
+            served.append((self.config.app, self.config.port))
+
     monkeypatch.setattr(remote_server, "_runtime", None)
-    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: served.append((app, kwargs)))
+    monkeypatch.setattr(uvicorn, "Server", Served)
     (tmp_path / "index.html").write_text("<!doctype html>")
-    remote_server.run_foreground(tmp_path, 9123)
-    ((app, kwargs),) = served
-    assert app.kit.port == kwargs["port"] == 9123
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = int(probe.getsockname()[1])
+    remote_server.run_foreground(tmp_path, port)
+    ((app, served_port),) = served
+    assert app.kit.port == served_port == port
 
 
 def test_a_socket_that_cannot_be_closed_does_not_cost_the_new_one_its_place(

@@ -8,6 +8,7 @@ import socket
 import stat
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -130,10 +131,18 @@ def test_state_file_is_created_with_write_off(runtime: Runtime) -> None:
     path = remote_state_path()
     assert path.exists()
     raw = json.loads(path.read_text(encoding="utf-8"))
-    assert set(raw) == {"token", "password", "allow_write", "auto_off_at", "sessions"}
-    assert raw["allow_write"] is False
+    assert set(raw) == {
+        "version",
+        "token",
+        "password",
+        "allow_write",
+        "auto_off_at",
+        "devices",
+        "unlock_failures",
+    }
+    assert raw["version"] == 2 and raw["allow_write"] is False
     assert len(raw["token"]) == 32
-    assert raw["sessions"] == []
+    assert raw["devices"] == [] and raw["unlock_failures"] == []
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
@@ -240,24 +249,35 @@ def test_unlock_wrong_password_is_401(client: TestClient, runtime: Runtime) -> N
 def test_unlock_sets_an_httponly_lax_cookie(client: TestClient, runtime: Runtime) -> None:
     response = unlock(client, runtime)
     assert response.status_code == 200
-    assert response.json() == {"ok": True}
+    (device,) = runtime.device_rows()
+    assert response.json() == {
+        "ok": True,
+        "device": {"id": device["id"], "expires_at": device["expires_at"]},
+    }
     header = response.headers["set-cookie"]
     assert header.startswith(f"{COOKIE}=")
     assert "HttpOnly" in header
     assert "SameSite=lax" in header
+    assert "Max-Age=604800" in header, "a new device's cookie lives as long as the device"
     assert f"Path={base(runtime)}" in header
-    devices = runtime.device_rows()
-    assert len(devices) == 1 and devices[0]["sid"] == response.cookies[COOKIE]
+    assert device["id"] != response.cookies[COOKIE] and len(response.cookies[COOKIE]) == 43
 
 
-def test_cookie_is_secure_only_behind_an_https_tunnel(client: TestClient, runtime: Runtime) -> None:
+def test_cookie_is_secure_only_behind_an_https_tunnel(
+    client: TestClient, runtime: Runtime, fake: Fake, dist: Path
+) -> None:
+    """uvicorn turns ngrok's ``X-Forwarded-Proto`` into the scheme, from the trusted hop
+    only; the header itself, which anyone can send, decides nothing here."""
     plain = unlock(client, runtime)
     assert "Secure" not in plain.headers["set-cookie"]
-    tunnelled = client.post(
+    forged = make_client(client.app).post(
         f"{base(runtime)}/api/unlock",
         json={"password": PASSWORD},
         headers={"X-Forwarded-Proto": "https", "X-Forwarded-For": "203.0.113.7"},
     )
+    assert forged.status_code == 200 and "Secure" not in forged.headers["set-cookie"]
+    app = build_app(runtime, sources=fake.sources(), dist_dir=dist)
+    tunnelled = unlock(make_client(app, base_url="https://testserver"), runtime)
     assert tunnelled.status_code == 200
     header = tunnelled.headers["set-cookie"]
     assert "Secure" in header and "HttpOnly" in header
@@ -323,17 +343,14 @@ def test_sixth_unlock_attempt_within_a_minute_is_429(
 
 
 def test_rate_limit_is_per_client(runtime: Runtime, fake: Fake, dist: Path) -> None:
+    """Per client as uvicorn resolved it (the scope's peer), never per header."""
     app = build_app(runtime, sources=fake.sources(), dist_dir=dist)
-    client = make_client(app)
+    client = make_client(app, client=("203.0.113.5", 4000))
     for _ in range(5):
         unlock(client, runtime, "wrong")
     assert unlock(client, runtime, PASSWORD).status_code == 429
-    other = client.post(
-        f"{base(runtime)}/api/unlock",
-        json={"password": PASSWORD},
-        headers={"X-Forwarded-For": "203.0.113.9"},
-    )
-    assert other.status_code == 200
+    other = make_client(app, client=("203.0.113.9", 4000))
+    assert unlock(other, runtime, PASSWORD).status_code == 200
 
 
 # --- write endpoints (§4-E) -------------------------------------------------------------
@@ -348,7 +365,7 @@ def test_write_endpoints_exist_and_are_403_by_default(
         assert response.status_code == 403, name
         assert response.json() == {"error": "read_only", "message": READ_ONLY_REASON}
     assert fake.written == []
-    assert not remote_audit_path().exists()
+    assert _audited() == ["unlock"], "only the unlock is on the trail"
 
 
 def test_write_endpoints_need_the_cookie_before_the_gate(
@@ -366,16 +383,16 @@ def test_unknown_write_endpoint_is_404(client: TestClient, runtime: Runtime) -> 
 def test_allowed_write_runs_the_handler_and_audits(
     client: TestClient, runtime: Runtime, fake: Fake
 ) -> None:
-    sid = unlock(client, runtime).cookies[COOKIE]
+    device_id = unlock(client, runtime).json()["device"]["id"]
     runtime.set_allow_write(True)
     response = client.post(f"{base(runtime)}/api/task/claim", json={"ref": "tsk_1"})
     assert response.status_code == 200
     assert response.json() == {"ok": True, "endpoint": "task/claim"}
     assert fake.written == [("task/claim", {"ref": "tsk_1"})]
     lines = remote_audit_path().read_text().splitlines()
-    assert len(lines) == 1
-    ts, who, endpoint, summary = lines[0].split(" ", 3)
-    assert who == sid and endpoint == "task/claim" and summary == "summary of task/claim"
+    assert _audited() == ["unlock", "task/claim"]
+    ts, who, endpoint, summary = lines[-1].split(" ", 3)
+    assert who == device_id and endpoint == "task/claim" and summary == "summary of task/claim"
     assert ts.endswith("+00:00")
     if sys.platform != "win32":  # POSIX file modes; the NTFS half is the spy test above
         assert stat.S_IMODE(remote_audit_path().stat().st_mode) == 0o600
@@ -389,7 +406,12 @@ def test_a_refused_write_keeps_its_status_and_is_not_audited(
     response = client.post(f"{base(runtime)}/api/note", json={"boom": True})
     assert response.status_code == 422
     assert response.json() == {"error": "refused", "message": "the fake said no"}
-    assert not remote_audit_path().exists()
+    assert _audited() == ["unlock"]
+
+
+def _audited() -> list[str]:
+    """The endpoint of every audit line, in order."""
+    return [line.split(" ")[2] for line in remote_audit_path().read_text().splitlines()]
 
 
 def test_write_body_must_be_an_object(client: TestClient, runtime: Runtime) -> None:
@@ -401,32 +423,36 @@ def test_write_body_must_be_an_object(client: TestClient, runtime: Runtime) -> N
 # --- devices + revoke (§4-F) ----------------------------------------------------------
 
 
-def test_devices_lists_sessions_and_delete_revokes(client: TestClient, runtime: Runtime) -> None:
-    first = unlock(client, runtime).cookies[COOKIE]
+def test_devices_lists_devices_and_delete_revokes(client: TestClient, runtime: Runtime) -> None:
+    first = unlock(client, runtime).json()["device"]["id"]
     other = make_client(client.app)
-    second = unlock(other, runtime).cookies[COOKIE]
+    second = unlock(other, runtime).json()["device"]["id"]
     rows = client.get(f"{base(runtime)}/api/devices").json()
-    assert [row["sid"] for row in rows] == [first, second]
-    assert set(rows[0]) == {"id", "sid", "ua", "first_seen", "last_seen", "current"}
     assert [row["id"] for row in rows] == [first, second]  # the name routes take (SPEC §2.3)
+    assert set(rows[0]) == {
+        "id",
+        "ua",
+        "first_seen",
+        "last_seen",
+        "expires_at",
+        "signed_in",
+        "current",
+    }
     assert [row["current"] for row in rows] == [True, False]
+    assert [row["signed_in"] for row in rows] == [True, True]
     assert [row["current"] for row in other.get(f"{base(runtime)}/api/devices").json()] == [
         False,
         True,
     ]
-    assert set(runtime.device_rows()[0]) == {
-        "sid",
-        "ua",
-        "first_seen",
-        "last_seen",
-    }  # §4-F status()
+    assert set(runtime.device_rows()[0]) == set(rows[0]) - {"current"}  # §4-F status()
     # Revoking ANOTHER device changes who can reach the fleet: a write (SPEC §2.3).
     refused = client.delete(f"{base(runtime)}/api/devices/{second}")
     assert refused.status_code == 403 and refused.json()["error"] == "read_only"
     assert other.get(f"{base(runtime)}/api/board").status_code == 200
     runtime.set_allow_write(True)
     gone = client.delete(f"{base(runtime)}/api/devices/{second}")
-    assert gone.status_code == 200 and gone.json() == {"ok": True, "id": second}
+    assert gone.status_code == 200
+    assert gone.json() == {"ok": True, "id": second, "signed_out": False}
     assert other.get(f"{base(runtime)}/api/board").status_code == 401
     assert client.get(f"{base(runtime)}/api/board").status_code == 200
     assert client.delete(f"{base(runtime)}/api/devices/{second}").status_code == 404
@@ -532,10 +558,10 @@ def test_pane_frames_only_for_subscribed_agents(
 
 
 def test_revoke_closes_the_socket_with_4401(client: TestClient, runtime: Runtime) -> None:
-    sid = unlock(client, runtime).cookies[COOKIE]
+    device_id = unlock(client, runtime).json()["device"]["id"]
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
         _frames_until(ws, "remote")
-        assert remote_server.Runtime.revoke_device(runtime, sid) is True
+        assert remote_server.Runtime.revoke_device(runtime, device_id) is True
         closed = None
         for _ in range(20):
             message = ws.receive()
@@ -624,18 +650,18 @@ def test_start_status_revoke_stop_over_a_real_port(
             assert http.get(f"/r/{info.token}/api/board").status_code == 401
             ok = http.post(f"/r/{info.token}/api/unlock", json={"password": info.password})
             assert ok.status_code == 200
-            sid = ok.cookies[COOKIE]
+            device_id = ok.json()["device"]["id"]
             assert http.get(f"/r/{info.token}/api/board").json() == fake.board
             assert http.get(f"/r/{info.token}/").text.startswith("<!doctype html>")
-            sessions = remote_server.remote_server_status()["sessions"]
-            assert isinstance(sessions, list) and sessions[0]["sid"] == sid
+            devices = remote_server.remote_server_status()["devices"]
+            assert isinstance(devices, list) and devices[0]["id"] == device_id
             assert http.post(f"/r/{info.token}/api/note", json={"text": "x"}).status_code == 403
             remote_server.set_allow_write(True)
             assert http.get(f"/r/{info.token}/api/remote").json()["allow_write"] is True
             remote_server.set_allow_write(False)
-            assert remote_server.revoke_remote_device(sid) is True
+            assert remote_server.revoke_remote_device(device_id) is True
             assert http.get(f"/r/{info.token}/api/board").status_code == 401
-            assert remote_server.revoke_remote_device(sid) is False
+            assert remote_server.revoke_remote_device(device_id) is False
     finally:
         remote_server.stop_remote_server()
     assert remote_server.remote_server_status()["running"] is False
@@ -683,7 +709,8 @@ def test_cli_status_allow_write_and_regenerate(
     status = _json_of(runner, "remote", "status")
     assert status["allow_write"] is False
     assert status["url_local"] == f"http://127.0.0.1:8750/r/{status['token']}/"
-    assert status["sessions"] == []
+    assert status["devices"] == []
+    assert (status["failed_unlocks"], status["locked_out_until"]) == (0, None)
     assert _json_of(runner, "remote", "allow-write", "on") == {"allow_write": True}
     assert _json_of(runner, "remote", "status")["allow_write"] is True
     assert _json_of(runner, "remote", "allow-write", "off") == {"allow_write": False}
@@ -714,16 +741,27 @@ def test_cli_serve_prints_link_and_password_then_serves(
     # `serve` refuses a machine with no page installed (tests/test_remote_install_page.py),
     # and this test is about the banner — so install one first.
     remote_server.install_page(dist)
-    served: list[tuple[Path | None, int]] = []
-    monkeypatch.setattr(
-        remote_server, "run_foreground", lambda dist, port: served.append((dist, port))
-    )
+    served: list[tuple[Path | None, int, int, str | None]] = []
+
+    def run_foreground(
+        dist: Path | None,
+        port: int,
+        auto_off_minutes: int,
+        public_url: str | None,
+        *,
+        ready: Callable[[], None],
+    ) -> bool:
+        served.append((dist, port, auto_off_minutes, public_url))
+        ready()  # the banner, once the port is bound
+        return False
+
+    monkeypatch.setattr(remote_server, "run_foreground", run_foreground)
     result = CliRunner().invoke(cli, ["--json", "remote", "serve", "--port", "9001"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["url_local"].startswith("http://127.0.0.1:9001/r/")
     assert payload["allow_write"] is False
-    assert served == [(None, 9001)]
+    assert served == [(None, 9001, 60, None)], "an hour of auto-off unless told otherwise"
     human = CliRunner().invoke(cli, ["remote", "serve", "--port", "9002"])
     assert human.exit_code == 0
     assert "password:" in human.output and "read-only" in human.output
@@ -743,12 +781,14 @@ def test_the_write_list_is_the_plan_verbatim() -> None:
 
 
 def test_password_is_a_phone_typeable_passphrase_without_lookalikes() -> None:
+    from aisquare.services.remote_words import REMOTE_PASSPHRASE_WORDS
+
     for _ in range(50):
         password = remote_server.new_password()
         words = password.split("-")
         assert len(words) == remote_server.PASSPHRASE_WORDS
         assert len(set(words)) == len(words)  # distinct words
-        assert all(word in remote_server._PASSPHRASE_WORDS for word in words)
+        assert all(word in REMOTE_PASSPHRASE_WORDS for word in words)
         assert password == password.lower() and not set(password) & set("0123456789")
         time.sleep(0)
 

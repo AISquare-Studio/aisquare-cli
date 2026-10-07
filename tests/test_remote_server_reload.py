@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,6 @@ from starlette.testclient import TestClient
 from aisquare.core.paths import remote_audit_path, remote_state_path
 from aisquare.services import remote_server
 from aisquare.services.remote_server import (
-    COOKIE,
     READ_ONLY_REASON,
     WS_CLOSE_UNAUTHORIZED,
     Runtime,
@@ -106,12 +106,12 @@ def test_allow_write_turned_off_externally_makes_the_next_write_403(
 def test_revoke_from_another_process_closes_the_socket_and_the_cookie(
     client: TestClient, runtime: Runtime
 ) -> None:
-    sid = client.cookies[COOKIE]
+    (device,) = client.get(f"{base(runtime)}/api/devices").json()
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
         _frames_until(ws, "remote")
         other_process_writes(
             lambda raw: raw.__setitem__(
-                "sessions", [row for row in raw["sessions"] if row["sid"] != sid]
+                "devices", [row for row in raw["devices"] if row["id"] != device["id"]]
             )
         )
         closed = None
@@ -131,10 +131,9 @@ def test_an_unchanged_file_is_never_re_read(client: TestClient, runtime: Runtime
         assert client.get(f"{base(runtime)}/api/remote").status_code == 200
         assert client.get(f"{base(runtime)}/api/board").status_code == 200
     assert runtime.reads == reads
-    other_process_writes(lambda raw: raw.__setitem__("auto_off_at", "2026-09-12T18:30:00+00:00"))
-    assert client.get(f"{base(runtime)}/api/remote").json()["auto_off_at"] == (
-        "2026-09-12T18:30:00+00:00"
-    )
+    later = (datetime.now(UTC) + timedelta(days=1)).isoformat(timespec="seconds")
+    other_process_writes(lambda raw: raw.__setitem__("auto_off_at", later))
+    assert client.get(f"{base(runtime)}/api/remote").json()["auto_off_at"] == later
     assert runtime.reads == reads + 1
     client.get(f"{base(runtime)}/api/remote")
     assert runtime.reads == reads + 1
@@ -160,7 +159,7 @@ def test_regenerated_password_from_another_process_applies(
     client: TestClient, runtime: Runtime
 ) -> None:
     other_process_writes(
-        lambda raw: raw.update({"password": "amber-birch-cedar-delta", "sessions": []})
+        lambda raw: raw.update({"password": "amber-birch-cedar-delta", "devices": []})
     )
     assert client.get(f"{base(runtime)}/api/board").status_code == 401
     assert (

@@ -355,7 +355,7 @@ def test_claiming_another_projects_task_needs_no_project(
     result, summary = live_writes().handlers["task/claim"]({"ref": task.id})
     claimed = result["task"]
     assert isinstance(claimed, dict) and claimed["project_id"] == other.id
-    assert summary == f"claimed {task.id}"
+    assert summary == f"claimed {task.id} as=-"
     assert "another project's task" in _event_texts(remote_board_payload(other.id))
 
 

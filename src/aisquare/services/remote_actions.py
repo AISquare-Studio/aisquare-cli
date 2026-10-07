@@ -230,8 +230,16 @@ def action_required(body: dict[str, Any], key: str) -> str:
     return value.strip()
 
 
-def action_ref(body: dict[str, Any], key: str, *, limit: int | None = None) -> str | None:
-    """An optional string: absent, null and blank all mean none; over ``limit`` is a 413."""
+def action_ref(
+    body: dict[str, Any], key: str, *, limit: int | None = None, guard: bool = False
+) -> str | None:
+    """An optional string: absent and null mean none; over ``limit`` is a 413.
+
+    Blank means none as well, except for a ``guard``: an id that keeps the
+    action off the wrong agent (``agent_id``, ``needs_id``). A page that sends
+    one blank, say from a card that had none, gets a 400. Read as none, the blank
+    would turn the guard off and the action would still go through.
+    """
     value = body.get(key)
     if value is None:
         return None
@@ -239,6 +247,8 @@ def action_ref(body: dict[str, Any], key: str, *, limit: int | None = None) -> s
         raise RequestError(400, "invalid", f"{key!r} must be a string")
     if limit is not None and len(value) > limit:
         raise RequestError(413, "too_large", f"{key!r} is over {limit} characters")
+    if guard and not value.strip():
+        raise RequestError(400, "invalid", f"{key!r} is blank: send the id, or leave it out")
     return value.strip() or None
 
 
@@ -704,8 +714,8 @@ def action_tell(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     label = action_required(body, "agent")
     text = action_tell_text(body)
     mode = action_tell_mode(body)
-    agent_id = action_ref(body, "agent_id")
-    needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX)
+    agent_id = action_ref(body, "agent_id", guard=True)
+    needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX, guard=True)
     target = action_project(body)
     with action_locked(target, label, agent_id):
         snap = action_check_needs(target, label, agent_id, needs_id)
@@ -744,7 +754,7 @@ def action_stop(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     label, agent_id = action_pinned(body)
     force = action_flag(body, "force")
     dismiss = action_flag(body, "dismiss_dialog")
-    needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX)
+    needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX, guard=True)
     target = action_project(body)
     with action_locked(target, label, agent_id) as row:
         snap = action_check_needs(target, label, agent_id, needs_id)
@@ -783,7 +793,7 @@ def action_restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     label, agent_id = action_pinned(body)
     fresh = action_flag(body, "fresh")
     dismiss = action_flag(body, "dismiss_dialog")
-    needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX)
+    needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX, guard=True)
     target = action_project(body)
     with action_locked(target, label, agent_id) as row:
         snap = action_check_needs(target, label, agent_id, needs_id)
@@ -831,7 +841,7 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     fresh = action_flag(body, "fresh")
     reason = action_ref(body, "reason", limit=ACTION_FIELD_MAX)
     dismiss = action_flag(body, "dismiss_dialog")
-    needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX)
+    needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX, guard=True)
     target = action_project(body)
     with action_locked(target, label, agent_id) as row:
         snap = action_check_needs(target, label, agent_id, needs_id)

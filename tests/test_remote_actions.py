@@ -1059,6 +1059,35 @@ def test_a_field_that_is_too_long_or_the_wrong_type_is_refused(
     assert fleet.calls == []
 
 
+@pytest.mark.parametrize("name", ACTION_ENDPOINTS)
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_needs_id_is_a_400_not_a_card_check_turned_off(
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo, name: str, blank: str
+) -> None:
+    """The card's item is gone, so its id would be 409 ``stale``. A page that sends the id
+    blank (``card.id ?? ""``) must not get the action done as if it came from no card."""
+    _row(project)
+    response = phone.post(name, **PINNED, text="hi", needs_id=blank)
+    assert (response.status_code, response.json()) == (
+        400,
+        {"error": "invalid", "message": "'needs_id' is blank: send the id, or leave it out"},
+    )
+    assert fleet.calls == [] and needs.reads == 0
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_agent_id_on_a_tell_is_a_400_not_a_tell_to_whoever_holds_the_label(
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo, blank: str
+) -> None:
+    _replaced(project)
+    response = phone.post("agent/tell", agent=LABEL, agent_id=blank, text="hi")
+    assert (response.status_code, response.json()) == (
+        400,
+        {"error": "invalid", "message": "'agent_id' is blank: send the id, or leave it out"},
+    )
+    assert fleet.calls == []
+
+
 # --- the dialog guard ------------------------------------------------------------------------
 
 

@@ -14,9 +14,13 @@ import json
 import re
 import stat
 import sys
+import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -24,25 +28,40 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli
 from aisquare.core.config import AccountsSettings
-from aisquare.core.paths import remote_needs_path
+from aisquare.core.paths import remote_audit_path, remote_needs_path
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamEvent, TeamSession
 from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_needs
+from aisquare.services.remote_actions import ActionLedger, LedgerEntry
 from aisquare.services.remote_needs import (
+    AgentNow,
     NeedsItem,
     NeedsSources,
     QuickAnswer,
+    RemoteNeedsWatcher,
     is_needs_board_event,
     load_needs_dismissals,
     looks_like_a_question,
+    needs_agent_now,
+    needs_at_input_prompt,
+    needs_dialog_open,
     needs_from_agent,
     needs_from_board,
+    needs_item_current,
     needs_item_id,
     needs_push_safe,
     record_needs_dismissal,
     scan_needs_you,
 )
+from aisquare.services.remote_server import (
+    READ_ONLY_REASON,
+    Runtime,
+    Sources,
+    build_app,
+    remote_agent_lock,
+)
 from aisquare.services.transcript import PendingTool, TranscriptTail
+from tests.remote_kit_helpers import base, make_client, make_runtime, receive_within, unlock
 
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
 BORN = NOW - timedelta(hours=1)
@@ -1076,6 +1095,617 @@ def test_an_unreadable_dismissals_file_dismisses_nothing(body: str) -> None:
     remote_needs_path().parent.mkdir(parents=True, exist_ok=True)
     remote_needs_path().write_text(body, encoding="utf-8")
     assert load_needs_dismissals() == {}
+
+
+# --- one agent, now: the predicates actions rely on ---------------------------------------
+
+
+class FakeTmux:
+    """The agent's tmux server: what it says about the pane, and what was typed into it."""
+
+    def __init__(
+        self,
+        *,
+        reference: datetime | None = None,
+        command: str = "claude",
+        quiet_for: float = 60.0,
+        gone: bool = False,
+    ) -> None:
+        self.reference = reference
+        self.command = command
+        self.quiet_for = quiet_for
+        self.gone = gone
+        self.fail = False
+        self.typed: list[tuple[str, ...]] = []
+
+    def pane_facts(self, pane_id: str) -> SimpleNamespace | None:
+        if self.gone:
+            return None
+        return SimpleNamespace(dead=False, current_command=self.command)
+
+    def run(self, *args: str, stdin: bytes | None = None) -> str:
+        assert args[:3] == ("display-message", "-p", "-t") and args[-1] == "#{window_activity}"
+        now = self.reference.timestamp() if self.reference else time.time()
+        return str(int(now - self.quiet_for))
+
+    def send_keys(self, pane_id: str, *keys: str) -> None:
+        if self.fail:
+            from aisquare.core.tmux import TmuxError
+
+            raise TmuxError("no server running on /tmp/tmux-1000/asq")
+        self.typed.append(("keys", pane_id, *keys))
+
+    def send_literal(self, pane_id: str, text: str) -> None:
+        self.typed.append(("text", pane_id, text))
+
+
+def _now_of(
+    fleet: Fleet, tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch, label: str = "coder-1"
+) -> AgentNow:
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: _sources(fleet))
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    return needs_agent_now(PROJECT, label, now=NOW)
+
+
+def _working(tail: TranscriptTail | None, *, state: str = "working") -> Fleet:
+    row = _row()
+    session = _session(row, state="attention" if state == "attention" else "working")
+    fleet = Fleet(agents=[_status(row, state, session)])
+    if tail is not None:
+        fleet.tails[f"/transcripts/{row.label}.jsonl"] = tail
+    return fleet
+
+
+def test_a_pending_tool_in_a_quiet_pane_is_a_dialog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Claude Code animates while a tool runs; a quiet pane with a tool pending is waiting."""
+    snap = _now_of(_working(_tail(_tool("toolu_a"))), FakeTmux(reference=NOW), monkeypatch)
+    assert snap.pane_is_agent and snap.pane_quiet is True
+    assert snap.status is not None and snap.status.agent.label == "coder-1"
+    assert needs_dialog_open(snap) and not needs_at_input_prompt(snap)
+    assert snap.items == (), "no item before the notification: the dialog is open all the same"
+
+
+def test_a_pending_tool_in_a_busy_pane_is_a_tool_at_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    tmux = FakeTmux(reference=NOW, quiet_for=1)
+    snap = _now_of(_working(_tail(_tool("toolu_a"))), tmux, monkeypatch)
+    assert snap.pane_quiet is False
+    assert not needs_dialog_open(snap) and not needs_at_input_prompt(snap)
+
+
+def test_a_current_question_is_a_dialog_however_busy_the_pane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tail = _tail(_tool("toolu_q", "AskUserQuestion", **QUESTION))
+    snap = _now_of(_working(tail), FakeTmux(reference=NOW, quiet_for=0), monkeypatch)
+    (item,) = snap.items
+    assert item.kind == "question" and needs_item_current(snap, item.id)
+    assert needs_dialog_open(snap)
+
+
+def test_attention_is_a_dialog_until_an_interruption_follows_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snap = _now_of(_working(None, state="attention"), FakeTmux(reference=NOW), monkeypatch)
+    assert needs_dialog_open(snap)
+    escaped = _tail(newest="interrupted", at=NOW - timedelta(minutes=1), text="Stopping.")
+    after = _now_of(_working(escaped, state="attention"), FakeTmux(reference=NOW), monkeypatch)
+    assert [item.kind for item in after.items] == ["interrupted"]
+    assert not needs_dialog_open(after)
+    assert needs_at_input_prompt(after), (
+        "Esc fired no Stop: the row says attention, the pane a prompt"
+    )
+
+
+@pytest.mark.parametrize(
+    "tmux",
+    [
+        pytest.param(FakeTmux(reference=NOW, command="zsh"), id="a shell after an exit"),
+        pytest.param(FakeTmux(reference=NOW, command="python3.13"), id="the launcher"),
+        pytest.param(FakeTmux(reference=NOW, gone=True), id="no pane"),
+    ],
+)
+def test_a_pane_that_is_not_the_agent_shows_no_dialog(
+    tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never a dialog, even with attention and a pending tool: a crash mid-tool leaves both."""
+    snap = _now_of(_working(_tail(_tool("toolu_a")), state="attention"), tmux, monkeypatch)
+    assert not snap.pane_is_agent
+    assert not needs_dialog_open(snap) and not needs_at_input_prompt(snap)
+
+
+def test_at_the_prompt_takes_a_quiet_pane_tmux_vouches_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    waiting = _working(None, state="waiting")
+    assert needs_at_input_prompt(_now_of(waiting, FakeTmux(reference=NOW), monkeypatch))
+    busy = FakeTmux(reference=NOW, quiet_for=0)
+    assert not needs_at_input_prompt(_now_of(waiting, busy, monkeypatch))
+    said = _tail(newest="assistant_text", text="Done.")
+    assert needs_at_input_prompt(_now_of(_working(said), FakeTmux(reference=NOW), monkeypatch))
+    mid_turn = _tail(newest="tool_result")
+    assert not needs_at_input_prompt(
+        _now_of(_working(mid_turn), FakeTmux(reference=NOW), monkeypatch)
+    )
+
+
+def test_quiet_is_unknown_when_tmux_will_not_say(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Silent(FakeTmux):
+        def run(self, *args: str, stdin: bytes | None = None) -> str:
+            from aisquare.core.tmux import TmuxError
+
+            raise TmuxError("no server")
+
+    snap = _now_of(_working(None, state="waiting"), Silent(reference=NOW), monkeypatch)
+    assert snap.pane_quiet is None
+    assert not needs_at_input_prompt(snap), "only a pane tmux says is quiet is a prompt"
+    pending = _now_of(_working(_tail(_tool("toolu_a"))), Silent(reference=NOW), monkeypatch)
+    assert needs_dialog_open(pending), "unknown counts as quiet for a dialog: a refusal is cheap"
+
+
+def test_the_agents_items_include_its_project_kinds(monkeypatch: pytest.MonkeyPatch) -> None:
+    lost = _row()
+    fleet = Fleet(agents=[_status(lost, "lost", _session(lost))])
+    snap = _now_of(fleet, FakeTmux(reference=NOW, gone=True), monkeypatch)
+    assert [item.kind for item in snap.items] == ["lost"]
+    crashed = _row("coder-2", ended=NOW - timedelta(minutes=5), exit_status=1)
+    fleet = Fleet(ended=[crashed])
+    snap = _now_of(fleet, FakeTmux(reference=NOW), monkeypatch, label="coder-2")
+    assert snap.status is None, "its newest row ended and has no window left"
+    (item,) = snap.items
+    assert item.kind == "crashed" and needs_item_current(snap, item.id)
+    assert not snap.pane_is_agent and not needs_dialog_open(snap)
+
+
+def test_a_dismissed_prompt_is_still_the_agents(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dismissal hides the card; the dialog is still up, and an Enter would still answer it."""
+    fleet = _working(_tail(_tool("toolu_a")), state="attention")
+    (item,) = _scan(fleet)
+    record_needs_dismissal(item.id)
+    snap = _now_of(fleet, FakeTmux(reference=NOW), monkeypatch)
+    assert needs_item_current(snap, item.id) and needs_dialog_open(snap)
+
+
+def test_a_label_with_no_row_is_no_such_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(fleet_service.NoSuchAgent):
+        _now_of(_working(None), FakeTmux(reference=NOW), monkeypatch, label="ghost")
+
+
+def test_a_listing_that_fails_is_not_an_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A snapshot without the listing would claim the pane shows no dialog."""
+    fleet = _working(None)
+    fleet.listing_fails = True
+    with pytest.raises(fleet_service.FleetUnavailable):
+        _now_of(fleet, FakeTmux(reference=NOW), monkeypatch)
+
+
+# --- the watcher --------------------------------------------------------------------------
+
+
+def _server_sources() -> Sources:
+    return Sources(
+        projects=lambda: [],
+        fleet=lambda project: {},
+        board=lambda project: {},
+        tasks=lambda project: [],
+        memory=lambda project: [],
+        panes=lambda agent, project, history: {"rows": [], "width": 0, "height": 0},
+        explainability=lambda agent, project: {"available": False},
+    )
+
+
+@pytest.fixture
+def runtime() -> Runtime:
+    return make_runtime()
+
+
+def _until_true(check: Callable[[], bool], seconds: float = 5.0) -> None:
+    deadline = time.monotonic() + seconds
+    while not check():
+        assert time.monotonic() < deadline, "it never happened"
+        time.sleep(0.01)
+
+
+def test_the_watcher_scans_only_while_a_device_exists(runtime: Runtime, tmp_path: Path) -> None:
+    """Nobody to show it to, no scan: no store reads, no tmux spawns."""
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    made: list[NeedsSources] = []
+
+    def counted() -> NeedsSources:
+        made.append(_sources(Fleet()))
+        return made[-1]
+
+    watcher = RemoteNeedsWatcher(app.kit, sources=counted, interval=0.01)
+    watcher.start_watching()
+    try:
+        threading.Event().wait(0.2)
+        assert made == [] and watcher.needs_scanned_at() is None
+        assert unlock(make_client(app), runtime).status_code == 200
+        _until_true(lambda: watcher.needs_scanned_at() is not None)
+        assert any(t.name == "asq-remote-needs" for t in threading.enumerate())
+    finally:
+        watcher.stop_watching()
+    assert not watcher.needs_watching()
+
+
+def test_every_scan_reaches_every_listener_and_a_failing_one_costs_nothing(
+    runtime: Runtime, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    fleet = _working(_tail(_tool("toolu_q", "AskUserQuestion", **QUESTION)))
+    clock = iter([NOW, NOW + timedelta(seconds=3)])
+    watcher = RemoteNeedsWatcher(
+        app.kit, sources=lambda: _sources(fleet), clock=lambda: next(clock)
+    )
+    heard: list[tuple[list[NeedsItem], datetime]] = []
+
+    def broken(items: list[NeedsItem], scanned_at: datetime) -> None:
+        raise RuntimeError("a listener's bug")
+
+    app.kit.needs_listeners.extend([broken, lambda items, at: heard.append((items, at))])
+    first = watcher.scan_needs_now()
+    second = watcher.scan_needs_now()
+    assert [at for _items, at in heard] == [NOW, NOW + timedelta(seconds=3)]
+    assert [items for items, _at in heard] == [first, second]
+    assert [item.kind for item in first] == ["question"] and first == second
+    assert sum("needs listener failed" in r.getMessage() for r in caplog.records) == 2
+    assert watcher.needs_items_now() == second
+    assert watcher.needs_scanned_at() == NOW + timedelta(seconds=3)
+
+
+def test_the_stream_and_the_heartbeat_read_the_watchers_snapshot(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    assert remote_needs.needs_ws_frames(app.kit) == []
+    assert remote_needs.needs_scanned_iso(app.kit) is None
+    fleet = _working(_tail(_tool("toolu_q", "AskUserQuestion", **QUESTION)))
+    watcher = RemoteNeedsWatcher(app.kit, sources=lambda: _sources(fleet), clock=lambda: NOW)
+    app.kit.lane_state["needs"] = watcher
+    assert remote_needs.needs_ws_frames(app.kit) == [], "nothing until the first scan"
+    (item,) = watcher.scan_needs_now()
+    assert remote_needs.needs_ws_frames(app.kit) == [
+        ("needs_you", {"items": [item.needs_item_json()]})
+    ]
+    assert remote_needs.needs_scanned_iso(app.kit) == "2026-10-07T12:00:00+00:00"
+    assert watcher.needs_payload_now() == {
+        "items": [item.needs_item_json()],
+        "scanned_at": "2026-10-07T12:00:00+00:00",
+    }
+
+
+# --- the routes (SPEC §4.6) ---------------------------------------------------------------
+
+
+@dataclass
+class Live:
+    """A served app over fake needs sources and a fake tmux, one device unlocked."""
+
+    app: Any
+    client: Any
+    runtime: Runtime
+    fleet: Fleet
+    tmux: FakeTmux
+
+    def url(self, path: str) -> str:
+        return f"{base(self.runtime)}/api/{path}"
+
+    def feed(self) -> list[dict[str, Any]]:
+        response = self.client.get(self.url("needs"))
+        assert response.status_code == 200, response.text
+        items: list[dict[str, Any]] = response.json()["items"]
+        return items
+
+    def card(self, kind: str) -> dict[str, Any]:
+        return next(item for item in self.feed() if item["kind"] == kind)
+
+    def audit(self) -> list[str]:
+        path = remote_audit_path()
+        return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+@pytest.fixture
+def live(runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Live:
+    now = datetime.now(UTC)
+    status, tail = _asking(now)
+    manager = _row("manager", role="manager", created=now - timedelta(hours=2))
+    managing = _session(manager, seen=now - timedelta(minutes=1))
+    fleet = Fleet(
+        agents=[status, _status(manager, "working", managing)],
+        sessions=[managing],
+        events=[_event(5, "question", "Ship on Friday?", session=managing, at=now)],
+    )
+    fleet.tails["/transcripts/coder-1.jsonl"] = tail
+    tmux = FakeTmux()
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: _sources(fleet))
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 0.0)
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    client = make_client(app)
+    assert unlock(client, runtime).status_code == 200
+    return Live(app, client, runtime, fleet, tmux)
+
+
+def test_the_feed_is_one_scan_away_when_no_watcher_runs(live: Live) -> None:
+    response = live.client.get(live.url("needs"))
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"items", "scanned_at"} and body["scanned_at"] is not None
+    assert [item["kind"] for item in body["items"]] == ["permission", "board_question"]
+    card = body["items"][0]
+    assert set(card) == {
+        "id", "kind", "project", "agent", "agent_id", "reason", "excerpt", "detail",
+        "answers", "since", "actions",
+    }  # fmt: skip
+    assert card["project"] == {"id": "prj_alpha", "name": "alpha"}
+    assert card["detail"] == {"tool": "Bash", "input": {"command": "git push"}}
+    assert "push_after" not in card
+
+
+def test_a_dismissal_hides_a_card_for_good_and_is_audited(live: Live) -> None:
+    assert live.runtime.allow_write is False, "not write-gated: it changes what is shown"
+    card = live.card("permission")
+    response = live.client.post(live.url("needs/dismiss"), json={"id": card["id"]})
+    assert response.status_code == 200 and response.json() == {"dismissed": card["id"]}
+    assert [item["kind"] for item in live.feed()] == ["board_question"]
+    assert card["id"] in load_needs_dismissals()
+    assert live.audit()[-1].endswith(f"needs/dismiss {card['id']} permission coder-1@prj_alpha")
+
+
+@pytest.mark.parametrize(
+    ("body", "status", "error"),
+    [
+        ({"id": "ny_0000000000000000"}, 404, "not_found"),
+        ({}, 400, "invalid"),
+        ({"id": 7}, 400, "invalid"),
+        ({"id": "ny_" + "f" * 62}, 413, "too_large"),
+    ],
+)
+def test_a_dismissal_of_nothing_is_refused(
+    live: Live, body: dict[str, Any], status: int, error: str
+) -> None:
+    response = live.client.post(live.url("needs/dismiss"), json=body)
+    assert (response.status_code, response.json()["error"]) == (status, error)
+    assert live.audit() == []
+
+
+def test_an_answer_is_refused_while_writes_are_off(live: Live) -> None:
+    card = live.card("permission")
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert response.status_code == 403
+    assert response.json() == {"error": "read_only", "message": READ_ONLY_REASON}
+    assert live.tmux.typed == []
+
+
+def test_an_answer_types_into_the_agent_is_audited_and_clears_its_card(live: Live) -> None:
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    watcher = live.app.kit.lane_state["needs"]
+    scanned = watcher.needs_scanned_at()
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "answered": card["id"],
+        "agent": "coder-1",
+        "project": "prj_alpha",
+        "sent": True,
+    }
+    assert live.tmux.typed == [("keys", "%7", "1")]
+    assert live.audit()[-1].endswith(
+        f"needs/answer answer {card['id']} permission coder-1@prj_alpha keys=[1] text=0ch "
+        "enter=False"
+    )
+    _until_true(lambda: watcher.needs_scanned_at() != scanned)
+
+
+def test_an_answer_in_words_is_typed_then_entered(live: Live) -> None:
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    body = {"id": card["id"], "text": "use the staging remote", "enter": True}
+    assert live.client.post(live.url("needs/answer"), json=body).status_code == 200
+    assert live.tmux.typed == [("text", "%7", "use the staging remote"), ("keys", "%7", "Enter")]
+    assert live.audit()[-1].endswith("keys=0 text=22ch enter=True")
+
+
+def test_a_card_that_changed_under_the_phone_is_stale(live: Live) -> None:
+    """A stale card's ``1`` must never approve the prompt that replaced it."""
+    live.runtime.set_allow_write(True)
+    gone = live.client.post(
+        live.url("needs/answer"), json={"id": "ny_0000000000000000", "keys": ["1"]}
+    )
+    assert gone.status_code == 409
+    assert gone.json() == {
+        "error": "stale",
+        "message": "that card no longer needs you",
+        "current": [],
+    }
+    card = live.card("permission")
+    status, tail = _asking(datetime.now(UTC), tool="toolu_next")
+    live.fleet.agents[0] = status
+    live.fleet.tails["/transcripts/coder-1.jsonl"] = tail
+    stale = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert stale.status_code == 409
+    body = stale.json()
+    assert body["error"] == "stale" and body["message"] == "coder-1 no longer shows that permission"
+    assert [item["id"] for item in body["current"]] == [
+        needs_item_id(PROJECT.id, "permission", "toolu_next")
+    ]
+    assert live.tmux.typed == []
+
+
+def test_a_board_card_is_answered_on_the_board(live: Live) -> None:
+    live.runtime.set_allow_write(True)
+    card = live.card("board_question")
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "text": "yes"})
+    assert response.status_code == 400
+    assert response.json() == {"error": "not_answerable", "message": "reply on the board instead"}
+
+
+@pytest.mark.parametrize(
+    "keys", [["C-c"], ["C-d"], ["F1"], ["1", "kill-server"], ["Enter;"], ["-l"], [7]]
+)
+def test_an_answer_is_only_the_keys_an_answer_needs(live: Live, keys: list[Any]) -> None:
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": keys})
+    assert response.status_code == 400 and response.json()["error"] == "invalid_key"
+    assert live.tmux.typed == []
+
+
+@pytest.mark.parametrize(
+    ("extra", "status", "error"),
+    [
+        ({"keys": ["1"], "text": "and words"}, 400, "text_and_keys"),
+        ({}, 400, "invalid"),
+        ({"keys": []}, 400, "invalid"),
+        ({"text": ""}, 400, "invalid"),
+        ({"text": 7}, 400, "invalid"),
+        ({"text": "x" * 2_049}, 413, "too_large"),
+    ],
+)
+def test_an_answer_is_keys_or_words_never_both(
+    live: Live, extra: dict[str, Any], status: int, error: str
+) -> None:
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], **extra})
+    assert (response.status_code, response.json()["error"]) == (status, error)
+    assert live.tmux.typed == []
+
+
+def test_an_answer_waits_for_no_other_action_on_the_agent(live: Live) -> None:
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    held = remote_agent_lock(PROJECT.id, "coder-1")
+    assert held.acquire(blocking=False)
+    try:
+        response = live.client.post(
+            live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]}
+        )
+    finally:
+        held.release()
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "busy",
+        "message": "another action on coder-1 is still running",
+    }
+    assert live.tmux.typed == []
+
+
+def test_a_pane_that_is_not_the_agent_is_not_typed_into(live: Live) -> None:
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    live.tmux.command = "zsh"
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert response.status_code == 409 and response.json()["error"] == "not_agent"
+    assert live.tmux.typed == []
+
+
+def test_an_answer_needs_the_listing_it_rechecks_against(live: Live) -> None:
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    live.fleet.listing_fails = True
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert response.status_code == 503
+    assert response.json() == {"error": "fleet_unavailable", "message": "tmux is not installed"}
+    assert live.tmux.typed == []
+    assert not remote_agent_lock(PROJECT.id, "coder-1").locked(), "the lock is let go"
+
+
+def test_tmux_failing_mid_answer_is_said_and_still_on_the_trail(live: Live) -> None:
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    live.tmux.fail = True
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert response.status_code == 503 and response.json()["error"] == "fleet_unavailable"
+    assert live.audit()[-1].endswith("enter=False failed"), "part of it may have reached the pane"
+
+
+class _KeepingLedger(ActionLedger):
+    """A ledger that keeps finished requests, the way the real one must."""
+
+    def __init__(self) -> None:
+        self.finished: dict[tuple[str, str], tuple[int, dict[str, object]]] = {}
+
+    def ledger_replay(
+        self, device_id: str, request_id: str
+    ) -> tuple[int, dict[str, object]] | None:
+        return self.finished.get((device_id, request_id))
+
+    def ledger_finish(
+        self, device_id: str, request_id: str, status: int, body: dict[str, object]
+    ) -> None:
+        self.finished[(device_id, request_id)] = (status, body)
+
+    def ledger_recent(self, device_id: str) -> list[LedgerEntry]:
+        return []
+
+
+def _answer_twice(live: Live) -> tuple[Any, Any]:
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    body = {"id": card["id"], "keys": ["1"], "request_id": "c0ffee"}
+    return (
+        live.client.post(live.url("needs/answer"), json=body),
+        live.client.post(live.url("needs/answer"), json=body),
+    )
+
+
+def test_a_retried_answer_is_answered_from_the_ledger_not_typed_twice(live: Live) -> None:
+    live.app.kit.ledger = _KeepingLedger()
+    first, again = _answer_twice(live)
+    assert first.status_code == again.status_code == 200
+    assert first.json() == again.json()
+    assert live.tmux.typed == [("keys", "%7", "1")]
+
+
+@pytest.mark.xfail(
+    strict=True, reason="needs lane e-agent-actions: the request ledger that keeps answers"
+)
+def test_a_retried_answer_is_typed_once_with_the_servers_own_ledger(live: Live) -> None:
+    first, again = _answer_twice(live)
+    assert first.status_code == again.status_code == 200
+    assert live.tmux.typed == [("keys", "%7", "1")]
+
+
+@pytest.mark.xfail(
+    strict=True, reason="needs lane b-security: check_remote_key_names caps keys at 32"
+)
+def test_an_answer_of_more_keys_than_any_pad_sends_is_refused(live: Live) -> None:
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    keys = ["Down"] * 33
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": keys})
+    assert response.status_code in (400, 413), "refused, as send-keys refuses it"
+    assert live.tmux.typed == []
+
+
+# --- the stream ---------------------------------------------------------------------------
+
+
+def test_the_stream_sends_the_feed_once_the_watcher_has_scanned(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status, tail = _asking(datetime.now(UTC))
+    fleet = Fleet(agents=[status])
+    fleet.tails["/transcripts/coder-1.jsonl"] = tail
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: _sources(fleet))
+    monkeypatch.setattr(remote_needs, "NEEDS_SCAN_SECONDS", 0.02)
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path, tick=0.02)
+    with make_client(app) as client:
+        assert unlock(client, runtime).status_code == 200
+        with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+            for _ in range(500):
+                message = receive_within(ws)
+                assert message["type"] == "websocket.send", message
+                frame = json.loads(message["text"])
+                if frame["type"] == "needs_you":
+                    break
+            else:
+                raise AssertionError("no needs_you frame")
+        (item,) = frame["payload"]["items"]
+        assert item["kind"] == "permission" and item["agent"] == "coder-1"
+        assert set(frame["payload"]) == {"items"}, "no scan time: it goes out on a change only"
+        watcher = app.kit.lane_state["needs"]
+        assert isinstance(watcher, RemoteNeedsWatcher) and watcher.needs_watching()
+    assert not watcher.needs_watching(), "the lifespan stopped it"
 
 
 # --- asq remote needs ---------------------------------------------------------------------

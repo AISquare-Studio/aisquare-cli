@@ -22,9 +22,18 @@ shows; the content a human must read before answering (the full command, every
 question and option, the plan) lives in ``excerpt`` and ``detail``, which are
 served to an unlocked page and never pushed.
 
-``asq remote needs`` runs one scan, here and now. The server's seams still
-answer as if nothing had been scanned, and :func:`needs_agent_now` refuses
-rather than guess, until the watcher and the routes that serve the scan exist.
+A phone answers a card through ``POST api/needs/answer``, which re-derives the
+agent right then (:func:`needs_agent_now`) and types only while the card is
+still true: a stale card's ``1`` must never approve the prompt that replaced it.
+:func:`needs_dialog_open` and :func:`needs_at_input_prompt` are the same
+re-derivation as predicates, for the agent actions (``remote_actions``) that
+must not press Enter into an open dialog.
+
+The watcher (:class:`RemoteNeedsWatcher`) runs in its own daemon thread, scans
+every :data:`NEEDS_SCAN_SECONDS` while any device exists, and lives at
+``kit.lane_state["needs"]``; the stream, the heartbeat and the push sender read
+its latest snapshot under a lock and do no I/O of their own. The server imports
+this module inside functions only, so it is not on the hook path (SPEC §0.2).
 """
 
 from __future__ import annotations
@@ -52,10 +61,13 @@ from aisquare.models import (
 from aisquare.services.transcript import PendingTool, TranscriptTail, read_transcript_tail
 
 if TYPE_CHECKING:
+    from starlette.requests import Request
+    from starlette.responses import Response
     from starlette.routing import BaseRoute
 
     from aisquare.core.config import AccountsSettings
-    from aisquare.services.remote_server import RemoteKit
+    from aisquare.core.tmux import TmuxServer
+    from aisquare.services.remote_server import Device, RemoteKit
 
 log = logging.getLogger(__name__)
 
@@ -1308,28 +1320,122 @@ def _needs_ranked(items: Sequence[NeedsItem]) -> list[NeedsItem]:
 
 
 def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = None) -> AgentNow:
-    """One agent re-derived now, synchronously, never on the event loop.
+    """One agent of ``project`` re-derived now, synchronously: never call it on the event loop.
 
-    Not built yet. It raises rather than answering empty: an ``AgentNow`` with
-    no items and no dialog is a claim about a live pane, and a caller trusting
-    it would type into whatever that pane is showing.
+    It runs the scan's part for this one project — one listing, its ended rows,
+    its board, the cached tails — plus two tmux questions about the label's
+    pane: is its foreground the agent, and has its window been quiet. The
+    listing is not caught here: a snapshot made without it would claim a pane
+    shows no dialog when nobody asked. Raises ``fleet.NoSuchAgent`` only when the
+    label has had no row at all within ``RECENTLY_ENDED``.
     """
-    raise NotImplementedError("needs-you is not built yet")
+    from aisquare.services import fleet as fleet_service
+
+    when = now or _needs_now()
+    sources = live_needs_sources()
+    statuses = sources.list_agents(project)
+    scanned = _needs_scan_project(
+        sources,
+        project,
+        statuses,
+        now=when,
+        first_seen={},
+        seen=set(),
+        accounts=_needs_accounts(sources),
+    )
+    rows = [
+        row for row in [*scanned.ended, *(s.agent for s in scanned.statuses)] if row.label == label
+    ]
+    if not rows:
+        raise fleet_service.NoSuchAgent(
+            f"no agent {label!r} in {project.root.name or project.id} within the last day"
+        )
+    newest = max(rows, key=lambda row: row.created_at)
+    status = next((s for s in scanned.statuses if s.agent.id == newest.id), None)
+    pane_is_agent, pane_quiet = False, None
+    if status is not None and status.agent.ended_at is None:
+        server = fleet_service.server_for(status.agent.tmux_socket)
+        pane_is_agent = fleet_service._pane_is_the_agent(server, status.agent.pane_id)
+        pane_quiet = _needs_pane_quiet(server, status.agent.pane_id, when)
+    return AgentNow(
+        project=project,
+        status=status,
+        tail=None if status is None else scanned.tails.get(status.agent.id),
+        pane_is_agent=pane_is_agent,
+        pane_quiet=pane_quiet,
+        items=tuple(item for item in scanned.items if item.agent == label),
+    )
+
+
+def _needs_pane_quiet(server: TmuxServer, pane_id: str, now: datetime) -> bool | None:
+    """Whether the pane's window printed nothing for ``fleet.ACTIVITY_WINDOW``.
+
+    Claude Code animates its spinner while a tool runs, so a quiet pane with a
+    tool pending is a dialog waiting. One-second resolution, the fact
+    ``fleet._derive`` reads too; ``None`` when tmux would not say.
+    """
+    from aisquare.services import fleet as fleet_service
+
+    try:
+        raw = server.run("display-message", "-p", "-t", pane_id, "#{window_activity}").strip()
+    except Exception:
+        return None
+    if not raw.isdigit():
+        return None
+    return now - datetime.fromtimestamp(int(raw), tz=UTC) > fleet_service.ACTIVITY_WINDOW
 
 
 def needs_dialog_open(snap: AgentNow) -> bool:
-    """Whether the agent shows a dialog an Enter would answer. Not built yet: ``False``."""
-    return False
+    """Whether the agent may show a dialog that an Enter (or a typed ``/exit``) would answer.
+
+    Never for a pane that is not the agent's: an exited, lost or not-yet-started
+    agent shows no dialog, even when its transcript ends on a pending tool (a
+    crash mid-tool). Otherwise any of: a pending tool in a quiet pane (the
+    spinner stops while a dialog waits, in the 6 s before the notification
+    too); attention with no interruption since; a current prompt, question or
+    plan item, or the usage-limit dialog. A false positive costs a refusal with
+    a sentence, or an Escape to an agent about to be stopped anyway — never an
+    Enter into a dialog.
+    """
+    status = snap.status
+    if status is None or not snap.pane_is_agent:
+        return False
+    if _needs_pending(snap.tail, status.agent) and snap.pane_quiet is not False:
+        return True
+    if _needs_attention(status) and not (
+        snap.tail is not None and _needs_marker_later(status, snap.tail)
+    ):
+        return True
+    return any(
+        item.kind in ("permission", "question", "plan")
+        # A `limited` item of a row that does not derive `limited` is the dialog form.
+        or (item.kind == "limited" and status.state != "limited")
+        for item in snap.items
+    )
 
 
 def needs_at_input_prompt(snap: AgentNow) -> bool:
-    """Whether the agent waits at its input prompt. Not built yet: ``False``."""
-    return False
+    """Whether the agent sits at its input prompt, where typed text is a message to it.
+
+    No dialog, the pane is the agent and quiet (tmux must say so), no tool
+    pending, and the newest record is an interruption or the agent's own words —
+    or the row derives ``waiting``, the only sign there is without a tail.
+    """
+    status = snap.status
+    if status is None or not snap.pane_is_agent or snap.pane_quiet is not True:
+        return False
+    if needs_dialog_open(snap):
+        return False
+    if snap.tail is None:
+        return status.state == "waiting"
+    if _needs_pending(snap.tail, status.agent):
+        return False
+    return snap.tail.newest in ("interrupted", "assistant_text") or status.state == "waiting"
 
 
 def needs_item_current(snap: AgentNow, item_id: str) -> bool:
-    """Whether ``item_id`` is still one of the agent's items. Not built yet: ``False``."""
-    return False
+    """Whether ``item_id`` is still one of the agent's items right now."""
+    return any(item.id == item_id for item in snap.items)
 
 
 # --- the live sources ---------------------------------------------------------------------
@@ -1457,27 +1563,355 @@ def _needs_stamp(raw: str) -> datetime | None:
     return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
 
 
-# --- the seams the server calls -----------------------------------------------------------
+# --- the watcher --------------------------------------------------------------------------
+
+
+class RemoteNeedsWatcher:
+    """The scanner: a daemon thread scanning every ``interval`` while any device exists.
+
+    Signed-out devices count: they still receive pushes. Each scan replaces the
+    latest snapshot at once and then calls every listener in
+    ``kit.needs_listeners`` with ``(all items, scanned_at)``; a listener that
+    raises is logged and the rest are called. Readers (the stream, the
+    heartbeat, the routes, the push sender) take the snapshot under a lock and
+    do no I/O.
+    """
+
+    def __init__(
+        self,
+        kit: RemoteKit,
+        *,
+        sources: Callable[[], NeedsSources] = live_needs_sources,
+        interval: float = NEEDS_SCAN_SECONDS,
+        clock: Callable[[], datetime] = _needs_now,
+    ) -> None:
+        self._kit = kit
+        self._sources = sources
+        self._interval = interval
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._scanning = threading.Lock()
+        """One scan at a time: the watcher's own, a route's, the one after a quick answer."""
+        self._latest: list[NeedsItem] = []
+        self._latest_json: list[dict[str, object]] = []
+        self._scanned_at: datetime | None = None
+        self._projects: dict[str, ProjectInfo] = {}
+        self._first_seen: dict[str, datetime] = {}
+        self._stopping = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start_watching(self) -> None:
+        """Start the daemon thread ``asq-remote-needs``; its first scan runs at once."""
+        if self._thread is None:
+            self._thread = threading.Thread(
+                target=self._needs_loop, name="asq-remote-needs", daemon=True
+            )
+            self._thread.start()
+
+    def stop_watching(self) -> None:
+        """Stop the thread, waiting a few seconds for a scan in progress."""
+        self._stopping.set()
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout=5.0)
+
+    def needs_watching(self) -> bool:
+        """Whether the thread is scanning (a lifespan started it)."""
+        return self._thread is not None and self._thread.is_alive()
+
+    def _needs_loop(self) -> None:
+        while not self._stopping.is_set():
+            if self._needs_devices():
+                try:
+                    self.scan_needs_now()
+                except Exception:
+                    log.warning("remote: the needs scan failed", exc_info=True)
+            self._stopping.wait(self._interval)
+
+    def _needs_devices(self) -> bool:
+        """Whether any device is on record, signed in or not: nobody to show it to, no scan."""
+        try:
+            return bool(self._kit.runtime.device_rows())
+        except Exception:
+            return False
+
+    def scan_needs_now(self) -> list[NeedsItem]:
+        """One synchronous scan: the snapshot replaced, then every listener called."""
+        with self._scanning:
+            now = self._clock()
+            sources = self._sources()
+            projects = sources.list_projects()
+            items = scan_needs_you(
+                replace(sources, list_projects=lambda: projects),
+                now=now,
+                dismissed=load_needs_dismissals(),
+                first_seen=self._first_seen,
+            )
+            payload = [item.needs_item_json() for item in items]
+            with self._lock:
+                self._latest, self._latest_json, self._scanned_at = items, payload, now
+                self._projects = {project.id: project for project in projects}
+            for listener in list(self._kit.needs_listeners):
+                try:
+                    listener(list(items), now)
+                except Exception:
+                    log.warning("remote: a needs listener failed", exc_info=True)
+        return items
+
+    def needs_items_now(self) -> list[NeedsItem]:
+        """The latest scan's items, ranked."""
+        with self._lock:
+            return list(self._latest)
+
+    def needs_scanned_at(self) -> datetime | None:
+        """When the latest scan ran; ``None`` before the first."""
+        with self._lock:
+            return self._scanned_at
+
+    def needs_items_json(self) -> list[dict[str, object]] | None:
+        """The latest items in their wire shape, made once per scan; ``None`` before the first."""
+        with self._lock:
+            return None if self._scanned_at is None else self._latest_json
+
+    def needs_payload_now(self) -> dict[str, object]:
+        """``GET api/needs``: ``{"items", "scanned_at"}``."""
+        with self._lock:
+            scanned = self._scanned_at
+            items = list(self._latest_json)
+        stamp = None if scanned is None else scanned.isoformat(timespec="seconds")
+        return {"items": items, "scanned_at": stamp}
+
+    def needs_lookup(self, item_id: str) -> tuple[NeedsItem, ProjectInfo] | None:
+        """The latest scan's item with this id, and its project; ``None`` when it is not there."""
+        with self._lock:
+            item = next((item for item in self._latest if item.id == item_id), None)
+            project = None if item is None else self._projects.get(item.project_id)
+        return None if item is None or project is None else (item, project)
+
+    def needs_forget(self, item_id: str) -> None:
+        """Drop a dismissed item now, rather than at the next scan."""
+        with self._lock:
+            self._latest = [item for item in self._latest if item.id != item_id]
+            self._latest_json = [item for item in self._latest_json if item.get("id") != item_id]
+
+    def needs_rescan_soon(self) -> None:
+        """Scan again in :data:`NEEDS_RESCAN_AFTER_ANSWER` seconds, off every caller's thread."""
+        timer = threading.Timer(NEEDS_RESCAN_AFTER_ANSWER, self._needs_rescan)
+        timer.daemon = True
+        timer.start()
+
+    def _needs_rescan(self) -> None:
+        try:
+            self.scan_needs_now()
+        except Exception:
+            log.warning("remote: the needs scan after an answer failed", exc_info=True)
+
+
+def _needs_watcher(kit: RemoteKit) -> RemoteNeedsWatcher:
+    """The kit's watcher, or one that is not started (no lifespan): it scans when asked."""
+    watcher = kit.lane_state.get("needs")
+    if isinstance(watcher, RemoteNeedsWatcher):
+        return watcher
+    made = RemoteNeedsWatcher(kit, sources=live_needs_sources)
+    kit.lane_state["needs"] = made
+    return made
+
+
+# --- the routes ---------------------------------------------------------------------------
+
+
+def _needs_id_field(body: Mapping[str, object]) -> str:
+    """The body's item ``id``: required, at most :data:`NEEDS_ID_MAX` characters."""
+    from aisquare.services.remote_server import RequestError
+
+    value = body.get("id")
+    if not isinstance(value, str) or not value:
+        raise RequestError(400, "invalid", "'id' is required: the needs item's id")
+    if len(value) > NEEDS_ID_MAX:
+        raise RequestError(413, "too_large", f"'id' is at most {NEEDS_ID_MAX} characters")
+    return value
+
+
+def _needs_answer_body(body: Mapping[str, object]) -> tuple[str, list[str], str, bool]:
+    """``(id, keys, text, enter)`` of a quick answer: exactly one of ``keys`` and ``text``."""
+    from aisquare.services.remote_server import RequestError, check_remote_key_names
+
+    item_id = _needs_id_field(body)
+    raw_keys, raw_text = body.get("keys"), body.get("text")
+    if raw_text is not None and not isinstance(raw_text, str):
+        raise RequestError(400, "invalid", "'text' must be a string")
+    if raw_keys is not None and raw_text:
+        raise RequestError(
+            400, "text_and_keys", "send 'keys' or 'text', not both: the order would be lost"
+        )
+    keys = [] if raw_keys is None else check_remote_key_names(raw_keys)
+    refused = [key for key in keys if key not in NEEDS_ANSWER_KEYS]
+    if refused:
+        allowed = ", ".join(sorted(NEEDS_ANSWER_KEYS))
+        named = needs_push_safe(refused[0], 32)
+        raise RequestError(
+            400, "invalid_key", f"{named!r} is not an answer key — one of: {allowed}"
+        )
+    text = raw_text or ""
+    if not keys and not text:
+        raise RequestError(400, "invalid", "give 'keys' or 'text' to answer with")
+    if len(text) > NEEDS_ANSWER_TEXT_MAX:
+        raise RequestError(
+            413, "too_large", f"'text' is at most {NEEDS_ANSWER_TEXT_MAX} characters"
+        )
+    return item_id, keys, text, bool(body.get("enter", False))
+
+
+def _needs_send(agent: FleetAgent, keys: Sequence[str], text: str, enter: bool) -> None:
+    """Type the answer into the agent's pane: the keys, or the text, then Enter if asked."""
+    from aisquare.services import fleet as fleet_service
+
+    server = fleet_service.server_for(agent.tmux_socket)
+    if keys:
+        server.send_keys(agent.pane_id, *keys)
+    if text:
+        server.send_literal(agent.pane_id, text)
+    if enter:
+        server.send_keys(agent.pane_id, "Enter")
 
 
 def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
-    """``GET api/needs``, ``POST api/needs/dismiss``, ``POST api/needs/answer``. None yet."""
-    return []
+    """``GET api/needs``, ``POST api/needs/dismiss``, ``POST api/needs/answer`` (SPEC §1.3)."""
+    import asyncio
+
+    from starlette.responses import JSONResponse
+
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services.remote_server import _audit_keys, remote_agent_lock
+
+    async def needs_list_endpoint(
+        request: Request, device: Device, body: dict[str, Any]
+    ) -> Response:
+        """The feed. A watcher that is not running (no lifespan) scans for this request."""
+        watcher = _needs_watcher(kit)
+        if not watcher.needs_watching() or watcher.needs_scanned_at() is None:
+            await asyncio.to_thread(watcher.scan_needs_now)
+        return JSONResponse(watcher.needs_payload_now())
+
+    async def needs_dismiss_endpoint(
+        request: Request, device: Device, body: dict[str, Any]
+    ) -> Response:
+        """Hide one card for good. Not write-gated: it changes what is shown, not the fleet."""
+        item_id = _needs_id_field(body)
+        watcher = _needs_watcher(kit)
+        if watcher.needs_scanned_at() is None:
+            await asyncio.to_thread(watcher.scan_needs_now)
+        found = watcher.needs_lookup(item_id)
+        if found is None:
+            return kit.kit_refuse(404, "not_found", "no such item in the needs feed")
+        item, _project = found
+        await asyncio.to_thread(record_needs_dismissal, item.id)
+        watcher.needs_forget(item.id)
+        summary = f"{item.id} {item.kind} {item.agent or '-'}@{item.project_id}"
+        kit.kit_audit(device, "needs/dismiss", summary)
+        return JSONResponse({"dismissed": item.id})
+
+    async def needs_answer_endpoint(
+        request: Request, device: Device, body: dict[str, Any]
+    ) -> Response:
+        """Answer a card on the agent it is about, only while the card is still true.
+
+        The item comes from the latest scan; the agent is re-derived right
+        before typing, under the agent's action lock, and a card that is no
+        longer current is a 409 ``stale`` that carries what is current instead.
+        """
+        item_id, keys, text, enter = _needs_answer_body(body)
+        watcher = _needs_watcher(kit)
+        if watcher.needs_scanned_at() is None:
+            await asyncio.to_thread(watcher.scan_needs_now)
+        found = watcher.needs_lookup(item_id)
+        if found is None:
+            return kit.kit_refuse(409, "stale", "that card no longer needs you", current=[])
+        item, project = found
+        label = item.agent
+        if item.kind not in _NEEDS_ANSWERABLE or label is None:
+            board = item.kind in _NEEDS_BOARD_KINDS
+            why = "reply on the board instead" if board else f"a {item.kind} card takes its actions"
+            return kit.kit_refuse(400, "not_answerable", why)
+        lock = remote_agent_lock(project.id, label)
+        if not lock.acquire(blocking=False):
+            return kit.kit_refuse(409, "busy", f"another action on {label} is still running")
+        try:
+            try:
+                snap = await asyncio.to_thread(needs_agent_now, project, label)
+            except fleet_service.NoSuchAgent:
+                return kit.kit_refuse(409, "stale", f"{label} is gone", current=[])
+            except fleet_service.FleetUnavailable as exc:
+                return kit.kit_refuse(503, "fleet_unavailable", str(exc))
+            except fleet_service.FleetError as exc:
+                return kit.kit_refuse(409, "fleet_error", str(exc))
+            if not needs_item_current(snap, item.id):
+                current = [now_item.needs_item_json() for now_item in snap.items]
+                gone = f"{label} no longer shows that {item.kind}"
+                return kit.kit_refuse(409, "stale", gone, current=current)
+            if snap.status is None or not snap.pane_is_agent:
+                why = f"{label}'s pane is not running the agent — nothing was sent"
+                return kit.kit_refuse(409, "not_agent", why)
+            summary = (
+                f"answer {item.id} {item.kind} {label}@{project.id} keys={_audit_keys(keys)} "
+                f"text={len(text)}ch enter={enter}"
+            )
+            try:
+                await asyncio.to_thread(_needs_send, snap.status.agent, keys, text, enter)
+            except Exception as exc:
+                # Part of it may have reached the pane: the trail says it was tried.
+                kit.kit_audit(device, "needs/answer", f"{summary} failed")
+                return kit.kit_refuse(503, "fleet_unavailable", f"tmux could not type it: {exc}")
+            kit.kit_audit(device, "needs/answer", summary)
+        finally:
+            lock.release()
+        watcher.needs_rescan_soon()
+        return JSONResponse(
+            {"answered": item.id, "agent": label, "project": project.id, "sent": True}
+        )
+
+    return [
+        kit.kit_route("/api/needs", needs_list_endpoint, methods=["GET"], write_gated=False),
+        kit.kit_route(
+            "/api/needs/dismiss", needs_dismiss_endpoint, methods=["POST"], write_gated=False
+        ),
+        kit.kit_route(
+            "/api/needs/answer", needs_answer_endpoint, methods=["POST"], write_gated=True
+        ),
+    ]
+
+
+# --- the seams the server calls -----------------------------------------------------------
 
 
 def start_needs_watch(kit: RemoteKit) -> Callable[[], None] | None:
-    """Start the scanner at ``kit.lane_state["needs"]``; its stopper. Nothing to start yet."""
-    return None
+    """Start the watcher at ``kit.lane_state["needs"]``; its stopper, for the lifespan."""
+    watcher = RemoteNeedsWatcher(kit, sources=live_needs_sources, interval=NEEDS_SCAN_SECONDS)
+    kit.lane_state["needs"] = watcher
+    watcher.start_watching()
+    return watcher.stop_watching
 
 
 def needs_ws_frames(kit: RemoteKit) -> list[tuple[str, object]]:
-    """``[("needs_you", {"items": [...]})]`` once the watcher has scanned; ``[]`` until then."""
-    return []
+    """``[("needs_you", {"items": [...]})]`` once the watcher has scanned; ``[]`` until then.
+
+    No ``scanned_at`` in it, so the stream sends it only on a real change. No I/O:
+    the items were made into their wire shape once, by the scan.
+    """
+    watcher = kit.lane_state.get("needs")
+    if not isinstance(watcher, RemoteNeedsWatcher):
+        return []
+    items = watcher.needs_items_json()
+    return [] if items is None else [("needs_you", {"items": items})]
 
 
 def needs_scanned_iso(kit: RemoteKit) -> str | None:
     """When the watcher last scanned, for the heartbeat frame; ``None``: it never has."""
-    return None
+    watcher = kit.lane_state.get("needs")
+    if not isinstance(watcher, RemoteNeedsWatcher):
+        return None
+    scanned = watcher.needs_scanned_at()
+    return None if scanned is None else scanned.isoformat(timespec="seconds")
 
 
 def needs_cli_payload() -> dict[str, object]:
@@ -1503,6 +1937,7 @@ __all__ = [
     "NeedsItem",
     "NeedsSources",
     "QuickAnswer",
+    "RemoteNeedsWatcher",
     "is_needs_board_event",
     "live_needs_sources",
     "load_needs_dismissals",

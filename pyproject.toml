@@ -157,6 +157,11 @@ Changelog = "https://github.com/AISquare-Studio/aisquare-cli/blob/main/CHANGELOG
 [tool.hatch.build.targets.wheel]
 packages = ["src/aisquare"]
 
+[tool.hatch.build.targets.sdist]
+# The demo's renders (docs/demo.tape) are pictures for the README and the
+# release notes, re-rendered rather than built from; no build reads them.
+exclude = ["/docs/demo.gif", "/docs/demo/*.png"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"

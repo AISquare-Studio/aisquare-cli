@@ -472,6 +472,14 @@ async function lostTwice() {
   return { bodies, said, orphaned, later: page.toast(), send: sendState(page) };
 }
 
+/* Send with nothing typed, ⏎ on as it is by default. */
+async function emptySend() {
+  const page = await agentView({ "POST api/send-keys": () => ({ status: 200, json: { sent: true } }) });
+  await typeAndSend(page, "");
+  const enter = find(page.main(), (node) => node.tagName === "LABEL" && node.textContent === "⏎");
+  return { bodies: page.sent("api/send-keys"), toast: page.toast(), enterOn: enter.firstChild.checked };
+}
+
 /* A pad key whose request never arrived, and a phone that is back an hour later. */
 async function lostKeyLongAgo() {
   const page = await agentView({ "POST api/send-keys": () => "network" });
@@ -595,6 +603,7 @@ async function main() {
     lostKeyLongAgo: await lostKeyLongAgo(),
     lostThenSignedOut: await lostThenSignedOut(),
     lostRead: await lostRead(),
+    emptySend: await emptySend(),
     quickAnswerTwice: await quickAnswerTwice(),
     staleDevices: await staleDevices(),
     tellNotSent: await tellNotSent(),

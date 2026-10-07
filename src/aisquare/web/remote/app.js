@@ -2301,15 +2301,19 @@ function inputBar(pid, label, cleanups) {
     }
     post({ keys: [key] }, "Key " + key);
   };
+  // Send needs words. An empty box with ⏎ on was a bare Enter into the pane, which
+  // picks a dialog's highlighted option ("1. Yes"); Enter on its own is the pad's.
   const sendText = async () => {
     const value = text.value;
-    if (!value && !enter.box.checked) return;
+    if (!value) {
+      toast("Type something first — Enter on its own is on the key pad.");
+      return;
+    }
     if (value.length > TEXT_MAX.keys) {
       toast("Too long (max " + TEXT_MAX.keys + " characters) — use Actions › Tell for a longer message.");
       return;
     }
-    const body = { enter: enter.box.checked };
-    if (value) body.text = value;
+    const body = { text: value, enter: enter.box.checked };
     send.classList.add("busy");
     gateButtons();
     const sent = await post(body, "Send");

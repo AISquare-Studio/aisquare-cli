@@ -817,6 +817,15 @@ def test_a_write_lost_before_the_phone_had_to_unlock_is_not_sent_again(
     assert len(gone["bodies"]) == 1 and gone["pending"] == 0
 
 
+def test_send_with_nothing_typed_presses_no_enter(boot_report: dict[str, Any]) -> None:
+    """With ⏎ on, as it is by default, Send on an empty box posted ``{enter: true}``: a bare
+    Enter into the pane, which picks a dialog's highlighted option ("1. Yes")."""
+    empty = boot_report["emptySend"]
+    assert empty["enterOn"], "the toggle is on, as the page starts it"
+    assert empty["bodies"] == []
+    assert empty["toast"] == "Type something first — Enter on its own is on the key pad."
+
+
 def test_a_frame_clears_the_offline_banner_a_lost_read_raised(
     boot_report: dict[str, Any],
 ) -> None:

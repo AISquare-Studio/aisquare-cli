@@ -8,21 +8,29 @@ at pypi.org and 404s; the 0.7.0 page carried eleven of them (README lines 6, 21,
 on that version's page for good.
 
 It is also the page a stranger reads first, so roadmap 9.5 holds it to 250
-lines and moves the long form into ``docs/``. Three rules, each a callable that
+lines and moves the long form into ``docs/``. Five rules, each a callable that
 the controls below reach with known input (CONTRIBUTING, "Writing a guard that
 still guards"):
 
 - ``_too_long`` — more than 250 lines.
 - ``_relative_targets`` — every link and image target, markdown or HTML, must
-  be an absolute ``http(s)`` or ``mailto`` URL. Code is not a link on either
-  renderer, so a ``[x](y)`` inside a fence or an inline span is text and is not
-  read.
+  be an absolute ``http(s)`` or ``mailto`` URL.
 - ``_unresolved_repo_links`` — every URL into this repository's ``main`` must
   name a file in this checkout, and a ``#fragment`` on a Markdown page one of
   that page's headings. Absolute links are what PyPI needs and what nothing
   else checks: without this, renaming a docs page leaves the README on ``main``
   pointing at a 404. Fenced code is read here, because the one-liner's URL
   lives in a fence and is the most-copied line on the page.
+- ``_stale_pending`` — every excused file is still linked (below).
+- ``_unresolved_relative_links`` — the pages the README's long form moved into,
+  and every other page under ``docs/`` and CONTRIBUTING, link each other
+  relatively; every such link must name a file, and an anchor a heading.
+
+CommonMark IS A PARSER'S JOB, NOT THIS FILE'S. What is code, what is a link,
+and where a block ends are read from markdown-it-py's CommonMark rendering, the
+same blocks cmark-gfm builds for GitHub and PyPI (markdown-it-py comes with
+rich, a core dependency). Review found a blind spot in every hand-written copy:
+a fence closed by its list item, a code span wrapped onto the next line.
 
 WHAT THIS CANNOT PROTECT. It reads this checkout. A release's PyPI page keeps
 the README it shipped with, and its ``blob/main`` links follow ``main``, so
@@ -51,10 +59,13 @@ from __future__ import annotations
 import re
 import tomllib
 from collections.abc import Mapping
+from html.parser import HTMLParser
+from itertools import pairwise
 from pathlib import Path
 from urllib.parse import unquote
 
 import pytest
+from markdown_it import MarkdownIt
 
 REPO = Path(__file__).resolve().parents[1]
 README = REPO / "README.md"
@@ -70,16 +81,8 @@ _PENDING: dict[str, str] = {
 }
 _PENDING_WHILE_VERSION = "0.7.0"
 
-#: A fence opener. A backtick fence's info string holds no backtick (CommonMark).
-_FENCE = re.compile(r"^ {0,3}(`{3,}(?=[^`]*$)|~{3,})")
-_INLINE_CODE = re.compile(r"(`+)(?:(?!\1).)+?\1")
-#: Inline links and images, badges included: `[![alt](image)](link)` yields both.
-_INLINE_TARGET = re.compile(r"\]\(\s*<?([^)\s>]*)")
-#: Reference-style definitions: `[label]: target`.
-_DEFINITION_TARGET = re.compile(r"^ {0,3}\[[^\]]+\]:\s*<?([^\s>]+)", re.MULTILINE)
-#: Quoted or not: `<img src=docs/demo.gif>` is valid HTML and PyPI keeps `img[src]`.
-#: After whitespace only, as an attribute is, so `?src=` inside a URL is not read.
-_HTML_TARGET = re.compile(r"""(?<=\s)(?:src|href)\s*=\s*["']?\s*([^"'\s>]*)""", re.IGNORECASE)
+#: CommonMark with tables, as GitHub and PyPI render a README (see the docstring).
+_COMMONMARK = MarkdownIt("commonmark").enable("table")
 _ABSOLUTE = re.compile(r"^(?:https?://|mailto:)", re.IGNORECASE)
 #: The two spellings of a link into this repository's `main` the README uses.
 _BLOB = "https://github.com/AISquare-Studio/aisquare-cli/blob/main"
@@ -97,42 +100,23 @@ def _too_long(text: str) -> bool:
     return len(text.splitlines()) > MAX_LINES
 
 
-def _outside_fences(markdown: str) -> list[str]:
-    """The lines a renderer reads as Markdown: everything outside fenced code.
+class _LinkTargets(HTMLParser):
+    """Every ``href`` and ``src`` in rendered HTML, raw HTML in the page included."""
 
-    A fence closes only on a run of its opener's character at least as long as
-    the opener, with nothing after it but spaces (CommonMark, fenced code
-    blocks). So a ```` fence can hold a ``` line, and a ```sh line inside a
-    block does not close it. One walker for both readers below: two copies of
-    a fence rule are how one of them goes stale.
-    """
-    kept: list[str] = []
-    fence: tuple[str, int] | None = None
-    for line in markdown.splitlines():
-        if fence is None:
-            opener = _FENCE.match(line)
-            if opener:
-                fence = (opener.group(1)[0], len(opener.group(1)))
-                continue
-            kept.append(line)
-        elif re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{fence[1]},}}\s*", line):
-            fence = None
-    return kept
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.found: list[str] = []
 
-
-def _prose(text: str) -> str:
-    """The text with fenced blocks and inline code spans removed."""
-    return "\n".join(_INLINE_CODE.sub("", line) for line in _outside_fences(text))
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.found.extend(value or "" for name, value in attrs if name in {"href", "src"})
 
 
 def _targets(text: str) -> list[str]:
-    """Every link and image target the renderers will resolve."""
-    prose = _prose(text)
-    return [
-        *_INLINE_TARGET.findall(prose),
-        *_DEFINITION_TARGET.findall(prose),
-        *_HTML_TARGET.findall(prose),
-    ]
+    """Every link and image target a renderer resolves: code is text, not a link."""
+    reader = _LinkTargets()
+    reader.feed(_COMMONMARK.render(text))
+    reader.close()
+    return reader.found
 
 
 def _relative_targets(text: str) -> list[str]:
@@ -160,11 +144,12 @@ def _anchors(markdown: str) -> set[str]:
     """The anchors GitHub gives a page's headings, numbered when they repeat."""
     seen: dict[str, int] = {}
     found: set[str] = set()
-    for line in _outside_fences(markdown):
-        heading = re.match(r"^ {0,3}#{1,6}\s+(.*?)\s*#*\s*$", line)
-        if heading is None:
+    tokens = _COMMONMARK.parse(markdown)
+    # A heading is `heading_open`, then the inline token that holds its text.
+    for opening, inline in pairwise(tokens):
+        if opening.type != "heading_open":
             continue
-        slug = _slug(heading.group(1))
+        slug = _slug(inline.content)
         count = seen.get(slug, 0)
         seen[slug] = count + 1
         found.add(slug if count == 0 else f"{slug}-{count}")
@@ -189,6 +174,35 @@ def _unresolved_repo_links(
             and fragment not in _anchors(target.read_text(encoding="utf-8"))
         ):
             unresolved.append(f"{path}#{fragment} names no heading on that page")
+    return unresolved
+
+
+def _stale_pending(text: str, pending: Mapping[str, str]) -> list[str]:
+    """Excused files the text no longer links: an excuse must not outlive its link."""
+    linked = {path for path, _fragment in _repo_links(text)}
+    return sorted(path for path in pending if path not in linked)
+
+
+#: Every page under docs/, and CONTRIBUTING: a glob rather than a list, so a page
+#: another lane adds is read the day it lands.
+_LINKING_PAGES = sorted([*REPO.glob("docs/**/*.md"), REPO / "CONTRIBUTING.md"])
+
+
+def _unresolved_relative_links(text: str, page: Path) -> list[str]:
+    """Relative targets on `page` that name no file, or a heading their page lacks."""
+    unresolved: list[str] = []
+    for target in _relative_targets(text):
+        address, _, fragment = target.partition("#")
+        path = unquote(address.split("?", 1)[0])
+        destination = page.parent / path if path else page
+        if not destination.exists():
+            unresolved.append(f"{target}: no such file")
+        elif (
+            fragment
+            and destination.suffix == ".md"
+            and fragment not in _anchors(destination.read_text(encoding="utf-8"))
+        ):
+            unresolved.append(f"{target}: no such heading")
     return unresolved
 
 
@@ -252,11 +266,23 @@ def test_every_repo_link_in_the_readme_resolves() -> None:
 
 def test_each_pending_file_is_still_linked_from_the_readme() -> None:
     """The other direction, so an excuse cannot outlive the link it excuses."""
-    linked = {path for path, _fragment in _repo_links(README.read_text(encoding="utf-8"))}
-
-    stale = sorted(path for path in _PENDING if path not in linked)
+    stale = _stale_pending(README.read_text(encoding="utf-8"), _PENDING)
 
     assert not stale, f"_PENDING excuses files the README no longer links: {stale}"
+
+
+def test_every_relative_link_in_the_docs_resolves() -> None:
+    """The long form links itself relatively; a renamed page or heading must not dangle."""
+    read = 0
+    unresolved: list[str] = []
+    for page in _LINKING_PAGES:
+        text = page.read_text(encoding="utf-8")
+        read += len(_relative_targets(text))
+        name = page.relative_to(REPO).as_posix()
+        unresolved += [f"{name}: {item}" for item in _unresolved_relative_links(text, page)]
+    assert read, "no relative link read under docs/ or in CONTRIBUTING — the reader went blind"
+
+    assert not unresolved, "relative links that resolve to nothing:\n  " + "\n  ".join(unresolved)
 
 
 # --- controls: synthetic input, so they keep controlling whatever the README says ---
@@ -274,15 +300,23 @@ _RELATIVE_SHAPES = {
     "relative image": "![demo](docs/demo.gif)",
     "badge whose link is relative": "[![License](https://img.shields.io/x.svg)](LICENSE)",
     "bare anchor": "Read [part one](#part-1--memory-start-here) first.",
-    "reference-style definition": "[guide]: docs/fleet.md",
+    "reference-style link": "[guide]: docs/fleet.md\n\nSee [guide][].",
     "html image": '<img src="docs/demo.gif" alt="demo">',
     "html image, unquoted": "<img src=docs/demo.gif alt=demo>",
     "html link": '<a href="CONTRIBUTING.md">contributing</a>',
-    # The fence walker must not lose its place, or everything after a block is
-    # read as code and passes unread.
+    # What is code is CommonMark's call: misread it, and every link after the
+    # block passes unread.
     "after a fence that holds a shorter fence": "````\n```\n````\nSee [x](docs/fleet.md).",
     "after a fence holding a line with an info string": "```\n```sh\n```\nSee [x](docs/fleet.md).",
     "after a line that only looks like a fence": "``` not`a fence\nSee [x](docs/fleet.md).",
+    "after a code span wrapped onto the next line": (
+        "Run `aisquare\ninit` and see [x](docs/fleet.md) then `asq`."
+    ),
+    "after a stray backtick and a blank line": "A stray `\n\nSee [x](docs/fleet.md) and `foo`.",
+    "after a list item that leaves a fence open": (
+        "1. step:\n\n   ```sh\n   asq\n2. See [x](docs/fleet.md).\n"
+    ),
+    "after a fence line inside an HTML comment": "<!--\n```sh\n-->\nSee [x](docs/fleet.md).\n",
 }
 
 
@@ -304,6 +338,9 @@ _ABSOLUTE_SHAPES = {
         "````markdown\n```\nSee [the guide](docs/fleet.md).\n```\n````"
     ),
     "a relative link inside inline code": "Write `[the guide](docs/fleet.md)` in a doc page.",
+    "a relative link inside a code span that wraps": (
+        "Write `[the guide](docs/fleet.md)\nlike this` in a doc page."
+    ),
     "an absolute link whose query says src=": "[x](https://example.com/page?src=readme)",
 }
 
@@ -383,3 +420,46 @@ def test_a_pending_file_is_excused_only_until_the_release(tree: Path) -> None:
     for released in ("0.8.0", "0.9.0rc1", "0.9.0"):
         assert missing(released, pending), f"still excused at {released}"
     assert missing(_PENDING_WHILE_VERSION, {}), "a missing file nothing excuses went unreported"
+
+
+def test_an_excuse_whose_link_is_gone_is_caught() -> None:
+    gif = f"![demo]({_RAW}/docs/demo.gif)"
+
+    stale = _stale_pending(gif, {"docs/demo.gif": "x", "docs/gone.md": "y"})
+
+    assert stale == ["docs/gone.md"], f"an excuse whose README line was dropped: {stale}"
+    assert _stale_pending(gif, {"docs/demo.gif": "x"}) == [], "a linked excuse was accused"
+
+
+_UNRESOLVED_RELATIVE = {
+    "a page that does not exist": "[x](gone.md)",
+    "a page above that does not exist": "[x](../gone.md)",
+    "a heading the page does not have": "[x](install.md#no-such-heading)",
+    "a heading that is only a comment in a fence": "[x](install.md#not-a-heading)",
+    "an anchor this page does not have": "[x](#nowhere)",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_UNRESOLVED_RELATIVE))
+def test_each_dangling_relative_link_is_caught(shape: str, tree: Path) -> None:
+    unresolved = _unresolved_relative_links(
+        _UNRESOLVED_RELATIVE[shape], tree / "docs" / "install.md"
+    )
+
+    assert unresolved, f"{shape}: went unreported"
+
+
+_RESOLVED_RELATIVE = {
+    "a page that exists": "[x](install.md)",
+    "a heading the page has": "[x](install.md#start-the-gui)",
+    "a file above": "[x](../install.sh)",
+    "a heading on this page": "[x](#start-the-gui)",
+    "an absolute link": "[x](https://example.com/gone.md#nowhere)",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_RESOLVED_RELATIVE))
+def test_resolving_relative_links_are_not_accused(shape: str, tree: Path) -> None:
+    unresolved = _unresolved_relative_links(_RESOLVED_RELATIVE[shape], tree / "docs" / "install.md")
+
+    assert unresolved == [], f"{shape}: was accused: {unresolved}"

@@ -77,7 +77,6 @@ MAX_LINES = 250
 #: while the version is ``_PENDING_WHILE_VERSION`` (see the module docstring).
 _PENDING: dict[str, str] = {
     "docs/demo.gif": "the demo GIF; roadmap 9.4 commits it",
-    "docs/claude-code-plugin.md": "the plugin route's page; roadmap 9.3 writes it",
 }
 _PENDING_WHILE_VERSION = "0.7.0"
 

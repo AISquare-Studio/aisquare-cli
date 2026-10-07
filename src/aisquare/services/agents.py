@@ -46,9 +46,11 @@ def claude_code_connected(config_dir: Path | None = None) -> bool:
     session started from this shell reads (``CLAUDE_CONFIG_DIR``, else
     ``~/.claude``), as ``agents connect`` means it.
 
-    Today that means every lifecycle hook ``agents connect`` installs is in the
-    directory's ``settings.json``, and that file does not switch hooks off. A
-    partial install from an older version answers False, because Connect is
+    Two routes connect it, in a directory whose ``settings.json`` does not switch
+    hooks off: every lifecycle hook ``agents connect`` installs is in that file,
+    or the aisquare Claude Code plugin is installed and enabled there
+    (:func:`claude_plugin`), whose hooks run the same ``aisquare hook <event>``.
+    A partial install from an older version answers False, because Connect is
     what completes it. So does ``"disableAllHooks": true``, which Connect
     cannot change: a surface that offers Connect asks
     ``agent_core.hooks_disabled`` first and says so instead, as the doctor's row
@@ -62,6 +64,16 @@ def claude_code_connected(config_dir: Path | None = None) -> bool:
     are there.
     """
     return agent_core.claude_code_connected(config_dir)
+
+
+def claude_plugin(config_dir: Path | None = None) -> agent_core.ClaudePlugin | None:
+    """The aisquare Claude Code plugin in ``config_dir``, when it is installed and enabled."""
+    return agent_core.claude_plugin(config_dir)
+
+
+def claude_plugin_command(verb: str, config_dir: Path) -> str:
+    """``claude plugin <verb> aisquare@aisquare-cli`` aimed at ``config_dir``."""
+    return agent_core.claude_plugin_command(verb, config_dir)
 
 
 class UnsupportedAgentError(ValueError):

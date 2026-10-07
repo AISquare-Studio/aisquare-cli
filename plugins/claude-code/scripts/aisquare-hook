@@ -1,0 +1,140 @@
+#!/bin/sh
+# aisquare's Claude Code plugin: run `aisquare hook <event>` for one lifecycle event.
+#
+# hooks/hooks.json calls this for the six events `aisquare agents connect
+# claude-code` writes into settings.json. The work is the CLI's, through the entry
+# point those hooks run, so the two routes cannot behave differently:
+#
+#   1. Stand down when settings.json already runs aisquare for this event. Claude
+#      Code runs a plugin's hooks AND the settings.json hooks, so both firing would
+#      inject the context twice and capture every prompt twice.
+#   2. Else run the aisquare CLI: on PATH, or in ~/.local/bin, where `uv tool
+#      install` puts it (a session started from a desktop app may lack it on PATH).
+#   3. Else run the pinned release with uvx, so a machine with only uv has memory
+#      without an installer.
+#   4. Else do nothing, and say so once, at session start.
+#
+# It never reads stdin, so the child gets the hook payload untouched, and it always
+# exits 0: a hook that fails costs its own feature, never the session. aisquare's
+# hooks exit 0 themselves; an exit 2 from a broken install would block a prompt.
+#
+# POSIX sh, like install.sh: no `local`, no `[[`. Checked by shellcheck --shell=sh,
+# shfmt -i 4 -ci, dash -n and busybox ash -n (.github/workflows/install.yml).
+
+# The aisquare-cli release uvx runs. The release commit bumps it together with
+# pyproject.toml and .claude-plugin/plugin.json; tests/test_claude_plugin.py fails
+# when the three disagree. AISQUARE_PLUGIN_FROM replaces the whole requirement
+# (a wheel, a path) for testing a build that is not on PyPI yet.
+AISQUARE_PLUGIN_VERSION=0.7.0
+
+event=${1:-}
+case $event in
+    session-start | user-prompt-submit | session-end | stop | notification | stop-failure) ;;
+    *) exit 0 ;;
+esac
+
+# The hook `agents connect` writes for this event, as it reads in settings.json's
+# JSON text, matched the way core.agents._is_aisquare_hook_command matches it: the
+# command's first word is a program named aisquare or asq (a path, shell-quoted or
+# not, `.exe` on Windows), or it is `python [-P] -m aisquare`; then `hook <event>`
+# ends it, with any options before `hook`. A user's own `webhook stop`,
+# `~/bin/my-hook stop` or `echo aisquare hook stop` does not match.
+_a="'"
+_ws='( |\\t)'              # a space, or a tab as JSON escapes it
+_p1="${_a}[^${_a}]*/"      # '/a path/with spaces/
+_p2="[^ \"${_a}\\\\]*/"    # /a/plain/path/
+_p3="[^ \"${_a}]*\\\\\\\\" # C:\\a\\windows\\path\\ (JSON escapes \)
+_p4="\\\\\"[^\"]*\\\\\\\\" # \"C:\\a quoted\\windows\\path\\
+_p5='[^"]* -m '            # python -P -m
+_program="($_p1|$_p2|$_p3|$_p4|$_p5)?(aisquare|asq)(\\.[eE][xX][eE])?(\\\\\"|$_a)?"
+_ours="\"command\" *: *\"$_program($_ws+-[^\"]*)?$_ws+hook$_ws+$event$_ws*\""
+
+# Whether the program a matching hook ($1, its JSON line) names can start. A hook
+# naming an aisquare that is gone -- the CLI uninstalled after `agents connect` --
+# fails on every event, and standing down beside it would leave the session
+# running none. A program sh cannot read out of the JSON text (an escape: a
+# Windows or non-ASCII path) is trusted, as every match was before this check.
+_runnable() {
+    _cmd=${1#*\"command\"}
+    _cmd=${_cmd#*:}
+    _cmd=${_cmd#*\"}
+    case $_cmd in
+        *\\*) return 0 ;;
+        "$_a"*)
+            _prog=${_cmd#"$_a"}
+            _prog=${_prog%%"$_a"*}
+            ;;
+        *)
+            _prog=${_cmd%% *}
+            _prog=${_prog%%\"*}
+            ;;
+    esac
+    case $_prog in
+        \~/*) _prog=$HOME/${_prog#??} ;;
+    esac
+    case $_prog in
+        */*) [ -f "$_prog" ] && [ -x "$_prog" ] ;;
+        *) command -v "$_prog" >/dev/null 2>&1 ;;
+    esac
+}
+_nl='
+'
+
+# The settings.json files a session reads its hooks from: the config dir this copy
+# of the plugin was installed in (Claude Code keeps it under <dir>/plugins/cache),
+# and the one CLAUDE_CONFIG_DIR names, else ~/.claude.
+case ${CLAUDE_PLUGIN_ROOT:-} in
+    */plugins/cache/*) _installed_in=${CLAUDE_PLUGIN_ROOT%%/plugins/cache/*} ;;
+    *) _installed_in= ;;
+esac
+for _dir in "$_installed_in" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; do
+    [ -n "$_dir" ] || continue
+    # A missing or unreadable settings.json is grep's error, which is no match.
+    _line=$(grep -E "$_ours" "$_dir/settings.json" 2>/dev/null) || continue
+    if _runnable "${_line%%"$_nl"*}"; then
+        exit 0
+    fi
+done
+
+# The first executable named $1: on PATH, then where uv installs tools.
+_find() {
+    _found=$(command -v "$1" 2>/dev/null)
+    if [ -n "$_found" ]; then
+        printf '%s\n' "$_found"
+        return 0
+    fi
+    for _found in "$HOME/.local/bin/$1" "$HOME/.cargo/bin/$1"; do
+        if [ -f "$_found" ] && [ -x "$_found" ]; then
+            printf '%s\n' "$_found"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if _runner=$(_find aisquare); then
+    "$_runner" hook "$event"
+    _status=$?
+elif _runner=$(_find uvx); then
+    _from=${AISQUARE_PLUGIN_FROM:-aisquare-cli==$AISQUARE_PLUGIN_VERSION}
+    # An interpreter CI tests (3.11-3.13) first: an installed one, else uv fetches
+    # one. Where uv may not fetch (Fedora's packaged uv sets python-downloads =
+    # "manual") and only a newer Python is installed, that fails before aisquare
+    # starts, so the payload is still unread: let uv run it on what it has.
+    "$_runner" --python '>=3.11,<3.14' --from "$_from" aisquare hook "$event"
+    _status=$?
+    if [ "$_status" -ne 0 ]; then
+        "$_runner" --from "$_from" aisquare hook "$event"
+        _status=$?
+    fi
+else
+    if [ "$event" = session-start ]; then
+        printf '%s\n' '{"systemMessage": "aisquare: neither the aisquare CLI nor uv was found, so this session has no aisquare memory. Install uv: https://docs.astral.sh/uv/"}'
+    fi
+    exit 0
+fi
+
+if [ "$_status" -ne 0 ] && [ "$event" = session-start ]; then
+    printf '{"systemMessage": "aisquare: its session-start hook failed (exit %s), so this session has no aisquare memory."}\n' "$_status"
+fi
+exit 0

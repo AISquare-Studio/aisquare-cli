@@ -33,12 +33,15 @@ without one (:meth:`RemoteKit.kit_public_url`).
 
 Nothing here blocks the event loop. Routes do their file work in a worker
 thread; every send runs on the sender's thread (``asq-remote-push``) or a
-one-shot daemon thread, with a 10 s timeout. Lock order: the module's file lock
-is never held while calling into the runtime, which takes its own.
+one-shot daemon thread, with a 10 s timeout, and a process on its way out waits
+that long for its one-shot pushes (:func:`push_drain`), the farewell above all.
+Lock order: the module's file lock is never held while calling into the
+runtime, which takes its own.
 """
 
 from __future__ import annotations
 
+import atexit
 import base64
 import contextlib
 import hashlib
@@ -106,6 +109,9 @@ PUSH_DISCOVERY_SECONDS = 60.0
 """How often, at most, the sender asks ngrok's local API for a public URL it was not told."""
 PUSH_STOP_SECONDS = 2.0
 """How long stopping the server waits for a send in flight."""
+PUSH_DRAIN_SECONDS = PUSH_TIMEOUT_SECONDS
+"""How long a process on its way out waits for its one-shot pushes (:func:`push_drain`): a
+push's own timeout, so a farewell that can arrive does, and one that cannot costs no more."""
 PUSHED_KEEP = timedelta(days=7)
 PUSHED_MAX = 1_000
 """``pushed`` keeps a week, and at most this many ids, the newest."""
@@ -854,13 +860,21 @@ def _push_targets(device_ids: Collection[str]) -> list[tuple[str, PushSubscripti
     return [(d, subscriptions[d]) for d in device_ids if d in subscriptions]
 
 
+_push_in_flight: set[threading.Thread] = set()
+"""The one-shot push threads still sending, which :func:`push_drain` waits for."""
+_push_in_flight_lock = threading.Lock()
+
+
 def _push_in_background(
     targets: Sequence[tuple[str, PushSubscriptionRecord]],
     message: PushMessage,
     *,
     transport: PushTransport | None = None,
 ) -> None:
-    """Send ``message`` to ``targets`` from a daemon thread; the caller never waits on it."""
+    """Send ``message`` to ``targets`` from a daemon thread; the caller never waits on it.
+
+    The process does, on its way out (:func:`push_drain`).
+    """
 
     def push_now_thread() -> None:
         try:
@@ -878,8 +892,41 @@ def _push_in_background(
                 )
         except Exception:  # a daemon thread's failure is logged, or it is lost
             log.warning("remote: a push could not be sent", exc_info=True)
+        finally:
+            with _push_in_flight_lock:
+                _push_in_flight.discard(threading.current_thread())
 
-    threading.Thread(target=push_now_thread, name="asq-remote-push-now", daemon=True).start()
+    thread = threading.Thread(target=push_now_thread, name="asq-remote-push-now", daemon=True)
+    with _push_in_flight_lock:  # its last step waits for this lock: it is in the set by then
+        try:
+            thread.start()
+        except RuntimeError as exc:  # the interpreter is exiting, or out of threads
+            log.warning("remote: a push was not sent: %s", exc)
+            return
+        _push_in_flight.add(thread)
+
+
+def push_drain(timeout: float = PUSH_DRAIN_SECONDS) -> bool:
+    """Wait at most ``timeout`` s for the one-shot pushes still sending; ``True`` once none is.
+
+    Run at exit (:mod:`atexit`). A one-shot push is sent from a daemon thread so
+    that its caller never waits on a push service, but a daemon thread dies
+    with its process: ``asq remote serve`` returns a quarter of a second after
+    its auto-off queued the farewell, and the TUI can quit right after Remote
+    was turned off, both well inside a TLS handshake with the push service.
+    Exit handlers run before the interpreter stops its daemon threads, so the
+    farewell gets its own timeout to arrive, and a process with nothing in
+    flight leaves at once.
+    """
+    deadline = time.monotonic() + timeout
+    with _push_in_flight_lock:
+        pending = list(_push_in_flight)
+    for thread in pending:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    return not any(thread.is_alive() for thread in pending)
+
+
+atexit.register(push_drain)
 
 
 def push_farewell(
@@ -889,9 +936,10 @@ def push_farewell(
 
     Their subscriptions are read now, while they still exist, and sent to from a
     daemon thread: turning Remote off never waits on a push service, and the
-    revoke that follows cannot take the farewell with it. ``reason`` (``remote
-    off``, ``auto-off``) is logged, not sent; the sentence is the same either way.
-    Never raises into the caller.
+    revoke that follows cannot take the farewell with it. A process that exits
+    right after (``serve``'s auto-off) waits for it on the way out
+    (:func:`push_drain`). ``reason`` (``remote off``, ``auto-off``) is logged,
+    not sent; the sentence is the same either way. Never raises into the caller.
     """
     try:
         targets = _push_targets(device_ids)
@@ -1417,6 +1465,7 @@ __all__ = [
     "encrypt_push_payload",
     "load_or_create_vapid_keys",
     "load_push_state",
+    "push_drain",
     "push_farewell",
     "push_host_allowed",
     "push_routes",

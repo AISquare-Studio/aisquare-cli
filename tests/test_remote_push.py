@@ -63,6 +63,7 @@ from aisquare.services.remote_push import (
     encrypt_push_payload,
     load_or_create_vapid_keys,
     load_push_state,
+    push_drain,
     push_farewell,
     push_host_allowed,
     push_record_outcome,
@@ -1178,6 +1179,54 @@ def test_the_farewell_never_waits_on_a_push_service(world: World) -> None:
     push_farewell(list(DEVICES), "auto-off", transport=stuck)
     assert time.monotonic() - started < 1.0
     released.set()
+
+
+def test_a_farewell_queued_as_the_process_exits_still_arrives(world: World, tmp_path: Path) -> None:
+    """``asq remote serve`` returns a quarter of a second after its auto-off queued the
+    farewell, and the TUI can quit right after Remote was turned off: the daemon thread
+    sending it died with the process, inside the TLS handshake. The process now waits for
+    it on its way out. A real interpreter exits here, so a real exit is what is tested."""
+    delivered = tmp_path / "delivered.txt"
+    script = tmp_path / "farewell_then_exit.py"
+    script.write_text(
+        "import sys, time\n"
+        "from aisquare.services import remote_push\n"
+        "def slow_push_service(endpoint, headers, body):\n"
+        "    time.sleep(0.5)\n"
+        "    with open(sys.argv[1], 'a', encoding='utf-8') as out:\n"
+        "        out.write(endpoint + '\\n')\n"
+        "    return 201\n"
+        "remote_push.push_farewell(sys.argv[2:], 'auto-off', transport=slow_push_service)\n",
+        encoding="utf-8",
+    )
+    exited = subprocess.run(
+        [sys.executable, str(script), str(delivered), *DEVICES],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert exited.returncode == 0, exited.stderr
+    assert delivered.exists(), "the process exited without waiting for its farewell"
+    assert sorted(delivered.read_text(encoding="utf-8").split()) == sorted(
+        browser.endpoint for browser in world.browsers.values()
+    )
+
+
+def test_the_wait_at_exit_ends_at_its_deadline(world: World) -> None:
+    """A push service that never answers costs an exiting process a bounded wait, and the
+    wait says whether a push was still sending when it gave up."""
+    released = threading.Event()
+
+    def stuck(endpoint: str, headers: dict[str, str], body: bytes) -> int:
+        released.wait(10)
+        return 201
+
+    push_farewell(list(DEVICES), "auto-off", transport=stuck)
+    started = time.monotonic()
+    assert push_drain(0.2) is False
+    assert time.monotonic() - started < 2.0
+    released.set()
+    assert push_drain(10) is True
 
 
 def test_the_lockout_alert_goes_once_per_trip(world: World) -> None:

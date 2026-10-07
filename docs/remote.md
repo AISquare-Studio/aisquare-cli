@@ -61,7 +61,8 @@ uses it for the links in notifications.
 panel starts the server and ngrok, shows the link, a QR code and the passphrase,
 the write switch, the auto-off timer (30, 60 or 120 minutes, or Never) and the
 devices that have unlocked. Scan the QR code with the phone. If ngrok stops, the
-UI restarts it within half a minute.
+UI restarts it within half a minute. The panel serves on port 8750, or on the
+one an exported `AISQUARE_REMOTE_PORT` names, as `serve` does.
 
 **From a shell**, for a machine without the UI open:
 
@@ -371,8 +372,9 @@ every device out but keeps Remote on. `regenerate-password` makes a new
 passphrase and signs every device out; with `--new-link` it also makes a new
 token, so a leaked link stops working everywhere. The TUI shows the new link
 after Remote is turned off and on. The link `status` and `--new-link` print is
-for port 8750: when `serve` runs on another, give them its `--port` too (an
-exported `AISQUARE_REMOTE_PORT` sets all three).
+for port 8750: when `serve` runs on another, give them its `--port` too. An
+exported `AISQUARE_REMOTE_PORT` sets the port for all of them, and for the R
+panel, whose server and ngrok use it as well.
 
 ---
 

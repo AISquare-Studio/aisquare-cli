@@ -21,6 +21,7 @@ path to ``allow_write=True`` is the user's switch.
 from __future__ import annotations
 
 import contextlib
+import os
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -47,8 +48,26 @@ DEFAULT_AUTO_OFF = 60
 NEVER = "never"
 """How Never is stored under ``auto_off_minutes`` in ``state.json``."""
 STATE_KEYS = ("remote_enabled", "auto_off_minutes")
+PORT_ENV = "AISQUARE_REMOTE_PORT"
+"""``serve --port``'s variable, read by ``status`` and ``regenerate-password`` for the link
+they print: the panel serves on it too, so one export moves all of them. The panel always
+served on 8750, and with the variable exported ``status`` printed a port it was not on."""
 
 TunnelFactory = Callable[[int], NgrokTunnel]
+
+
+def _panel_port() -> tuple[int, str | None]:
+    """The port :data:`PORT_ENV` names, 8750 when it names none, and why not when it is no port."""
+    raw = os.environ.get(PORT_ENV, "").strip()
+    if not raw:
+        return remote_server.DEFAULT_PORT, None
+    try:
+        port = int(raw)  # as serve's --port reads it
+    except ValueError:
+        port = 0
+    if not 0 < port < 65536:
+        return remote_server.DEFAULT_PORT, f"{PORT_ENV} is {raw!r}, not a port"
+    return port, None
 
 
 def _utc_now() -> datetime:
@@ -107,7 +126,7 @@ class RemoteController:
     ``server`` is :mod:`aisquare.services.remote_server`, ``tunnel_factory``
     builds the ngrok subprocess wrapper, ``now`` is the clock — all three are
     seams for the tests. Every time here carries its offset; a naive one from
-    ``now`` is read as local time.
+    ``now`` is read as local time. ``port`` is :data:`PORT_ENV`'s when not given.
     """
 
     def __init__(
@@ -116,7 +135,7 @@ class RemoteController:
         server: ModuleType = remote_server,
         tunnel_factory: TunnelFactory = NgrokTunnel,
         dist_dir: Path | None = None,
-        port: int = remote_server.DEFAULT_PORT,
+        port: int | None = None,
         now: Callable[[], datetime] = _utc_now,
         state: RemoteState | None = None,
         url_timeout: float = 15.0,
@@ -124,7 +143,7 @@ class RemoteController:
         self._server = server
         self._tunnel_factory = tunnel_factory
         self._dist_dir = dist_dir
-        self._port = port
+        self._port, self._port_problem = (port, None) if port is not None else _panel_port()
         self._now = now
         self._url_timeout = url_timeout
         self.state = state if state is not None else load_remote_state()
@@ -158,6 +177,9 @@ class RemoteController:
         if self.running:
             return
         self.public_url = None
+        if self._port_problem is not None:  # a sentence, never Remote on another port
+            self.message = f"Remote could not start — {self._port_problem}"
+            return
         try:
             self.info = self._server.start_remote_server(self._dist_dir, port=self._port)
         except Exception as exc:  # the remote extra is missing, or the port is taken

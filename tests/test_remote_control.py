@@ -21,7 +21,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from typer.testing import CliRunner
 
+from aisquare.cli.app import app as cli
 from aisquare.cli.ui import remote_control
 from aisquare.cli.ui.remote_control import (
     READ_ONLY_REASON,
@@ -755,3 +757,61 @@ def test_a_real_remote_json_that_will_not_write_is_a_sentence_for_each_control(
         assert controller.running
         controller.shutdown_for_exit()
     assert remote_server._server is None
+
+
+def test_status_prints_the_port_the_panel_serves_on_when_one_is_exported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``status`` and ``regenerate-password`` read ``AISQUARE_REMOTE_PORT`` for the link they
+    print, as ``serve`` reads it for its port; the panel always served on 8750, so with the
+    variable exported, ``status`` printed a port the TUI was not on (r2 smoke of #243)."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    page = tmp_path / "page"
+    page.mkdir()
+    (page / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    port = _free_port()
+    monkeypatch.setenv("AISQUARE_REMOTE_PORT", str(port))
+    tunnels: list[int] = []
+
+    def tunnel_factory(on: int) -> FakeTunnel:
+        tunnels.append(on)
+        return FakeTunnel(on, url=None, failure=INSTALL_HINT)
+
+    controller = RemoteController(tunnel_factory=tunnel_factory, dist_dir=page)
+    controller.turn_on()
+    try:
+        served = remote_server._server
+        assert controller.running and served is not None and served.port == port
+        link = controller.link_url()
+        assert link is not None and link.startswith(f"http://127.0.0.1:{port}/r/")
+        assert tunnels == [port], "ngrok forwards to the port served"
+        status = CliRunner().invoke(cli, ["--json", "remote", "status"])
+        assert status.exit_code == 0, status.output
+        assert json.loads(status.stdout)["url_local"] == link
+    finally:
+        controller.shutdown_for_exit()
+
+
+def test_a_port_the_panel_cannot_use_is_a_sentence_and_unset_is_the_default() -> None:
+    """An ``AISQUARE_REMOTE_PORT`` that is no port is a sentence on the status line, never
+    Remote served on some other port. Unset, it is 8750; a port the caller gives wins."""
+    server = fake_server()
+    no_ngrok = fake_tunnel_factory(failure=INSTALL_HINT)
+    default = RemoteController(server=server, tunnel_factory=no_ngrok)
+    default.turn_on()
+    assert default.link_url() == f"http://127.0.0.1:8750/r/{server.token}/"
+    default.turn_off()
+    for raw in ("eighteen", "0", "70000", "-1"):
+        with pytest.MonkeyPatch.context() as env:
+            env.setenv("AISQUARE_REMOTE_PORT", raw)
+            refused = RemoteController(server=server, tunnel_factory=no_ngrok)
+            refused.turn_on()
+            assert not refused.running and not server.running, raw
+            assert refused.message == (
+                f"Remote could not start — AISQUARE_REMOTE_PORT is {raw!r}, not a port"
+            )
+            given = RemoteController(server=server, tunnel_factory=no_ngrok, port=18999)
+            given.turn_on()
+            assert given.link_url() == f"http://127.0.0.1:18999/r/{server.token}/", raw
+            given.turn_off()

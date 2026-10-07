@@ -106,6 +106,7 @@ class FakeElement extends FakeNode {
     this.value = "";
     this.checked = false;
     this.listeners = {};
+    this.attrs = {};
     this.style = { setProperty() {} };
   }
 
@@ -126,7 +127,10 @@ class FakeElement extends FakeNode {
     };
   }
 
-  setAttribute() {} // what an attribute may hold is remote_page_check.js's business
+  /* Recorded, never judged: what an attribute may hold is remote_page_check.js's business. */
+  setAttribute(name, value) {
+    this.attrs[String(name)] = String(value);
+  }
 
   addEventListener(type, fn) {
     (this.listeners[type] = this.listeners[type] || []).push(fn);
@@ -475,9 +479,12 @@ async function lostTwice() {
 /* Send with nothing typed, ⏎ on as it is by default. */
 async function emptySend() {
   const page = await agentView({ "POST api/send-keys": () => ({ status: 200, json: { sent: true } }) });
-  await typeAndSend(page, "");
+  const say = await typeAndSend(page, "");
   const enter = find(page.main(), (node) => node.tagName === "LABEL" && node.textContent === "⏎");
-  return { bodies: page.sent("api/send-keys"), toast: page.toast(), enterOn: enter.firstChild.checked };
+  return {
+    bodies: page.sent("api/send-keys"), toast: page.toast(), enterOn: enter.firstChild.checked,
+    keyHint: say.attrs.enterkeyhint || null,
+  };
 }
 
 /* A pad key whose request never arrived, and a phone that is back an hour later. */

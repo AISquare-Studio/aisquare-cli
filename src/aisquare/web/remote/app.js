@@ -2244,7 +2244,6 @@ function inputBar(pid, label, cleanups) {
   const text = el("textarea", "say");
   text.rows = 1;
   text.setAttribute("aria-label", "Type to the agent");
-  text.setAttribute("enterkeyhint", "send");
   text.maxLength = TEXT_MAX.keys;
   const enter = checkbox("⏎", true);
   const send = button("w primary", "Send", () => sendText());

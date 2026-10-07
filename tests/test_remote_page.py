@@ -826,6 +826,14 @@ def test_send_with_nothing_typed_presses_no_enter(boot_report: dict[str, Any]) -
     assert empty["toast"] == "Type something first — Enter on its own is on the key pad."
 
 
+def test_the_keyboards_return_key_is_not_called_send_where_it_types_a_newline(
+    boot_report: dict[str, Any],
+) -> None:
+    """The textarea takes several lines, so return is a newline there and Send is the button;
+    an ``enterkeyhint`` of ``send`` labelled the key with what it does not do."""
+    assert boot_report["emptySend"]["keyHint"] is None
+
+
 def test_a_frame_clears_the_offline_banner_a_lost_read_raised(
     boot_report: dict[str, Any],
 ) -> None:

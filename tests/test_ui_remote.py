@@ -62,7 +62,7 @@ def fresh_remote_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def installed_page(isolated_home: Path) -> Path:
     """Every test here starts from a machine where the page IS installed.
 
-    ``start()`` refuses to serve a directory with no ``index.html`` (that is the
+    ``start_remote_server()`` refuses to serve a directory with no ``index.html`` (that is the
     whole point of ``aisquare remote install-page``), so without this the tests
     about the link, the QR and the password would all be testing the
     no-page-installed path instead. The one test that wants that path deletes

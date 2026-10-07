@@ -1,11 +1,11 @@
 """``asq remote install-page``, and what a machine with no page installed is told.
 
-``RemoteController.start()`` passes ``dist_dir=None``, the server falls back to
+``RemoteController.turn_on()`` passes ``dist_dir=None``, the server falls back to
 ``remote_dist_dir()`` (``~/.aisquare/remote-dist``) — and nothing populated it,
-so pressing ``m`` on a fresh machine used to start a server that answered every
+so pressing ``R`` on a fresh machine used to start a server that answered every
 page request with a 404 nobody was looking at. These tests pin the two halves of
 the fix: the command that installs a built dist, and the ONE sentence
-(:data:`remote_server.NO_PAGE_HINT`) that ``start()``, ``run_foreground()`` and
+(:data:`remote_server.NO_PAGE_HINT`) that ``start_remote_server()``, ``run_foreground()`` and
 ``asq remote serve`` all report when it has not been run.
 
 Self-contained on purpose: ``tests/test_remote_server.py`` owns the server's

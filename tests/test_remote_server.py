@@ -639,7 +639,9 @@ def test_start_status_revoke_stop_over_a_real_port(
     finally:
         remote_server.stop_remote_server()
     assert remote_server.remote_server_status()["running"] is False
-    assert not server._thread.is_alive(), "stop() returned with uvicorn's thread still up"
+    assert not server._thread.is_alive(), (
+        "stop_remote_server() returned with uvicorn's thread still up"
+    )
     # Nothing listens any more. Linux refuses at once (ConnectError); Windows retries a
     # refused loopback SYN for about two seconds before WSAECONNREFUSED, so a one-second
     # timeout reports the same fact as ConnectTimeout. A listener that was still open

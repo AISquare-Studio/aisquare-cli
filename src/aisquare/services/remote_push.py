@@ -136,7 +136,9 @@ PUSH_HOST_SUFFIXES = (".push.apple.com", ".notify.windows.com")
 
 PUSH_INSTALL_HINT = "Web Push needs the cryptography package — pip install 'aisquare-cli[remote]'"
 
-AUTO_OFF_TITLE = "Remote turns off in 10 min"
+AUTO_OFF_TITLE = "Remote turns off in {minutes} min"
+"""With the minutes left, rounded up: 10 when the first check inside :data:`AUTO_OFF_WARNING`
+sees the deadline, fewer for one that was nearer from the start (``serve --auto-off 5``)."""
 AUTO_OFF_BODY = "Open to extend it by an hour."
 FAREWELL_TITLE = "Remote is off on the machine"
 FAREWELL_BODY = "No more notifications until it is turned on again."
@@ -1193,7 +1195,11 @@ class RemotePushSender:
     def _push_auto_off_warning(
         self, now: datetime, subscriptions: Mapping[str, PushSubscriptionRecord]
     ) -> None:
-        """Ten minutes before auto-off, once per deadline: an extension arms it again."""
+        """Ten minutes before auto-off, once per deadline: an extension arms it again.
+
+        The title says the minutes really left: a deadline nearer than ten minutes
+        from the start (``serve --auto-off 5``) is warned of at once, with five.
+        """
         raw = self._kit.runtime.remote_json().get("auto_off_at")
         deadline = _push_parse_time(raw) if isinstance(raw, str) else None
         if deadline is None or not timedelta(0) < deadline - now <= AUTO_OFF_WARNING:
@@ -1203,7 +1209,8 @@ class RemotePushSender:
             return
         self._push_mark([key], now)
         base = self._push_public_base(now)
-        message = push_system_message(AUTO_OFF_TITLE, AUTO_OFF_BODY, base, tag="asq-auto-off")
+        title = AUTO_OFF_TITLE.format(minutes=math.ceil((deadline - now).total_seconds() / 60))
+        message = push_system_message(title, AUTO_OFF_BODY, base, tag="asq-auto-off")
         for device_id, record in subscriptions.items():
             self.deliver_one_push(device_id, record, message)
 

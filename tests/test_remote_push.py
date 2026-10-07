@@ -339,6 +339,10 @@ def every_device(title: str) -> list[tuple[str, str]]:
     return [(device, title) for device in DEVICES]
 
 
+def auto_off_title(minutes: int) -> str:
+    return AUTO_OFF_TITLE.format(minutes=minutes)
+
+
 def push_item(world: World, n: int) -> Any:
     """Item ``n`` through two scans and its window, then the throttle's 20 s: the link its
     notification carried, or ``None``."""
@@ -1194,17 +1198,35 @@ def test_the_auto_off_warning_goes_once_per_deadline_and_again_after_an_extensio
     world.kit.runtime.set_auto_off(T0 + timedelta(minutes=25))
     world.later(30)
     assert world.transport.sent == [], "25 minutes ahead: not yet"
-    world.clock.advance(15 * 60)
-    world.later(30)
-    assert world.titles() == every_device(AUTO_OFF_TITLE)
+    world.clock.advance(14 * 60)
+    world.later(30)  # T0 + 15 min: the first check inside the ten minutes
+    assert world.titles() == every_device(auto_off_title(10))
     for _ in range(4):
         world.later(30)
     assert len(world.transport.sent) == 2, "once per deadline"
     world.kit.runtime.set_auto_off(world.clock.now + timedelta(minutes=60))  # extended
-    world.clock.advance(55 * 60)
+    world.clock.advance(50 * 60)
     world.later(30)
-    assert world.titles()[2:] == every_device(AUTO_OFF_TITLE)
+    assert world.titles()[2:] == every_device(auto_off_title(10))
     assert world.pushes()[0][1]["tag"] == "asq-auto-off"
+
+
+@pytest.mark.parametrize(
+    ("left", "minutes"),
+    [
+        (timedelta(minutes=10), 10),
+        (timedelta(minutes=9, seconds=31), 10),
+        (timedelta(minutes=5), 5),
+        (timedelta(seconds=20), 1),
+    ],
+)
+def test_the_auto_off_warning_says_the_minutes_really_left(
+    world: World, left: timedelta, minutes: int
+) -> None:
+    """``serve --auto-off 5`` is warned of at its first check, with five minutes, not ten."""
+    world.kit.runtime.set_auto_off(T0 + timedelta(seconds=30) + left)
+    world.later(30)
+    assert world.titles() == every_device(auto_off_title(minutes))
 
 
 def test_a_deadline_written_in_local_time_is_read_as_local_time(world: World) -> None:
@@ -1213,7 +1235,7 @@ def test_a_deadline_written_in_local_time_is_read_as_local_time(world: World) ->
         (world.clock.now + timedelta(minutes=5)).astimezone().replace(tzinfo=None)
     )
     world.later(30)
-    assert world.titles() == every_device(AUTO_OFF_TITLE)
+    assert world.titles() == every_device(auto_off_title(5))
 
 
 def test_a_system_push_skips_the_throttle(world: World) -> None:
@@ -1226,7 +1248,7 @@ def test_a_system_push_skips_the_throttle(world: World) -> None:
     world.later(5)
     assert world.titles() == every_device("aisquare-cli: coder-auth needs you")
     world.later(3)  # T0 + 30 s: 3 s after the needs push
-    assert world.titles()[2:] == every_device(AUTO_OFF_TITLE)
+    assert world.titles()[2:] == every_device(auto_off_title(8))
 
 
 def test_the_expiry_warning_goes_only_to_the_expiring_device(

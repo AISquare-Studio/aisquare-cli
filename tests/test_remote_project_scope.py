@@ -504,11 +504,11 @@ def _sources(fleets: dict[str | None, dict[str, object]]) -> Sources:
     return Sources(
         projects=lambda: [],
         fleet=fleet,
-        board=lambda: {},
-        tasks=lambda: [],
-        memory=lambda: [],
+        board=lambda project: {},
+        tasks=lambda project: [],
+        memory=lambda project: [],
         panes=panes,
-        explainability=lambda agent: {"available": False},
+        explainability=lambda agent, project: {"available": False},
     )
 
 

@@ -66,9 +66,9 @@ class Fake:
         return Sources(
             projects=lambda: [{"id": "p1", "name": "demo"}],
             fleet=fleet,
-            board=lambda: self.board,
-            tasks=lambda: [{"id": "t1", "title": "ship it"}],
-            memory=lambda: [{"id": "m1", "text": "remember"}],
+            board=lambda project: self.board,
+            tasks=lambda project: [{"id": "t1", "title": "ship it"}],
+            memory=lambda project: [{"id": "m1", "text": "remember"}],
             panes=panes,
         )
 
@@ -578,9 +578,9 @@ def test_live_sources_match_the_json_commands(
     )
     for row in live_projects:
         assert set(row["agents"]) >= {"working", "waiting", "attention", "exited", "lost"}
-    assert live.tasks() == _json_of(runner, "task", "list")
-    assert live.memory() == _json_of(runner, "context", "list")
-    board = live.board()
+    assert live.tasks(None) == _json_of(runner, "task", "list")
+    assert live.memory(None) == _json_of(runner, "context", "list")
+    board = live.board(None)
     expected = _json_of(runner, "board")
     assert board == expected
     assert isinstance(board, dict) and set(board) == {"project", "sessions", "tasks", "events"}

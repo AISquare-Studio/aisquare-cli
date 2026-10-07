@@ -37,11 +37,11 @@ def client(runtime: Runtime, tmp_path: Path) -> TestClient:
     sources = Sources(
         projects=lambda: [],
         fleet=lambda project: {"agents": []},
-        board=lambda: {"tasks": []},
-        tasks=lambda: [],
-        memory=lambda: [],
+        board=lambda project: {"tasks": []},
+        tasks=lambda project: [],
+        memory=lambda project: [],
         panes=lambda agent, project, history: {"rows": [], "width": 0, "height": 0},
-        explainability=lambda agent: {"available": False},
+        explainability=lambda agent, project: {"available": False},
     )
     client = TestClient(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
     assert (

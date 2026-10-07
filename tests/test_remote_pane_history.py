@@ -170,11 +170,11 @@ def _sources(panes: Any) -> Sources:
     return Sources(
         projects=lambda: [],
         fleet=lambda project: {},
-        board=lambda: {},
-        tasks=lambda: [],
-        memory=lambda: [],
+        board=lambda project: {},
+        tasks=lambda project: [],
+        memory=lambda project: [],
         panes=panes,
-        explainability=lambda agent: {"available": False},
+        explainability=lambda agent, project: {"available": False},
     )
 
 

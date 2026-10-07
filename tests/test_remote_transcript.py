@@ -333,17 +333,19 @@ def _sources(transcript: Any) -> Sources:
     return Sources(
         projects=lambda: [],
         fleet=lambda project: {},
-        board=lambda: {},
-        tasks=lambda: [],
-        memory=lambda: [],
+        board=lambda project: {},
+        tasks=lambda project: [],
+        memory=lambda project: [],
         panes=lambda agent, project, history: {"rows": [], "width": 0, "height": 0},
         transcript=transcript,
-        explainability=lambda agent: {"available": False},
+        explainability=lambda agent, project: {"available": False},
     )
 
 
-def _echo(agent: str, project: str | None, limit: int, before: str | None) -> dict[str, object]:
-    return {"lines": [f"{agent}/{project}/{limit}/{before}"], "cursor": None, "more": False}
+def _echo(
+    agent: str, project: str | None, limit: int, before: str | None, width: int | None
+) -> dict[str, object]:
+    return {"lines": [f"{agent}/{project}/{limit}/{before}/{width}"], "cursor": None, "more": False}
 
 
 def _client(runtime: Runtime, transcript: Any, tmp_path: Path) -> TestClient:
@@ -355,12 +357,16 @@ def _client(runtime: Runtime, transcript: Any, tmp_path: Path) -> TestClient:
     return client
 
 
-def test_the_route_forwards_project_limit_and_before(runtime: Runtime, tmp_path: Path) -> None:
+def test_the_route_forwards_project_limit_before_and_width(
+    runtime: Runtime, tmp_path: Path
+) -> None:
     client = _client(runtime, _echo, tmp_path)
     base = f"/r/{runtime.token}/api/transcript/coder-1"
-    assert client.get(base).json()["lines"] == ["coder-1/None/0/None"]
-    scoped = client.get(base, params={"project": "prj_x", "limit": 50, "before": "1234"})
-    assert scoped.json()["lines"] == ["coder-1/prj_x/50/1234"]
+    assert client.get(base).json()["lines"] == ["coder-1/None/0/None/None"]
+    scoped = client.get(
+        base, params={"project": "prj_x", "limit": 50, "before": "1234", "width": 42}
+    )
+    assert scoped.json()["lines"] == ["coder-1/prj_x/50/1234/42"]
 
 
 def test_the_page_shape_is_the_contract(runtime: Runtime, tmp_path: Path) -> None:
@@ -377,7 +383,9 @@ def test_a_bad_limit_is_a_400(runtime: Runtime, tmp_path: Path) -> None:
 
 
 def test_an_unknown_agent_is_404(runtime: Runtime, tmp_path: Path) -> None:
-    def missing(agent: str, project: str | None, limit: int, before: str | None) -> Any:
+    def missing(
+        agent: str, project: str | None, limit: int, before: str | None, width: int | None
+    ) -> Any:
         raise NoSuchAgent(f"no live agent {agent!r}")
 
     client = _client(runtime, missing, tmp_path)

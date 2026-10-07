@@ -42,11 +42,11 @@ def _sources() -> Sources:
     return Sources(
         projects=lambda: [],
         fleet=lambda project: {},
-        board=lambda: {},
-        tasks=lambda: [],
-        memory=lambda: [],
+        board=lambda project: {},
+        tasks=lambda project: [],
+        memory=lambda project: [],
         panes=lambda agent, project, history: {"rows": [], "width": 0, "height": 0},
-        explainability=lambda agent: {"available": False},
+        explainability=lambda agent, project: {"available": False},
     )
 
 

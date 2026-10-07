@@ -666,21 +666,24 @@ class Runtime:
 
 
 Snapshot = Callable[[], object]
-FleetSource = Callable[[str | None], object]
-"""An optional project (id/name/codename) → that project's ``fleet ls --json`` payload.
-``None`` is the CURRENT project — byte-identical to today. Raises :class:`NoSuchProject`."""
+ProjectSource = Callable[[str | None], object]
+"""An optional project (id/name/codename) → that project's ``--json`` payload (``fleet ls``,
+``board``, ``task list``, ``context list``). ``None`` is the CURRENT project, as it always
+was. Raises :class:`NoSuchProject`."""
 PaneSource = Callable[[str, str | None, int], dict[str, object]]
 """Agent label, optional project, scrollback lines → one pane capture.
 
 ``history`` of 0 is today's live-screen-only frame, byte for byte (§4-L).
 Raises :class:`NoSuchAgent` / :class:`NoSuchProject`."""
-TranscriptSource = Callable[[str, str | None, int, str | None], dict[str, object]]
-"""Agent, optional project, limit, ``before`` cursor → one page of conversation (§4-M).
+TranscriptSource = Callable[[str, str | None, int, str | None, int | None], dict[str, object]]
+"""Agent, optional project, limit, ``before`` cursor, width → one page of conversation (§4-M).
 
+``width`` is the reader's column count; ``None`` wraps at the agent's own pane width.
 A missing or unreadable transcript is an EMPTY page, never an error: an agent
 that has not written one yet must still open in the page."""
-ExplainabilitySource = Callable[[str], dict[str, object]]
-"""Agent label → the §4-I card payload. Raises :class:`NoSuchAgent` only; never anything else."""
+ExplainabilitySource = Callable[[str, str | None], dict[str, object]]
+"""Agent label, optional project → the §4-I card payload. Raises :class:`NoSuchAgent` or
+:class:`NoSuchProject` only; never anything else."""
 WriteHandler = Callable[[dict[str, Any]], tuple[dict[str, object], str]]
 """Body in → ``(result, audit summary)``; raise :class:`RequestError` to refuse."""
 KitEndpoint = Callable[["Request", Device, dict[str, Any]], Awaitable["Response"]]
@@ -727,17 +730,19 @@ class Sources:
     """The read-only JSON — by default the very functions ``asq --json`` prints."""
 
     projects: Snapshot
-    fleet: FleetSource
-    board: Snapshot
-    tasks: Snapshot
-    memory: Snapshot
+    fleet: ProjectSource
+    board: ProjectSource
+    tasks: ProjectSource
+    memory: ProjectSource
     panes: PaneSource
     transcript: TranscriptSource = field(
-        default=lambda label, project, limit, before: _live_transcript(
-            label, project, limit, before
+        default=lambda label, project, limit, before, width: _live_transcript(
+            label, project, limit, before, width
         )
     )
-    explainability: ExplainabilitySource = field(default=lambda label: _live_explainability(label))
+    explainability: ExplainabilitySource = field(
+        default=lambda label, project: _live_explainability(label, project)
+    )
 
 
 @dataclass(frozen=True)
@@ -787,12 +792,18 @@ def _live_panes(label: str, project: str | None = None, history: int = 0) -> dic
 
 
 def _live_transcript(
-    label: str, project: str | None = None, limit: int = 0, before: str | None = None
+    label: str,
+    project: str | None = None,
+    limit: int = 0,
+    before: str | None = None,
+    width: int | None = None,
 ) -> dict[str, object]:
     """One page of the agent's own conversation, from the board's transcript (§4-M).
 
     The pane cannot answer this: agent panes are alternate-screen and tmux keeps
     no scrollback for them. The board already records where the transcript is.
+    ``width`` is the phone's own column count; without it the lines wrap at the
+    agent's pane width, which a phone narrower than the pane re-wraps into a mess.
     """
     from aisquare.core.store import store_session
     from aisquare.services import transcript as transcript_service
@@ -808,7 +819,7 @@ def _live_transcript(
         path,
         limit=limit or transcript_service.DEFAULT_LIMIT,
         before=before,
-        width=_pane_width(agent),
+        width=width or _pane_width(agent),
     )
     return page.page_json()
 
@@ -889,15 +900,23 @@ def live_sources() -> Sources:
         target = _resolve_project(project)
         return agents_json(target, fleet_service.list_agents(target, live_only=True))
 
-    def tasks_payload() -> object:
+    def tasks_payload(project: str | None = None) -> object:
         from aisquare.services import team as team_service
 
-        return [task.model_dump(mode="json") for task in team_service.list_tasks(None)]
+        cwd = None if project is None else _resolve_project(project).root
+        return [task.model_dump(mode="json") for task in team_service.list_tasks(None, cwd=cwd)]
 
-    def memory_payload() -> object:
+    def memory_payload(project: str | None = None) -> object:
+        from aisquare.core.store import store_session
         from aisquare.services import context as context_service
 
-        return [entry.model_dump(mode="json") for entry in context_service.list_entries()]
+        if project is None:
+            entries = context_service.list_entries()
+        else:
+            target = _resolve_project(project)
+            with store_session() as store:
+                entries = store.entries(project_id=target.id)
+        return [entry.model_dump(mode="json") for entry in entries]
 
     return Sources(
         projects=projects_payload,
@@ -1023,22 +1042,24 @@ def _explainability_policy() -> dict[str, object] | None:
     }
 
 
-def _live_explainability(label: str) -> dict[str, object]:
-    """The card for one live agent; only an unknown label raises (→ 404)."""
+def _live_explainability(label: str, project: str | None = None) -> dict[str, object]:
+    """The card for one live agent of a project (the current one for ``None``).
+
+    Only an unknown label or project raises (→ 404), never anything else.
+    """
     from aisquare.core.store import store_session
-    from aisquare.services import fleet as fleet_service
     from aisquare.services import metrics as metrics_service
 
-    project = fleet_service.resolve_project(None)
+    target = _resolve_project(project)
     with store_session() as store:
-        agent = store.fleet_agent_by_label(project.id, label, live_only=True)
+        agent = store.fleet_agent_by_label(target.id, label, live_only=True)
         if agent is None:
-            raise NoSuchAgent(f"no live agent {label!r} in {project.root.name or project.id}")
+            raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
         session = store.get_session(agent.session_id) if agent.session_id else None
     turns: list[TurnMetric] = []
     if agent.session_id:
         try:
-            turns = metrics_service.recent(project_id=project.id, session_id=agent.session_id)
+            turns = metrics_service.recent(project_id=target.id, session_id=agent.session_id)
         except Exception as exc:
             log.debug("remote: turn metrics for %s unavailable: %s", label, exc)
     return explainability_payload(
@@ -1130,14 +1151,22 @@ def live_writes() -> Writes:
         return {"task": task.model_dump(mode="json")}, f"done {task.id}"
 
     def write_note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        """A note on a project's board: ``project``'s, or the current one's without it.
+
+        The board resolves from the project's root exactly as ``asq note`` run
+        there would; with ``as``, the session's own board still wins (the CLI's
+        rule), so a note posted as an agent lands where that agent reads.
+        """
         from aisquare.services import team as team_service
 
+        project = _optional_ref(body, "project")
         event = team_service.add_note(
             _required(body, "text"),
             session_ref=_optional_ref(body, "as"),
             task_ref=_optional_ref(body, "task"),
             to_role=_optional_ref(body, "to"),
             kind=_optional_ref(body, "kind") or "note",
+            cwd=None if project is None else _resolve_project(project).root,
         )
         return {
             "event": event.as_envelope().model_dump(mode="json")
@@ -1326,6 +1355,29 @@ def _limit_param(raw: str | None) -> int:
         raise ValueError(f"'limit' must be a whole number of turns, not {raw!r}") from None
     if value < 0:
         raise ValueError(f"'limit' cannot be negative, got {value}")
+    return value
+
+
+TRANSCRIPT_WIDTH_MIN = 20
+TRANSCRIPT_WIDTH_MAX = 200
+
+
+def _width_param(raw: str | None) -> int | None:
+    """``?width=`` as the reader's column count; ``None`` (absent) is the pane's own width.
+
+    Refused outside 20-200 rather than clamped: a page that measured its own
+    columns wrongly should hear so, not get lines wrapped for a screen it is not.
+    """
+    if raw is None or raw == "":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"'width' must be a whole number of columns, not {raw!r}") from None
+    if not TRANSCRIPT_WIDTH_MIN <= value <= TRANSCRIPT_WIDTH_MAX:
+        raise ValueError(
+            f"'width' must be {TRANSCRIPT_WIDTH_MIN} to {TRANSCRIPT_WIDTH_MAX} columns, not {value}"
+        )
     return value
 
 
@@ -1798,10 +1850,17 @@ def build_app(
     async def snapshot(kind: str, compute: Snapshot) -> object:
         return await asyncio.to_thread(cache.cached_snapshot, kind, compute)
 
-    def guarded(compute: Snapshot, kind: str) -> Callable[[Request], Any]:
+    def guarded(
+        kind: str, compute: ProjectSource, *, scoped: bool = True
+    ) -> Callable[[Request], Any]:
+        """A cached read. ``?project=`` picks the project (``scoped``) and is part of the
+        cache key, so a read of one project is never answered from another's snapshot
+        (SPEC §7.5); an unknown project is a 404 shaped like an unknown agent."""
+
         async def guarded_read(request: Request) -> Response:
+            project = (request.query_params.get("project") or None) if scoped else None
             try:
-                payload = await snapshot(kind, compute)
+                payload = await snapshot(f"{kind}:{project or ''}", lambda: compute(project))
             except LookupError as exc:
                 return _json_error(404, "not_found", str(exc))
             except Exception as exc:
@@ -1873,19 +1932,6 @@ def build_app(
         kit.kit_audit(device, "devices/revoke", "self" if own else device_id)
         return JSONResponse({"ok": True, "id": device_id})
 
-    async def fleet_endpoint(request: Request) -> Response:
-        project = request.query_params.get("project") or None
-        try:
-            payload = await asyncio.to_thread(
-                cache.cached_snapshot, f"fleet:{project or ''}", lambda: reads.fleet(project)
-            )
-        except LookupError as exc:
-            return _json_error(404, "not_found", str(exc))
-        except Exception as exc:
-            log.warning("remote: fleet snapshot failed: %s", exc)
-            return _json_error(503, "unavailable", str(exc))
-        return JSONResponse(payload)
-
     async def panes(request: Request) -> Response:
         agent = request.path_params["agent"]
         project = request.query_params.get("project") or None
@@ -1908,10 +1954,13 @@ def build_app(
         before = request.query_params.get("before") or None
         try:
             limit = _limit_param(request.query_params.get("limit"))
+            width = _width_param(request.query_params.get("width"))
         except ValueError as exc:
             return _json_error(400, "invalid", str(exc))
         try:
-            payload = await asyncio.to_thread(reads.transcript, agent, project, limit, before)
+            payload = await asyncio.to_thread(
+                reads.transcript, agent, project, limit, before, width
+            )
         except LookupError as exc:
             return _json_error(404, "not_found", str(exc))
         except Exception as exc:
@@ -1921,8 +1970,9 @@ def build_app(
 
     async def explainability(request: Request) -> Response:
         agent = request.path_params["agent"]
+        project = request.query_params.get("project") or None
         try:
-            payload = await asyncio.to_thread(reads.explainability, agent)
+            payload = await asyncio.to_thread(reads.explainability, agent, project)
         except LookupError as exc:
             return _json_error(404, "not_found", str(exc))
         except Exception as exc:  # §4-I: never raises, never blocks the other endpoints
@@ -2033,7 +2083,7 @@ def build_app(
 
         async def tick_once() -> None:
             try:
-                payload = await snapshot("board", reads.board)
+                payload = await snapshot("board:", lambda: reads.board(None))
                 await push_if_changed("board", "board", payload, None)
             except Exception as exc:
                 log.debug("remote: board frame skipped: %s", exc)
@@ -2099,11 +2149,15 @@ def build_app(
     api_routes = [
         Route("/api/unlock", unlock_endpoint, methods=["POST"]),
         Route("/api/remote", remote, methods=["GET"]),
-        Route("/api/projects", guarded(reads.projects, "projects"), methods=["GET"]),
-        Route("/api/fleet", fleet_endpoint, methods=["GET"]),
-        Route("/api/board", guarded(reads.board, "board"), methods=["GET"]),
-        Route("/api/tasks", guarded(reads.tasks, "tasks"), methods=["GET"]),
-        Route("/api/memory", guarded(reads.memory, "memory"), methods=["GET"]),
+        Route(
+            "/api/projects",
+            guarded("projects", lambda _project: reads.projects(), scoped=False),
+            methods=["GET"],
+        ),
+        Route("/api/fleet", guarded("fleet", reads.fleet), methods=["GET"]),
+        Route("/api/board", guarded("board", reads.board), methods=["GET"]),
+        Route("/api/tasks", guarded("tasks", reads.tasks), methods=["GET"]),
+        Route("/api/memory", guarded("memory", reads.memory), methods=["GET"]),
         Route("/api/devices", devices_list_endpoint, methods=["GET"]),
         Route("/api/devices/{device_id}", devices_delete_endpoint, methods=["DELETE"]),
         Route("/api/panes/{agent}", panes, methods=["GET"]),

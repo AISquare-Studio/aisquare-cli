@@ -165,9 +165,9 @@ def _sources(explainability: Any) -> Sources:
     return Sources(
         projects=lambda: [],
         fleet=lambda project: {},
-        board=lambda: {},
-        tasks=lambda: [],
-        memory=lambda: [],
+        board=lambda project: {},
+        tasks=lambda project: [],
+        memory=lambda project: [],
         panes=lambda agent, project, history: {"rows": [], "width": 0, "height": 0},
         explainability=explainability,
     )
@@ -183,7 +183,7 @@ def _client(runtime: Runtime, explainability: Any, tmp_path: Path) -> TestClient
 
 
 def test_endpoint_returns_the_card(runtime: Runtime, tmp_path: Path) -> None:
-    def card(label: str) -> dict[str, object]:
+    def card(label: str, project: str | None) -> dict[str, object]:
         if label == "ghost":
             raise NoSuchAgent("no live agent 'ghost'")
         return {"available": False, "reason": "explainability SDK not installed", "model": "m"}
@@ -200,7 +200,7 @@ def test_endpoint_returns_the_card(runtime: Runtime, tmp_path: Path) -> None:
 
 
 def test_endpoint_never_raises_when_the_source_blows_up(runtime: Runtime, tmp_path: Path) -> None:
-    def boom(label: str) -> dict[str, object]:
+    def boom(label: str, project: str | None) -> dict[str, object]:
         raise RuntimeError("sdk exploded")
 
     client = _client(runtime, boom, tmp_path)
@@ -215,7 +215,9 @@ def test_endpoint_never_raises_when_the_source_blows_up(runtime: Runtime, tmp_pa
 
 
 def test_endpoint_obeys_the_token_and_cookie_gates(runtime: Runtime, tmp_path: Path) -> None:
-    app = build_app(runtime, sources=_sources(lambda label: {"available": True}), dist_dir=tmp_path)
+    app = build_app(
+        runtime, sources=_sources(lambda label, project: {"available": True}), dist_dir=tmp_path
+    )
     anonymous = TestClient(app)
     assert anonymous.get("/r/wrong/api/explainability/coder-1").status_code == 404
     assert anonymous.get(f"/r/{runtime.token}/api/explainability/coder-1").status_code == 401
@@ -279,7 +281,7 @@ def fleet_home(isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 def test_live_lookup_on_this_machine_is_red_and_still_shows_fleet_facts(fleet_home: str) -> None:
     """The SDK is not installed here (the machine the demo runs on): available:false, no raise."""
-    card = remote_server.live_sources().explainability("coder-1")
+    card = remote_server.live_sources().explainability("coder-1", None)
     assert card["available"] is False
     assert isinstance(card["reason"], str) and "SDK not installed" in card["reason"]
     assert card["model"] == "claude-sonnet-5"
@@ -293,7 +295,7 @@ def test_live_lookup_on_this_machine_is_red_and_still_shows_fleet_facts(fleet_ho
     }
     assert isinstance(card["updated_at"], str)
     with pytest.raises(NoSuchAgent):
-        remote_server.live_sources().explainability("nobody")
+        remote_server.live_sources().explainability("nobody", None)
 
 
 def test_live_lookup_with_the_sdk_present_and_a_red_doctor(
@@ -310,7 +312,7 @@ def test_live_lookup_with_the_sdk_present_and_a_red_doctor(
             ),
         ],
     )
-    card = remote_server.live_sources().explainability("coder-1")
+    card = remote_server.live_sources().explainability("coder-1", None)
     assert card["available"] is False
     assert card["reason"] == "doctor is RED: explainability proxy: proxy unreachable"
     assert card["model"] == "claude-sonnet-5"
@@ -325,7 +327,7 @@ def test_live_lookup_with_the_sdk_present_and_a_green_doctor(
         "checks",
         lambda *a, **k: [DoctorCheck(name="explainability", status=CheckStatus.ok, detail="on")],
     )
-    card = remote_server.live_sources().explainability("coder-1")
+    card = remote_server.live_sources().explainability("coder-1", None)
     assert card["available"] is True and "reason" not in card
     assert card["tokens_in"] == 200
 
@@ -353,6 +355,6 @@ def test_a_crashing_doctor_becomes_a_reason_not_an_error(
 
     monkeypatch.setattr(ops, "checks", broken)
     monkeypatch.setattr(ops, "sdk_presence", lambda: ops.SdkPresence(True, None, "1.2.0", False))
-    card = remote_server.live_sources().explainability("coder-1")
+    card = remote_server.live_sources().explainability("coder-1", None)
     assert card["available"] is False
     assert card["reason"] == "doctor is RED: doctor: doctor fell over"

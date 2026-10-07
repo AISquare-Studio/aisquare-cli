@@ -1013,6 +1013,35 @@ def test_serve_on_a_taken_port_fails_before_it_prints_anything(page: Path) -> No
     assert "url_local" not in result.stdout and "password" not in result.stdout
 
 
+def test_the_link_serve_prints_takes_a_connection_before_uvicorn_runs(
+    page: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The banner goes out once the port is bound, and whatever reads it may connect at
+    once: a script reading the ``--json`` link, ngrok, a phone. The socket already
+    listens then, so that connection waits for uvicorn instead of being refused."""
+    import socket
+
+    import uvicorn
+
+    class NeverStarted:
+        def __init__(self, config: Any) -> None:
+            self.should_exit = False
+
+        def run(self, sockets: Any = None) -> None:
+            pass
+
+    monkeypatch.setattr(uvicorn, "Server", NeverStarted)
+    port = _free_port()
+    reached: list[int] = []
+
+    def banner() -> None:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as phone:
+            reached.append(int(phone.getpeername()[1]))
+
+    remote_server.run_foreground(port=port, ready=banner)
+    assert reached == [port]
+
+
 def test_a_remote_json_that_will_not_write_is_not_called_a_taken_port(
     page: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

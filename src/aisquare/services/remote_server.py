@@ -3850,6 +3850,11 @@ def _bind_remote_socket(port: int) -> socket.socket:
     taken port into ``sys.exit(3)`` AFTER ``serve`` had printed its banner and the
     ``--json`` success payload. Address reuse only on POSIX, where it means "past
     TIME_WAIT"; on Windows it would mean sharing a port another process holds.
+
+    It listens at once, too: the banner goes out before uvicorn has started, and a
+    script reading the ``--json`` link (or ngrok, or a phone) that connected in
+    between was refused. A connection now waits in the backlog for uvicorn, whose
+    own ``listen`` on the same socket only sets the backlog again.
     """
     import socket
 
@@ -3858,6 +3863,7 @@ def _bind_remote_socket(port: int) -> socket.socket:
         if os.name == "posix":
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((BIND, port))
+        sock.listen()
     except OSError as exc:
         sock.close()
         raise RemoteBindError(f"cannot bind {BIND}:{port} — {exc}") from exc

@@ -291,6 +291,21 @@ REMOTE_KEY_VOCABULARY = (
     "Enter, Escape, Tab, BTab, BSpace, Space, Up, Down, Left, Right, Home, End, PageUp, "
     "PageDown, Delete, F1-F12, C-c, C-d, C-l, C-o, C-r, C-u, 0-9, y, n"
 )
+_TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+"""What typed ``text`` may not hold: a C0 control other than tab, newline and carriage return,
+or DEL (:func:`check_remote_text`)."""
+_TEXT_CONTROL_KEYS = {
+    "\x03": "C-c",
+    "\x04": "C-d",
+    "\x0c": "C-l",
+    "\x0f": "C-o",
+    "\x12": "C-r",
+    "\x15": "C-u",
+    "\x1b": "Escape",
+    "\x08": "BSpace",
+    "\x7f": "BSpace",
+}
+"""The pad's key for what a control character in ``text`` would have typed."""
 
 AUDIT_DEVICE_MAX = 32
 AUDIT_ENDPOINT_MAX = 32
@@ -1432,6 +1447,27 @@ def check_remote_key_names(keys: object) -> list[str]:
     return list(keys)
 
 
+def check_remote_text(text: str) -> str:
+    """``text`` when it holds no control character but tab, newline and carriage return;
+    else 400 ``invalid``, naming the pad's key for it.
+
+    Text reaches the pane as hex, byte for byte, so a control character in it IS a
+    keystroke: ``"\\x03"`` was a Ctrl-C past the double-press guard, ``"\\x1a"`` the
+    Ctrl-Z :data:`REMOTE_KEY_NAME` refuses as a key, and the audit line said
+    ``text=1ch``, which cannot tell either from a letter. Keys go as ``keys``, where
+    the allowlist, the guard and the trail see them by name.
+    """
+    found = _TEXT_CONTROL.search(text)
+    if found is None:
+        return text
+    char = found.group()
+    key = _TEXT_CONTROL_KEYS.get(char)
+    instead = f"send the pad's {key} key instead" if key else "no key of the pad sends it"
+    raise RequestError(
+        400, "invalid", f"'text' holds the control character U+{ord(char):04X} — {instead}"
+    )
+
+
 def check_project_add_root(raw: object) -> Path:
     """The project root ``project/add`` may register for ``raw``; else 400 ``invalid`` (§2.9).
 
@@ -2017,10 +2053,11 @@ def live_writes() -> Writes:
         """Type into one agent's pane: ``text`` (as hex, nothing parses it), or pad ``keys``.
 
         Everything is checked before anything is sent: the keys against the
-        allowlist, the caps, one input per body (``text`` went first, so "Esc,
-        then type" arrived as "type, then Esc"), and the double Ctrl-C. Once a
-        byte may have reached the pane, a failure is still audited: the trail
-        exists for what a device did to a live agent, finished or not.
+        allowlist, the caps, no control character in the text, one input per body
+        (``text`` went first, so "Esc, then type" arrived as "type, then Esc"), and
+        the double Ctrl-C. Once a byte may have reached the pane, a failure is
+        still audited: the trail exists for what a device did to a live agent,
+        finished or not.
         """
         from aisquare.core.store import store_session
         from aisquare.services import fleet as fleet_service
@@ -2035,6 +2072,8 @@ def live_writes() -> Writes:
                 "too_large",
                 f"'text' is at most {SEND_KEYS_TEXT_MAX} characters — longer goes as a tell",
             )
+        if text:
+            check_remote_text(text)
         if text and keys:
             raise RequestError(
                 400, "text_and_keys", "send 'text' or 'keys', not both: they would arrive in turn"

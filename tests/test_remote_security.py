@@ -274,6 +274,38 @@ def test_text_and_keys_in_one_body_are_refused_and_text_is_capped(pane: FakePane
     assert pane.sent == [("literal", "x" * SEND_KEYS_TEXT_MAX), ("keys", "Enter")]
 
 
+@pytest.mark.parametrize(
+    ("char", "said"),
+    [
+        ("\x03", "the pad's C-c key"),
+        ("\x04", "the pad's C-d key"),
+        ("\x1b", "the pad's Escape key"),
+        ("\x7f", "the pad's BSpace key"),
+        ("\x1a", "no key of the pad sends it"),
+        ("\x00", "no key of the pad sends it"),
+    ],
+    ids=repr,
+)
+def test_text_holding_a_control_character_is_refused_and_names_the_key(
+    pane: FakePane, char: str, said: str
+) -> None:
+    """Text reaches the pane byte for byte: ``"\\x03"`` twice was two Ctrl-Cs past the
+    double-press guard, and ``"\\x1a"`` the Ctrl-Z no key may send, each audited as
+    ``text=1ch`` (review of #243, round 2)."""
+    send = live_writes().handlers["send-keys"]
+    with pytest.raises(RequestError) as refused:
+        send({"agent": "coder-1", "text": f"yes{char}"})
+    assert (refused.value.status, refused.value.error) == (400, "invalid")
+    assert f"U+{ord(char):04X}" in refused.value.message and said in refused.value.message
+    assert pane.sent == []
+
+
+def test_tab_newline_and_carriage_return_are_still_text(pane: FakePane) -> None:
+    send = live_writes().handlers["send-keys"]
+    send({"agent": "coder-1", "text": "a\tb\nc\r"})
+    assert pane.sent == [("literal", "a\tb\nc\r")]
+
+
 def test_a_send_that_fails_after_typing_is_still_on_the_audit_trail(
     runtime: Runtime, pane: FakePane, tmp_path: Path
 ) -> None:

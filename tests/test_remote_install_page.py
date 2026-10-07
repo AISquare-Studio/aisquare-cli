@@ -1,12 +1,15 @@
-"""``asq remote install-page``, and what a machine with no page installed is told.
+"""``asq remote install-page``, and what a machine with no page installed gets.
 
 ``RemoteController.turn_on()`` passes ``dist_dir=None``, the server falls back to
 ``remote_dist_dir()`` (``~/.aisquare/remote-dist``) — and nothing populated it,
 so pressing ``R`` on a fresh machine used to start a server that answered every
-page request with a 404 nobody was looking at. These tests pin the two halves of
-the fix: the command that installs a built dist, and the ONE sentence
-(:data:`remote_server.NO_PAGE_HINT`) that ``start_remote_server()``, ``run_foreground()`` and
-``asq remote serve`` all report when it has not been run.
+page request with a 404 nobody was looking at. aisquare-cli now carries its own
+page (``services/remote_page.py``), served whenever none is installed, so a fresh
+machine just works. These tests pin what is left of the problem: the command
+that installs a build over the bundled page, and the ONE sentence
+(:data:`remote_server.NO_PAGE_HINT`) that ``start_remote_server()``,
+``run_foreground()`` and ``asq remote serve`` all report for an install that
+lost its bundled page.
 
 Self-contained on purpose: ``tests/test_remote_server.py`` owns the server's
 gates and its own fixtures, and this file must not inherit them.
@@ -16,6 +19,7 @@ from __future__ import annotations
 
 import json
 import socket
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -23,7 +27,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli
 from aisquare.core.paths import remote_audit_path, remote_dist_dir, remote_state_path
-from aisquare.services import remote_server
+from aisquare.services import remote_page, remote_server
 from aisquare.services.remote_server import NO_PAGE_HINT, NoRemotePage, Runtime, build_app
 from tests.remote_kit_helpers import make_client
 
@@ -45,6 +49,12 @@ def fresh_module_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(remote_server, "_server", None)
 
 
+@pytest.fixture
+def no_bundled_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An install that lost the page aisquare-cli carries: its files read as none at all."""
+    monkeypatch.setattr(remote_page, "bundled_page_files", dict)
+
+
 def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -62,14 +72,15 @@ def _json_of(runner: CliRunner, *args: str) -> dict[str, object]:
 
 
 def test_install_page_copies_the_dist_into_the_directory_the_server_serves(
-    isolated_home: Path, built: Path
+    isolated_home: Path, built: Path, no_bundled_page: None
 ) -> None:
     destination = remote_server.install_page(built)
 
     assert destination == remote_dist_dir()
     assert (destination / "index.html").read_text().startswith("<!doctype html>")
     assert (destination / "assets" / "app.js").read_text() == "console.log('remote')"
-    assert remote_server._page_missing(None) is None  # the default dir now has a page
+    # The installed page counts on its own: here there is no bundled one to fall back to.
+    assert remote_server._page_missing(None) is None
 
 
 def test_install_page_replaces_an_older_page_and_leaves_no_staging_directory(
@@ -134,31 +145,65 @@ def test_the_cli_refuses_a_directory_that_is_not_a_build(
     assert not remote_dist_dir().exists()
 
 
-# --- what a machine with no page installed is told -----------------------------------------
+# --- a fresh machine, and an install that lost its page ------------------------------------
 
 
-def test_start_with_no_page_installed_raises_the_actionable_sentence(isolated_home: Path) -> None:
+def test_a_fresh_machine_starts_and_serves_the_bundled_page(isolated_home: Path) -> None:
+    """The first ``R`` press on a machine nobody set up: a real server, on loopback."""
+    assert remote_server._page_missing(None) is None
+    info = remote_server.start_remote_server(port=free_port())
+    direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # loopback, never a proxy
+    try:
+        with direct.open(info.url_local, timeout=10) as response:
+            body = response.read()
+            headers = response.headers
+        assert response.status == 200
+        assert body == remote_page.bundled_page_files()["index.html"]
+        assert headers["content-security-policy"] == remote_page.PAGE_CSP
+    finally:
+        remote_server.stop_remote_server()
+
+
+def test_start_with_no_page_at_all_raises_the_actionable_sentence(
+    isolated_home: Path, no_bundled_page: None
+) -> None:
     with pytest.raises(NoRemotePage) as raised:
         remote_server.start_remote_server(port=free_port())
 
     assert str(raised.value) == NO_PAGE_HINT
-    assert "aisquare remote install-page" in str(raised.value)
+    assert "reinstall aisquare-cli" in str(raised.value)
     assert remote_server.remote_server_status()["running"] is False  # nothing was left listening
 
 
-def test_run_foreground_with_no_page_installed_raises_before_it_binds(
-    isolated_home: Path,
+def test_run_foreground_with_no_page_at_all_raises_before_it_binds(
+    isolated_home: Path, no_bundled_page: None
 ) -> None:
     port = free_port()
 
-    with pytest.raises(NoRemotePage, match="install-page"):
+    with pytest.raises(NoRemotePage, match="reinstall"):
         remote_server.run_foreground(port=port)
 
     with socket.socket() as probe:  # the port is still free: it never got that far
         probe.bind(("127.0.0.1", port))
 
 
-def test_cli_serve_exits_non_zero_with_the_same_sentence(isolated_home: Path) -> None:
+def test_cli_serve_on_a_fresh_machine_serves_without_an_install_page(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    served: list[tuple[Path | None, int]] = []
+    monkeypatch.setattr(
+        remote_server, "run_foreground", lambda dist, port: served.append((dist, port))
+    )
+
+    result = CliRunner().invoke(cli, ["--json", "remote", "serve", "--port", "9001"])
+
+    assert result.exit_code == 0, result.output
+    assert served == [(None, 9001)]
+
+
+def test_cli_serve_exits_non_zero_with_the_same_sentence(
+    isolated_home: Path, no_bundled_page: None
+) -> None:
     runner = CliRunner()
 
     result = runner.invoke(cli, ["--json", "remote", "serve"])
@@ -177,14 +222,14 @@ def test_an_explicit_dist_is_still_the_callers_business(
 ) -> None:
     """``--dist`` names a path on purpose — maybe still building — so it stays a per-request 404.
 
-    The up-front refusal is for the DEFAULT directory only; ``build_app`` keeps
-    the ``no_dist`` behaviour ``tests/test_remote_server.py`` pins.
+    Up front it is named in the refusal, never answered with the bundled page:
+    whoever passed ``--dist`` meant that directory. ``build_app`` keeps the
+    ``no_dist`` behaviour ``tests/test_remote_server.py`` pins.
     """
-    assert remote_server._page_missing(tmp_path / "still-building") == NO_PAGE_HINT
+    missing = tmp_path / "still-building"
+    assert remote_server._page_missing(missing) == f"no index.html in {missing.resolve()}"
     runtime = Runtime(remote_state_path(), remote_audit_path())
-    response = make_client(build_app(runtime, dist_dir=tmp_path / "still-building")).get(
-        f"/r/{runtime.token}/"
-    )
+    response = make_client(build_app(runtime, dist_dir=missing)).get(f"/r/{runtime.token}/")
     assert response.status_code == 404 and response.json()["error"] == "no_dist"
 
 

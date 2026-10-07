@@ -1,8 +1,12 @@
-"""The phone page aisquare-cli bundles (SPEC §6): safe by construction.
+"""The phone page aisquare-cli bundles (SPEC §6): served by default, safe by construction.
 
-The page ships inside the package (``aisquare.web.remote``): hand-written HTML,
-one script, one stylesheet, a service worker and a manifest. Two layers:
+A fresh machine had no page installed, so the first ``R`` press started a server
+with nothing to show. The page now ships inside the package
+(``aisquare.web.remote``) and the server answers from it whenever neither
+``--dist`` nor ``asq remote install-page`` gave it another one. Three layers:
 
+* serving, through ``TestClient``: the bundled page by default, the two overrides,
+  the content types, the ETags, and the headers (a strict CSP on the bundled page);
 * the files, read as text: every reference resolves, nothing points at another
   origin, none of the DOM sinks a server string could reach appears, and the page's
   API table names only routes the built app has;
@@ -20,20 +24,24 @@ import re
 import shutil
 import struct
 import subprocess
+from collections.abc import Iterator
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
 import pytest
+from starlette.testclient import TestClient
 
-from aisquare.services import remote_server
+from aisquare.core.paths import remote_dist_dir
+from aisquare.services import remote_page, remote_server
 from aisquare.services.remote_server import (
+    NO_PAGE_HINT,
     Runtime,
     Sources,
     build_app,
     write_endpoint_names,
 )
-from tests.remote_kit_helpers import make_runtime, mounted_routes
+from tests.remote_kit_helpers import base, make_client, make_runtime, mounted_routes
 
 WEB = Path(str(resources.files("aisquare.web.remote")))
 HARNESS = Path(__file__).resolve().parent / "js" / "remote_page_check.js"
@@ -67,6 +75,256 @@ def _sources() -> Sources:
 @pytest.fixture
 def runtime() -> Runtime:
     return make_runtime()
+
+
+@pytest.fixture
+def client(runtime: Runtime) -> TestClient:
+    """The app as the TUI and ``serve`` build it: no ``--dist``, nothing installed."""
+    return make_client(build_app(runtime, sources=_sources()))
+
+
+@pytest.fixture
+def built(tmp_path: Path) -> Path:
+    """A build of another page, as ``install-page`` and ``--dist`` take one."""
+    root = tmp_path / "built"
+    (root / "assets").mkdir(parents=True)
+    (root / "index.html").write_text("<!doctype html><title>installed build</title>")
+    (root / "assets" / "app.js").write_text("console.log('installed')")
+    return root
+
+
+@pytest.fixture
+def no_bundled_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An install that lost its page: the package's files read as none at all."""
+    monkeypatch.setattr(remote_page, "bundled_page_files", dict)
+
+
+# --- 1. served by default -----------------------------------------------------------------
+
+
+def test_a_fresh_machine_is_served_the_bundled_page(client: TestClient, runtime: Runtime) -> None:
+    assert not remote_dist_dir().exists()
+
+    response = client.get(f"{base(runtime)}/")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/html; charset=utf-8"
+    assert response.content == (WEB / "index.html").read_bytes()
+    csp = response.headers["content-security-policy"]
+    assert "default-src 'none'" in csp and "script-src 'self'" in csp
+    assert "unsafe-" not in csp
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-frame-options"] == "DENY"
+
+
+def test_the_policy_lets_nothing_but_this_origin_in() -> None:
+    """Each directive the page needs, at 'self' or 'none', and nothing wider anywhere."""
+    directives = dict(
+        part.strip().split(" ", 1) for part in remote_page.PAGE_CSP.split(";") if part.strip()
+    )
+    assert directives["default-src"] == "'none'"
+    for name in ("script-src", "style-src", "connect-src", "manifest-src", "worker-src"):
+        assert directives[name] == "'self'", name
+    assert directives["img-src"] == "'self' data:"
+    for name in ("base-uri", "form-action", "frame-ancestors"):
+        assert directives[name] == "'none'", name
+    assert "*" not in remote_page.PAGE_CSP and "http" not in remote_page.PAGE_CSP
+
+
+def test_the_page_needs_no_device_and_a_top_level_name_is_the_document(
+    client: TestClient, runtime: Runtime
+) -> None:
+    """``#/unlock`` must load for a phone that has not unlocked yet; ``/unlock`` (an older
+    page's route) gets the same document, whose relative URLs still resolve from there."""
+    response = client.get(f"{base(runtime)}/unlock")
+
+    assert response.status_code == 200
+    assert response.content == (WEB / "index.html").read_bytes()
+
+
+def test_a_deeper_path_is_sent_to_the_top_where_relative_urls_resolve(
+    client: TestClient, runtime: Runtime
+) -> None:
+    """At ``/fleet/coder-1`` the document would ask for ``/fleet/app.js`` and boot blank."""
+    for path in ("fleet/coder-1", "fleet/"):
+        response = client.get(f"{base(runtime)}/{path}", follow_redirects=False)
+        assert response.status_code == 307, path
+        assert response.headers["location"] == f"{base(runtime)}/"
+        assert response.headers["referrer-policy"] == "no-referrer"
+
+
+# --- 2. overrides ---------------------------------------------------------------------------
+
+
+def test_an_installed_page_wins_over_the_bundled_one(
+    client: TestClient, runtime: Runtime, built: Path
+) -> None:
+    remote_server.install_page(built)
+
+    index = client.get(f"{base(runtime)}/")
+    asset = client.get(f"{base(runtime)}/assets/app.js")
+
+    assert index.status_code == 200 and "installed build" in index.text
+    assert asset.text == "console.log('installed')"
+    # The page headers go on an installed build too; the CSP is the bundled page's own.
+    assert index.headers["referrer-policy"] == "no-referrer"
+    assert index.headers["x-content-type-options"] == "nosniff"
+    assert "content-security-policy" not in index.headers
+
+
+def test_the_choice_is_made_per_request_without_a_restart(
+    client: TestClient, runtime: Runtime, built: Path
+) -> None:
+    """``install-page`` takes over a running server, and removing it hands back."""
+    assert client.get(f"{base(runtime)}/").content == (WEB / "index.html").read_bytes()
+    remote_server.install_page(built)
+    assert "installed build" in client.get(f"{base(runtime)}/").text
+    shutil.rmtree(remote_dist_dir())
+    assert client.get(f"{base(runtime)}/").content == (WEB / "index.html").read_bytes()
+
+
+def test_an_explicit_dist_wins_over_the_installed_page(
+    runtime: Runtime, built: Path, tmp_path: Path
+) -> None:
+    remote_server.install_page(built)
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    (chosen / "index.html").write_text("<!doctype html><title>the --dist page</title>")
+
+    response = make_client(build_app(runtime, sources=_sources(), dist_dir=chosen)).get(
+        f"{base(runtime)}/"
+    )
+
+    assert "the --dist page" in response.text
+
+
+def test_an_explicit_dist_without_a_page_is_still_a_404_never_the_bundled_one(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """``--dist`` names a directory on purpose: a wrong one says so, per request."""
+    missing = tmp_path / "still-building"
+    client = make_client(build_app(runtime, sources=_sources(), dist_dir=missing))
+
+    response = client.get(f"{base(runtime)}/")
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "no_dist"
+    assert "no index.html in" in response.json()["message"]
+    assert response.headers["referrer-policy"] == "no-referrer"
+
+
+def test_an_install_without_its_bundled_page_says_to_reinstall(
+    client: TestClient, runtime: Runtime, no_bundled_page: None
+) -> None:
+    response = client.get(f"{base(runtime)}/")
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "no_dist", "message": NO_PAGE_HINT}
+    assert "reinstall aisquare-cli" in NO_PAGE_HINT
+    assert remote_server._page_missing(None) == NO_PAGE_HINT
+
+
+# --- 3. types, misses and revalidation -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "content_type"),
+    [
+        ("sw.js", "text/javascript; charset=utf-8"),
+        ("app.js", "text/javascript; charset=utf-8"),
+        ("manifest.webmanifest", "application/manifest+json"),
+        ("icon.svg", "image/svg+xml"),
+        ("icon-180.png", "image/png"),
+        ("app.css", "text/css; charset=utf-8"),
+    ],
+)
+def test_each_file_is_served_with_its_own_type(
+    client: TestClient, runtime: Runtime, name: str, content_type: str
+) -> None:
+    response = client.get(f"{base(runtime)}/{name}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == content_type
+    assert response.content == (WEB / name).read_bytes()
+    assert response.headers["content-security-policy"] == remote_page.PAGE_CSP
+
+
+@pytest.mark.parametrize("name", ["nope.js", "__init__.py", "app.js.map", "assets/app.js"])
+def test_a_file_the_page_does_not_serve_is_a_404_and_never_the_document(
+    client: TestClient, runtime: Runtime, name: str
+) -> None:
+    response = client.get(f"{base(runtime)}/{name}", follow_redirects=False)
+
+    assert response.status_code == 404, name
+    assert "text/html" not in response.headers["content-type"]
+    assert response.json()["error"] == "not_found"
+
+
+def test_an_unchanged_file_is_answered_304_by_its_etag(
+    client: TestClient, runtime: Runtime
+) -> None:
+    first = client.get(f"{base(runtime)}/app.js")
+    etag = first.headers["etag"]
+
+    again = client.get(f"{base(runtime)}/app.js", headers={"if-none-match": etag})
+    weak = client.get(f"{base(runtime)}/app.js", headers={"if-none-match": f'"x", W/{etag}'})
+    stale = client.get(f"{base(runtime)}/app.js", headers={"if-none-match": '"another"'})
+
+    assert again.status_code == 304 and again.content == b""
+    assert again.headers["etag"] == etag
+    assert again.headers["cache-control"] == "no-cache"
+    assert weak.status_code == 304
+    assert stale.status_code == 200 and stale.content == first.content
+    assert client.get(f"{base(runtime)}/sw.js").headers["etag"] != etag  # per file
+
+
+def test_the_content_types_are_a_closed_list() -> None:
+    assert remote_page.page_content_type("a.HTML") == "text/html; charset=utf-8"
+    for name in ("x.py", "x.map", "x.txt", "x", "x.json"):
+        assert remote_page.page_content_type(name) is None, name
+
+
+def test_the_page_headers_keep_the_token_in_the_path_to_ourselves() -> None:
+    assert remote_page.remote_page_headers() == {
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
+        "x-frame-options": "DENY",
+        "permissions-policy": "camera=(), microphone=(), geolocation=()",
+    }
+
+
+@pytest.fixture
+def fake_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """The package directory replaced by a temporary one; the read cache cleared around it."""
+    package = tmp_path / "package"
+    package.mkdir()
+    monkeypatch.setattr(resources, "files", lambda name: package)
+    remote_page._bundled_items.cache_clear()
+    yield package
+    remote_page._bundled_items.cache_clear()
+
+
+def test_the_bundled_files_leave_out_the_package_init_and_dotfiles(fake_package: Path) -> None:
+    (fake_package / "index.html").write_text("<!doctype html>")
+    (fake_package / "app.js").write_text("'use strict';")
+    (fake_package / "__init__.py").write_text("")
+    (fake_package / ".DS_Store").write_text("finder")
+    (fake_package / "__pycache__").mkdir()
+
+    assert remote_page.bundled_page_files() == {
+        "app.js": b"'use strict';",
+        "index.html": b"<!doctype html>",
+    }
+    assert remote_page.bundled_page_present()
+
+
+def test_the_package_ships_exactly_the_page() -> None:
+    """The real package, read the way the server reads it: these files and no others."""
+    remote_page._bundled_items.cache_clear()
+
+    assert sorted(remote_page.bundled_page_files()) == sorted(PAGE_FILES)
 
 
 # --- 4. references resolve ------------------------------------------------------------------

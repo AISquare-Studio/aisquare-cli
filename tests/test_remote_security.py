@@ -573,7 +573,7 @@ def test_guesses_decided_at_once_get_no_further_past_the_budget(app: Any, runtim
     the budget, five guesses together get one evaluation and four ``locked_out``."""
     for n in range(UNLOCK_GLOBAL_FAILURES - 1):
         unlock(_from(app, f"203.0.113.{n}"), runtime, "wrong")
-    together = threading.Barrier(5)
+    together = threading.Barrier(5, timeout=10)  # a guess that fails first breaks it, not hangs
     answers: list[int] = []
 
     def guess(n: int) -> None:

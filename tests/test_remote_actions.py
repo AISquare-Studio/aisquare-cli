@@ -66,7 +66,14 @@ from aisquare.services.remote_server import (
 )
 from aisquare.services.team import TeamDisabledError
 from aisquare.services.transcript import PendingTool, TranscriptTail
-from tests.remote_kit_helpers import base, make_client, make_runtime, receive_within, unlock
+from tests.remote_kit_helpers import (
+    base,
+    frame_within,
+    make_client,
+    make_runtime,
+    receive_within,
+    unlock,
+)
 
 
 def _sources() -> Sources:
@@ -420,7 +427,7 @@ def test_the_action_frame_carries_this_devices_ledger_and_no_one_elses(
     url = f"{base(runtime)}/api/note"
     theirs.post(url, json={"text": "c", "request_id": "theirs-1"})
     with mine.websocket_connect(f"{base(runtime)}/ws") as ws:
-        first = [json.loads(ws.receive_text())["type"] for _ in range(3)]
+        first = [frame_within(ws)["type"] for _ in range(3)]
         assert first == ["board", "fleet", "remote"]
         mine.post(url, json={"text": "a", "request_id": "mine-1"})
         frame = _until(ws, "action")

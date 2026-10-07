@@ -39,7 +39,7 @@ from aisquare.services.remote_server import (
     live_sources,
     live_writes,
 )
-from tests.remote_kit_helpers import make_client
+from tests.remote_kit_helpers import frame_within, make_client
 
 PASSWORD = "Test1234"
 T0 = datetime(2026, 9, 12, 10, 0, tzinfo=UTC)
@@ -583,7 +583,7 @@ def test_the_project_query_param_still_needs_the_cookie(runtime: Runtime, tmp_pa
 
 def _frame(ws: Any, kind: str, *, limit: int = 20) -> dict[str, Any]:
     for _ in range(limit):
-        frame: dict[str, Any] = json.loads(ws.receive_text())
+        frame = frame_within(ws)
         if frame["type"] == kind:
             return frame
     raise AssertionError(f"no {kind} frame in {limit} frames")

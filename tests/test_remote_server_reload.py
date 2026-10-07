@@ -20,7 +20,7 @@ from aisquare.services.remote_server import (
     Sources,
     build_app,
 )
-from tests.remote_kit_helpers import make_client
+from tests.remote_kit_helpers import frame_within, make_client, receive_within
 
 PASSWORD = "Test1234"
 
@@ -72,7 +72,7 @@ def base(runtime: Runtime) -> str:
 
 def _frames_until(ws: Any, kind: str, *, limit: int = 12) -> dict[str, Any]:
     for _ in range(limit):
-        frame: dict[str, Any] = json.loads(ws.receive_text())
+        frame = frame_within(ws)
         if frame["type"] == kind:
             return frame
     raise AssertionError(f"no {kind} frame")
@@ -116,7 +116,7 @@ def test_revoke_from_another_process_closes_the_socket_and_the_cookie(
         )
         closed = None
         for _ in range(40):
-            message = ws.receive()
+            message = receive_within(ws)
             if message["type"] == "websocket.close":
                 closed = message
                 break

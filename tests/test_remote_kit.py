@@ -46,7 +46,14 @@ from aisquare.services.remote_server import (
     remote_agent_lock,
     write_endpoint_names,
 )
-from tests.remote_kit_helpers import base, make_client, make_runtime, receive_within, unlock
+from tests.remote_kit_helpers import (
+    base,
+    frame_within,
+    make_client,
+    make_runtime,
+    receive_within,
+    unlock,
+)
 
 
 def _sources() -> Sources:
@@ -538,12 +545,12 @@ def test_a_needs_item_serializes_to_the_wire_shape_without_push_after() -> None:
 
 
 def _frames(ws: Any, count: int) -> list[dict[str, Any]]:
-    return [json.loads(ws.receive_text()) for _ in range(count)]
+    return [frame_within(ws) for _ in range(count)]
 
 
 def _until(ws: Any, kind: str, *, limit: int = 60) -> dict[str, Any]:
     for _ in range(limit):
-        frame: dict[str, Any] = json.loads(ws.receive_text())
+        frame = frame_within(ws)
         if frame["type"] == kind:
             return frame
     raise AssertionError(f"no {kind} frame in {limit}")
@@ -715,7 +722,7 @@ def test_a_fifth_socket_from_one_device_closes_its_oldest_with_4409(
             sockets.append(ws)
         closed = None
         for _ in range(1000):
-            message = sockets[0].receive()
+            message = receive_within(sockets[0])
             if message["type"] == "websocket.close":
                 closed = message
                 break

@@ -32,7 +32,7 @@ from aisquare.services.remote_server import (
     Writes,
     build_app,
 )
-from tests.remote_kit_helpers import make_client
+from tests.remote_kit_helpers import frame_within, make_client, receive_within
 
 PASSWORD = "Test1234"
 
@@ -549,7 +549,7 @@ def test_websocket_without_cookie_is_denied_401(client: TestClient, runtime: Run
 def _frames_until(ws: Any, kind: str, *, limit: int = 12) -> list[dict[str, Any]]:
     seen: list[dict[str, Any]] = []
     for _ in range(limit):
-        frame = json.loads(ws.receive_text())
+        frame = frame_within(ws)
         seen.append(frame)
         if frame["type"] == kind:
             return seen
@@ -570,7 +570,7 @@ def test_stream_sends_board_fleet_remote_then_only_changes(
         assert first[2]["payload"]["allow_write"] is False
         # Nothing changed: no frame arrives for several ticks.
         fake.board = {**fake.board, "events": [{"seq": 1, "text": "hello from the desk"}]}
-        changed = json.loads(ws.receive_text())
+        changed = frame_within(ws)
         assert changed["type"] == "board"
         assert changed["payload"]["events"][0]["text"] == "hello from the desk"
         runtime.set_allow_write(True)
@@ -606,7 +606,7 @@ def test_revoke_closes_the_socket_with_4401(client: TestClient, runtime: Runtime
         assert remote_server.Runtime.revoke_device(runtime, device_id) is True
         closed = None
         for _ in range(20):
-            message = ws.receive()
+            message = receive_within(ws)
             if message["type"] == "websocket.close":
                 closed = message
                 break

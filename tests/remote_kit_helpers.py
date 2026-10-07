@@ -11,6 +11,7 @@ the client's default headers too.
 from __future__ import annotations
 
 import contextlib
+import json
 import threading
 from typing import Any
 from urllib.parse import urlsplit
@@ -78,3 +79,11 @@ def receive_within(ws: Any, seconds: float = 10.0) -> dict[str, Any]:
     waiter.join(seconds)
     assert got, f"nothing from the socket in {seconds} s: did the stream end without a close?"
     return got[0]
+
+
+def frame_within(ws: Any, seconds: float = 10.0) -> dict[str, Any]:
+    """The socket's next frame, decoded: :func:`receive_within`, failed at a close too."""
+    message = receive_within(ws, seconds)
+    assert message["type"] == "websocket.send", f"the socket closed instead: {message}"
+    frame: dict[str, Any] = json.loads(message["text"])
+    return frame

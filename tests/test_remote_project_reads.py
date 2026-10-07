@@ -39,7 +39,14 @@ from aisquare.services.remote_server import (
     live_writes,
     remote_board_payload,
 )
-from tests.remote_kit_helpers import base, make_client, make_runtime, receive_within, unlock
+from tests.remote_kit_helpers import (
+    base,
+    frame_within,
+    make_client,
+    make_runtime,
+    receive_within,
+    unlock,
+)
 
 T0 = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
 
@@ -426,7 +433,7 @@ def _socket_client(runtime: Runtime, tmp_path: Path, reads: Reads, panes: Panes)
 
 def _until(ws: Any, match: Any, *, limit: int = 100) -> dict[str, Any]:
     for _ in range(limit):
-        frame: dict[str, Any] = json.loads(ws.receive_text())
+        frame = frame_within(ws)
         if match(frame):
             return frame
     raise AssertionError(f"no matching frame in {limit}")

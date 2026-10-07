@@ -37,7 +37,7 @@ from aisquare.services.remote_server import (
     _history_param,
     build_app,
 )
-from tests.remote_kit_helpers import make_client
+from tests.remote_kit_helpers import frame_within, make_client
 
 PASSWORD = "Test1234"
 requires_tmux = pytest.mark.skipif(
@@ -344,7 +344,7 @@ def test_the_ws_pane_frame_still_asks_for_no_history(runtime: Runtime, tmp_path:
     with streaming.websocket_connect(f"/r/{runtime.token}/ws") as ws:
         ws.send_text(json.dumps({"subscribe": "coder-1"}))
         for _ in range(20):
-            frame = json.loads(ws.receive_text())
+            frame = frame_within(ws)
             if frame["type"] == "pane":
                 assert set(frame) == {"type", "agent", "payload", "ts"}
                 break

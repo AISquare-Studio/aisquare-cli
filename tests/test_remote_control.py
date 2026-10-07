@@ -156,9 +156,9 @@ def test_a_tunnel_that_exits_without_a_url_says_so_instead_of_hanging(tmp_path: 
 # --- the controller -------------------------------------------------------------------------
 
 
-#: Every ``remote_server`` module function the controller calls, now or once a later
-#: lane lands (turning Remote off revokes every device; the TUI notes ngrok's URL and
-#: adopts a deadline the phone extended). The fake answers all of them from day one.
+#: Every ``remote_server`` module function the controller calls: turning Remote off
+#: revokes every device, the TUI notes ngrok's URL and adopts a deadline the phone
+#: extended. The fake answers all of them, and the test below holds it to the module.
 SERVER_CALLS = (
     "start_remote_server",
     "stop_remote_server",

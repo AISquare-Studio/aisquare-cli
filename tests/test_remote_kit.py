@@ -2,7 +2,7 @@
 
 Every lane module is replaced here by a recorder through ``monkeypatch``: the
 server reaches them only through their module attributes, inside functions, so
-a lane that lands later plugs into exactly these calls.
+these tests pin the calls each lane plugs into, whatever the lane does behind them.
 """
 
 from __future__ import annotations

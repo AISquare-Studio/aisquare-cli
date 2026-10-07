@@ -2,11 +2,10 @@
 client that sends the page's ``Origin``, unlock, the routes of a built app, and a
 socket read that fails instead of hanging.
 
-The ``Origin`` header goes on every request and every handshake from day one:
-the Origin gate refuses a write or a socket without it (SPEC §2.8), and a
-client that already sends it keeps every test written against these helpers
-green when that gate lands. Starlette's ``websocket_connect`` sends the
-client's default headers too.
+The ``Origin`` header goes on every request and every handshake: the Origin
+gate refuses a write or a socket without it (SPEC §2.8), so a test that is
+about something else never trips it. Starlette's ``websocket_connect`` sends
+the client's default headers too.
 """
 
 from __future__ import annotations

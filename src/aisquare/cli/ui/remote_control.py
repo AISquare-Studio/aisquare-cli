@@ -104,10 +104,10 @@ def save_remote_state(state: RemoteState) -> None:
 class RemoteController:
     """Turn Remote on and off, and answer what the modal paints.
 
-    ``server`` is the PLAN §4-F module (the stub until the server branch
-    merges), ``tunnel_factory`` builds the ngrok subprocess wrapper, ``now`` is
-    the clock — all three are seams for the tests. Every time here carries its
-    offset; a naive one from ``now`` is read as local time.
+    ``server`` is :mod:`aisquare.services.remote_server`, ``tunnel_factory``
+    builds the ngrok subprocess wrapper, ``now`` is the clock — all three are
+    seams for the tests. Every time here carries its offset; a naive one from
+    ``now`` is read as local time.
     """
 
     def __init__(

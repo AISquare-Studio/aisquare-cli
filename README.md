@@ -8,7 +8,7 @@
 **One terminal over your projects and your coding agents: task a manager in
 plain words, and it runs the coders, testers and reviewers for you.**
 
-![The asq terminal UI: projects on the left, a manager's live Claude Code session on the right](https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/docs/demo.gif)
+![The first run in asq: add a project, then start its manager](https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/docs/demo.gif)
 
 Type `asq` and you get a full-screen, mouse-driven view: your projects on the
 left, and on the right a **manager** agent you task in prose — it plans, spawns
@@ -56,17 +56,18 @@ you ran it from and wires Claude Code's hooks. Running it again is a no-op.
 has the PowerShell line that sets up WSL2 on Windows, how to read the script
 before you run it, and how to install by hand.
 
-Then, in `asq`:
+Then `asq` opens on Welcome, three steps to a running fleet:
 
-1. **Click `+` beside Fleet** and point it at a directory. It registers the
-   project and runs a health check in the background — you never leave the UI.
-2. **Click the project**, then press *Start manager*. Its live Claude Code
-   session fills the pane. **Type your goal in prose.**
-3. **Watch the agents appear** under the project — 🧭 manager · 🔨 coder ·
-   🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator — each with a live
-   state chip. Click one to see and drive its session.
-4. **Press `F12`** to hand focus back to the sidebar; `q` quits. **The agents
-   keep running**; reopen `asq` and it re-attaches to what it finds.
+1. **Project:** use the folder you are in, or choose another.
+2. **Claude Code:** connect it. If it is missing, Welcome names the install
+   command; if it is signed out, it offers the sign-in.
+3. **Fleet:** press *Start manager*, then *Start the coders*: a manager and two
+   coders, each a real Claude Code session. **Type your goal to the manager in
+   prose.**
+
+Click any agent to see and drive its session. **Press `F12`** to hand focus
+back to the sidebar, where `w` returns to Welcome and `q` quits. **The agents
+keep running**; reopen `asq` and it re-attaches to what it finds.
 
 The manager never writes code and never merges — a human does that.
 

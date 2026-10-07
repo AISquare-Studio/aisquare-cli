@@ -353,8 +353,20 @@ def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> 
     return [
         event
         for event, _ in _HOOKS
-        if not any(accepts(group, event) for group in (hooks.get(event) or []))
+        if not any(accepts(group, event) for group in _event_groups(hooks, event))
     ]
+
+
+def _event_groups(hooks: dict[str, Any], event: str) -> list[Any]:
+    """The hook groups ``settings.json`` lists under ``event``; anything but a list is none.
+
+    The file is hand-edited, and a number or ``true`` under an event made every
+    reader raise ``TypeError``: ``aisquare doctor`` printed a traceback instead of
+    its claude-code row, and the "connected?" check raised with it. The writers
+    (``install_hooks``, ``remove_hooks``) already treated such a value as no groups.
+    """
+    groups = hooks.get(event)
+    return groups if isinstance(groups, list) else []
 
 
 def _installed_timeout(groups: Any, event: str) -> int | None:
@@ -633,7 +645,7 @@ def hook_commands(name: str, config_dir: Path | None = None) -> list[str]:
         return []
     found: list[str] = []
     for event, _ in _HOOKS:
-        for group in hooks.get(event) or []:
+        for group in _event_groups(hooks, event):
             if not _is_aisquare_group(group):
                 continue
             for item in group["hooks"]:

@@ -123,3 +123,22 @@ def test_asking_reads_only_and_never_raises(claude_home: Path) -> None:
     assert agents_service.claude_code_connected() is False, "an unreadable path answers False"
 
     assert not home.exists(), "asking created the aisquare home"
+
+
+def test_a_non_list_event_in_settings_json_is_no_hooks_not_a_traceback(
+    runner: CliRunner, claude_home: Path
+) -> None:
+    """``{"hooks": {"Stop": 5}}`` made ``doctor`` print a traceback, and the check raise."""
+    settings_path = claude_home / "settings.json"
+    settings_path.write_text(json.dumps({"hooks": {"Stop": 5, "SessionEnd": True}}), "utf-8")
+
+    assert agents_service.claude_code_connected() is False
+    result = runner.invoke(app, ["--json", "doctor"])
+    assert result.exception is None or isinstance(result.exception, SystemExit), repr(
+        result.exception
+    )
+    row = next(row for row in json.loads(result.stdout) if row["name"] == "claude-code")
+    assert row["status"] == "warn" and "agents connect claude-code" in row["fix"], row
+
+    _connect(runner)  # control: connect writes each event back as a list of our group
+    assert agents_service.claude_code_connected() is True

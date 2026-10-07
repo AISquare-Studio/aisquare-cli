@@ -797,6 +797,37 @@ def _plugin_label(plugin: agent_core.ClaudePlugin) -> str:
     return f"the aisquare plugin {plugin.version}" if plugin.version else "the aisquare plugin"
 
 
+def _plugin_runner(pin: str | None) -> tuple[str, str | None, str | None]:
+    """What the plugin's hooks run here: ``(what, problem, fix)``, graded like a hook's binary.
+
+    The plugin's version is its manifest's, not the CLI's, and the launcher runs the
+    first aisquare it finds (``agent_core.plugin_runner``), else the pinned release
+    through uvx. An old CLI first on PATH is the #84 blind spot again, so it is
+    graded with the same probe the settings.json hooks get. ``pin`` is the version
+    the plugin was installed at, which the launcher pins uvx to.
+    """
+    program = agent_core.plugin_runner()
+    if program is None:
+        if shutil.which("uvx") is not None:
+            release = f"{DISTRIBUTION}=={pin}" if pin else f"the pinned {DISTRIBUTION}"
+            return f"{release} through uvx", None, None
+        return (
+            "",
+            "finds neither aisquare nor uvx on PATH, so its hooks run nothing",
+            f"Install uv (https://docs.astral.sh/uv/), or the CLI: uv tool install {DISTRIBUTION}",
+        )
+    state, version = agent_core.classify_hook_binary(agent_core.HookBinary(program))
+    if state == agent_core.HOOK_BINARY_CURRENT:
+        return "this install", None, None
+    found = f"{program} ({version})" if version else f"{program}, whose version could not be read"
+    this = f"{agent_core.current_install()} ({__version__})"
+    return (
+        "",
+        f"runs {found} — this install is {this}",
+        f"put this install's aisquare first on PATH, or upgrade {program}",
+    )
+
+
 def _check_claude_code() -> DoctorCheck:
     """Claude Code: are our hooks in every config dir, and do they run THIS install?
 
@@ -857,12 +888,25 @@ def _check_claude_code() -> DoctorCheck:
         for site in sites
         if site.plugin is not None and agent_core.hook_commands("claude-code", site.config_dir)
     ]
+    # Doubled directories are graded too. The plugin's copies stand down only beside
+    # hooks whose program exists, so beside dead ones the plugin runs instead: that
+    # is not "two ways", and those hooks fail on every event (review of #249).
+    dead = [site for site in doubled if site.binary_state == agent_core.HOOK_BINARY_MISSING]
     wrong_binary = [
         site
         for site in sites
-        if site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT) and site not in doubled
+        if site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT) and site not in dead
     ]
-    if not unhooked and not wrong_binary and not doubled:
+    # Where the plugin is the route that runs, what it runs is graded like a hook.
+    plugin_runs = [site for site in sites if site.plugin is not None and site not in doubled]
+    plugin_runs += dead
+    pins = [site.plugin.version for site in plugin_runs if site.plugin is not None]
+    runs, runner_problem, runner_fix = (
+        _plugin_runner(next((pin for pin in pins if pin), None))
+        if plugin_runs
+        else ("", None, None)
+    )
+    if not unhooked and not wrong_binary and not doubled and runner_problem is None:
         # Installed, firing, and running THIS install — but a context hook may
         # still carry a shorter timeout than the CI hook can wait for (a
         # settings.json from 0.6.0, or one hand-edited). Its own sentence: the
@@ -895,9 +939,11 @@ def _check_claude_code() -> DoctorCheck:
         )
         routes = [f"all lifecycle hooks installed{note}"] if hooked else []
         if len(plugins) == 1 and not hooked:
-            routes.append(f"through {_plugin_label(plugins[0][1])}")
+            routes.append(f"through {_plugin_label(plugins[0][1])}, which runs {runs}")
         else:
             routes.extend(f"through {_plugin_label(p)} in {d}" for d, p in plugins)
+            if plugins:
+                routes.append(f"the plugin runs {runs}")
         return _ok("claude-code", f"{product} connected{where} ({'; '.join(routes)})")
 
     problems: list[str] = []
@@ -908,22 +954,42 @@ def _check_claude_code() -> DoctorCheck:
         clauses = "; ".join(_hook_binary_problems(wrong_binary))
         this = f"{agent_core.current_install()} ({__version__})"
         problems.append(f"{clauses} — this install is {this}")
-    if doubled:
-        listed = ", ".join(str(site.config_dir) for site in doubled)
+    live = [site for site in doubled if site not in dead]
+    if dead:
+        listed = ", ".join(str(site.config_dir) for site in dead)
+        problems.append(
+            f"settings.json hooks in: {listed} name an aisquare that does not exist, so they "
+            "fail on every event and the aisquare plugin runs in their place"
+        )
+    if live:
+        listed = ", ".join(str(site.config_dir) for site in live)
         problems.append(
             f"runs aisquare two ways in: {listed} — settings.json hooks and the aisquare "
             "plugin, whose hooks stand down while those are installed; keep one"
         )
+    if runner_problem is not None:
+        listed = ", ".join(str(site.config_dir) for site in plugin_runs)
+        problems.append(f"the aisquare plugin in: {listed} {runner_problem}")
+    # A doubled directory gets no Connect button: connecting keeps both routes.
     broken: list[Path] = []
     for site in sites:
-        if (site in unhooked or site in wrong_binary) and site.config_dir not in broken:
+        if site in doubled or site.config_dir in broken:
+            continue
+        if site in unhooked or site in wrong_binary:
             broken.append(site.config_dir)
     fixes = [f"aisquare agents connect claude-code --config-dir {p}" for p in broken]
     fixes.extend(
-        f"keep the plugin: aisquare agents disconnect claude-code --config-dir {site.config_dir}"
-        f" (or keep the hooks: /plugin uninstall {agent_core.CLAUDE_PLUGIN_ID} in Claude Code)"
-        for site in doubled
+        "remove them, and the plugin runs alone: "
+        f"aisquare agents disconnect claude-code --config-dir {site.config_dir}"
+        for site in dead
     )
+    fixes.extend(
+        f"keep the plugin: aisquare agents disconnect claude-code --config-dir {site.config_dir}"
+        f" (or keep the hooks: {agent_core.claude_plugin_command('uninstall', site.config_dir)})"
+        for site in live
+    )
+    if runner_fix is not None:
+        fixes.append(runner_fix)
     return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
 
 

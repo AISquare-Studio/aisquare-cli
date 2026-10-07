@@ -71,6 +71,11 @@ def claude_plugin(config_dir: Path | None = None) -> agent_core.ClaudePlugin | N
     return agent_core.claude_plugin(config_dir)
 
 
+def claude_plugin_command(verb: str, config_dir: Path) -> str:
+    """``claude plugin <verb> aisquare@aisquare-cli`` aimed at ``config_dir``."""
+    return agent_core.claude_plugin_command(verb, config_dir)
+
+
 class UnsupportedAgentError(ValueError):
     """An agent aisquare can detect but has no hooks for yet (Codex, Cursor).
 

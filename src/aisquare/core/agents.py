@@ -562,6 +562,42 @@ def claude_plugin(config_dir: Path | None = None) -> ClaudePlugin | None:
     return ClaudePlugin(config_dir=directory, version=version)
 
 
+def plugin_runner() -> Path | None:
+    """The aisquare the plugin's launcher would run, as THIS process's PATH resolves it.
+
+    The launcher's order (``plugins/claude-code/scripts/aisquare-hook``): ``aisquare``
+    on PATH, then ``~/.local/bin`` and ``~/.cargo/bin``. ``None`` means it falls back
+    to the pinned release through uvx, or to nothing. A Claude Code started from a
+    desktop app may see another PATH; this is the best a doctor run can see.
+    """
+    found = shutil.which("aisquare")
+    if found:
+        return Path(found)
+    for candidate in (_home() / ".local" / "bin", _home() / ".cargo" / "bin"):
+        program = candidate / "aisquare"
+        if program.is_file() and os.access(program, os.X_OK):
+            return program
+    return None
+
+
+def claude_plugin_command(verb: str, config_dir: Path) -> str:
+    """``claude plugin <verb> aisquare@aisquare-cli``, aimed at ``config_dir``.
+
+    Plugins belong to one config dir, and ``claude`` acts on the one it starts in, so
+    a bare ``/plugin`` typed into the usual session would act on the wrong one for a
+    fleet account dir. The ambient dir needs nothing; ``~/.claude`` needs
+    ``CLAUDE_CONFIG_DIR`` unset (pointed at it, Claude Code would look for
+    ``.claude.json`` inside it); any other dir is named.
+    """
+    command = f"claude plugin {verb} {CLAUDE_PLUGIN_ID}"
+    key = _dir_key(config_dir)
+    if key == _dir_key(_claude_home()):
+        return command
+    if key == _dir_key(_home() / ".claude"):
+        return f"env -u CLAUDE_CONFIG_DIR {command}"
+    return f"CLAUDE_CONFIG_DIR={_quote(str(config_dir))} {command}"
+
+
 def _registry() -> dict[str, Any]:
     """The raw agent registry, or ``{}`` when absent or unreadable."""
     return read_json(paths.agents_registry_path())
@@ -981,8 +1017,8 @@ def _claude_dirs_on_disk() -> list[Path]:
             ours = bool(hook_commands("claude-code", candidate)) or (
                 claude_plugin(candidate) is not None
             )
-        except OSError:
-            continue  # unreadable settings.json — see the docstring
+        except (OSError, ValueError):
+            continue  # unreadable or undecodable settings.json — see the docstring
         if ours:
             found.append(candidate)
     return found

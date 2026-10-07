@@ -34,11 +34,51 @@ case $event in
 esac
 
 # The hook `agents connect` writes for this event, as it reads in settings.json's
-# JSON text: a program named aisquare or asq (a path, shell-quoted or not, `.exe`
-# on Windows) or `python -P -m aisquare`, then `hook <event>` ending the string.
-# A user's own `webhook stop` or `~/bin/my-hook stop` does not match.
-_apos="'"
-_ours='"command" *: *"(([^"]|\\")*[/\\" ])?(aisquare|asq)(\.[eE][xX][eE])?(\\"|'"$_apos"')? +hook +'"$event"'"'
+# JSON text, matched the way core.agents._is_aisquare_hook_command matches it: the
+# command's first word is a program named aisquare or asq (a path, shell-quoted or
+# not, `.exe` on Windows), or it is `python [-P] -m aisquare`; then `hook <event>`
+# ends it, with any options before `hook`. A user's own `webhook stop`,
+# `~/bin/my-hook stop` or `echo aisquare hook stop` does not match.
+_a="'"
+_ws='( |\\t)'              # a space, or a tab as JSON escapes it
+_p1="${_a}[^${_a}]*/"      # '/a path/with spaces/
+_p2="[^ \"${_a}\\\\]*/"    # /a/plain/path/
+_p3="[^ \"${_a}]*\\\\\\\\" # C:\\a\\windows\\path\\ (JSON escapes \)
+_p4="\\\\\"[^\"]*\\\\\\\\" # \"C:\\a quoted\\windows\\path\\
+_p5='[^"]* -m '            # python -P -m
+_program="($_p1|$_p2|$_p3|$_p4|$_p5)?(aisquare|asq)(\\.[eE][xX][eE])?(\\\\\"|$_a)?"
+_ours="\"command\" *: *\"$_program($_ws+-[^\"]*)?$_ws+hook$_ws+$event$_ws*\""
+
+# Whether the program a matching hook ($1, its JSON line) names can start. A hook
+# naming an aisquare that is gone -- the CLI uninstalled after `agents connect` --
+# fails on every event, and standing down beside it would leave the session
+# running none. A program sh cannot read out of the JSON text (an escape: a
+# Windows or non-ASCII path) is trusted, as every match was before this check.
+_runnable() {
+    _cmd=${1#*\"command\"}
+    _cmd=${_cmd#*:}
+    _cmd=${_cmd#*\"}
+    case $_cmd in
+        *\\*) return 0 ;;
+        "$_a"*)
+            _prog=${_cmd#"$_a"}
+            _prog=${_prog%%"$_a"*}
+            ;;
+        *)
+            _prog=${_cmd%% *}
+            _prog=${_prog%%\"*}
+            ;;
+    esac
+    case $_prog in
+        \~/*) _prog=$HOME/${_prog#??} ;;
+    esac
+    case $_prog in
+        */*) [ -f "$_prog" ] && [ -x "$_prog" ] ;;
+        *) command -v "$_prog" >/dev/null 2>&1 ;;
+    esac
+}
+_nl='
+'
 
 # The settings.json files a session reads its hooks from: the config dir this copy
 # of the plugin was installed in (Claude Code keeps it under <dir>/plugins/cache),
@@ -48,8 +88,10 @@ case ${CLAUDE_PLUGIN_ROOT:-} in
     *) _installed_in= ;;
 esac
 for _dir in "$_installed_in" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; do
+    [ -n "$_dir" ] || continue
     # A missing or unreadable settings.json is grep's error, which is no match.
-    if [ -n "$_dir" ] && grep -Eq "$_ours" "$_dir/settings.json" 2>/dev/null; then
+    _line=$(grep -E "$_ours" "$_dir/settings.json" 2>/dev/null) || continue
+    if _runnable "${_line%%"$_nl"*}"; then
         exit 0
     fi
 done

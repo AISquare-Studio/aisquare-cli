@@ -24,6 +24,7 @@ settings.json, and ``plugins/installed_plugins.json`` (``{"version": 2, "plugins
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,12 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     work.mkdir()
     monkeypatch.chdir(work)
     return work
+
+
+@pytest.fixture(autouse=True)
+def plugin_runs_this_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The aisquare the plugin's launcher finds is this install, whatever this PATH holds."""
+    monkeypatch.setattr(agent_core, "plugin_runner", agent_core.current_install)
 
 
 @pytest.fixture
@@ -97,7 +104,7 @@ def test_a_plugin_only_install_reads_connected(claude: Path) -> None:
     check = diagnostics._check_claude_code()
 
     assert check.status is CheckStatus.ok, check
-    assert "connected (through the aisquare plugin 0.9.0)" in check.detail
+    assert "connected (through the aisquare plugin 0.9.0, which runs this install)" in check.detail
     assert check.fix is None and _buttons(check) == []
     assert agents_service.claude_code_connected() is True
 
@@ -122,7 +129,9 @@ def test_both_routes_warn_and_name_both_ways_out_without_a_button(
     assert check.status is CheckStatus.warn
     assert f"runs aisquare two ways in: {claude}" in check.detail
     assert f"aisquare agents disconnect claude-code --config-dir {claude}" in (check.fix or "")
-    assert f"/plugin uninstall {agent_core.CLAUDE_PLUGIN_ID}" in (check.fix or "")
+    assert f"(or keep the hooks: claude plugin uninstall {agent_core.CLAUDE_PLUGIN_ID})" in (
+        check.fix or ""
+    ), "the ambient dir needs no CLAUDE_CONFIG_DIR"
     assert _buttons(check) == [], "keeping one route is a choice, not a one-click fix"
     assert agents_service.claude_code_connected() is True
 
@@ -191,7 +200,7 @@ def test_a_record_without_a_version_still_counts(claude: Path) -> None:
     check = diagnostics._check_claude_code()
 
     assert check.status is CheckStatus.ok
-    assert "connected (through the aisquare plugin)" in check.detail
+    assert "connected (through the aisquare plugin, which runs this install)" in check.detail
 
 
 def test_a_plugin_dir_found_on_disk_is_graded_with_the_rest(
@@ -229,7 +238,7 @@ def test_disconnect_says_the_plugin_keeps_aisquare_running(runner: CliRunner, cl
     result = runner.invoke(app, ["agents", "disconnect", "claude-code"])
 
     assert result.exit_code == 0, result.output
-    assert f"/plugin disable {agent_core.CLAUDE_PLUGIN_ID}" in result.stderr
+    assert f"claude plugin disable {agent_core.CLAUDE_PLUGIN_ID}" in result.stderr
     assert "no aisquare hooks found" not in result.stderr
 
 
@@ -254,3 +263,114 @@ def test_connect_beside_the_plugin_says_its_hooks_stand_down(
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["hooks_installed"] is True, "stdout stays one JSON object"
     assert "stand down" in result.stderr
+
+
+def _hooks_name(claude: Path, program: str) -> None:
+    """Point every aisquare hook in ``claude``'s settings.json at ``program``."""
+    settings_path = claude / "settings.json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    for groups in settings["hooks"].values():
+        for group in groups:
+            for item in group["hooks"]:
+                subcommand = item["command"].rsplit(" hook ", 1)[1]
+                item["command"] = f"{program} hook {subcommand}"
+    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+
+def test_hooks_naming_a_gone_aisquare_beside_the_plugin_say_so(
+    runner: CliRunner, claude: Path, tmp_path: Path
+) -> None:
+    """The CLI uninstalled after `agents connect`, then the plugin installed (review of #249).
+
+    The launcher does not stand down beside a program that is gone, so the plugin is
+    the route that runs and the dead hooks fail on every event. "Two ways" would be
+    false, and "keep the hooks: uninstall the plugin" would leave nothing running.
+    """
+    _connect(runner)
+    _hooks_name(claude, str(tmp_path / "uninstalled" / "aisquare"))
+    _install_plugin(claude)
+
+    check = diagnostics._check_claude_code()
+
+    assert check.status is CheckStatus.warn
+    assert "name an aisquare that does not exist" in check.detail
+    assert "the aisquare plugin runs in their place" in check.detail
+    assert "two ways" not in check.detail and "uninstall" not in (check.fix or "")
+    assert f"aisquare agents disconnect claude-code --config-dir {claude}" in (check.fix or "")
+    assert _buttons(check) == [], "connecting would keep both routes"
+
+
+def test_a_stale_aisquare_the_plugin_runs_is_graded(
+    claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plugin's version is its manifest's; what it RUNS is graded, as a hook's binary is."""
+    old = tmp_path / "pipx" / "aisquare"
+    old.parent.mkdir()
+    old.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(agent_core, "plugin_runner", lambda: old)
+    monkeypatch.setattr(agent_core, "hook_binary_version", lambda argv, **_kwargs: "0.6.0")
+    _install_plugin(claude)
+
+    check = diagnostics._check_claude_code()
+
+    assert check.status is CheckStatus.warn
+    assert f"the aisquare plugin in: {claude} runs {old} (0.6.0)" in check.detail
+    assert "first on PATH" in (check.fix or "")
+
+
+@pytest.mark.parametrize(("uvx", "status"), [(True, CheckStatus.ok), (False, CheckStatus.warn)])
+def test_with_no_cli_the_plugin_runs_the_pin_through_uvx_or_nothing(
+    claude: Path, monkeypatch: pytest.MonkeyPatch, uvx: bool, status: CheckStatus
+) -> None:
+    real_which = shutil.which
+    monkeypatch.setattr(agent_core, "plugin_runner", lambda: None)
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name, *args, **kwargs: (
+            ("/usr/bin/uvx" if uvx else None) if name == "uvx" else real_which(name)
+        ),
+    )
+    _install_plugin(claude)
+
+    check = diagnostics._check_claude_code()
+
+    assert check.status is status
+    if uvx:
+        assert "which runs aisquare-cli==0.9.0 through uvx" in check.detail
+    else:
+        assert "finds neither aisquare nor uvx on PATH" in check.detail
+
+
+def test_the_plugin_commands_name_the_config_dir_they_act_on(
+    isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/plugin` in the usual session acts on ITS dir, so a fleet account dir is named."""
+    default = isolated_agent_home / ".claude"
+    account = isolated_agent_home / ".claude-c2"
+    command = f"claude plugin uninstall {agent_core.CLAUDE_PLUGIN_ID}"
+
+    ambient = agent_core.claude_plugin_command("uninstall", default)
+    other = agent_core.claude_plugin_command("uninstall", account)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(account))
+    default_from_elsewhere = agent_core.claude_plugin_command("uninstall", default)
+
+    assert ambient == command
+    assert other == f"CLAUDE_CONFIG_DIR={account} {command}"
+    assert default_from_elsewhere == f"env -u CLAUDE_CONFIG_DIR {command}"
+
+
+def test_a_settings_json_that_is_not_utf8_costs_its_row_nothing(
+    claude: Path, isolated_agent_home: Path
+) -> None:
+    """A UTF-16 settings.json (Notepad) beside the plugin: no traceback (review of #249)."""
+    backup = isolated_agent_home / ".claude-backup"
+    backup.mkdir()
+    (backup / "settings.json").write_bytes(b"\xff\xfe{\x00}\x00")
+    _install_plugin(claude)
+
+    rows = {check.name: check for check in diagnostics.doctor()}
+
+    assert rows["claude-code"].status is CheckStatus.ok, rows["claude-code"]
+    (claude / "settings.json").write_bytes(b"\xff\xfe{\x00}\x00")
+    assert diagnostics._check_claude_code().status is CheckStatus.warn

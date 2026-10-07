@@ -8,7 +8,6 @@ from typing import Annotated
 import typer
 
 from aisquare.cli.common import emit_agents, emit_connected, emit_disconnected, fail
-from aisquare.core.agents import CLAUDE_PLUGIN_ID
 from aisquare.core.console import stderr_console
 from aisquare.services import agents as agents_service
 
@@ -93,6 +92,7 @@ def disconnect(name: AgentName, config_dir: ConfigDir = None) -> None:
         # removing these hands every event to the plugin rather than stopping it.
         stderr_console().print(
             f"note: the aisquare plugin is still enabled in {plugin.config_dir}, so aisquare "
-            f"keeps running there — to stop it, in Claude Code: /plugin disable {CLAUDE_PLUGIN_ID}"
+            f"keeps running there — to stop it: "
+            f"{agents_service.claude_plugin_command('disable', plugin.config_dir)}"
         )
     emit_disconnected(name)

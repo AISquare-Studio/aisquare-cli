@@ -374,16 +374,33 @@ def test_it_stands_down_where_agents_connect_installed_the_hooks(machine: Machin
     assert machine.ran("aisquare") == ["hook", "session-start"]
 
 
-#: Every shape ``agents connect`` has written a hook in, as (command, is it a POSIX shape
-#: ``core.agents`` itself recognises here). The JSON escaping of each is real: the test
-#: writes them with ``json.dumps``.
+def _programs(machine: Machine) -> Path:
+    """Executables the settings.json hooks below name: they exist, so the launcher
+    stands down beside them (it does not beside a program that is gone)."""
+    programs = machine.home / "programs"
+    for relative in ("aisquare", "asq", "python3", "My Tools/aisquare"):
+        script = programs / relative
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        script.chmod(0o755)
+    return programs
+
+
+#: Every shape ``agents connect`` has written a hook in, and the hand-edited ones the
+#: CLI's own matcher accepts, as (command, is it a POSIX shape ``core.agents``
+#: recognises here). ``{bin}`` is :func:`_programs`. The JSON escaping of each is real:
+#: the test writes them with ``json.dumps``, which turns a tab into ``\t``.
 _OURS = [
-    ("/home/u/.local/bin/aisquare hook stop", True),
-    ("'/home/u/My Tools/bin/aisquare' hook stop", True),
-    ("/usr/bin/python3 -P -m aisquare hook stop", True),
-    ("/usr/bin/python3 -m aisquare hook stop", True),
+    ("{bin}/aisquare hook stop", True),
+    ("'{bin}/My Tools/aisquare' hook stop", True),
+    ("{bin}/python3 -P -m aisquare hook stop", True),
+    ("{bin}/python3 -m aisquare hook stop", True),
     ("aisquare hook stop", True),
-    ("/home/u/.local/bin/asq hook stop", True),
+    ("{bin}/asq hook stop", True),
+    ("{bin}/aisquare hook stop ", True),
+    ("{bin}/aisquare\thook\tstop", True),
+    ("{bin}/aisquare  hook  stop", True),
+    ("{bin}/aisquare --no-color hook stop", True),
     (r"C:\Users\u\.local\bin\aisquare.exe hook stop", False),
     (r'"C:\Program Files\aisquare\bin\aisquare.EXE" hook stop', False),
 ]
@@ -396,6 +413,7 @@ def test_it_recognises_every_shape_of_our_hook(
     machine: Machine, command: str, posix_shape: bool, indent: int | None
 ) -> None:
     machine.fake("aisquare")
+    command = command.format(bin=_programs(machine))
     machine.settings(machine.home / ".claude", ("Stop", command), indent=indent)
 
     result = machine.run("stop")
@@ -414,8 +432,9 @@ def test_it_recognises_every_shape_of_our_hook(
         "~/bin/my-hook stop",
         "/opt/aisquare-tools/notify hook stop",
         "/x/notaisquare hook stop",
-        "/home/u/.local/bin/aisquare hook stop-failure",
-        "/home/u/.local/bin/aisquare hook session-end",
+        "echo aisquare hook stop",
+        "{bin}/aisquare hook stop-failure",
+        "{bin}/aisquare hook session-end",
     ],
 )
 def test_it_runs_beside_hooks_that_are_not_ours_for_this_event(
@@ -423,6 +442,36 @@ def test_it_runs_beside_hooks_that_are_not_ours_for_this_event(
 ) -> None:
     """A user's own hook, or ours for ANOTHER event, must not silence this one."""
     machine.fake("aisquare")
+    command = command.format(bin=_programs(machine))
+    machine.settings(machine.home / ".claude", ("Stop", command))
+
+    result = machine.run("stop")
+
+    assert result.returncode == 0
+    assert machine.ran("aisquare") == ["hook", "stop"]
+    assert not (agent_core._is_aisquare_hook_command(command) and command.endswith(" stop"))
+
+
+@posix_only
+@pytest.mark.parametrize(
+    ("command", "runner_in_local_bin"),
+    [
+        ("{gone}/aisquare hook stop", False),
+        ("'{gone}/My Tools/aisquare' hook stop", False),
+        # A bare name the hook's shell would not find: the CLI is on no PATH, only in
+        # ~/.local/bin, where the launcher still finds it.
+        ("aisquare hook stop", True),
+    ],
+    ids=["gone", "gone-quoted", "bare-not-on-path"],
+)
+def test_it_runs_in_place_of_a_hook_whose_program_is_gone(
+    machine: Machine, command: str, runner_in_local_bin: bool
+) -> None:
+    """Hooks from `agents connect`, then the CLI uninstalled: those hooks fail on every
+    event, so standing down beside them would leave the session running no aisquare."""
+    where = machine.home / ".local" / "bin" if runner_in_local_bin else None
+    machine.fake("aisquare", where=where)
+    command = command.format(gone=machine.home / "uninstalled")
     machine.settings(machine.home / ".claude", ("Stop", command))
 
     result = machine.run("stop")
@@ -437,7 +486,7 @@ def test_it_reads_the_settings_json_the_session_reads(machine: Machine) -> None:
     alt = machine.home / ".claude-c2"
     in_alt = alt / "plugins" / "cache" / "aisquare-cli" / "aisquare" / _release()
     machine.fake("aisquare")
-    ours = ("Stop", "/home/u/.local/bin/aisquare hook stop")
+    ours = ("Stop", f"{_programs(machine)}/aisquare hook stop")
 
     machine.settings(alt, ours)
     machine.settings(machine.home / ".claude")

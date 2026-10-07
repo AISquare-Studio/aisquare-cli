@@ -23,6 +23,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("why",),
     ("status",),
     ("doctor",),
+    ("upgrade",),
     ("log",),
     ("note",),
     ("board",),

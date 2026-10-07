@@ -19,6 +19,7 @@ import asyncio
 import dataclasses
 import os
 import sqlite3
+import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -94,12 +95,19 @@ class Machine:
     """Answers in turn; the last one repeats."""
     tmux: TmuxState = field(default_factory=lambda: TmuxState(found=True, version=(3, 4)))
     gh: bool = True
-    found: Candidates | Exception = field(default_factory=lambda: Candidates(items=()))
+    found: Candidates | Exception | Callable[[list[ProjectInfo] | None], Candidates] = field(
+        default_factory=lambda: Candidates(items=())
+    )
+    """Step 1's answer: fixed, raised, or computed from the frame it is handed."""
+    hold_first_look: threading.Event | None = None
+    """When set, the page's first look waits for it — a look still in flight."""
     stored: dict[str, ProjectInfo] = field(default_factory=dict)
     onboard_answer: Callable[[Path], OnboardOutcome] | None = None
     connect_answer: FixResult | None = None
     refuse: dict[str, str] = field(default_factory=dict)
     """Labels ``start`` refuses, with the reason."""
+    blind: str | None = None
+    """Why the fleet cannot be read, when it cannot: ``start`` refuses before any spawn."""
     looks: list[bool] = field(default_factory=list)
     frames: list[list[ProjectInfo] | None] = field(default_factory=list)
     onboarded: list[Path] = field(default_factory=list)
@@ -110,6 +118,8 @@ class Machine:
     def seams(self, platform: str = "linux") -> Seams:
         def claude(sign_in: bool) -> ClaudeState:
             self.looks.append(sign_in)
+            if self.hold_first_look is not None and len(self.looks) == 1:
+                self.hold_first_look.wait(10)
             answer = self.claude[0] if len(self.claude) == 1 else self.claude.pop(0)
             return answer if sign_in else dataclasses.replace(answer, signed_in=None)
 
@@ -117,6 +127,8 @@ class Machine:
             self.frames.append(listed)
             if isinstance(self.found, Exception):
                 raise self.found
+            if callable(self.found):
+                return self.found(listed)
             return self.found
 
         def onboard(path: Path, on_line: Callable[[str], None]) -> OnboardOutcome:
@@ -143,7 +155,7 @@ class Machine:
                 manager=manager,
                 coders=coders,
                 spawn=self.spawn,
-                live=lambda p: list(self.live),
+                live=self.listing,
             )
 
         return Seams(
@@ -158,6 +170,11 @@ class Machine:
             start=start,
             platform=platform,
         )
+
+    def listing(self, project: ProjectInfo) -> list[FleetAgent]:
+        if self.blind is not None:
+            raise RuntimeError(self.blind)
+        return list(self.live)
 
     def spawn(self, project: ProjectInfo, role: str, **kwargs: Any) -> fleet_service.SpawnReceipt:
         assert kwargs.get("prompt") is None, "Welcome typed into an agent"
@@ -597,6 +614,110 @@ def test_the_keyboard_follows_the_trust_question_then_the_coders(tmp_path: Path)
     assert [m for m in machine.starts] == [("prj_demo", True, 0), ("prj_demo", False, 2)]
 
 
+def test_tmux_installed_while_the_page_is_shown_opens_step_three(tmp_path: Path) -> None:
+    missing = TmuxState(found=False, problem="tmux is not installed", hint="apt install tmux")
+
+    async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> tuple[bool, bool]:
+        before = visible(page, "fleet-manager")
+        machine.tmux = TmuxState(found=True, version=(3, 4))  # installed in another terminal
+        for _ in range(60):
+            await pilot.pause(0.05)
+            if visible(page, "fleet-manager"):
+                break
+        await settle_page(host)
+        return before, visible(page, "fleet-manager")
+
+    machine, _ = _ready_machine(tmp_path, tmux=missing)
+    assert hosted(machine, go, recheck=0.05) == (False, True)
+    # Control: with the re-check off, nothing notices.
+    machine, _ = _ready_machine(tmp_path, tmux=missing)
+    assert hosted(machine, go, recheck=0) == (False, False)
+
+
+def test_connect_works_while_a_folder_is_being_set_up(tmp_path: Path) -> None:
+    """Steps 1 and 2 are independent: onboarding a folder does not swallow Connect."""
+    folder = tmp_path / "slow-app"
+    folder.mkdir()
+    gate = threading.Event()
+    machine = Machine(claude=[UNHOOKED], found=Candidates(items=(here(folder),)))
+
+    def slow(path: Path) -> OnboardOutcome:
+        gate.wait(10)
+        project = ProjectInfo(id=project_id_for(path), root=path, onboarded_at=T0)
+        machine.stored[project.id] = project
+        return OnboardOutcome(path=path, project_id=project.id)
+
+    machine.onboard_answer = slow
+
+    async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> tuple[int, bool, str]:
+        first_candidate(page).press()
+        await pilot.pause()
+        page.query_one("#claude-connect", Button).press()
+        for _ in range(100):
+            await pilot.pause(0.02)
+            if machine.connects:
+                break
+        during = machine.connects
+        gate.set()
+        await settle_page(host)
+        return during, page.project is not None, card(page, "claude-status")
+
+    during, chosen, text = hosted(machine, go)
+    assert during == 1  # Connect ran while init and doctor were still running
+    assert chosen and "✓ connected" in text
+
+
+def test_a_full_look_asked_for_during_another_is_owed_not_dropped() -> None:
+    hold = threading.Event()
+    machine = Machine(claude=[MISSING], hold_first_look=hold)
+
+    async def run() -> list[bool]:
+        page = WelcomeView(seams=machine.seams(), recheck_seconds=0, id="welcome")
+        host = Host(page)
+        async with host.run_test(size=SIZE) as pilot:
+            for _ in range(100):  # the mount's look is in flight, and held
+                await pilot.pause(0.01)
+                if machine.looks:
+                    break
+            page.look(full=True)  # what Check again, Connect and a return to the page ask
+            hold.set()
+            await settle_page(host)
+            return list(machine.looks)
+
+    assert asyncio.run(run()) == [True, True]
+
+
+def test_old_error_lines_go_once_their_problem_has(tmp_path: Path) -> None:
+    refused = FixResult(
+        fix=first_run.connect_fix(), returncode=1, reason="claude-code is not installed"
+    )
+    machine, _ = _ready_machine(
+        tmp_path, claude=[UNHOOKED], connect_answer=refused, blind="database is locked"
+    )
+
+    async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> list[str]:
+        seen: list[str] = []
+        await press(pilot, page, "claude-connect")
+        seen.append(card(page, "claude-status"))
+        machine.claude = [READY]  # connected another way: a terminal, or Sign in
+        page.look(full=True)
+        await settle_page(host)
+        seen.append(card(page, "claude-status"))
+        await press(pilot, page, "fleet-manager")
+        seen.append(card(page, "fleet-status"))
+        machine.blind = None  # the store answers again
+        await press(pilot, page, "fleet-manager")
+        seen.append(card(page, "fleet-status"))
+        return seen
+
+    failed, connected, refused_line, started = hosted(machine, go)
+    assert "✗ claude-code is not installed" in failed
+    assert "✓ connected" in connected and "claude-code is not installed" not in connected
+    # A refusal no agent's label can replace: it goes with the next start.
+    assert "✗ fleet: could not read the fleet: database is locked" in refused_line
+    assert "✓ manager — started" in started and "could not read the fleet" not in started
+
+
 def test_gh_missing_is_a_note_not_a_block(tmp_path: Path) -> None:
     machine, _ = _ready_machine(tmp_path, gh=False)
 
@@ -786,13 +907,16 @@ def test_after_onboarding_through_plus_the_keyboard_lands_on_start_manager(
     scripted(Machine())
     root = tmp_path / "acme-api"
 
-    async def onboarded(
-        pilot: Pilot[None], app: FleetApp, *, from_sidebar: bool
-    ) -> tuple[str, str | None]:
+    async def onboarded(pilot: Pilot[None], app: FleetApp, *, where: str) -> tuple[str, str | None]:
         await pilot.press("plus")
         await settle_page(app)
-        if from_sidebar:
+        if where == "sidebar":
             app.sidebar.focus()
+        elif where == "welcome":
+            # Back to Welcome while onboarding runs, and onto one of its buttons.
+            await pilot.press("w")
+            await settle_page(app)
+            app.query_one("#claude-check", Button).focus()
         else:
             app.query_one("#onboard-path", Input).focus()
         await settle_page(app)
@@ -804,15 +928,23 @@ def test_after_onboarding_through_plus_the_keyboard_lands_on_start_manager(
         return str(app.content.current), (focused.id if focused is not None else None)
 
     async def from_box(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> Any:
-        return await onboarded(pilot, app, from_sidebar=False)
+        return await onboarded(pilot, app, where="box")
 
     async def from_sidebar(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> Any:
-        return await onboarded(pilot, app, from_sidebar=True)
+        return await onboarded(pilot, app, where="sidebar")
+
+    async def from_welcome(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> Any:
+        return await onboarded(pilot, app, where="welcome")
 
     current, focused = in_shell(Machine(), from_box)
     assert current == f"project-{project_id_for(root)}"
     assert focused == "start-manager"
     assert in_shell(Machine(), from_sidebar) == (current, "sidebar")
+    # A keyboard that had left the Onboard view is not taken, even though the switch
+    # to the project hid the button it is on (Textual's own Hide then releases it):
+    # its next Enter must not start a manager.
+    elsewhere, left = in_shell(Machine(), from_welcome)
+    assert elsewhere == current and left in (None, "claude-check")
 
 
 def test_plus_from_the_sidebar_opens_onboarding_and_w_comes_back(
@@ -826,6 +958,7 @@ def test_plus_from_the_sidebar_opens_onboarding_and_w_comes_back(
     async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[Any]:
         seen: list[Any] = []
         looks = len(machine.looks)
+        frames = len(machine.frames)
         await pilot.press("plus")
         await settle_page(app)
         seen.append(app.content.current)
@@ -834,11 +967,13 @@ def test_plus_from_the_sidebar_opens_onboarding_and_w_comes_back(
         await settle_page(app)
         seen.append((app.content.current, app.sidebar.selected_key))
         seen.append(machine.looks[looks:])
+        seen.append(len(machine.frames) - frames)
         return seen
 
-    current, back, looks = in_shell(machine, go)
+    current, back, looks, listed = in_shell(machine, go)
     assert (current, back) == ("onboard", ("welcome", None))
     assert looks == [True]  # back on screen, the page looked at the machine again
+    assert listed == 1  # …and listed step 1's folders again
 
 
 def test_plus_and_w_are_the_sidebars_not_the_pages(
@@ -952,6 +1087,75 @@ def test_a_shell_whose_store_will_not_open_still_shows_the_page(
     assert machine.frames == [None]  # the page asked the store itself…
     assert len(naps) < welcome.FRAME_WAITS  # …as soon as the shell said so, not after 5 s
     assert "database is locked" in project_text and "✓ Claude Code" in claude_text
+
+
+def test_an_agent_stopped_elsewhere_is_not_brought_back(
+    captain: str | None,
+    scripted: Callable[[Machine], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The frame read after a start is the whole answer, so a stop elsewhere shows.
+
+    ``fleet stop`` (the CLI, or the agent view's Stop) kills the window, and the row
+    leaves the listing altogether. Kept from what the start said, the manager stayed
+    "started", Start manager stayed hidden, and Start the coders would have started
+    two coders under no manager.
+    """
+    machine, project = _ready_machine(tmp_path)
+    with store_session() as store:
+        store.onboard_project(ProjectInfo(id=project.id, root=project.root))
+
+    def listing(p: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        return [FleetAgentStatus(agent=a) for a in machine.live if a.project_id == p.id]
+
+    monkeypatch.setattr(fleet_service, "list_agents", listing)
+    scripted(machine)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[Any]:
+        await press(pilot, page, "fleet-manager")
+        seen: list[Any] = [visible(page, "fleet-coders")]  # the manager is live
+        machine.live.clear()  # stopped elsewhere: window gone, row off the listing
+        app.refresh_data()
+        page.paint()  # what the page's refresh tick does
+        seen += [visible(page, "fleet-manager"), visible(page, "fleet-coders")]
+        seen.append(card(page, "fleet-status"))
+        return seen
+
+    coders_before, start_after, coders_after, status = in_shell(machine, go)
+    assert coders_before  # control: a live manager, by the frame, offers the coders
+    assert start_after and not coders_after
+    assert "manager — started" not in status
+
+
+def test_step_one_follows_the_frame_when_a_folder_is_listed_elsewhere(
+    captain: str | None,
+    fleet_rows: dict[str, list[FleetAgentStatus]],
+    scripted: Callable[[Machine], None],
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "app"
+    root.mkdir()
+    pid = project_id_for(root)
+
+    def found(listed: list[ProjectInfo] | None) -> Candidates:
+        project = next((p for p in listed or [] if p.id == pid), None)
+        return Candidates(items=(here(root, project),))
+
+    machine = Machine(claude=[READY], found=found)
+    scripted(machine)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[str | None]:
+        seen = [page.project.id if page.project else None]
+        with store_session() as store:  # `aisquare init` in another terminal
+            store.onboard_project(ProjectInfo(id=pid, root=root))
+        app.refresh_data()
+        page._tick()  # the page's refresh tick
+        await settle_page(app)
+        seen.append(page.project.id if page.project else None)
+        return seen
+
+    assert in_shell(machine, go) == [None, pid]
 
 
 def test_the_page_hosted_alone_asks_the_store_itself() -> None:

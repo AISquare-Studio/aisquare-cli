@@ -1054,16 +1054,22 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.run_doctor()
 
     async def on_project_onboarded(self, event: ProjectOnboarded) -> None:
+        # Asked BEFORE the switch below, which hides whatever the content pane had
+        # focused: only a keyboard still on the Onboard view (or nowhere) is handed on.
+        focused = self.focused
+        onboarding = focused is None or any(isinstance(n, OnboardView) for n in focused.ancestors)
         self.refresh_data()
         await self.on_project_selected(ProjectSelected(event.project_id))
-        self.call_after_refresh(self._hand_on_after_onboarding, f"project-{event.project_id}")
+        if onboarding:
+            self.call_after_refresh(self._hand_on_after_onboarding, f"project-{event.project_id}")
 
     def _hand_on_after_onboarding(self, view_id: str) -> None:
         """The Onboard view kept the keyboard on its path box, hidden now: give it the next step.
 
         Keys typed there went nowhere anyone could see, and the footer had nothing
-        to offer. The project's *Start manager* takes it, else the sidebar; a
-        keyboard the user put somewhere visible meanwhile is left where it is.
+        to offer. The project's *Start manager* takes it, else the sidebar. Only
+        asked when the keyboard was on the Onboard view as onboarding finished; one
+        the user has put on a visible widget since then is left where it is.
         """
         chain = self.screen.focus_chain
         if self.focused is not None and self.focused in chain:

@@ -31,10 +31,12 @@ never markup: a folder called ``[archive]`` reaches the screen as ``[archive]``.
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -47,7 +49,7 @@ from textual.widget import Widget
 from textual.widgets import Button, Input, Static
 from textual.worker import Worker, WorkerState
 
-from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected
+from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, short_path
 from aisquare.cli.ui.views.onboard import render_verdict
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo
@@ -68,6 +70,9 @@ WORKER_GROUP = "welcome"
 FRAME_WAITS = 50
 FRAME_WAIT_SECONDS = 0.1
 """How long step 1 waits for the shell's first frame (5 s) before reading the store itself."""
+
+FLEET_WORK = frozenset({"manager", "coders"})
+"""Step 3's workers: one start at a time."""
 
 FLEET_UP = "Your fleet is up."
 """The sentence step 3 ends on — stable, so a recording can wait for it."""
@@ -157,16 +162,9 @@ DEFAULT_SEAMS = Seams()
 # --------------------------------------------------------------------------- the words
 
 
-def _home_relative(path: Path) -> str:
-    try:
-        return f"~/{path.relative_to(Path.home()).as_posix()}"
-    except ValueError:
-        return str(path)
-
-
 def candidate_detail(candidate: Candidate) -> Text:
     """The dim line beside a candidate's button: where it is and what it is."""
-    text = Text(_home_relative(candidate.root), style="dim")
+    text = Text(short_path(candidate.root), style="dim")
     if candidate.here:
         text.append(" · this folder", style="dim")
     text.append(" · git" if candidate.is_git else " · not a git repository", style="dim")
@@ -303,18 +301,25 @@ class WelcomeView(VerticalScroll):
         self.verdict: PathVerdict = _EMPTY_VERDICT
         self.project: ProjectInfo | None = None
         """The project step 1 settled on; step 3's agents start in it."""
-        self.busy: str | None = None
-        """The worker in flight: ``onboard``, ``connect``, ``manager`` or ``coders``."""
+        self.busy: set[str] = set()
+        """The workers in flight, by step: ``onboard``, ``connect``, ``manager``, ``coders``.
+        Steps 1 and 2 work side by side; a press waits only on its own step's work."""
         self.project_note: Text | None = None
         """Step 1's progress or refusal line."""
         self.connect_error: str | None = None
         self.steps: dict[str, FleetStep] = {}
         """Per label, what the last start said about the chosen project's agents."""
+        self.steps_at: datetime | None = None
+        """When ``steps`` was last written: a frame read after it is the whole answer."""
         self.fleet_error: str | None = None
         self.opened: str | None = None
         """The manager whose pane *Open the manager* last opened: the trust question's turn
         is over, and the coders are next."""
         self._shown = False
+        self._full_owed = False
+        """A full look was asked for while another look ran: it starts when that one lands."""
+        self._found_ids: frozenset[str] | None = None
+        """The shell frame's project ids when step 1 was last listed."""
         self._keyboard = False
         """Whether the keyboard was on this page at the last paint (see :meth:`paint`)."""
 
@@ -380,6 +385,7 @@ class WelcomeView(VerticalScroll):
         """
         if self._shown:
             self.look(full=True)
+            self.find_candidates()
         self._shown = True
         self.paint()
 
@@ -396,26 +402,51 @@ class WelcomeView(VerticalScroll):
         )
 
     def look(self, *, full: bool) -> None:
-        """Probe the machine off the UI thread; ``full`` adds tmux, gh and the sign-in."""
+        """Probe the machine off the UI thread.
+
+        ``full`` reads everything, the sign-in included. The periodic look reads
+        only what is not ready yet: Claude Code, tmux, gh. A full look asked for
+        while another look runs is owed, and starts when that one lands, so
+        *Check again*, a finished Connect and a return to the page are never lost.
+        """
         if self._in_flight("look"):
+            self._full_owed = self._full_owed or full
             return
         seams = self.seams
+        claude_due = full or self.claude is None or not self.claude.ready
+        tmux_due = full or self.tmux is None or not self.tmux.ok
+        gh_due = full or not self.gh
 
-        def probe() -> tuple[TmuxState | None, ClaudeState, bool | None]:
-            claude = seams.claude(full)
-            if not full:
-                return None, claude, None
-            return seams.tmux(), claude, seams.gh()
+        def probe() -> tuple[TmuxState | None, ClaudeState | None, bool | None]:
+            return (
+                seams.tmux() if tmux_due else None,
+                seams.claude(full) if claude_due else None,
+                seams.gh() if gh_due else None,
+            )
 
         self._run("look", probe)
 
+    def _not_ready(self) -> bool:
+        claude, tmux = self.claude, self.tmux
+        return (
+            claude is None or not claude.ready or (tmux is not None and not tmux.ok) or not self.gh
+        )
+
     def _tick(self) -> None:
-        """While shown: look again if step 2 is not done, and repaint step 3 from the frame."""
+        """While shown: look again at what is not ready, list step 1 again when the shell's
+        frame lists other projects, and repaint step 3 from the frame."""
         if not self.display:
             return
-        if self.claude is None or not self.claude.ready:
+        if self._not_ready():
             self.look(full=False)
+        stale = self.project is None and self._frame_ids() != self._found_ids
+        if stale and not self._in_flight("candidates"):
+            self.find_candidates()
         self.paint()
+
+    def _frame_ids(self) -> frozenset[str] | None:
+        listed = _frame_projects(self.app)
+        return frozenset(project.id for project in listed) if listed is not None else None
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         worker = event.worker
@@ -425,9 +456,8 @@ class WelcomeView(VerticalScroll):
         if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
             return
         name = (worker.name or "").removeprefix("welcome-")
+        self.busy.discard(name)
         if event.state is WorkerState.CANCELLED:
-            if name == self.busy:
-                self.busy = None
             return
         result: Any = worker.result if event.state is WorkerState.SUCCESS else None
         error = worker.error if event.state is WorkerState.ERROR else None
@@ -444,18 +474,23 @@ class WelcomeView(VerticalScroll):
         self.paint()
 
     def _looked(self, result: Any) -> None:
-        if not isinstance(result, tuple):
-            return  # the probes never raise; a crash keeps what the card showed
-        tmux, claude, gh = result
-        if isinstance(tmux, TmuxState):
-            self.tmux = tmux
-        if isinstance(claude, ClaudeState):
-            if claude.signed_in is None and self.claude is not None and claude.found:
-                # The periodic look leaves the login out: keep the last answer.
-                claude = _with_sign_in(claude, self.claude.signed_in)
-            self.claude = claude
-        if isinstance(gh, bool):
-            self.gh = gh
+        # Not a tuple: a probe crashed (they never raise), and the card keeps what it had.
+        if isinstance(result, tuple):
+            tmux, claude, gh = result
+            if isinstance(tmux, TmuxState):
+                self.tmux = tmux
+            if isinstance(claude, ClaudeState):
+                if claude.signed_in is None and self.claude is not None and claude.found:
+                    # The periodic look leaves the login out: keep the last answer.
+                    claude = dataclasses.replace(claude, signed_in=self.claude.signed_in)
+                self.claude = claude
+                if claude.connected:
+                    self.connect_error = None  # connected since, by this page or another way
+            if isinstance(gh, bool):
+                self.gh = gh
+        if self._full_owed:
+            self._full_owed = False
+            self.look(full=True)
 
     def find_candidates(self) -> None:
         """List step 1's folders off the UI thread, once the shell has read its first frame.
@@ -483,6 +518,7 @@ class WelcomeView(VerticalScroll):
         self._run("candidates", find)
 
     def _found(self, result: Any, error: BaseException | None) -> None:
+        self._found_ids = self._frame_ids()
         if isinstance(result, Candidates):
             self.candidates = result
         else:
@@ -549,13 +585,13 @@ class WelcomeView(VerticalScroll):
 
     def choose(self, root: Path, listed: ProjectInfo | None) -> None:
         """Settle step 1 on ``root``: at once when it is listed, else once it is onboarded."""
-        if self.busy is not None:
+        if "onboard" in self.busy:
             return
         self.project_note = None
         if listed is not None:
             self._settle(listed)
             return
-        self.busy = "onboard"
+        self.busy.add("onboard")
         self.project_note = Text(f"Setting up {root.name or root}…", style="dim")
         seams = self.seams
         app = self.app
@@ -570,12 +606,11 @@ class WelcomeView(VerticalScroll):
         self.paint()
 
     def _onboard_line(self, line: str) -> None:
-        if self.busy == "onboard":
+        if "onboard" in self.busy:
             self.project_note = Text(line, style="dim")
             self.paint()
 
     def _onboarded(self, result: Any, error: BaseException | None) -> None:
-        self.busy = None
         outcome = result if isinstance(result, OnboardOutcome) else None
         if outcome is None or outcome.project_id is None:
             reason = outcome.reason if outcome is not None else _reason(error)
@@ -623,7 +658,7 @@ class WelcomeView(VerticalScroll):
         if button.id == "welcome-path-use":
             self._use_typed()
         elif button.id == "welcome-change":
-            if self.busy is None:  # not while a folder is being set up
+            if "onboard" not in self.busy:  # not while a folder is being set up
                 self.project = None
                 self.steps = {}
                 self.fleet_error = None
@@ -646,15 +681,15 @@ class WelcomeView(VerticalScroll):
                 self.paint()
 
     def _start_work(self, name: str, work: Callable[[], object]) -> None:
-        if self.busy is not None:
+        if name in self.busy:
             return
-        self.busy = name
-        self.connect_error = None
+        self.busy.add(name)
+        if name == "connect":
+            self.connect_error = None
         self._run(name, work)
         self.paint()
 
     def _connected(self, result: Any, error: BaseException | None) -> None:
-        self.busy = None
         if isinstance(result, FixResult) and result.ok:
             self.look(full=True)
             return
@@ -663,9 +698,11 @@ class WelcomeView(VerticalScroll):
 
     def _start_fleet(self, which: str) -> None:
         project = self.project
-        if project is None or self.busy is not None or not self._ready():
+        if project is None or self.busy & FLEET_WORK or not self._ready():
             return
         self.fleet_error = None
+        # A refusal answers the start that met it; a new start clears it.
+        self.steps = {label: s for label, s in self.steps.items() if s.outcome != "refused"}
         start = self.seams.start
         if which == "manager":
             self._start_work("manager", lambda: start(project, True, 0))
@@ -673,12 +710,12 @@ class WelcomeView(VerticalScroll):
             self._start_work("coders", lambda: start(project, False, first_run.CODERS))
 
     def _started(self, result: Any, error: BaseException | None) -> None:
-        self.busy = None
         if not isinstance(result, FleetStart):
             self.fleet_error = f"could not start the fleet: {_reason(error)}"
             return
         for step in result.steps:
             self.steps[step.label] = step
+        self.steps_at = datetime.now()
         if self.project is not None:
             self.post_message(self.Progress(self.project.id))
 
@@ -687,9 +724,12 @@ class WelcomeView(VerticalScroll):
     def _live(self) -> dict[str, FleetAgent]:
         """The chosen project's live agents by label: the shell's frame, and what we started.
 
-        The frame is the truth once it has the row; an agent this page just
-        started is not in it until the shell's next read, and one the frame shows
-        ENDED is not live whatever we last heard.
+        An agent this page just started is not in the frame until the shell reads
+        again, so until then what its start said stands in for it. A frame read
+        after that start, for this project and not failed open, is the whole
+        answer: an agent missing from it was stopped elsewhere (``fleet stop``
+        kills its window and the row leaves the listing), and is not brought back
+        from what this page last heard. An ENDED row is never live.
         """
         project = self.project
         if project is None:
@@ -707,6 +747,19 @@ class WelcomeView(VerticalScroll):
                 live[agent.label] = agent
             else:
                 ended.add(agent.id)
+        notices = getattr(snapshot, "notices", None)
+        taken = getattr(snapshot, "taken_at", None)
+        answered = (
+            isinstance(frame, dict)
+            and project.id in frame
+            and not (isinstance(notices, dict) and notices.get(project.id))
+            and getattr(snapshot, "stale_since", None) is None
+            and isinstance(taken, datetime)
+            and self.steps_at is not None
+            and taken >= self.steps_at
+        )
+        if answered:
+            return live
         for step in self.steps.values():
             agent = step.agent
             if agent is not None and step.outcome != "refused" and agent.id not in ended:
@@ -777,14 +830,14 @@ class WelcomeView(VerticalScroll):
 
     def _paint_project(self) -> bool:
         project = self.project
-        done = project is not None and self.busy != "onboard"
+        done = project is not None and "onboard" not in self.busy
         title = Text("1  Project", style="bold")
         status = Text()
         if project is not None:
             title.append("  ✓", style="green")
             status.append("✓ ", style="green")
             status.append(project.root.name or str(project.root), style="bold")
-            status.append(f" — {_home_relative(project.root)}", style="dim")
+            status.append(f" — {short_path(project.root)}", style="dim")
         else:
             status.append("Pick the folder your agents will work in.")
             if self.candidates is not None and not self.candidates.items:
@@ -817,9 +870,9 @@ class WelcomeView(VerticalScroll):
         if done:
             title.append("  ✓", style="green")
         body = claude_text(claude, platform=self.seams.platform)
-        if self.busy == "connect":
+        if "connect" in self.busy:
             body.append("\nConnecting…", style="dim")
-        elif self.connect_error:
+        elif self.connect_error and not (claude is not None and claude.connected):
             body.append(f"\n✗ {self.connect_error}", style="red")
         self.query_one("#claude-title", Static).update(title)
         self.query_one("#claude-status", Static).update(body)
@@ -845,7 +898,7 @@ class WelcomeView(VerticalScroll):
         status = Text()
         if not ready and manager is None:
             status.append(self._waiting_for(), style="dim")
-        elif self.busy == "manager":
+        elif "manager" in self.busy:
             status.append("Starting the manager…", style="dim")
         elif manager is None:
             name = self.project.root.name if self.project is not None else "the project"
@@ -860,7 +913,7 @@ class WelcomeView(VerticalScroll):
                 status.append("\n")
             status.append_text(line)
         if manager is not None and not up:
-            if self.busy == "coders":
+            if "coders" in self.busy:
                 status.append("\nStarting the coders…", style="dim")
             else:
                 status.append(
@@ -952,18 +1005,6 @@ def _frame_projects(app: object) -> list[ProjectInfo] | None:
     if not isinstance(projects, list):
         return None
     return [project for project in projects if isinstance(project, ProjectInfo)]
-
-
-def _with_sign_in(claude: ClaudeState, signed_in: bool | None) -> ClaudeState:
-    return ClaudeState(
-        wanted=claude.wanted,
-        source=claude.source,
-        binary=claude.binary,
-        version=claude.version,
-        connected=claude.connected,
-        signed_in=signed_in,
-        problem=claude.problem,
-    )
 
 
 def _reason(error: BaseException | None) -> str:

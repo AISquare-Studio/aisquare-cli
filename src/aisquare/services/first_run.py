@@ -29,6 +29,7 @@ Two rules shape :func:`start_fleet`:
 
 from __future__ import annotations
 
+import dataclasses
 import shutil
 import sys
 from collections.abc import Callable, Iterator
@@ -36,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
+from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import harness, selfcli
 from aisquare.core import tmux as tmux_core
@@ -201,8 +203,26 @@ def connect_fix() -> FixCommand:
     )
 
 
-def connect(*, run: Runner = selfcli.run) -> FixResult:
-    """``aisquare --json agents connect claude-code``, exactly as the doctor's button runs it."""
+def connect(*, run: Runner = selfcli.run, config_dir: Path | None = None) -> FixResult:
+    """``aisquare --json agents connect claude-code``, exactly as the doctor's button runs it.
+
+    ``agents connect`` takes a missing config dir for "Claude Code is not installed"
+    (``core.agents``: detected means the directory exists). The native installer
+    creates ``~/.claude``, but the npm and Homebrew routes step 2 offers do not
+    until ``claude`` first runs, and neither does a ``CLAUDE_CONFIG_DIR`` naming a
+    new directory: the binary is on PATH and Connect still answered
+    ``not_installed``. Connect is a deliberate click, so the directory a session
+    from this shell reads (``config_dir`` for a test) is made first, as Claude
+    Code's own first start would make it; that start then reads the hooks from it.
+    """
+    where = config_dir if config_dir is not None else agent_core.ambient_hook_dir("claude-code")
+    if where is not None and not where.exists():
+        try:
+            where.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return FixResult(
+                fix=connect_fix(), returncode=None, reason=f"could not create {where}: {_why(exc)}"
+            )
     return onboarding.apply_fix(connect_fix(), None, run=run)
 
 
@@ -364,7 +384,9 @@ def candidates(
             Candidate(
                 root=project.root,
                 is_git=fleet_service.is_git_project(project.root),
-                project=project,
+                # A captured row (the shell lists them while `a` is on) was never
+                # added on purpose: choosing it onboards it, as for any folder.
+                project=project if project.onboarded_at else None,
             )
         )
         extra += 1
@@ -523,14 +545,7 @@ def start_fleet(
         for label in _free_labels("coder", missing, held):
             step = _spawn(spawner, project, "coder", label=label, worktree=None if git else False)
             if not git and step.outcome == "started":
-                step = FleetStep(
-                    step.label,
-                    step.role,
-                    step.outcome,
-                    step.detail,
-                    step.agent,
-                    (NOT_GIT_NOTE, *step.notes),
-                )
+                step = dataclasses.replace(step, notes=(NOT_GIT_NOTE, *step.notes))
             if not done(step):
                 break
     return FleetStart(tuple(steps))

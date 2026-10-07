@@ -125,12 +125,12 @@ def describe(account: ClaudeAccount) -> ClaudeAccountStatus:
 
 
 def _hooks_installed(account: ClaudeAccount) -> bool:
-    from aisquare.core import agents as agent_core
+    """Whether aisquare runs in this slot: the one shared answer, which never raises.
 
-    try:
-        return agent_core.hooks_installed(AGENT, account.config_dir)
-    except Exception:  # a settings.json we cannot parse is "not installed", not a crash
-        return False
+    So a slot reads as the doctor's row and ``agents status`` read it, and a
+    settings.json that cannot be read is "not installed" rather than a crash.
+    """
+    return agents_service.claude_code_connected(account.config_dir)
 
 
 def overview() -> AccountsOverview:

@@ -22,6 +22,7 @@ from aisquare.models import ClientReason, ProjectInfo, TurnMetric
 from aisquare.services import hooks as hooks_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services import team as team_service
+from tests.budgets import budget
 from tests.rendered import plain
 
 PROJECT = ProjectInfo(id="prj_metrics", root=Path("/tmp/metrics"), linked_repos=[])
@@ -496,8 +497,9 @@ def test_metrics_show_is_clean_with_nothing_recorded(
 
 def test_opening_a_turn_stays_under_the_hot_path_budget(store: ContextStore) -> None:
     """A single INSERT, aggregation deferred to read. Asserts an order of
-    magnitude, not a stopwatch: 20 inserts in well under a second."""
+    magnitude, not a stopwatch: 20 inserts in well under a second, scaled on the
+    Windows leg, where one loaded run took 1.12 s (``budget``, tests/budgets.py)."""
     started = time.perf_counter()
     for n in range(20):
         metrics_service.open_turn(_turn(n=n, session_id="ses_perf"), store=store)
-    assert time.perf_counter() - started < 1.0
+    assert time.perf_counter() - started < budget(1.0)

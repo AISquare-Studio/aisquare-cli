@@ -13,10 +13,11 @@ project and contributions are welcome.
 - **Ask when unsure.**
   [Discussions, Q&A](https://github.com/AISquare-Studio/aisquare-cli/discussions/categories/q-a)
   is the place for "where does this live?" and "would you take a PR that…?".
-- **Find your way around.** `src/aisquare/cli/` parses the command line,
-  `src/aisquare/services/` does the work, and `src/aisquare/core/` is shared
-  plumbing. `tests/` is hermetic: it never touches your real `~/.aisquare`.
-  User docs live under `docs/`; the README is the front page.
+- **Find your way around.** `src/aisquare/cli/` parses the command line and
+  holds the full-screen UI (`src/aisquare/cli/ui/`), `src/aisquare/services/`
+  does the work, and `src/aisquare/core/` is shared plumbing. `tests/` is
+  hermetic: it never touches your real `~/.aisquare`. User docs live under
+  `docs/`; the README is the front page.
 - **Keep a PR to one change**, with a test that fails without it. The rest of
   this page says how this suite likes its tests.
 
@@ -467,6 +468,9 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   real home in a test or example.
 - Keep CLI modules thin and services free of CLI concerns.
 - New shared plumbing goes in `core/`; new domain shapes go in `models.py`.
+- A change that makes the CLI keep something new on disk, or reach the network,
+  updates SECURITY.md's "What it keeps on your machine" or "What leaves your
+  machine" in the same PR.
 
 ## Reporting bugs / proposing features
 

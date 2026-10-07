@@ -16,6 +16,7 @@ from typing import Annotated, Any
 import typer
 
 from aisquare.cli.common import fail
+from aisquare.core import selfcli
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 from aisquare.services import install_route
@@ -156,6 +157,17 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
         _say(f"· {note}")
 
 
+def _reopen(reopen: bool) -> None:
+    """Hand the terminal back to asq (``--reopen``, what asq's Update button runs).
+
+    Only where nothing failed, and never under ``--json``: a failure stays on
+    screen to be read. The asq that opens is a new process of THIS install, so
+    after an upgrade it is the version just installed.
+    """
+    if reopen and not get_state().json_output:
+        selfcli.exec_self(["ui"])
+
+
 def _fallback(plan: lifecycle_service.UpgradePlan) -> str:
     return (
         f"Run it again by hand: {plan.command} — or reinstall from nothing: "
@@ -184,6 +196,14 @@ def upgrade(
     ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show what would run, and run nothing.")
+    ] = False,
+    reopen: Annotated[
+        bool,
+        typer.Option(
+            "--reopen",
+            hidden=True,
+            help="Open asq again afterwards, unless something failed (asq's Update button).",
+        ),
     ] = False,
 ) -> None:
     """Upgrade aisquare in place, then re-connect its Claude Code hooks.
@@ -228,6 +248,7 @@ def upgrade(
                 f"aisquare {plan.current} is up to date (PyPI's latest is "
                 f"{plan.latest_version}) — nothing to do"
             )
+        _reopen(reopen)
         return
     if dry_run or not yes:
         _emit_plan(plan)
@@ -240,6 +261,7 @@ def upgrade(
             f"Upgrade aisquare {plan.current} → {plan.destination}?", default=False
         ):
             _say("nothing changed")
+            _reopen(reopen)
             return
     elif not json_output:
         _say(f"upgrading aisquare {plan.current} → {plan.destination}: {plan.command}")
@@ -261,6 +283,7 @@ def upgrade(
     _emit_report(report)
     if any(not hook.ok for hook in report.hooks):
         raise typer.Exit(1)
+    _reopen(reopen)
 
 
 # --- uninstall ---------------------------------------------------------------------------

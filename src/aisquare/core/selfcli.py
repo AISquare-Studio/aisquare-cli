@@ -19,6 +19,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 
 @dataclass(frozen=True)
@@ -89,3 +90,25 @@ def run(
     return CliResult(
         argv=argv, returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr
     )
+
+
+def exec_self(args: Sequence[str]) -> NoReturn:
+    """Hand this terminal to ``aisquare <args>`` on THIS install, and end here.
+
+    A registered spawn seam (``core.spawn.SEAMS``), EXCLUDED: our own CLI, no
+    model process. asq's Update and Uninstall buttons come here once the UI has
+    quit (``run_ui``), and ``upgrade --reopen`` comes here to open asq again on
+    the version it just installed. POSIX replaces this process (``os.execv``),
+    so nothing of the old one keeps running, from an environment ``uv`` may be
+    replacing, and the next program owns the terminal and its exit status.
+    Windows has no such exec: its ``os.execv`` starts the program and exits at
+    once, handing the prompt back to the shell while the program still asks its
+    y/N. There the program runs as a child, waited for, and this process exits
+    with its status.
+    """
+    argv = argv_for(args)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if sys.platform == "win32":
+        raise SystemExit(subprocess.call(argv))
+    os.execv(argv[0], argv)

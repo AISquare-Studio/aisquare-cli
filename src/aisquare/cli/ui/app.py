@@ -394,7 +394,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 # The Onboard view is built on the first `+` (on_add_project): its
                 # DirectoryTree scans the home directory and keeps a loader worker
                 # alive for its whole life — not a cost to pay at every start-up.
-                yield DoctorView(id="doctor")
+                yield DoctorView(id="doctor", machine=True)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1058,6 +1058,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # screen as ``/home/me//repo`` and name a directory that did not fail.
         self.notify(f"{event.path}: {event.reason}", severity="error", timeout=8, markup=False)
 
+    hand_off: tuple[str, ...] | None = None
+    """The ``aisquare`` command this terminal goes to when asq quits (``run_ui``)."""
+
+    def on_doctor_view_hand_off(self, event: DoctorView.HandOff) -> None:
+        """Update or Uninstall in the Doctor view: quit, and let ``run_ui`` hand over."""
+        self.hand_off = event.args
+        self.exit()
+
     def on_doctor_refreshed(self, event: DoctorRefreshed) -> None:
         """A view re-ran the doctor after a one-click fix — follow it.
 
@@ -1099,3 +1107,7 @@ def run_ui(**options: Any) -> None:
     app.run()
     for line in app.unsaved:
         stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
+    if app.hand_off is not None:  # the terminal is ours again: give it to the command
+        from aisquare.core import selfcli
+
+        selfcli.exec_self(app.hand_off)

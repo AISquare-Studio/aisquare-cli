@@ -1891,15 +1891,14 @@ def test_a_retried_answer_is_typed_once_with_the_servers_own_ledger(live: Live) 
     assert live.tmux.typed == [("keys", "%7", "1")]
 
 
-@pytest.mark.xfail(
-    strict=True, reason="needs lane b-security: check_remote_key_names caps keys at 32"
-)
 def test_an_answer_of_more_keys_than_any_pad_sends_is_refused(live: Live) -> None:
     live.runtime.set_allow_write(True)
     card = live.card("permission")
     keys = ["Down"] * 33
     response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": keys})
-    assert response.status_code in (400, 413), "refused, as send-keys refuses it"
+    assert (response.status_code, response.json()["error"]) == (413, "too_large"), (
+        "refused as send-keys refuses it: check_remote_key_names caps keys at 32"
+    )
     assert live.tmux.typed == []
 
 

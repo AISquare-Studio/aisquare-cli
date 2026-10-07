@@ -1,4 +1,13 @@
-"""Web Push: the keys, the subscriptions, and pushes sealed to one browser (SPEC §5).
+"""Web Push: the phone is pinged when something needs the human, page closed or not (SPEC §5).
+
+The decision is split the way the lanes are. Needs-you decides WHETHER and WHEN
+an item may be pushed (``NeedsItem.push_after``; ``None`` keeps it in the feed
+only). This module decides HOW, and is strict about it: an item is pushed once,
+only after two consecutive scans saw it, only if it is still there when its
+5-second coalescing window closes, at most one notification per device every
+20 s, and the payload holds fixed sentences and bounded names only. Never an
+excerpt, a detail or anything else an agent wrote: a lock screen shows it to
+whoever holds the phone.
 
 **Keys and subscriptions** live in ``~/.aisquare/remote-push.json``, owner-only
 like ``remote.json``: one VAPID key pair (P-256, made on first use and never
@@ -23,13 +32,9 @@ request: the server's public origin comes from the TUI's ngrok announcement,
 without one (:meth:`RemoteKit.kit_public_url`).
 
 Nothing here blocks the event loop. Routes do their file work in a worker
-thread, and every send runs on a one-shot daemon thread with a 10 s timeout.
-Lock order: the module's file lock is never held while calling into the
-runtime, which takes its own.
-
-The sender, which pushes what needs the human, and the pushes Remote sends about
-itself are still to come: :func:`start_push_sender`, :func:`push_farewell` and
-:func:`push_security_alert` start and send nothing yet.
+thread; every send runs on the sender's thread (``asq-remote-push``) or a
+one-shot daemon thread, with a 10 s timeout. Lock order: the module's file lock
+is never held while calling into the runtime, which takes its own.
 """
 
 from __future__ import annotations
@@ -42,6 +47,7 @@ import json
 import logging
 import math
 import os
+import queue
 import re
 import struct
 import threading
@@ -53,7 +59,7 @@ from typing import TYPE_CHECKING, Any
 
 from aisquare.core.atomic import write_replacing
 from aisquare.core.paths import remote_push_path
-from aisquare.services.remote_server import RequestError
+from aisquare.services.remote_server import RequestError, check_public_origin
 
 if TYPE_CHECKING:
     from cryptography.hazmat.primitives.asymmetric import ec
@@ -61,9 +67,19 @@ if TYPE_CHECKING:
     from starlette.responses import Response
     from starlette.routing import BaseRoute
 
+    from aisquare.services.remote_needs import NeedsItem
     from aisquare.services.remote_server import Device, RemoteKit
 
 log = logging.getLogger(__name__)
+
+PUSH_MIN_INTERVAL_SECONDS = 20.0
+"""The shortest gap between two needs notifications to one device. System pushes skip it."""
+PUSH_COALESCE_SECONDS = 5.0
+"""How long the sender waits once an item becomes pushable, so a burst is one notification."""
+AUTO_OFF_WARNING = timedelta(minutes=10)
+"""How long before auto-off the phones are told, so one of them can extend it."""
+EXPIRY_WARNING = timedelta(hours=24)
+"""How long before a device's 7-day sign-in ends its phone is told its pushes end with it."""
 
 PUSH_ENDPOINT_MAX = 1_024
 """The longest subscription endpoint accepted; the real services' are about 200 characters."""
@@ -71,6 +87,10 @@ PUSH_PLAINTEXT_MAX = 3_000
 """The most bytes of JSON one push carries, cut before encryption (:func:`push_plaintext`)."""
 PUSH_RECORD_SIZE = 4_096
 """The aes128gcm record size the body declares; one record always holds the whole payload."""
+PUSH_IDS_MAX = 50
+"""The most item ids one notification lists. More is a fleet on fire, and the page refetches."""
+PUSH_REASON_MAX = 160
+"""A reason's length on a lock screen: needs-you's templates with two 40-character names fit."""
 PUSH_TTL_SECONDS = 3_600
 """How long a push service keeps a push for a phone that is offline; older news is no news."""
 PUSH_TIMEOUT_SECONDS = 10.0
@@ -80,9 +100,17 @@ PUSH_FAILURES_MAX = 3
 """Refusals in a row (400/401/403) after which a subscription is dropped as broken."""
 PUSH_TEST_INTERVAL_SECONDS = 10.0
 """One test push per device this often: a test is a tap, never a loop."""
+PUSH_SYSTEM_CHECK_SECONDS = 30.0
+"""How often the sender looks at the auto-off deadline and the devices' expiry."""
+PUSH_DISCOVERY_SECONDS = 60.0
+"""How often, at most, the sender asks ngrok's local API for a public URL it was not told."""
+PUSH_STOP_SECONDS = 2.0
+"""How long stopping the server waits for a send in flight."""
 PUSHED_KEEP = timedelta(days=7)
 PUSHED_MAX = 1_000
 """``pushed`` keeps a week, and at most this many ids, the newest."""
+LOCKOUT_ALERT_WINDOW = timedelta(minutes=30)
+"""One lockout alert per window: the unlock budget's own 30 minutes."""
 
 VAPID_SUBJECT = "https://github.com/AISquare-Studio/aisquare-cli"
 """Who sends (RFC 8292 ``sub``): where a push service turns when a sender misbehaves."""
@@ -101,6 +129,13 @@ PUSH_HOST_SUFFIXES = (".push.apple.com", ".notify.windows.com")
 
 PUSH_INSTALL_HINT = "Web Push needs the cryptography package — pip install 'aisquare-cli[remote]'"
 
+AUTO_OFF_TITLE = "Remote turns off in 10 min"
+AUTO_OFF_BODY = "Open to extend it by an hour."
+FAREWELL_TITLE = "Remote is off on the machine"
+FAREWELL_BODY = "No more notifications until it is turned on again."
+LOCKOUT_TITLE = "Someone is guessing the Remote password"
+EXPIRY_TITLE = "Notifications on this phone end in 24 h"
+EXPIRY_BODY = "Its 7-day sign-in ends then; unlock again afterwards to keep them."
 TEST_TITLE = "Notifications work"
 TEST_BODY = "This is the test you asked for from aisquare remote."
 
@@ -114,6 +149,9 @@ _B64URL = re.compile(r"[A-Za-z0-9_-]*\Z")
 _DNS_NAME = re.compile(
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\Z"
 )
+_ROUTE_ID = re.compile(r"ny_[0-9a-f]{16}\Z")
+_ROUTE_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
+"""What the page's router accepts in a card link (SPEC §6.6); anything else is left out."""
 
 
 # --- small pieces -----------------------------------------------------------------------------
@@ -752,12 +790,68 @@ def push_send_one(
 # --- what a notification says (SPEC §5.6) -----------------------------------------------------
 
 
+def push_card_url(base_url: str | None, item: NeedsItem) -> str | None:
+    """The link to this item's card: ``<base>#/n/<id>/p/<project id>[/a/<label>]``.
+
+    The page can then say what changed even when it never saw the item. A
+    segment the page's router would refuse is left out rather than sent, and an
+    item without an agent (a project-level kind) links to its project.
+    """
+    if base_url is None:
+        return None
+    if not (_ROUTE_ID.match(item.id) and _ROUTE_SEGMENT.match(item.project_id)):
+        return f"{base_url}#/"
+    route = f"#/n/{item.id}/p/{item.project_id}"
+    if item.agent is not None and _ROUTE_SEGMENT.match(item.agent):
+        route += f"/a/{item.agent}"
+    return base_url + route
+
+
+def push_needs_message(
+    items: Sequence[NeedsItem], *, total: int, base_url: str | None
+) -> PushMessage:
+    """The notification for ``items`` (in feed order), the feed holding ``total`` in all.
+
+    One item: ``"<project>: <label> needs you"`` (``"<project> needs you"`` for a
+    project-level kind), its reason, and its card. Several: ``"<n> things need
+    you"``, the first two reasons, and the feed. `` · <total> open`` when the feed
+    holds more than this covers. Every name is cut and cleaned by
+    ``needs_push_safe``, and the reasons, needs-you's fixed templates, are cleaned
+    again here: nothing an agent typed reaches a lock screen unbounded.
+    """
+    from aisquare.services import remote_needs
+
+    safe: Callable[[str, int], str] = remote_needs.needs_push_safe  # type: ignore[attr-defined]
+    first = items[0]
+    if len(items) == 1:
+        project = safe(first.project_name, 40)
+        who = f"{project}: {safe(first.agent, 40)}" if first.agent else project
+        title, body = f"{who} needs you", safe(first.reason, PUSH_REASON_MAX)
+        url = push_card_url(base_url, first)
+    else:
+        title = f"{len(items)} things need you"
+        body = " · ".join(safe(item.reason, PUSH_REASON_MAX) for item in items[:2])
+        url = None if base_url is None else f"{base_url}#/"
+    if total > len(items):
+        title += f" · {total} open"
+    ids = [item.id for item in items][:PUSH_IDS_MAX]
+    return {"v": 1, "title": title, "body": body, "tag": "asq-needs", "url": url, "ids": ids}
+
+
 def push_system_message(title: str, body: str, url: str | None, *, tag: str) -> PushMessage:
     """A system push: fixed text under its own ``tag``, so it never replaces a needs push."""
     return {"v": 1, "title": title, "body": body, "tag": tag, "url": url, "ids": []}
 
 
 # --- one-shot pushes, off the caller's thread -------------------------------------------------
+
+
+def _push_targets(device_ids: Collection[str]) -> list[tuple[str, PushSubscriptionRecord]]:
+    """These devices' subscriptions, read NOW: the caller may be about to revoke them."""
+    if push_crypto_missing() is not None:
+        return []
+    subscriptions = load_push_state().subscriptions
+    return [(d, subscriptions[d]) for d in device_ids if d in subscriptions]
 
 
 def _push_in_background(
@@ -788,22 +882,405 @@ def _push_in_background(
     threading.Thread(target=push_now_thread, name="asq-remote-push-now", daemon=True).start()
 
 
-def push_farewell(device_ids: Collection[str], reason: str) -> None:
-    """Tell these devices Remote is off, before they are revoked. Nothing is sent yet."""
-    return None
+def push_farewell(
+    device_ids: Collection[str], reason: str, *, transport: PushTransport | None = None
+) -> None:
+    """Tell these devices Remote is off, before they are revoked (SPEC §2.4, §5.6).
+
+    Their subscriptions are read now, while they still exist, and sent to from a
+    daemon thread: turning Remote off never waits on a push service, and the
+    revoke that follows cannot take the farewell with it. ``reason`` (``remote
+    off``, ``auto-off``) is logged, not sent; the sentence is the same either way.
+    Never raises into the caller.
+    """
+    try:
+        targets = _push_targets(device_ids)
+    except Exception:
+        log.warning("remote: the farewell push could not read its subscriptions", exc_info=True)
+        return
+    if not targets:
+        return
+    log.debug("remote: farewell push (%s) to %d devices", reason, len(targets))
+    message = push_system_message(FAREWELL_TITLE, FAREWELL_BODY, None, tag="asq-remote-off")
+    _push_in_background(targets, message, transport=transport)
 
 
-def push_security_alert(device_ids: Collection[str], text: str) -> None:
-    """Warn these devices that someone is guessing the password. Nothing is sent yet."""
-    return None
+def push_security_alert(
+    device_ids: Collection[str],
+    text: str,
+    *,
+    transport: PushTransport | None = None,
+    now: datetime | None = None,
+) -> None:
+    """Warn these devices that someone is guessing the password, once per trip (SPEC §2.2).
+
+    The lockout's caller sends the sentence (``text``, its fixed advice to rotate
+    the link); this adds the title. A second call inside the same 30 minutes is
+    the same trip and sends nothing: ``sys:lockout:<when it began>`` is the key.
+    Sent from a daemon thread; never raises into the caller, which is answering
+    an unlock.
+    """
+    at = now or _push_utc_now()
+    try:
+        targets = _push_targets(device_ids)
+        if not targets:
+            return
+        with _push_state_edit() as state:
+            for key, stamp in state.pushed.items():
+                began = _push_parse_time(stamp)
+                if (
+                    key.startswith("sys:lockout:")
+                    and began is not None
+                    and timedelta(0) <= at - began < LOCKOUT_ALERT_WINDOW
+                ):
+                    return
+            state.pushed[f"sys:lockout:{_push_iso(at)}"] = _push_iso(at)
+            state.pushed = _push_prune_pushed(state.pushed, at)
+    except Exception:
+        log.warning("remote: the lockout alert could not be prepared", exc_info=True)
+        return
+    message = push_system_message(LOCKOUT_TITLE, text, None, tag="asq-lockout")
+    _push_in_background(targets, message, transport=transport)
 
 
 # --- the sender (SPEC §5.6) -------------------------------------------------------------------
 
+_STOP = object()
+
+
+class RemotePushSender:
+    """The needs pushes and the timed system pushes of one server, on one thread.
+
+    The needs watcher calls :meth:`enqueue_needs_push` after every scan, which only
+    queues. The thread (``asq-remote-push``, :meth:`push_sender_loop`) owns every
+    decision and every send. Its state machine is two methods, which the thread
+    drives and the tests call directly with a fake clock: :meth:`push_scan_seen`
+    takes one scan, and :meth:`push_run_due` does whatever has fallen due and says
+    how long until the next thing will.
+
+    An item is pushed when its ``push_after`` has passed, two consecutive scans
+    showed it, and it is still in the watcher's feed when its coalescing window
+    closes. Each subscribed device then gets ONE notification covering every
+    such item, no sooner than 20 s after its last, and the ids it covered are
+    then recorded as pushed, so neither a later scan nor a restart pushes them
+    again. Without a watcher at ``kit.lane_state["needs"]`` nothing is pushed.
+    """
+
+    def __init__(
+        self,
+        kit: RemoteKit,
+        *,
+        transport: PushTransport | None = None,
+        clock: Callable[[], datetime] | None = None,
+        discover: Callable[[int, float], str | None] | None = None,
+    ) -> None:
+        self._kit = kit
+        self._transport = transport
+        """``None``: :func:`push_https_transport`, looked up at each send."""
+        self._clock = clock or _push_utc_now
+        self._discover = discover
+        """``None``: ``ngrok_tunnel.discover_ngrok_public_url``."""
+        self._queue: queue.Queue[object] = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._streak: dict[str, int] = {}
+        """Per item id, how many consecutive scans showed it. An absence forgets it."""
+        self._window: set[str] = set()
+        """Ids that became pushable since the coalescing window opened."""
+        self._window_closes: datetime | None = None
+        self._owed: dict[str, set[str]] = {}
+        """Per device id, the item ids its next notification covers, while its throttle runs."""
+        self._last_sent: dict[str, datetime] = {}
+        """Per device id, when its last needs notification went out."""
+        self._pushed: dict[str, str] | None = None
+        """``remote-push.json``'s ``pushed``, read once, then kept current by :meth:`_push_mark`."""
+        self._keys: VapidKeys | None = None
+        self._next_system_check: datetime | None = None
+        self._discovered_at: datetime | None = None
+        self._failing = False
+
+    # --- the thread ---
+
+    def push_begin(self) -> None:
+        """Start the thread."""
+        self._thread = threading.Thread(
+            target=self.push_sender_loop, name="asq-remote-push", daemon=True
+        )
+        self._thread.start()
+
+    def push_end(self, timeout: float = PUSH_STOP_SECONDS) -> None:
+        """Stop the thread, waiting at most ``timeout`` for a send in flight."""
+        self._queue.put(_STOP)
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+    def enqueue_needs_push(self, items: list[NeedsItem], scanned_at: datetime) -> None:
+        """The needs watcher's listener: queue one scan, and return at once."""
+        self._queue.put((list(items), scanned_at))
+
+    def push_sender_loop(self) -> None:
+        """Take each scan as it comes, and wake between scans for whatever falls due."""
+        wait = 0.0
+        while True:
+            try:
+                message = self._queue.get(timeout=wait)
+            except queue.Empty:
+                message = None
+            if message is _STOP:
+                return
+            try:
+                if isinstance(message, tuple):
+                    items, scanned_at = message
+                    self.push_scan_seen(items, scanned_at)
+                wait = self.push_run_due()
+                self._failing = False
+            except Exception:  # one bad scan or send must not end every phone's notifications
+                level = logging.DEBUG if self._failing else logging.WARNING
+                self._failing = True
+                log.log(level, "remote: the push sender failed; it carries on", exc_info=True)
+                wait = PUSH_SYSTEM_CHECK_SECONDS
+
+    # --- the state machine ---
+
+    def push_scan_seen(self, items: Sequence[NeedsItem], scanned_at: datetime) -> None:
+        """One scan: count each item's consecutive scans, and gather what is now pushable."""
+        self._streak = {item.id: self._streak.get(item.id, 0) + 1 for item in items}
+        # An item gone from this scan leaves the window too; back, it starts over.
+        self._window.intersection_update(self._streak)
+        pushed = self._push_pushed()
+        for item in items:
+            if (
+                item.push_after is not None
+                and item.push_after <= scanned_at
+                and self._streak[item.id] >= 2
+                and item.id not in pushed
+            ):
+                self._window.add(item.id)
+        if self._window and self._window_closes is None:
+            self._window_closes = self._clock() + timedelta(seconds=PUSH_COALESCE_SECONDS)
+
+    def push_run_due(self) -> float:
+        """Do what is due now; the seconds until the next thing will be."""
+        now = self._clock()
+        if self._window_closes is not None and now >= self._window_closes:
+            self._push_close_window(now)
+        if self._owed:
+            self._push_send_owed(now)
+        if self._next_system_check is None or now >= self._next_system_check:
+            self._next_system_check = now + timedelta(seconds=PUSH_SYSTEM_CHECK_SECONDS)
+            self._push_system_checks(now)
+        return self._push_next_due(now)
+
+    def deliver_one_push(
+        self, device_id: str, record: PushSubscriptionRecord, message: PushMessage
+    ) -> int | None:
+        """One notification to one device, through this sender's transport and clock."""
+        keys = self._push_keys()
+        if keys is None:  # no key: no subscription can have been made against one
+            return None
+        return push_send_one(
+            device_id,
+            record,
+            message,
+            keys=keys,
+            transport=self._transport or push_https_transport,
+            now=self._clock(),
+        )
+
+    def _push_close_window(self, now: datetime) -> None:
+        """The window closed: what is still in the feed is owed to every subscribed device.
+
+        With none subscribed it counts as pushed now: a phone that subscribes later
+        hears of what happens next, not of what it is already looking at.
+        """
+        candidates, self._window, self._window_closes = self._window, set(), None
+        present = {item.id for item in self._push_feed()}
+        pushed = self._push_pushed()
+        covered = [i for i in candidates if i in present and i not in pushed]
+        if not covered:
+            return
+        subscriptions = self._push_live_subscriptions()
+        if not subscriptions:
+            self._push_mark(covered, now)
+        for device_id in subscriptions:
+            self._owed.setdefault(device_id, set()).update(covered)
+
+    def _push_send_owed(self, now: datetime) -> None:
+        """One notification to each device its throttle allows, of what is still in the feed."""
+        subscriptions = self._push_live_subscriptions()
+        feed = self._push_feed()
+        gap = timedelta(seconds=PUSH_MIN_INTERVAL_SECONDS)
+        for device_id in list(self._owed):
+            record = subscriptions.get(device_id)
+            if record is None:  # unsubscribed, or gone, since: owed nothing any more
+                del self._owed[device_id]
+                continue
+            last = self._last_sent.get(device_id)
+            if last is not None and now - last < gap:
+                continue
+            owed = self._owed.pop(device_id)
+            items = [item for item in feed if item.id in owed]
+            if not items:  # every one of them cleared while the throttle ran
+                continue
+            base = self._push_public_base(now)
+            message = push_needs_message(items, total=len(feed), base_url=base)
+            self._last_sent[device_id] = now
+            self.deliver_one_push(device_id, record, message)
+            self._push_mark([item.id for item in items], now)
+
+    def _push_system_checks(self, now: datetime) -> None:
+        subscriptions = self._push_live_subscriptions()
+        if subscriptions:
+            self._push_auto_off_warning(now, subscriptions)
+            self._push_expiry_warnings(now, subscriptions)
+
+    def _push_auto_off_warning(
+        self, now: datetime, subscriptions: Mapping[str, PushSubscriptionRecord]
+    ) -> None:
+        """Ten minutes before auto-off, once per deadline: an extension arms it again."""
+        raw = self._kit.runtime.remote_json().get("auto_off_at")
+        deadline = _push_parse_time(raw) if isinstance(raw, str) else None
+        if deadline is None or not timedelta(0) < deadline - now <= AUTO_OFF_WARNING:
+            return
+        key = f"sys:auto-off:{raw}"
+        if key in self._push_pushed():
+            return
+        self._push_mark([key], now)
+        base = self._push_public_base(now)
+        message = push_system_message(AUTO_OFF_TITLE, AUTO_OFF_BODY, base, tag="asq-auto-off")
+        for device_id, record in subscriptions.items():
+            self.deliver_one_push(device_id, record, message)
+
+    def _push_expiry_warnings(
+        self, now: datetime, subscriptions: Mapping[str, PushSubscriptionRecord]
+    ) -> None:
+        """A day before a device's 7-day sign-in ends, to that device alone."""
+        for row in self._kit.runtime.device_rows():
+            device_id, expires = row.get("id"), row.get("expires_at")
+            if not isinstance(device_id, str) or not isinstance(expires, str):
+                continue
+            record = subscriptions.get(device_id)
+            at = _push_parse_time(expires)
+            if record is None or at is None or not timedelta(0) < at - now <= EXPIRY_WARNING:
+                continue
+            key = f"sys:expiry:{device_id}:{expires}"
+            if key in self._push_pushed():
+                continue
+            self._push_mark([key], now)
+            base = self._push_public_base(now)
+            message = push_system_message(EXPIRY_TITLE, EXPIRY_BODY, base, tag="asq-expiry")
+            self.deliver_one_push(device_id, record, message)
+
+    def _push_next_due(self, now: datetime) -> float:
+        due = [self._next_system_check or now]
+        if self._window_closes is not None:
+            due.append(self._window_closes)
+        gap = timedelta(seconds=PUSH_MIN_INTERVAL_SECONDS)
+        due += [
+            now if (last := self._last_sent.get(device_id)) is None else last + gap
+            for device_id in self._owed
+        ]
+        return max(0.0, (min(due) - now).total_seconds())
+
+    # --- what it reads ---
+
+    def _push_feed(self) -> list[NeedsItem]:
+        """The watcher's latest items, ranked; none without a watcher."""
+        watcher = self._kit.lane_state.get("needs")
+        return [] if watcher is None else list(watcher.needs_items_now())
+
+    def _push_live_subscriptions(self) -> dict[str, PushSubscriptionRecord]:
+        """Every subscription of a device the runtime still has; the others dropped first."""
+        if not load_push_state().subscriptions:
+            return {}
+        live = push_device_ids(self._kit)  # before the file lock: the runtime takes its own
+        with _push_state_edit() as state:
+            _push_prune(state, live)
+            return dict(state.subscriptions)
+
+    def _push_pushed(self) -> Mapping[str, str]:
+        if self._pushed is None:
+            self._pushed = dict(load_push_state().pushed)
+        return self._pushed
+
+    def _push_mark(self, keys: Collection[str], now: datetime) -> None:
+        """Record ``keys`` as pushed: here first, then in the file, for a restart.
+
+        In that order because the file can fail (a full disk): remembered here,
+        this process still pushes each item once, where a record kept only in a
+        file that cannot be written would push it again every 25 s.
+        """
+        marks = dict.fromkeys(keys, _push_iso(now))
+        self._pushed = _push_prune_pushed({**self._push_pushed(), **marks}, now)
+        try:
+            with _push_state_edit() as state:
+                state.pushed = _push_prune_pushed({**state.pushed, **marks}, now)
+        except OSError as exc:
+            _push_warn_once(
+                "unrecorded",
+                "remote: could not record what was pushed in %s (%s); a restart may push it again",
+                remote_push_path(),
+                exc,
+            )
+
+    def _push_keys(self) -> VapidKeys | None:
+        if self._keys is None:
+            self._keys = load_push_state().vapid
+        return self._keys
+
+    def _push_public_base(self, now: datetime) -> str | None:
+        """Where a link in a push leads, from authoritative sources only (SPEC §5.8).
+
+        What the TUI or ``serve`` announced; else, at most once a minute and only
+        when the server knows its port, the tunnel to that port ngrok's local API
+        names. Never a request's ``Host``: anyone who reaches the server writes
+        that, and a push link is where the human types the passphrase.
+        """
+        base = self._kit.kit_public_url()
+        port = self._kit.port
+        if base is not None or port is None:
+            return base
+        quiet = timedelta(seconds=PUSH_DISCOVERY_SECONDS)
+        if self._discovered_at is not None and now - self._discovered_at < quiet:
+            return None
+        self._discovered_at = now
+        if self._discover is not None:
+            found = self._discover(port, 1.0)
+        else:
+            from aisquare.services.ngrok_tunnel import discover_ngrok_public_url
+
+            found = discover_ngrok_public_url(port, 1.0)
+        if found is None:
+            return None
+        try:
+            self._kit.runtime.note_public_origin(check_public_origin(found))
+        except ValueError as exc:
+            log.debug("remote: ngrok's API named %r, which is no public origin: %s", found, exc)
+            return None
+        return self._kit.kit_public_url()
+
 
 def start_push_sender(kit: RemoteKit) -> Callable[[], None] | None:
-    """Start the sender at ``kit.lane_state["push"]``; its stopper. Nothing to start yet."""
-    return None
+    """Start the sender at ``kit.lane_state["push"]`` and hang it on the needs watcher.
+
+    Without ``cryptography`` nothing starts: nothing could be encrypted, and
+    ``GET api/push`` already says why. The stopper unhooks the listener, then
+    stops the thread, waiting at most 2 s for a send in flight.
+    """
+    if push_crypto_missing() is not None:
+        return None
+    sender = RemotePushSender(kit)
+    kit.lane_state["push"] = sender
+    kit.needs_listeners.append(sender.enqueue_needs_push)
+    sender.push_begin()
+
+    def push_stopper() -> None:
+        with contextlib.suppress(ValueError):
+            kit.needs_listeners.remove(sender.enqueue_needs_push)
+        sender.push_end(PUSH_STOP_SECONDS)
+        if kit.lane_state.get("push") is sender:
+            del kit.lane_state["push"]
+
+    return push_stopper
 
 
 # --- the routes (SPEC §5.8) -------------------------------------------------------------------
@@ -929,8 +1406,13 @@ def push_routes(kit: RemoteKit) -> list[BaseRoute]:
 
 
 __all__ = [
+    "AUTO_OFF_WARNING",
+    "EXPIRY_WARNING",
+    "PUSH_COALESCE_SECONDS",
+    "PUSH_MIN_INTERVAL_SECONDS",
     "PushState",
     "PushSubscriptionRecord",
+    "RemotePushSender",
     "VapidKeys",
     "encrypt_push_payload",
     "load_or_create_vapid_keys",

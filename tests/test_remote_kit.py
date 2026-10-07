@@ -12,14 +12,16 @@ import dataclasses
 import json
 import threading
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from typer.testing import CliRunner
 
+from aisquare.cli.app import app as cli
 from aisquare.core.paths import remote_audit_path
 from aisquare.services import remote_actions, remote_needs, remote_push, remote_server
 from aisquare.services.remote_actions import ActionLedger, LedgerEntry
@@ -747,3 +749,35 @@ def test_no_request_header_teaches_the_server_its_public_origin(
     runtime.note_public_origin("https://abcd-12.ngrok-free.app")
     assert client.get(f"{base(runtime)}/api/remote").status_code == 200
     assert app.kit.kit_public_url() == f"https://abcd-12.ngrok-free.app/r/{runtime.token}/"
+
+
+# --- asq remote needs ------------------------------------------------------------------------
+
+
+def test_asq_remote_needs_prints_the_lanes_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {"items": [], "scanned_at": "2026-10-07T10:12:05+00:00"}
+    monkeypatch.setattr(remote_needs, "needs_cli_payload", lambda: payload)
+    as_json = CliRunner().invoke(cli, ["--json", "remote", "needs"])
+    assert as_json.exit_code == 0, as_json.output
+    assert json.loads(as_json.stdout) == payload
+    human = CliRunner().invoke(cli, ["remote", "needs"])
+    assert human.exit_code == 0 and human.stdout.strip() == "nothing needs you"
+
+
+def test_asq_remote_needs_prints_one_line_per_item(monkeypatch: pytest.MonkeyPatch) -> None:
+    since = datetime.now(UTC) - timedelta(hours=1, minutes=5, seconds=10)
+    item = {
+        "kind": "question",
+        "project": {"id": "prj_8c1e", "name": "aisquare-cli"},
+        "agent": "coder-auth",
+        "reason": "coder-auth asks you a question [/b]",  # agents' text: never markup
+        "since": since.isoformat(timespec="seconds"),
+    }
+    project_level = {**item, "kind": "fleet_down", "agent": None, "reason": "tmux is down"}
+    monkeypatch.setattr(remote_needs, "needs_cli_payload", lambda: {"items": [item, project_level]})
+    result = CliRunner().invoke(cli, ["remote", "needs"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines() == [
+        "⚑ question · aisquare-cli · coder-auth — coder-auth asks you a question [/b] (1h05m)",
+        "⚑ fleet_down · aisquare-cli · - — tmux is down (1h05m)",
+    ]

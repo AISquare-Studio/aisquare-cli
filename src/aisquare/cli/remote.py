@@ -12,8 +12,9 @@ windows leg). ``tests/test_remote_stays_off_the_hook_path.py`` keeps it off.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 
@@ -188,3 +189,46 @@ def revoke_command(
         typer.echo(json.dumps({"revoked": sid}))
     else:
         stdout_console().print(f"✓ revoked {sid}", markup=False)
+
+
+@app.command("needs")
+def needs_command() -> None:
+    """What needs you right now, across every project: prompts, questions, crashes, limits."""
+    from aisquare.services import remote_needs
+
+    payload = remote_needs.needs_cli_payload()
+    if get_state().json_output:
+        typer.echo(json.dumps(payload))
+        return
+    items = payload.get("items")
+    rows = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+    console = stdout_console()
+    if not rows:
+        console.print("nothing needs you", markup=False)
+        return
+    now = datetime.now(UTC)
+    for item in rows:
+        # markup=False: a reason carries labels and roles, which are agents' own text.
+        console.print(_needs_line(item, now), markup=False)
+
+
+def _needs_line(item: dict[str, Any], now: datetime) -> str:
+    """``⚑ <kind> · <project> · <agent> — <reason> (<age>)``: one item of the feed."""
+    project = item.get("project")
+    name = project.get("name") if isinstance(project, dict) else None
+    return (
+        f"⚑ {item.get('kind') or '?'} · {name or '-'} · {item.get('agent') or '-'}"
+        f" — {item.get('reason') or ''} ({_needs_age(item.get('since'), now)})"
+    )
+
+
+def _needs_age(since: object, now: datetime) -> str:
+    """How long an item has waited, as the board says it: ``12m``, ``3h05m``."""
+    try:
+        when = datetime.fromisoformat(str(since))
+    except ValueError:
+        return "?"
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    minutes = max(0, int((now - when).total_seconds() // 60))
+    return f"{minutes}m" if minutes < 60 else f"{minutes // 60}h{minutes % 60:02d}m"

@@ -458,6 +458,16 @@ def remote_dist_dir() -> Path:
     return aisquare_home() / "remote-dist"
 
 
+def remote_needs_path() -> Path:
+    """``remote-needs.json`` — the needs-you items a phone dismissed, and when."""
+    return aisquare_home() / "remote-needs.json"
+
+
+def remote_push_path() -> Path:
+    """``remote-push.json`` — the Web Push keys, each device's subscription, what was pushed."""
+    return aisquare_home() / "remote-push.json"
+
+
 def project_data_dir(project_id: str) -> Path:
     """Per-project data directory (codebase snapshots, future sync artifacts)."""
     return aisquare_home() / "projects" / project_id

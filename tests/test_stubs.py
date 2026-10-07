@@ -165,6 +165,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "allow-write",
             "regenerate-password",
             "revoke",
+            "needs",
         )
     ),
 }

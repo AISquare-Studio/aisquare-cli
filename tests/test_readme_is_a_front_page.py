@@ -37,9 +37,10 @@ the README it shipped with, and its ``blob/main`` links follow ``main``, so
 renaming a page the README links still breaks every older release page. Leave a
 stub at the old path when you rename one.
 
-PENDING FILES, AND WHY THE EXCUSE EXPIRES. Two links on the README name files
-that other lanes of the same release commit: the demo GIF and the Claude Code
-plugin page. They are excused only while pyproject's version is still the one
+PENDING FILES, AND WHY THE EXCUSE EXPIRES. A link on the README may name a file
+another lane of the same release commits (the demo GIF was one until it
+landed; the Claude Code plugin page is one now). Such a file is excused only
+while pyproject's version is still the one
 this branch was cut at, ``_PENDING_WHILE_VERSION``. The release commit bumps
 the version, so a slipped GIF or plugin page fails that commit's CI instead of
 shipping a broken image or a dead link to PyPI. Each entry must still be
@@ -76,7 +77,6 @@ MAX_LINES = 250
 #: Files the README links before they exist, with who commits them. Excused only
 #: while the version is ``_PENDING_WHILE_VERSION`` (see the module docstring).
 _PENDING: dict[str, str] = {
-    "docs/demo.gif": "the demo GIF; roadmap 9.4 commits it",
     "docs/claude-code-plugin.md": "the plugin route's page; roadmap 9.3 writes it",
 }
 _PENDING_WHILE_VERSION = "0.7.0"

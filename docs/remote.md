@@ -325,10 +325,12 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   (the machine and phones that unlocked before can still unlock, and subscribed
   phones get an alert).
 - **Devices** are named by public ids (`dev_3fa9c2d1`); the cookie behind each is
-  stored only as a digest, so a copy of `~/.aisquare/remote.json` signs nobody
-  in. A device is signed out after 24 hours unused and removed after 7 days. A
-  phone whose sign-in lapsed unlocks back into the same device, so its
-  notifications carry on.
+  stored only as a digest, so a copy of `~/.aisquare/remote.json` replays no
+  existing sign-in. It does hold the link and the passphrase, though, so keep it
+  private (it is owner-only); if it leaked, run
+  `aisquare remote regenerate-password --new-link`. A device is signed out after
+  24 hours unused and removed after 7 days. A phone whose sign-in lapsed unlocks
+  back into the same device, so its notifications carry on.
 - **Remote off revokes every device**: turning it off in the panel, or auto-off,
   signs every phone out (after a goodbye notification). Closing the UI or
   stopping `serve` with Ctrl-C does not; expiry bounds them.

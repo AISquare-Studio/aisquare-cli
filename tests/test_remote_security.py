@@ -62,7 +62,14 @@ from aisquare.services.remote_server import (
     normalize_passphrase,
 )
 from aisquare.services.remote_words import REMOTE_PASSPHRASE_WORDS
-from tests.remote_kit_helpers import PASSWORD, base, make_client, make_runtime, receive_within
+from tests.remote_kit_helpers import (
+    PASSWORD,
+    base,
+    make_client,
+    make_runtime,
+    receive_within,
+    unlock,
+)
 
 PAD_KEYS = [
     *("Enter", "Escape", "Tab", "BTab", "BSpace", "Space", "Up", "Down", "Left", "Right"),
@@ -90,20 +97,13 @@ def runtime(isolated_home: Path) -> Runtime:
 
 
 @pytest.fixture
-def ran() -> list[tuple[str, dict[str, Any]]]:
-    return []
+def app(runtime: Runtime, tmp_path: Path) -> Any:
+    """The built app over the fixture's runtime, every write a no-op that goes through."""
 
+    def handler(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        return {"ok": True}, "ran"
 
-@pytest.fixture
-def app(runtime: Runtime, ran: list[tuple[str, dict[str, Any]]], tmp_path: Path) -> Any:
-    def handler(name: str) -> remote_server.WriteHandler:
-        def run(body: dict[str, Any]) -> tuple[dict[str, object], str]:
-            ran.append((name, body))
-            return {"ok": True}, f"{name} ran"
-
-        return run
-
-    writes = Writes({name: handler(name) for name in remote_server.write_endpoint_names()})
+    writes = Writes({name: handler for name in remote_server.write_endpoint_names()})
     return build_app(runtime, sources=_sources(), writes=writes, dist_dir=tmp_path, tick=0.02)
 
 
@@ -121,10 +121,6 @@ class Clock:
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     return Clock(monkeypatch)
-
-
-def _unlock(client: TestClient, runtime: Runtime, password: str = PASSWORD) -> Any:
-    return client.post(f"{base(runtime)}/api/unlock", json={"password": password})
 
 
 def _from(app: Any, host: str, **kw: Any) -> TestClient:
@@ -283,7 +279,7 @@ def test_a_send_that_fails_after_typing_is_still_on_the_audit_trail(
     """The text reached the pane, then Enter failed: the write answered 400 and used to
     leave no audit line, though a live agent had been typed into (review of #243)."""
     client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
-    device_id = _unlock(client, runtime).json()["device"]["id"]
+    device_id = unlock(client, runtime).json()["device"]["id"]
     runtime.set_allow_write(True)
     pane.fail_keys = True
     response = client.post(
@@ -329,7 +325,7 @@ def test_the_limiter_forgets_a_client_whose_minute_is_over() -> None:
     now = [0.0]
     limiter = _RateLimiter(lambda: now[0])
     for n in range(500):
-        assert limiter.limiter_retry_after(f"198.51.100.{n % 250}.{n}") is None
+        assert limiter.limiter_retry_after(f"198.51.{n // 250}.{n % 250}") is None
     now[0] += 61
     assert limiter.limiter_retry_after("203.0.113.5") is None
     assert list(limiter._attempts) == ["203.0.113.5"]
@@ -344,7 +340,7 @@ def test_the_client_is_the_scope_peer_and_only_that() -> None:
 def _spend_the_budget(app: Any, runtime: Runtime) -> None:
     """``UNLOCK_GLOBAL_FAILURES`` wrong guesses from as many addresses, five a minute each."""
     for n in range(UNLOCK_GLOBAL_FAILURES):
-        assert _unlock(_from(app, f"203.0.113.{n}"), runtime, "wrong").status_code == 401
+        assert unlock(_from(app, f"203.0.113.{n}"), runtime, "wrong").status_code == 401
 
 
 def test_a_spent_budget_refuses_a_stranger_without_evaluating_the_guess(
@@ -361,7 +357,7 @@ def test_a_spent_budget_refuses_a_stranger_without_evaluating_the_guess(
         return real(supplied)
 
     monkeypatch.setattr(runtime, "password_matches", counted)
-    refused = _unlock(_from(app, "198.51.100.7"), runtime, PASSWORD)
+    refused = unlock(_from(app, "198.51.100.7"), runtime, PASSWORD)
     assert refused.status_code == 429 and refused.json()["error"] == "locked_out"
     assert "regenerate-password --new-link" in refused.json()["message"]
     assert 1700 < int(refused.headers["retry-after"]) <= 1800
@@ -377,23 +373,23 @@ def test_the_budget_holds_across_processes_and_restarts(app: Any, runtime: Runti
     assert UnlockBudget(shell).budget_failures() == UNLOCK_GLOBAL_FAILURES
     assert UnlockBudget(shell).budget_exhausted_until() is not None
     restarted = build_app(shell, sources=_sources(), dist_dir=Path())
-    assert _unlock(_from(restarted, "198.51.100.8"), shell).status_code == 429
+    assert unlock(_from(restarted, "198.51.100.8"), shell).status_code == 429
 
 
 def test_the_budget_ages_out_and_only_a_password_change_resets_it(
     app: Any, runtime: Runtime, clock: Clock
 ) -> None:
     _spend_the_budget(app, runtime)
-    assert _unlock(_from(app, "198.51.100.1"), runtime).status_code == 429
+    assert unlock(_from(app, "198.51.100.1"), runtime).status_code == 429
     direct = _from(app, "127.0.0.1", base_url="http://127.0.0.1:8750")
-    assert _unlock(direct, runtime).status_code == 200, "a success resets nothing…"
-    assert _unlock(_from(app, "198.51.100.2"), runtime).status_code == 429, "…as here"
+    assert unlock(direct, runtime).status_code == 200, "a success resets nothing…"
+    assert unlock(_from(app, "198.51.100.2"), runtime).status_code == 429, "…as here"
     clock.advance(minutes=30, seconds=1)
-    assert _unlock(_from(app, "198.51.100.3"), runtime).status_code == 200, "aged out"
+    assert unlock(_from(app, "198.51.100.3"), runtime).status_code == 200, "aged out"
     _spend_the_budget(app, runtime)
     runtime.regenerate_password()
     assert UnlockBudget(runtime).budget_failures() == 0
-    assert _unlock(_from(app, "198.51.100.4"), runtime, runtime.password).status_code == 200
+    assert unlock(_from(app, "198.51.100.4"), runtime, runtime.password).status_code == 200
 
 
 def test_the_machine_itself_always_unlocks_and_its_guesses_do_not_count(
@@ -401,9 +397,9 @@ def test_the_machine_itself_always_unlocks_and_its_guesses_do_not_count(
 ) -> None:
     _spend_the_budget(app, runtime)
     direct = _from(app, "127.0.0.1", base_url="http://127.0.0.1:8750")
-    assert _unlock(direct, runtime, "wrong").status_code == 401
+    assert unlock(direct, runtime, "wrong").status_code == 401
     assert UnlockBudget(runtime).budget_failures() == UNLOCK_GLOBAL_FAILURES
-    assert _unlock(direct, runtime).status_code == 200
+    assert unlock(direct, runtime).status_code == 200
 
 
 @pytest.mark.parametrize(
@@ -433,12 +429,12 @@ def test_a_known_phone_unlocks_through_a_spent_budget_into_its_own_device(
     """The DoS relief (SPEC §2.2 item 4): the human's own phone, signed out by a quiet day,
     re-unlocks into the same id while strangers are paused."""
     phone = _from(app, "198.51.100.50")
-    first = _unlock(phone, runtime)
+    first = unlock(phone, runtime)
     device_id, old_secret = first.json()["device"]["id"], phone.cookies[COOKIE]
     clock.advance(hours=25)  # idle: signed out
     assert phone.get(f"{base(runtime)}/api/board").status_code == 401
     _spend_the_budget(app, runtime)
-    again = _unlock(phone, runtime)
+    again = unlock(phone, runtime)
     assert again.status_code == 200
     assert again.json()["device"] == first.json()["device"], "same id, same expiry"
     assert phone.cookies[COOKIE] != old_secret, "a new secret"
@@ -454,25 +450,25 @@ def test_a_known_cookie_buys_ten_guesses_then_its_device_is_revoked(
     app: Any, runtime: Runtime
 ) -> None:
     phone = _from(app, "198.51.100.51")
-    _unlock(phone, runtime)
+    unlock(phone, runtime)
     _spend_the_budget(app, runtime)
     for n in range(KNOWN_DEVICE_FAILURES_MAX):
         guesser = _from(app, f"198.51.100.{60 + n}")  # its own limiter row each time
         guesser.cookies.set(COOKIE, phone.cookies[COOKIE])
-        assert _unlock(guesser, runtime, "wrong").status_code == 401
+        assert unlock(guesser, runtime, "wrong").status_code == 401
     assert runtime.device_rows() == [], "the tenth wrong guess revoked it"
     assert UnlockBudget(runtime).budget_failures() == UNLOCK_GLOBAL_FAILURES, "none counted"
-    assert _unlock(phone, runtime).status_code == 429, "a stranger again"
+    assert unlock(phone, runtime).status_code == 429, "a stranger again"
 
 
 def test_a_right_guess_resets_the_known_devices_count(app: Any, runtime: Runtime) -> None:
     phone = _from(app, "198.51.100.52")
-    _unlock(phone, runtime)
+    unlock(phone, runtime)
     for n in range(KNOWN_DEVICE_FAILURES_MAX - 1):
         guesser = _from(app, f"198.51.100.{80 + n}")
         guesser.cookies.set(COOKIE, phone.cookies[COOKIE])
-        _unlock(guesser, runtime, "wrong")
-    assert _unlock(phone, runtime).status_code == 200
+        unlock(guesser, runtime, "wrong")
+    assert unlock(phone, runtime).status_code == 200
     assert runtime._state.devices[0].failed_unlocks == 0
 
 
@@ -484,11 +480,11 @@ def test_the_trip_is_said_once_logged_and_pushed(
         remote_push, "push_security_alert", lambda ids, text: alerts.append((list(ids), text))
     )
     phone = _from(app, "198.51.100.53")
-    device_id = _unlock(phone, runtime).json()["device"]["id"]
+    device_id = unlock(phone, runtime).json()["device"]["id"]
     with caplog.at_level("WARNING", logger=remote_server.__name__):
         _spend_the_budget(app, runtime)
         for n in range(3):  # refused, not counted: no second trip
-            _unlock(_from(app, f"198.51.100.{120 + n}"), runtime, "wrong")
+            unlock(_from(app, f"198.51.100.{120 + n}"), runtime, "wrong")
     assert alerts == [([device_id], remote_server.LOCKOUT_ALERT)]
     said = [r.getMessage() for r in caplog.records if "new unlocks are paused" in r.getMessage()]
     assert len(said) == 1 and "regenerate-password --new-link" in said[0]
@@ -499,11 +495,11 @@ def test_status_reports_the_failed_unlocks_and_the_lockout(
 ) -> None:
     monkeypatch.setattr(remote_server, "_runtime", None)
     for n in range(3):
-        _unlock(_from(app, f"203.0.113.{n}"), runtime, "wrong")
+        unlock(_from(app, f"203.0.113.{n}"), runtime, "wrong")
     status = remote_server.remote_server_status()
     assert (status["failed_unlocks"], status["locked_out_until"]) == (3, None)
     for n in range(3, UNLOCK_GLOBAL_FAILURES):
-        _unlock(_from(app, f"203.0.113.{n}"), runtime, "wrong")
+        unlock(_from(app, f"203.0.113.{n}"), runtime, "wrong")
     shown = json.loads(CliRunner().invoke(cli, ["--json", "remote", "status"]).stdout)
     assert shown["failed_unlocks"] == UNLOCK_GLOBAL_FAILURES
     assert shown["locked_out_until"] == remote_server.remote_server_status()["locked_out_until"]
@@ -594,8 +590,8 @@ def test_a_device_is_named_by_an_id_and_only_its_digest_is_stored(
     phone, read-only included, could keep using another's after it was revoked."""
     monkeypatch.setattr(remote_server, "_runtime", runtime)
     mine, theirs = make_client(app), make_client(app)
-    _unlock(mine, runtime)
-    _unlock(theirs, runtime)
+    unlock(mine, runtime)
+    unlock(theirs, runtime)
     secrets_ = [mine.cookies[COOKIE], theirs.cookies[COOKIE]]
     digests = [hashlib.sha256(secret.encode()).hexdigest() for secret in secrets_]
     stored = remote_state_path().read_text(encoding="utf-8")
@@ -613,7 +609,7 @@ def test_a_device_is_named_by_an_id_and_only_its_digest_is_stored(
 
 def test_signing_out_is_always_allowed_and_clears_the_cookie(app: Any, runtime: Runtime) -> None:
     client = make_client(app)
-    device_id = _unlock(client, runtime).json()["device"]["id"]
+    device_id = unlock(client, runtime).json()["device"]["id"]
     assert runtime.allow_write is False
     response = client.delete(f"{base(runtime)}/api/devices/{device_id}")
     assert response.status_code == 200
@@ -626,7 +622,7 @@ def test_signing_out_is_always_allowed_and_clears_the_cookie(app: Any, runtime: 
 @pytest.mark.parametrize("device_id", ["dev_00000000", "dev_zz", "sid", "dev_0000000a0"])
 def test_another_id_that_is_no_device_is_a_404(app: Any, runtime: Runtime, device_id: str) -> None:
     client = make_client(app)
-    _unlock(client, runtime)
+    unlock(client, runtime)
     runtime.set_allow_write(True)
     response = client.delete(f"{base(runtime)}/api/devices/{device_id}")
     assert response.status_code == 404 and response.json()["error"] == "not_found"
@@ -636,8 +632,8 @@ def test_revoking_another_device_needs_writes_and_closes_its_socket(
     app: Any, runtime: Runtime
 ) -> None:
     mine, theirs = make_client(app), make_client(app)
-    _unlock(mine, runtime)
-    other = _unlock(theirs, runtime).json()["device"]["id"]
+    unlock(mine, runtime)
+    other = unlock(theirs, runtime).json()["device"]["id"]
     with theirs.websocket_connect(f"{base(runtime)}/ws") as ws:
         receive_within(ws)
         assert mine.delete(f"{base(runtime)}/api/devices/{other}").status_code == 403
@@ -663,7 +659,7 @@ def test_the_cli_revokes_by_id_and_all_with_4401_and_no_farewell(
     farewells: list[object] = []
     monkeypatch.setattr(remote_push, "push_farewell", lambda *a: farewells.append(a))
     phones = [make_client(app) for _ in range(3)]
-    ids = [_unlock(phone, runtime).json()["device"]["id"] for phone in phones]
+    ids = [unlock(phone, runtime).json()["device"]["id"] for phone in phones]
     closed: list[int] = []
     runtime.register_socket(ids[1], closed.append)
     runtime.register_socket(ids[2], closed.append)
@@ -684,7 +680,7 @@ def test_a_user_agent_that_is_rich_markup_is_printed_as_text(
     """``x [/b]`` raised MarkupError and took ``asq remote status`` down (review of #243)."""
     monkeypatch.setattr(remote_server, "_runtime", runtime)
     client = make_client(app, headers={"user-agent": "x [/b] [bold red]phone"})
-    _unlock(client, runtime)
+    unlock(client, runtime)
     shown = CliRunner().invoke(cli, ["remote", "status"])
     assert shown.exit_code == 0, shown.output
     assert "x [/b] [bold red]phone" in shown.stdout
@@ -697,7 +693,7 @@ def test_a_day_idle_signs_a_device_out_and_keeps_its_record(
     app: Any, runtime: Runtime, clock: Clock
 ) -> None:
     client = make_client(app)
-    device_id = _unlock(client, runtime).json()["device"]["id"]
+    device_id = unlock(client, runtime).json()["device"]["id"]
     clock.advance(hours=23, minutes=59)
     assert client.get(f"{base(runtime)}/api/board").status_code == 200, "and that was a use"
     clock.advance(hours=24)
@@ -717,7 +713,7 @@ def test_an_open_socket_closes_4401_when_its_device_goes(
     app: Any, runtime: Runtime, clock: Clock
 ) -> None:
     client = make_client(app)
-    _unlock(client, runtime)
+    unlock(client, runtime)
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
         receive_within(ws)
         clock.advance(days=7)
@@ -728,7 +724,7 @@ def test_seven_days_after_the_first_unlock_a_device_is_removed(
     app: Any, runtime: Runtime, clock: Clock
 ) -> None:
     client = make_client(app)
-    _unlock(client, runtime)
+    unlock(client, runtime)
     for _day in range(7):  # used every day, so never idle long enough to be signed out
         clock.advance(hours=23)
         assert client.get(f"{base(runtime)}/api/board").status_code == 200
@@ -748,14 +744,14 @@ def test_past_the_deadline_everything_is_a_404_like_a_wrong_token(
     app: Any, runtime: Runtime, clock: Clock
 ) -> None:
     client = make_client(app)
-    _unlock(client, runtime)
+    unlock(client, runtime)
     runtime.set_auto_off(clock.now + timedelta(minutes=5))
     assert client.get(f"{base(runtime)}/api/board").status_code == 200
     clock.advance(minutes=5)
     for path in ("/", "/api/board", "/api/remote"):
         response = client.get(f"{base(runtime)}{path}")
         assert response.status_code == 404 and response.json() == {"error": "not_found"}
-    assert _unlock(make_client(app), runtime).status_code == 404
+    assert unlock(make_client(app), runtime).status_code == 404
     with (
         pytest.raises(WebSocketDenialResponse) as denied,
         client.websocket_connect(f"{base(runtime)}/ws"),
@@ -768,7 +764,7 @@ def test_an_open_socket_closes_4410_at_the_deadline(
     app: Any, runtime: Runtime, clock: Clock
 ) -> None:
     client = make_client(app)
-    _unlock(client, runtime)
+    unlock(client, runtime)
     runtime.set_auto_off(clock.now + timedelta(minutes=5))
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
         receive_within(ws)
@@ -791,7 +787,7 @@ def test_extend_adds_an_hour_up_to_eight_hours_ahead(
     app: Any, runtime: Runtime, clock: Clock
 ) -> None:
     client = make_client(app)
-    device_id = _unlock(client, runtime).json()["device"]["id"]
+    device_id = unlock(client, runtime).json()["device"]["id"]
     url = f"{base(runtime)}/api/remote/extend"
     runtime.set_auto_off(clock.now + timedelta(minutes=10))
     assert client.post(url, json={}).status_code == 403, "a write"
@@ -818,7 +814,7 @@ def test_extend_never_brings_a_far_deadline_closer(runtime: Runtime, clock: Cloc
 
 def test_extend_without_a_deadline_is_409(app: Any, runtime: Runtime) -> None:
     client = make_client(app)
-    _unlock(client, runtime)
+    unlock(client, runtime)
     runtime.set_allow_write(True)
     response = client.post(f"{base(runtime)}/api/remote/extend", json={})
     assert response.status_code == 409 and response.json()["error"] == "no_auto_off"
@@ -986,7 +982,7 @@ def test_remote_off_says_farewell_then_revokes_every_device_with_4410(
         lambda ids, reason: farewells.append((list(ids), reason, runtime.device_ids())),
     )
     client = make_client(app)
-    device_id = _unlock(client, runtime).json()["device"]["id"]
+    device_id = unlock(client, runtime).json()["device"]["id"]
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
         receive_within(ws)
         remote_server.revoke_every_remote_device("remote off")
@@ -1004,7 +1000,7 @@ def test_a_farewell_that_cannot_be_queued_still_turns_remote_off(
         raise RuntimeError("no sender")
 
     monkeypatch.setattr(remote_push, "push_farewell", broken)
-    _unlock(make_client(app), runtime)
+    unlock(make_client(app), runtime)
     remote_server.revoke_every_remote_device("remote off")
     assert runtime.device_rows() == []
 
@@ -1016,7 +1012,7 @@ def test_a_new_link_retires_the_old_one_on_the_running_server(
     app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = make_client(app)
-    _unlock(client, runtime)
+    unlock(client, runtime)
     old = base(runtime)
     monkeypatch.setattr(remote_server, "_runtime", None)  # the CLI is another process
     result = CliRunner().invoke(cli, ["--json", "remote", "regenerate-password", "--new-link"])
@@ -1025,7 +1021,7 @@ def test_a_new_link_retires_the_old_one_on_the_running_server(
     assert shown["url_local"] == f"http://127.0.0.1:8750/r/{shown['token']}/"
     assert client.get(f"{old}/api/remote").status_code == 404
     assert client.get(f"/r/{shown['token']}/api/remote").status_code == 401, "devices dropped"
-    assert _unlock(client, runtime, shown["password"]).status_code == 200
+    assert unlock(client, runtime, shown["password"]).status_code == 200
     assert runtime.token == shown["token"] and base(runtime) != old
 
 
@@ -1211,7 +1207,7 @@ def test_adding_a_known_project_says_it_was_not_added(
 
 def test_a_write_without_an_origin_or_from_another_is_403(app: Any, runtime: Runtime) -> None:
     client = make_client(app)
-    _unlock(client, runtime)
+    unlock(client, runtime)
     runtime.set_allow_write(True)
     url = f"{base(runtime)}/api/note"
     for origin in (None, "https://evil.example", "null", "http://testserver.evil.example"):
@@ -1230,7 +1226,7 @@ def test_x_forwarded_host_is_never_what_the_origin_is_checked_against(
     app: Any, runtime: Runtime
 ) -> None:
     client = make_client(app)
-    _unlock(client, runtime)
+    unlock(client, runtime)
     runtime.set_allow_write(True)
     forged = {"origin": "https://evil.example", "x-forwarded-host": "evil.example"}
     response = client.post(f"{base(runtime)}/api/note", json={"text": "x"}, headers=forged)
@@ -1240,16 +1236,16 @@ def test_x_forwarded_host_is_never_what_the_origin_is_checked_against(
 def test_the_origin_of_an_https_hop_is_https(runtime: Runtime, tmp_path: Path) -> None:
     app = build_app(runtime, sources=_sources(), dist_dir=tmp_path)
     secure = make_client(app, base_url="https://testserver")
-    assert _unlock(secure, runtime).status_code == 200
+    assert unlock(secure, runtime).status_code == 200
     plain_origin = make_client(
         app, base_url="https://testserver", headers={"origin": "http://testserver"}
     )
-    assert _unlock(plain_origin, runtime).status_code == 403
+    assert unlock(plain_origin, runtime).status_code == 403
 
 
 def test_a_get_needs_no_origin(app: Any, runtime: Runtime) -> None:
     client = make_client(app)
-    _unlock(client, runtime)
+    unlock(client, runtime)
     bare = TestClient(app, cookies=dict(client.cookies))
     assert bare.get(f"{base(runtime)}/api/board").status_code == 200
     assert bare.get(f"{base(runtime)}/").status_code != 403
@@ -1257,7 +1253,7 @@ def test_a_get_needs_no_origin(app: Any, runtime: Runtime) -> None:
 
 def test_a_socket_from_another_origin_is_denied_403(app: Any, runtime: Runtime) -> None:
     client = make_client(app)
-    _unlock(client, runtime)
+    unlock(client, runtime)
     with (
         pytest.raises(WebSocketDenialResponse) as denied,
         client.websocket_connect(f"{base(runtime)}/ws", headers={"origin": "https://evil.example"}),

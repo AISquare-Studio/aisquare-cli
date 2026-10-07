@@ -213,6 +213,53 @@ def test_a_result_too_long_to_parse_still_answers_its_tool_use(tmp_path: Path) -
     assert len(path.read_bytes().splitlines()[-1]) > MAX_LINE, "the premise: never parsed"
     tail = read_transcript_tail(path)
     assert tail is not None and tail.pending == ()
+    assert tail.newest == "tool_result", "the newest record, parsed or not"
+
+
+def test_a_tool_use_too_long_to_parse_still_waits(tmp_path: Path) -> None:
+    """A ``Write`` of a large file waits on its prompt like any other tool use. Skipped
+    unparsed, it was not pending, and the text before it in the same message read as the
+    agent's last words at its prompt: a typed message's Enter would approve the write."""
+    big = _tool("toolu_w", "Write", file_path="/x/fixture.json", content="y" * (MAX_LINE + 10))
+    records = [
+        _prompt("write the fixture", uuid="u1"),
+        _said(_text("I'll write the fixture file now."), uuid="a1", message="m1", second=1),
+        _said(big, uuid="a2", message="m1", second=2),
+    ]
+    path = _write(tmp_path / "t.jsonl", records)
+    assert len(path.read_bytes().splitlines()[-1]) > MAX_LINE, "the premise: never parsed"
+    tail = read_transcript_tail(path)
+    assert tail is not None
+    (waiting,) = tail.pending
+    assert (waiting.tool_use_id, waiting.name, waiting.input) == ("toolu_w", "Write", {})
+    assert tail.newest == "assistant_tool", "not the text before it: no prompt to type at"
+    assert tail.newest_at == waiting.at == datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+    assert tail.last_text == "I'll write the fixture file now."
+    _write(path, [*records, _result("toolu_w", "File created", uuid="r1", second=9)])
+    answered = read_transcript_tail(path)
+    assert answered is not None and answered.pending == ()
+
+
+def test_a_tool_use_too_long_to_parse_waits_behind_a_newer_result(tmp_path: Path) -> None:
+    """Tools run while their message streams: a result of the message's first tool can be
+    newer than its huge second one. A sub-agent's huge tool use is not this agent's."""
+    huge = "y" * (MAX_LINE + 10)
+    sidechain = _said(_tool("toolu_s", "Write", content=huge), uuid="s1", message="ms", second=3)
+    sidechain["isSidechain"] = True
+    path = _write(
+        tmp_path / "t.jsonl",
+        [
+            _prompt("two things", uuid="u1"),
+            _said(_tool("toolu_a", "Bash", command="ls"), uuid="a1", message="m1", second=1),
+            _said(_tool("toolu_w", "Write", content=huge), uuid="a2", message="m1", second=2),
+            _result("toolu_a", uuid="r1", second=3),
+            sidechain,
+        ],
+    )
+    tail = read_transcript_tail(path, budget=4 * MAX_LINE)  # two such lines: past the default
+    assert tail is not None
+    assert [tool.tool_use_id for tool in tail.pending] == ["toolu_w"]
+    assert (tail.newest, tail.marker_key) == ("tool_result", "r1")
 
 
 def test_sub_agent_and_injected_records_are_not_the_conversation(tmp_path: Path) -> None:

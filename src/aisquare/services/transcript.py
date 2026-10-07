@@ -89,6 +89,18 @@ _TOOL_USE_ID = re.compile(rb'"tool_use_id"\s*:\s*"([^"]+)"')
 """A tool result's pairing key, found in a line too long to parse (an escaped ``\\"`` inside a
 string never matches, so a pasted transcript cannot answer a tool use it quotes)."""
 
+_TOOL_USE_BLOCK = re.compile(rb'"type"\s*:\s*"tool_use"')
+"""A tool use in a line too long to parse, found the same way, as a key and not as text."""
+
+_TOOL_USE_BLOCK_ID = re.compile(
+    rb'"id"\s*:\s*"(toolu_[^"\\]+)"(?:\s*,\s*"name"\s*:\s*"([^"\\]{1,64})")?'
+)
+"""Such a tool use's id (the API's ``toolu_`` form), and its name where it follows the id, as
+the API writes the block."""
+
+_UNPARSED_ASIDE = re.compile(rb'"is(?:Sidechain|Meta)"\s*:\s*true')
+"""A line too long to parse that is a sub-agent's or an injected record, which the tail skips."""
+
 INTERRUPTED_MARKER = "[Request interrupted by user"
 """How Claude Code 2.1.292 records an Esc, as the text of a user record (a prefix: the
 rejection of a tool use adds `` for tool use]``). A Claude Code string, not a contract."""
@@ -464,11 +476,12 @@ def read_transcript_tail(
     records skipped, and the walk ends at whichever comes first: an assistant
     record of an OLDER message once the newest one has been seen, the human's
     own last prompt, :data:`TAIL_RECORDS`, or ``budget`` bytes. Every tool
-    result met on the way answers its tool use, one in a line too long to parse
-    included (its id is found without parsing), and a result may sit between two
-    blocks of the newest message, because tools run while it streams. Records
-    without a ``message.id`` (an older Claude Code) are read back to the human's
-    prompt instead. Never raises: an unreadable file is ``None``.
+    result met on the way answers its tool use, and a result may sit between two
+    blocks of the newest message, because tools run while it streams. A line too
+    long to parse is read for its ids alone (:func:`_tail_unparsed`): a result
+    in it still answers, and a tool use in it still waits. Records without a
+    ``message.id`` (an older Claude Code) are read back to the human's prompt
+    instead. Never raises: an unreadable file is ``None``.
 
     Only a regular file is opened. The path is whatever the agent's own hook
     payload said, and opening a named pipe waits for a writer: the watcher's
@@ -487,14 +500,19 @@ def read_transcript_tail(
         return None
     if facts.st_size == 0:
         return _TAIL_NOTHING
+    written = datetime.fromtimestamp(facts.st_mtime, tz=UTC)
     try:
-        return _tail_walk(file, facts.st_size, budget)
+        return _tail_walk(file, facts.st_size, budget, written)
     except OSError:
         return None
 
 
-def _tail_walk(file: Path, size: int, budget: int) -> TranscriptTail:
-    """The body of :func:`read_transcript_tail`, free to raise ``OSError``."""
+def _tail_walk(file: Path, size: int, budget: int, written: datetime) -> TranscriptTail:
+    """The body of :func:`read_transcript_tail`, free to raise ``OSError``.
+
+    ``written`` is when the file last changed: the time of a newest record too
+    long to parse, which its own ``timestamp`` cannot be read for.
+    """
     answered: set[str] = set()
     tools: list[list[PendingTool]] = []  # each record's, newest record first
     texts: list[str] = []  # each record's text, newest record first
@@ -506,7 +524,12 @@ def _tail_walk(file: Path, size: int, budget: int) -> TranscriptTail:
     examined = 0
     for offset, raw in _lines_backwards(file, size, budget=budget):
         if len(raw) > MAX_LINE:
-            answered.update(m.decode("utf-8", "replace") for m in _TOOL_USE_ID.findall(raw))
+            at = written if newest == "none" else None
+            said, unparsed_tools = _tail_unparsed(raw, answered, at)
+            if said is not None:
+                tools.append(unparsed_tools)
+                if newest == "none":
+                    newest, newest_at, marker_key = said, at, str(offset)
             continue
         record = _parse_transcript_line(raw)
         if record is None or record.get("isSidechain") is True or record.get("isMeta") is True:
@@ -640,6 +663,39 @@ def _tail_pending(block: dict[str, Any], at: datetime | None) -> PendingTool | N
         input=kept,
         at=at,
     )
+
+
+def _tail_unparsed(
+    raw: bytes, answered: set[str], at: datetime | None
+) -> tuple[str | None, list[PendingTool]]:
+    """A line too long to parse, read off its bytes: what record it is, and its pending tools.
+
+    Its tool results answer their tool uses (``answered`` grows), and make it a
+    ``tool_result``. A line with tool uses and no results is ``assistant_tool``,
+    and each of its tool uses still without a result is pending, known by id and
+    name alone (its input is far over :data:`TOOL_INPUT_MAX`). Skipped whole, a
+    ``Write`` of a large file waited on its permission prompt unseen, and the
+    text block before it in the same message read as the agent's last words at
+    its prompt, where a typed message's Enter would have approved the write.
+    ``None`` for a sub-agent's or an injected record, or one that shows neither.
+    """
+    results = [match.decode("utf-8", "replace") for match in _TOOL_USE_ID.findall(raw)]
+    answered.update(results)
+    if _UNPARSED_ASIDE.search(raw):
+        return None, []
+    if results:
+        return "tool_result", []
+    if not _TOOL_USE_BLOCK.search(raw):
+        return None, []
+    pending: list[PendingTool] = []
+    for match in _TOOL_USE_BLOCK_ID.finditer(raw):
+        tool_use_id = match.group(1).decode("utf-8", "replace")
+        name = (match.group(2) or b"tool").decode("utf-8", "replace")
+        if tool_use_id not in answered:
+            pending.append(
+                PendingTool(tool_use_id=tool_use_id, name=name, summary=name, input={}, at=at)
+            )
+    return "assistant_tool", pending
 
 
 __all__ = [

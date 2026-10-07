@@ -113,6 +113,15 @@ DOCUMENTED = (
     ".github/ISSUE_TEMPLATE/bug_report.md",
     "docs/runbooks/MORNING-HANDOFF.md",
     "docs/signing-in.md",
+    # The README's long form, moved out when the README became a front page
+    # (roadmap 9.5). Its fenced commands moved with it and are still steps a
+    # reader types, so each page is listed in its own right; the command tree
+    # lives in docs/reference.md now (TREE_DOCUMENT below).
+    "docs/install.md",
+    "docs/memory.md",
+    "docs/orchestration.md",
+    "docs/reference.md",
+    "docs/platform.md",
     # The fleet's user guide. Its command reference is fenced `sh` on purpose:
     # every `aisquare fleet …` line there is a step the reader types, so a flag
     # that leaves the CLI must fail here (docs/plans/fleet-tui.md §5, §10).
@@ -766,8 +775,13 @@ def test_the_convention_survives_a_widening_in_both_directions() -> None:
     )
 
 
+#: The page that draws the command tree. It was the README until the README
+#: became a front page (roadmap 9.5); the tree moved, verbatim, to the reference.
+TREE_DOCUMENT = "docs/reference.md"
+
+
 def test_the_command_tree_has_no_deleted_flags() -> None:
-    """The README's reference tree is not copy-pasteable, and was still wrong.
+    """The reference tree is not copy-pasteable, and was still wrong.
 
     `launch <planner|coder|runner> [--account DIR]` named a flag deleted a train
     earlier. The fenced-code guard above cannot see it: tree lines start with a
@@ -777,8 +791,8 @@ def test_the_command_tree_has_no_deleted_flags() -> None:
     once, so a flag counts as valid anywhere under its top-level command. That
     is still enough to catch a flag that exists nowhere, which is the defect.
     """
-    text = (REPO / "README.md").read_text(encoding="utf-8")
-    assert _tree_lines(text), "no command tree in the README — this guard sees nothing"
+    text = (REPO / TREE_DOCUMENT).read_text(encoding="utf-8")
+    assert _tree_lines(text), f"no command tree in {TREE_DOCUMENT} — this guard sees nothing"
 
     stale, checked = _stale_tree_flags(text)
 
@@ -793,7 +807,7 @@ def test_the_tree_guard_bites_on_a_flag_that_does_not_exist() -> None:
     `--account not under launch`. Doing it here means the ability to bite is
     re-earned on every commit rather than resting on one afternoon's check.
     """
-    text = (REPO / "README.md").read_text(encoding="utf-8")
+    text = (REPO / TREE_DOCUMENT).read_text(encoding="utf-8")
     spiked = text.replace("├── serve ", "├── serve [--nosuchflag] ", 1)
     assert spiked != text, "the anchor line moved — this bite-check is not spiking anything"
 
@@ -869,9 +883,20 @@ _NOT_AN_INVOCATION = (
 CENSUS = {
     ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
     "docs/runbooks/MORNING-HANDOFF.md": (1, 0),
-    # Re-measured 2026-09-05 when `project forget` / `project prune` (#83) added a
-    # fenced example to the memory section.
-    "README.md": (58, 5),
+    # Re-measured 2026-10-07 when the README became a front page (roadmap 9.5):
+    # the two quickstarts and the plain-command block, with the `uv tool install`
+    # line and the installer URL as the two classified mentions. The 82 commands
+    # it carried before moved, unchanged, into the five pages below.
+    "README.md": (5, 2),
+    # Measured 2026-10-07 on the day they were split out of the README; their
+    # commands sum to the README's 82 before the split. Re-measure when they grow.
+    "docs/install.md": (6, 3),
+    "docs/memory.md": (23, 0),
+    "docs/orchestration.md": (50, 2),
+    # One resolved line, and it is the command tree's root (`aisquare` alone in
+    # the bare fence); the tree itself is checked by the tree tests instead.
+    "docs/reference.md": (1, 1),
+    "docs/platform.md": (2, 1),
     # Re-measured 2026-09-13 when "Choose where traces land with your sign-in"
     # (#142) added its fence: 20 commands, the same four classified mentions.
     # Re-measured 2026-09-24 at 21 when #142 took in #141's review (its key

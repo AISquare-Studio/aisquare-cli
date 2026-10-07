@@ -204,11 +204,30 @@ def test_state_survives_a_reload(runtime: Runtime) -> None:
     assert again.allow_write is True
 
 
-def test_a_corrupt_state_file_is_replaced(isolated_home: Path) -> None:
-    remote_state_path().parent.mkdir(parents=True, exist_ok=True)
-    remote_state_path().write_text("{not json")
-    rt = Runtime(remote_state_path(), remote_audit_path())
+@pytest.mark.parametrize(
+    "body", ["{not json", "[1, 2]", '"remote"', '{"version": 2, "token": "kept"'], ids=repr
+)
+def test_a_corrupt_state_file_is_refused_and_left_as_it_is(isolated_home: Path, body: str) -> None:
+    """Replacing it meant a new link and passphrase, and writes off: every phone lost Remote
+    to one typo in a hand edit, at the first process that so much as read the file."""
+    path = remote_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    with pytest.raises(remote_server.RemoteError, match="is not a JSON object"):
+        Runtime(path, remote_audit_path())
+    assert path.read_text() == body
+
+
+@pytest.mark.parametrize("body", [b"", b" \n\t", b"\x00" * 512], ids=["empty", "blank", "NULs"])
+def test_an_empty_state_file_is_made_anew(isolated_home: Path, body: bytes) -> None:
+    """Nothing in it to keep: what a crash leaves when the size reached the disk and the
+    data did not is a run of NULs."""
+    path = remote_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(body)
+    rt = Runtime(path, remote_audit_path())
     assert len(rt.token) == 32 and rt.allow_write is False
+    assert json.loads(path.read_bytes())["token"] == rt.token
 
 
 # --- the token gate (§4-C) --------------------------------------------------------------

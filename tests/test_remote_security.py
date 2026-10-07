@@ -1318,6 +1318,25 @@ def test_a_file_that_cannot_be_read_is_never_replaced(runtime: Runtime) -> None:
     assert path.read_bytes() == before
 
 
+def test_a_hand_edit_that_breaks_the_json_costs_no_phone_its_link(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One deleted closing brace, then a plain ``asq remote status``: that read minted a new
+    link and passphrase and turned writes off, and the running server adopted them on its
+    next request, so every phone's link was a 404 (review of #243, round 2)."""
+    monkeypatch.setattr(remote_server, "_runtime", None)  # the CLI is another process
+    runtime.set_allow_write(True)
+    path = remote_state_path()
+    broken = path.read_bytes().rstrip()[:-1]
+    path.write_bytes(broken)
+    result = CliRunner().invoke(cli, ["--json", "remote", "status"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"] == "remote_state_unreadable"
+    assert path.read_bytes() == broken
+    assert runtime.reload_if_changed() is False, "the server keeps what it has"
+    assert (runtime.password, runtime.allow_write) == (PASSWORD, True)
+
+
 def test_a_write_waits_for_another_process_holding_the_lock(runtime: Runtime) -> None:
     """A CLI revoke landing inside a server's flush was undone by it: every read-modify-write
     now holds ``remote.json.lock``, and starts from what is on disk once it has it."""

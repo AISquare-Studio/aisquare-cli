@@ -653,6 +653,9 @@ _UNRESTRICTED = (
     "remote: could not restrict %s to your account — other users on this machine "
     "may be able to read %s"
 )
+_BLANK_STATE = b" \t\r\n\x00"
+"""All an empty ``remote.json`` holds: whitespace, or the NULs a crash leaves when the size
+reached the disk and the data did not (``core.state_file`` reads its file the same way)."""
 
 
 def _encoded_state(state: _State) -> bytes:
@@ -792,7 +795,7 @@ class Runtime:
                 return False
             digest, data = signature
             try:
-                raw = json.loads(data.decode("utf-8"))
+                raw = json.loads(data.decode("utf-8-sig"))
             except (ValueError, RecursionError):
                 return False
             if not isinstance(raw, dict) or raw.get("version") != STATE_VERSION:
@@ -813,24 +816,37 @@ class Runtime:
                 self._close_sockets(device_id, WS_CLOSE_UNAUTHORIZED)
             return True
 
-    def _read_state_file(self) -> tuple[bytes | None, dict[str, Any] | None]:
-        """The file's bytes and its JSON object: ``(None, None)`` when there is no file,
-        ``(bytes, None)`` when it is not a JSON object. Unreadable is a :class:`RemoteError`:
-        a file that exists is never replaced because this process could not read it."""
+    def _read_state_file(self) -> tuple[bytes, dict[str, Any]] | None:
+        """The file's bytes and its JSON object; ``None`` when there is nothing to keep.
+
+        Nothing to keep is no file, or one holding only blanks or a crash's NULs.
+        Anything else that is not a JSON object is a :class:`RemoteError`, and so is
+        a file that cannot be read: what replaces a file is a new link and a new
+        passphrase, so every phone loses Remote, and a hand edit's typo did exactly
+        that for any process that merely read the file (``asq remote status``, the
+        R modal), the running server adopting it on its next request.
+        """
         try:
             data = self._state_path.read_bytes()
         except FileNotFoundError:
-            return None, None
+            return None
         except OSError as exc:
             raise RemoteError(
                 f"{self._state_path} could not be read ({exc}) — nothing was changed; "
                 "fix its permissions and try again"
             ) from exc
+        if not data.strip(_BLANK_STATE):
+            return None
         try:
-            raw = json.loads(data.decode("utf-8"))
+            raw = json.loads(data.decode("utf-8-sig"))
         except (ValueError, RecursionError):
-            return data, None
-        return data, raw if isinstance(raw, dict) else None
+            raw = None
+        if not isinstance(raw, dict):
+            raise RemoteError(
+                f"{self._state_path} is not a JSON object — nothing was changed; fix it, "
+                "or move it aside to start over with a new link and password"
+            )
+        return data, raw
 
     def _load_state(self) -> _State:
         """``remote.json`` as it is; written only when there is something to write.
@@ -838,24 +854,26 @@ class Runtime:
         A version-2 file that parses is taken as it is, with no write: every process
         that reads the file (``asq remote status``, every CLI toggle) used to rewrite
         it from its own snapshot, and one landing inside a server's unlock dropped
-        the device that had just unlocked. A missing file is made, a corrupt one
-        replaced and a version-1 one migrated, each under the file lock and re-read
-        there first, so two processes starting at once settle on one file.
+        the device that had just unlocked. A missing or empty file is made and a
+        version-1 one migrated, each under the file lock and re-read there first, so
+        two processes starting at once settle on one file; any other file is refused
+        (:meth:`_read_state_file`), never replaced.
         """
-        data, raw = self._read_state_file()
-        if raw is not None and raw.get("version") == STATE_VERSION:
+        found = self._read_state_file()
+        if found is not None and found[1].get("version") == STATE_VERSION:
+            data, raw = found
             state = _State.from_json(raw)
             if _encoded_state(state) == data:
                 self._disk = self._state_digest(data)
                 return state
         with self._state_file_lock():
-            data, raw = self._read_state_file()
-            if raw is None:
+            found = self._read_state_file()
+            if found is None:
                 state = _State(new_token(), new_password())
-            elif raw.get("version") == STATE_VERSION:
-                state = _State.from_json(raw)
+            elif found[1].get("version") == STATE_VERSION:
+                state = _State.from_json(found[1])
             else:
-                state = _State.migrated(raw)
+                state = _State.migrated(found[1])
             self._write_state(state)
             return state
 

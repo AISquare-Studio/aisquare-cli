@@ -1467,9 +1467,9 @@ def check_remote_key_names(keys: object) -> list[str]:
     return list(keys)
 
 
-def check_remote_text(text: str) -> str:
-    """``text`` when it holds no control character but tab, newline and carriage return;
-    else 400 ``invalid``, naming the pad's key for it.
+def check_remote_text(text: str) -> None:
+    """Refuse typed ``text`` holding a control character other than tab, newline and
+    carriage return: 400 ``invalid``, naming the pad's key for it.
 
     Text reaches the pane as hex, byte for byte, so a control character in it IS a
     keystroke: ``"\\x03"`` was a Ctrl-C past the double-press guard, ``"\\x1a"`` the
@@ -1479,7 +1479,7 @@ def check_remote_text(text: str) -> str:
     """
     found = _TEXT_CONTROL.search(text)
     if found is None:
-        return text
+        return
     char = found.group()
     key = _TEXT_CONTROL_KEYS.get(char)
     instead = f"send the pad's {key} key instead" if key else "no key of the pad sends it"

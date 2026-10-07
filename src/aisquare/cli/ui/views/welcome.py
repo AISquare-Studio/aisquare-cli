@@ -214,6 +214,12 @@ def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
     if claude.connected:
         text.append("\n✓ ", style="green")
         text.append("connected — the manager gets its instructions through aisquare's hooks")
+    elif claude.hooks_off is not None:
+        text.append("\n✗ ", style="red")
+        text.append(f'hooks are switched off ("disableAllHooks": true in {claude.hooks_off}) — ')
+        text.append(
+            "Connect cannot change that. Remove it; this page notices within a few seconds."
+        )
     else:
         text.append("\n✗ ", style="red")
         text.append("not connected — Connect installs aisquare's hooks, which bring the manager ")
@@ -878,7 +884,9 @@ class WelcomeView(VerticalScroll):
         self.query_one("#claude-status", Static).update(body)
         found = claude is not None and claude.found
         connect = self.query_one("#claude-connect", Button)
-        connect.display = found and claude is not None and not claude.connected
+        connect.display = (
+            found and claude is not None and not claude.connected and claude.hooks_off is None
+        )
         self.query_one("#claude-sign-in", Button).display = (
             found and claude is not None and claude.signed_in is False
         )

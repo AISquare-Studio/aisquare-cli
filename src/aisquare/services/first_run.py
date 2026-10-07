@@ -110,6 +110,9 @@ class ClaudeState:
     version: str | None = None
     connected: bool = False
     """aisquare's hooks are in the config dir a session from this shell reads."""
+    hooks_off: Path | None = None
+    """The settings file that switches every hook off (``"disableAllHooks": true``),
+    when one does: Connect cannot change it, so step 2 says so instead of offering it."""
     signed_in: bool | None = None
     """``None`` when this probe did not look (the periodic one skips it)."""
     problem: str | None = None
@@ -135,6 +138,14 @@ def _connected_default() -> bool:
     return agents_service.claude_code_connected()
 
 
+def _hooks_off_default() -> Path | None:
+    """The settings file that switches Claude Code's hooks off here, if one does."""
+    if not agent_core.hooks_disabled("claude-code"):
+        return None
+    where = agent_core.ambient_hook_dir("claude-code")
+    return where / "settings.json" if where is not None else None
+
+
 def _signed_in_default() -> bool:
     return accounts_core.signed_in(accounts_core.default_account())
 
@@ -145,6 +156,7 @@ def probe_claude(
     which: Callable[[str], str | None] = shutil.which,
     connected: Callable[[], bool] | None = None,
     signed_in: Callable[[], bool] | None = None,
+    hooks_off: Callable[[], Path | None] | None = None,
 ) -> ClaudeState:
     """Claude Code as the fleet will meet it. Starts no process; never raises.
 
@@ -154,7 +166,9 @@ def probe_claude(
     one shared answer to "is Claude Code connected" (``agents.claude_code_connected``),
     which the doctor's row asks as well. ``sign_in`` reads the plain ``claude``'s
     login, which lives in a file that can be tens of megabytes, so the periodic
-    re-check leaves it out.
+    re-check leaves it out. Not connected, it asks ``core.agents.hooks_disabled``
+    first, as the shared check's contract says: ``"disableAllHooks": true`` reads as
+    not connected, and no Connect can change it.
     """
     problems: list[str] = []
     try:
@@ -175,6 +189,12 @@ def probe_claude(
     except Exception as exc:
         problems.append(f"could not read the hooks: {_why(exc)}")
         is_connected = False
+    switched_off: Path | None = None
+    if not is_connected:
+        try:
+            switched_off = (hooks_off or _hooks_off_default)()
+        except Exception as exc:
+            problems.append(f"could not read the hook settings: {_why(exc)}")
     signed: bool | None = None
     if sign_in and binary is not None:
         try:
@@ -187,6 +207,7 @@ def probe_claude(
         binary=binary,
         version=version,
         connected=is_connected,
+        hooks_off=switched_off,
         signed_in=signed,
         problem="; ".join(problems) or None,
     )

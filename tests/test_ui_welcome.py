@@ -382,6 +382,19 @@ def test_a_connect_that_fails_says_why() -> None:
     assert again  # Connect is still there to try again
 
 
+def test_hooks_switched_off_are_named_instead_of_offering_connect(tmp_path: Path) -> None:
+    switched_off = dataclasses.replace(UNHOOKED, hooks_off=tmp_path / ".claude" / "settings.json")
+
+    async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> tuple[str, bool]:
+        return card(page, "claude-status"), visible(page, "claude-connect")
+
+    text, connect = hosted(Machine(claude=[switched_off]), go)
+    assert '"disableAllHooks": true' in text and "Connect cannot change that" in text
+    assert not connect
+    # Control: hooks merely missing are what Connect is for.
+    assert hosted(Machine(claude=[UNHOOKED]), go)[1]
+
+
 def test_sign_in_opens_the_accounts_page() -> None:
     signed_out = dataclasses.replace(READY, signed_in=False)
 

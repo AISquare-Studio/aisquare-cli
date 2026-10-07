@@ -9,6 +9,7 @@ that must NOT be spawned twice, the ``prompt`` that must NOT reach a spawn.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -214,6 +215,32 @@ def test_a_probe_that_fails_is_said_not_raised(tmp_path: Path) -> None:
     state = first_run.probe_claude(which=lambda name: binary, connected=broken, signed_in=broken)
     assert state.found and not state.connected and state.signed_in is None
     assert state.problem is not None and "settings.json is a directory" in state.problem
+
+
+def test_hooks_switched_off_are_named_and_connect_is_not_their_answer(tmp_path: Path) -> None:
+    """``"disableAllHooks": true`` reads as not connected, and Connect cannot change it."""
+    where = agent_core.ambient_hook_dir("claude-code")
+    assert where is not None
+    where.mkdir(parents=True)
+    settings = where / "settings.json"
+    binary = str(tmp_path / "claude")
+
+    def probe() -> first_run.ClaudeState:
+        return first_run.probe_claude(which=lambda name: binary, signed_in=lambda: True)
+
+    settings.write_text(json.dumps({"disableAllHooks": True}), encoding="utf-8")
+    off = probe()
+    assert (off.connected, off.hooks_off) == (False, settings)
+    settings.write_text(json.dumps({}), encoding="utf-8")  # control: hooks merely missing
+    assert (probe().connected, probe().hooks_off) == (False, None)
+
+    def never() -> Path | None:
+        raise AssertionError("asked whether hooks are off for a connected Claude Code")
+
+    connected = first_run.probe_claude(
+        which=lambda name: binary, connected=lambda: True, signed_in=lambda: True, hooks_off=never
+    )
+    assert connected.connected and connected.hooks_off is None
 
 
 def test_connect_is_the_doctors_own_fix() -> None:

@@ -883,9 +883,18 @@ function failText(res, max) {
   return message || plainText(res.error) || "That did not work (" + res.status + ").";
 }
 
-/* What a refusal does beyond its sentence. */
+/* What a refusal does beyond its sentence. A read_only is the machine saying writes are
+ * off now: the page shows it at once, where it kept the pad and Send live until the next
+ * remote frame said so. */
 function afterFailure(res, route) {
-  if (res.status === 403 && res.error === "read_only") readOnlySheet(res.message);
+  if (res.status === 403 && res.error === "read_only") {
+    if (writable()) {
+      S.remote = Object.assign({}, S.remote, { allow_write: false });
+      drawStatus();
+      gateButtons();
+    }
+    readOnlySheet(res.message);
+  }
   if (res.status === 404 && res.error === "no_such_agent" && route && route.pid) pageGo({ name: "project", pid: route.pid, tab: "fleet" });
 }
 

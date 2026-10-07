@@ -768,6 +768,26 @@ async function stopAtAPrompt() {
   return { said, dismissed: page.sent("api/agent/stop").map((body) => body.dismiss_dialog === true), toast: page.toast() };
 }
 
+/* A pad key refused read_only: writes went off on the machine, and no remote frame has
+ * said so yet. */
+async function refusedReadOnly() {
+  const page = await agentView({
+    "POST api/send-keys": () => ({ status: 403, json: { error: "read_only", message: "writes are off" } }),
+  });
+  const pill = () => !page.run("UI.ro.hidden");
+  const before = { send: sendState(page), pill: pill() };
+  click(buttonNamed(page.main(), "1"));
+  await settle();
+  return {
+    before,
+    send: sendState(page),
+    keys: page.main().querySelectorAll("button.w.key").map((key) => key.disabled),
+    pill: pill(),
+    readOnly: page.run("document.body.classList.contains('ro')"),
+    sheet: page.run("UI.sheet").textContent,
+  };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -793,6 +813,7 @@ async function main() {
     tellNotSent: await tellNotSent(),
     paneCursor: await paneCursor(),
     stopAtAPrompt: await stopAtAPrompt(),
+    refusedReadOnly: await refusedReadOnly(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

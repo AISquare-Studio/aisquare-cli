@@ -1053,6 +1053,19 @@ def test_a_stop_refused_at_a_prompt_is_explained_in_the_pages_own_words(
     assert stop["toast"] == "Stopped coder-1"
 
 
+def test_a_write_refused_read_only_shuts_every_write_button_at_once(
+    boot_report: dict[str, Any],
+) -> None:
+    """After a 403 ``read_only`` the pad and Send stayed live, and the READ-ONLY pill hidden,
+    until a ``remote`` frame or a reconnect said what the machine had just said itself."""
+    refused = boot_report["refusedReadOnly"]
+    assert refused["before"] == {"send": {"busy": False, "disabled": False}, "pill": False}
+    assert refused["send"] == {"busy": False, "disabled": True}
+    assert refused["keys"] and all(refused["keys"]), refused["keys"]
+    assert refused["pill"] is True and refused["readOnly"] is True
+    assert "can watch but not act" in refused["sheet"]
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

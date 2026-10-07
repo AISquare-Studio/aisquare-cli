@@ -48,8 +48,8 @@ case ${CLAUDE_PLUGIN_ROOT:-} in
     *) _installed_in= ;;
 esac
 for _dir in "$_installed_in" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; do
-    [ -n "$_dir" ] && [ -f "$_dir/settings.json" ] || continue
-    if grep -Eq "$_ours" "$_dir/settings.json" 2>/dev/null; then
+    # A missing or unreadable settings.json is grep's error, which is no match.
+    if [ -n "$_dir" ] && grep -Eq "$_ours" "$_dir/settings.json" 2>/dev/null; then
         exit 0
     fi
 done

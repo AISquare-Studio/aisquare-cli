@@ -781,3 +781,18 @@ def test_asq_remote_needs_prints_one_line_per_item(monkeypatch: pytest.MonkeyPat
         "⚑ question · aisquare-cli · coder-auth — coder-auth asks you a question [/b] (1h05m)",
         "⚑ fleet_down · aisquare-cli · - — tmux is down (1h05m)",
     ]
+
+
+def test_serve_hands_its_port_to_the_kit(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Push discovery asks ngrok's local API for the tunnel to THIS port (SPEC §5.8)."""
+    import uvicorn
+
+    served: list[Any] = []
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: served.append((app, kwargs)))
+    (tmp_path / "index.html").write_text("<!doctype html>")
+    remote_server.run_foreground(tmp_path, 9123)
+    ((app, kwargs),) = served
+    assert app.kit.port == kwargs["port"] == 9123

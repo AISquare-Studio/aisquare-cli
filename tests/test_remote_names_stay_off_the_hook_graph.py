@@ -38,9 +38,11 @@ REMOTE = (
     "cli/ui/views/remote.py",
 )
 
-#: Remote names that may stay shared: neither is an entry point, and renaming them
-#: churns about sixty test lines. This set may only shrink.
-GRANDFATHERED = frozenset({"build_app", "token"})
+#: Remote names that may stay shared: ``Runtime.token``, which no hook-path code
+#: reaches, and renaming it churns about sixty test lines. This set may only shrink:
+#: ``build_app`` left it when #240's own ``build_app`` turned out to be reached by name
+#: from the hook path, and the remote def became ``build_remote_app``.
+GRANDFATHERED = frozenset({"token"})
 
 
 def _is_remote(module: Path) -> bool:

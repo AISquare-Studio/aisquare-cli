@@ -1948,7 +1948,7 @@ async def remote_lifespan(kit: RemoteKit) -> AsyncIterator[None]:
             pool.shutdown(wait=False, cancel_futures=True)
 
 
-def build_app(
+def build_remote_app(
     runtime: Runtime,
     *,
     sources: Sources | None = None,
@@ -2386,6 +2386,14 @@ def build_app(
     return _TokenGate(inner, runtime, kit)
 
 
+build_app = build_remote_app
+"""``build_app`` is the name every caller uses (SPEC §1). The def carries its area prefix
+because #240 defines a ``build_app`` of its own that the hook path reaches by bare name
+(``serve`` → the captain's voice ``serve`` → ``build_app``), and a remote def of that
+name would pull this whole app into the graph the config-write guard walks. An
+assignment is not a def, so the alias bridges nothing."""
+
+
 # --- process lifecycle: the module API the TUI modal calls (PLAN §4-F) ----------------
 
 
@@ -2521,7 +2529,7 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
     with _lock:
         if _server is not None and _server.running:
             return state.connection_info(_server.port)
-        app = build_app(state, dist_dir=dist_dir)
+        app = build_remote_app(state, dist_dir=dist_dir, port=port)
         server = _Server(app, port)
         server.start_serving()
         _server = server
@@ -2610,7 +2618,7 @@ def run_foreground(dist_dir: Path | None = None, port: int = DEFAULT_PORT) -> No
         raise NoRemotePage(page_problem)
     import uvicorn
 
-    app = build_app(runtime(), dist_dir=dist_dir)
+    app = build_remote_app(runtime(), dist_dir=dist_dir, port=port)
     uvicorn.run(app, host=BIND, port=port, log_level="warning", ws="auto")
 
 
@@ -2639,6 +2647,7 @@ __all__ = [
     "Writes",
     "build_app",
     "build_local_url",
+    "build_remote_app",
     "check_public_origin",
     "explainability_payload",
     "install_page",

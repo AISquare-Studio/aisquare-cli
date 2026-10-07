@@ -40,8 +40,9 @@ the same builders the typer commands use (``projects_json``, ``agents_json``,
 Remote-specific state has its own endpoint, ``GET /api/remote``.
 
 State (token, password, ``allow_write``, ``auto_off_at``, devices) lives in
-``~/.aisquare/remote.json`` at 0600, and a serving process re-reads it when its
-bytes change — ``aisquare remote allow-write on`` from another shell reaches the
+``~/.aisquare/remote.json``, owner-only (0600; on Windows, a DACL for this
+account alone), and a serving process re-reads it when its bytes change —
+``aisquare remote allow-write on`` from another shell reaches the
 running server within a second (:meth:`Runtime.reload_if_changed`). Everything
 that touches real systems goes through :class:`Sources` and :class:`Writes`, two
 bags of callables the tests replace — the server itself never opens the store or
@@ -71,11 +72,13 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
+from aisquare.core.atomic import write_replacing
 from aisquare.core.paths import (
     ensure_home,
     remote_audit_path,
     remote_dist_dir,
     remote_state_path,
+    restrict_to_owner,
 )
 from aisquare.core.version import __version__
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TurnMetric
@@ -326,6 +329,12 @@ class _State:
         )
 
 
+_UNRESTRICTED = (
+    "remote: could not restrict %s to your account — other users on this machine "
+    "may be able to read %s"
+)
+
+
 class Runtime:
     """The server's mutable state: ``remote.json``, the live sockets, the audit log.
 
@@ -349,6 +358,7 @@ class Runtime:
         """
         self.reads = 0
         """How many times the file was parsed after startup — tests pin the short-circuit."""
+        self._said_unrestricted = False
         self._state = self._load()
 
     # -- persistence --
@@ -420,12 +430,18 @@ class Runtime:
 
     def _write(self, state: _State) -> None:
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._state_path.with_name(self._state_path.name + ".tmp")
         encoded = json.dumps(state.as_json(), indent=2).encode("utf-8")
-        tmp.write_bytes(encoded)
-        tmp.chmod(0o600)
-        tmp.replace(self._state_path)
-        self._state_path.chmod(0o600)
+        # The token, the passphrase and every device's cookie, so written as
+        # core.credentials writes secrets: a temp of this write's own, created 0600
+        # and restricted to this account while still EMPTY (on NTFS, the DACL the
+        # rename carries over), then renamed over the target with the Windows
+        # contention retry. A shared `remote.json.tmp` written under the umask and
+        # chmodded afterwards held them 0644 until the chmod, and two writers
+        # collided on its name. Bytes, so the digest below is of what is on disk.
+        restricted = write_replacing(self._state_path, encoded, owner_only=True)
+        if not restricted and not self._said_unrestricted:
+            self._said_unrestricted = True  # once: the flush rewrites the file every 30 s
+            log.warning(_UNRESTRICTED, self._state_path, "the password and device cookies")
         # Our own write, by content: the next check finds these exact bytes and
         # skips the parse; a sibling process writing the same size in the same
         # mtime tick is still seen, because its bytes differ.
@@ -571,14 +587,28 @@ class Runtime:
     # -- audit --
 
     def audit(self, sid: str, endpoint: str, summary: str) -> None:
-        """``ts sid endpoint summary`` — one line per write that went through (§4-E)."""
-        line = f"{_stamp()} {sid} {endpoint} {summary}\n"
+        """``ts sid endpoint summary`` — one line per write that went through (§4-E).
+
+        A line names its device by ``sid``, which IS that device's cookie, so the
+        log is owner-only before it holds one: created empty at 0600, then
+        restricted to this account (on NTFS, where the bits protect nothing, the
+        DACL), the order ``core.atomic`` restricts a temp in. Appended to in text
+        mode and chmodded afterwards, the first line sat under the umask until the
+        chmod, and Windows never got anything but the DACL its directory hands down.
+        """
+        line = f"{_stamp()} {sid} {endpoint} {summary}\n".encode()
         with self._lock:
             self._audit_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._audit_path.open("a", encoding="utf-8") as handle:
+            try:
+                os.close(os.open(self._audit_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            except FileExistsError:
+                pass
+            else:
+                if not restrict_to_owner(self._audit_path):
+                    log.warning(_UNRESTRICTED, self._audit_path, "the device cookies it records")
+            # Binary, so a line ends in "\n" on Windows too.
+            with self._audit_path.open("ab") as handle:
                 handle.write(line)
-            with contextlib.suppress(OSError):
-                self._audit_path.chmod(0o600)
 
 
 # --- what the server reads and writes: the seams -----------------------------------

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import stat
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -123,15 +125,65 @@ def unlock(client: TestClient, runtime: Runtime, password: str = PASSWORD) -> An
 # --- state file -----------------------------------------------------------------------
 
 
-def test_state_file_is_created_0600_with_write_off(runtime: Runtime) -> None:
+def test_state_file_is_created_with_write_off(runtime: Runtime) -> None:
     path = remote_state_path()
     assert path.exists()
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    raw = json.loads(path.read_text())
+    raw = json.loads(path.read_text(encoding="utf-8"))
     assert set(raw) == {"token", "password", "allow_write", "auto_off_at", "sessions"}
     assert raw["allow_write"] is False
     assert len(raw["token"]) == 32
     assert raw["sessions"] == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_state_file_is_0600(runtime: Runtime) -> None:
+    assert stat.S_IMODE(remote_state_path().stat().st_mode) == 0o600
+
+
+def test_both_files_are_restricted_to_the_owner_before_they_hold_anything(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every platform, Windows included, where the 0600 above is skipped: there a new file
+    starts with the DACL its directory hands down, so the restriction is the whole
+    protection. ``remote.json``'s temp is restricted while still empty, before each write;
+    the audit log once, when it is created, before its first line."""
+    from aisquare.core import paths
+
+    restricted: list[tuple[str, int]] = []
+    real = paths.restrict_to_owner
+
+    def spy(path: Path) -> bool:
+        restricted.append((path.name, path.stat().st_size))
+        return real(path)
+
+    monkeypatch.setattr(paths, "restrict_to_owner", spy)
+    monkeypatch.setattr(remote_server, "restrict_to_owner", spy)
+    runtime.set_allow_write(True)
+    runtime.audit("sid", "note", "x")
+    runtime.audit("sid", "note", "y")
+    assert len(restricted) == 2, restricted  # the log once, not once per line
+    (temp, temp_size), (log, log_size) = restricted
+    assert temp.startswith(f".{remote_state_path().name}.") and temp_size == 0
+    assert log == remote_audit_path().name and log_size == 0
+    assert len(remote_audit_path().read_bytes().splitlines()) == 2
+
+
+def test_a_restriction_that_fails_is_said_once_not_at_every_flush(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A serving process rewrites ``remote.json`` every 30 s, so a warning per write would
+    repeat for as long as it serves wherever ``icacls`` cannot run. The file is still written."""
+    from aisquare.core import paths
+
+    monkeypatch.setattr(paths, "restrict_to_owner", lambda path: False)
+    with caplog.at_level(logging.WARNING, logger=remote_server.__name__):
+        for _ in range(3):
+            runtime.flush()
+        runtime.set_allow_write(True)
+    said = [r.getMessage() for r in caplog.records if r.name == remote_server.__name__]
+    assert len(said) == 1 and "could not restrict" in said[0], said
+    assert str(remote_state_path()) in said[0]
+    assert json.loads(remote_state_path().read_bytes())["allow_write"] is True
 
 
 def test_state_survives_a_reload(runtime: Runtime) -> None:
@@ -324,7 +376,8 @@ def test_allowed_write_runs_the_handler_and_audits(
     ts, who, endpoint, summary = lines[0].split(" ", 3)
     assert who == sid and endpoint == "task/claim" and summary == "summary of task/claim"
     assert ts.endswith("+00:00")
-    assert stat.S_IMODE(remote_audit_path().stat().st_mode) == 0o600
+    if sys.platform != "win32":  # POSIX file modes; the NTFS half is the spy test above
+        assert stat.S_IMODE(remote_audit_path().stat().st_mode) == 0o600
 
 
 def test_a_refused_write_keeps_its_status_and_is_not_audited(

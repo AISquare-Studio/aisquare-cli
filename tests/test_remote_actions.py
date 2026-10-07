@@ -1885,11 +1885,7 @@ def test_a_refused_auto_tell_answers_as_the_cli_maps_it_and_is_on_the_trail(
 # --- with needs-you's own predicates (lane C) ------------------------------------------------
 #
 # Above, needs-you is faked whole. Here only the agent's snapshot is: the predicates are
-# the module's own, held to what SPEC §4.5 says they answer for that snapshot. Until lane C
-# lands they are the foundation's stubs, which answer False to everything, so these fail;
-# strict, so the merge that makes them pass also makes the run fail until the marker goes.
-
-NEEDS_C = "needs lane c-needs-you: the needs-you predicates (the foundation's stubs answer False)"
+# the module's own, held to what SPEC §4.5 says they answer for that snapshot.
 
 
 @pytest.fixture
@@ -1900,7 +1896,6 @@ def own_predicates(needs: FakeNeeds, monkeypatch: pytest.MonkeyPatch) -> FakeNee
     return needs
 
 
-@pytest.mark.xfail(strict=True, reason=NEEDS_C)
 def test_a_card_whose_item_needs_you_still_lists_goes_through(
     phone: Phone, fleet: FleetCalls, own_predicates: FakeNeeds, project: ProjectInfo
 ) -> None:
@@ -1915,7 +1910,6 @@ def test_a_card_whose_item_needs_you_still_lists_goes_through(
     assert fleet.names() == ["switch"]
 
 
-@pytest.mark.xfail(strict=True, reason=NEEDS_C)
 def test_a_current_permission_item_is_an_open_dialog_to_the_guard(
     phone: Phone,
     fleet: FleetCalls,
@@ -1933,7 +1927,6 @@ def test_a_current_permission_item_is_an_open_dialog_to_the_guard(
     assert fleet.calls == [] and pane.sent == []
 
 
-@pytest.mark.xfail(strict=True, reason=NEEDS_C)
 def test_prompt_types_into_a_quiet_waiting_agent_that_has_no_transcript(
     phone: Phone, own_predicates: FakeNeeds, pane: FakePane, project: ProjectInfo
 ) -> None:

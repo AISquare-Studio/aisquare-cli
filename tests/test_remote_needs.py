@@ -40,7 +40,6 @@ from aisquare.models import (
 )
 from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_needs
-from aisquare.services.remote_actions import LedgerEntry
 from aisquare.services.remote_needs import (
     AgentNow,
     NeedsItem,
@@ -1848,59 +1847,14 @@ def test_tmux_failing_mid_answer_is_said_and_still_on_the_trail(live: Live) -> N
     assert live.audit()[-1].endswith("enter=False failed"), "part of it may have reached the pane"
 
 
-class _KeepingLedger:
-    """A ledger that keeps finished requests, the way the real one must.
-
-    Whole on its own, not a subclass: the real ``ActionLedger`` (lane E) keeps
-    state its own ``__init__`` makes, which a subclass skipping it would lack.
-    """
-
-    def __init__(self) -> None:
-        self.finished: dict[tuple[str, str], tuple[int, dict[str, object]]] = {}
-
-    def ledger_replay(
-        self, device_id: str, request_id: str
-    ) -> tuple[int, dict[str, object]] | None:
-        return self.finished.get((device_id, request_id))
-
-    def ledger_begin(self, device_id: str, request_id: str, endpoint: str) -> bool:
-        return True
-
-    def ledger_finish(
-        self, device_id: str, request_id: str, status: int, body: dict[str, object]
-    ) -> None:
-        self.finished[(device_id, request_id)] = (status, body)
-
-    def ledger_recent(self, device_id: str) -> list[LedgerEntry]:
-        return []
-
-
-def _answer_twice(live: Live) -> tuple[Any, Any]:
+def test_a_retried_answer_is_typed_once_with_the_servers_own_ledger(live: Live) -> None:
     live.runtime.set_allow_write(True)
     card = live.card("permission")
     body = {"id": card["id"], "keys": ["1"], "request_id": "c0ffee"}
-    return (
-        live.client.post(live.url("needs/answer"), json=body),
-        live.client.post(live.url("needs/answer"), json=body),
-    )
-
-
-def test_a_retried_answer_is_answered_from_the_ledger_not_typed_twice(
-    live: Live, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(live.app.kit, "ledger", _KeepingLedger())
-    first, again = _answer_twice(live)
+    first = live.client.post(live.url("needs/answer"), json=body)
+    again = live.client.post(live.url("needs/answer"), json=body)
     assert first.status_code == again.status_code == 200
-    assert first.json() == again.json()
-    assert live.tmux.typed == [("keys", "%7", "1")]
-
-
-@pytest.mark.xfail(
-    strict=True, reason="needs lane e-agent-actions: the request ledger that keeps answers"
-)
-def test_a_retried_answer_is_typed_once_with_the_servers_own_ledger(live: Live) -> None:
-    first, again = _answer_twice(live)
-    assert first.status_code == again.status_code == 200
+    assert first.json() == again.json(), "the retry is answered from the ledger"
     assert live.tmux.typed == [("keys", "%7", "1")]
 
 

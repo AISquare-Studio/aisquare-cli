@@ -249,12 +249,17 @@ def _lines_backwards(
 
 
 def _parse_transcript_line(raw: bytes) -> dict[str, Any] | None:
-    """One JSONL record, or ``None`` for anything that cannot be one usefully."""
+    """One JSONL record, or ``None`` for anything that cannot be one usefully.
+
+    A line nested deeper than ``json`` recurses (well inside :data:`MAX_LINE`:
+    about 1 000 levels on 3.11) raises ``RecursionError``, not ``ValueError``;
+    it is no record either, and must not cost the page or the tail its reader.
+    """
     if len(raw) > MAX_LINE:
         return None
     try:
         record = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return None
     return record if isinstance(record, dict) else None
 
@@ -602,7 +607,10 @@ def _tail_pending(block: dict[str, Any], at: datetime | None) -> PendingTool | N
     payload = block.get("input")
     kept: Mapping[str, object] = {}
     if isinstance(payload, dict):
-        size = len(json.dumps(payload, ensure_ascii=False).encode("utf-8", "replace"))
+        try:
+            size = len(json.dumps(payload, ensure_ascii=False).encode("utf-8", "replace"))
+        except (ValueError, RecursionError):  # what parsed may still be too deep to write
+            size = TOOL_INPUT_MAX + 1
         kept = payload if size <= TOOL_INPUT_MAX else {}
     return PendingTool(
         tool_use_id=tool_use_id,

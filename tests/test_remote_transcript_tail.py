@@ -454,6 +454,16 @@ def test_no_transcript_is_none_and_an_empty_one_is_nothing(tmp_path: Path) -> No
     assert (tail.pending, tail.newest, tail.newest_at, tail.last_text) == ((), "none", None, None)
 
 
+def test_a_line_nested_past_the_parsers_depth_is_skipped_not_raised(tmp_path: Path) -> None:
+    """``json`` raises ``RecursionError`` for it, not ``ValueError``; neither reader may."""
+    path = _write(tmp_path / "deep.jsonl", [_prompt("hi", uuid="u1")])
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("[" * 100_000 + "]" * 100_000 + "\n")
+    tail = read_transcript_tail(path)
+    assert tail is not None and (tail.newest, tail.marker_key) == ("user_prompt", "u1")
+    assert any("hi" in line for line in _plain(read_page(path).lines))
+
+
 def test_garbage_lines_are_skipped(tmp_path: Path) -> None:
     path = tmp_path / "torn.jsonl"
     _write(

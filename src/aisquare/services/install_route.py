@@ -763,13 +763,18 @@ def not_automated(route: InstallRoute) -> str | None:
     process afterwards. Everything else is told the exact command instead.
     """
     windows = _windows_blocker(route, "replace")
+    if route.kind == EDITABLE:
+        # First on every platform: the pull is the step the printed reinstall
+        # cannot carry, and Windows only changes WHEN the reinstall can run.
+        pull = command_line(["git", "-C", route.source or ".", "pull"])
+        reason = (
+            f"an editable install follows its checkout — pull it first ({pull}), then reinstall it"
+        )
+        if windows is not None:
+            reason += " after aisquare exits (Windows locks the files of a running program)"
+        return reason
     if windows is not None:
         return windows
-    if route.kind == EDITABLE:
-        return (
-            "an editable install follows its checkout — pull it first "
-            f"({command_line(['git', '-C', route.source or '.', 'pull'])}), then reinstall it"
-        )
     if route.kind != UV_TOOL:
         return _NOT_AUTOMATED.get(route.kind, "this install is not one aisquare manages")
     receipt = route.receipt or UvReceipt()

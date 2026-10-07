@@ -25,6 +25,7 @@ from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import credentials as credentials_store
 from aisquare.core import paths
+from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import (
     AppConfig,
     ExplainabilitySettings,
@@ -181,7 +182,9 @@ def initialize(
                 f"{report.snapshot.token_count} tokens packed for fast agent context."
             )
         elif report.snapshot is None:
-            notes.append("Codebase snapshot skipped (repomix/Node not available).")
+            # Off (no Node, or no packer: optional, not a fault) or a pack that
+            # failed -- the same sentence `project onboard` prints, from one place.
+            notes.append(f"Snapshot: {snapshot_core.skipped_detail()}.")
 
     for agent in agents:
         try:
@@ -189,8 +192,8 @@ def initialize(
         except (KeyError, ValueError) as exc:
             notes.append(f"Could not connect {agent}: {exc}")
             continue
-        hook_note = "hooks installed" if connection.hooks_installed else "no hooks for this agent"
-        notes.append(f"Connected {agent}: {hook_note}, imported {connection.imported} entries.")
+        # Always installed: `connect` refuses rather than return a connection without hooks.
+        notes.append(f"Connected {agent}: hooks installed, imported {connection.imported} entries.")
 
     return SetupReport(
         home=home,
@@ -468,14 +471,36 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
     return tuple(refresh), tuple(left)
 
 
+def settings_unreadable(directory: Path) -> str | None:
+    """Why ``directory``'s settings.json cannot be read as UTF-8, or ``None``.
+
+    ``hook_commands`` reads a file it cannot read as one with no hooks (#247),
+    which is right for doctor and wrong for a step that has to act on the hooks.
+    Claude Code decodes the file leniently, so a Latin-1 byte does not stop it
+    running the hooks inside, and a file this user cannot read may hold some. So
+    such a site is named with its reason, never taken for an empty one.
+    """
+    settings = directory / "settings.json"
+    if not settings.exists():
+        return None
+    try:
+        settings.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return f"its settings.json could not be read ({exc})"
+    return None
+
+
 def hook_binaries(directory: Path) -> tuple[list[agent_core.HookBinary], str | None]:
     """The distinct programs ``directory``'s aisquare hooks run — or why it could not be read.
 
     The one reader for upgrade's refresh and uninstall's plan. A settings.json
-    that is unreadable, not UTF-8 (a ValueError), or holds hooks of a shape
-    Claude Code does not write (``{"Stop": 1}`` is a TypeError) is a reason, not
-    a traceback: one bad file must not stop the work on every other directory.
+    this user cannot read, or that is not UTF-8, is a reason (:func:`settings_unreadable`),
+    and so is anything else the read raises: one bad file must not stop the work
+    on every other directory, and must never pass for a directory with no hooks.
     """
+    unreadable = settings_unreadable(directory)
+    if unreadable is not None:
+        return [], unreadable
     try:
         commands = agent_core.hook_commands(HOOK_AGENT, directory)
     except (OSError, ValueError, TypeError) as exc:

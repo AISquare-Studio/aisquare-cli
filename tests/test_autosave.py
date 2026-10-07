@@ -23,6 +23,7 @@ from aisquare.cli.ui.autosave import Autosave
 from aisquare.core import state_file
 from aisquare.core.atomic import write_replacing
 from aisquare.core.state_file import StateUnwritableError, read_state, update_state
+from tests.budgets import budget
 
 
 class _Host(App[None]):
@@ -308,14 +309,15 @@ def test_a_quit_that_runs_out_of_time_says_so_and_starts_no_further_write(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The join's timeout was ignored: the value was lost without a word and a write cut off at
-    interpreter exit left a temp file and no `state.json`."""
-    writer = _Writer(delay=lambda value: 0.6)
+    interpreter exit left a temp file and no `state.json`. The write outlasts the deadline by
+    0.5 s, and by more on the Windows leg (``budget``, tests/budgets.py)."""
+    writer = _Writer(delay=lambda value: budget(0.6))
     monkeypatch.setattr(autosave_mod, "update_state", writer)
 
     async def go(saver: Autosave, app: App[None]) -> None:
         saver.remember(34)
         await _in_flight(writer)
-        unsaved = saver.flush(0.1)
+        unsaved = saver.flush(budget(0.1))
         assert unsaved == "it was not saved: the write of 34 did not finish before the app closed"
         saver.remember(38)
         saver.wake()  # closed: nothing more may start
@@ -360,7 +362,10 @@ def test_flush_all_joins_every_saver_against_one_deadline(
 def test_flush_all_closes_a_saver_that_misses_the_deadline_and_names_what_was_cut_off(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    writer = _Writer(delay=lambda value: 0.8 if value == 34 else 0.0)
+    """The theme's write is real and must land inside the deadline, and an fsynced write
+    is slow on the Windows leg: there the deadline and the width's slow write are scaled
+    together (``budget``, tests/budgets.py)."""
+    writer = _Writer(delay=lambda value: budget(0.8) if value == 34 else 0.0)
     monkeypatch.setattr(autosave_mod, "update_state", writer)
     monkeypatch.setattr(Autosave, "DEBOUNCE", 5.0)
     savers: list[Autosave] = []
@@ -373,7 +378,7 @@ def test_flush_all_closes_a_saver_that_misses_the_deadline_and_names_what_was_cu
             savers.extend((width, theme))
             width.remember(34)
             theme.remember("nord")
-            unsaved = Autosave.flush_all(pilot.app, timeout=0.2)
+            unsaved = Autosave.flush_all(pilot.app, timeout=budget(0.2))
             assert unsaved == [
                 "the width was not saved: the write of 34 did not finish before the app closed"
             ]

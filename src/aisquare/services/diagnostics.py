@@ -38,6 +38,7 @@ from aisquare.models import (
     ShippingStatus,
     StatusReport,
 )
+from aisquare.services import agents as agents_service
 from aisquare.services import (
     auto_mode,
     ci_client,
@@ -138,6 +139,7 @@ def doctor(
         _check_repomix(),
         _check_tiktoken(),
         _check_claude_code(),
+        *_planned_agent_checks(),
         *_claude_accounts_checks(),
         _check_tmux(),
         _check_gh(),
@@ -626,7 +628,7 @@ def _read_line(path: Path) -> str:
         return ""
 
 
-_NODE_FLOOR = ".".join(str(part) for part in snapshot_core.MIN_NODE)
+_NODE_FLOOR = snapshot_core.MIN_NODE_TEXT
 
 #: Deliberately NOT ``install_hint("nodejs")``. On the distributions that ship a
 #: Node too old for repomix, the package manager's ``nodejs`` IS the old one --
@@ -663,14 +665,26 @@ def _check_repomix() -> DoctorCheck:
     run -- a warning, not "untested". An unreadable Node stays ``ok``: failing
     open costs this line its verdict, while guessing "too old" would send
     someone to reinstall a working toolchain.
+
+    NO NODE AT ALL IS OFF, NOT BROKEN. Snapshots are optional and memory and
+    the hooks never touch Node, so a machine with none of ``repomix``,
+    ``npx`` or ``node`` made a choice rather than a mistake: ``ok``, with
+    :data:`snapshot_core.OFF_DETAIL` and no fix. Any ONE of the three present
+    means someone started on the toolchain, and the warnings below still say
+    what is missing.
     """
     name = "repomix"
     direct = shutil.which("repomix")
     if direct is None and shutil.which("npx") is None:
+        if shutil.which("node") is None:
+            return _ok(name, snapshot_core.OFF_DETAIL)
+        # A Node IS here, so the missing piece is npm: no npx almost always means
+        # no npm, which Arch, Alpine and Debian's own nodejs package separately.
         return _warn(
             name,
             "repomix not found — codebase snapshots are disabled",
-            f"Install Node.js {_NODE_FLOOR}+, then: npm install -g repomix",
+            f"Install npm (some distributions package it apart from Node; repomix needs "
+            f"Node.js {_NODE_FLOOR}+), then: npm install -g repomix",
         )
     how = "repomix found" if direct else "repomix available on demand via npx"
     if shutil.which("node") is None:
@@ -690,12 +704,11 @@ def _check_repomix() -> DoctorCheck:
             f"{how} — Node version not readable, so untested against the "
             f"{_NODE_FLOOR} minimum; snapshots enabled",
         )
-    floor = snapshot_core.installed_repomix_floor() if direct else None
-    required = floor or snapshot_core.MIN_NODE
+    required, own_floor = snapshot_core.pack_node_floor()
     found = ".".join(str(part) for part in node)
     if node < required:
         wanted = ".".join(str(part) for part in required)
-        whose = "the installed repomix needs" if floor else "repomix needs"
+        whose = "the installed repomix needs" if own_floor else "repomix needs"
         return _warn(
             name,
             f"{how}, but Node {found} is older than {whose} "
@@ -708,6 +721,11 @@ def _check_repomix() -> DoctorCheck:
 def _check_tiktoken() -> DoctorCheck:
     if _has_module("tiktoken"):
         return _ok("tiktoken", "exact snapshot token counts enabled")
+    if not snapshot_core.can_pack():
+        # Only the snapshot counts tokens, so with snapshots off there is nothing
+        # for it to sharpen -- an amber line here was a fix for a feature that is
+        # not running, on exactly the machines that chose not to run it.
+        return _ok("tiktoken", "off — only snapshot token counts use it, and snapshots are off")
     # `pipx inject` takes the name of an INSTALLED PIPX ENVIRONMENT, which is
     # this distribution -- so `pipx inject aisquare tiktoken` failed on every
     # machine that had followed the documented install, naming an environment
@@ -798,7 +816,10 @@ def _check_claude_code() -> DoctorCheck:
     ``~/.claude*`` on disk that carries our hooks (``agent_core.hook_sites``).
     Two ways a directory goes red, both with the same one-line fix:
 
-    * hooks missing or partial — the check this always made;
+    * not connected (hooks missing or partial) — the check this always made,
+      asked of ``agents_service.claude_code_connected`` per directory, the one
+      answer the Welcome view and the plugin route share, so this row's Connect
+      fix (a button in asq) never offers to connect what is already connected;
     * hooks present but naming an aisquare that is not this install — the #84
       gap. The text of a hook is ours whichever binary it names; for weeks every
       board update on one box ran a 0.3-era checkout while this line was green.
@@ -811,10 +832,28 @@ def _check_claude_code() -> DoctorCheck:
         return _ok("claude-code", "Claude Code not detected on this machine")
     version = claude_code_version()
     product = f"Claude Code {version}" if version else "Claude Code"
+    # Hooks switched off ("disableAllHooks": true) run none of ours however complete
+    # they are, and `agents connect` cannot change that. The shared check answers
+    # False there, so such a directory must not reach `unhooked` below and be
+    # offered a Connect button that could never clear it. It is reported alone:
+    # until hooks run at all, the other clauses describe hooks that do not fire.
+    switched_off = [
+        site.config_dir / "settings.json"
+        for site in sites
+        if agent_core.hooks_disabled("claude-code", site.config_dir)
+    ]
+    if switched_off:
+        listed = ", ".join(str(path) for path in switched_off)
+        return _warn(
+            "claude-code",
+            f'{product} hooks are switched off ("disableAllHooks": true) in: {listed} — '
+            "Claude Code runs none of them, so no context is injected and no prompt is captured",
+            f'Turn hooks back on: remove "disableAllHooks" from {listed}',
+        )
     if not sites:
         return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
 
-    unhooked = [site for site in sites if not site.hooks_installed]
+    unhooked = [site for site in sites if not agents_service.claude_code_connected(site.config_dir)]
     wrong_binary = [
         site for site in sites if site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT)
     ]
@@ -866,6 +905,38 @@ def _check_claude_code() -> DoctorCheck:
         f"{product} {'; '.join(problems)}",
         "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in broken),
     )
+
+
+def _planned_agent_checks() -> list[DoctorCheck]:
+    """A row for each agent in the registry that aisquare detects but cannot connect yet.
+
+    Codex and Cursor today (``core.agents``; Claude Code is the row above). One
+    row per registry entry, so an agent added there gets its row here, and one
+    that gains hooks moves to a check of its own. Always ``ok``, detected or
+    not: there is nothing to fix, and a warning would take one of the sidebar's
+    three not-ok lines (``DOCTOR_LINES``) from a row an operator can act on. No
+    ``fix``, so no button: ``agents connect`` refuses these agents rather than
+    record a connection that installs nothing. A release is named only where
+    the registry plans one.
+
+    Reads paths only (``agent_core.detected``), and each sentence names the
+    path it checked. "Not detected on this machine" was not true of a Codex
+    kept elsewhere through ``CODEX_HOME``, which this check does not follow.
+    """
+    rows: list[DoctorCheck] = []
+    for spec in agent_core.specs():
+        if spec.connectable:
+            continue
+        if agent_core.detected(spec):
+            later = f" (planned for {spec.planned})" if spec.planned else ""
+            detail = (
+                f"{spec.label} detected at {spec.home}, but aisquare can't connect it yet{later}"
+            )
+        else:
+            later = f" (aisquare support is planned for {spec.planned})" if spec.planned else ""
+            detail = f"{spec.label} not detected at {spec.home}{later}"
+        rows.append(_ok(spec.name, detail))
+    return rows
 
 
 def _claude_accounts_checks() -> list[DoctorCheck]:
@@ -2012,6 +2083,14 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
         # The fix is `--refresh` because a plain `onboard` only reloads this
         # verdict — which is how the line stayed a warning forever.
         return _warn("snapshot", snapshot_core.too_large_detail(snap), snapshot_core.REPACK_HINT)
+    if not snapshot_core.can_pack():
+        # No fix, deliberately: `Pack one: aisquare project onboard` is a one-click
+        # button in the UI (services/onboarding.KNOWN_FIXES), and with nothing to
+        # run repomix it can never turn green. When something of the toolchain IS
+        # here, the repomix row warns and names what is missing. A Node that is
+        # there but too old still packs-and-fails, so it keeps this row's warning:
+        # can_pack() reads PATH only (snapshot_core.can_pack).
+        return _ok("snapshot", snapshot_core.off_detail())
     return _warn(
         "snapshot",
         "no codebase snapshot for the active project",

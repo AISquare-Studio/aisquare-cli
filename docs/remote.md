@@ -273,7 +273,8 @@ the machine. **Send test** checks the whole path. A notification goes out when a
 item has been there for two scans in a row, with a delay for kinds that often
 clear by themselves (a crash: 30 seconds; a lost pane or a stopped manager: a
 minute, since they flash during a restart). Several at once come as one
-notification, at most one every 20 seconds per phone. Tapping it opens the card.
+notification, at most one every 20 seconds per phone; a new one takes the place
+of the one still shown and sounds all the same. Tapping it opens the card.
 
 The machine also sends: a warning 10 minutes before auto-off ("open to extend
 it"), a goodbye when Remote is turned off, an alert when someone is guessing the

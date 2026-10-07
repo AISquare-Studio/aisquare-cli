@@ -596,7 +596,6 @@ def test_the_worker_shows_pushes_opens_cards_and_never_serves_from_a_cache() -> 
 
     assert {"push", "notificationclick"} <= listeners
     assert "fetch" not in listeners, "a fetch handler would let the page go stale"
-    assert "renotify" not in source, "Safari ignores it; every push carries a fresh title"
     for suffix in NGROK_SUFFIXES:
         assert f'"{suffix}"' in source, suffix
     assert "postMessage" in source and "openWindow" in source
@@ -724,6 +723,26 @@ def test_safe_url_opens_only_this_origin_or_an_ngrok_page(node_report: dict[str,
     ):
         assert safe[refused] is None, refused
     assert tuple(node_report["suffixes"]) == NGROK_SUFFIXES
+
+
+def test_every_notification_alerts_even_when_it_replaces_one_still_shown(
+    node_report: dict[str, Any],
+) -> None:
+    """Every needs push carries the tag ``asq-needs``, and without ``renotify`` a push that
+    replaces one still in the shade is shown in silence: the second prompt of a turn never
+    rang on Android, desktop Chrome or Firefox."""
+    notices = node_report["notices"]
+    assert notices["needs"] == {
+        "title": "api: coder-1 needs you",
+        "options": {
+            "body": "coder-1 asks you a question",
+            "tag": "asq-needs",
+            "renotify": True,
+            "data": {"url": None},
+        },
+    }
+    assert notices["bare"]["options"]["tag"] == "asq-needs", "renotify needs a tag"
+    assert notices["bare"]["options"]["renotify"] is True
 
 
 def test_the_python_reading_of_the_tables_is_what_the_script_holds(

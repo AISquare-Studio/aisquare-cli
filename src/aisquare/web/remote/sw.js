@@ -26,11 +26,17 @@ function safeUrl(url, ownOrigin) {
   return ngrok && parsed.pathname.indexOf("/r/") >= 0 ? parsed.toString() : null;
 }
 
+/* renotify: a push that replaces one still shown under its tag alerts again.
+ * Without it Chrome, Edge and Firefox swap it in silently, and the second
+ * prompt of a turn made no sound. Safari ignores it. */
 function pushNotice(data) {
   const text = (value, limit) => (typeof value === "string" ? value.slice(0, limit) : "");
   return {
     title: text(data.title, 120) || "aisquare remote",
-    options: { body: text(data.body, 400), tag: text(data.tag, 64) || "asq-needs", data: { url: typeof data.url === "string" ? data.url : null } },
+    options: {
+      body: text(data.body, 400), tag: text(data.tag, 64) || "asq-needs", renotify: true,
+      data: { url: typeof data.url === "string" ? data.url : null },
+    },
   };
 }
 
@@ -45,8 +51,7 @@ if (typeof self === "object" && self && typeof self.addEventListener === "functi
     } catch (error) {
       data = {};
     }
-    // Every push shows a notification (userVisibleOnly), with a fresh title:
-    // Safari does not re-alert for a tag it already shows.
+    // Every push shows a notification (userVisibleOnly), and every one alerts.
     const notice = pushNotice(data && typeof data === "object" ? data : {});
     event.waitUntil(self.registration.showNotification(notice.title, notice.options));
   });
@@ -72,4 +77,4 @@ if (typeof self === "object" && self && typeof self.addEventListener === "functi
   });
 }
 
-if (typeof module === "object" && module && module.exports) module.exports = { safeUrl, NGROK_SUFFIXES };
+if (typeof module === "object" && module && module.exports) module.exports = { safeUrl, pushNotice, NGROK_SUFFIXES };

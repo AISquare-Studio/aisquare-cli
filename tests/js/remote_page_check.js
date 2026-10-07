@@ -1,5 +1,5 @@
 /* The phone page's pure core, fed hostile input over a recording fake document
- * (SPEC §6.7 item 7), and the service worker's safeUrl. Test-only; not packaged.
+ * (SPEC §6.7 item 7), and the service worker's safeUrl and notice. Test-only; not packaged.
  *
  * It asserts nothing itself. It prints ONE JSON report on stdout and
  * tests/test_remote_page.py asserts on it, so a failure names the element, the
@@ -91,7 +91,7 @@ const ROWS = [
   "a lone escape \x1b",
 ];
 
-const report = { runs: [], main: null, control: null, clamped: null, cursor: null, routes: {}, hashes: {}, safeUrl: {}, exports: [] };
+const report = { runs: [], main: null, control: null, clamped: null, cursor: null, routes: {}, hashes: {}, safeUrl: {}, notices: {}, exports: [] };
 
 const main = recorder();
 for (const row of ROWS) {
@@ -172,6 +172,10 @@ for (const url of [
   "https://u:p@x.ngrok.app/r/t/", "https://x.ngrok.io/no-token-path", "not a url",
 ]) report.safeUrl[url] = worker.safeUrl(url, OWN);
 report.suffixes = worker.NGROK_SUFFIXES;
+report.notices = {
+  needs: worker.pushNotice({ title: "api: coder-1 needs you", body: "coder-1 asks you a question", tag: "asq-needs", url: null }),
+  bare: worker.pushNotice({}),
+};
 report.exports = Object.keys(page).sort();
 // What the script really holds, for the Python side to check its own parse of the tables against.
 report.api = page.API;

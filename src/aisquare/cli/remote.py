@@ -146,7 +146,8 @@ def serve_remote(
                 markup=False,
             )
         if public_url is not None:
-            console.print(f"public link: {public_url.rstrip('/')}/r/{info.token}/", markup=False)
+            origin = remote_server.check_public_origin(public_url)
+            console.print(f"public link: {origin}/r/{info.token}/", markup=False)
         console.print(f"expose with: ngrok http {port}   · Ctrl-C stops", markup=False)
 
     try:

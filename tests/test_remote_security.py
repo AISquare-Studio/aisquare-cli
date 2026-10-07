@@ -936,9 +936,27 @@ def test_serve_sets_the_deadline_notes_the_public_url_and_reports_auto_off(
     assert seen["proxy"] == (True, "127.0.0.1") and seen["ws_max_size"] == 65_536
     assert seen["bound"] == [port]
     assert "auto-off: at" in result.stderr and "a phone can extend it" in result.stderr
+    token = remote_server.runtime().token
+    assert f"public link: https://abcd-12.ngrok-free.app/r/{token}/" in result.stderr
     assert remote_server.runtime().auto_off_deadline() is None, "no server, no deadline"
     never = CliRunner().invoke(cli, ["remote", "serve", "--port", str(port), "--auto-off", "0"])
     assert "auto-off: never (--auto-off 0)" in never.stderr
+
+
+def test_serves_auto_off_stops_the_server_even_when_remote_json_cannot_be_written(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deadline is the server's to keep: a revoke that cannot be written must not leave
+    ``serve`` running past it."""
+
+    def unwritable(reason: str) -> None:
+        raise OSError("remote.json: read-only file system")
+
+    monkeypatch.setattr(remote_server, "revoke_every_remote_device", unwritable)
+    server = SimpleNamespace(should_exit=False)
+    with pytest.raises(OSError, match="read-only"):
+        remote_server._remote_serve_off(runtime, server)
+    assert server.should_exit is True
 
 
 def test_serve_says_so_when_the_timer_ended_it(page: Path, monkeypatch: pytest.MonkeyPatch) -> None:

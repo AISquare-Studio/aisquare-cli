@@ -497,3 +497,17 @@ def test_the_write_switch_reaches_remote_json_while_remote_is_off() -> None:
     assert not controller.running
     controller.set_allow_write(True)
     assert server.allow_write_calls == [True] and controller.write_actions_allowed() is True
+
+
+def test_a_revoke_that_cannot_be_written_still_turns_remote_off_and_says_so() -> None:
+    server = fake_server()
+
+    def unwritable(reason: str) -> None:
+        raise OSError("remote.json: read-only file system")
+
+    server.revoke_every_remote_device = unwritable  # type: ignore[method-assign]
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    controller.turn_on()
+    controller.turn_off()
+    assert not server.running and not controller.running
+    assert controller.message is not None and "could not be revoked" in controller.message

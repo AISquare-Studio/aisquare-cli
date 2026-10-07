@@ -3664,6 +3664,16 @@ class _AutoOffTimer:
                 self._timer = None
 
 
+def _remote_serve_off(state: Runtime, server: Any) -> None:
+    """``serve``'s auto-off firing: the farewell, every device revoked (4410), the deadline
+    cleared, and the server told to stop, even when ``remote.json`` cannot be written."""
+    try:
+        revoke_every_remote_device("auto-off")
+        state.set_auto_off(None)
+    finally:
+        server.should_exit = True
+
+
 def _bind_remote_socket(port: int) -> socket.socket:
     """A socket bound to ``127.0.0.1:port`` for uvicorn to serve on; ``OSError`` when taken.
 
@@ -3720,12 +3730,7 @@ def run_foreground(
         app = build_remote_app(state, dist_dir=dist_dir, port=port)
         server = uvicorn.Server(_remote_uvicorn_config(app, port))
 
-        def turn_off() -> None:
-            revoke_every_remote_device("auto-off")
-            state.set_auto_off(None)
-            server.should_exit = True
-
-        timer = _AutoOffTimer(state, turn_off)
+        timer = _AutoOffTimer(state, lambda: _remote_serve_off(state, server))
         minutes = max(0, auto_off_minutes)
         state.set_auto_off(_remote_now() + timedelta(minutes=minutes) if minutes else None)
         state.note_public_origin(origin)
@@ -3748,9 +3753,12 @@ def run_foreground(
                 flusher, _flusher = _flusher, None
             if flusher is not None:
                 flusher.cancel()
-            if minutes and not timer.fired:
-                state.set_auto_off(None)  # no server, no deadline: nothing stays on to end
-            state.flush_last_seen()
+            try:
+                if minutes and not timer.fired:
+                    state.set_auto_off(None)  # no server, no deadline: nothing stays on to end
+                state.flush_last_seen()
+            except Exception:  # the way out reports what ended the server, not this
+                log.warning("remote: writing remote.json on the way out failed", exc_info=True)
         return timer.fired
     finally:
         sock.close()

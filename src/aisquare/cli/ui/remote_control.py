@@ -195,18 +195,22 @@ class RemoteController:
         the devices' own expiry bounds them meanwhile.
         """
         tunnel, self.tunnel = self.tunnel, None
+        failure = None
         if self.info is not None:
-            if persist:
-                self._server.revoke_every_remote_device(reason)
-            self._server.note_public_url(None)
-            self._server.set_auto_off(None)
+            try:
+                if persist:
+                    self._server.revoke_every_remote_device(reason)
+                self._server.note_public_url(None)
+                self._server.set_auto_off(None)
+            except Exception as exc:  # remote.json unwritable: Remote still goes off
+                failure = f"Remote is off, but its devices could not be revoked — {exc}"
             self._server.stop_remote_server()
         if tunnel is not None:
             tunnel.stop_tunnel()
         self.info = None
         self.public_url = None
         self.auto_off_at = None
-        self.message = None
+        self.message = failure
         if persist:
             self._set_state(remote_enabled=False)
 

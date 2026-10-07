@@ -216,8 +216,8 @@ function deferred() {
 
 /* Boot app.js at `hash`, the machine answering every request through `answer`:
  * (method, path, body) -> {status, json}, or "network" for a request that never
- * arrives, or a promise of either. */
-function bootPage(hash, answer) {
+ * arrives, or a promise of either. `globals` adds to the browser (fakePush). */
+function bootPage(hash, answer, globals) {
   const doc = {
     title: "",
     visibilityState: "visible",
@@ -286,6 +286,7 @@ function bootPage(hash, answer) {
       (this.listeners[type] = this.listeners[type] || []).push(fn);
     },
   });
+  Object.assign(win, globals || {});
   win.window = win;
   const context = vm.createContext(win);
   vm.runInContext(SOURCE, context, { filename: "app.js" });
@@ -559,6 +560,88 @@ async function quickAnswerTwice() {
   return { inFlight, sentWhileHeld, after: answers().map((control) => control.disabled), toast: page.toast() };
 }
 
+/* A browser that can take pushes and already holds a subscription made against
+ * `key` (bytes); what it is asked to do is written down in `log`. */
+function fakePush(key) {
+  const log = [];
+  const subscription = (name, bytes) => ({
+    options: { applicationServerKey: Uint8Array.from(bytes).buffer },
+    unsubscribe: async () => { log.push("unsubscribe " + name); return true; },
+    toJSON: () => ({ endpoint: "https://fcm.googleapis.com/fcm/send/" + name, keys: { p256dh: "p", auth: "a" } }),
+  });
+  let current = subscription("old", key);
+  const registration = {
+    pushManager: {
+      getSubscription: async () => current,
+      subscribe: async (options) => {
+        log.push("subscribe " + Buffer.from(options.applicationServerKey).toString("base64url"));
+        current = subscription("new", options.applicationServerKey);
+        return current;
+      },
+    },
+  };
+  const serviceWorker = {
+    getRegistration: async () => registration, register: async () => registration, ready: Promise.resolve(registration), addEventListener() {},
+  };
+  const globals = {
+    navigator: { serviceWorker, userAgent: "Mozilla/5.0 (Linux; Android 14)", platform: "Linux" },
+    PushManager: function PushManager() {},
+    Notification: { permission: "granted", requestPermission: async () => "granted" },
+    isSecureContext: true,
+    atob: (text) => Buffer.from(text, "base64").toString("binary"),
+  };
+  return { log, globals };
+}
+
+const KEY_NOW = Array.from({ length: 65 }, (unused, n) => (n * 7 + 4) % 256);
+const KEY_BEFORE = Array.from({ length: 65 }, (unused, n) => (n * 11 + 4) % 256);
+
+/* The machine's push answers, its VAPID key KEY_NOW; what was subscribed is collected. */
+function pushRoutes(subscribed) {
+  return {
+    "GET api/push": () => ({ status: 200, json: { supported: true, vapid_public_key: Buffer.from(KEY_NOW).toString("base64url"), subscribed: false } }),
+    "POST api/push/subscribe": (body) => {
+      subscribed.push(body.endpoint);
+      return { status: 201, json: { subscribed: true } };
+    },
+  };
+}
+
+/* Settings → Turn on, in a browser whose subscription was made against `held`. */
+async function pushTurnedOn(held) {
+  const push = fakePush(held);
+  const subscribed = [];
+  const page = bootPage("#/settings", signedIn(pushRoutes(subscribed)), push.globals);
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const turnOn = buttonNamed(page.main(), "Turn on");
+  click(turnOn);
+  await settle();
+  return { offered: !!turnOn, log: push.log, subscribed };
+}
+
+/* An unlock, in a browser whose subscription was made against `held`. */
+async function pushAfterUnlock(held) {
+  const push = fakePush(held);
+  const subscribed = [];
+  let unlocked = false;
+  const routes = pushRoutes(subscribed);
+  const page = bootPage("#/", (method, where, body) => {
+    if (method === "POST" && where === "api/unlock") {
+      unlocked = true;
+      return { status: 200, json: { ok: true, device: { id: "dev_0a1b2c3d" } } };
+    }
+    return unlocked ? signedIn(routes)(method, where, body) : { status: 401, json: { error: "unauthorized" } };
+  }, push.globals);
+  await settle();
+  const { input, form } = unlockForm(page);
+  input.value = PASSPHRASE;
+  form.dispatch("submit");
+  await settle();
+  return { log: push.log, subscribed };
+}
+
 /* Nothing heard for longer than the stale limit, on the devices screen. */
 async function staleDevices() {
   const page = bootPage("#/devices", signedIn({
@@ -611,6 +694,11 @@ async function main() {
     lostThenSignedOut: await lostThenSignedOut(),
     lostRead: await lostRead(),
     emptySend: await emptySend(),
+    pushKeyChanged: await pushTurnedOn(KEY_BEFORE),
+    pushKeyKept: await pushTurnedOn(KEY_NOW),
+    pushKeyChangedAtUnlock: await pushAfterUnlock(KEY_BEFORE),
+    pushKeyKeptAtUnlock: await pushAfterUnlock(KEY_NOW),
+    keyNow: Buffer.from(KEY_NOW).toString("base64url"),
     quickAnswerTwice: await quickAnswerTwice(),
     staleDevices: await staleDevices(),
     tellNotSent: await tellNotSent(),

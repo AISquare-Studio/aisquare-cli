@@ -853,6 +853,30 @@ def test_the_keyboards_return_key_is_not_called_send_where_it_types_a_newline(
     assert boot_report["emptySend"]["keyHint"] is None
 
 
+def test_turning_notifications_on_replaces_a_subscription_made_with_another_key(
+    boot_report: dict[str, Any],
+) -> None:
+    """A lost ``remote-push.json`` costs the machine its VAPID keys, and a subscription made
+    against the old public key is refused at every push. Turn on re-posted it as it was,
+    the machine took it, and every push failed again until the site's data was cleared."""
+    changed = boot_report["pushKeyChanged"]
+    assert changed["offered"]
+    assert changed["log"] == ["unsubscribe old", f"subscribe {boot_report['keyNow']}"]
+    assert changed["subscribed"] == ["https://fcm.googleapis.com/fcm/send/new"]
+    kept = boot_report["pushKeyKept"]  # the control: the same key, the same subscription
+    assert kept["log"] == [] and kept["subscribed"] == ["https://fcm.googleapis.com/fcm/send/old"]
+
+
+def test_an_unlock_sends_a_subscription_made_anew_when_the_key_changed(
+    boot_report: dict[str, Any],
+) -> None:
+    changed = boot_report["pushKeyChangedAtUnlock"]
+    assert changed["log"] == ["unsubscribe old", f"subscribe {boot_report['keyNow']}"]
+    assert changed["subscribed"] == ["https://fcm.googleapis.com/fcm/send/new"]
+    kept = boot_report["pushKeyKeptAtUnlock"]
+    assert kept == {"log": [], "subscribed": ["https://fcm.googleapis.com/fcm/send/old"]}
+
+
 def test_a_frame_clears_the_offline_banner_a_lost_read_raised(
     boot_report: dict[str, Any],
 ) -> None:

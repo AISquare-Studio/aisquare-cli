@@ -2410,6 +2410,28 @@ async function workerRegistration() {
   return existing || navigator.serviceWorker.register("sw.js", { scope: "./" });
 }
 
+/* A subscription only works with the key it was made against. One made against a
+ * key the machine no longer has (remote-push.json lost, and its keys made again) is
+ * refused by the push service at every push, and only a new one works again. A
+ * browser that does not say which key its subscription used is believed. */
+function madeWithKey(sub, vapid) {
+  const own = sub && sub.options && sub.options.applicationServerKey;
+  if (!own) return true;
+  const mine = new Uint8Array(own);
+  const key = b64urlToBytes(vapid);
+  return mine.length === key.length && mine.every((byte, i) => byte === key[i]);
+}
+
+/* This browser's subscription for the machine's key: the one it has, or a new one. */
+async function subscribeFor(reg, vapid) {
+  let sub = await reg.pushManager.getSubscription();
+  if (sub && !madeWithKey(sub, vapid)) {
+    await sub.unsubscribe();
+    sub = null;
+  }
+  return sub || reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64urlToBytes(vapid) });
+}
+
 async function pushState() {
   const res = await apiCall("GET", API.push);
   S.push = res.ok && res.data && typeof res.data === "object" ? res.data : { supported: false, reason: res.status === 404 ? "this server does not send notifications" : failText(res) };
@@ -2422,6 +2444,7 @@ async function pushState() {
       local = null;
     }
   }
+  if (local && S.push.supported && !madeWithKey(local, S.push.vapid_public_key)) local = null; // dead: "Turn on" mends it
   return { server: S.push, local, permission: "Notification" in window ? Notification.permission : "unsupported" };
 }
 
@@ -2434,8 +2457,7 @@ async function pushEnable() {
   if (!state.server.supported) return plainText(state.server.reason) || "The machine cannot send notifications.";
   const reg = await workerRegistration();
   await navigator.serviceWorker.ready;
-  let sub = await reg.pushManager.getSubscription();
-  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64urlToBytes(state.server.vapid_public_key) });
+  const sub = await subscribeFor(reg, state.server.vapid_public_key);
   const res = await apiCall("POST", API.pushSubscribe, { body: sub.toJSON() });
   return res.ok ? "" : failText(res);
 }
@@ -2448,13 +2470,17 @@ async function pushDisable() {
 }
 
 /* After every unlock: a subscription this browser already has goes to the
- * machine again, so a re-unlocked or new device keeps its notifications. */
+ * machine again, so a re-unlocked or new device keeps its notifications; made
+ * anew first if the machine's key changed. */
 async function pushResend() {
   try {
     if (!pushCapable()) return;
     const reg = await navigator.serviceWorker.getRegistration();
-    const sub = reg ? await reg.pushManager.getSubscription() : null;
-    if (sub) await apiCall("POST", API.pushSubscribe, { body: sub.toJSON() });
+    if (!reg || !(await reg.pushManager.getSubscription())) return;
+    const res = await apiCall("GET", API.push);
+    if (!res.ok || !res.data || res.data.supported !== true) return;
+    const sub = await subscribeFor(reg, res.data.vapid_public_key);
+    await apiCall("POST", API.pushSubscribe, { body: sub.toJSON() });
   } catch (error) {
     // notifications stay as they were; Settings says so
   }

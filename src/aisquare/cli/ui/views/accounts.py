@@ -595,7 +595,15 @@ class AccountsView(Vertical):
         A session that changed since the last frame — a ``login`` or ``logout``
         in another terminal — re-reads the credits under the card at once
         rather than on the next minute tick: they are that session's.
+
+        The first frame reads the usage too, when the page is already on screen.
+        ``on_show`` reads it, and the shell hands the page its first frame after
+        the switch to the page has been awaited, so the ``Show`` could be handled
+        first: that reading found no frame and returned, and every row said
+        ``usage: …`` until the minute tick. Off screen this does nothing, and
+        ``on_show`` reads as before.
         """
+        first = self.overview is None
         self.overview = overview
         previous, self.session = self.session, self._read_session()
         if not self.is_mounted:
@@ -604,6 +612,8 @@ class AccountsView(Vertical):
         self._paint_claude(overview)
         if self.session != previous:
             self.refresh_credits()
+        if first:
+            self.refresh_usage()
 
     def _env_token(self) -> bool:
         """Whether ``AISQUARE_TOKEN`` is what aisquare is using — not a session this page owns."""

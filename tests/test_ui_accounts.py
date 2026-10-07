@@ -33,11 +33,12 @@ from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.app import ACCOUNTS_WORKER, FleetApp
-from aisquare.cli.ui.sidebar import AccountsSection, AccountsTitle
+from aisquare.cli.ui.sidebar import AccountsSection, AccountsSelected, AccountsTitle
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views.accounts import (
     SIGN_IN_WORKER,
+    USAGE_WORKER,
     AccountRow,
     AccountsView,
     account_line_text,
@@ -64,7 +65,7 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import device_flow, iam
 from aisquare.services import fleet as fleet_service
 from tests.pane_harness import asks_a_server, socket_of
-from tests.ui_workers import settle_page
+from tests.ui_workers import settle_page, settle_until
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -258,6 +259,12 @@ def line(view: AccountsView, slot: int) -> str:
 
 def notice(view: AccountsView) -> str:
     return shown(view.query_one("#accounts-notice", Static))
+
+
+def painted(view: AccountsView, *slots: int) -> bool:
+    """Whether the rows of ``slots`` show what their usage reading answered, not the
+    ``usage: …`` of a reading still owed: what the usage tests wait for (``settle_until``)."""
+    return all("usage: …" not in line(view, slot) for slot in slots)
 
 
 # --- pure helpers --------------------------------------------------------------------------------
@@ -622,8 +629,7 @@ def test_usage_is_fetched_only_for_signed_in_slots_and_painted_into_their_rows(
     async def go(pilot: Pilot[None]) -> tuple[list[int], str, str, str]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
-        await settle(app)
-        await pilot.pause()
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 2 and painted(view, 1, 2))
         return sorted(no_network["usage_calls"]), line(view, 1), line(view, 2), line(view, 3)
 
     calls, first, second, third = drive(go, overview=overview)
@@ -639,8 +645,7 @@ def test_usage_that_cannot_be_read_says_why_on_the_row(no_network: dict[str, Any
     async def go(pilot: Pilot[None]) -> str:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
-        await settle(app)
-        await pilot.pause()
+        await settle_until(app, lambda: painted(view, 1))
         return line(view, 1)
 
     assert "usage: the stored token has expired" in drive(go)
@@ -658,14 +663,56 @@ def test_a_keychain_backed_account_is_asked_and_its_row_says_why(
     async def go(pilot: Pilot[None]) -> tuple[list[int], str]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
-        await settle(app)
-        await pilot.pause()
+        await settle_until(app, lambda: no_network["usage_calls"] and painted(view, 1))
         return no_network["usage_calls"], line(view, 1)
 
     calls, first = drive(go, overview=overview)
     assert calls == [1]  # asked, although its token state is "missing"
     assert "usage: credentials are in the macOS Keychain" in first
     assert "usage: …" not in first
+
+
+def test_a_page_on_screen_before_its_first_frame_reads_the_usage_when_the_frame_comes(
+    no_network: dict[str, Any],
+) -> None:
+    """The page reads the usage from ``on_show``, and the shell hands it its first frame
+    after the switch to the page has been awaited, so the ``Show`` could be handled
+    first. That reading found no frame and returned, and every row said ``usage: …``
+    until the minute tick: the Windows leg's ``assert [] == [1, 2]`` in the tests above,
+    made certain on Linux by resuming the switch's handler 50 ms late. Made certain here
+    as a busy registry makes it: the shell's first accounts read is held until the page
+    is on screen, so the frame comes after the ``Show``."""
+    asked, release = threading.Event(), threading.Event()
+    overview = _overview(_status(1, "me@example.com"))
+
+    def reader() -> AccountsOverview:
+        asked.set()
+        release.wait(10)  # as a writer holds the registry's lock
+        return overview
+
+    async def run() -> tuple[bool, list[int], str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
+        async with app.run_test(size=SIZE):
+            try:
+                assert await asyncio.to_thread(asked.wait, 5), "the shell asked for the accounts"
+                app.post_message(AccountsSelected())  # what a click on the section posts
+                # Only the usage group is waited for: the held read is the point.
+                await settle_until(
+                    app,
+                    lambda: app.query_one("#accounts", AccountsView)._on_screen,
+                    group=USAGE_WORKER,
+                )
+                view = app.query_one("#accounts", AccountsView)
+                shown_first = view._on_screen and view.overview is None
+            finally:
+                release.set()
+            await settle_until(app, lambda: no_network["usage_calls"] and painted(view, 1))
+            return shown_first, no_network["usage_calls"], line(view, 1)
+
+    shown_first, calls, first = asyncio.run(run())
+    assert shown_first, "precondition: the page was on screen before it had a frame"
+    assert calls == [1]  # read when the frame came, not at the minute tick
+    assert "usage: scripted: no fetch" in first
 
 
 # --- AISquare: the device flow as a card --------------------------------------------------------
@@ -1496,8 +1543,7 @@ def test_the_row_says_how_long_the_window_has_at_the_current_pace(
     async def go(pilot: Pilot[None]) -> tuple[str, str]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
-        await settle(app)
-        await pilot.pause()
+        await settle_until(app, lambda: len(recorded) >= 2 and painted(view, 1, 2))
         return line(view, 1), line(view, 2)
 
     one, two = drive(go, overview=overview)
@@ -1532,8 +1578,7 @@ def test_a_row_that_leaves_takes_its_projection_with_it(
     async def go(pilot: Pilot[None]) -> tuple[set[int], set[int], set[int], set[int]]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
-        await settle(app)
-        await pilot.pause()
+        await settle_until(app, lambda: painted(view, 1, 2))
         before = (set(view.usage), set(view.trends))
         view.show(_overview(_status(1, "me@example.com")))  # slot 2 removed
         await pilot.pause()

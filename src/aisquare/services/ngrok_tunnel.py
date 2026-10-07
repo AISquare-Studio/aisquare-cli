@@ -7,6 +7,12 @@ error about the authtoken is the one a first-time user hits, so it gets its own
 hint. The binary is the human's job (PLAN §7); when it is absent this module
 returns a sentence that says how to get it — it never raises into the TUI.
 
+``--inspect=false`` turns off ngrok's traffic inspector. Left on, the agent keeps
+every request and answer on its local web interface (``127.0.0.1:4040``), which
+asks no one for a password and can replay a request: the unlock's passphrase,
+every device's cookie, the token in every path and every transcript, for any
+user or process on the machine to read.
+
 Pure functions (:func:`build_public_url`, :func:`parse_log_line`,
 :func:`missing_binary_message`) carry the logic, so PLAN §4-H's proxies for the
 "ngrok present" check — the URL builder and the missing-binary message — are unit
@@ -131,8 +137,9 @@ def ngrok_static_host(raw: str | None) -> str | None:
 
 
 def ngrok_command(port: int, binary: str = "ngrok", *, url: str | None = None) -> list[str]:
-    """``ngrok http <port>`` with its log as JSON lines, on the static domain ``url`` if one."""
-    command = [binary, "http", str(port), "--log=stdout", "--log-format=json"]
+    """``ngrok http <port>`` with its log as JSON lines and its traffic inspector off, on the
+    static domain ``url`` if one."""
+    command = [binary, "http", str(port), "--log=stdout", "--log-format=json", "--inspect=false"]
     return [*command, f"--url={url}"] if url else command
 
 

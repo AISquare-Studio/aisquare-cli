@@ -1917,7 +1917,7 @@ def test_ngrok_is_told_the_static_domain_from_the_environment(
     tunnel.wait_for_url(5)
     tunnel.stop_tunnel()
     assert spawned == [
-        ["ngrok", "http", "8750", "--log=stdout", "--log-format=json",
+        ["ngrok", "http", "8750", "--log=stdout", "--log-format=json", "--inspect=false",
          "--url=remote-anmol.ngrok-free.app"]
     ]  # fmt: skip
 

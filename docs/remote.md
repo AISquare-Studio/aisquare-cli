@@ -67,7 +67,7 @@ UI restarts it within half a minute.
 
 ```sh
 aisquare remote serve --auto-off 120 --public-url https://your-name.ngrok-free.app
-ngrok http --url=your-name.ngrok-free.app 8750
+ngrok http --url=your-name.ngrok-free.app --inspect=false 8750
 ```
 
 `serve` prints the local link and the passphrase and runs until Ctrl-C or until
@@ -334,6 +334,11 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   is a 404. A phone can extend it an hour at a time, up to 8 hours ahead.
 - **Origin**: every write and every live connection must come from the page's own
   origin, so another site cannot use your cookie.
+- **ngrok's inspector is off.** Left on, ngrok keeps every request and answer on
+  its local web interface (`127.0.0.1:4040`), which asks for no password: the
+  passphrase you unlock with, every device's cookie, the token and the
+  transcripts, readable by any user of the machine. The panel starts ngrok with
+  `--inspect=false`; start yours with it too.
 - **Keys**: the pad sends key names from a fixed list (no `;`, nothing that
   tmux reads as a command); typed text travels as literal text, never as keys.
 - **Caps**: 64 KiB per request, 2 048 characters per keystroke message, 8 000

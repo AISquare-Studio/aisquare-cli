@@ -784,7 +784,7 @@ def test_cli_serve_prints_link_and_password_then_serves(
     human = CliRunner().invoke(cli, ["remote", "serve", "--port", "9002"])
     assert human.exit_code == 0
     assert "password:" in human.output and "read-only" in human.output
-    assert "ngrok http 9002" in human.output
+    assert "ngrok http 9002 --inspect=false" in human.output
 
 
 def test_the_write_list_is_the_plan_verbatim() -> None:

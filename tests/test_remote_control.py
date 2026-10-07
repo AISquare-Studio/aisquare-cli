@@ -97,7 +97,11 @@ def test_parse_log_line_turns_an_authtoken_error_into_the_authtoken_hint() -> No
 
 
 def test_ngrok_command_is_the_documented_one() -> None:
-    assert ngrok_command(8750) == ["ngrok", "http", "8750", "--log=stdout", "--log-format=json"]
+    """``--inspect=false``: ngrok's inspector keeps every request and answer, the unlock's
+    passphrase and every cookie included, on a local web interface that asks for nothing."""
+    assert ngrok_command(8750) == [
+        "ngrok", "http", "8750", "--log=stdout", "--log-format=json", "--inspect=false"
+    ]  # fmt: skip
 
 
 # --- the missing binary -------------------------------------------------------------------

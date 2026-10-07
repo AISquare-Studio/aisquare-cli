@@ -153,7 +153,11 @@ def serve_remote(
         if public_url is not None:
             origin = remote_server.check_public_origin(public_url)
             console.print(f"public link: {origin}/r/{info.token}/", markup=False)
-        console.print(f"expose with: ngrok http {port}   · Ctrl-C stops", markup=False)
+        # The inspector off: it keeps every request (the passphrase, the cookies) on a local
+        # web interface that any user of this machine can read (ngrok_tunnel says more).
+        console.print(
+            f"expose with: ngrok http {port} --inspect=false   · Ctrl-C stops", markup=False
+        )
 
     try:
         timed_out = remote_server.run_foreground(dist, port, auto_off, public_url, ready=banner)

@@ -541,7 +541,7 @@ ngrok tunnel, and the page it serves ships inside aisquare-cli.
 ```sh
 pipx install 'aisquare-cli[remote]'
 aisquare remote serve             # or press R in `aisquare ui`
-ngrok http 8750                   # in another terminal; a static domain is better
+ngrok http 8750 --inspect=false   # in another terminal; a static domain is better
 aisquare remote allow-write on    # read-only until you say so
 ```
 

@@ -29,7 +29,15 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app as cli
 from aisquare.core.config import AccountsSettings
 from aisquare.core.paths import remote_audit_path, remote_needs_path
-from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamEvent, TeamSession
+from aisquare.core.store import store_session
+from aisquare.models import (
+    FleetAgent,
+    FleetAgentStatus,
+    ProjectInfo,
+    TeamEvent,
+    TeamSession,
+    TeamTask,
+)
 from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_needs
 from aisquare.services.remote_actions import LedgerEntry
@@ -60,7 +68,12 @@ from aisquare.services.remote_server import (
     build_app,
     remote_agent_lock,
 )
-from aisquare.services.transcript import PendingTool, TranscriptTail
+from aisquare.services.transcript import (
+    TAIL_BUDGET,
+    PendingTool,
+    TranscriptTail,
+    read_transcript_tail,
+)
 from tests.remote_kit_helpers import base, make_client, make_runtime, receive_within, unlock
 
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
@@ -1133,6 +1146,8 @@ class FakeTmux:
         return self.started
 
     def run(self, *args: str, stdin: bytes | None = None) -> str:
+        if args[:2] == ("list-panes", "-a"):
+            return ""  # the fleet listing's output times: none, so the board's state decides
         assert args[:3] == ("display-message", "-p", "-t") and args[-1] == "#{window_activity}"
         self.asked.append(args[3])
         now = self.reference.timestamp() if self.reference else time.time()
@@ -1316,6 +1331,165 @@ def test_a_listing_that_fails_is_not_an_answer(monkeypatch: pytest.MonkeyPatch) 
     fleet.listing_fails = True
     with pytest.raises(fleet_service.FleetUnavailable):
         _now_of(fleet, FakeTmux(reference=NOW), monkeypatch)
+
+
+# --- the live sources, over a real store --------------------------------------------------
+
+
+def _asking_record(at: datetime) -> dict[str, Any]:
+    """A transcript's assistant record with a pending ``AskUserQuestion``."""
+    question = {"type": "tool_use", "id": "toolu_q", "name": "AskUserQuestion", "input": QUESTION}
+    return {
+        "type": "assistant",
+        "uuid": "a1",
+        "timestamp": at.isoformat(),
+        "message": {"id": "m1", "role": "assistant", "content": [question]},
+    }
+
+
+def test_the_live_sources_scan_the_store_the_fleet_and_the_transcripts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every other test hands the scan fake sources. These are the real ones, over a seeded
+    store and the fleet's own listing on a fake tmux server, so what is tested is the wiring:
+    ended rows since ``RECENTLY_ENDED`` and none older, the board's events and sessions, a
+    task's status, and the transcript a session names."""
+    now = datetime.now(UTC)
+    root = tmp_path / "alpha"
+    transcript = tmp_path / "coder-1.jsonl"
+    record = _asking_record(now - timedelta(minutes=2))
+    transcript.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    hour_ago, crashed_at = now - timedelta(hours=1), now - timedelta(minutes=5)
+    with store_session() as store:
+        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        store.upsert_session(
+            TeamSession(
+                id="ses_1",
+                project_id=project.id,
+                role="coder",
+                label="coder-1",
+                started_at=hour_ago,
+                last_seen_at=now - timedelta(seconds=30),
+                transcript_path=str(transcript),
+            )
+        )
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_1",
+                project_id=project.id,
+                label="coder-1",
+                role="coder",
+                pane_id="%1",
+                session_id="ses_1",
+                cwd=root,
+                created_at=hour_ago,
+            )
+        )
+        for label, task_id, task_status in (
+            ("coder-2", "tsk_open", "doing"),
+            ("coder-3", "tsk_done", "done"),
+        ):
+            store.upsert_task(
+                TeamTask(
+                    id=task_id,
+                    project_id=project.id,
+                    key=task_id,
+                    title=f"{label}'s work",
+                    status=task_status,
+                    created_at=hour_ago,
+                    updated_at=hour_ago,
+                )
+            )
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=f"agt_{label}",
+                    project_id=project.id,
+                    label=label,
+                    role="coder",
+                    pane_id="%9",
+                    cwd=root,
+                    task_id=task_id,
+                    created_at=hour_ago,
+                    ended_at=crashed_at,
+                    exit_status=1,
+                )
+            )
+        # Two days gone: past RECENTLY_ENDED, so no `manager_down` for it.
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_old",
+                project_id=project.id,
+                label="manager",
+                role="manager",
+                pane_id="%8",
+                cwd=root,
+                created_at=now - timedelta(days=3),
+                ended_at=now - timedelta(days=2),
+                exit_status=3,
+            )
+        )
+        store.upsert_session(
+            TeamSession(
+                id="ses_m",
+                project_id=project.id,
+                role="manager",
+                started_at=now - timedelta(hours=3),
+                last_seen_at=now - timedelta(hours=2),
+                state="waiting",
+            )
+        )
+        store.add_team_event(
+            TeamEvent(
+                id="evt_q",
+                project_id=project.id,
+                session_id="ses_m",
+                kind="question",
+                text="Ship on Friday?",
+                created_at=now - timedelta(minutes=1),
+            )
+        )
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+    assert [(item.kind, item.agent) for item in items] == [
+        ("question", "coder-1"),
+        ("board_question", None),
+        ("crashed", "coder-2"),
+    ]
+    assert "%1" in tmux.asked, "the fleet's own listing asked tmux about the live pane"
+
+
+def test_the_live_sources_read_an_unchanged_transcript_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The watcher scans every few seconds: a transcript that did not change costs a
+    ``stat()``, and one that grew is read again."""
+    reads: list[str] = []
+    real = read_transcript_tail
+
+    def counted(path: Path | str | None, *, budget: int = TAIL_BUDGET) -> TranscriptTail | None:
+        reads.append(str(path))
+        return real(path, budget=budget)
+
+    monkeypatch.setattr(remote_needs, "read_transcript_tail", counted)
+    monkeypatch.setattr(remote_needs, "_tails", {})
+    transcript = tmp_path / "coder-1.jsonl"
+    transcript.write_text(json.dumps(_asking_record(NOW)) + "\n", encoding="utf-8")
+    tail_of = remote_needs.live_needs_sources().transcript_tail
+    first = tail_of(str(transcript))
+    assert first is not None and [tool.tool_use_id for tool in first.pending] == ["toolu_q"]
+    assert tail_of(str(transcript)) is first
+    assert reads == [str(transcript)], "unchanged: read once"
+    answer = {
+        "type": "user",
+        "uuid": "r1",
+        "timestamp": NOW.isoformat(),
+        "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_q"}]},
+    }
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(answer) + "\n")
+    again = tail_of(str(transcript))
+    assert len(reads) == 2 and again is not None and again.pending == (), "it grew: read again"
 
 
 # --- the watcher --------------------------------------------------------------------------

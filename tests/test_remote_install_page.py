@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import socket
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -191,9 +192,19 @@ def test_cli_serve_on_a_fresh_machine_serves_without_an_install_page(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     served: list[tuple[Path | None, int]] = []
-    monkeypatch.setattr(
-        remote_server, "run_foreground", lambda dist, port: served.append((dist, port))
-    )
+
+    def run_foreground(
+        dist: Path | None, port: int, *_more: object, ready: Callable[[], None] | None = None
+    ) -> bool:
+        """What ``serve`` asked to serve. The auto-off and public URL that lane b-security's
+        ``serve`` passes too are not this test's business; its ``ready`` banner prints once
+        the port is bound, as the real one does, and then the timer did not end it."""
+        served.append((dist, port))
+        if ready is not None:
+            ready()
+        return False
+
+    monkeypatch.setattr(remote_server, "run_foreground", run_foreground)
 
     result = CliRunner().invoke(cli, ["--json", "remote", "serve", "--port", "9001"])
 

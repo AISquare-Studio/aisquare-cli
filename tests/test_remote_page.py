@@ -570,7 +570,8 @@ def test_the_page_sends_only_the_socket_messages_the_server_reads() -> None:
     source = _text("app.js")
     sent = set(re.findall(r'wsSend\(\s*"([a-z_]+)"', source))
     table = re.findall(r'"([a-z_]+)"', _js_table("SOCKET_MESSAGES", r"\[", r"\]"))
-    server = set(re.findall(r'message\.get\("([a-z_]+)"', Path(remote_server.__file__).read_text()))
+    server_source = Path(remote_server.__file__).read_text(encoding="utf-8")
+    server = set(re.findall(r'message\.get\("([a-z_]+)"', server_source))
 
     assert sent == set(table) == {"subscribe", "unsubscribe", "subscribe_fleet", "subscribe_board"}
     assert sent | {"project"} <= server, "a message the server's reader never looks at"
@@ -629,8 +630,14 @@ def node_report() -> dict[str, Any]:
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not on PATH; the page's runtime check needs it")
+    # node writes UTF-8 to a pipe whatever the locale; Windows' cp1252 would garble it.
     result = subprocess.run(
-        [node, str(HARNESS)], capture_output=True, text=True, timeout=120, check=False
+        [node, str(HARNESS)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     report: dict[str, Any] = json.loads(result.stdout)

@@ -1,21 +1,25 @@
 """Coding-agent adapters (roadmap 9.1, Doctor half): one "connected?" check, no empty connections.
 
-``services.agents.claude_code_connected`` is the single answer the doctor's Connect
-button, the Welcome view and the Claude Code plugin route all ask, so the hooks are
-never offered, or installed, twice. ``agents connect`` refuses an agent aisquare has
-no hooks for (Codex, Cursor) instead of recording a connection that installs
-nothing, and the doctor has a row for every agent in the registry: Claude Code's
-with its Connect fix, the others ok, saying whether they are on this machine and
-when they are planned, with no button. Each claim has its negative control in the
-same test.
+``claude_code_connected`` (core, with ``services.agents`` its public face) is the one
+answer to "is Claude Code connected here?". The doctor's Connect button, ``agents
+list`` and ``agents status``, the Accounts page and the Welcome view ask it, and the
+plugin route extends it, so the hooks are never offered, or installed, twice.
+``agents connect`` refuses an agent aisquare has no hooks for (Codex, Cursor) instead
+of recording a connection that installs nothing, and names a file of Claude Code's it
+cannot read instead of calling Claude Code not installed. The doctor has a row for
+every agent in the registry: Claude Code's with its Connect fix, the others ok,
+naming the path they checked and a release only where one is planned, with no
+button. Each claim has its negative control in the same test.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import socket
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -23,11 +27,14 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
+from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import paths
 from aisquare.models import CheckStatus, DoctorCheck
 from aisquare.services import agents as agents_service
+from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import diagnostics
 from aisquare.services.onboarding import fix_commands
+from tests.fsperms import can_deny_reads
 from tests.test_no_traceback_on_a_damaged_store import damaged_store  # noqa: F401
 
 
@@ -136,31 +143,126 @@ def test_asking_reads_only_and_never_raises(claude_home: Path) -> None:
     assert not home.exists(), "asking created the aisquare home"
 
 
-def test_a_non_list_event_in_settings_json_is_no_hooks_not_a_traceback(
+def _non_list_event(path: Path) -> None:
+    path.write_text(json.dumps({"hooks": {"Stop": 5, "SessionEnd": True}}), encoding="utf-8")
+
+
+def _not_utf8(path: Path) -> None:
+    path.write_bytes(b"\xff\xfe")  # a UTF-16 byte-order mark
+
+
+def _a_directory(path: Path) -> None:
+    path.mkdir()
+
+
+def _mode_000(path: Path) -> None:
+    path.write_text("{}", encoding="utf-8")
+    path.chmod(0)
+
+
+#: settings.json shapes that each cost `aisquare --json doctor` its whole report (a
+#: traceback, nothing on stdout) before the read-only readers went through `read_json`.
+_DAMAGED_SETTINGS = {
+    "non-list event": _non_list_event,
+    "not UTF-8": _not_utf8,
+    "a directory": _a_directory,
+    "mode 000": _mode_000,
+}
+_UNREADABLE_SHAPES = {"not UTF-8", "a directory", "mode 000"}
+_NEEDS_DENIED_READS = pytest.mark.skipif(
+    not can_deny_reads(), reason="chmod(0) denies nothing here (root, or NTFS where it is advice)"
+)
+
+
+def _shapes(names: set[str] | None = None) -> list[object]:
+    return [
+        pytest.param(name, marks=_NEEDS_DENIED_READS if name == "mode 000" else (), id=name)
+        for name in _DAMAGED_SETTINGS
+        if names is None or name in names
+    ]
+
+
+def _cleared(path: Path) -> None:
+    """Take a damaged shape away again, leaving nothing at ``path``."""
+    if path.is_dir():
+        path.rmdir()
+    elif path.exists():
+        path.chmod(0o600)
+        path.unlink()
+
+
+def _content(path: Path) -> object:
+    """What is at ``path``, made readable again: a directory's entries or a file's bytes."""
+    if path.is_dir():
+        return sorted(child.name for child in path.iterdir())
+    path.chmod(0o600)
+    return path.read_bytes()
+
+
+def _row_named(stdout: str, name: str) -> dict[str, object]:
+    rows: list[dict[str, object]] = json.loads(stdout)
+    return next(row for row in rows if row["name"] == name)
+
+
+@pytest.mark.parametrize("shape", _shapes())
+def test_a_damaged_settings_json_reads_as_no_hooks_not_a_traceback(
+    runner: CliRunner, claude_home: Path, shape: str
+) -> None:
+    settings_path = claude_home / "settings.json"
+    _DAMAGED_SETTINGS[shape](settings_path)
+    try:
+        connected = agents_service.claude_code_connected()
+        damaged = runner.invoke(app, ["--json", "doctor"])
+    finally:
+        _cleared(settings_path)
+    settings_path.write_text("{}", encoding="utf-8")
+    plain = runner.invoke(app, ["--json", "doctor"])
+
+    assert connected is False
+    assert damaged.exception is None or isinstance(damaged.exception, SystemExit), repr(
+        damaged.exception
+    )
+    row = _row_named(damaged.stdout, "claude-code")
+    assert row["status"] == "warn" and "agents connect claude-code" in str(row["fix"]), row
+    assert row == _row_named(plain.stdout, "claude-code"), (
+        "control: it reads as a file with no hooks"
+    )
+
+
+def test_an_undecodable_sibling_settings_json_costs_doctor_nothing(
     runner: CliRunner, claude_home: Path
 ) -> None:
-    """``{"hooks": {"Stop": 5}}`` made ``doctor`` print a traceback, and the check raise."""
-    settings_path = claude_home / "settings.json"
-    settings_path.write_text(json.dumps({"hooks": {"Stop": 5, "SessionEnd": True}}), "utf-8")
+    """``_claude_dirs_on_disk`` promises that one unreadable sibling never costs doctor
+    its other rows; an undecodable one crashed it."""
+    _connect(runner)
+    sibling = claude_home.parent / ".claude-account1"
+    sibling.mkdir()
+    (sibling / "settings.json").write_bytes(b"\xff\xfe")
+    skipped = runner.invoke(app, ["--json", "doctor"])
+    # Control: the scan does read siblings, so the one above was skipped, not unseen.
+    shutil.copyfile(claude_home / "settings.json", sibling / "settings.json")
+    seen = runner.invoke(app, ["--json", "doctor"])
 
-    assert agents_service.claude_code_connected() is False
-    result = runner.invoke(app, ["--json", "doctor"])
-    assert result.exception is None or isinstance(result.exception, SystemExit), repr(
-        result.exception
+    assert skipped.exception is None or isinstance(skipped.exception, SystemExit), repr(
+        skipped.exception
     )
-    row = next(row for row in json.loads(result.stdout) if row["name"] == "claude-code")
-    assert row["status"] == "warn" and "agents connect claude-code" in row["fix"], row
-
-    _connect(runner)  # control: connect writes each event back as a list of our group
-    assert agents_service.claude_code_connected() is True
+    row = _row_named(skipped.stdout, "claude-code")
+    assert row["status"] == "ok" and str(sibling) not in str(row["detail"]), row
+    assert str(sibling) in str(_row_named(seen.stdout, "claude-code")["detail"])
 
 
 # --------------------------------------------------------------------------- the refusal
 
 
-@pytest.mark.parametrize(("name", "label"), [("codex", "Codex"), ("cursor", "Cursor")])
+#: The detect-only agents and the release each is planned for. Cursor has none: the
+#: release plan schedules Codex (10.1), and a row promising Cursor in 0.10 would be
+#: false on 0.10 itself.
+_DETECT_ONLY = [("codex", "Codex", "0.10"), ("cursor", "Cursor", None)]
+
+
+@pytest.mark.parametrize(("name", "label", "planned"), _DETECT_ONLY)
 def test_connect_refuses_an_agent_it_has_no_hooks_for(
-    runner: CliRunner, isolated_agent_home: Path, name: str, label: str
+    runner: CliRunner, isolated_agent_home: Path, name: str, label: str, planned: str | None
 ) -> None:
     """It exited 0 and wrote the agent into agents.json as connected, installing nothing."""
     agent_dir = isolated_agent_home / f".{name}"
@@ -169,8 +271,10 @@ def test_connect_refuses_an_agent_it_has_no_hooks_for(
     human = runner.invoke(app, ["agents", "connect", name])
     machine = runner.invoke(app, ["--json", "agents", "connect", name])
 
+    later = f"; support is planned for {planned}" if planned else ""
     assert (human.exit_code, machine.exit_code) == (1, 1)
-    assert f"✗ aisquare can't connect {label} yet; support is planned for 0.10" in human.output
+    assert human.output.strip() == f"✗ aisquare can't connect {label} yet{later}"
+    assert ("planned for" in human.output) == (planned is not None), human.output
     assert json.loads(machine.stdout) == {"error": "unsupported_agent", "ref": name}
     assert not paths.aisquare_home().exists(), "a refusal must not build the aisquare home"
     assert list(agent_dir.iterdir()) == [], f"nothing may be written under ~/.{name}"
@@ -182,7 +286,7 @@ def test_connect_refuses_an_agent_it_has_no_hooks_for(
 
 
 def test_an_absent_unsupported_agent_gets_the_same_answer(runner: CliRunner) -> None:
-    """ "Not installed" would send someone to install Codex, and it still could not connect."""
+    """Saying "not installed" would send someone to install Codex, still unable to connect it."""
     refused = runner.invoke(app, ["agents", "connect", "codex"])
     absent = runner.invoke(app, ["agents", "connect", "claude-code"])
 
@@ -233,6 +337,72 @@ def test_the_refusal_never_reaches_a_damaged_store(
         assert reached.get("name") == "claude-code" and "error" not in reached, reached
 
 
+def test_connect_names_a_context_file_it_cannot_read(runner: CliRunner, claude_home: Path) -> None:
+    """A CLAUDE.md saved as Latin-1 was reported as ``not_installed``: an installed Claude
+    Code, and asq's Connect button saying it was not, with no file named."""
+    claude_md = claude_home / "CLAUDE.md"
+    claude_md.write_bytes("# Prefs\ncaf\xe9\n".encode("latin-1"))
+
+    machine = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+    human = runner.invoke(app, ["agents", "connect", "claude-code"])
+    ingested = paths.aisquare_home().exists()
+    shutil.rmtree(claude_home)
+    absent = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+
+    reason = f"can't read {claude_md}: it is not UTF-8 text"
+    assert json.loads(machine.stdout) == {
+        "error": "agent_file_unreadable",
+        "ref": "claude-code",
+        "detail": reason,
+    }
+    assert human.exit_code == 1 and human.output.strip() == f"✗ {reason}"
+    assert not ingested, "refused before anything was ingested or the home built"
+    assert json.loads(absent.stdout)["error"] == "not_installed", "control: absent still says so"
+
+
+@pytest.mark.parametrize("shape", _shapes(_UNREADABLE_SHAPES))
+def test_connect_names_a_settings_json_it_cannot_read_and_leaves_it_alone(
+    runner: CliRunner, claude_home: Path, tmp_path: Path, shape: str
+) -> None:
+    """Undecodable was ``not_installed`` after the home was built, a directory a traceback
+    after CLAUDE.md was ingested. Now: refused first, the file named, nothing changed."""
+    settings_path = claude_home / "settings.json"
+    _DAMAGED_SETTINGS[shape](settings_path)
+    reference = tmp_path / "reference" / "settings.json"
+    reference.parent.mkdir()
+    _DAMAGED_SETTINGS[shape](reference)
+
+    refused = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+    built = paths.aisquare_home().exists()
+    left = _content(settings_path)
+    _cleared(settings_path)
+    connected = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+
+    assert isinstance(refused.exception, SystemExit), repr(refused.exception)
+    payload = json.loads(refused.stdout)
+    assert (payload["error"], payload["ref"]) == ("agent_file_unreadable", "claude-code"), payload
+    assert str(payload["detail"]).startswith(f"can't read {settings_path}: "), payload
+    assert not built, "refused before the context was ingested or the home built"
+    assert left == _content(reference), "the file is left exactly as it was"
+    assert connected.exit_code == 0, "control: the same connect succeeds once it can read"
+
+
+def test_a_connection_that_installs_nothing_is_refused_not_recorded(
+    runner: CliRunner, claude_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bug read "no hooks for this agent": `connect codex` exited 0 with it and recorded
+    the agent. No connection without hooks may be printed or recorded again."""
+    with monkeypatch.context() as patched:
+        patched.setattr(agent_core, "install_hooks", lambda name, config_dir=None: False)
+        refused = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+    recorded = paths.agents_registry_path().exists()
+    connected = runner.invoke(app, ["agents", "connect", "claude-code"])
+
+    assert json.loads(refused.stdout) == {"error": "unsupported_agent", "ref": "claude-code"}
+    assert not recorded, "nothing was written to agents.json"
+    assert connected.output.startswith("✓ connected claude-code — hooks installed"), "control"
+
+
 # --------------------------------------------------------------------------- the doctor's rows
 
 
@@ -258,28 +428,59 @@ def test_the_doctor_has_a_row_for_every_agent_in_the_registry(
         assert (rows[name]["status"], rows[name]["fix"]) == ("ok", None), rows[name]
 
 
-@pytest.mark.parametrize(("name", "label"), [("codex", "Codex"), ("cursor", "Cursor")])
-def test_a_planned_agent_row_says_whether_it_is_on_this_machine(
+@pytest.mark.parametrize(("name", "label", "planned"), _DETECT_ONLY)
+def test_a_detect_only_agent_row_names_the_path_it_checked(
     isolated_agent_home: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     name: str,
     label: str,
+    planned: str | None,
 ) -> None:
+    """By path, not "on this machine": a Codex kept elsewhere through ``CODEX_HOME`` is
+    not looked for there, so a sentence about the machine could be false."""
     monkeypatch.chdir(tmp_path)
+    home = isolated_agent_home / f".{name}"
     absent = _row(name)
-    (isolated_agent_home / f".{name}").mkdir(parents=True)
+    home.mkdir(parents=True)
     present = _row(name)
 
-    assert absent.detail == (
-        f"{label} not detected on this machine (aisquare support is planned for 0.10)"
-    )
-    assert present.detail == (
-        f"{label} detected at {isolated_agent_home / f'.{name}'}, but aisquare can't "
-        "connect it yet (planned for 0.10)"
-    )
+    support = f" (aisquare support is planned for {planned})" if planned else ""
+    later = f" (planned for {planned})" if planned else ""
+    spec = agent_core.spec(name)
+    assert spec is not None and spec.planned == planned, spec
+    assert absent.detail == f"{label} not detected at {home}{support}"
+    assert present.detail == f"{label} detected at {home}, but aisquare can't connect it yet{later}"
     for row in (absent, present):
         assert (row.status, row.fix) == (CheckStatus.ok, None), row
+
+
+def _release(version: str) -> tuple[int, ...]:
+    """``"0.10"`` → ``(0, 10, 0)``: the release a version names, compared as numbers."""
+    found = re.match(r"\d+(?:\.\d+)*", version)
+    numbers = [int(part) for part in found.group(0).split(".")][:3] if found else []
+    return tuple(numbers + [0] * (3 - len(numbers)))
+
+
+def _still_ahead(planned: str, running: str) -> bool:
+    """Whether a release planned as ``planned`` is still to come for ``running``."""
+    return _release(planned) > _release(running)
+
+
+def test_every_planned_release_is_still_ahead_of_this_one() -> None:
+    """A row saying "planned for 0.10" on 0.10 itself is a promise broken in public. So the
+    release commit that reaches a planned version fails here until the plan moves or the
+    agent can be connected."""
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    running = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+    planned = {spec.name: spec.planned for spec in agent_core.specs() if spec.planned}
+
+    assert planned, "the registry plans no release, so this guards nothing (Codex: 0.10)"
+    overdue = {name: when for name, when in planned.items() if not _still_ahead(when, running)}
+    assert overdue == {}, f"planned releases already reached by {running}: {overdue}"
+    # The rule's controls: by number, not by text, and a release that has arrived is due.
+    assert _still_ahead("0.10", "0.9.0") and _still_ahead("1.0", "0.10.3")
+    assert not _still_ahead("0.10", "0.10.0") and not _still_ahead("0.9", "0.10.0")
 
 
 def test_only_the_claude_code_row_offers_connect(
@@ -302,25 +503,77 @@ def test_only_the_claude_code_row_offers_connect(
     ), [named["codex"], named["cursor"]]
 
 
-def test_the_connect_fix_follows_the_shared_check(
-    claude_home: Path, monkeypatch: pytest.MonkeyPatch
+def test_every_reader_follows_the_shared_check(
+    runner: CliRunner, claude_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The plugin route extends ``claude_code_connected``; the row must follow it, so a
-    directory it calls connected is never offered a second install of the hooks."""
-    offered = diagnostics._check_claude_code()
-    monkeypatch.setattr(agents_service, "claude_code_connected", lambda config_dir=None: True)
-    answered = diagnostics._check_claude_code()
+    """The plugin route extends ``claude_code_connected``. Every reader must follow it, or
+    one of them goes on calling a directory unconnected and points at a second install of
+    the hooks: the doctor's row, ``agents status``, and the Accounts page's slot."""
+    _connect(runner)
+    (claude_home / "settings.json").write_text("{}", encoding="utf-8")  # recorded, hooks gone
 
-    assert offered.status is CheckStatus.warn
-    assert offered.fix == f"aisquare agents connect claude-code --config-dir {claude_home}"
-    assert answered.status is CheckStatus.ok, answered.detail
-    assert fix_commands([answered]) == []
+    def readers() -> tuple[DoctorCheck, bool, bool]:
+        status = json.loads(
+            runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout
+        )
+        slot = claude_accounts_service.describe(claude_accounts_core.default_account())
+        site: bool = status[0]["sites"][0]["hooks_installed"]
+        return diagnostics._check_claude_code(), site, slot.hooks_installed
+
+    before = readers()
+    monkeypatch.setattr(agent_core, "claude_code_connected", lambda config_dir=None: True)
+    after = readers()
+
+    row, site, slot = before
+    assert row.status is CheckStatus.warn, "control: unconnected, and every reader says so"
+    assert row.fix == f"aisquare agents connect claude-code --config-dir {claude_home}"
+    assert (site, slot) == (False, False)
+    row, site, slot = after
+    assert row.status is CheckStatus.ok and fix_commands([row]) == [], row
+    assert (site, slot) == (True, True)
+
+
+def test_hooks_switched_off_are_not_connected_and_never_offered_connect(
+    runner: CliRunner, claude_home: Path
+) -> None:
+    """``"disableAllHooks": true`` runs none of our hooks however complete they are, and
+    Connect leaves the key alone, so it may not be offered: the row says what to change."""
+    _connect(runner)
+    settings_path = claude_home / "settings.json"
+    hooked = json.loads(settings_path.read_text(encoding="utf-8"))
+    settings_path.write_text(json.dumps({**hooked, "disableAllHooks": True}), encoding="utf-8")
+    switched_off = agents_service.claude_code_connected(), diagnostics._check_claude_code()
+    _connect(runner)
+    after_connect = agents_service.claude_code_connected()
+    settings_path.write_text(json.dumps({"disableAllHooks": True}), encoding="utf-8")
+    no_hooks_either = diagnostics._check_claude_code()
+    settings_path.write_text(json.dumps(hooked), encoding="utf-8")
+    back_on = agents_service.claude_code_connected(), diagnostics._check_claude_code()
+
+    connected, row = switched_off
+    assert connected is False and after_connect is False, "Connect cannot clear the switch"
+    assert row.status is CheckStatus.warn and '"disableAllHooks": true' in row.detail, row
+    assert row.fix == f'Turn hooks back on: remove "disableAllHooks" from {settings_path}'
+    assert fix_commands([row]) == [] and fix_commands([no_hooks_either]) == [], "no button"
+    connected, row = back_on
+    assert connected is True and row.status is CheckStatus.ok, f"control: {row}"
+
+
+def test_only_a_literal_true_switches_hooks_off(claude_home: Path) -> None:
+    """As Claude Code reads the key; anything else leaves the hooks on."""
+    settings_path = claude_home / "settings.json"
+    answers = {}
+    for value in (True, False, "true", 1, None):
+        settings_path.write_text(json.dumps({"disableAllHooks": value}), encoding="utf-8")
+        answers[repr(value)] = agent_core.hooks_disabled("claude-code")
+
+    assert answers == {"True": True, "False": False, "'true'": False, "1": False, "None": False}
 
 
 def test_the_agent_rows_read_paths_only(
     isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No socket, no process, no state: every doctor run in asq computes these rows."""
+    """No socket, no process, no agents.json, no state: every doctor run in asq computes them."""
     for name in (".codex", ".cursor"):
         (isolated_agent_home / name).mkdir(parents=True)
     before = _tree(isolated_agent_home)
@@ -335,8 +588,13 @@ def test_the_agent_rows_read_paths_only(
         started.append("process")
         raise OSError("a doctor agent row started a process")
 
+    def no_registry() -> dict[str, object]:
+        started.append("registry")
+        raise OSError("a doctor agent row read agents.json")
+
     monkeypatch.setattr(socket, "socket", Tripwire)
     monkeypatch.setattr(subprocess, "Popen", no_process)
+    monkeypatch.setattr(agent_core, "_registry", no_registry)
 
     rows = diagnostics._planned_agent_checks()
 
@@ -344,11 +602,13 @@ def test_the_agent_rows_read_paths_only(
     assert started == []
     assert not paths.aisquare_home().exists()
     assert _tree(isolated_agent_home) == before
-    with pytest.raises(OSError):  # control: both tripwires are live
+    with pytest.raises(OSError):  # control: every tripwire is live
         socket.create_connection(("127.0.0.1", 9))
     with pytest.raises(OSError):
         subprocess.run(["true"], check=False)
-    assert started == ["socket", "process"]
+    with pytest.raises(OSError):
+        agent_core.detect("codex")
+    assert started == ["socket", "process", "registry"]
 
 
 def test_doctor_with_every_agent_on_disk_writes_nothing(
@@ -363,8 +623,15 @@ def test_doctor_with_every_agent_on_disk_writes_nothing(
     monkeypatch.chdir(tmp_path)
     before = _tree(isolated_agent_home)
 
-    runner.invoke(app, ["doctor"])
+    result = runner.invoke(app, ["--json", "doctor"])
 
+    # A doctor that crashed would write nothing too: the report must have been made,
+    # and must have seen the agents put there (doctor exits 1: there is no home).
+    assert result.exception is None or isinstance(result.exception, SystemExit), repr(
+        result.exception
+    )
+    for name, label in (("codex", "Codex"), ("cursor", "Cursor")):
+        assert str(_row_named(result.stdout, name)["detail"]).startswith(f"{label} detected at ")
     assert _tree(isolated_agent_home) == before
     assert not paths.aisquare_home().exists()
     _connect(runner)  # control: a real connect writes, and the listing sees it

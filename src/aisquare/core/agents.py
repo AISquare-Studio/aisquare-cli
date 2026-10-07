@@ -138,9 +138,10 @@ def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
             (claude / "CLAUDE.md",),
             settings_path=claude / "settings.json",
         ),
-        # Detected only: no hooks yet, so `agents connect` refuses them and the
-        # doctor's row for each says when they are planned.
-        AgentSpec("cursor", "Cursor", home / ".cursor", (), planned="0.10"),
+        # Detected only: no hooks yet, so `agents connect` refuses them. The doctor's
+        # row names a release only where the release plan has one (Codex: 10.1);
+        # tests/test_agent_adapters.py fails once that release is the running one.
+        AgentSpec("cursor", "Cursor", home / ".cursor", ()),
         AgentSpec("codex", "Codex", home / ".codex", (), planned="0.10"),
     ]
 
@@ -358,13 +359,53 @@ def hook_timeout_shortfall(name: str, config_dir: Path | None = None) -> list[st
     return _missing_events(name, config_dir, reconciled=True)
 
 
+def hooks_disabled(name: str, config_dir: Path | None = None) -> bool:
+    """Whether the agent's settings file switches every hook off (``"disableAllHooks": true``).
+
+    Claude Code then runs no hook from that directory, its plugins' included, so
+    none of ours fire however complete they are, and ``agents connect`` leaves the
+    key alone: Connect cannot change it. Only a literal ``true`` counts, as Claude
+    Code reads it. Read-only (:func:`read_json`); never raises.
+    """
+    spec = _spec(name, config_dir)
+    if spec is None or spec.settings_path is None:
+        return False
+    return read_json(spec.settings_path).get("disableAllHooks") is True
+
+
+def claude_code_connected(config_dir: Path | None = None) -> bool:
+    """Whether Claude Code in ``config_dir`` runs aisquare: the one "connected?" answer.
+
+    ``services.agents.claude_code_connected`` is its public face and says who asks
+    and why. It is implemented here so this module's own per-directory readers ask
+    it too: ``_to_info`` reports it as each site's ``hooks_installed`` in ``agents
+    list`` and ``agents status``.
+
+    Two routes, in a directory whose ``settings.json`` does not switch hooks off:
+    every lifecycle hook ``agents connect`` installs is in that file, or the
+    aisquare Claude Code plugin is installed and enabled there
+    (:func:`claude_plugin`). The switch comes first because it silences every
+    route, the plugin's included. Never raises: everything it reads goes through
+    :func:`read_json`.
+    """
+    if hooks_disabled("claude-code", config_dir):
+        return False
+    return hooks_installed("claude-code", config_dir) or claude_plugin(config_dir) is not None
+
+
 def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> list[str]:
     """Lifecycle events with no aisquare group — or, with ``reconciled``, none
-    whose context timeout reaches :data:`CONTEXT_HOOK_TIMEOUT_SECONDS`."""
+    whose context timeout reaches :data:`CONTEXT_HOOK_TIMEOUT_SECONDS`.
+
+    Read through :func:`read_json`, this module's rule for a file it only reads:
+    a ``settings.json`` that is missing, unreadable, not UTF-8 or a directory
+    holds no hooks. Read through ``_read_settings``, which must raise for the
+    writers, each of those cost ``aisquare doctor`` its whole report.
+    """
     spec = _spec(name, config_dir)
-    if spec is None or spec.settings_path is None or not spec.settings_path.exists():
+    if spec is None or spec.settings_path is None:
         return [event for event, _ in _HOOKS]
-    hooks = _read_settings(spec.settings_path).get("hooks")
+    hooks = read_json(spec.settings_path).get("hooks")
     if not isinstance(hooks, dict):
         return [event for event, _ in _HOOKS]
     accepts = _is_current_aisquare_group if reconciled else (lambda g, _e: _is_aisquare_group(g))
@@ -597,18 +638,33 @@ def set_connected(name: str, connected: bool, config_dir: Path | None = None) ->
     )
 
 
+def detected(spec: AgentSpec) -> bool:
+    """Whether ``spec``'s agent is on this machine: its home or one of its context files exists.
+
+    Paths only. The registry says what this home connected, which is a different
+    question, so the doctor's rows for agents aisquare cannot connect ask here
+    rather than through :func:`detect`.
+    """
+    return spec.home.exists() or any(path.exists() for path in spec.context_files)
+
+
 def _to_info(spec: AgentSpec, registry: dict[str, Any]) -> AgentInfo:
     existing = [path for path in spec.context_files if path.exists()]
     sites = [
         AgentHookSite(
             config_dir=directory,
-            hooks_installed=hooks_installed(spec.name, directory),
+            # Claude Code's sites report the shared answer, as the doctor's row does.
+            hooks_installed=(
+                claude_code_connected(directory)
+                if spec.name == "claude-code"
+                else hooks_installed(spec.name, directory)
+            ),
         )
         for directory in connected_dirs(spec.name, registry)
     ]
     return AgentInfo(
         name=spec.name,
-        detected=spec.home.exists() or bool(existing),
+        detected=detected(spec),
         config_paths=existing,
         connected=spec.name in _connected_set(registry),
         sites=sites,
@@ -718,12 +774,13 @@ def hook_commands(name: str, config_dir: Path | None = None) -> list[str]:
 
     Any event counts, not only the full set ``hooks_installed`` demands: a
     partial install from an older version still RUNS on the events it has, so
-    what it runs is still worth grading.
+    what it runs is still worth grading. Read-only, so through :func:`read_json`
+    (see ``_missing_events``): a file that cannot be read names no command.
     """
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
         return []
-    hooks = _read_settings(spec.settings_path).get("hooks")
+    hooks = read_json(spec.settings_path).get("hooks")
     if not isinstance(hooks, dict):
         return []
     found: list[str] = []

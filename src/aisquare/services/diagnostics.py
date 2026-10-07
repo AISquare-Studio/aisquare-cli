@@ -829,6 +829,24 @@ def _check_claude_code() -> DoctorCheck:
         return _ok("claude-code", "Claude Code not detected on this machine")
     version = claude_code_version()
     product = f"Claude Code {version}" if version else "Claude Code"
+    # Hooks switched off ("disableAllHooks": true) run none of ours however complete
+    # they are, and `agents connect` cannot change that. The shared check answers
+    # False there, so such a directory must not reach `unhooked` below and be
+    # offered a Connect button that could never clear it. It is reported alone:
+    # until hooks run at all, the other clauses describe hooks that do not fire.
+    switched_off = [
+        site.config_dir / "settings.json"
+        for site in sites
+        if agent_core.hooks_disabled("claude-code", site.config_dir)
+    ]
+    if switched_off:
+        listed = ", ".join(str(path) for path in switched_off)
+        return _warn(
+            "claude-code",
+            f'{product} hooks are switched off ("disableAllHooks": true) in: {listed} — '
+            "Claude Code runs none of them, so no context is injected and no prompt is captured",
+            f'Turn hooks back on: remove "disableAllHooks" from {listed}',
+        )
     if not sites:
         return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
 
@@ -918,21 +936,25 @@ def _planned_agent_checks() -> list[DoctorCheck]:
     not: there is nothing to fix, and a warning would take one of the sidebar's
     three not-ok lines (``DOCTOR_LINES``) from a row an operator can act on. No
     ``fix``, so no button: ``agents connect`` refuses these agents rather than
-    record a connection that installs nothing. Reads paths only.
+    record a connection that installs nothing. A release is named only where
+    the registry plans one.
+
+    Reads paths only (``agent_core.detected``), and each sentence names the
+    path it checked. "Not detected on this machine" was not true of a Codex
+    kept elsewhere through ``CODEX_HOME``, which this check does not follow.
     """
     rows: list[DoctorCheck] = []
     for spec in agent_core.specs():
         if spec.connectable:
             continue
-        info = agent_core.detect(spec.name)
-        if info is not None and info.detected:
+        if agent_core.detected(spec):
             later = f" (planned for {spec.planned})" if spec.planned else ""
             detail = (
                 f"{spec.label} detected at {spec.home}, but aisquare can't connect it yet{later}"
             )
         else:
             later = f" (aisquare support is planned for {spec.planned})" if spec.planned else ""
-            detail = f"{spec.label} not detected on this machine{later}"
+            detail = f"{spec.label} not detected at {spec.home}{later}"
         rows.append(_ok(spec.name, detail))
     return rows
 

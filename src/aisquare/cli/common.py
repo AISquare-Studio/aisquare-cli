@@ -527,10 +527,10 @@ def emit_connected(connection: AgentConnection) -> None:
     if get_state().json_output:
         typer.echo(connection.model_dump_json())
         return
-    hooks = "hooks installed" if connection.hooks_installed else "no hooks for this agent"
+    # Always installed: `connect` refuses rather than return a connection without hooks.
     noun = "entry" if connection.imported == 1 else "entries"
     stdout_console().print(
-        f"✓ connected {connection.name} — {hooks}; imported {connection.imported} {noun}"
+        f"✓ connected {connection.name} — hooks installed; imported {connection.imported} {noun}"
     )
 
 

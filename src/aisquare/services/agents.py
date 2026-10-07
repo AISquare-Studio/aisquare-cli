@@ -33,35 +33,37 @@ def status(name: str | None = None) -> list[AgentInfo]:
 def claude_code_connected(config_dir: Path | None = None) -> bool:
     """Whether Claude Code in ``config_dir`` runs aisquare: the one "connected?" answer.
 
-    Every surface that decides whether to offer Connect asks here: the doctor's
-    ``claude-code`` row (whose ``agents connect`` fix is a button in asq), the
-    Welcome view, and the Claude Code plugin route, which extends THIS function
-    rather than adding a check of its own. Two answers to one question is how
-    the hooks get installed twice and every prompt captured twice.
+    Asked wherever Claude Code is reported connected or offered Connect: the
+    doctor's ``claude-code`` row (whose ``agents connect`` fix is a button in asq),
+    ``agents list`` and ``agents status``, the Accounts page and the Welcome view.
+    The Claude Code plugin route extends it rather than adding a check of its
+    own. Two answers to one question is how the hooks get installed twice and
+    every prompt captured twice. It is implemented in ``core.agents``
+    (:func:`aisquare.core.agents.claude_code_connected`) so the readers there
+    can ask it too.
 
     ``config_dir`` is a Claude Code config directory; ``None`` is the one a
     session started from this shell reads (``CLAUDE_CONFIG_DIR``, else
     ``~/.claude``), as ``agents connect`` means it.
 
-    Two routes connect it. Every lifecycle hook ``agents connect`` installs is in
-    the directory's ``settings.json`` -- a partial install from an older version
-    answers False, because Connect is what completes it. Or the aisquare Claude
-    Code plugin is installed and enabled there (``agent_core.claude_plugin``):
-    its hooks run the same ``aisquare hook <event>``, so offering Connect to a
-    plugin user would install every hook a second time. Which aisquare the hooks
-    run is the doctor's question, not this one: answering it can start a process.
+    Two routes connect it, in a directory whose ``settings.json`` does not switch
+    hooks off: every lifecycle hook ``agents connect`` installs is in that file,
+    or the aisquare Claude Code plugin is installed and enabled there
+    (:func:`claude_plugin`), whose hooks run the same ``aisquare hook <event>``.
+    A partial install from an older version answers False, because Connect is
+    what completes it. So does ``"disableAllHooks": true``, which Connect
+    cannot change: a surface that offers Connect asks
+    ``agent_core.hooks_disabled`` first and says so instead, as the doctor's row
+    does. Which aisquare the hooks run is the doctor's question, not this one:
+    answering it can start a process.
 
-    Read-only and offline: two files are read and nothing is written, so no
-    ``~/.aisquare`` appears. ``agents.json`` is not consulted, because hooks on
-    disk run whether or not this home recorded them (#84). A ``settings.json``
-    that cannot be read answers False: nothing shows our hooks are there.
+    Read-only and offline, and it never raises: one file is read and nothing is
+    written, so no ``~/.aisquare`` appears. ``agents.json`` is not consulted,
+    because hooks on disk run whether or not this home recorded them (#84). A
+    ``settings.json`` that cannot be read answers False: nothing shows our hooks
+    are there.
     """
-    try:
-        if agent_core.hooks_installed("claude-code", config_dir):
-            return True
-    except (OSError, ValueError):
-        return False
-    return agent_core.claude_plugin(config_dir) is not None
+    return agent_core.claude_code_connected(config_dir)
 
 
 def claude_plugin(config_dir: Path | None = None) -> agent_core.ClaudePlugin | None:
@@ -78,6 +80,33 @@ class UnsupportedAgentError(ValueError):
     """
 
 
+class AgentNotInstalledError(ValueError):
+    """The agent is not on this machine: the one ``ValueError`` reported as ``not_installed``."""
+
+
+class AgentFileUnreadableError(ValueError):
+    """A file ``connect`` must read (``CLAUDE.md``, ``settings.json``) is not readable UTF-8 text.
+
+    Any ``ValueError`` used to be reported as ``not_installed``, which is what an
+    undecodable ``CLAUDE.md`` became, and an ``OSError`` (a directory where the
+    file should be, a file this user may not read) was a traceback with nothing
+    on stdout. So asq's Connect button named neither the file nor the reason.
+    The message names both.
+    """
+
+
+def _read_agent_file(path: Path) -> str | None:
+    """The text of one of the agent's own files, or ``None`` when there is none."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except UnicodeDecodeError as exc:
+        raise AgentFileUnreadableError(f"can't read {path}: it is not UTF-8 text") from exc
+    except OSError as exc:
+        raise AgentFileUnreadableError(f"can't read {path}: {exc.strerror or exc}") from exc
+
+
 def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
     """Install aisquare's hooks into the agent and ingest its existing context.
 
@@ -85,7 +114,9 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
     aisquare context and aisquare captures prompts), then one-time-ingests the
     agent's context files (e.g. ``~/.claude/CLAUDE.md``) into the user pool.
     Raises ``KeyError`` for an unknown agent, :class:`UnsupportedAgentError`
-    for one aisquare cannot connect yet, and ``ValueError`` if not installed.
+    for one aisquare cannot connect yet, :class:`AgentNotInstalledError` if it
+    is not installed, and :class:`AgentFileUnreadableError` for a file of its
+    that cannot be read. The last three are ``ValueError``.
     """
     spec = agent_core.spec(name, config_dir)
     if spec is None:
@@ -97,11 +128,15 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
         raise UnsupportedAgentError(f"aisquare can't connect {spec.label} yet{planned}")
     info = agent_core.detect(name, config_dir)
     if info is None or not info.detected:
-        raise ValueError(f"{name} is not installed on this machine")
+        raise AgentNotInstalledError(f"{name} is not installed on this machine")
 
+    # Every file is read before anything is written: a settings.json that cannot
+    # be read stopped connect after the context was ingested and the home built.
+    if spec.settings_path is not None:
+        _read_agent_file(spec.settings_path)
     sections: list[str] = []
     for path in agent_core.context_files(name, config_dir):
-        sections.extend(_split_sections(path.read_text(encoding="utf-8")))
+        sections.extend(_split_sections(_read_agent_file(path) or ""))
 
     added = 0
     with store_session() as store:
@@ -113,9 +148,13 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
             existing.add(text)
             added += 1
 
-    hooks_installed = agent_core.install_hooks(name, config_dir)
+    if not agent_core.install_hooks(name, config_dir):
+        # Unreachable while `connectable` means a settings file to write. Raised, not
+        # reported: a connection that installed nothing is what the refusal above is
+        # for, and it must never be recorded, or printed, as connected.
+        raise UnsupportedAgentError(f"aisquare can't connect {spec.label} yet")
     agent_core.set_connected(name, True, config_dir)
-    return AgentConnection(name=name, hooks_installed=hooks_installed, imported=added)
+    return AgentConnection(name=name, hooks_installed=True, imported=added)
 
 
 def disconnect(name: str, config_dir: Path | None = None) -> bool:

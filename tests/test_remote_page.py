@@ -585,6 +585,54 @@ def test_each_file_and_the_whole_page_fit_their_budgets() -> None:
     assert total <= 150 * 1024
 
 
+KEY_PX = 44
+"""SPEC §6.4's touch target: no key of the pad is narrower."""
+PHONE_ROW_PX = 360 - 2 * 12
+"""The key pad's row on a 360 px phone: the input bar's width, less its 12 px each side."""
+MONO_EM = 0.62
+"""A monospace character's advance, per em, a little over the fonts the page names
+(Menlo, SF Mono, Liberation Mono and DejaVu Sans Mono are 0.60 to 0.61)."""
+
+
+def _css_value(css: str, selector: str, prop: str) -> str:
+    rule = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", css)
+    assert rule is not None, selector
+    value = re.search(rf"(?:^|[;\s]){prop}:\s*([^;]+);", rule.group(1))
+    assert value is not None, f"{selector} {{ {prop} }}"
+    return value.group(1).strip()
+
+
+def _css_px(css: str, selector: str, prop: str) -> list[int]:
+    return [int(px) for px in re.findall(r"(\d+)px", _css_value(css, selector, prop))]
+
+
+def _pad_labels(script: str, table: str) -> list[str]:
+    found = re.search(rf"const {table} = \[(.*?)\];\n", script, re.S)
+    assert found is not None, table
+    return re.findall(r'\["([^"]+)", "[^"]+"\]', found.group(1))
+
+
+def test_the_key_pad_fits_a_360_px_phone_and_every_label_its_key() -> None:
+    """On a 390 px phone "Enter" (53 px) ran out of its 45 px key into the ↑ beside it, and
+    on a 360 px one the row's seven 44 px keys and 6 px gaps (344 px) overran its 336 px:
+    ↓ went to a row of its own. Headless Chromium measured both, and measures neither now."""
+    script, css = _text("app.js"), _text("app.css")
+    row, more = _pad_labels(script, "PAD_ROW"), _pad_labels(script, "PAD_MORE")
+    (gap,) = _css_px(css, ".pad", "gap")
+    (basis,) = _css_px(css, ".pad .key", "flex")
+    _vertical, side = _css_px(css, ".pad .key", "padding")
+    (font,) = _css_px(css, "button", "font-size")
+    room = basis - 2 - 2 * side  # inside a 1 px border on each side
+
+    assert len(row) == 7 and "Esc" in row
+    assert basis >= KEY_PX
+    assert len(row) * basis + (len(row) - 1) * gap <= PHONE_ROW_PX
+    assert [label for label in row if len(label) * font * MONO_EM > room] == []
+    wider = [label for label in more if len(label) * font * MONO_EM > room]
+    assert "Space" in wider, "the control: More holds labels a 44 px key cannot"
+    assert _css_value(css, ".pad .key", "min-width") == "max-content", "so theirs widen"
+
+
 # --- 10. the service worker -----------------------------------------------------------------
 
 NGROK_SUFFIXES = (".ngrok-free.app", ".ngrok.app", ".ngrok.io", ".ngrok-free.dev", ".ngrok.dev")
@@ -842,7 +890,7 @@ def test_send_with_nothing_typed_presses_no_enter(boot_report: dict[str, Any]) -
     empty = boot_report["emptySend"]
     assert empty["enterOn"], "the toggle is on, as the page starts it"
     assert empty["bodies"] == []
-    assert empty["toast"] == "Type something first — Enter on its own is on the key pad."
+    assert empty["toast"] == "Type something first — Enter on its own is ⏎ on the key pad."
 
 
 def test_the_keyboards_return_key_is_not_called_send_where_it_types_a_newline(

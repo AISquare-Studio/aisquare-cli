@@ -2121,7 +2121,8 @@ function measureColumns(box) {
   return clampInt(width > 0 ? Math.floor((box.clientWidth - 8) / width) : 40, 20, 200);
 }
 
-const PAD_ROW = [["Esc", "Escape"], ["1", "1"], ["2", "2"], ["3", "3"], ["Enter", "Enter"], ["↑", "Up"], ["↓", "Down"]];
+/* Enter is ⏎, as on the input bar: "Enter" ran out of its key into ↑ on a 390 px phone. */
+const PAD_ROW = [["Esc", "Escape"], ["1", "1"], ["2", "2"], ["3", "3"], ["⏎", "Enter"], ["↑", "Up"], ["↓", "Down"]];
 const PAD_MORE = [
   ["Tab", "Tab"], ["⇧Tab", "BTab"], ["⌫", "BSpace"], ["Space", "Space"], ["←", "Left"], ["→", "Right"],
   ["PgUp", "PageUp"], ["PgDn", "PageDown"], ["Home", "Home"], ["End", "End"], ["y", "y"], ["n", "n"],
@@ -2327,7 +2328,7 @@ function inputBar(pid, label, cleanups) {
   const sendText = async () => {
     const value = text.value;
     if (!value) {
-      toast("Type something first — Enter on its own is on the key pad.");
+      toast("Type something first — Enter on its own is ⏎ on the key pad.");
       return;
     }
     if (value.length > TEXT_MAX.keys) {

@@ -40,7 +40,7 @@ from tests.fsperms import can_deny_reads
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
 
 #: The real lookup, captured before the autouse fixture closes it (its own tests
-#: drive it with a stand-in ``urlopen``, which the fixture also closes).
+#: drive it with a stand-in ``open_url``, which the fixture also closes).
 _REAL_FETCH_LATEST = install_route.fetch_latest
 
 _EVENTS = (
@@ -671,11 +671,11 @@ class _Response(io.BytesIO):
 def test_the_lookup_reads_info_version(monkeypatch: pytest.MonkeyPatch) -> None:
     asked: list[Any] = []
 
-    def urlopen(request: Any, timeout: float) -> _Response:
+    def open_url(request: Any, timeout: float) -> _Response:
         asked.append((request.full_url, timeout))
         return _Response(json.dumps({"info": {"version": "0.9.1"}}).encode())
 
-    monkeypatch.setattr(install_route, "urlopen", urlopen)
+    monkeypatch.setattr(install_route, "open_url", open_url)
 
     latest = _REAL_FETCH_LATEST()
 
@@ -684,10 +684,10 @@ def test_the_lookup_reads_info_version(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_an_unreachable_pypi_is_an_answer_not_an_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    def urlopen(_request: Any, timeout: float) -> _Response:
+    def open_url(_request: Any, timeout: float) -> _Response:
         raise URLError("name resolution failed")
 
-    monkeypatch.setattr(install_route, "urlopen", urlopen)
+    monkeypatch.setattr(install_route, "open_url", open_url)
 
     latest = _REAL_FETCH_LATEST()
 
@@ -701,7 +701,7 @@ def test_an_unreachable_pypi_is_an_answer_not_an_exception(monkeypatch: pytest.M
 def test_an_answer_with_no_version_in_it_is_not_a_version(
     monkeypatch: pytest.MonkeyPatch, body: bytes
 ) -> None:
-    monkeypatch.setattr(install_route, "urlopen", lambda _request, timeout: _Response(body))
+    monkeypatch.setattr(install_route, "open_url", lambda _request, timeout: _Response(body))
 
     latest = _REAL_FETCH_LATEST()
 
@@ -901,14 +901,29 @@ def test_json_without_yes_prints_the_plan_and_changes_nothing(
     assert machine.installs == []
 
 
-def test_dry_run_at_a_terminal_neither_asks_nor_runs(
-    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "argv", [["upgrade", "--dry-run"], ["--json", "upgrade"]], ids=["dry-run", "json"]
+)
+def test_the_plan_modes_neither_ask_nor_run_even_at_a_terminal(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
 ) -> None:
+    """Off a terminal every path without --yes ends as a plan, which would hide a
+    plan mode that fell through; at a terminal, with every question answered yes,
+    only the plan modes themselves keep uv from running."""
     monkeypatch.setattr(install_cli, "_stdin_is_a_terminal", lambda: True)
     asked: list[str] = []
-    monkeypatch.setattr("aisquare.cli.install.typer.confirm", lambda text, **_: asked.append(text))
 
-    result = runner.invoke(app, ["upgrade", "--dry-run"])
+    def confirm(text: str, **_: object) -> bool:
+        asked.append(text)
+        return True
+
+    monkeypatch.setattr("aisquare.cli.install.typer.confirm", confirm)
+
+    result = runner.invoke(app, argv)
 
     assert result.exit_code == 0, result.output
     assert asked == [] and machine.installs == []

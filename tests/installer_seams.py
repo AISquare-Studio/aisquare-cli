@@ -25,9 +25,9 @@ import pytest
 from aisquare.services import install_route
 
 #: Everything in ``install_route`` that leaves this process or reads ambient
-#: machine state. ``urlopen`` is listed beside ``fetch_latest`` so a test of the
+#: machine state. ``open_url`` is listed beside ``fetch_latest`` so a test of the
 #: real lookup still cannot reach the network unless it supplies a stand-in.
-SEAMS = ("fetch_latest", "urlopen", "run_installer", "run_captured", "find_uv")
+SEAMS = ("fetch_latest", "open_url", "run_installer", "run_captured", "find_uv")
 
 
 @pytest.fixture(autouse=True)

@@ -31,15 +31,20 @@ install where it is ("Nothing to upgrade", exit 0 — docs/plans/one-line-instal
 §3.9.1); ``tests/test_lifecycle_upgrade.py`` holds both modules to that.
 
 The outside world is reached through three functions here and nowhere else —
-:func:`fetch_latest` (the network), :func:`run_installer` and
-:func:`run_captured` (processes) — so a test replaces them and never starts uv
-or touches PyPI; :func:`find_uv` is the one PATH lookup, for the same reason.
+:func:`open_url` (the network, for :func:`fetch_latest`), :func:`run_installer`
+and :func:`run_captured` (processes) — so a test replaces them and never starts
+uv or touches PyPI; :func:`find_uv` is the one PATH lookup, for the same reason.
 The process ones are registered spawn seams (``core.spawn.SEAMS``).
 
-Everything is imported at module top, on purpose. ``uv tool install --force``
-deletes the environment this process was loaded from while it is still
-running, so an import made AFTER the install would load the new version's
-module into the old process, or fail outright.
+What the run touches AFTER the installer is imported at module top, on purpose.
+``uv tool install --force`` deletes the environment this process was loaded from
+while it is still running, so a later import of anything in that environment
+would load the new version's module into the old process, or fail outright. The
+one exception is the PyPI lookup's network modules, imported inside it to keep
+them off the path every command pays to start (``tests/test_iam_single_reader.py``,
+the hooks included). That is safe twice over: the lookup runs before any
+installer, and those are standard-library modules, which live with the
+interpreter rather than in the tool environment uv replaces.
 """
 
 from __future__ import annotations
@@ -55,13 +60,10 @@ import sys
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from http.client import HTTPException
 from importlib import metadata
 from pathlib import Path
 from typing import Any
-from urllib.error import URLError
 from urllib.parse import unquote, urlparse
-from urllib.request import Request, urlopen
 
 from aisquare.core.version import DISTRIBUTION, __version__
 
@@ -246,12 +248,17 @@ def fetch_latest(timeout: float = LOOKUP_TIMEOUT_SECONDS) -> LatestRelease:
     anything to do; whether an upgrade WORKED is decided by asking the new
     install its version, because a mirror may serve a different "latest".
     """
+    # Here, not at module top: see the module docstring's one exception.
+    from http.client import HTTPException
+    from urllib.error import URLError
+    from urllib.request import Request
+
     request = Request(
         PYPI_JSON_URL,
         headers={"Accept": "application/json", "User-Agent": f"{DISTRIBUTION}/{__version__}"},
     )
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with open_url(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (URLError, HTTPException, OSError, TimeoutError, ValueError) as exc:
         # HTTPException is not an OSError: a truncated body raises IncompleteRead.
@@ -261,6 +268,14 @@ def fetch_latest(timeout: float = LOOKUP_TIMEOUT_SECONDS) -> LatestRelease:
     if not isinstance(version, str) or version_key(version) is None:
         return LatestRelease(None, "PyPI's answer named no version")
     return LatestRelease(version)
+
+
+def open_url(request: Any, *, timeout: float) -> Any:
+    """``urllib.request.urlopen``: the one network call in this module, behind a name a
+    test can replace. Imported inside for the reason the module docstring gives."""
+    from urllib.request import urlopen
+
+    return urlopen(request, timeout=timeout)
 
 
 # --- the uv receipt ---------------------------------------------------------------------

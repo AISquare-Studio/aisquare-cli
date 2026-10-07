@@ -1,9 +1,10 @@
-"""Coding-agent adapters: the one "is Claude Code connected?" check (roadmap 9.1, Doctor half).
+"""Coding-agent adapters (roadmap 9.1, Doctor half): one "connected?" check, no empty connections.
 
 ``services.agents.claude_code_connected`` is the single answer the doctor's Connect
 button, the Welcome view and the Claude Code plugin route all ask, so the hooks are
-never offered, or installed, twice. Each claim below has its negative control in
-the same test: connected and not, this directory and another, readable and not.
+never offered, or installed, twice. ``agents connect`` refuses an agent aisquare has
+no hooks for (Codex, Cursor) instead of recording a connection that installs
+nothing. Each claim has its negative control in the same test.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import paths
 from aisquare.services import agents as agents_service
+from tests.test_no_traceback_on_a_damaged_store import damaged_store  # noqa: F401
 
 
 @pytest.fixture
@@ -142,3 +144,81 @@ def test_a_non_list_event_in_settings_json_is_no_hooks_not_a_traceback(
 
     _connect(runner)  # control: connect writes each event back as a list of our group
     assert agents_service.claude_code_connected() is True
+
+
+# --------------------------------------------------------------------------- the refusal
+
+
+@pytest.mark.parametrize(("name", "label"), [("codex", "Codex"), ("cursor", "Cursor")])
+def test_connect_refuses_an_agent_it_has_no_hooks_for(
+    runner: CliRunner, isolated_agent_home: Path, name: str, label: str
+) -> None:
+    """It exited 0 and wrote the agent into agents.json as connected, installing nothing."""
+    agent_dir = isolated_agent_home / f".{name}"
+    agent_dir.mkdir(parents=True)
+
+    human = runner.invoke(app, ["agents", "connect", name])
+    machine = runner.invoke(app, ["--json", "agents", "connect", name])
+
+    assert (human.exit_code, machine.exit_code) == (1, 1)
+    assert f"✗ aisquare can't connect {label} yet; support is planned for 0.10" in human.output
+    assert json.loads(machine.stdout) == {"error": "unsupported_agent", "ref": name}
+    assert not paths.aisquare_home().exists(), "a refusal must not build the aisquare home"
+    assert list(agent_dir.iterdir()) == [], f"nothing may be written under ~/.{name}"
+
+    (isolated_agent_home / ".claude").mkdir()
+    _connect(runner)  # control: the same harness records a connection that is real
+    registry = json.loads(paths.agents_registry_path().read_text(encoding="utf-8"))
+    assert registry["connected"] == ["claude-code"], registry
+
+
+def test_an_absent_unsupported_agent_gets_the_same_answer(runner: CliRunner) -> None:
+    """ "Not installed" would send someone to install Codex, and it still could not connect."""
+    refused = runner.invoke(app, ["agents", "connect", "codex"])
+    absent = runner.invoke(app, ["agents", "connect", "claude-code"])
+
+    assert refused.exit_code == 1
+    assert "can't connect Codex yet" in refused.output
+    assert "not installed" not in refused.output
+    assert "not installed" in absent.output, "control: an absent connectable agent says so"
+
+
+def test_init_reports_the_refusal_as_a_note_and_records_nothing(
+    runner: CliRunner, isolated_agent_home: Path
+) -> None:
+    (isolated_agent_home / ".codex").mkdir(parents=True)
+
+    result = runner.invoke(app, ["--json", "init", "--yes", "--no-onboard", "--agent", "codex"])
+
+    assert result.exit_code == 0, result.output
+    notes = json.loads(result.stdout)["notes"]
+    assert "Could not connect codex: aisquare can't connect Codex yet" in " ".join(notes), notes
+    listed = runner.invoke(app, ["--json", "agents", "list"])
+    connected = {agent["name"]: agent["connected"] for agent in json.loads(listed.stdout)}
+    assert connected == {"claude-code": False, "cursor": False, "codex": False}, connected
+
+
+def test_the_refusal_never_reaches_a_damaged_store(
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    damaged_store: str,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+) -> None:
+    """Refused before the store is opened: one JSON object, no traceback, the file untouched."""
+    (isolated_agent_home / ".codex").mkdir(parents=True)
+    (isolated_agent_home / ".claude").mkdir(parents=True)
+    before = paths.db_path().read_bytes()
+
+    refused = runner.invoke(app, ["--json", "agents", "connect", "codex"])
+
+    assert isinstance(refused.exception, SystemExit), repr(refused.exception)
+    assert refused.exit_code == 1
+    assert json.loads(refused.stdout) == {"error": "unsupported_agent", "ref": "codex"}
+    assert paths.db_path().read_bytes() == before
+
+    # Control: a real connect does reach the store. A file that is no database stops
+    # it there; a zeroed page its queries never read does not (the shapes differ).
+    reached = json.loads(runner.invoke(app, ["--json", "agents", "connect", "claude-code"]).stdout)
+    if damaged_store == "at-open":
+        assert reached.get("error") == "store_unopenable", reached
+    else:
+        assert reached.get("name") == "claude-code" and "error" not in reached, reached

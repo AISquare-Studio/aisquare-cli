@@ -60,13 +60,20 @@ _HOOKS = (
 
 @dataclass(frozen=True)
 class AgentSpec:
-    """A coding agent aisquare knows how to detect."""
+    """A coding agent aisquare knows how to detect, and to connect when it has hooks for it."""
 
     name: str
     label: str
     home: Path
     context_files: tuple[Path, ...]
     settings_path: Path | None = None  # where aisquare installs hooks, if supported
+    planned: str | None = None
+    """The release planned to connect this agent, while aisquare can only detect it."""
+
+    @property
+    def connectable(self) -> bool:
+        """Whether ``agents connect`` installs anything: aisquare has hooks for this agent."""
+        return self.settings_path is not None
 
 
 def _home() -> Path:
@@ -122,8 +129,10 @@ def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
             (claude / "CLAUDE.md",),
             settings_path=claude / "settings.json",
         ),
-        AgentSpec("cursor", "Cursor", home / ".cursor", ()),
-        AgentSpec("codex", "Codex", home / ".codex", ()),
+        # Detected only: no hooks yet, so `agents connect` refuses them and the
+        # doctor's row for each says when they are planned.
+        AgentSpec("cursor", "Cursor", home / ".cursor", (), planned="0.10"),
+        AgentSpec("codex", "Codex", home / ".codex", (), planned="0.10"),
     ]
 
 
@@ -420,6 +429,16 @@ def _is_current_aisquare_group(group: Any, event: str) -> bool:
 
 def _spec(name: str, config_dir: Path | None = None) -> AgentSpec | None:
     return next((spec for spec in _specs(config_dir) if spec.name == name), None)
+
+
+def specs() -> list[AgentSpec]:
+    """Every coding agent aisquare knows, in the registry's order: one doctor row each."""
+    return _specs()
+
+
+def spec(name: str, config_dir: Path | None = None) -> AgentSpec | None:
+    """The registry entry for ``name``, or ``None`` when aisquare knows no such agent."""
+    return _spec(name, config_dir)
 
 
 def read_json(path: Path) -> dict[str, Any]:

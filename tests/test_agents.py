@@ -73,8 +73,10 @@ def test_connect_unknown_agent_fails(runner: CliRunner, fake_home: Path) -> None
     assert "unknown agent" in result.output
 
 
-def test_connect_not_installed_fails(runner: CliRunner, fake_home: Path) -> None:
-    result = runner.invoke(app, ["agents", "connect", "cursor"])
+def test_connect_not_installed_fails(runner: CliRunner) -> None:
+    # The suite's agent home has no ~/.claude. (Cursor, the old example here, is now
+    # refused as not connectable before presence is asked: test_agent_adapters.py.)
+    result = runner.invoke(app, ["agents", "connect", "claude-code"])
     assert result.exit_code == 1
     assert "not installed" in result.output
 

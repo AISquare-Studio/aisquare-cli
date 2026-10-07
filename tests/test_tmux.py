@@ -973,6 +973,32 @@ def test_send_keys_and_send_literal_build_their_argv(fake_bin: Path, conf: Path)
     ], "nothing to send is not a tmux call"
 
 
+#: The most arguments tmux 3.7 takes in one command ("Limit MSG_COMMAND argument to
+#: between 0 and 1000", CHANGES 3.6b to 3.7); past it the client says "command too long".
+_TMUX_ARGUMENT_LIMIT = 1000
+
+
+def test_a_long_send_literal_is_cut_into_commands_tmux_37_accepts(
+    fake_bin: Path, conf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``-H`` spends an argument per byte, and chunks of 1024 failed every paste of 997
+    bytes or more on tmux 3.7. The live chunking test cannot see that on a tmux older than
+    the limit, CI's among them, so the arguments are counted here; the control is the old
+    chunk size, which the same count has to catch. Either way every byte goes, in order."""
+    text = "".join(chr(ord("a") + i % 26) for i in range(3000))
+
+    def longest_command() -> int:
+        fake = FakeTmux()
+        _server(fake, fake_bin, conf).send_literal("%3", text)
+        commands = fake.commands()
+        assert [byte for command in commands for byte in command[4:]] == _hex(text)
+        return max(len(command) for command in commands)
+
+    assert longest_command() <= _TMUX_ARGUMENT_LIMIT
+    monkeypatch.setattr(tmux_module, "_HEX_CHUNK", 1024)
+    assert longest_command() > _TMUX_ARGUMENT_LIMIT
+
+
 def test_paste_loads_the_buffer_from_stdin_then_pastes_bracketed(
     fake_bin: Path, conf: Path
 ) -> None:

@@ -188,9 +188,10 @@ def test_text_arrives_byte_exact(pane: tuple[TmuxServer, str], text: str) -> Non
 
 @requires_tmux
 def test_a_tab_is_delivered_as_the_tab_byte(pane: tuple[TmuxServer, str]) -> None:
-    """Asserted on the BYTE, not the screen: a terminal renders 09 as movement to
-    the next tab stop, so a tab can never appear literally in a capture. The
-    screen equality used for printable text is the wrong instrument here."""
+    """Asserted on the BYTE and the cursor, not the screen: a terminal renders 09 as
+    movement to the next tab stop, and whether a capture shows that as spaces or as
+    a literal tab depends on the tmux version. The screen equality used for
+    printable text is the wrong instrument here."""
     server, pane_id = pane
     calls: list[tuple[str, ...]] = []
     original = server.run
@@ -206,7 +207,10 @@ def test_a_tab_is_delivered_as_the_tab_byte(pane: tuple[TmuxServer, str]) -> Non
     assert list(sent[sent.index("-H") + 1 :]) == ["09"]
     server.send_literal(pane_id, "|")  # a sentinel, so the moved-to column is visible
     time.sleep(0.25)
-    assert server.capture(pane_id).lines[0].rstrip() == " " * 8 + "|", "it moved the cursor"
+    # The CURSOR, not the cells: tmux 3.6+ keeps a tab in the grid and captures it as
+    # "\t" ("Preserve tabs for copying and capture-pane"); older ones paint spaces.
+    # Either way the tab moved the cursor to the next stop and the sentinel followed.
+    assert server.capture(pane_id).facts.cursor_x == 9, "it moved the cursor"
 
 
 @requires_tmux

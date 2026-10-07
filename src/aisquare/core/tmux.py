@@ -246,10 +246,17 @@ _UNTARGETABLE = frozenset(".:")
 #: with ``kill-server`` in place of ``set`` the private server (every agent on
 #: it) dies. So every argument that carries CALLER data is passed through
 #: :func:`_data_arg` first.
-_HEX_CHUNK = 1024
-"""Bytes per ``send-keys -H`` call — one argv element each, so keep argv small."""
-
 _ARGV_SEPARATOR = ";"
+
+_HEX_CHUNK = 512
+"""Bytes per ``send-keys -H`` call — one argument each, so a paste is cut up.
+
+tmux 3.7 refuses a command of more than 1000 arguments ("Limit MSG_COMMAND
+argument to between 0 and 1000", CHANGES 3.6b to 3.7) with "command too long",
+and ``send-keys -t <pane> -H`` spends four of them: measured on 3.7c, 996 bytes
+go and 997 do not, so chunks of 1024 failed every paste of 997 bytes or more.
+512 leaves room for a flag added to the call later. Older tmux has no such
+limit, CI's included, so ``tests/test_tmux.py`` counts the arguments instead."""
 
 
 class TmuxError(RuntimeError):
@@ -1271,9 +1278,10 @@ class TmuxServer:
         any cell past 95 split in two, with the row byte then read as text.
 
         Sent in chunks of :data:`_HEX_CHUNK` bytes because ``-H`` costs one argv
-        element PER BYTE: a pasted paragraph would otherwise build a command line
-        long enough to fail with E2BIG. Chunks go in order down one synchronous
-        path, so the pane sees one uninterrupted stream; a typed run is one call.
+        element PER BYTE: a pasted paragraph would otherwise build a command tmux
+        3.7 refuses (more than 1000 arguments) and, longer still, a command line
+        that fails with E2BIG. Chunks go in order down one synchronous path, so
+        the pane sees one uninterrupted stream; a typed run is one call.
         """
         for start in range(0, len(data), _HEX_CHUNK):
             chunk = data[start : start + _HEX_CHUNK]

@@ -633,6 +633,59 @@ def test_the_key_pad_fits_a_360_px_phone_and_every_label_its_key() -> None:
     assert _css_value(css, ".pad .key", "min-width") == "max-content", "so theirs widen"
 
 
+DOCS = Path(__file__).resolve().parents[1] / "docs" / "remote.md"
+
+
+def test_the_pad_has_one_shape_on_every_phone_and_the_docs_describe_it() -> None:
+    """The docs said the pad was one row, ``Esc 1 2 3 ⏎ ↑ ↓ More``. Headless Chromium put
+    More on a full-width line of its own at 360 and 390 px, the eight needing 380 px, in
+    the row past 400 px, and at 320 px ↓ went down with it. More now takes the line under
+    the seven on every phone, one under 360 px has two rows of four, and the docs say so."""
+    script, css = _text("app.js"), _text("app.css")
+    row = _pad_labels(script, "PAD_ROW")
+    (gap,) = _css_px(css, ".pad", "gap")
+    (basis,) = _css_px(css, ".pad .key", "flex")
+
+    assert (len(row) + 1) * basis + len(row) * gap > PHONE_ROW_PX, "eight do not fit the row"
+    assert '"ghost key more", "More"' in script
+    assert _css_value(css, ".pad > .more", "flex-basis") == "100%"
+    narrow = re.search(
+        r"@media \(max-width: 359px\) \{\s*\.pad > \.key \{ flex-basis: calc\(25% - (\d+)px\); \}",
+        css,
+    )
+    assert narrow is not None, "under 360 px, four to a row"
+    assert 4 * int(narrow.group(1)) == 3 * gap, "four keys and their three gaps fill the row"
+    assert (320 - 2 * 12 - 3 * gap) / 4 >= KEY_PX
+    described = re.search(r"The key pad is a row of seven keys, `([^`]+)`", DOCS.read_text("utf-8"))
+    assert described is not None and described.group(1).split() == row
+    prose = " ".join(DOCS.read_text("utf-8").split())
+    assert "with More under them for the rest" in prose
+    assert "a phone narrower than 360 px takes them as two rows of four, More last" in prose
+
+
+def test_the_status_strip_and_the_bottom_nav_keep_to_one_line_on_a_phone() -> None:
+    """Read-only with an auto-off, the strip needs 400 px, and at 360 px Extend 1 h went to
+    a second line; the Needs tab put its count under its label in a 90 px tab. The strip's
+    name starts from nothing and takes what is left, so it gives way first and never pushes
+    the rest down, and a tab has 2 px of side padding where the button's 14 px crowded its
+    count out. Both still wrap where nothing else would fit: a strip that wrapped only under
+    300 px ran Extend 12 px past the edge of a 300 px screen, and a nowrap tab ran its
+    count over the next one at 280 px. Headless Chromium measured one line each from 325 px
+    up, and nothing past an edge from 280 px."""
+    css = _text("app.css")
+    strip = re.search(r"\n\.top \{([^}]*)\}", css)
+    assert strip is not None and re.search(r"(?:^|[;\s])flex-wrap:\s*wrap;", strip.group(1))
+    assert not re.search(r"@media[^{]*\{\s*\.top \{", css), "it wraps at whatever width it must"
+    assert _css_value(css, ".top > *", "flex") == "none"
+    assert _css_value(css, ".top > *", "white-space") == "nowrap"
+    assert _css_value(css, ".top .where", "flex") == "1 1 0", "never the reason for a wrap"
+    assert _css_value(css, ".top .where", "min-width") == "0"
+    assert _css_value(css, ".top .where", "text-overflow") == "ellipsis"
+    tab = re.search(r"\n\.bottom \.tab \{([^}]*)\}", css)
+    assert tab is not None and "nowrap" not in tab.group(1)
+    assert _css_px(css, ".bottom .tab", "padding") == [8, 2]
+
+
 # --- 10. the service worker -----------------------------------------------------------------
 
 NGROK_SUFFIXES = (".ngrok-free.app", ".ngrok.app", ".ngrok.io", ".ngrok-free.dev", ".ngrok.dev")

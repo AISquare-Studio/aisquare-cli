@@ -262,8 +262,9 @@ Every action is pinned to the agent you looked at: if a manager restarted or
 switched it in the meantime, the action is refused as `stale` rather than
 applied to the replacement.
 
-The key pad is one row (`Esc 1 2 3 ⏎ ↑ ↓ More`, ⏎ being Enter) and the rest
-under More.
+The key pad is a row of seven keys, `Esc 1 2 3 ⏎ ↑ ↓` (⏎ being Enter), with
+More under them for the rest; a phone narrower than 360 px takes them as two
+rows of four, More last.
 Ctrl-C and Ctrl-D ask first, and a second one within 3 seconds asks again,
 because Claude Code exits on it. A second Esc within a second and a half asks
 too: two in a row open Claude Code's Rewind selector. The pad and the phone's

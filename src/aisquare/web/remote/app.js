@@ -2350,7 +2350,7 @@ function inputBar(pid, label, cleanups) {
     return control;
   };
   for (const key of PAD_ROW) pad.appendChild(keyButton(key));
-  pad.appendChild(button("ghost key", "More", () => more.classList.toggle("open")));
+  pad.appendChild(button("ghost key more", "More", () => more.classList.toggle("open")));
   for (const key of PAD_MORE) more.appendChild(keyButton(key));
   pad.appendChild(more);
   bar.append(line, pad);

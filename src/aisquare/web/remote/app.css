@@ -54,13 +54,18 @@ input, textarea, select {
 textarea { resize: none; width: 100%; }
 input:focus, textarea:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-/* the status strip */
+/* the status strip: one line on a phone. Read-only with an auto-off it needs 400 px, and
+ * on a 360 px phone Extend went to a line of its own. The name starts from nothing and
+ * takes what is left, so it gives way first, with an ellipsis, and never pushes the rest
+ * down; only a strip too narrow for the dot, the pill, the timer and Extend themselves
+ * wraps (under about 325 px), rather than run past the edge of the screen. */
 .top {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
   padding: calc(6px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right)) 6px calc(12px + env(safe-area-inset-left));
   border-bottom: 1px solid var(--line); background: var(--bg);
 }
-.top .where { font-weight: 600; margin-right: auto; }
+.top > * { flex: none; white-space: nowrap; }
+.top .where { font-weight: 600; flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
 .dot.live { background: var(--ok); }
 .dot.wait { background: var(--warn); }
@@ -91,7 +96,14 @@ h3 { font-size: 16px; margin: 12px 0 4px; }
   display: flex; border-top: 1px solid var(--line); background: var(--bg);
   padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
-.bottom .tab { flex: 1; min-height: 52px; border: 0; border-radius: 0; background: transparent; color: var(--muted); font-size: 14px; position: relative; }
+/* a label and its count on one line: in a 90 px tab (a 360 px phone) "Needs 10" wrapped
+ * its count under the label, with the button's own 14 px of padding each side. With 2 px
+ * they share a line from 320 px; a tab narrower than that (a fold's cover screen) still
+ * puts the count under its label, never over the tab beside it, as nowrap did. */
+.bottom .tab {
+  flex: 1; min-height: 52px; border: 0; border-radius: 0; background: transparent; color: var(--muted); font-size: 14px;
+  position: relative; padding: 8px 2px;
+}
 .bottom .tab.on { color: var(--accent); font-weight: 600; }
 .count:not(:empty) {
   display: inline-block; min-width: 20px; margin-left: 6px; padding: 0 6px; border-radius: 999px;
@@ -185,10 +197,18 @@ pre.pane.fit { overflow-x: hidden; font-size: calc((100vw - 48px) / (var(--cols,
 .inputbar .row-inline { flex-wrap: nowrap; margin: 0; }
 .say { flex: 1; min-width: 0; min-height: 44px; max-height: 160px; }
 /* Seven 44 px keys and their gaps fit the 336 px row of a 360 px phone, and share
- * what is left evenly; a key is never narrower than its label (Space, under More). */
+ * what is left evenly; a key is never narrower than its label (Space, under More).
+ * More takes the line under them on every phone: the eight need 380 px, so More
+ * joined the row only past 400 px, and below that wrapped to a line of its own, a
+ * pad that changed shape with the phone. Under 360 px not even seven fit (↓ went
+ * with More): two rows of four, More last. */
 .pad { display: none; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
 .pad.open { display: flex; }
 .pad .key { flex: 1 0 44px; min-width: max-content; padding: 6px 4px; font-family: var(--mono); }
+.pad > .more { flex-basis: 100%; }
+@media (max-width: 359px) {
+  .pad > .key { flex-basis: calc(25% - 3px); }
+}
 .pad-more { display: none; flex-wrap: wrap; gap: 6px; width: 100%; }
 .pad-more.open { display: flex; }
 

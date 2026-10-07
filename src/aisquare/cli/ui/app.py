@@ -209,6 +209,7 @@ class HelpScreen(ModalScreen[None]):
             ("t", "themes (applied live, autosaved)"),
             ("r", "refresh now"),
             ("a", "show or hide the captured directories (never added)"),
+            ("+  w", "onboard a project · back to the Welcome page"),
             ("F1", "command palette"),
             ("q", "quit — from the sidebar; inside a pane every key goes to the agent"),
         ):
@@ -328,6 +329,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         Binding("t", "pick_theme", "theme"),
         Binding("r", "refresh_now", "refresh"),
         Binding("a", "toggle_captured", "captured", show=False),
+        Binding("plus", "add_project", "add project", show=False, key_display="+"),
+        Binding("w", "welcome", "welcome", show=False),
         Binding("question_mark", "help", "help", key_display="?"),
     ]
     SIDEBAR_ACTIONS: ClassVar[frozenset[str]] = frozenset(
@@ -339,6 +342,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             "command_palette",
             "change_theme",
             "toggle_captured",
+            "add_project",
+            "welcome",
         }
     )
     """Actions that are live only while focus is in the sidebar (§4.3)."""
@@ -1049,8 +1054,34 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.run_doctor()
 
     async def on_project_onboarded(self, event: ProjectOnboarded) -> None:
+        # Asked BEFORE the switch below, which hides whatever the content pane had
+        # focused: only a keyboard still on the Onboard view (or nowhere) is handed on.
+        focused = self.focused
+        onboarding = focused is None or any(isinstance(n, OnboardView) for n in focused.ancestors)
         self.refresh_data()
-        self.post_message(ProjectSelected(event.project_id))
+        await self.on_project_selected(ProjectSelected(event.project_id))
+        if onboarding:
+            self.call_after_refresh(self._hand_on_after_onboarding, f"project-{event.project_id}")
+
+    def _hand_on_after_onboarding(self, view_id: str) -> None:
+        """The Onboard view kept the keyboard on its path box, hidden now: give it the next step.
+
+        Keys typed there went nowhere anyone could see, and the footer had nothing
+        to offer. The project's *Start manager* takes it, else the sidebar. Only
+        asked when the keyboard was on the Onboard view as onboarding finished; one
+        the user has put on a visible widget since then is left where it is.
+        """
+        chain = self.screen.focus_chain
+        if self.focused is not None and self.focused in chain:
+            return
+        try:
+            view = self.content.get_child_by_id(view_id)
+        except NoMatches:
+            view = None
+        start = (
+            next((w for w in view.query("#start-manager") if w in chain), None) if view else None
+        )
+        (start or self.sidebar).focus()
 
     def on_onboard_failed(self, event: OnboardFailed) -> None:
         # markup=False: the message carries a path the user chose, and a toast
@@ -1058,11 +1089,32 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # screen as ``/home/me//repo`` and name a directory that did not fail.
         self.notify(f"{event.path}: {event.reason}", severity="error", timeout=8, markup=False)
 
+    def action_add_project(self) -> None:
+        """``+`` from the sidebar: what a click on the ``+`` beside Fleet does."""
+        self.post_message(AddProject())
+
+    async def action_welcome(self) -> None:
+        """``w`` from the sidebar: back to the Welcome page, with nothing selected."""
+        await self._show("welcome")
+        self.sidebar.select(None)
+        self._remember_selection(None)
+
+    def on_welcome_view_progress(self, event: WelcomeView.Progress) -> None:
+        """Welcome added a project or started an agent: the sidebar shows it now."""
+        self.refresh_data()
+
     hand_off: tuple[str, ...] | None = None
     """The ``aisquare`` command this terminal goes to when asq quits (``run_ui``)."""
 
     def on_doctor_view_hand_off(self, event: DoctorView.HandOff) -> None:
-        """Update or Uninstall in the Doctor view: quit, and let ``run_ui`` hand over."""
+        """Update or Uninstall in the Doctor view: quit, and let ``run_ui`` hand over.
+
+        Never under a fix that is still writing, in ANY Doctor view: the Project
+        tab's and Onboard's run their own, and quitting would cut them off.
+        """
+        if any(view.busy for view in self.query(DoctorView)):
+            self.notify("a fix is still running — try again when it ends", severity="warning")
+            return
         self.hand_off = event.args
         self.exit()
 

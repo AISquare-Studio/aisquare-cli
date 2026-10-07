@@ -69,18 +69,34 @@ def claude_plugin(config_dir: Path | None = None) -> agent_core.ClaudePlugin | N
     return agent_core.claude_plugin(config_dir)
 
 
+class UnsupportedAgentError(ValueError):
+    """An agent aisquare can detect but has no hooks for yet (Codex, Cursor).
+
+    Connecting one used to exit 0 and record it as connected in ``agents.json``
+    while installing nothing. A ``ValueError``, so ``init --agent`` reports it in
+    its notes the way it reports an agent that is not installed.
+    """
+
+
 def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
     """Install aisquare's hooks into the agent and ingest its existing context.
 
     Installs SessionStart/UserPromptSubmit hooks (so the agent auto-injects
     aisquare context and aisquare captures prompts), then one-time-ingests the
     agent's context files (e.g. ``~/.claude/CLAUDE.md``) into the user pool.
-    Raises ``KeyError`` for an unknown agent and ``ValueError`` if not installed.
+    Raises ``KeyError`` for an unknown agent, :class:`UnsupportedAgentError`
+    for one aisquare cannot connect yet, and ``ValueError`` if not installed.
     """
-    info = agent_core.detect(name, config_dir)
-    if info is None:
+    spec = agent_core.spec(name, config_dir)
+    if spec is None:
         raise KeyError(name)
-    if not info.detected:
+    if not spec.connectable:
+        # Before anything is read or written: no context ingested, nothing in
+        # agents.json, no ~/.aisquare created for a connection that installs nothing.
+        planned = f"; support is planned for {spec.planned}" if spec.planned else ""
+        raise UnsupportedAgentError(f"aisquare can't connect {spec.label} yet{planned}")
+    info = agent_core.detect(name, config_dir)
+    if info is None or not info.detected:
         raise ValueError(f"{name} is not installed on this machine")
 
     sections: list[str] = []

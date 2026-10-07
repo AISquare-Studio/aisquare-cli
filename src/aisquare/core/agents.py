@@ -69,13 +69,20 @@ CLAUDE_PLUGIN_ID = f"{CLAUDE_PLUGIN}@{CLAUDE_PLUGIN_MARKETPLACE}"
 
 @dataclass(frozen=True)
 class AgentSpec:
-    """A coding agent aisquare knows how to detect."""
+    """A coding agent aisquare knows how to detect, and to connect when it has hooks for it."""
 
     name: str
     label: str
     home: Path
     context_files: tuple[Path, ...]
     settings_path: Path | None = None  # where aisquare installs hooks, if supported
+    planned: str | None = None
+    """The release planned to connect this agent, while aisquare can only detect it."""
+
+    @property
+    def connectable(self) -> bool:
+        """Whether ``agents connect`` installs anything: aisquare has hooks for this agent."""
+        return self.settings_path is not None
 
 
 def _home() -> Path:
@@ -131,8 +138,10 @@ def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
             (claude / "CLAUDE.md",),
             settings_path=claude / "settings.json",
         ),
-        AgentSpec("cursor", "Cursor", home / ".cursor", ()),
-        AgentSpec("codex", "Codex", home / ".codex", ()),
+        # Detected only: no hooks yet, so `agents connect` refuses them and the
+        # doctor's row for each says when they are planned.
+        AgentSpec("cursor", "Cursor", home / ".cursor", (), planned="0.10"),
+        AgentSpec("codex", "Codex", home / ".codex", (), planned="0.10"),
     ]
 
 
@@ -362,8 +371,20 @@ def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> 
     return [
         event
         for event, _ in _HOOKS
-        if not any(accepts(group, event) for group in (hooks.get(event) or []))
+        if not any(accepts(group, event) for group in _event_groups(hooks, event))
     ]
+
+
+def _event_groups(hooks: dict[str, Any], event: str) -> list[Any]:
+    """The hook groups ``settings.json`` lists under ``event``; anything but a list is none.
+
+    The file is hand-edited, and a number or ``true`` under an event made every
+    reader raise ``TypeError``: ``aisquare doctor`` printed a traceback instead of
+    its claude-code row, and the "connected?" check raised with it. The writers
+    (``install_hooks``, ``remove_hooks``) already treated such a value as no groups.
+    """
+    groups = hooks.get(event)
+    return groups if isinstance(groups, list) else []
 
 
 def _installed_timeout(groups: Any, event: str) -> int | None:
@@ -417,6 +438,16 @@ def _is_current_aisquare_group(group: Any, event: str) -> bool:
 
 def _spec(name: str, config_dir: Path | None = None) -> AgentSpec | None:
     return next((spec for spec in _specs(config_dir) if spec.name == name), None)
+
+
+def specs() -> list[AgentSpec]:
+    """Every coding agent aisquare knows, in the registry's order: one doctor row each."""
+    return _specs()
+
+
+def spec(name: str, config_dir: Path | None = None) -> AgentSpec | None:
+    """The registry entry for ``name``, or ``None`` when aisquare knows no such agent."""
+    return _spec(name, config_dir)
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -697,7 +728,7 @@ def hook_commands(name: str, config_dir: Path | None = None) -> list[str]:
         return []
     found: list[str] = []
     for event, _ in _HOOKS:
-        for group in hooks.get(event) or []:
+        for group in _event_groups(hooks, event):
             if not _is_aisquare_group(group):
                 continue
             for item in group["hooks"]:

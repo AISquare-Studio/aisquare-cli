@@ -38,6 +38,7 @@ from aisquare.models import (
     ShippingStatus,
     StatusReport,
 )
+from aisquare.services import agents as agents_service
 from aisquare.services import (
     auto_mode,
     ci_client,
@@ -138,6 +139,7 @@ def doctor(
         _check_repomix(),
         _check_tiktoken(),
         _check_claude_code(),
+        *_planned_agent_checks(),
         *_claude_accounts_checks(),
         _check_tmux(),
         _check_gh(),
@@ -803,7 +805,10 @@ def _check_claude_code() -> DoctorCheck:
     (``agent_core.hook_sites``). Two ways a directory goes red, both with the
     same one-line fix:
 
-    * hooks missing or partial — the check this always made;
+    * not connected (hooks missing or partial) — the check this always made,
+      asked of ``agents_service.claude_code_connected`` per directory, the one
+      answer the Welcome view and the plugin route share, so this row's Connect
+      fix (a button in asq) never offers to connect what is already connected;
     * hooks present but naming an aisquare that is not this install — the #84
       gap. The text of a hook is ours whichever binary it names; for weeks every
       board update on one box ran a 0.3-era checkout while this line was green.
@@ -827,7 +832,8 @@ def _check_claude_code() -> DoctorCheck:
     if not sites:
         return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
 
-    unhooked = [site for site in sites if not site.hooks_installed and site.plugin is None]
+    # The shared answer, which counts the plugin route as connected.
+    unhooked = [site for site in sites if not agents_service.claude_code_connected(site.config_dir)]
     doubled = [
         site
         for site in sites
@@ -901,6 +907,34 @@ def _check_claude_code() -> DoctorCheck:
         for site in doubled
     )
     return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
+
+
+def _planned_agent_checks() -> list[DoctorCheck]:
+    """A row for each agent in the registry that aisquare detects but cannot connect yet.
+
+    Codex and Cursor today (``core.agents``; Claude Code is the row above). One
+    row per registry entry, so an agent added there gets its row here, and one
+    that gains hooks moves to a check of its own. Always ``ok``, detected or
+    not: there is nothing to fix, and a warning would take one of the sidebar's
+    three not-ok lines (``DOCTOR_LINES``) from a row an operator can act on. No
+    ``fix``, so no button: ``agents connect`` refuses these agents rather than
+    record a connection that installs nothing. Reads paths only.
+    """
+    rows: list[DoctorCheck] = []
+    for spec in agent_core.specs():
+        if spec.connectable:
+            continue
+        info = agent_core.detect(spec.name)
+        if info is not None and info.detected:
+            later = f" (planned for {spec.planned})" if spec.planned else ""
+            detail = (
+                f"{spec.label} detected at {spec.home}, but aisquare can't connect it yet{later}"
+            )
+        else:
+            later = f" (aisquare support is planned for {spec.planned})" if spec.planned else ""
+            detail = f"{spec.label} not detected on this machine{later}"
+        rows.append(_ok(spec.name, detail))
+    return rows
 
 
 def _claude_accounts_checks() -> list[DoctorCheck]:

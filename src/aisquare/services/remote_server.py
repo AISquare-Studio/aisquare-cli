@@ -3610,8 +3610,7 @@ def stop_remote_server() -> None:
     The server stops first and ``remote.json`` is flushed last, best effort, as the
     flusher's every-30-s write is: a file that will not write is logged, never
     raised. The TUI turns Remote off from a Textual timer (auto-off), where an
-    exception ends the whole fleet UI, and the stop comes after everything else
-    turning off does, the tunnel included.
+    exception ends the whole fleet UI, and stops ngrok only once this returns.
     """
     global _server, _flusher
     with _lock:

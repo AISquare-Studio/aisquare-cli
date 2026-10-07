@@ -486,7 +486,7 @@ def test_projects_rows_keep_every_field_the_json_command_prints(
 def runtime(isolated_home: Path) -> Runtime:
     rt = Runtime(remote_state_path(), remote_audit_path())
     rt._state.password = PASSWORD
-    rt._save()
+    rt._save_state()
     return rt
 
 

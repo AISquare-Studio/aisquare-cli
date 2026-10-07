@@ -325,7 +325,7 @@ def test_the_limit_is_capped(conversation: Path) -> None:
 def runtime(isolated_home: Path) -> Runtime:
     rt = Runtime(remote_state_path(), remote_audit_path())
     rt._state.password = PASSWORD
-    rt._save()
+    rt._save_state()
     return rt
 
 

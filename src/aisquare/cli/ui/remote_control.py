@@ -131,7 +131,7 @@ class RemoteController:
             return
         self.public_url = None
         try:
-            self.info = self._server.start(self._dist_dir, port=self._port)
+            self.info = self._server.start_remote_server(self._dist_dir, port=self._port)
         except Exception as exc:  # the remote extra is missing, or the port is taken
             # RemoteUnavailable / RemoteError carry the sentence to show; Remote stays
             # off and the saved switch is not flipped, so a restart does not retry blindly.
@@ -145,7 +145,7 @@ class RemoteController:
         self.message = None
         self._set_state(remote_enabled=True)
         tunnel = self._tunnel_factory(self._port)
-        failure = tunnel.start()
+        failure = tunnel.start_tunnel()
         if failure is not None:
             # No tunnel, but the local server is up: the modal keeps the local link
             # (PLAN §6 fallback) and the status line says what to install.
@@ -173,10 +173,10 @@ class RemoteController:
         """Stop the tunnel and the server. ``persist=False`` keeps the saved switch (app exit)."""
         tunnel, self.tunnel = self.tunnel, None
         if tunnel is not None:
-            tunnel.stop()
+            tunnel.stop_tunnel()
         if self.info is not None:
             self._server.set_auto_off(None)
-            self._server.stop()
+            self._server.stop_remote_server()
         self.info = None
         self.public_url = None
         self.auto_off_at = None
@@ -189,7 +189,7 @@ class RemoteController:
         if self.state.remote_enabled and not self.running:
             self.turn_on()
 
-    def shutdown(self) -> None:
+    def shutdown_for_exit(self) -> None:
         """At TUI exit: end the processes, keep the saved switches for ``restore``."""
         self.turn_off(persist=False)
 
@@ -219,13 +219,13 @@ class RemoteController:
     def devices(self) -> list[dict[str, Any]]:
         """The connected sessions ``[{sid, ua, first_seen, last_seen}]`` from the server."""
         try:
-            sessions = self._server.status().get("sessions", [])
+            sessions = self._server.remote_server_status().get("sessions", [])
         except Exception:  # a half-written remote.json costs the list, not the modal
             return []
         return [s for s in sessions if isinstance(s, dict) and isinstance(s.get("sid"), str)]
 
-    def revoke(self, sid: str) -> None:
-        self._server.revoke(sid)
+    def revoke_device(self, sid: str) -> None:
+        self._server.revoke_remote_device(sid)
 
     # --- what the modal paints ---------------------------------------------------------------
 

@@ -527,7 +527,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.unsaved = Autosave.flush_all(self)
         # The TUI is leaving: no ngrok may outlive it. The saved switches stay,
         # so a Remote that was on comes back on at the next start (restore()).
-        self.remote.shutdown()
+        self.remote.shutdown_for_exit()
 
     # --- help / refresh ---------------------------------------------------------------
 

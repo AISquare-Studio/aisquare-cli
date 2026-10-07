@@ -157,7 +157,7 @@ def test_payload_keys_stay_inside_the_contract() -> None:
 def runtime(isolated_home: Path) -> Runtime:
     rt = Runtime(remote_state_path(), remote_audit_path())
     rt._state.password = PASSWORD
-    rt._save()
+    rt._save_state()
     return rt
 
 

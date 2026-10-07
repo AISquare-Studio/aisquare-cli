@@ -55,7 +55,7 @@ def fresh_remote_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """The server's runtime is loaded once per process; each test's home is new."""
     monkeypatch.setattr(remote_server, "_runtime", None)
     yield
-    remote_server.stop()
+    remote_server.stop_remote_server()
 
 
 @pytest.fixture(autouse=True)
@@ -144,7 +144,7 @@ async def open_panel(pilot: Pilot[None]) -> RemotePanel:
 
 
 def sessions() -> list[dict[str, str]]:
-    listed = remote_server.status()["sessions"]
+    listed = remote_server.remote_server_status()["sessions"]
     assert isinstance(listed, list)
     return listed
 
@@ -176,7 +176,7 @@ def test_shift_r_opens_the_remote_panel_and_the_switch_turns_remote_on_and_off()
         modal.repaint()
         await pilot.pause()
         assert app.remote.running
-        assert remote_server.status()["running"] is True
+        assert remote_server.remote_server_status()["running"] is True
         expected = build_public_url(PUBLIC, app.remote.info.token)  # type: ignore[union-attr]
         assert shown(modal.query_one("#remote-link", Static)) == expected
         assert shown(modal.query_one("#remote-state", Static)).startswith("on")
@@ -190,7 +190,7 @@ def test_shift_r_opens_the_remote_panel_and_the_switch_turns_remote_on_and_off()
         switch.toggle()
         await pilot.pause()
         assert not app.remote.running
-        assert remote_server.status()["running"] is False
+        assert remote_server.remote_server_status()["running"] is False
         assert shown(modal.query_one("#remote-state", Static)) == "off"
         assert shown(modal.query_one("#remote-qr", Static)) == ""
 
@@ -245,7 +245,7 @@ def test_with_no_page_installed_the_modal_says_how_to_install_it_and_remote_stay
         assert "aisquare remote install-page" in status
         assert not app.remote.running
         assert app.remote.info is None
-        assert remote_server.status()["running"] is False
+        assert remote_server.remote_server_status()["running"] is False
         # The switch snaps back and the saved state is untouched: no blind retry at next start.
         assert modal.query_one("#remote-on", Switch).value is False
         assert shown(modal.query_one("#remote-state", Static)) == "off"
@@ -430,7 +430,7 @@ def test_the_modal_state_survives_a_restart_of_the_tui() -> None:
     drive(second, tunnel=missing_ngrok)
     # Leaving the TUI ends the processes but keeps the switch for the next restore.
     assert json.loads(paths.state_path().read_text())["remote_enabled"] is True
-    assert remote_server.status()["running"] is False
+    assert remote_server.remote_server_status()["running"] is False
 
 
 def test_a_fresh_home_opens_with_write_actions_off() -> None:
@@ -455,9 +455,9 @@ def test_devices_list_shows_sessions_from_remote_json_and_revoke_drops_one() -> 
         modal.query_one("#remote-on", Switch).toggle()
         await pilot.pause()
         runtime = remote_server.runtime()
-        assert runtime.unlock(runtime.password, "iPhone Safari") is not None
-        assert runtime.unlock(runtime.password, "Firefox") is not None
-        assert runtime.unlock("wrong", "Burglar") is None
+        assert runtime.unlock_device(runtime.password, "iPhone Safari") is not None
+        assert runtime.unlock_device(runtime.password, "Firefox") is not None
+        assert runtime.unlock_device("wrong", "Burglar") is None
         assert len(sessions()) == 2
         assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
         modal.repaint()

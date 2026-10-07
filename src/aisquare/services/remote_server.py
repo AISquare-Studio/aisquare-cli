@@ -1,7 +1,8 @@
 """The Remote Control server: one local port that shows the fleet to a phone.
 
 ``asq remote serve`` runs it in the foreground; the fleet UI's Remote modal runs
-it in a background thread through :func:`start` / :func:`stop`. Either way it
+it in a background thread through :func:`start_remote_server` /
+:func:`stop_remote_server`. Either way it
 binds ``127.0.0.1`` only — ngrok (or the same machine's browser) is the only way
 in — and every path lives under ``/r/<token>/``:
 
@@ -51,7 +52,7 @@ spawns tmux.
 Dependencies: starlette and uvicorn (already here through the ``serve`` extra) and
 ``websockets`` (uvicorn's WebSocket backend) — the ``remote`` extra in pyproject.
 All three are imported lazily so this module, and the modal that imports it,
-load in a base install; :func:`start` and the CLI say what to install.
+load in a base install; :func:`start_remote_server` and the CLI say what to install.
 """
 
 from __future__ import annotations
@@ -156,8 +157,9 @@ short answer is never mistaken for a short pane.
 INSTALL_HINT = "pip install 'aisquare-cli[remote]' (or: pipx inject aisquare-cli websockets)"
 
 NO_PAGE_HINT = "no remote page installed — run: aisquare remote install-page <dist>"
-"""Shown by the modal's status line, ``asq remote serve``'s exit, and ``start()``'s raise —
-one sentence, so a fresh machine never sees a server that quietly answers with nothing."""
+"""Shown by the modal's status line, ``asq remote serve``'s exit, and the raise of
+``start_remote_server()`` — one sentence, so a fresh machine never sees a server that
+quietly answers with nothing."""
 
 _PASSPHRASE_WORDS = (
     "amber", "birch", "cedar", "delta", "ember", "fjord", "glade", "harbor",
@@ -224,12 +226,12 @@ def _resolve_project(ref: str | None) -> ProjectInfo:
         raise NoSuchProject(str(exc)) from exc
 
 
-def _now() -> datetime:
+def _remote_now() -> datetime:
     return datetime.now(UTC)
 
 
 def _stamp() -> str:
-    return _now().isoformat(timespec="seconds")
+    return _remote_now().isoformat(timespec="seconds")
 
 
 def new_token() -> str:
@@ -269,7 +271,7 @@ class Device:
     first_seen: str
     last_seen: str
 
-    def as_json(self) -> dict[str, str]:
+    def device_json(self) -> dict[str, str]:
         return {
             "sid": self.sid,
             "ua": self.ua,
@@ -295,13 +297,13 @@ class _State:
     auto_off_at: str | None = None
     sessions: list[Device] = field(default_factory=list)
 
-    def as_json(self) -> dict[str, object]:
+    def state_json(self) -> dict[str, object]:
         return {
             "token": self.token,
             "password": self.password,
             "allow_write": self.allow_write,
             "auto_off_at": self.auto_off_at,
-            "sessions": [device.as_json() for device in self.sessions],
+            "sessions": [device.device_json() for device in self.sessions],
         }
 
     @classmethod
@@ -338,7 +340,7 @@ _UNRESTRICTED = (
 class Runtime:
     """The server's mutable state: ``remote.json``, the live sockets, the audit log.
 
-    Shared between the uvicorn thread and whoever called :func:`start` (the
+    Shared between the uvicorn thread and whoever called :func:`start_remote_server` (the
     TUI's thread), so every mutation takes the lock. ``allow_write`` is never
     flipped on here — only :meth:`set_allow_write` does, on an explicit call.
     """
@@ -359,12 +361,12 @@ class Runtime:
         self.reads = 0
         """How many times the file was parsed after startup — tests pin the short-circuit."""
         self._said_unrestricted = False
-        self._state = self._load()
+        self._state = self._load_state()
 
     # -- persistence --
 
     @staticmethod
-    def _digest(data: bytes) -> bytes:
+    def _state_digest(data: bytes) -> bytes:
         return hashlib.blake2b(data, digest_size=16).digest()
 
     def _signature(self) -> tuple[bytes, bytes] | None:
@@ -373,7 +375,7 @@ class Runtime:
             data = self._state_path.read_bytes()
         except OSError:
             return None
-        return (self._digest(data), data)
+        return (self._state_digest(data), data)
 
     def reload_if_changed(self) -> bool:
         """Re-read ``remote.json`` if ANOTHER process changed it; ``True`` when it had.
@@ -417,7 +419,7 @@ class Runtime:
                 self._close_sockets(sid)
             return True
 
-    def _load(self) -> _State:
+    def _load_state(self) -> _State:
         try:
             raw = json.loads(self._state_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -425,12 +427,12 @@ class Runtime:
         state = (
             _State.from_json(raw) if isinstance(raw, dict) else _State(new_token(), new_password())
         )
-        self._write(state)
+        self._write_state(state)
         return state
 
-    def _write(self, state: _State) -> None:
+    def _write_state(self, state: _State) -> None:
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        encoded = json.dumps(state.as_json(), indent=2).encode("utf-8")
+        encoded = json.dumps(state.state_json(), indent=2).encode("utf-8")
         # The token, the passphrase and every device's cookie, so written as
         # core.credentials writes secrets: a temp of this write's own, created 0600
         # and restricted to this account while still EMPTY (on NTFS, the DACL the
@@ -445,11 +447,11 @@ class Runtime:
         # Our own write, by content: the next check finds these exact bytes and
         # skips the parse; a sibling process writing the same size in the same
         # mtime tick is still seen, because its bytes differ.
-        self._disk = self._digest(encoded)
+        self._disk = self._state_digest(encoded)
 
-    def _save(self) -> None:
+    def _save_state(self) -> None:
         with self._lock:
-            self._write(self._state)
+            self._write_state(self._state)
 
     # -- identity --
 
@@ -467,7 +469,7 @@ class Runtime:
         self.reload_if_changed()
         return self._state.allow_write
 
-    def info(self, port: int = DEFAULT_PORT) -> RemoteInfo:
+    def connection_info(self, port: int = DEFAULT_PORT) -> RemoteInfo:
         with self._lock:
             return RemoteInfo(self.token, self.password, build_local_url(self.token, port))
 
@@ -490,13 +492,13 @@ class Runtime:
         with self._lock:
             self.reload_if_changed()
             self._state.allow_write = bool(enabled)
-            self._save()
+            self._save_state()
 
     def set_auto_off(self, at: datetime | None) -> None:
         with self._lock:
             self.reload_if_changed()
             self._state.auto_off_at = at.isoformat(timespec="seconds") if at else None
-            self._save()
+            self._save_state()
 
     def regenerate_password(self) -> str:
         """A new password; every unlocked device is dropped with the old one."""
@@ -505,12 +507,12 @@ class Runtime:
             self._state.password = new_password()
             for device in list(self._state.sessions):
                 self._drop(device.sid)
-            self._save()
+            self._save_state()
             return self._state.password
 
     # -- sessions --
 
-    def unlock(self, password: str, ua: str) -> str | None:
+    def unlock_device(self, password: str, ua: str) -> str | None:
         """A new session id when ``password`` is right, else ``None``."""
         with self._lock:
             self.reload_if_changed()
@@ -519,10 +521,10 @@ class Runtime:
             sid = new_token()
             stamp = _stamp()
             self._state.sessions.append(Device(sid, ua[:200], stamp, stamp))
-            self._save()
+            self._save_state()
             return sid
 
-    def session(self, sid: str | None) -> Device | None:
+    def device_for_cookie(self, sid: str | None) -> Device | None:
         """The device behind a cookie, its ``last_seen`` refreshed; ``None`` when invalid."""
         if not sid:
             return None
@@ -538,7 +540,7 @@ class Runtime:
         """Every unlocked device as ``{sid, ua, first_seen, last_seen}`` (§4-F)."""
         self.reload_if_changed()
         with self._lock:
-            return [device.as_json() for device in self._state.sessions]
+            return [device.device_json() for device in self._state.sessions]
 
     def _close_sockets(self, sid: str) -> None:
         for close in self._closers.pop(sid, set()):
@@ -553,16 +555,16 @@ class Runtime:
         self._close_sockets(sid)
         return len(self._state.sessions) != before
 
-    def revoke(self, sid: str) -> bool:
+    def revoke_device(self, sid: str) -> bool:
         """Drop the cookie session and close its websockets; ``True`` if it existed."""
         with self._lock:
             self.reload_if_changed()
             dropped = self._drop(sid)
             if dropped:
-                self._save()
+                self._save_state()
             return dropped
 
-    def flush(self) -> None:
+    def flush_last_seen(self) -> None:
         """Persist ``last_seen`` (called on a timer, not per request).
 
         Another process's change lands first: a flush that wrote memory over a
@@ -570,7 +572,7 @@ class Runtime:
         """
         with self._lock:
             self.reload_if_changed()
-            self._save()
+            self._save_state()
 
     def register_socket(self, sid: str, close: Callable[[], None]) -> None:
         with self._lock:
@@ -722,7 +724,7 @@ def _live_transcript(
         before=before,
         width=_pane_width(agent),
     )
-    return page.as_json()
+    return page.page_json()
 
 
 def _pane_width(agent: FleetAgent) -> int:
@@ -760,10 +762,26 @@ def _agent_state_counts(agents: list[FleetAgentStatus]) -> dict[str, int]:
     return counts
 
 
+def remote_board_payload(project: str | None = None) -> dict[str, object]:
+    """``GET api/board`` and the ``board`` frame — the ONE call into ``board_data``.
+
+    The project's root as ``cwd`` is exactly what ``asq board --json`` prints when
+    run there, ``AISQUARE_TEAM_HUB`` included (``team_service._project``); ``None``
+    is the current project, as it always was.
+
+    #240 fold: pass ``exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS`` here (one line).
+    """
+    from aisquare.cli.team import board_json
+    from aisquare.services import team as team_service
+
+    cwd = None if project is None else _resolve_project(project).root
+    return board_json(*team_service.board_data(cwd))
+
+
 def live_sources() -> Sources:
     """The real thing: the ``--json`` builders over the live store and tmux."""
 
-    def projects() -> object:
+    def projects_payload() -> object:
         from aisquare.cli.common import projects_json
         from aisquare.core.store import store_session
         from aisquare.services import fleet as fleet_service
@@ -778,31 +796,32 @@ def live_sources() -> Sources:
             row["agents"] = _agent_state_counts(agents)
         return rows
 
-    def fleet(project: str | None = None) -> object:
+    def fleet_payload(project: str | None = None) -> object:
         from aisquare.cli.fleet import agents_json
         from aisquare.services import fleet as fleet_service
 
         target = _resolve_project(project)
         return agents_json(target, fleet_service.list_agents(target, live_only=True))
 
-    def board() -> object:
-        from aisquare.cli.team import board_json
-        from aisquare.services import team as team_service
-
-        return board_json(*team_service.board_data())
-
-    def tasks() -> object:
+    def tasks_payload() -> object:
         from aisquare.services import team as team_service
 
         return [task.model_dump(mode="json") for task in team_service.list_tasks(None)]
 
-    def memory() -> object:
+    def memory_payload() -> object:
         from aisquare.services import context as context_service
 
         return [entry.model_dump(mode="json") for entry in context_service.list_entries()]
 
     return Sources(
-        projects, fleet, board, tasks, memory, _live_panes, _live_transcript, _live_explainability
+        projects=projects_payload,
+        fleet=fleet_payload,
+        board=remote_board_payload,
+        tasks=tasks_payload,
+        memory=memory_payload,
+        panes=_live_panes,
+        transcript=_live_transcript,
+        explainability=_live_explainability,
     )
 
 
@@ -976,7 +995,7 @@ def _audit_keys(keys: list[str] | None) -> str:
     return "[" + ",".join(scrubbed) + "]"
 
 
-def _optional(body: dict[str, Any], key: str) -> str | None:
+def _optional_ref(body: dict[str, Any], key: str) -> str | None:
     """An optional NAME or reference — blank and whitespace-only both mean absent.
 
     Correct for a project ref, a note's task or a role. WRONG for literal text a
@@ -989,9 +1008,9 @@ def _optional(body: dict[str, Any], key: str) -> str | None:
 def _literal(body: dict[str, Any], key: str) -> str | None:
     """Text to deliver verbatim — whitespace is CONTENT here, not emptiness.
 
-    ``_optional`` answers "did they name something", and a name that is all
+    ``_optional_ref`` answers "did they name something", and a name that is all
     spaces is no name. A keystroke that is all spaces is a keystroke. Reading
-    typed text with ``_optional`` is what silently ate the space bar: a flush of
+    typed text with ``_optional_ref`` is what silently ate the space bar: a flush of
     ``" "`` became ``None``, so a write carrying only a space delivered nothing
     while the endpoint answered 200 ``sent: true``, and the audit line recorded
     ``text=0ch`` — the trail honestly reporting that no text was sent, the loss
@@ -1008,26 +1027,30 @@ def live_writes() -> Writes:
     def task_claim(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.services import team as team_service
 
-        task = team_service.claim_task(_required(body, "ref"), session_ref=_optional(body, "as"))
+        task = team_service.claim_task(
+            _required(body, "ref"), session_ref=_optional_ref(body, "as")
+        )
         return {"task": task.model_dump(mode="json")}, f"claimed {task.id}"
 
     def task_done(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.services import team as team_service
 
         task = team_service.finish_task(
-            _required(body, "ref"), note=_optional(body, "note"), session_ref=_optional(body, "as")
+            _required(body, "ref"),
+            note=_optional_ref(body, "note"),
+            session_ref=_optional_ref(body, "as"),
         )
         return {"task": task.model_dump(mode="json")}, f"done {task.id}"
 
-    def note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+    def write_note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.services import team as team_service
 
         event = team_service.add_note(
             _required(body, "text"),
-            session_ref=_optional(body, "as"),
-            task_ref=_optional(body, "task"),
-            to_role=_optional(body, "to"),
-            kind=_optional(body, "kind") or "note",
+            session_ref=_optional_ref(body, "as"),
+            task_ref=_optional_ref(body, "task"),
+            to_role=_optional_ref(body, "to"),
+            kind=_optional_ref(body, "kind") or "note",
         )
         return {
             "event": event.as_envelope().model_dump(mode="json")
@@ -1071,7 +1094,7 @@ def live_writes() -> Writes:
             raise RequestError(400, "ambiguous_project", str(exc)) from None
         return {"report": _as_json(report)}, f"removed {ref}"
 
-    def send_keys(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+    def write_send_keys(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.core.store import store_session
         from aisquare.services import fleet as fleet_service
 
@@ -1085,7 +1108,7 @@ def live_writes() -> Writes:
         enter = bool(body.get("enter", False))
         if not text and not keys and not enter:
             raise RequestError(400, "invalid", "give 'text', 'keys' or 'enter'")
-        target = _resolve_project(_optional(body, "project"))
+        target = _resolve_project(_optional_ref(body, "project"))
         with store_session() as store:
             agent = store.fleet_agent_by_label(target.id, label, live_only=True)
         if agent is None:
@@ -1106,11 +1129,11 @@ def live_writes() -> Writes:
         {
             "task/claim": task_claim,
             "task/done": task_done,
-            "note": note,
+            "note": write_note,
             "project/switch": project_switch,
             "project/add": project_add,
             "project/remove": project_remove,
-            "send-keys": send_keys,
+            "send-keys": write_send_keys,
         }
     )
 
@@ -1158,7 +1181,7 @@ class _Cache:
         self._lock = threading.Lock()
         self._values: dict[str, tuple[float, object]] = {}
 
-    def get(self, kind: str, compute: Snapshot) -> object:
+    def cached_snapshot(self, kind: str, compute: Snapshot) -> object:
         with self._lock:
             hit = self._values.get(kind)
             if hit is not None and time.monotonic() - hit[0] < self._ttl:
@@ -1260,6 +1283,15 @@ def _json_error(status: int, error: str, message: str | None = None) -> Response
     return JSONResponse(body, status_code=status)
 
 
+def remote_gate_token(runtime: Runtime, scope: Any) -> bool:
+    """Gate 1: the path is under ``/r/<the token>/``, the whole token, in constant time."""
+    path = str(scope.get("path", ""))
+    if not path.startswith("/r/"):
+        return False
+    supplied = path[3:].split("/", 1)[0]
+    return bool(supplied) and runtime.token_matches(supplied)
+
+
 class _TokenGate:
     """Pure ASGI: anything not under ``/r/<the token>/`` is a 404, HTTP and WS alike."""
 
@@ -1267,16 +1299,9 @@ class _TokenGate:
         self._app = app
         self._runtime = runtime
 
-    def _accepted(self, path: str) -> bool:
-        if not path.startswith("/r/"):
-            return False
-        rest = path[3:]
-        supplied = rest.split("/", 1)[0]
-        return bool(supplied) and self._runtime.token_matches(supplied)
-
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         kind = scope.get("type")
-        if kind not in ("http", "websocket") or self._accepted(scope.get("path", "")):
+        if kind not in ("http", "websocket") or remote_gate_token(self._runtime, scope):
             await self._app(scope, receive, send)
             return
         if kind == "http":
@@ -1328,13 +1353,13 @@ def build_app(
         return f"/r/{request.path_params['token']}"
 
     def device_of(request: Request) -> Device | None:
-        return runtime.session(request.cookies.get(COOKIE))
+        return runtime.device_for_cookie(request.cookies.get(COOKIE))
 
     async def snapshot(kind: str, compute: Snapshot) -> object:
-        return await asyncio.to_thread(cache.get, kind, compute)
+        return await asyncio.to_thread(cache.cached_snapshot, kind, compute)
 
     def guarded(compute: Snapshot, kind: str) -> Callable[[Request], Any]:
-        async def endpoint(request: Request) -> Response:
+        async def guarded_read(request: Request) -> Response:
             if device_of(request) is None:
                 return _json_error(401, "unauthorized")
             try:
@@ -1346,9 +1371,9 @@ def build_app(
                 return _json_error(503, "unavailable", str(exc))
             return JSONResponse(payload)
 
-        return endpoint
+        return guarded_read
 
-    async def unlock(request: Request) -> Response:
+    async def unlock_endpoint(request: Request) -> Response:
         if not limiter.allow(_client_of(request.scope)):
             return _json_error(429, "too_many_attempts", "5 attempts a minute — wait")
         try:
@@ -1358,7 +1383,7 @@ def build_app(
         password = body.get("password") if isinstance(body, dict) else None
         if not isinstance(password, str):
             return _json_error(400, "invalid", 'send {"password": "..."}')
-        sid = runtime.unlock(password, request.headers.get("user-agent", ""))
+        sid = runtime.unlock_device(password, request.headers.get("user-agent", ""))
         if sid is None:
             return _json_error(401, "wrong_password")
         response = JSONResponse({"ok": True})
@@ -1379,7 +1404,7 @@ def build_app(
             return _json_error(401, "unauthorized")
         return JSONResponse(runtime.remote_json())
 
-    async def devices_endpoint(request: Request) -> Response:
+    async def devices_list_endpoint(request: Request) -> Response:
         device = device_of(request)
         if device is None:
             return _json_error(401, "unauthorized")
@@ -1388,12 +1413,12 @@ def build_app(
         ]
         return JSONResponse(rows)
 
-    async def revoke_device(request: Request) -> Response:
+    async def devices_delete_endpoint(request: Request) -> Response:
         device = device_of(request)
         if device is None:
             return _json_error(401, "unauthorized")
         sid = request.path_params["sid"]
-        if not runtime.revoke(sid):
+        if not runtime.revoke_device(sid):
             return _json_error(404, "not_found", "no such device")
         runtime.audit(device.sid, "devices/revoke", sid)
         return JSONResponse({"ok": True, "sid": sid})
@@ -1404,7 +1429,7 @@ def build_app(
         project = request.query_params.get("project") or None
         try:
             payload = await asyncio.to_thread(
-                cache.get, f"fleet:{project or ''}", lambda: reads.fleet(project)
+                cache.cached_snapshot, f"fleet:{project or ''}", lambda: reads.fleet(project)
             )
         except LookupError as exc:
             return _json_error(404, "not_found", str(exc))
@@ -1463,7 +1488,7 @@ def build_app(
             payload = {"available": False, "reason": f"explainability lookup failed: {exc}"}
         return JSONResponse(payload)
 
-    async def write(request: Request) -> Response:
+    async def write_endpoint(request: Request) -> Response:
         device = device_of(request)
         if device is None:
             return _json_error(401, "unauthorized")
@@ -1516,7 +1541,7 @@ def build_app(
         )
 
     async def stream(websocket: WebSocket) -> None:
-        device = runtime.session(websocket.cookies.get(COOKIE))
+        device = runtime.device_for_cookie(websocket.cookies.get(COOKIE))
         if device is None:
             if "websocket.http.response" in websocket.scope.get("extensions", {}):
                 await websocket.send_denial_response(_json_error(401, "unauthorized"))
@@ -1563,7 +1588,7 @@ def build_app(
             fleet_key = f"fleet:{fleet_project or ''}"
             try:
                 fleet_payload = await asyncio.to_thread(
-                    cache.get, fleet_key, lambda: reads.fleet(fleet_project)
+                    cache.cached_snapshot, fleet_key, lambda: reads.fleet(fleet_project)
                 )
                 await push_if_changed(fleet_key, "fleet", fleet_payload, None)
             except Exception as exc:
@@ -1604,7 +1629,7 @@ def build_app(
         reading = asyncio.ensure_future(reader())
         try:
             while not reading.done():
-                if runtime.session(sid) is None:
+                if runtime.device_for_cookie(sid) is None:
                     await close_unauthorized()
                     break
                 await tick_once()
@@ -1620,19 +1645,19 @@ def build_app(
                 await reading
 
     api_routes = [
-        Route("/api/unlock", unlock, methods=["POST"]),
+        Route("/api/unlock", unlock_endpoint, methods=["POST"]),
         Route("/api/remote", remote, methods=["GET"]),
         Route("/api/projects", guarded(reads.projects, "projects"), methods=["GET"]),
         Route("/api/fleet", fleet_endpoint, methods=["GET"]),
         Route("/api/board", guarded(reads.board, "board"), methods=["GET"]),
         Route("/api/tasks", guarded(reads.tasks, "tasks"), methods=["GET"]),
         Route("/api/memory", guarded(reads.memory, "memory"), methods=["GET"]),
-        Route("/api/devices", devices_endpoint, methods=["GET"]),
-        Route("/api/devices/{sid}", revoke_device, methods=["DELETE"]),
+        Route("/api/devices", devices_list_endpoint, methods=["GET"]),
+        Route("/api/devices/{sid}", devices_delete_endpoint, methods=["DELETE"]),
         Route("/api/panes/{agent}", panes, methods=["GET"]),
         Route("/api/transcript/{agent}", transcript, methods=["GET"]),
         Route("/api/explainability/{agent}", explainability, methods=["GET"]),
-        Route("/api/{name:path}", write, methods=["POST"]),
+        Route("/api/{name:path}", write_endpoint, methods=["POST"]),
         Route("/api/{rest:path}", api_missing),
         WebSocketRoute("/ws", stream),
         Route("/", static, methods=["GET"]),
@@ -1645,7 +1670,7 @@ def build_app(
 # --- process lifecycle: the module API the TUI modal calls (PLAN §4-F) ----------------
 
 
-def _dependency_error() -> str | None:
+def _remote_dependency_error() -> str | None:
     import importlib.util
 
     missing = [
@@ -1677,15 +1702,17 @@ class _Server:
         self.port = port
         config = uvicorn.Config(app, host=BIND, port=port, log_level="warning", ws="auto")
         self._server = uvicorn.Server(config)
-        self._thread = threading.Thread(target=self._run, name="asq-remote", daemon=True)
+        self._thread = threading.Thread(
+            target=self._serve_in_thread, name="asq-remote", daemon=True
+        )
 
-    def _run(self) -> None:
+    def _serve_in_thread(self) -> None:
         # uvicorn answers a failed bind with sys.exit(3); in a thread that is
-        # noise, and start() already turns "never started" into a RemoteError.
+        # noise, and start_serving() already turns "never started" into a RemoteError.
         with contextlib.suppress(SystemExit):
             self._server.run()
 
-    def start(self, timeout: float = 5.0) -> None:
+    def start_serving(self, timeout: float = 5.0) -> None:
         self._thread.start()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -1699,7 +1726,7 @@ class _Server:
             f"the remote server did not come up on {BIND}:{self.port} — is the port in use?"
         )
 
-    def stop(self, timeout: float = 5.0) -> None:
+    def stop_serving(self, timeout: float = 5.0) -> None:
         self._server.should_exit = True
         self._thread.join(timeout)
 
@@ -1717,7 +1744,7 @@ _flusher: threading.Timer | None = None
 def _page_missing(dist_dir: Path | None) -> str | None:
     """``None`` when the directory ``build_app`` would serve has an ``index.html``.
 
-    Checked up front by :func:`start` and :func:`run_foreground`, not by
+    Checked up front by :func:`start_remote_server` and :func:`run_foreground`, not by
     :func:`build_app` itself: an explicit ``--dist``/``dist_dir`` that turns out
     to be wrong is still a per-request 404 (``test_missing_dist_is_a_404_...``),
     because the caller named that path on purpose and may still be building it.
@@ -1762,10 +1789,10 @@ def install_page(source: Path) -> Path:
     return destination
 
 
-def start(dist_dir: Path | None = None, port: int = DEFAULT_PORT) -> RemoteInfo:
+def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) -> RemoteInfo:
     """Serve in the background; idempotent while running. ``allow_write`` is left as persisted."""
     global _server
-    problem = _dependency_error()
+    problem = _remote_dependency_error()
     if problem is not None:
         raise RemoteUnavailable(problem)
     page_problem = _page_missing(dist_dir)
@@ -1774,16 +1801,16 @@ def start(dist_dir: Path | None = None, port: int = DEFAULT_PORT) -> RemoteInfo:
     state = runtime()
     with _lock:
         if _server is not None and _server.running:
-            return state.info(_server.port)
+            return state.connection_info(_server.port)
         app = build_app(state, dist_dir=dist_dir)
         server = _Server(app, port)
-        server.start()
+        server.start_serving()
         _server = server
     _schedule_flush()
-    return state.info(port)
+    return state.connection_info(port)
 
 
-def stop() -> None:
+def stop_remote_server() -> None:
     """Stop the background server (no-op when it is not running)."""
     global _server, _flusher
     with _lock:
@@ -1792,21 +1819,21 @@ def stop() -> None:
     if flusher is not None:
         flusher.cancel()
     if server is not None:
-        server.stop()
+        server.stop_serving()
     if _runtime is not None:
-        _runtime.flush()
+        _runtime.flush_last_seen()
 
 
-def status() -> dict[str, object]:
+def remote_server_status() -> dict[str, object]:
     """``{running, sessions:[{sid, ua, first_seen, last_seen}]}`` (PLAN §4-F)."""
     with _lock:
         running = _server is not None and _server.running
     return {"running": running, "sessions": runtime().device_rows()}
 
 
-def revoke(sid: str) -> bool:
+def revoke_remote_device(sid: str) -> bool:
     """Drop a device's cookie session and close its websockets."""
-    return runtime().revoke(sid)
+    return runtime().revoke_device(sid)
 
 
 def set_allow_write(enabled: bool) -> None:
@@ -1828,25 +1855,25 @@ def _schedule_flush() -> None:
     """Persist ``last_seen`` every 30 s while serving, instead of once per request."""
     global _flusher
 
-    def run() -> None:
+    def flush_and_rearm() -> None:
         with _lock:
             serving = _server is not None and _server.running
         if _runtime is not None:
-            _runtime.flush()
+            _runtime.flush_last_seen()
         if serving:
             _schedule_flush()
 
     with _lock:
         if _flusher is not None:
             _flusher.cancel()
-        _flusher = threading.Timer(30.0, run)
+        _flusher = threading.Timer(30.0, flush_and_rearm)
         _flusher.daemon = True
         _flusher.start()
 
 
 def run_foreground(dist_dir: Path | None = None, port: int = DEFAULT_PORT) -> None:
     """``asq remote serve``: block in this thread until Ctrl-C."""
-    problem = _dependency_error()
+    problem = _remote_dependency_error()
     if problem is not None:
         raise RemoteUnavailable(problem)
     page_problem = _page_missing(dist_dir)
@@ -1888,12 +1915,14 @@ __all__ = [
     "live_sources",
     "live_writes",
     "regenerate_password",
-    "revoke",
+    "remote_board_payload",
+    "remote_gate_token",
+    "remote_server_status",
+    "revoke_remote_device",
     "run_foreground",
     "runtime",
     "set_allow_write",
     "set_auto_off",
-    "start",
-    "status",
-    "stop",
+    "start_remote_server",
+    "stop_remote_server",
 ]

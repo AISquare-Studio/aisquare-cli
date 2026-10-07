@@ -86,7 +86,7 @@ class Page:
     ``None`` when the beginning of the transcript is included."""
     more: bool
 
-    def as_json(self) -> dict[str, object]:
+    def page_json(self) -> dict[str, object]:
         return {"lines": self.lines, "cursor": self.cursor, "more": self.more}
 
 
@@ -130,7 +130,7 @@ def read_page(
         for offset, raw in _lines_backwards(file, end):
             if offset == 0:
                 reached_start = True
-            rendered = _render(_parse(raw), width)
+            rendered = _render_transcript_record(_parse_transcript_line(raw), width)
             if rendered:
                 collected.append((offset, rendered))
                 if len(collected) >= limit:
@@ -196,7 +196,7 @@ def _lines_backwards(file: Path, end: int) -> Iterator[tuple[int, bytes]]:
             yield 0, pending
 
 
-def _parse(raw: bytes) -> dict[str, Any] | None:
+def _parse_transcript_line(raw: bytes) -> dict[str, Any] | None:
     """One JSONL record, or ``None`` for anything that cannot be one usefully."""
     if len(raw) > MAX_LINE:
         return None
@@ -263,7 +263,7 @@ def _wrap(text: str, width: int, *, indent: str = "  ") -> list[str]:
     return out
 
 
-def _render(record: dict[str, Any] | None, width: int) -> list[str]:
+def _render_transcript_record(record: dict[str, Any] | None, width: int) -> list[str]:
     """One transcript record as terminal lines, or ``[]`` when it is not conversation."""
     if record is None or record.get("type") not in ("user", "assistant"):
         return []

@@ -37,7 +37,7 @@ app = typer.Typer(
 def _fail_if_missing() -> None:
     from aisquare.services import remote_server
 
-    problem = remote_server._dependency_error()
+    problem = remote_server._remote_dependency_error()
     if problem is not None:
         fail(problem, error="remote_not_installed")
 
@@ -50,7 +50,7 @@ def _fail_if_no_page(dist: Path | None) -> None:
         fail(problem, error="no_remote_page")
 
 
-def _describe(info: RemoteInfo, *, allow_write: bool) -> dict[str, object]:
+def _describe_remote(info: RemoteInfo, *, allow_write: bool) -> dict[str, object]:
     from aisquare.services import remote_server
 
     return {
@@ -81,8 +81,8 @@ def serve_remote(
     _fail_if_missing()
     _fail_if_no_page(dist)
     state = remote_server.runtime()
-    info = state.info(port)
-    payload = _describe(info, allow_write=state.allow_write)
+    info = state.connection_info(port)
+    payload = _describe_remote(info, allow_write=state.allow_write)
     if get_state().json_output:
         typer.echo(json.dumps(payload), err=False)
     else:
@@ -128,12 +128,12 @@ def install_page(
 
 
 @app.command("status")
-def status() -> None:
+def status_command() -> None:
     """The link, the password and the unlocked devices, from ~/.aisquare/remote.json."""
     from aisquare.services import remote_server
 
     state = remote_server.runtime()
-    payload = _describe(state.info(), allow_write=state.allow_write)
+    payload = _describe_remote(state.connection_info(), allow_write=state.allow_write)
     payload["sessions"] = state.device_rows()
     if get_state().json_output:
         typer.echo(json.dumps(payload))
@@ -177,11 +177,13 @@ def regenerate_password() -> None:
 
 
 @app.command("revoke")
-def revoke(sid: Annotated[str, typer.Argument(help="Device session id (see status).")]) -> None:
+def revoke_command(
+    sid: Annotated[str, typer.Argument(help="Device session id (see status).")],
+) -> None:
     """Drop one unlocked device."""
     from aisquare.services import remote_server
 
-    if not remote_server.revoke(sid):
+    if not remote_server.revoke_remote_device(sid):
         fail(f"no device {sid}", error="not_found", ref=sid)
     if get_state().json_output:
         typer.echo(json.dumps({"revoked": sid}))

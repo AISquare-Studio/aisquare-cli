@@ -139,11 +139,11 @@ def test_the_cli_refuses_a_directory_that_is_not_a_build(
 
 def test_start_with_no_page_installed_raises_the_actionable_sentence(isolated_home: Path) -> None:
     with pytest.raises(NoRemotePage) as raised:
-        remote_server.start(port=free_port())
+        remote_server.start_remote_server(port=free_port())
 
     assert str(raised.value) == NO_PAGE_HINT
     assert "aisquare remote install-page" in str(raised.value)
-    assert remote_server.status()["running"] is False  # nothing was left listening
+    assert remote_server.remote_server_status()["running"] is False  # nothing was left listening
 
 
 def test_run_foreground_with_no_page_installed_raises_before_it_binds(

@@ -172,9 +172,9 @@ class RemotePanel(ModalScreen[None]):
         table.clear()
         for device in devices:
             table.add_row(
-                _short(device.get("ua"), 40) or "unknown device",
-                _short(device.get("first_seen"), 19) or "—",
-                _short(device.get("last_seen"), 19) or "—",
+                _short_cell(device.get("ua"), 40) or "unknown device",
+                _short_cell(device.get("first_seen"), 19) or "—",
+                _short_cell(device.get("last_seen"), 19) or "—",
                 key=str(device["sid"]),
             )
         self.query_one("#remote-revoke", Button).disabled = not sids
@@ -187,8 +187,8 @@ class RemotePanel(ModalScreen[None]):
         The value a repaint writes back comes round as a ``Changed`` message of
         its own, and Textual delivers those from the queue — so the ``_syncing``
         flag this used to read was always back to ``False`` by the time the echo
-        arrived. Measured: a ``start()`` that refuses (no page installed) set the
-        status line, ``repaint`` snapped the switch back to off, and that echo
+        arrived. Measured: a ``start_remote_server()`` that refuses (no page
+        installed) set the status line, ``repaint`` snapped the switch back to off, and that echo
         ran ``turn_off()`` — which cleared the very sentence the user needed.
         Comparing against the controller needs no flag and cannot go stale: the
         switch always shows the current state, so a real toggle never matches it.
@@ -235,7 +235,7 @@ class RemotePanel(ModalScreen[None]):
         if not self._device_sids or row < 0 or row >= len(self._device_sids):
             return
         sid = self._device_sids[row]
-        self.controller.revoke(sid)
+        self.controller.revoke_device(sid)
         self._device_sids = []  # force the table to be rebuilt on the next paint
         self.notify(f"Revoked {sid[:8]}…")
 
@@ -248,6 +248,6 @@ def _auto_off_label(minutes: int | None) -> str:
     return "Never" if minutes is None else f"{minutes} min"
 
 
-def _short(value: Any, width: int) -> str:
+def _short_cell(value: Any, width: int) -> str:
     text = str(value) if value is not None else ""
     return text if len(text) <= width else text[: width - 1] + "…"

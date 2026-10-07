@@ -92,7 +92,9 @@ def ngrok_command(port: int, binary: str = "ngrok") -> list[str]:
 
 
 class NgrokTunnel:
-    """One ngrok subprocess; ``start`` spawns it, ``stop`` ends it, the URL arrives from its log.
+    """One ngrok subprocess: ``start_tunnel`` spawns it, ``stop_tunnel`` ends it.
+
+    The public URL arrives from its log.
 
     ``which`` and ``popen`` are seams: tests hand a fake binary (a Python script
     that prints the JSON lines) and the missing-binary path needs no ngrok at all.
@@ -121,7 +123,7 @@ class NgrokTunnel:
 
     # --- lifecycle ------------------------------------------------------------------
 
-    def start(self) -> str | None:
+    def start_tunnel(self) -> str | None:
         """Spawn ngrok; ``None`` on success, else the sentence to show (no binary, spawn failed)."""
         command = self._command
         if command is None:
@@ -153,7 +155,7 @@ class NgrokTunnel:
     def running(self) -> bool:
         return self._process is not None and self._process.poll() is None
 
-    def stop(self) -> None:
+    def stop_tunnel(self) -> None:
         process = self._process
         self._process = None
         if process is None:
@@ -177,7 +179,7 @@ class NgrokTunnel:
         try:
             for line in process.stdout:
                 self.handle_line(line)
-        except ValueError:  # the pipe was closed under us by stop()
+        except ValueError:  # the pipe was closed under us by stop_tunnel()
             return
         if self.public_url is None and self.error is None:
             code = process.poll()

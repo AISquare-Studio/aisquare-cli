@@ -90,7 +90,7 @@ def runtime(isolated_home: Path) -> Runtime:
     rt = Runtime(remote_state_path(), remote_audit_path())
     # A known password for the tests; the file keeps the generated token.
     rt._state.password = PASSWORD
-    rt._save()
+    rt._save_state()
     return rt
 
 
@@ -178,7 +178,7 @@ def test_a_restriction_that_fails_is_said_once_not_at_every_flush(
     monkeypatch.setattr(paths, "restrict_to_owner", lambda path: False)
     with caplog.at_level(logging.WARNING, logger=remote_server.__name__):
         for _ in range(3):
-            runtime.flush()
+            runtime.flush_last_seen()
         runtime.set_allow_write(True)
     said = [r.getMessage() for r in caplog.records if r.name == remote_server.__name__]
     assert len(said) == 1 and "could not restrict" in said[0], said
@@ -528,7 +528,7 @@ def test_revoke_closes_the_socket_with_4401(client: TestClient, runtime: Runtime
     sid = unlock(client, runtime).cookies[COOKIE]
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
         _frames_until(ws, "remote")
-        assert remote_server.Runtime.revoke(runtime, sid) is True
+        assert remote_server.Runtime.revoke_device(runtime, sid) is True
         closed = None
         for _ in range(20):
             message = ws.receive()
@@ -599,13 +599,13 @@ def test_start_status_revoke_stop_over_a_real_port(
     monkeypatch.setattr(remote_server, "_server", None)
     monkeypatch.setattr(remote_server, "live_sources", fake.sources)
     port = _free_port()
-    info = remote_server.start(dist, port=port)
+    info = remote_server.start_remote_server(dist, port=port)
     server = remote_server._server
     assert server is not None
     try:
         assert info.url_local == f"http://127.0.0.1:{port}/r/{info.token}/"
-        assert remote_server.status()["running"] is True
-        assert remote_server.start(dist, port=port) == info  # idempotent
+        assert remote_server.remote_server_status()["running"] is True
+        assert remote_server.start_remote_server(dist, port=port) == info  # idempotent
         with httpx.Client(base_url=f"http://127.0.0.1:{port}") as http:
             assert http.get("/r/wrong/api/board").status_code == 404
             assert http.get(f"/r/{info.token}/api/board").status_code == 401
@@ -614,18 +614,18 @@ def test_start_status_revoke_stop_over_a_real_port(
             sid = ok.cookies[COOKIE]
             assert http.get(f"/r/{info.token}/api/board").json() == fake.board
             assert http.get(f"/r/{info.token}/").text.startswith("<!doctype html>")
-            sessions = remote_server.status()["sessions"]
+            sessions = remote_server.remote_server_status()["sessions"]
             assert isinstance(sessions, list) and sessions[0]["sid"] == sid
             assert http.post(f"/r/{info.token}/api/note", json={"text": "x"}).status_code == 403
             remote_server.set_allow_write(True)
             assert http.get(f"/r/{info.token}/api/remote").json()["allow_write"] is True
             remote_server.set_allow_write(False)
-            assert remote_server.revoke(sid) is True
+            assert remote_server.revoke_remote_device(sid) is True
             assert http.get(f"/r/{info.token}/api/board").status_code == 401
-            assert remote_server.revoke(sid) is False
+            assert remote_server.revoke_remote_device(sid) is False
     finally:
-        remote_server.stop()
-    assert remote_server.status()["running"] is False
+        remote_server.stop_remote_server()
+    assert remote_server.remote_server_status()["running"] is False
     assert not server._thread.is_alive(), "stop() returned with uvicorn's thread still up"
     # Nothing listens any more. Linux refuses at once (ConnectError); Windows retries a
     # refused loopback SYN for about two seconds before WSAECONNREFUSED, so a one-second
@@ -645,16 +645,16 @@ def test_start_reports_a_busy_port(
         taken.listen(1)
         port = int(taken.getsockname()[1])
         with pytest.raises(remote_server.RemoteError, match="did not come up"):
-            remote_server.start(dist, port=port)
-    remote_server.stop()
+            remote_server.start_remote_server(dist, port=port)
+    remote_server.stop_remote_server()
 
 
 def test_start_without_the_extra_says_what_to_install(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        remote_server, "_dependency_error", lambda: "the remote extra is not installed"
+        remote_server, "_remote_dependency_error", lambda: "the remote extra is not installed"
     )
     with pytest.raises(remote_server.RemoteUnavailable, match="not installed"):
-        remote_server.start(Path("."), port=1)
+        remote_server.start_remote_server(Path("."), port=1)
 
 
 # --- the CLI surface --------------------------------------------------------------------
@@ -684,7 +684,7 @@ def test_cli_status_allow_write_and_regenerate(
 def test_cli_serve_without_the_extra_fails_with_the_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         remote_server,
-        "_dependency_error",
+        "_remote_dependency_error",
         lambda: "the remote extra is not installed — pip install x",
     )
     result = CliRunner().invoke(cli, ["--json", "remote", "serve"])

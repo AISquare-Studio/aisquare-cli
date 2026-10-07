@@ -111,10 +111,10 @@ def test_missing_binary_message_names_the_install_and_the_authtoken() -> None:
 
 def test_a_tunnel_without_the_binary_reports_instead_of_raising() -> None:
     tunnel = NgrokTunnel(8748, which=lambda _name: None)
-    assert tunnel.start() == INSTALL_HINT
+    assert tunnel.start_tunnel() == INSTALL_HINT
     assert tunnel.error == INSTALL_HINT
     assert not tunnel.running
-    tunnel.stop()  # idempotent with nothing spawned
+    tunnel.stop_tunnel()  # idempotent with nothing spawned
 
 
 # --- the subprocess lifecycle against a fake ngrok ----------------------------------------
@@ -134,10 +134,10 @@ def test_the_tunnel_learns_its_url_from_the_log_and_stop_ends_the_process(
     tmp_path: Path,
 ) -> None:
     tunnel = NgrokTunnel(8748, command=fake_ngrok(tmp_path, {"lvl": "info", "msg": "hi"}, STARTED))
-    assert tunnel.start() is None
+    assert tunnel.start_tunnel() is None
     assert tunnel.wait_for_url(timeout=10) == STARTED["url"]
     assert tunnel.running
-    tunnel.stop()
+    tunnel.stop_tunnel()
     assert not tunnel.running
     assert tunnel.error is None
 
@@ -145,10 +145,10 @@ def test_the_tunnel_learns_its_url_from_the_log_and_stop_ends_the_process(
 def test_a_tunnel_that_exits_without_a_url_says_so_instead_of_hanging(tmp_path: Path) -> None:
     error = {"lvl": "eror", "err": "authentication failed: ERR_NGROK_4018"}
     tunnel = NgrokTunnel(8748, command=fake_ngrok(tmp_path, error, linger=False))
-    assert tunnel.start() is None
+    assert tunnel.start_tunnel() is None
     assert tunnel.wait_for_url(timeout=10) is None
     assert tunnel.error == AUTHTOKEN_HINT
-    tunnel.stop()
+    tunnel.stop_tunnel()
 
 
 # --- the controller -------------------------------------------------------------------------
@@ -170,7 +170,7 @@ class FakeServer(types.ModuleType):
         self.DEFAULT_PORT = 8748
         self.RemoteInfo = remote_server.RemoteInfo
 
-    def start(self, dist_dir: Path | None, port: int = 8748) -> remote_server.RemoteInfo:
+    def start_remote_server(self, dist_dir: Path | None, port: int = 8748) -> remote_server.RemoteInfo:
         if self.fail_start is not None:
             raise self.fail_start
         self.running = True
@@ -178,13 +178,13 @@ class FakeServer(types.ModuleType):
             self.token, self.password, f"http://127.0.0.1:{port}/r/{self.token}/"
         )
 
-    def stop(self) -> None:
+    def stop_remote_server(self) -> None:
         self.running = False
 
-    def status(self) -> dict[str, Any]:
+    def remote_server_status(self) -> dict[str, Any]:
         return {"running": self.running, "sessions": list(self.sessions)}
 
-    def revoke(self, sid: str) -> None:
+    def revoke_remote_device(self, sid: str) -> None:
         self.revoked.append(sid)
         self.sessions = [s for s in self.sessions if s.get("sid") != sid]
 
@@ -212,7 +212,7 @@ class FakeTunnel(NgrokTunnel):
         self._failure = failure
         self.stopped = False
 
-    def start(self) -> str | None:
+    def start_tunnel(self) -> str | None:
         if self._failure is not None:
             self.error = self._failure
             return self._failure
@@ -220,7 +220,7 @@ class FakeTunnel(NgrokTunnel):
         self._url_ready.set()
         return None
 
-    def stop(self) -> None:
+    def stop_tunnel(self) -> None:
         self.stopped = True
 
 
@@ -283,7 +283,7 @@ def test_the_switches_survive_a_restart_of_the_tui_next_to_the_theme_key() -> No
     first.set_allow_write(True)
     first.set_auto_off(120)
     first.turn_on()
-    first.shutdown()  # the TUI exits: processes end, the saved switches stay
+    first.shutdown_for_exit()  # the TUI exits: processes end, the saved switches stay
     saved = json.loads(paths.state_path().read_text())
     assert saved["board_theme"] == "nord"  # the theme key is untouched by our merge
     assert (saved["remote_enabled"], saved["allow_write"], saved["auto_off_minutes"]) == (
@@ -343,6 +343,6 @@ def test_regenerate_devices_and_revoke_go_through_the_server() -> None:
     assert controller.regenerate_password() == "ember-fjord-glade-harbor"
     assert controller.password() == "ember-fjord-glade-harbor"
     assert [d["sid"] for d in controller.devices()] == ["sid_a", "sid_b"]
-    controller.revoke("sid_a")
+    controller.revoke_device("sid_a")
     assert server.revoked == ["sid_a"]
     assert [d["sid"] for d in controller.devices()] == ["sid_b"]

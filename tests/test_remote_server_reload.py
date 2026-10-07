@@ -28,7 +28,7 @@ PASSWORD = "Test1234"
 def runtime(isolated_home: Path) -> Runtime:
     rt = Runtime(remote_state_path(), remote_audit_path())
     rt._state.password = PASSWORD
-    rt._save()
+    rt._save_state()
     return rt
 
 
@@ -143,14 +143,14 @@ def test_own_writes_do_not_trigger_a_re_read(runtime: Runtime) -> None:
     reads = runtime.reads
     runtime.set_allow_write(True)
     runtime.set_allow_write(False)
-    runtime.flush()
+    runtime.flush_last_seen()
     assert runtime.reload_if_changed() is False
     assert runtime.reads == reads
 
 
 def test_flush_does_not_overwrite_a_fresher_file(runtime: Runtime) -> None:
     other_process_writes(lambda raw: raw.__setitem__("allow_write", True))
-    runtime.flush()
+    runtime.flush_last_seen()
     assert json.loads(remote_state_path().read_text())["allow_write"] is True
     assert runtime.allow_write is True
 

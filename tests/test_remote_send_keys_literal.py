@@ -2,7 +2,7 @@
 
 The human: "space not working". Two faults, one of them mine and the cause:
 
-* ``_optional`` was used to read typed text, and it answers "absent" for a
+* ``_optional_ref`` was used to read typed text, and it answers "absent" for a
   string that strips to nothing. A 50 ms flush of ``" "`` therefore became
   ``None`` and delivered nothing, while the endpoint answered 200 ``sent: true``
   and the audit line recorded ``text=0ch`` — the trail honestly reporting that
@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 
 from aisquare.core.tmux import CHECK_SOCKET_SUFFIX, TmuxError, TmuxServer
-from aisquare.services.remote_server import RequestError, _literal, _optional
+from aisquare.services.remote_server import RequestError, _literal, _optional_ref
 
 requires_tmux = pytest.mark.skipif(
     shutil.which("tmux") is None, reason="tmux is not installed; the live tests need it"
@@ -44,8 +44,8 @@ _SOCKETS = itertools.count()
 
 def test_optional_still_treats_a_blank_name_as_absent() -> None:
     """Unchanged, and correct for a NAME: a project ref of spaces is no ref."""
-    assert _optional({"project": "   "}, "project") is None
-    assert _optional({"project": "prj_x"}, "project") == "prj_x"
+    assert _optional_ref({"project": "   "}, "project") is None
+    assert _optional_ref({"project": "prj_x"}, "project") == "prj_x"
 
 
 def test_literal_keeps_whitespace_because_a_keystroke_is_a_keystroke() -> None:

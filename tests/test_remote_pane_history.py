@@ -162,7 +162,7 @@ def test_history_of_zero_is_the_live_screen(seeded: tuple[TmuxServer, str, int])
 def runtime(isolated_home: Path) -> Runtime:
     rt = Runtime(remote_state_path(), remote_audit_path())
     rt._state.password = PASSWORD
-    rt._save()
+    rt._save_state()
     return rt
 
 

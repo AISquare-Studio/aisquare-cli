@@ -1,4 +1,4 @@
-"""aisquare — a portable memory layer for coding agents.
+"""aisquare — one terminal over your projects and your coding agents.
 
 ``__version__`` stays re-exported here for anyone who already imports it from
 the package root, but nothing INSIDE this package may read it back off this

@@ -5,7 +5,7 @@
 [![CI](https://github.com/AISquare-Studio/aisquare-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/AISquare-Studio/aisquare-cli/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/AISquare-Studio/aisquare-cli/blob/main/LICENSE)
 
-**One terminal over every project and every coding agent: task a manager in
+**One terminal over your projects and your coding agents: task a manager in
 plain words, and it runs the coders, testers and reviewers for you.**
 
 ![The asq terminal UI: projects on the left, a manager's live Claude Code session on the right](https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/docs/demo.gif)

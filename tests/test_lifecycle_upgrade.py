@@ -200,6 +200,20 @@ def test_an_editable_direct_url_is_the_editable_route(tmp_path: Path) -> None:
     assert install_route.command_line(["git", "-C", str(checkout), "pull"]) in reason
 
 
+def test_an_editable_install_on_windows_is_still_told_to_pull_first(tmp_path: Path) -> None:
+    """The same advice on every platform; Windows only adds WHEN the reinstall runs
+    (a Windows-only CI failure on #251's round 1: the lock branch came first)."""
+    checkout = tmp_path / "checkout"
+    url = json.dumps({"url": checkout.as_uri(), "dir_info": {"editable": True}})
+    windows = install_route.classify(_facts(_prefix(tmp_path), direct_url=url, platform="win32"))
+
+    reason = install_route.not_automated(windows)
+
+    assert reason is not None
+    assert install_route.command_line(["git", "-C", str(checkout), "pull"]) in reason
+    assert "after aisquare exits" in reason
+
+
 def test_an_editable_install_in_a_uv_made_venv_reinstalls_with_uv_pip(tmp_path: Path) -> None:
     checkout = tmp_path / "checkout"
     url = json.dumps({"url": checkout.as_uri(), "dir_info": {"editable": True}})
@@ -1359,27 +1373,37 @@ def test_a_move_back_leaves_the_hooks_and_says_how_to_rewrite_them(
 
 
 @pytest.mark.parametrize(
-    "content",
-    [b'{"hooks": {}, "note": "caf\xe9"}', b'{"hooks": {"Stop": 1}}'],
+    ("content", "left"),
+    [
+        (
+            b'{"note": "caf\xe9", "hooks": {"Stop": [{"hooks": [{"type": "command", '
+            b'"command": "/x/aisquare hook stop"}]}]}}',
+            True,
+        ),
+        (b'{"hooks": {"Stop": 1}}', False),
+    ],
     ids=["not-utf-8", "hooks-of-the-wrong-shape"],
 )
 def test_a_settings_file_that_cannot_be_read_as_hooks_is_left_not_raised(
-    tool: Tool, tmp_path: Path, runner: CliRunner, machine: Machine, content: bytes
+    tool: Tool, tmp_path: Path, runner: CliRunner, machine: Machine, content: bytes, left: bool
 ) -> None:
-    """Finding 2: a ValueError or TypeError from one recorded settings.json used to
-    end `upgrade` and `upgrade --check` in a traceback."""
+    """Finding 2: a ValueError or TypeError from one recorded settings.json used to end
+    `upgrade` and `upgrade --check` in a traceback. A file that is not UTF-8 is left
+    and named (Claude Code may still run hooks from it); a hooks table of the wrong
+    shape holds no hooks of ours, so there is nothing to refresh or report."""
     bad = tmp_path / "c-bad"
     bad.mkdir()
     (bad / "settings.json").write_bytes(content)
     _record(bad)
 
-    refresh, left = lifecycle.refresh_sites(tool.facts)
+    refresh, kept = lifecycle.refresh_sites(tool.facts)
     result = runner.invoke(app, ["--json", "upgrade", "--check"])
 
     assert refresh == ()
-    assert [site.config_dir for site in left] == [bad]
+    assert [site.config_dir for site in kept] == ([bad] if left else [])
     assert result.exit_code == 0, result.output
-    assert _one_object(result.stdout)["hooks_left"][0]["config_dir"] == str(bad)
+    named = [site["config_dir"] for site in _one_object(result.stdout)["hooks_left"]]
+    assert named == ([str(bad)] if left else [])
 
 
 def test_an_install_on_its_own_index_does_not_take_pypis_word_for_latest(

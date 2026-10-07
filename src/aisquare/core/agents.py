@@ -957,10 +957,8 @@ def _claude_dirs_on_disk() -> list[Path]:
         seen.add(key)
         try:
             ours = bool(hook_commands("claude-code", candidate))
-        except (OSError, ValueError, TypeError):
-            # Unreadable, not UTF-8, or hooks of a shape Claude Code does not
-            # write — see the docstring; one sibling must not cost the rest.
-            continue
+        except OSError:
+            continue  # unreadable settings.json — see the docstring
         if ours:
             found.append(candidate)
     return found

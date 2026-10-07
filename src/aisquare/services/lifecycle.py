@@ -13,7 +13,9 @@ subprocess.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -471,14 +473,88 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
     return tuple(refresh), tuple(left)
 
 
+#: A ``"command": "…"`` pair in settings.json text, found without parsing the JSON.
+_COMMAND_FIELD = re.compile(r'"command"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def lenient_hook_commands(text: str) -> list[str]:
+    """The aisquare hook commands in settings.json ``text``, valid JSON or not.
+
+    Claude Code reads its settings more forgivingly than ``json.loads``: a
+    Latin-1 byte or a trailing comma need not stop it running the hooks inside.
+    So whether a file holds OUR hooks is decided from every ``"command"`` value
+    in it, matched as text, each judged by the same matcher ``connect`` uses.
+    """
+    found: list[str] = []
+    for match in _COMMAND_FIELD.finditer(text):
+        try:
+            command = json.loads(f'"{match.group(1)}"')
+        except ValueError:
+            command = match.group(1)
+        if isinstance(command, str) and agent_core.hook_binary(command) is not None:
+            found.append(command)
+    return found
+
+
+#: Byte-order marks a hand-saved settings.json may start with: PowerShell 5.1 writes
+#: UTF-16, Notepad has written UTF-8 with a BOM.
+_BOMS = ((b"\xff\xfe", "utf-16"), (b"\xfe\xff", "utf-16"), (b"\xef\xbb\xbf", "utf-8-sig"))
+
+
+def lenient_text(raw: bytes) -> str:
+    """``raw`` as text for :func:`lenient_hook_commands`: by its BOM, else UTF-8 with
+    replacement characters, so no byte stops the search for our commands."""
+    for bom, codec in _BOMS:
+        if raw.startswith(bom):
+            return raw.decode(codec, errors="replace")
+    return raw.decode("utf-8", errors="replace")
+
+
+def settings_unreadable(directory: Path) -> str | None:
+    """Why the aisquare hooks in ``directory`` cannot be read or rewritten, or ``None``.
+
+    ``hook_commands`` reads a file it cannot parse as one with no hooks (#247),
+    which is right for doctor and wrong for a step that has to act on the hooks.
+    A site is named, with its reason, when:
+    - its settings.json cannot be read at all, which may hide hooks; or
+    - it holds aisquare hook commands (:func:`lenient_hook_commands`) in a file
+      that is not UTF-8, not valid JSON, or not an object with a ``hooks``
+      object. Claude Code may still run those hooks, and this CLI cannot rewrite
+      that file safely.
+    A file that cannot be parsed but holds nothing of ours is not this
+    command's business (review of #254).
+    """
+    settings = directory / "settings.json"
+    if not settings.exists():
+        return None
+    try:
+        raw = settings.read_bytes()
+    except OSError as exc:
+        return f"its settings.json could not be read ({exc})"
+    problem: str | None = None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:  # UnicodeDecodeError is one
+        problem = f"cannot be read as UTF-8 JSON ({exc})"
+    else:
+        if not isinstance(data, dict) or not isinstance(data.get("hooks", {}), dict):
+            problem = "is not a JSON object with a hooks object"
+    if problem is None or not lenient_hook_commands(lenient_text(raw)):
+        return None
+    return f"its settings.json holds aisquare hooks but {problem}, so they cannot be removed safely"
+
+
 def hook_binaries(directory: Path) -> tuple[list[agent_core.HookBinary], str | None]:
     """The distinct programs ``directory``'s aisquare hooks run — or why it could not be read.
 
     The one reader for upgrade's refresh and uninstall's plan. A settings.json
-    that is unreadable, not UTF-8 (a ValueError), or holds hooks of a shape
-    Claude Code does not write (``{"Stop": 1}`` is a TypeError) is a reason, not
-    a traceback: one bad file must not stop the work on every other directory.
+    this user cannot read, or that is not UTF-8, is a reason (:func:`settings_unreadable`),
+    and so is anything else the read raises: one bad file must not stop the work
+    on every other directory, and must never pass for a directory with no hooks.
     """
+    unreadable = settings_unreadable(directory)
+    if unreadable is not None:
+        return [], unreadable
     try:
         commands = agent_core.hook_commands(HOOK_AGENT, directory, strict=True)
     except (OSError, ValueError, TypeError) as exc:
@@ -906,6 +982,28 @@ _LIVE_ROWS = (
 )
 
 
+def _siblings_hiding_hooks() -> list[Path]:
+    """``~/.claude*`` directories whose aisquare hooks only show without strict parsing.
+
+    The on-disk scan behind :func:`agent_core.hook_dirs` reads leniently since
+    #247, so a sibling whose settings.json is Latin-1 or not valid JSON reads as
+    having no hooks there, though Claude Code may still run them. Those are found
+    here, and the plan then names them as sites it cannot clean, which keeps the
+    package (review of #254). A sibling this user cannot read at all stays
+    skipped, as the scan's own docstring rules: it cannot be shown to carry our
+    hooks, and another account's backup must not block an uninstall forever.
+    """
+    found: list[Path] = []
+    for directory in _claude_dirs_for_mcp():
+        try:
+            raw = (directory / "settings.json").read_bytes()
+        except OSError:
+            continue
+        if lenient_hook_commands(lenient_text(raw)):
+            found.append(directory)
+    return found
+
+
 def _live_fleet_agents() -> tuple[tuple[tuple[str, str], ...], str | None]:
     """The fleet's live rows as ``(label (project), socket)``, or why they could not be read.
 
@@ -981,7 +1079,7 @@ def _server_listening(socket_name: str) -> bool:
 def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
     """Decide what ``aisquare uninstall`` would do. Reads only; never creates the home."""
     route = install_route.detect()
-    candidates = [*agent_core.hook_dirs(HOOK_AGENT), *_account_dirs()]
+    candidates = [*agent_core.hook_dirs(HOOK_AGENT), *_account_dirs(), *_siblings_hiding_hooks()]
     hooks: list[HookSite] = []
     unreadable: list[HookSite] = []
     seen: set[Path] = set()

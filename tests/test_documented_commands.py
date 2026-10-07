@@ -506,11 +506,6 @@ def _stale_flags(invocations: list[Invocation]) -> list[str]:
     return missing
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="needs lane b-security: docs/remote.md documents `remote serve --auto-off "
-    "--public-url`, `remote revoke --all` and `remote regenerate-password --new-link`",
-)
 def test_every_documented_flag_exists(documented: list[Invocation]) -> None:
     """The README's `--account` defect. A deleted flag stays copy-pasteable."""
     missing = _stale_flags(documented)

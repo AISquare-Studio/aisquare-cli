@@ -543,30 +543,13 @@ def test_the_route_match_sees_real_routes_and_not_the_catch_alls(app: Any) -> No
     assert _routes_for(app, "api/no-such-thing") == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="needs lanes c-needs-you, d-push and e-agent-actions: api/needs*, api/push* and "
-    "api/actions/recent are routes only once they merge (SPEC §6.7 item 8)",
-)
 def test_every_path_in_the_page_api_table_is_a_route_of_the_built_app(app: Any) -> None:
     missing = [key for key, value in _api_table().items() if not _routes_for(app, value)]
     assert missing == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="needs lane e-agent-actions: agent/tell, agent/stop, agent/restart and "
-    "agent/switch join write_endpoint_names() with ACTION_ENDPOINTS",
-)
 def test_every_write_the_page_sends_is_one_the_dispatcher_answers() -> None:
     assert set(_writes_table()) <= set(write_endpoint_names())
-
-
-def test_the_plan_writes_the_page_sends_are_the_dispatchers_already() -> None:
-    """The half of the write list that is on this branch now, so it cannot rot meanwhile."""
-    plan = [name for name in _writes_table() if not name.startswith("agent/")]
-    assert plan == ["send-keys", "note"]
-    assert set(plan) <= set(remote_server.WRITE_ENDPOINTS)
 
 
 def test_the_page_sends_only_the_socket_messages_the_server_reads() -> None:

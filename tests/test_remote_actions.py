@@ -91,6 +91,22 @@ def _unlocked(app: Any, runtime: Runtime) -> Any:
     return client
 
 
+def _audit_lines() -> list[str]:
+    path = remote_audit_path()
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+def _writes_audited() -> list[tuple[str, str]]:
+    """``(endpoint, summary)`` of every write's audit line, in order.
+
+    Writes only, the names ``POST api/{name}`` takes: what they leave is what this
+    file is about, and an unlock may leave a line of its own.
+    """
+    writes = set(write_endpoint_names())
+    fields = [line.split(" ", 3) for line in _audit_lines()]
+    return [(field[2], field[3]) for field in fields if field[2] in writes]
+
+
 # --- a refusal can say what is current ---------------------------------------------------
 
 STALE = {
@@ -681,10 +697,7 @@ class Phone:
         return self.client.post(f"{base(self.runtime)}/api/{name}", json=body)
 
     def audit(self) -> list[tuple[str, str]]:
-        """``(endpoint, summary)`` of every audit line, in order."""
-        path = remote_audit_path()
-        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-        return [(line.split(" ", 3)[2], line.split(" ", 3)[3]) for line in lines]
+        return _writes_audited()
 
 
 @pytest.fixture
@@ -1555,12 +1568,13 @@ def test_the_tell_audit_line_keeps_how_the_text_began_and_nothing_it_could_forge
 ) -> None:
     _row(project)
     text = "first line\n2026-10-07T10:00:00+00:00 dev_x agent/stop forged\x1b[2J" + "y" * 300
+    before = _audit_lines()
     response = phone.post("agent/tell", agent=LABEL, text=text)
     assert response.status_code == 200
-    lines = remote_audit_path().read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1, "a newline in the text did not begin a line of its own"
+    lines = _audit_lines()
+    assert len(lines) == len(before) + 1, "a newline in the text did not begin a line of its own"
     excerpt = action_audit_excerpt(text)
-    assert lines[0].endswith(
+    assert lines[-1].endswith(
         f'tell coder-1@{project.id} mode=auto delivered=no text={len(text)}ch "{excerpt}"'
     )
     assert excerpt.startswith("first line?2026-10-07T10:00:00+00:00 dev_x agent/stop forged?[2J")

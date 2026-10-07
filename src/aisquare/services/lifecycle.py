@@ -12,10 +12,15 @@ subprocess.
 
 from __future__ import annotations
 
+import os
+import re
+import shutil
+from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from aisquare.core import agents as agent_core
+from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import credentials as credentials_store
 from aisquare.core import paths
 from aisquare.core.config import (
@@ -25,7 +30,7 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.core.store import store_session
-from aisquare.core.stubs import stub
+from aisquare.core.tmux import CONF_NAME as FLEET_TMUX_CONF
 from aisquare.core.version import __version__
 from aisquare.core.workspace import current_project
 from aisquare.models import SetupReport
@@ -554,6 +559,482 @@ def _refresh(site: HookSite, found: install_route.Facts) -> HookRefresh:
     return HookRefresh(site.config_dir, True)
 
 
-def uninstall() -> None:
-    """Remove agent hooks and optionally wipe local data."""
-    stub("uninstall")
+# --- uninstall ---------------------------------------------------------------------------
+#
+# The ORDER is the design, and every step that can go wrong stops the ones after
+# it from removing the means to retry:
+#
+#   1. refuse while the fleet has live agents — their sessions would keep firing
+#      hooks at a program that is about to vanish;
+#   2. remove aisquare's hook groups from every Claude Code directory, one
+#      directory at a time, each failure recorded and the rest still attempted;
+#   3. only when the home STAYS, record in agents.json that nothing is connected;
+#   4. with --purge only, delete the home — behind a guard, never through a link;
+#   5. LAST, and only when 2-4 all succeeded, hand the process to the package
+#      manager. A failure anywhere above keeps the package, so `aisquare
+#      uninstall` is still there to run again.
+#
+# Nothing here goes through `agents_service.disconnect`: it calls set_connected,
+# which calls `paths.ensure_home()`, and an uninstall that recreated the home it
+# was keeping out of — or had just purged — would be the one place that broke the
+# promise that the plan never creates ~/.aisquare.
+
+#: Files that make a directory an aisquare home: at least one must be there
+#: before --purge deletes anything.
+HOME_MARKERS = ("config.toml", "context.db", "agents.json")
+
+#: What aisquare itself writes at the top of its home, by name. A home that
+#: AISQUARE_HOME moved somewhere custom is deleted by --purge only when it holds
+#: nothing else: pointed at a directory people keep other things in, a
+#: recursive delete would take those too. Names come from the helpers that
+#: create them wherever one exists, so a rename there cannot strand this list.
+_HOME_NAMES = frozenset(
+    {
+        paths.config_path().name,
+        paths.credentials_path().name,
+        f"{paths.credentials_path().name}.lock",
+        paths.db_path().name,
+        f"{paths.db_path().name}-wal",
+        f"{paths.db_path().name}-shm",
+        f"{paths.db_path().name}-journal",
+        paths.agents_registry_path().name,
+        paths.state_path().name,
+        f"{paths.state_path().name}.lock",
+        paths.claude_accounts_dir().name,
+        paths.cache_dir().name,
+        paths.log_dir().name,
+        paths.project_data_dir("x").parent.name,
+        paths.explainability_dir().name,
+        paths.truncation_marker_path().name,
+        explainability_service.key_path().name,
+        FLEET_TMUX_CONF,
+        "screenshots",
+    }
+)
+#: ``core.atomic``'s sibling temp files: ``.<name>.<pid>.<8 hex>.tmp``.
+_ATOMIC_TEMP = re.compile(r"^\..+\.\d+\.[0-9a-f]{8}\.tmp$")
+
+FLEET_SHUTDOWN = "aisquare fleet shutdown --all --yes"
+
+
+class UninstallRefused(RuntimeError):
+    """Uninstall will not start; ``error`` is the machine-readable reason."""
+
+    def __init__(self, message: str, error: str) -> None:
+        super().__init__(message)
+        self.error = error
+
+
+@dataclass(frozen=True)
+class McpRegistration:
+    """An MCP server entry in a ``.claude.json`` that runs aisquare."""
+
+    name: str
+    file: Path
+    project: str | None = None
+    """The project a local-scope entry belongs to; ``None`` for user scope."""
+
+
+@dataclass(frozen=True)
+class UninstallPlan:
+    """What ``aisquare uninstall`` would do, read before anything is touched.
+
+    Read-only, and it never creates ``~/.aisquare``: the store is opened only when
+    ``context.db`` already exists, and every other read is a file that is there
+    or is not.
+    """
+
+    route: install_route.InstallRoute
+    hooks: tuple[HookSite, ...]
+    """Every Claude Code directory holding aisquare hooks, with what they run."""
+    unreadable: tuple[HookSite, ...]
+    """Directories that may hold hooks but whose settings.json could not be read."""
+    mcp: tuple[McpRegistration, ...]
+    package_argv: tuple[str, ...]
+    package_env: dict[str, str]
+    package_reason: str | None
+    """Why the package step is printed rather than run; ``None`` when it runs."""
+    home: Path
+    home_exists: bool
+    home_entries: tuple[str, ...]
+    accounts: tuple[str, ...]
+    """The Claude Code logins kept in the home's account slots, described."""
+    purge: bool
+    purge_refusal: str | None
+    """Why the home may not be deleted — consulted only when ``purge`` is set."""
+    live_agents: tuple[str, ...]
+    fleet_error: str | None
+    """Why the fleet's live agents could not be counted, when they could not."""
+    tmux_found: bool
+
+    @property
+    def package_command(self) -> str:
+        return install_route.command_line(self.package_argv)
+
+    @property
+    def refusal(self) -> UninstallRefused | None:
+        """The reason nothing may start, or ``None``."""
+        if self.live_agents and self.tmux_found:
+            count = len(self.live_agents)
+            return UninstallRefused(
+                f"{count} fleet agent{'s are' if count != 1 else ' is'} running "
+                f"({', '.join(self.live_agents)}) — their sessions would keep calling hooks "
+                f"that no longer exist. Stop them first: {FLEET_SHUTDOWN}",
+                error="fleet_running",
+            )
+        if self.purge and self.purge_refusal is not None:
+            return UninstallRefused(
+                f"--purge will not delete {self.home}: {self.purge_refusal}",
+                error="purge_refused",
+            )
+        return None
+
+
+@dataclass(frozen=True)
+class HookRemoval:
+    """One directory's hooks, removed — or why not."""
+
+    config_dir: Path
+    ok: bool
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class UninstallReport:
+    """What uninstall did. ``package_runs`` means the package step comes next, by exec."""
+
+    plan: UninstallPlan
+    hooks: tuple[HookRemoval, ...] = ()
+    unrecorded: bool = False
+    purged: bool = False
+    purge_error: str | None = None
+    notes: tuple[str, ...] = ()
+
+    @property
+    def failed(self) -> bool:
+        return any(not hook.ok for hook in self.hooks) or self.purge_error is not None
+
+    @property
+    def package_runs(self) -> bool:
+        return not self.failed and self.plan.package_reason is None
+
+
+def _user_home() -> Path:
+    """The user's home directory (an indirection so tests can name one)."""
+    return Path.home()
+
+
+def _tmux_on_path() -> bool:
+    """Whether tmux exists here at all (an indirection so tests can decide)."""
+    return shutil.which("tmux") is not None
+
+
+def _is_link(path: Path) -> bool:
+    """A symlink, or on Windows a junction — anything a delete could be led through."""
+    if path.is_symlink():
+        return True
+    is_junction = getattr(os.path, "isjunction", None)  # Python 3.12+
+    return bool(is_junction(path)) if is_junction is not None else False
+
+
+def purge_refusal(home: Path, *, custom: bool) -> str | None:
+    """Why ``home`` must not be deleted, or ``None`` when ``--purge`` may delete it.
+
+    Every check is about the one mistake that cannot be undone — a recursive
+    delete of the wrong directory: a link (#198 plans links between account slots
+    and ~/.claude, and a delete led through one would take the target), the
+    user's home or anything above it, a directory with none of aisquare's
+    markers, and — when AISQUARE_HOME moved the home somewhere custom — any
+    entry aisquare did not create.
+    """
+    if _is_link(home):
+        return f"{home} is a link — delete what it points at by hand if that is what you mean"
+    if not home.exists():
+        return None
+    if not home.is_dir():
+        return f"{home} is not a directory"
+    resolved = _identity(home)
+    user_home = _identity(_user_home())
+    if resolved == user_home:
+        return f"{home} is your home directory"
+    if resolved == Path(resolved.anchor):
+        return f"{home} is the root of a filesystem"
+    if resolved in user_home.parents:
+        return f"{home} contains your home directory"
+    if not any((home / marker).is_file() for marker in HOME_MARKERS):
+        return f"{home} holds none of {', '.join(HOME_MARKERS)}, so it is not an aisquare home"
+    if custom:
+        try:
+            names = sorted(child.name for child in home.iterdir())
+        except OSError as exc:
+            return f"{home} could not be listed ({exc})"
+        foreign = [n for n in names if n not in _HOME_NAMES and not _ATOMIC_TEMP.match(n)]
+        if foreign:
+            shown = ", ".join(foreign[:5]) + (
+                f" and {len(foreign) - 5} more" if len(foreign) > 5 else ""
+            )
+            return (
+                f"AISQUARE_HOME points at a directory that also holds {shown}, which aisquare "
+                "did not create — move them out, or delete the directory by hand"
+            )
+    return None
+
+
+def _account_dirs() -> list[Path]:
+    """Every directory under the managed account root: the slots and the removed ones."""
+    root = paths.claude_accounts_dir()
+    try:
+        return sorted(child for child in root.iterdir() if child.is_dir()) if root.is_dir() else []
+    except OSError:
+        return []
+
+
+def _accounts_kept() -> tuple[str, ...]:
+    """The logins the home keeps in its account slots, as a person reads them."""
+    described: list[str] = []
+    for account in accounts_core.managed_accounts():
+        identity = accounts_core.identity(account)
+        who = identity.email if identity is not None else "not signed in"
+        described.append(f"slot {account.slot}: {who}")
+    retired = [d for d in _account_dirs() if ".removed-" in d.name]
+    if retired:
+        described.append(f"{len(retired)} removed slot{'s' if len(retired) != 1 else ''}")
+    return tuple(described)
+
+
+def _runs_aisquare(spec: object) -> bool:
+    """Whether an ``mcpServers`` entry starts aisquare: by name, or ``python -m aisquare``.
+
+    Any token counts, not only ``command``: ``uvx --from aisquare-cli aisquare
+    serve`` names the program in its arguments. Windows names (``asq.exe``) are
+    read as Windows paths whatever this machine is, because the file may have
+    been written on either.
+    """
+    if not isinstance(spec, dict):
+        return False
+    tokens = [str(spec.get("command") or "")]
+    args = spec.get("args")
+    if isinstance(args, list):
+        tokens.extend(str(arg) for arg in args)
+    for index, token in enumerate(tokens):
+        if PureWindowsPath(token).stem.lower() in ("aisquare", "asq"):
+            return True
+        if token == "-m" and tokens[index + 1 : index + 2] == ["aisquare"]:
+            return True
+    return False
+
+
+def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ...]:
+    """aisquare's MCP servers in every ``.claude.json`` these directories use — read only.
+
+    Listed, never edited: ``.claude.json`` is Claude Code's own file, rewritten by
+    every running session, and a second writer racing them is how a login gets
+    lost. ``claude mcp remove`` is the tool that owns it.
+    """
+    found: list[McpRegistration] = []
+    read: set[Path] = set()
+    for directory in directories:
+        for path in agent_core.claude_json_paths(directory):
+            if path in read:
+                continue
+            read.add(path)
+            data = agent_core.read_json(path)
+            servers = data.get("mcpServers")
+            if isinstance(servers, dict):
+                found.extend(
+                    McpRegistration(str(name), path)
+                    for name, spec in servers.items()
+                    if _runs_aisquare(spec)
+                )
+            projects = data.get("projects")
+            if not isinstance(projects, dict):
+                continue
+            for project, block in projects.items():
+                servers = block.get("mcpServers") if isinstance(block, dict) else None
+                if isinstance(servers, dict):
+                    found.extend(
+                        McpRegistration(str(name), path, str(project))
+                        for name, spec in servers.items()
+                        if _runs_aisquare(spec)
+                    )
+    return tuple(found)
+
+
+def _live_fleet_agents() -> tuple[tuple[str, ...], str | None]:
+    """The fleet's live rows as ``label (project)``, or why they could not be read.
+
+    The store is opened only when ``context.db`` exists and is not empty: opening
+    creates a missing home, and an empty file is rebuilt by ``open_store`` (its
+    truncation path writes a marker). A store that cannot answer is reported,
+    never raised — the plan reads, and a damaged board is no reason to keep a
+    user from removing the tool.
+    """
+    database = paths.db_path()
+    try:
+        if not database.is_file() or database.stat().st_size == 0:
+            return (), None
+    except OSError as exc:
+        return (), str(exc)
+    try:
+        with store_session() as store:
+            live = [
+                f"{agent.label} ({project.codename or project.root.name})"
+                for project in store.list_projects(all=True, include_forgotten=True)
+                for agent in store.fleet_agents(project.id, live_only=True)
+            ]
+    except Exception as exc:  # StoreUnopenable, a corrupt page, a lock: report it
+        return (), str(exc) or type(exc).__name__
+    return tuple(live), None
+
+
+def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
+    """Decide what ``aisquare uninstall`` would do. Reads only; never creates the home."""
+    route = install_route.detect()
+    candidates = [*agent_core.hook_dirs(HOOK_AGENT), *_account_dirs()]
+    hooks: list[HookSite] = []
+    unreadable: list[HookSite] = []
+    seen: set[Path] = set()
+    for directory in candidates:
+        key = _identity(directory)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            commands = agent_core.hook_commands(HOOK_AGENT, directory)
+        except OSError as exc:
+            unreadable.append(
+                HookSite(directory, reason=f"its settings.json could not be read ({exc})")
+            )
+            continue
+        if commands:
+            programs: list[str] = []
+            for command in commands:
+                binary = agent_core.hook_binary(command)
+                if binary is not None and str(binary.program) not in programs:
+                    programs.append(str(binary.program))
+            hooks.append(HookSite(directory, tuple(programs)))
+    home = paths.aisquare_home()
+    try:
+        entries = tuple(sorted(c.name for c in home.iterdir())) if home.is_dir() else ()
+    except OSError:
+        entries = ()
+    live, fleet_error = _live_fleet_agents()
+    custom = bool(os.environ.get(paths.HOME_ENV_VAR))
+    return UninstallPlan(
+        route=route,
+        hooks=tuple(hooks),
+        unreadable=tuple(unreadable),
+        mcp=_mcp_registrations(candidates),
+        package_argv=tuple(install_route.remove_argv(route)),
+        package_env=install_route.installer_env(route),
+        package_reason=install_route.not_removable(route),
+        home=home,
+        home_exists=home.exists() or home.is_symlink(),
+        home_entries=entries,
+        accounts=_accounts_kept(),
+        purge=purge,
+        purge_refusal=purge_refusal(home, custom=custom),
+        live_agents=live,
+        fleet_error=fleet_error,
+        tmux_found=_tmux_on_path(),
+    )
+
+
+def uninstall(plan: UninstallPlan) -> UninstallReport:
+    """Carry out the plan up to — not including — removing the package.
+
+    Raises :class:`UninstallRefused` before touching anything when the plan
+    refuses. Each directory's hooks are removed on their own: one that fails is
+    recorded and the rest still go (fail open per directory). The package step
+    is the caller's (:func:`remove_package`), and only when
+    :attr:`UninstallReport.package_runs` says nothing failed.
+    """
+    refusal = plan.refusal
+    if refusal is not None:
+        raise refusal
+    removals: list[HookRemoval] = []
+    for site in plan.hooks:
+        try:
+            agent_core.remove_hooks(HOOK_AGENT, site.config_dir)
+            left = agent_core.hook_commands(HOOK_AGENT, site.config_dir)
+        except Exception as exc:  # fail open per directory; the report names it
+            removals.append(HookRemoval(site.config_dir, False, str(exc) or type(exc).__name__))
+            continue
+        if left:
+            removals.append(
+                HookRemoval(site.config_dir, False, f"{len(left)} aisquare hook(s) still there")
+            )
+        else:
+            removals.append(HookRemoval(site.config_dir, True))
+    unrecorded = False
+    if not plan.purge and paths.agents_registry_path().is_file():
+        # The home stays, so it should not claim a connection that is gone. Only
+        # because agents.json already exists: set_connected creates the home.
+        try:
+            for removal in removals:
+                if removal.ok:
+                    agent_core.set_connected(HOOK_AGENT, False, removal.config_dir)
+            unrecorded = True
+        except Exception:  # agents.json is a record, not the hooks: never a reason to stop
+            unrecorded = False
+    purged, purge_error = False, None
+    hooks_failed = any(not removal.ok for removal in removals)
+    if plan.purge and plan.home_exists and not hooks_failed:
+        purged, purge_error = _purge(plan.home)
+    elif plan.purge and hooks_failed:
+        purge_error = "not attempted: hooks were left in a directory above"
+    return UninstallReport(
+        plan,
+        hooks=tuple(removals),
+        unrecorded=unrecorded,
+        purged=purged,
+        purge_error=purge_error,
+        notes=tuple(_uninstall_notes(plan, removals)),
+    )
+
+
+def _purge(home: Path) -> tuple[bool, str | None]:
+    """Delete the home, after asking the guard again right before the delete.
+
+    ``shutil.rmtree`` never follows a link inside the tree — it removes the link —
+    and refuses a link at the top; the guard has already refused that one.
+    """
+    refusal = purge_refusal(home, custom=bool(os.environ.get(paths.HOME_ENV_VAR)))
+    if refusal is not None:
+        return False, refusal
+    try:
+        shutil.rmtree(home)
+    except OSError as exc:
+        return False, f"{home} was only partly deleted ({exc})"
+    return True, None
+
+
+def _uninstall_notes(plan: UninstallPlan, removals: Iterable[HookRemoval]) -> list[str]:
+    notes: list[str] = []
+    if any(removal.ok for removal in removals):
+        notes.append("open Claude Code sessions keep the hooks they started with — restart them")
+    if plan.mcp:
+        names = ", ".join(sorted({entry.name for entry in plan.mcp}))
+        notes.append(
+            f"MCP servers that run aisquare are still registered ({names}); Claude Code owns "
+            "that file — remove each with: claude mcp remove <name>"
+        )
+    notes.append(
+        "a running `aisquare serve` keeps running until you stop it; uv, tmux, Node, gh "
+        "and Claude Code stay installed"
+    )
+    return notes
+
+
+def remove_package(plan: UninstallPlan, *, stdout_to_stderr: bool) -> None:
+    """Hand this process to the package manager. Returns only if it could not start.
+
+    The LAST step on purpose: the hooks are already gone, so no session can fire
+    one at the program while it disappears (and if any were left, uninstall
+    stopped before this).
+    """
+    if plan.package_reason is not None:
+        return
+    install_route.exec_replace(
+        plan.package_argv, env=plan.package_env, stdout_to_stderr=stdout_to_stderr
+    )

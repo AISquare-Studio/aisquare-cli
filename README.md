@@ -104,6 +104,10 @@ Claude Code's hooks. It runs for the uv tool install the one-liner makes; any
 other install is shown the exact command that updates it. Releases before 0.9.0
 have no `upgrade` yet: re-run the one-liner instead.
 
+Remove it with `aisquare uninstall`. It takes aisquare's hooks out of Claude
+Code, then removes the package, and keeps `~/.aisquare` (your memory and boards)
+unless you add `--purge`. It shows what it will do and asks first.
+
 ## Start the GUI
 
 The installer offers this at the end; if you skipped it:
@@ -739,6 +743,7 @@ aisquare
 │                   promote · import · export · —  your persistent memory
 ├── inject · why · log · status · doctor
 ├── upgrade [--check] [--version V] [--dry-run] [-y]   update this install in place
+├── uninstall [--purge] [--dry-run] [-y]   hooks out of Claude Code, then the package
 ├── project (workspace)  info · list · switch · link · onboard [--refresh] · forget <id|path> [--purge]
 │                   prune [--missing] [--worktrees] [--purge] [--yes]
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
@@ -794,8 +799,8 @@ registered but hidden until they do something real.
 
 ### Roadmap commands
 
-`sync`, `connectors`, `capture`, `policy` / `enforce`, `open` and
-`uninstall` are the cloud roadmap (sync across machines, managed connectors). They are **hidden from `--help`**
+`sync`, `connectors`, `capture`, `policy` / `enforce` and `open` are the cloud
+roadmap (sync across machines, managed connectors). They are **hidden from `--help`**
 so the listed surface is only what actually works, but they still run and
 still say plainly that they are not implemented (exit code 70) rather than
 half-working. Follow along in

@@ -224,11 +224,6 @@ def open_() -> None:
     diagnostics_service.open_home()
 
 
-def uninstall() -> None:
-    """Remove agent hooks and optionally local data."""
-    lifecycle_service.uninstall()
-
-
 def register(app: typer.Typer) -> None:
     """Attach the top-level commands to ``app`` in display order.
 
@@ -250,4 +245,4 @@ def register(app: typer.Typer) -> None:
     app.command("logout")(auth_cli.logout)
     app.command("whoami")(auth_cli.whoami)
     app.command("upgrade")(install_cli.upgrade)
-    app.command("uninstall", hidden=True)(uninstall)
+    app.command("uninstall")(install_cli.uninstall)

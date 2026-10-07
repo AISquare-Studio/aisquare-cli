@@ -908,3 +908,33 @@ def hook_sites(name: str) -> list[HookSiteHealth]:
     return [
         hook_site_health(name, path, recorded=recorded, cache=cache) for path, recorded in sites
     ]
+
+
+def hook_dirs(name: str) -> list[Path]:
+    """Every config directory that may carry ``name``'s hooks — found, never graded.
+
+    The directories :func:`hook_sites` grades, without the grading: the ones
+    this home connected, the ambient one a session from this shell would use,
+    and for Claude Code every ``~/.claude*`` on disk whose ``settings.json``
+    holds an aisquare hook. ``hook_sites`` asks each hook's program its version,
+    which is the wrong thing to do while removing that program, so ``uninstall``
+    asks this instead. Reads only; each directory appears once.
+    """
+    found: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(path: Path) -> None:
+        key = _dir_key(path)
+        if key not in seen:
+            seen.add(key)
+            found.append(path)
+
+    for path in connected_dirs(name):
+        add(path)
+    ambient = ambient_hook_dir(name)
+    if ambient is not None and ambient.is_dir():
+        add(ambient)
+    if name == "claude-code":
+        for path in _claude_dirs_on_disk():
+            add(path)
+    return found

@@ -24,6 +24,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("status",),
     ("doctor",),
     ("upgrade",),
+    ("uninstall",),
     ("log",),
     ("note",),
     ("board",),

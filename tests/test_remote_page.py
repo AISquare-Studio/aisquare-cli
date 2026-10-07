@@ -11,7 +11,9 @@ with nothing to show. The page now ships inside the package
   origin, none of the DOM sinks a server string could reach appears, and the page's
   API table names only routes the built app has;
 * the page's pure core, run by node (``tests/js/remote_page_check.js``): hostile
-  pane rows, runs and needs items become text and fixed elements, and nothing else.
+  pane rows, runs and needs items become text and fixed elements, and nothing else;
+* the whole page booted by node in a fake browser (``tests/js/remote_page_boot.js``):
+  what it draws and what it sends, scenario by scenario, as the machine answers.
 
 Every static guard below has a control that feeds it the thing it forbids: a
 pattern that matches nothing passes on any page.
@@ -45,6 +47,7 @@ from tests.remote_kit_helpers import base, make_client, make_runtime, mounted_ro
 
 WEB = Path(str(resources.files("aisquare.web.remote")))
 HARNESS = Path(__file__).resolve().parent / "js" / "remote_page_check.js"
+BOOT_HARNESS = Path(__file__).resolve().parent / "js" / "remote_page_boot.js"
 PAGE_FILES = (
     "index.html",
     "app.css",
@@ -625,14 +628,13 @@ _RGB = re.compile(r"rgb\((\d{1,3}), (\d{1,3}), (\d{1,3})\)")
 _BIDI = "؜‎‏‪‫‬‭‮⁦⁧⁨⁩"
 
 
-@pytest.fixture(scope="module")
-def node_report() -> dict[str, Any]:
+def _node_report(harness: Path) -> dict[str, Any]:
     node = shutil.which("node")
     if node is None:
-        pytest.skip("node is not on PATH; the page's runtime check needs it")
+        pytest.skip("node is not on PATH; the page's runtime checks need it")
     # node writes UTF-8 to a pipe whatever the locale; Windows' cp1252 would garble it.
     result = subprocess.run(
-        [node, str(HARNESS)],
+        [node, str(harness)],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -642,6 +644,11 @@ def node_report() -> dict[str, Any]:
     assert result.returncode == 0, result.stderr
     report: dict[str, Any] = json.loads(result.stdout)
     return report
+
+
+@pytest.fixture(scope="module")
+def node_report() -> dict[str, Any]:
+    return _node_report(HARNESS)
 
 
 def _forbidden_writes(log: dict[str, Any]) -> list[str]:
@@ -743,6 +750,39 @@ def test_the_python_reading_of_the_tables_is_what_the_script_holds(
     assert node_report["api"] == _api_table()
     assert node_report["writes"] == _writes_table()
     assert {"ansiToRuns", "renderRuns", "renderNeedsCard"} <= set(node_report["exports"])
+
+
+# --- the page booted in a fake browser (node) ----------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def boot_report() -> dict[str, Any]:
+    return _node_report(BOOT_HARNESS)
+
+
+def test_a_page_opened_at_unlock_without_a_sign_in_draws_the_unlock_form(
+    boot_report: dict[str, Any],
+) -> None:
+    """A reload at ``#/unlock`` (pull to refresh, a discarded tab) drew its route while the
+    boot still asked who this is, and the 401 then found the page "already" at unlock: it
+    said "Connecting to the machine…" for good. The bare link is the control."""
+    reloaded = boot_report["reloadAtUnlock"]
+    assert reloaded["form"], reloaded["main"]
+    assert "Connecting" not in reloaded["main"]
+    assert boot_report["bareLink"]["hash"] == "#/unlock" and boot_report["bareLink"]["form"]
+
+
+def test_an_unlock_the_browser_did_not_keep_says_so_and_keeps_the_route(
+    boot_report: dict[str, Any],
+) -> None:
+    """The passphrase was right but the next request is still signed out: the form said
+    "Unlocking…" forever and forgot where the phone was going."""
+    lost = boot_report["unlockNotKept"]
+    assert lost["hash"] == "#/unlock"
+    assert lost["form"] and lost["typed"] == "amber birch cedar delta"
+    assert "did not keep the sign-in" in lost["said"]
+    assert lost["remembered"] == "#/p/prj_x/board"
+    assert boot_report["unlockKept"] == {"hash": "#/p/prj_x/board", "form": False}
 
 
 # --- 11. the wheel --------------------------------------------------------------------------

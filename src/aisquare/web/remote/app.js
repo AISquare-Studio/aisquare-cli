@@ -55,6 +55,8 @@ const TEXT_MAX = { keys: 2048, tell: 8000, note: 8000 };
 const READ_ONLY = "writes are off — on the machine run `aisquare remote allow-write on`, " +
   "or switch Allow write actions in the R panel";
 const OFF_OR_MOVED = "Remote is off on the machine, or the link changed";
+const UNKEPT_SIGN_IN = "The machine took the passphrase, but this browser did not keep the sign-in — " +
+  "allow cookies for this page, then unlock again.";
 
 // --- the pure core: escapes out, runs in, DOM out ---
 
@@ -1211,6 +1213,10 @@ function toUnlock() {
   S.sockState = "idle";
   if (sock) sock.close(1000);
   if (!S.route || S.route.name !== "unlock") pageGo("#/unlock");
+  // Already at #/unlock, as a page (re)loaded there is: its route was drawn while
+  // the boot still asked who this is, so no form is on screen and no hashchange
+  // will come. Draw it now. A form already shown keeps what is typed in it.
+  else if (!S.view) renderRoute();
 }
 
 function offScreen(kind) {
@@ -1336,7 +1342,10 @@ VIEWS.unlock = (route, main) => {
     said.textContent = "Unlocking…";
     const res = await apiCall("POST", API.unlock, { body: { password: input.value }, auth: false });
     go.disabled = false;
-    if (res.ok) return unlocked(res.data);
+    if (res.ok) {
+      if (!(await unlocked(res.data)) && S.locked) said.textContent = UNKEPT_SIGN_IN;
+      return undefined;
+    }
     if (res.status === 401) said.textContent = "That is not the passphrase.";
     else if (res.status === 429) wait(res.retryAfter || 60, plainText(res.message) || "Too many tries");
     else said.textContent = failText(res);
@@ -1347,21 +1356,29 @@ VIEWS.unlock = (route, main) => {
   return { cleanup: () => clearInterval(countdown) };
 };
 
+/* A good passphrase: go live, then back to the route the lock interrupted. False
+ * when the page is locked or off again instead: the machine answering the next
+ * request as signed out means this browser did not keep the cookie. */
 async function unlocked(data) {
   S.locked = false;
   S.me = data && data.device && typeof data.device.id === "string" ? data.device.id : null;
   let after = "#/";
   try {
     after = sessionStorage.getItem("asq.after") || "#/";
-    sessionStorage.removeItem("asq.after");
   } catch (error) {
     after = "#/";
   }
   pushResend();
   const res = await apiCall("GET", API.remote);
-  if (S.locked || S.off) return;
+  if (S.locked || S.off) return false;
+  try {
+    sessionStorage.removeItem("asq.after"); // kept until now, for an unlock that has to be tried again
+  } catch (error) {
+    // nothing was stored
+  }
   goLive(res.ok ? res.data : S.remote);
   pageGo(after);
+  return true;
 }
 
 // --- the needs feed and one card (SPEC §6.3) ---

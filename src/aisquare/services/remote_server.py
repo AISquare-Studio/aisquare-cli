@@ -2271,16 +2271,20 @@ def build_remote_app(
 
         async def tick_once() -> None:
             nonlocal next_heartbeat, first_tick
+            # A switch that lands while a snapshot is read must not let the old project's
+            # frame out after it: the page would show it as the new one's until next tick.
             board_ref = board_project
             try:
                 payload = await snapshot(f"board:{board_ref or ''}", lambda: reads.board(board_ref))
-                await push_if_changed("board", payload)
+                if board_ref == board_project:
+                    await push_if_changed("board", payload)
             except Exception as exc:
                 log.debug("remote: board frame skipped: %s", exc)
             fleet_ref = fleet_project
             try:
                 payload = await snapshot(f"fleet:{fleet_ref or ''}", lambda: reads.fleet(fleet_ref))
-                await push_if_changed("fleet", payload)
+                if fleet_ref == fleet_project:
+                    await push_if_changed("fleet", payload)
             except Exception as exc:
                 log.debug("remote: fleet frame skipped: %s", exc)
             await push_if_changed("remote", runtime.remote_json())

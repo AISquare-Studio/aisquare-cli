@@ -877,6 +877,9 @@ def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(
     monkeypatch.chdir(here)
     monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
     monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    # A machine that can pack, so `here`'s missing snapshot warns rather than reading
+    # off -- without a Node it is off on purpose, whatever this machine has on PATH.
+    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     # Activate the orchestrator in `there` only, with an off-ladder live session.
     monkeypatch.setenv("AISQUARE_ROLE", "runner")
     team_service.hook_session_start("sess-there-1", there, "startup", model="claude-haiku-4-5")

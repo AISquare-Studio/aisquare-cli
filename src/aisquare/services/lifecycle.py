@@ -6,6 +6,7 @@ from pathlib import Path
 
 from aisquare.core import credentials as credentials_store
 from aisquare.core import paths
+from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import (
     AppConfig,
     ExplainabilitySettings,
@@ -160,7 +161,9 @@ def initialize(
                 f"{report.snapshot.token_count} tokens packed for fast agent context."
             )
         elif report.snapshot is None:
-            notes.append("Codebase snapshot skipped (repomix/Node not available).")
+            # Off (no Node, or no packer: optional, not a fault) or a pack that
+            # failed -- the same sentence `project onboard` prints, from one place.
+            notes.append(f"Snapshot: {snapshot_core.skipped_detail()}.")
 
     for agent in agents:
         try:

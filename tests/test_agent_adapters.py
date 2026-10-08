@@ -664,7 +664,7 @@ def test_a_switched_off_directory_is_one_clause_and_the_others_keep_their_connec
     assert row.status is CheckStatus.warn, row
     assert f'switched off ("disableAllHooks": true) in: {settings_path}' in row.detail, row
     assert f"{diagnostics._STALE_HOOKS} in: {claude_home}" in row.detail, row
-    assert f'remove "disableAllHooks" from {settings_path}' in row.fix, row
+    assert f'remove "disableAllHooks" from {settings_path}' in (row.fix or ""), row
     assert buttons == [f"agents connect claude-code --config-dir {claude_home}"], buttons
 
 

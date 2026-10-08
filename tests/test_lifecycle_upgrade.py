@@ -37,6 +37,7 @@ from aisquare.core import agents as agent_core
 from aisquare.core import paths, spawn
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
+from aisquare.core.version import DISTRIBUTION
 from aisquare.models import FleetAgent
 from aisquare.services import agents as agents_service
 from aisquare.services import install_route, lifecycle
@@ -386,7 +387,7 @@ def test_security_md_lists_what_upgrade_and_the_plugin_change_and_send() -> None
     )
     assert install_route.PYPI_JSON_URL in sent and "User-Agent" in sent
     assert '--from "$_from" aisquare hook' in launcher, "the launcher still runs uvx --from"
-    assert f"uvx --from {install_route.DISTRIBUTION}==" in sent
+    assert f"uvx --from {DISTRIBUTION}==" in sent
 
 
 # --- the uv receipt, restated ----------------------------------------------------------

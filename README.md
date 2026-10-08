@@ -5,10 +5,10 @@
 [![CI](https://github.com/AISquare-Studio/aisquare-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/AISquare-Studio/aisquare-cli/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/AISquare-Studio/aisquare-cli/blob/main/LICENSE)
 
-**One terminal over every project and every coding agent: task a manager in
+**One terminal over your projects and your coding agents: task a manager in
 plain words, and it runs the coders, testers and reviewers for you.**
 
-![The asq terminal UI: projects on the left, a manager's live Claude Code session on the right](https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/docs/demo.gif)
+![The first run in asq: add a project, then start its manager](https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/docs/demo.gif)
 
 Type `asq` and you get a full-screen, mouse-driven view: your projects on the
 left, and on the right a **manager** agent you task in prose — it plans, spawns
@@ -56,17 +56,19 @@ you ran it from and wires Claude Code's hooks. Running it again is a no-op.
 has the PowerShell line that sets up WSL2 on Windows, how to read the script
 before you run it, and how to install by hand.
 
-Then, in `asq`:
+Then `asq` opens on Welcome, three steps to a running fleet:
 
-1. **Click `+` beside Fleet** and point it at a directory. It registers the
-   project and runs a health check in the background — you never leave the UI.
-2. **Click the project**, then press *Start manager*. Its live Claude Code
-   session fills the pane. **Type your goal in prose.**
-3. **Watch the agents appear** under the project — 🧭 manager · 🔨 coder ·
-   🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator — each with a live
-   state chip. Click one to see and drive its session.
-4. **Press `F12`** to hand focus back to the sidebar; `q` quits. **The agents
-   keep running**; reopen `asq` and it re-attaches to what it finds.
+1. **Project:** use the folder you are in, or choose another.
+2. **Claude Code:** connect it. If it is missing, Welcome names the install
+   command; if it is signed out, it offers the sign-in.
+3. **Fleet:** press *Start manager*, then *Open the manager* and answer Claude
+   Code's one-time question about trusting the folder, then *Start the coders*:
+   a manager and two coders, each a real Claude Code session. **Type your goal
+   to the manager in prose.**
+
+Click any agent to see and drive its session. **Press `F12`** to hand focus
+back to the sidebar, where `w` returns to Welcome and `q` quits. **The agents
+keep running**; reopen `asq` and it re-attaches to what it finds.
 
 The manager never writes code and never merges — a human does that.
 
@@ -102,7 +104,7 @@ short alias.
 
 | Page | What is in it |
 | --- | --- |
-| [Install](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/install.md) | The one-liner's flags and exit codes, reading it before you run it, installing by hand, Windows, starting the UI |
+| [Install](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/install.md) | The one-liner's flags and exit codes, reading it before you run it, installing by hand, Windows, starting the UI, updating and removing it |
 | [Memory](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/memory.md) | Your agent remembers preferences and project conventions, and starts every session oriented. For everyone; nothing to run after setup |
 | [The fleet](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/fleet.md) | The UI, the roles, `aisquare fleet …`, Claude accounts, and every default you can change |
 | [Orchestration](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/orchestration.md) | Several agent sessions work one problem as a team, with a shared task board. Opt-in, per repo |

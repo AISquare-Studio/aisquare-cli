@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "aisquare-cli"
 version = "0.7.0"
-description = "One terminal over every project and every coding agent: task a manager in plain words, and it runs the coders, testers and reviewers for you."
+description = "One terminal over your projects and your coding agents: task a manager in plain words, and it runs the coders, testers and reviewers for you."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "AISquare", email = "anmol@aisquare.studio" }]

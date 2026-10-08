@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import http.client
 import json
 import os
@@ -31,6 +32,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from cryptography.hazmat.primitives import hashes
@@ -1143,6 +1145,65 @@ def test_the_expiry_warning_goes_only_to_the_expiring_device(
     assert world.titles() == [(DEVICES[0], EXPIRY_TITLE)]
     world.later(30)
     assert len(world.transport.sent) == 1, "once per expiry"
+
+
+@contextlib.contextmanager
+def _process_zone(monkeypatch: pytest.MonkeyPatch, zone: str) -> Iterator[ZoneInfo]:
+    """The process's local time is ``zone``'s inside, put back after; skipped where ``time``
+    has no ``tzset`` (Windows), as ``test_reset_formatter.py``'s clock is."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is POSIX-only: the process zone cannot be switched for the test")
+    with monkeypatch.context() as local:
+        local.setenv("TZ", zone)
+        time.tzset()
+        try:
+            yield ZoneInfo(zone)
+        finally:
+            local.undo()
+            time.tzset()
+
+
+ZONES = pytest.mark.parametrize(
+    "zone", ["Pacific/Kiritimati", "Etc/GMT+12"], ids=["utc+14", "utc-12"]
+)
+
+
+@ZONES
+def test_a_device_stamp_without_an_offset_is_read_as_utc_as_the_server_reads_it(
+    world: World, monkeypatch: pytest.MonkeyPatch, zone: str
+) -> None:
+    """The stamps ``remote.json`` holds carry their offset. A device's without one, a hand
+    edit, is UTC to the server, which prunes the device by it (``_remote_instant``); the
+    sender read it as the machine's local time, the rule for a naive ``auto_off_at`` alone.
+    Fourteen hours ahead of UTC, the phone with 30 hours left was told its sign-in ends in
+    24 h; twelve behind, the one with 23 hours left was never told."""
+
+    def naive_utc(left: timedelta) -> str:
+        return (T0 + left).astimezone(UTC).replace(tzinfo=None).isoformat()
+
+    rows = [
+        {"id": DEVICES[0], "expires_at": naive_utc(timedelta(hours=30))},
+        {"id": DEVICES[1], "expires_at": naive_utc(timedelta(hours=23))},
+    ]
+    monkeypatch.setattr(world.kit.runtime, "device_rows", lambda: rows)
+    with _process_zone(monkeypatch, zone):
+        world.later(30)
+    assert world.titles() == [(DEVICES[1], EXPIRY_TITLE)]
+
+
+@ZONES
+def test_an_auto_off_written_without_an_offset_is_still_read_as_local_time(
+    world: World, monkeypatch: pytest.MonkeyPatch, zone: str
+) -> None:
+    """An ``auto_off_at`` an earlier build wrote as the TUI's naive local time (SPEC §2.5),
+    which the server reads so, in a zone where local time is not UTC: five minutes left is
+    warned of as five minutes."""
+    with _process_zone(monkeypatch, zone) as local:
+        wall = (T0 + timedelta(seconds=30, minutes=5)).astimezone(local).replace(tzinfo=None)
+        remote = {"allow_write": True, "auto_off_at": wall.isoformat()}
+        monkeypatch.setattr(world.kit.runtime, "remote_json", lambda: remote)
+        world.later(30)
+    assert world.titles() == every_device(auto_off_title(5))
 
 
 def test_the_farewell_reaches_devices_revoked_right_after_it(

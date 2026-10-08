@@ -184,13 +184,20 @@ def _push_iso(at: datetime) -> str:
     return at.astimezone(UTC).isoformat(timespec="seconds")
 
 
-def _push_parse_time(raw: str) -> datetime | None:
-    """An ISO time as an aware UTC datetime; a naive one is local time, as the TUI wrote it."""
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    return parsed.astimezone(UTC)
+def _push_parse_time(raw: str, *, naive_is_local: bool = False) -> datetime | None:
+    """An ISO stamp as an aware UTC datetime, read by the server's own rule
+    (``remote_server._remote_instant``): one without an offset is UTC, or local time
+    for an ``auto_off_at`` (``naive_is_local``), which the TUI once wrote so (SPEC §2.5).
+
+    A copy of that rule read every naive stamp as local time, a device's expiry
+    too, which the server reads as UTC and prunes the device by: the warning that a
+    phone's sign-in ends in 24 h came hours early, or never (sweep of review of
+    #243, round 3).
+    """
+    from aisquare.services.remote_server import _remote_instant
+
+    at = _remote_instant(raw, naive_is_local=naive_is_local)
+    return None if at is None else at.astimezone(UTC)
 
 
 def _push_b64(data: bytes) -> str:
@@ -1222,7 +1229,7 @@ class RemotePushSender:
         """
         remote = self._kit.runtime.remote_json()
         raw = remote.get("auto_off_at")
-        deadline = _push_parse_time(raw) if isinstance(raw, str) else None
+        deadline = _push_parse_time(raw, naive_is_local=True) if isinstance(raw, str) else None
         if deadline is None or not timedelta(0) < deadline - now <= AUTO_OFF_WARNING:
             return
         key = f"sys:auto-off:{raw}"

@@ -186,11 +186,22 @@ def test_more_keys_than_the_cap_is_413_and_not_a_list_is_400() -> None:
 
 
 class FakePane:
-    """The tmux server ``send-keys`` reaches: records what arrived, fails when told to."""
+    """The tmux server ``send-keys`` reaches: records what arrived, fails when told to.
+
+    Its pane runs the agent, on the server the row was recorded on: it started
+    before the row was written."""
+
+    STARTED = datetime(2026, 10, 7, 8, 0, tzinfo=UTC)
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, ...]] = []
         self.fail_keys = False
+
+    def pane_facts(self, pane_id: str) -> SimpleNamespace:
+        return SimpleNamespace(dead=False, current_command="claude")
+
+    def started_at(self) -> datetime:
+        return self.STARTED
 
     def send_literal(self, pane_id: str, text: str) -> None:
         self.sent.append(("literal", text))
@@ -211,6 +222,7 @@ def pane(monkeypatch: pytest.MonkeyPatch) -> FakePane:
     class Agent:
         pane_id = "%1"
         tmux_socket = "asq"
+        created_at = FakePane.STARTED + timedelta(hours=1)
 
     class Store:
         def fleet_agent_by_label(self, *args: object, **kwargs: object) -> Agent:

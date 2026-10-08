@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import functools
 import hashlib
 import hmac
 import json
@@ -102,7 +103,7 @@ if TYPE_CHECKING:
     from starlette.routing import Route
     from starlette.websockets import WebSocket
 
-    from aisquare.core.tmux import Capture
+    from aisquare.core.tmux import Capture, TmuxServer
     from aisquare.services.remote_actions import ActionLedger
     from aisquare.services.remote_needs import NeedsItem
 
@@ -281,6 +282,12 @@ SEND_KEYS_KEYS_MAX = 32
 EXIT_KEY_REPEAT_SECONDS = 3.0
 """A second Ctrl-C (or Ctrl-D) to one agent this soon exits Claude Code: refused unless meant."""
 EXIT_KEYS = frozenset({"C-c", "C-d"})
+SEND_KEYS_LOCK_WAIT_SECONDS = 2.0
+"""How long a send-keys waits for its agent's action lock (:func:`remote_agent_lock`). Keys
+tapped in a burst, or sent again together after a reconnect, wait out the milliseconds each
+other's tmux calls take; an action holds the lock for seconds (an interrupt's wait for the
+prompt, a stop's grace, a restart), and keys that would land in the middle of it are 409
+``busy`` instead."""
 NOTE_TEXT_MAX = 8_000
 NOTE_KINDS = frozenset({"note", "decision", "question", "result"})
 """The kinds a phone may post. The others (``attention``, ``limited``, ``agent_exited``,
@@ -1473,7 +1480,8 @@ PaneSource = Callable[[str, str | None, int], dict[str, object]]
 """Agent label, optional project, scrollback lines → one pane capture.
 
 ``history`` of 0 is today's live-screen-only frame, byte for byte (§4-L).
-Raises :class:`NoSuchAgent` / :class:`NoSuchProject`."""
+Raises :class:`NoSuchAgent` / :class:`NoSuchProject`, and :class:`RequestError` 409
+``not_agent`` for a row whose pane id is another agent's now."""
 TranscriptSource = Callable[[str, str | None, int, str | None, int | None], dict[str, object]]
 """Agent, optional project, limit, ``before`` cursor, width → one page of conversation (§4-M).
 
@@ -1504,9 +1512,12 @@ _agent_locks_guard = threading.Lock()
 def remote_agent_lock(project_id: str, label: str) -> threading.Lock:
     """The one lock for every action on one agent, process-wide.
 
-    Callers take it without blocking and answer 409 ``busy`` when it is held: a
-    second stop, restart or quick answer arriving while the first still runs
-    would otherwise act on the state the first is in the middle of changing.
+    The actions and the quick answers take it without blocking and answer 409
+    ``busy`` when it is held: a second stop, restart or quick answer arriving
+    while the first still runs would otherwise act on the state the first is in
+    the middle of changing. Keys wait for it a moment first
+    (:data:`SEND_KEYS_LOCK_WAIT_SECONDS`), since the pad sends taps without
+    waiting for each other's answers.
     """
     with _agent_locks_guard:
         return _agent_locks.setdefault((project_id, label), threading.Lock())
@@ -1652,26 +1663,96 @@ def _pane_payload(capture: Capture) -> dict[str, object]:
     }
 
 
+PANE_OUTLIVED = (
+    "{label}'s pane is gone: tmux restarted after {label} started, "
+    "and its pane id is another agent's now"
+)
+"""409 ``not_agent`` for a row that outlived its tmux server (:func:`_remote_pane_outlived`)."""
+
+
+def _remote_live_row(target: ProjectInfo, label: str) -> FleetAgent:
+    """The newest live row holding ``label`` in ``target``; :class:`NoSuchAgent` when none does."""
+    from aisquare.core.store import store_session
+
+    with store_session() as store:
+        agent = store.fleet_agent_by_label(target.id, label, live_only=True)
+    if agent is None:
+        raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
+    return agent
+
+
+def _remote_pane_outlived(server: TmuxServer, agent: FleetAgent) -> bool:
+    """Whether the pane under the row's id is ANOTHER agent's: the server on its socket
+    started after the row was written (``fleet._outlived``, FLEET-1).
+
+    A reboot or a hand-run ``tmux -L asq kill-server`` leaves live rows behind (the
+    listing reads them ``lost`` and ends none of them), and the next server, started by
+    a spawn in any project, numbers its panes from ``%0`` again. Asked about by id, that
+    agent's pane answered for the row: the phone showed its screen under the row's label,
+    and a key from the pad answered its prompt. The listing, the TUI
+    (``views.agent.shown_pane``) and the agent actions (``remote_needs``) each refuse
+    that pane already. A start tmux will not give judges nothing, as in
+    ``fleet._pane_alive``.
+    """
+    from aisquare.core.tmux import TmuxError
+    from aisquare.services import fleet as fleet_service
+
+    try:
+        started = server.started_at()
+    except TmuxError:
+        started = None
+    return fleet_service._outlived(agent, started)
+
+
+@contextlib.contextmanager
+def _remote_keys_turn(target: ProjectInfo, label: str) -> Iterator[FleetAgent]:
+    """Hold the agent's action lock while keys go to its pane; the row, read under it.
+
+    :func:`remote_agent_lock` is the one lock for every action on one agent, and keys
+    typed while an action is half done land in the middle of it: in an Interrupt &
+    tell between its Escape and its paste, which then submits them and the tell as one
+    message, or between a stop's ``/exit`` and its Enter. So keys wait for their turn,
+    up to :data:`SEND_KEYS_LOCK_WAIT_SECONDS`, and are 409 ``busy`` after that, as a
+    second action is. A label no row holds makes no lock: the registry is process-wide
+    and never shrinks, and a label is whatever a body says.
+    """
+    _remote_live_row(target, label)
+    lock = remote_agent_lock(target.id, label)
+    if not lock.acquire(timeout=SEND_KEYS_LOCK_WAIT_SECONDS):
+        raise RequestError(
+            409, "busy", f"another action on {label} is still running — nothing was sent"
+        )
+    try:
+        yield _remote_live_row(target, label)
+    finally:
+        lock.release()
+
+
 def _live_panes(label: str, project: str | None = None, history: int = 0) -> dict[str, object]:
     """One pane frame: the live screen, or scrollback and the screen together (§4-L).
 
     ``history`` of 0 takes the SAME call today took and returns the live keys
     alone (:func:`_pane_payload`), so the live stream and every existing client
     are untouched — the history keys appear only when history was asked for.
+
+    Never another agent's screen: a row whose pane id the next tmux server gave
+    away is 409 ``not_agent`` (:func:`_remote_pane_outlived`). The server is asked
+    when it started AFTER the capture, so one that restarted in between refuses
+    the frame instead of passing it.
     """
-    from aisquare.core.store import store_session
     from aisquare.services import fleet as fleet_service
 
-    target = _resolve_project(project)
-    with store_session() as store:
-        agent = store.fleet_agent_by_label(target.id, label, live_only=True)
-    if agent is None:
-        raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
+    agent = _remote_live_row(_resolve_project(project), label)
     server = fleet_service.server_for(agent.tmux_socket)
     if history <= 0:
-        return _pane_payload(server.capture(agent.pane_id))
-    capture = server.capture_history(agent.pane_id, history=min(history, HISTORY_CAP))
+        capture = server.capture(agent.pane_id)
+    else:
+        capture = server.capture_history(agent.pane_id, history=min(history, HISTORY_CAP))
+    if _remote_pane_outlived(server, agent):
+        raise RequestError(409, "not_agent", PANE_OUTLIVED.format(label=label))
     payload = _pane_payload(capture)
+    if history <= 0:
+        return payload
     payload["history_size"] = capture.facts.history_size
     payload["history"] = capture.scrollback
     if history > HISTORY_CAP:
@@ -1719,12 +1800,15 @@ def _pane_width(agent: FleetAgent) -> int:
 
     Best effort by design: a dead pane, or a tmux that will not answer, costs a
     sensible 80 columns and never the page itself — the conversation is on disk
-    and does not depend on the pane still being there.
+    and does not depend on the pane still being there. So does a pane id another
+    agent's pane holds now (:func:`_remote_pane_outlived`): its width is that agent's.
     """
     from aisquare.services import fleet as fleet_service
 
     try:
-        return fleet_service.server_for(agent.tmux_socket).capture(agent.pane_id).facts.width
+        server = fleet_service.server_for(agent.tmux_socket)
+        width = server.capture(agent.pane_id).facts.width
+        return 80 if _remote_pane_outlived(server, agent) else width
     except Exception:
         return 80
 
@@ -2150,12 +2234,14 @@ def live_writes() -> Writes:
 
         Everything is checked before anything is sent: the keys against the
         allowlist, the caps, no control character in the text, one input per body
-        (``text`` went first, so "Esc, then type" arrived as "type, then Esc"), and
-        the double Ctrl-C. Once a byte may have reached the pane, a failure is
-        still audited: the trail exists for what a device did to a live agent,
-        finished or not.
+        (``text`` went first, so "Esc, then type" arrived as "type, then Esc"), the
+        pane, and the double Ctrl-C. The pane must be running the agent, and be the
+        row's own: after a tmux restart the row's pane id names another agent's pane
+        (409 ``not_agent``, as the actions and quick answers refuse it). The pane is
+        judged and typed into under the agent's action lock (:func:`_remote_keys_turn`).
+        Once a byte may have reached the pane, a failure is still audited: the trail
+        exists for what a device did to a live agent, finished or not.
         """
-        from aisquare.core.store import store_session
         from aisquare.services import fleet as fleet_service
 
         label = _required(body, "agent")
@@ -2177,32 +2263,36 @@ def live_writes() -> Writes:
         if not text and not keys and not enter:
             raise RequestError(400, "invalid", "give 'text', 'keys' or 'enter'")
         target = _resolve_project(_optional_ref(body, "project"))
-        with store_session() as store:
-            agent = store.fleet_agent_by_label(target.id, label, live_only=True)
-        if agent is None:
-            raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
-        exits = sum(key in EXIT_KEYS for key in keys)
-        confirmed = body.get("confirm_exit") is True
-        if exits and not exit_keys.exit_keys_allowed(
-            (target.id, label), exits, confirmed=confirmed
-        ):
-            raise RequestError(409, "double_press", DOUBLE_PRESS)
         summary = (
             f"{label}@{target.id} text={len(text or '')}ch keys={_audit_keys(keys)} enter={enter}"
         )
-        server = fleet_service.server_for(agent.tmux_socket)
-        try:
-            if text:
-                server.send_literal(agent.pane_id, text)
-            if keys:
-                server.send_keys(agent.pane_id, *keys)
-            if enter:
-                server.send_keys(agent.pane_id, "Enter")
-        except Exception as exc:
-            log.warning("remote: send-keys to %s failed: %s", label, exc)
-            raise RequestError(
-                400, "write_failed", f"{label}: {exc}", audit=f"{summary} failed"
-            ) from exc
+        with _remote_keys_turn(target, label) as agent:
+            server = fleet_service.server_for(agent.tmux_socket)
+            if not fleet_service._pane_is_the_agent(server, agent.pane_id):
+                raise RequestError(
+                    409, "not_agent", f"{label}'s pane is not running the agent — nothing was sent"
+                )
+            if _remote_pane_outlived(server, agent):
+                gone = PANE_OUTLIVED.format(label=label)
+                raise RequestError(409, "not_agent", f"{gone} — nothing was sent")
+            exits = sum(key in EXIT_KEYS for key in keys)
+            confirmed = body.get("confirm_exit") is True
+            if exits and not exit_keys.exit_keys_allowed(
+                (target.id, label), exits, confirmed=confirmed
+            ):
+                raise RequestError(409, "double_press", DOUBLE_PRESS)
+            try:
+                if text:
+                    server.send_literal(agent.pane_id, text)
+                if keys:
+                    server.send_keys(agent.pane_id, *keys)
+                if enter:
+                    server.send_keys(agent.pane_id, "Enter")
+            except Exception as exc:
+                log.warning("remote: send-keys to %s failed: %s", label, exc)
+                raise RequestError(
+                    400, "write_failed", f"{label}: {exc}", audit=f"{summary} failed"
+                ) from exc
         return {"agent": label, "project": target.id, "sent": True}, summary
 
     return Writes(
@@ -2265,8 +2355,18 @@ class _RateLimiter:
         return None
 
 
+@dataclass(eq=False)
+class _CacheTurn:
+    """Whose turn it is to compute one kind (:class:`_Cache`): the lock its callers take
+    turns on, and how many of them hold it or wait for it."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    callers: int = 0
+
+
 class _Cache:
-    """One snapshot per kind per tick, however many sockets are open.
+    """One snapshot per kind per tick, however many sockets are open: each cached read,
+    and each pane the stream's sockets watch (one capture, not one per socket).
 
     It holds only what was asked for within the last tick. A kind carries the
     ``?project=`` ref as it was written, and every spelling that resolves is a
@@ -2276,28 +2376,62 @@ class _Cache:
     spelling for anyone unlocked, read-only included, until the process died.
     So each store first drops what has expired, and at most
     :data:`CACHE_KINDS_MAX` kinds are kept, the oldest going first.
+
+    One caller at a time computes a kind, and only that kind's callers wait for
+    it. The snapshots were computed under the one lock that guards the table,
+    so the slowest held up every other: ``projects`` lists every project's
+    fleet, a tmux call each, and a tmux that stops answering costs 30 s a call,
+    while every socket's board and fleet frames, and every cached read, waited
+    behind it.
     """
 
     def __init__(self, ttl: float, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._ttl = ttl
         self._clock = clock
         self._lock = threading.Lock()
+        """Guards the two tables, and is never held while a snapshot is computed."""
         self._values: dict[str, tuple[float, object]] = {}
+        self._turns: dict[str, _CacheTurn] = {}
+        """The kinds being computed or waited for now. A kind's turn goes with its last
+        caller, so this holds the kinds in flight and no more, whatever kinds are asked for."""
+
+    def _cache_fresh(self, kind: str) -> tuple[float, object] | None:
+        """``kind``'s snapshot while it is younger than the ttl; call it holding ``_lock``."""
+        hit = self._values.get(kind)
+        return hit if hit is not None and self._clock() - hit[0] < self._ttl else None
+
+    def _cache_store(self, kind: str, value: object) -> None:
+        """Keep ``value`` as ``kind``'s snapshot, once what expired is dropped; hold ``_lock``."""
+        now = self._clock()
+        for stale in [k for k, (at, _value) in self._values.items() if now - at >= self._ttl]:
+            del self._values[stale]
+        self._values.pop(kind, None)  # stored anew, so the dict stays oldest first
+        self._values[kind] = (now, value)
+        while len(self._values) > CACHE_KINDS_MAX:
+            del self._values[next(iter(self._values))]
 
     def cached_snapshot(self, kind: str, compute: Snapshot) -> object:
         with self._lock:
-            hit = self._values.get(kind)
-            if hit is not None and self._clock() - hit[0] < self._ttl:
+            hit = self._cache_fresh(kind)
+            if hit is not None:
                 return hit[1]
-            value = compute()
-            now = self._clock()
-            for stale in [k for k, (at, _value) in self._values.items() if now - at >= self._ttl]:
-                del self._values[stale]
-            self._values.pop(kind, None)  # stored anew, so the dict stays oldest first
-            self._values[kind] = (now, value)
-            while len(self._values) > CACHE_KINDS_MAX:
-                del self._values[next(iter(self._values))]
-            return value
+            turn = self._turns.setdefault(kind, _CacheTurn())
+            turn.callers += 1
+        try:
+            with turn.lock:
+                with self._lock:
+                    hit = self._cache_fresh(kind)  # the caller this one waited for made it
+                if hit is not None:
+                    return hit[1]
+                value = compute()
+                with self._lock:
+                    self._cache_store(kind, value)
+                return value
+        finally:
+            with self._lock:
+                turn.callers -= 1
+                if not turn.callers:
+                    del self._turns[kind]
 
 
 def _client_of(scope: Any) -> str:
@@ -2849,16 +2983,54 @@ class RemoteKit:
             if not live:
                 self.sockets.pop(device_id, None)
 
+    async def kit_ledgered(
+        self,
+        device: Device,
+        request_id: str | None,
+        endpoint: str,
+        respond: Callable[[], Awaitable[Response]],
+    ) -> Response:
+        """``respond()``, once per ``request_id`` (SPEC §1.5): the ledger flow of every
+        write-gated request, the write dispatcher's and a lane route's alike.
+
+        Without an id it just runs. A retried id is answered from the ledger
+        instead of running again, and one still running is 409 ``in_progress``.
+        How every request ended is stored, refusals included, so a retry gets the
+        answer the first try got, and it is stored in a ``finally``: a crash or a
+        cancellation is an ending too. The dispatcher kept a copy of this flow that
+        stored after its ``try``, which stops an ``Exception`` and nothing else, so
+        a cancelled write left its id running, and every retry of it was answered
+        ``in_progress`` until the ledger forgot the id.
+        """
+        from starlette.responses import JSONResponse
+
+        if request_id is None:
+            return await respond()
+        replayed = self.ledger.ledger_replay(device.id, request_id)
+        if replayed is not None:
+            status, payload = replayed
+            return JSONResponse(payload, status_code=status)
+        if not self.ledger.ledger_begin(device.id, request_id, endpoint):
+            return self.kit_refuse(409, "in_progress", IN_PROGRESS)
+        status, payload = 500, {"error": "internal_error"}
+        try:
+            response = await respond()
+            status, payload = response.status_code, _ledger_body(response)
+            return response
+        finally:  # even a crash is an ending: the id must never stay "running"
+            self.ledger.ledger_finish(device.id, request_id, status, payload)
+
     def kit_route(
         self, path: str, endpoint: KitEndpoint, *, methods: list[str], write_gated: bool
     ) -> Route:
         """A lane's route: the endpoint gets the device and the parsed body (``{}`` for GET).
 
         With ``write_gated``, the route answers 403 ``read_only`` until writes are
-        on, takes the optional ``request_id`` out of the body, answers a retried
-        id from the ledger instead of running it again, refuses one still running
-        (409 ``in_progress``), and stores how every request ended, refusals
-        included, so a retry gets the answer the first try got.
+        on, takes the optional ``request_id`` out of the body, and runs through the
+        ledger (:meth:`kit_ledgered`): a retried id is answered from it instead of
+        running again, one still running is 409 ``in_progress``, and how every
+        request ended is stored, refusals included, so a retry gets the answer the
+        first try got.
 
         A route that changes something without the gate must be in
         :data:`NOT_WRITE_GATED`: anything else is refused here, when the app is
@@ -2896,21 +3068,9 @@ class RemoteKit:
                 request_id = _ledger_request_id(body) if gated else None
             except RequestError as exc:
                 return JSONResponse(exc.request_error_body(), status_code=exc.status)
-            if request_id is None:
-                return await kit_respond(request, device, body)
-            replayed = self.ledger.ledger_replay(device.id, request_id)
-            if replayed is not None:
-                status, payload = replayed
-                return JSONResponse(payload, status_code=status)
-            if not self.ledger.ledger_begin(device.id, request_id, name):
-                return self.kit_refuse(409, "in_progress", IN_PROGRESS)
-            status, payload = 500, {"error": "internal_error"}
-            try:
-                response = await kit_respond(request, device, body)
-                status, payload = response.status_code, _ledger_body(response)
-                return response
-            finally:  # even a crash is an ending: the id must never stay "running"
-                self.ledger.ledger_finish(device.id, request_id, status, payload)
+            return await self.kit_ledgered(
+                device, request_id, name, lambda: kit_respond(request, device, body)
+            )
 
         return Route(path, kit_endpoint, methods=methods)
 
@@ -2991,6 +3151,18 @@ def build_remote_app(
 
     async def snapshot(kind: str, compute: Snapshot) -> object:
         return await asyncio.to_thread(cache.cached_snapshot, kind, compute)
+
+    def remote_pane_frame(label: str, project: str) -> dict[str, object]:
+        """A pane subscription's live frame: the capture, or what stopped it (``error``).
+
+        §4-L: history is a FETCH, live stays a stream, so 0 keeps this frame the
+        live shape, with no history keys. A failure is a frame too, so the sockets
+        watching a pane that is gone share its answer as they share a capture.
+        """
+        try:
+            return reads.panes(label, project or None, 0)
+        except Exception as exc:
+            return {"rows": [], "width": 0, "height": 0, "error": str(exc)}
 
     def guarded(
         kind: str, compute: ProjectSource, *, scoped: bool = True
@@ -3178,6 +3350,8 @@ def build_remote_app(
             return _json_error(400, "invalid", str(exc))
         try:
             payload = await asyncio.to_thread(reads.panes, agent, project, history)
+        except RequestError as exc:  # its pane id is another agent's now: 409 not_agent
+            return JSONResponse(exc.request_error_body(), status_code=exc.status)
         except NoSuchAgent as exc:  # gone: the page says so and goes back to the fleet
             return _json_error(404, "no_such_agent", str(exc))
         except LookupError as exc:
@@ -3226,10 +3400,12 @@ def build_remote_app(
     async def write_endpoint(request: Request) -> Response:
         """``POST api/{name}``: the plan's writes and the agent actions (SPEC §1.5).
 
-        In order: the name, the write gate, the body, the optional
-        ``request_id`` and the ledger, the handler in a worker thread, the
-        ledger again (refusals too, so a retry gets the same refusal), and the
-        audit line for a write that went through.
+        In order: the name, the write gate, the body and its optional
+        ``request_id``, then the handler in a worker thread, inside the ledger
+        flow every write-gated lane route goes through too
+        (:meth:`RemoteKit.kit_ledgered`: refusals are stored as well, so a retry
+        gets the same refusal), and last the audit line for a write that went
+        through.
         """
         device = kit.kit_device(request)
         name = request.path_params["name"]
@@ -3242,33 +3418,32 @@ def build_remote_app(
             body = await kit.kit_json_object(request)
             request_id = _ledger_request_id(body)
         except RequestError as exc:
-            return kit.kit_refuse(exc.status, exc.error, exc.message)
-        if request_id is not None:
-            replayed = kit.ledger.ledger_replay(device.id, request_id)
-            if replayed is not None:
-                status, payload = replayed
-                return JSONResponse(payload, status_code=status)
-            if not kit.ledger.ledger_begin(device.id, request_id, name):
-                return kit.kit_refuse(409, "in_progress", IN_PROGRESS)
+            return JSONResponse(exc.request_error_body(), status_code=exc.status)
         summary: str | None = None
-        try:
-            result, summary = await asyncio.to_thread(handler, body)
-            status, payload = 200, result
-        except RequestError as exc:
-            status, payload = exc.status, exc.request_error_body()
-            summary = exc.audit  # a refusal that still did something is on the trail too
-        except NoSuchAgent as exc:
-            status, payload = 404, _error_body("no_such_agent", str(exc))
-        except LookupError as exc:
-            status, payload = 404, _error_body("not_found", str(exc))
-        except Exception as exc:
-            log.warning("remote: write %s failed: %s", name, exc)
-            status, payload = 400, _error_body("write_failed", str(exc))
-        if request_id is not None:
-            kit.ledger.ledger_finish(device.id, request_id, status, payload)
+
+        async def dispatched() -> Response:
+            nonlocal summary
+            try:
+                result, summary = await asyncio.to_thread(handler, body)
+                status, payload = 200, result
+            except RequestError as exc:
+                status, payload = exc.status, exc.request_error_body()
+                summary = exc.audit  # a refusal that still did something is on the trail too
+            except NoSuchAgent as exc:
+                status, payload = 404, _error_body("no_such_agent", str(exc))
+            except LookupError as exc:
+                status, payload = 404, _error_body("not_found", str(exc))
+            except Exception as exc:
+                log.warning("remote: write %s failed: %s", name, exc)
+                status, payload = 400, _error_body("write_failed", str(exc))
+            return JSONResponse(payload, status_code=status)
+
+        response = await kit.kit_ledgered(device, request_id, name, dispatched)
+        # After the ledger has the ending: an audit log that cannot be written fails
+        # the request, and must not make a write that went through read as failed.
         if summary is not None:
             kit.kit_audit(device, name, summary)
-        return JSONResponse(payload, status_code=status)
+        return response
 
     async def api_missing(request: Request) -> Response:
         return _json_error(404, "not_found")
@@ -3420,12 +3595,16 @@ def build_remote_app(
             for wanted in list(panes_wanted):
                 project, label = wanted
                 try:
-                    # §4-L: history is a FETCH, live stays a stream — 0 keeps
-                    # this frame the live shape, with no history keys.
+                    # One capture per pane per tick however many sockets watch it, as for
+                    # board and fleet, and on the pane pool (§2.10). The key is the pair as
+                    # JSON: a ':' in a ref or a label must not make two pairs one kind.
                     payload = await loop.run_in_executor(
-                        kit.kit_pane_pool(), reads.panes, label, project or None, 0
+                        kit.kit_pane_pool(),
+                        cache.cached_snapshot,
+                        "pane:" + json.dumps([project, label]),
+                        functools.partial(remote_pane_frame, label, project),
                     )
-                except Exception as exc:
+                except Exception as exc:  # the pool, shut down under a socket still ticking
                     payload = {"rows": [], "width": 0, "height": 0, "error": str(exc)}
                 encoded = json.dumps(payload, sort_keys=True)
                 # Not wanted any more: unsubscribed while the capture ran, so no frame,

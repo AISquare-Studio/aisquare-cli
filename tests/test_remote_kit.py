@@ -7,6 +7,7 @@ these tests pin the calls each lane plugs into, whatever the lane does behind th
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import itertools
@@ -19,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -47,6 +49,7 @@ from aisquare.services.remote_server import (
     write_endpoint_names,
 )
 from tests.remote_kit_helpers import (
+    ORIGIN,
     base,
     frame_within,
     make_client,
@@ -478,6 +481,100 @@ def test_the_dispatcher_goes_through_the_ledger_and_audits_once(
     assert ("begin", "n1", "note") in app.kit.ledger.calls
     bad = client.post(url, json={"text": "hi", "request_id": "../x"})
     assert bad.status_code == 400 and len(ran) == 2
+
+
+def test_a_write_cancelled_while_it_runs_never_leaves_its_request_id_running(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """The dispatcher stored a write's ending after its ``try``, which stops an
+    ``Exception`` and nothing else: a write whose request was cancelled while the handler
+    ran left its id running, and every retry of it was 409 ``in_progress`` until the
+    ledger forgot the id, 15 minutes on. It goes through the one ledger flow a lane route
+    uses now, which ends every id in a ``finally``."""
+    running, release = threading.Event(), threading.Event()
+
+    def note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        running.set()
+        release.wait(timeout=10)
+        return {"event": 1}, "note seq=1"
+
+    app = build_app(runtime, sources=_sources(), writes=Writes({"note": note}), dist_dir=tmp_path)
+    app.kit.ledger = RecordingLedger()
+    runtime.set_allow_write(True)
+    client = _unlocked(app, runtime)
+    url = f"{base(runtime)}/api/note"
+    cookie = f"{remote_server.COOKIE}={client.cookies.get(remote_server.COOKIE)}"
+
+    async def cancel_it_while_it_runs() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+            headers={"origin": ORIGIN, "cookie": cookie},
+        ) as phone:
+            posted = asyncio.ensure_future(phone.post(url, json={"text": "hi", "request_id": "n3"}))
+            try:
+                for _ in range(500):
+                    if running.is_set() or posted.done():
+                        break
+                    await asyncio.sleep(0.01)
+                assert running.is_set(), "the handler never ran"
+                posted.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await posted
+            finally:
+                release.set()
+
+    asyncio.run(cancel_it_while_it_runs())
+    assert ("finish", "n3", 500, {"error": "internal_error"}) in app.kit.ledger.calls
+    assert app.kit.ledger.running == set()
+    retry = client.post(url, json={"text": "hi", "request_id": "n3"})
+    assert (retry.status_code, retry.json()) == (500, {"error": "internal_error"})
+
+
+def test_the_dispatcher_answers_a_refused_body_with_every_key_as_a_lane_route_does(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It answered a refusal of the body with its error and message alone, where
+    ``kit_route`` keeps every key the refusal carries (a 409 ``stale`` carries ``current``)."""
+
+    def refused(body: dict[str, Any]) -> str | None:
+        raise RequestError(400, "invalid", "send it again", current=[])
+
+    monkeypatch.setattr(remote_server, "_ledger_request_id", refused)
+    ran: list[dict[str, Any]] = []
+
+    def note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        ran.append(body)
+        return {}, "note"
+
+    app = build_app(runtime, sources=_sources(), writes=Writes({"note": note}), dist_dir=tmp_path)
+    runtime.set_allow_write(True)
+    response = _unlocked(app, runtime).post(f"{base(runtime)}/api/note", json={"text": "hi"})
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid", "message": "send it again", "current": []}
+    assert ran == []
+
+
+def test_a_write_whose_audit_line_cannot_be_written_is_still_recorded_as_done(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ledger has the ending before the audit line is written: the write went through,
+    and a retry must say so, not replay the failure of the log."""
+
+    def note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        return {"event": 1}, "note seq=1"
+
+    def full_disk(device: Device, endpoint: str, summary: str) -> None:
+        raise OSError(28, "No space left on device")
+
+    app = build_app(runtime, sources=_sources(), writes=Writes({"note": note}), dist_dir=tmp_path)
+    app.kit.ledger = RecordingLedger()
+    runtime.set_allow_write(True)
+    client = _unlocked(app, runtime)
+    monkeypatch.setattr(app.kit, "kit_audit", full_disk)
+    with pytest.raises(OSError, match="No space left"):
+        client.post(f"{base(runtime)}/api/note", json={"text": "hi", "request_id": "n4"})
+    assert ("finish", "n4", 200, {"event": 1}) in app.kit.ledger.calls
 
 
 def _audited(endpoint: str) -> int:

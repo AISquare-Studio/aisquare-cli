@@ -1382,6 +1382,22 @@ def test_a_page_that_slept_holds_its_keys_until_the_machine_says_what_is_on_scre
     ]
 
 
+def test_the_transcript_asks_for_lines_as_wide_as_fit_inside_its_padding(
+    boot_report: dict[str, Any],
+) -> None:
+    """The page measured its columns as the box's clientWidth less 8 px, but the box has 8 px
+    of padding a side, which clientWidth counts: it asked the machine to wrap a column or two
+    wider than fit, and every full line wrapped again on the phone (45 asked where 44 fit on a
+    360 px phone, 52 where 51 fit on a 412). A line of the width asked fits now, and a line
+    one column longer would not."""
+    report = boot_report["transcriptColumns"]
+    for width, columns in report["asked"].items():
+        inside = int(width) - 2 * report["padding"]
+        assert columns * report["charPx"] <= inside, (width, columns)
+        assert (columns + 1) * report["charPx"] > inside - 0.5, (width, columns)
+    assert report["asked"] == {"334": 44, "364": 48, "386": 51}
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

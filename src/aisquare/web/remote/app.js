@@ -2260,13 +2260,17 @@ function paneRenderer(pre) {
   };
 }
 
-/* Columns of the monospace font that fit, for transcript lines wrapped to this phone. */
+/* Columns of the monospace font that fit, for transcript lines wrapped to this phone: inside
+ * the box's padding, which clientWidth counts (8 px a side: lines one or two columns too wide
+ * wrapped again), and half a pixel short, as clientWidth may round a width up. */
 function measureColumns(box) {
   const probe = el("span", "measure", "0000000000");
   box.appendChild(probe);
   const width = probe.getBoundingClientRect().width / 10;
   box.removeChild(probe);
-  return clampInt(width > 0 ? Math.floor((box.clientWidth - 8) / width) : 40, 20, 200);
+  const style = getComputedStyle(box);
+  const inner = box.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0) - 0.5;
+  return clampInt(width > 0 ? Math.floor(inner / width) : 40, 20, 200);
 }
 
 /* Enter is ⏎, as on the input bar: "Enter" ran out of its key into ↑ on a 390 px phone. */

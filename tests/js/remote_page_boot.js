@@ -19,12 +19,17 @@ const vm = require("vm");
 
 const APP = path.join(__dirname, "..", "..", "src", "aisquare", "web", "remote", "app.js");
 const SOURCE = fs.readFileSync(APP, "utf8");
+const CSS = fs.readFileSync(path.join(path.dirname(APP), "app.css"), "utf8");
+/* The transcript box's padding, a side, as the stylesheet sets it. */
+const PRE_PADDING = /pre\.pane, pre\.transcript \{[^}]*padding: (\d+)px;/.exec(CSS)[1] + "px";
 const BASE = "http://127.0.0.1:8750/r/" + "t".repeat(32) + "/";
 const PROJECT = "prj_x";
 const NEEDS_ID = "ny_0123456789abcdef";
 const PASSPHRASE = "amber birch cedar delta";
 /* A 12 px monospace character's advance (0.6 em), as the page measures one. */
 const CHAR_PX = 7.2;
+/* A pre's clientWidth: its width inside the border, padding in. A scenario sets it. */
+let preWidth = 0;
 
 // --- a browser just big enough for the page -------------------------------------------------
 
@@ -167,9 +172,14 @@ class FakeElement extends FakeNode {
     this.dispatch("blur");
   }
 
-  /* A layout of one kind: a monospace character is CHAR_PX wide, and nothing else has a size. */
+  /* A layout of one kind: a monospace character is CHAR_PX wide, a pre is preWidth, and
+   * nothing else has a size. */
   getBoundingClientRect() {
     return { width: this.classList.contains("measure") ? Array.from(this.textContent).length * CHAR_PX : 0 };
+  }
+
+  get clientWidth() {
+    return this.tagName === "PRE" ? preWidth : 0;
   }
 
   /* "tag" or "tag.class.class": all the page ever asks for. */
@@ -323,6 +333,7 @@ function bootPage(hash, answer, globals) {
     crypto: globalThis.crypto,
     URL,
     URLSearchParams,
+    getComputedStyle: (node) => (node.tagName === "PRE" ? { paddingLeft: PRE_PADDING, paddingRight: PRE_PADDING } : {}),
     setTimeout: hold,
     setInterval: hold,
     clearTimeout() {},
@@ -1314,6 +1325,23 @@ async function staleAcrossAWake() {
   return steps;
 }
 
+/* The columns the Transcript asks the machine to wrap to, on 360, 390 and 412 px phones,
+ * whose transcript box is 334, 364 and 386 px inside its border. */
+async function transcriptColumns() {
+  const asked = {};
+  for (const width of [334, 364, 386]) {
+    preWidth = width;
+    const page = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
+      "GET api/transcript/coder-1": () => ({ status: 200, json: { lines: [], cursor: null, more: false, stamps: {} } }),
+    }));
+    await settle();
+    const read = page.requests.find((one) => one.path === "api/transcript/coder-1");
+    asked[width] = Number(new URLSearchParams(read.query).get("width"));
+  }
+  preWidth = 0;
+  return { asked, padding: parseFloat(PRE_PADDING), charPx: CHAR_PX };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -1352,6 +1380,7 @@ async function main() {
     keysInOrder: await keysInOrder(),
     padConfirms: await padConfirms(),
     staleAcrossAWake: await staleAcrossAWake(),
+    transcriptColumns: await transcriptColumns(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

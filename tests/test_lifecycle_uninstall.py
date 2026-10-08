@@ -1993,6 +1993,76 @@ def test_a_purge_the_run_did_not_attempt_is_reported_only_for_a_home_that_is_the
     assert world.execs == []
 
 
+def _mcp_server(claude_json: Path, name: str) -> Path:
+    """A ``.claude.json`` registering MCP server ``name``, which runs aisquare."""
+    claude_json.parent.mkdir(parents=True, exist_ok=True)
+    claude_json.write_text(
+        json.dumps({"mcpServers": {name: {"command": "aisquare", "args": ["serve", "--stdio"]}}}),
+        encoding="utf-8",
+    )
+    return claude_json
+
+
+def test_an_mcp_server_a_purge_deletes_with_the_home_is_not_kept(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+) -> None:
+    """`claude mcp add` in a fleet pane registers the server in its slot's .claude.json,
+    inside the home. Under --purge the plan listed it under "and keep:" beside
+    "DELETE <home>", and the run called it "still registered" after the purge deleted it
+    (sweep 2 of #257). One in ~/.claude.json outlives the purge, and without --purge the
+    slot's stays too (controls)."""
+    _initialised(runner, tmp_path)
+    _mcp_server(paths.claude_accounts_dir() / "2" / ".claude.json", "fleet-memory")
+    _mcp_server(isolated_agent_home / ".claude.json", "user-memory")
+
+    plain = runner.invoke(app, ["uninstall", "--dry-run"]).stdout
+    human = runner.invoke(app, ["uninstall", "--purge", "--dry-run"]).stdout
+    result = runner.invoke(app, ["uninstall", "--purge", "--yes"])
+
+    assert "fleet-memory in" in plain.split("and keep:", 1)[1], plain
+    kept = human.split("and keep:", 1)[1]
+    assert "DELETE" in human and "user-memory in" in kept, human
+    assert "fleet-memory" not in kept, human
+    assert result.exit_code == 0, result.output
+    assert not paths.aisquare_home().exists() and world.events[-1][0] == "package"
+    assert "still registered (user-memory);" in result.stdout, result.stdout
+
+
+def test_an_mcp_server_a_slot_links_to_outside_the_home_outlives_the_purge(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+) -> None:
+    """The purge unlinks a slot's .claude.json that is a link and leaves the file it leads
+    to, registration and all. The plan keeps it, and the run still names it afterwards,
+    when the link's path no longer leads to that file."""
+    if not can_symlink():
+        pytest.skip("this machine cannot create symlinks")
+    _initialised(runner, tmp_path)
+    target = _mcp_server(tmp_path / "elsewhere" / ".claude.json", "linked-memory")
+    slot = paths.claude_accounts_dir() / "2"
+    slot.mkdir(parents=True)
+    (slot / ".claude.json").symlink_to(target)
+
+    human = runner.invoke(app, ["uninstall", "--purge", "--dry-run"]).stdout
+    result = runner.invoke(app, ["uninstall", "--purge", "--yes"])
+
+    assert "DELETE" in human and "linked-memory in" in human.split("and keep:", 1)[1], human
+    assert result.exit_code == 0, result.output
+    assert not paths.aisquare_home().exists() and target.is_file()
+    assert "still registered (linked-memory);" in result.stdout, result.stdout
+
+
 _REPO = Path(__file__).resolve().parents[1]
 
 #: When `aisquare uninstall` removes the package itself, as CHANGELOG.md and docs/install.md

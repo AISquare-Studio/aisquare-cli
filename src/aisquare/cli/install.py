@@ -513,10 +513,11 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
         # Offered only where --purge could delete it, never for a home the guard refuses.
         offer = not plan.purge and plan.purge_refusal is None
         _say(f"  {_home_line(plan)}{' (delete it too with --purge)' if offer else ''}")
-    if plan.mcp:
+    lasting_mcp = plan.lasting_mcp
+    if lasting_mcp:
         _say("  MCP servers that run aisquare (Claude Code owns .claude.json; remove each with")
         _say("  `claude mcp remove <name>`):")
-        for entry in plan.mcp:
+        for entry in lasting_mcp:
             where = f"{entry.file}" + (f", project {entry.project}" if entry.project else "")
             _say(f"    {entry.name} in {where}")
     for plugin in plan.lasting_plugins:

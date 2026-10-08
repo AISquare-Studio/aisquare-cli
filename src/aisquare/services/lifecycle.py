@@ -950,9 +950,9 @@ class UninstallPlan:
             and all(self.in_home(site.config_dir) for site in self.unreadable)
         )
 
-    def in_home(self, directory: Path) -> bool:
-        """Whether ``directory`` is inside the home, so a purge deletes it with everything in it."""
-        return agent_core.dir_identity(self.home) in agent_core.dir_identity(directory).parents
+    def in_home(self, path: Path) -> bool:
+        """Whether ``path`` is inside the home, so a purge deletes it with everything in it."""
+        return agent_core.dir_identity(self.home) in agent_core.dir_identity(path).parents
 
     @property
     def lasting_plugins(self) -> tuple[agent_core.ClaudePlugin, ...]:
@@ -962,6 +962,17 @@ class UninstallPlan:
         if not self.purges:
             return self.plugins
         return tuple(plugin for plugin in self.plugins if not self.in_home(plugin.config_dir))
+
+    @property
+    def lasting_mcp(self) -> tuple[McpRegistration, ...]:
+        """The MCP registrations still there after this run: when it purges, not those in a
+        ``.claude.json`` inside the home (an account slot's), which the purge deletes, as it
+        does a plugin there (sweep 2 of #257). The run asks this before the purge: a link
+        inside the home may lead to a file the purge leaves, and once the link is gone, its
+        path no longer resolves to that file."""
+        if not self.purges:
+            return self.mcp
+        return tuple(entry for entry in self.mcp if not self.in_home(entry.file))
 
     @property
     def refusal(self) -> UninstallRefused | None:
@@ -1430,6 +1441,7 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
     removals.extend(HookRemoval(site.config_dir, False, site.reason) for site in blocking)
     purged, purge_error = False, None
     hooks_failed = any(not removal.ok for removal in removals)
+    lasting_mcp = plan.lasting_mcp  # read before the purge: see its docstring
     if plan.purges and not hooks_failed:
         purged, purge_error = _purge(plan.home)
     elif plan.purge and plan.home_exists and hooks_failed:
@@ -1457,7 +1469,9 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
         record_error=record_error,
         purged=purged,
         purge_error=purge_error,
-        notes=tuple(_uninstall_notes(plan, removals, purged=purged)),
+        notes=tuple(
+            _uninstall_notes(plan, removals, mcp=lasting_mcp if purged else plan.mcp, purged=purged)
+        ),
     )
 
 
@@ -1502,13 +1516,18 @@ def _purge(home: Path) -> tuple[bool, str | None]:
 
 
 def _uninstall_notes(
-    plan: UninstallPlan, removals: Iterable[HookRemoval], *, purged: bool = False
+    plan: UninstallPlan,
+    removals: Iterable[HookRemoval],
+    *,
+    mcp: tuple[McpRegistration, ...],
+    purged: bool = False,
 ) -> list[str]:
+    """What the run leaves for the user to do. ``mcp`` is the registrations still there."""
     notes: list[str] = []
     if any(removal.ok for removal in removals):
         notes.append("open Claude Code sessions keep the hooks they started with — restart them")
-    if plan.mcp:
-        names = ", ".join(sorted({entry.name for entry in plan.mcp}))
+    if mcp:
+        names = ", ".join(sorted({entry.name for entry in mcp}))
         notes.append(
             f"MCP servers that run aisquare are still registered ({names}); Claude Code owns "
             "that file — remove each with: claude mcp remove <name>"

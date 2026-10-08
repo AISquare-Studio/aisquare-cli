@@ -286,7 +286,8 @@ the address the panel's ngrok announced or `serve --public-url` named; a
 `serve` told neither opens the page the phone subscribed from.
 
 The machine also sends: a warning 10 minutes before auto-off ("open to extend
-it"), a goodbye when Remote is turned off, an alert when someone is guessing the
+it" while writes are on; with writes off, that the phone cannot extend it), a
+goodbye when Remote is turned off, an alert when someone is guessing the
 passphrase, and a warning a day before a phone's 7-day sign-in ends.
 
 **What a notification holds.** A title and a line built from fixed sentences
@@ -315,7 +316,7 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
 
 - [ ] A static ngrok domain is set (`AISQUARE_REMOTE_NGROK_URL`), so the link and the phone's sign-in survive a restart.
 - [ ] Writes are on, if you want to act and not only watch: `aisquare remote allow-write on`.
-- [ ] Auto-off is 120 minutes or Never in the R panel, or you know the phone can extend it an hour at a time.
+- [ ] Auto-off is 120 minutes or Never in the R panel, or writes are on, so the phone can extend it an hour at a time.
 - [ ] A test notification arrived on the phone (Settings → Send test).
 - [ ] The passphrase is in the phone's password manager.
 
@@ -343,8 +344,8 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   stopping `serve` with Ctrl-C does not; expiry bounds them.
 - **Auto-off** is enforced by the server itself: past the deadline every request
   is a 404, and within half a minute Remote turns off, phones signed out, even
-  on a machine that slept through the deadline. A phone can extend it an hour
-  at a time, up to 8 hours ahead.
+  on a machine that slept through the deadline. With writes on, a phone can
+  extend it an hour at a time, up to 8 hours ahead.
 - **Origin**: every write and every live connection must come from the page's own
   origin, so another site cannot use your cookie.
 - **Where a notification leads** is only the address the panel's ngrok announced,

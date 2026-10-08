@@ -52,6 +52,8 @@ from aisquare.services.ngrok_tunnel import (
 )
 from aisquare.services.remote_needs import NeedsItem
 from aisquare.services.remote_push import (
+    AUTO_OFF_BODY,
+    AUTO_OFF_READ_ONLY_BODY,
     AUTO_OFF_TITLE,
     EXPIRY_TITLE,
     FAREWELL_TITLE,
@@ -1048,6 +1050,29 @@ def test_the_auto_off_warning_goes_once_per_deadline_and_again_after_an_extensio
     world.later(30)
     assert world.titles()[2:] == every_device(auto_off_title(10))
     assert world.pushes()[0][1]["tag"] == "asq-auto-off"
+
+
+def test_the_auto_off_warning_offers_the_extension_only_while_writes_are_on(
+    world: World,
+) -> None:
+    """Extending is a write (SPEC §2.5). With writes off, the default, the page's Extend
+    button is greyed out and the server answers 403, and every phone was still told to open
+    and extend, then signed out at the deadline (review of #243, round 3, 12/13). The line
+    follows the switch as it is when the warning goes."""
+    world.kit.runtime.set_auto_off(T0 + timedelta(minutes=5))
+    world.later(30)
+    assert [payload["body"] for _device, payload in world.pushes()] == [
+        AUTO_OFF_READ_ONLY_BODY,
+        AUTO_OFF_READ_ONLY_BODY,
+    ]
+    world.kit.runtime.set_allow_write(True)
+    world.kit.runtime.set_auto_off(world.clock.now + timedelta(minutes=8))
+    world.later(30)
+    assert [payload["body"] for _device, payload in world.pushes()][2:] == [
+        AUTO_OFF_BODY,
+        AUTO_OFF_BODY,
+    ]
+    assert world.titles()[2:] == every_device(auto_off_title(8))
 
 
 @pytest.mark.parametrize(

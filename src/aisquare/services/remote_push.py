@@ -139,6 +139,9 @@ AUTO_OFF_TITLE = "Remote turns off in {minutes} min"
 """With the minutes left, rounded up: 10 when the first check inside :data:`AUTO_OFF_WARNING`
 sees the deadline, fewer for one that was nearer from the start (``serve --auto-off 5``)."""
 AUTO_OFF_BODY = "Open to extend it by an hour."
+AUTO_OFF_READ_ONLY_BODY = "Writes are off, so it cannot be extended from the phone."
+"""The warning's line while writes are off, the default: extending is a write (SPEC §2.5), so
+the page's Extend button is greyed out and the server would answer 403 ``read_only``."""
 FAREWELL_TITLE = "Remote is off on the machine"
 FAREWELL_BODY = "No more notifications until it is turned on again."
 LOCKOUT_TITLE = "Someone is guessing the Remote password"
@@ -1192,8 +1195,12 @@ class RemotePushSender:
 
         The title says the minutes really left: a deadline nearer than ten minutes
         from the start (``serve --auto-off 5``) is warned of at once, with five.
+        The line offers the extension only while writes are on, as they are when
+        it is sent: with writes off no phone can extend, and every phone was told
+        to open and do it (review of #243, round 3, 12/13).
         """
-        raw = self._kit.runtime.remote_json().get("auto_off_at")
+        remote = self._kit.runtime.remote_json()
+        raw = remote.get("auto_off_at")
         deadline = _push_parse_time(raw) if isinstance(raw, str) else None
         if deadline is None or not timedelta(0) < deadline - now <= AUTO_OFF_WARNING:
             return
@@ -1203,7 +1210,8 @@ class RemotePushSender:
         self._push_mark([key], now)
         base = self._kit.kit_public_url()
         title = AUTO_OFF_TITLE.format(minutes=math.ceil((deadline - now).total_seconds() / 60))
-        message = push_system_message(title, AUTO_OFF_BODY, base, tag="asq-auto-off")
+        body = AUTO_OFF_BODY if remote.get("allow_write") is True else AUTO_OFF_READ_ONLY_BODY
+        message = push_system_message(title, body, base, tag="asq-auto-off")
         for device_id, record in subscriptions.items():
             self.deliver_one_push(device_id, record, message)
 

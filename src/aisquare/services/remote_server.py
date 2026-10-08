@@ -3905,31 +3905,202 @@ def remote_install_hint() -> str:
     the extra, which misses starlette and uvicorn too: the same sentence came back
     after it.
 
-    A uv tool is installed again with the extra. uv has no inject, and installing
-    a tool again resolves its environment from that command alone, so ``--with
-    tiktoken`` is said again, as ``install.sh`` says it, or tiktoken goes. A pipx
-    install gets what is missing injected, which keeps what was injected before.
-    A virtualenv, or any other Python, gets the extra from its own interpreter:
-    ``uv pip`` when uv made it, since it has no pip, else ``-m pip``.
+    A uv tool is installed again as its receipt says it was, the extra added
+    (:func:`_remote_uv_tool_hint`): uv has no inject. A pipx install gets what is
+    missing injected, which keeps what was injected before. A virtualenv, or any
+    other Python, gets the extra from its own interpreter: ``uv pip`` when uv made
+    it, since it has no pip, else ``-m pip``. Each word is quoted for the shells of
+    this platform (:func:`_remote_shell_word`).
     """
     import importlib.util
-    import shlex
     import sys
 
     from aisquare.core.version import DISTRIBUTION
 
     prefix = Path(sys.prefix)
-    extra = f"'{DISTRIBUTION}[remote]'"
     if (prefix / "uv-receipt.toml").is_file():
-        python = f"{sys.version_info.major}.{sys.version_info.minor}"
-        return f"uv tool install --python {python} --with tiktoken {extra}"
+        return _remote_uv_tool_hint(prefix / "uv-receipt.toml")
     if (prefix / "pipx_metadata.json").is_file():
         missing = [name for name in REMOTE_EXTRA if importlib.util.find_spec(name) is None]
         return f"pipx inject {DISTRIBUTION} {' '.join(missing or REMOTE_EXTRA)}"
-    python = shlex.quote(sys.executable)
+    python = _remote_shell_word(sys.executable)
+    extra = _remote_shell_word(f"{DISTRIBUTION}[remote]")
     if _remote_made_by_uv(prefix):
         return f"uv pip install --python {python} {extra}"
     return f"{python} -m pip install {extra}"
+
+
+_UV_SOURCES = ("url", "path", "directory", "editable", "git")
+"""The keys a uv receipt gives a requirement's source by, when an index is not it."""
+_UV_REQUIREMENT_KEYS = frozenset(
+    {"name", "extras", "specifier", "marker", "subdirectory", *_UV_SOURCES}
+)
+"""What :func:`_remote_uv_requirement` can say again: a requirement with any other key is one
+it cannot say whole."""
+_UV_GIT_REFS = ("rev", "branch", "tag")
+"""How a receipt's ``git`` URL names the reference asked for, in its query."""
+_UV_FROM_FILES = ("constraints", "overrides", "build-constraint-dependencies", "excludes")
+"""What a receipt records from files (``-c``, ``--overrides``, ``-b``, ``--excludes``), which
+no command line carries."""
+
+
+def _remote_uv_tool_hint(receipt: Path) -> str:
+    """``uv tool install`` as this tool's receipt says it was installed, ``remote`` added to
+    aisquare-cli's extras.
+
+    Installing a tool again resolves it from that command alone (measured with uv
+    0.12.19): what the command does not name goes. A fixed ``--with tiktoken
+    'aisquare-cli[remote]'`` took the ``serve`` extra's mcp, and ``aisquare serve``
+    with it, from a tool installed with ``[serve]``, and any other ``--with``. So the
+    command names all the receipt records: each requirement as it was given (a pin, a
+    marker, a git or local source, editable or not), the packages whose executables
+    it took, and the Python: the receipt's, else the one it runs on, since without
+    ``--python`` uv takes its own default and makes the tool anew on another. A
+    receipt that cannot be read gets the command ``install.sh`` installs with; one
+    that records what no command line carries, a constraints file or a requirement in
+    a shape this does not know, gets a sentence naming it rather than a command that
+    would drop it.
+    """
+    import sys
+    import tomllib
+
+    from aisquare.core.version import DISTRIBUTION
+
+    running = f"{sys.version_info.major}.{sys.version_info.minor}"
+    try:
+        tool = tomllib.loads(receipt.read_text(encoding="utf-8"))["tool"]
+        requirements = tool["requirements"]
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError):
+        tool, requirements = {}, None
+    if not isinstance(requirements, list) or not requirements:
+        as_installed = ["--python", running, "--with", "tiktoken", f"{DISTRIBUTION}[remote]"]
+        return " ".join(
+            _remote_shell_word(word) for word in ["uv", "tool", "install", *as_installed]
+        )
+    said = _remote_uv_tool_words(tool, requirements, running)
+    if said is None:
+        return (
+            f"install {DISTRIBUTION} again with uv tool install, as {receipt} records it, "
+            "adding remote to its extras"
+        )
+    return " ".join(_remote_shell_word(word) for word in said)
+
+
+def _remote_uv_tool_words(
+    tool: dict[str, Any], requirements: list[Any], running: str
+) -> list[str] | None:
+    """The words of :func:`_remote_uv_tool_hint`'s command; ``None`` when they would drop
+    something the receipt records."""
+    from aisquare.core.version import DISTRIBUTION
+
+    python, points = tool.get("python", running), tool.get("entrypoints", [])
+    main, *others = requirements
+    if (
+        not isinstance(python, str)
+        or not isinstance(points, list)
+        or any(tool.get(key) for key in _UV_FROM_FILES)
+        or not isinstance(main, dict)
+        or main.get("name") != DISTRIBUTION
+    ):
+        return None
+    froms = [point.get("from") for point in points if isinstance(point, dict)]
+    executables = {name for name in froms if isinstance(name, str)}
+    words = ["uv", "tool", "install", "--python", python]
+    for entry in others:
+        given = _remote_uv_requirement(entry)
+        if given is None:
+            return None
+        editable, requirement = given
+        flag = "--with-executables-from" if entry["name"] in executables else "--with"
+        words += ["--with-editable" if editable else flag, requirement]
+    given = _remote_uv_requirement(main, extra="remote")
+    if given is None:
+        return None
+    editable, requirement = given
+    return [*words, *(["--editable"] if editable else []), requirement]
+
+
+def _remote_uv_requirement(entry: object, *, extra: str = "") -> tuple[bool, str] | None:
+    """A receipt's requirement as a command gives it, ``extra`` added to its extras: whether
+    it is editable, and the requirement; ``None`` for one it cannot give whole.
+
+    The receipt's shape is uv's own (``RequirementWire``): a name, extras, a marker, and
+    a specifier for a package from an index, else one source, given back as a direct
+    reference.
+    """
+    if not isinstance(entry, dict) or not entry.keys() <= _UV_REQUIREMENT_KEYS:
+        return None
+    extras = entry.get("extras", [])
+    if not isinstance(extras, list) or "name" not in entry:
+        return None
+    fields = [value for key, value in entry.items() if key != "extras"]
+    if not all(isinstance(value, str) for value in [*fields, *extras]):
+        return None
+    at = _remote_uv_source(entry)
+    if at is None:
+        return None
+    named = sorted({*extras, extra} - {""})
+    requirement = entry["name"] + (f"[{','.join(named)}]" if named else "") + at
+    if "marker" in entry:
+        requirement += f" ; {entry['marker']}"
+    return "editable" in entry, requirement
+
+
+def _remote_uv_source(entry: dict[str, Any]) -> str | None:
+    """What follows a receipt requirement's name and extras: its specifier, or `` @ `` and
+    its source as a direct reference; ``None`` for a source it cannot give whole."""
+    from urllib.parse import parse_qsl, urlsplit, urlunsplit
+
+    sources = [key for key in _UV_SOURCES if key in entry]
+    subdirectory = entry.get("subdirectory", "")
+    if not sources:
+        return None if subdirectory else entry.get("specifier", "")
+    kind = sources[0]
+    if len(sources) > 1 or "specifier" in entry or (subdirectory and kind != "url"):
+        return None
+    if kind == "url":
+        if subdirectory and "#" in entry["url"]:
+            return None
+        return f" @ {entry['url']}" + (f"#subdirectory={subdirectory}" if subdirectory else "")
+    if kind == "git":
+        try:
+            url = urlsplit(entry["git"])
+        except ValueError:  # an IPv6 host left open, say: no URL uv writes
+            return None
+        query = dict(parse_qsl(url.query))
+        refs = [f"@{query.pop(key)}" for key in _UV_GIT_REFS if key in query]
+        subdirectory = query.pop("subdirectory", "")
+        if query or len(refs) > 1:
+            return None
+        repository = urlunsplit((*url[:3], "", "")).removeprefix("git+")
+        fragment = f"#subdirectory={subdirectory}" if subdirectory else ""
+        return f" @ git+{repository}{''.join(refs)}{fragment}"
+    try:
+        return f" @ {Path(entry[kind]).as_uri()}"
+    except ValueError:  # a relative path, which a receipt does not record
+        return None
+
+
+_WINDOWS_BARE_WORD = re.compile(r"[\w.:\\/-]+")
+"""A word cmd.exe and PowerShell both pass on as it is."""
+
+
+def _remote_shell_word(word: str) -> str:
+    """``word`` quoted for the shells a human types the hint into on this platform.
+
+    POSIX quoting is wrong on Windows (``core.agents._quote`` says how for a hook's
+    path): cmd.exe has no single quotes and passes them on, so ``'aisquare-cli[remote]'``
+    reached pip quotes and all, and ``shlex.quote`` wraps every Windows path, whose
+    ``\\`` it counts unsafe, in them. There a word is bare when cmd.exe and
+    PowerShell both read it as it is, and double-quoted otherwise: a space, a ``,`` or
+    ``;`` (PowerShell's), a ``<`` or ``>`` (cmd.exe's), an extra's brackets.
+    """
+    import shlex
+    import sys
+
+    if sys.platform != "win32":
+        return shlex.quote(word)
+    return word if _WINDOWS_BARE_WORD.fullmatch(word) else f'"{word}"'
 
 
 def _remote_made_by_uv(prefix: Path) -> bool:

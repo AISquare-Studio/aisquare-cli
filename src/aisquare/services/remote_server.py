@@ -2983,16 +2983,54 @@ class RemoteKit:
             if not live:
                 self.sockets.pop(device_id, None)
 
+    async def kit_ledgered(
+        self,
+        device: Device,
+        request_id: str | None,
+        endpoint: str,
+        respond: Callable[[], Awaitable[Response]],
+    ) -> Response:
+        """``respond()``, once per ``request_id`` (SPEC §1.5): the ledger flow of every
+        write-gated request, the write dispatcher's and a lane route's alike.
+
+        Without an id it just runs. A retried id is answered from the ledger
+        instead of running again, and one still running is 409 ``in_progress``.
+        How every request ended is stored, refusals included, so a retry gets the
+        answer the first try got, and it is stored in a ``finally``: a crash or a
+        cancellation is an ending too. The dispatcher kept a copy of this flow that
+        stored after its ``try``, which stops an ``Exception`` and nothing else, so
+        a cancelled write left its id running, and every retry of it was answered
+        ``in_progress`` until the ledger forgot the id.
+        """
+        from starlette.responses import JSONResponse
+
+        if request_id is None:
+            return await respond()
+        replayed = self.ledger.ledger_replay(device.id, request_id)
+        if replayed is not None:
+            status, payload = replayed
+            return JSONResponse(payload, status_code=status)
+        if not self.ledger.ledger_begin(device.id, request_id, endpoint):
+            return self.kit_refuse(409, "in_progress", IN_PROGRESS)
+        status, payload = 500, {"error": "internal_error"}
+        try:
+            response = await respond()
+            status, payload = response.status_code, _ledger_body(response)
+            return response
+        finally:  # even a crash is an ending: the id must never stay "running"
+            self.ledger.ledger_finish(device.id, request_id, status, payload)
+
     def kit_route(
         self, path: str, endpoint: KitEndpoint, *, methods: list[str], write_gated: bool
     ) -> Route:
         """A lane's route: the endpoint gets the device and the parsed body (``{}`` for GET).
 
         With ``write_gated``, the route answers 403 ``read_only`` until writes are
-        on, takes the optional ``request_id`` out of the body, answers a retried
-        id from the ledger instead of running it again, refuses one still running
-        (409 ``in_progress``), and stores how every request ended, refusals
-        included, so a retry gets the answer the first try got.
+        on, takes the optional ``request_id`` out of the body, and runs through the
+        ledger (:meth:`kit_ledgered`): a retried id is answered from it instead of
+        running again, one still running is 409 ``in_progress``, and how every
+        request ended is stored, refusals included, so a retry gets the answer the
+        first try got.
 
         A route that changes something without the gate must be in
         :data:`NOT_WRITE_GATED`: anything else is refused here, when the app is
@@ -3030,21 +3068,9 @@ class RemoteKit:
                 request_id = _ledger_request_id(body) if gated else None
             except RequestError as exc:
                 return JSONResponse(exc.request_error_body(), status_code=exc.status)
-            if request_id is None:
-                return await kit_respond(request, device, body)
-            replayed = self.ledger.ledger_replay(device.id, request_id)
-            if replayed is not None:
-                status, payload = replayed
-                return JSONResponse(payload, status_code=status)
-            if not self.ledger.ledger_begin(device.id, request_id, name):
-                return self.kit_refuse(409, "in_progress", IN_PROGRESS)
-            status, payload = 500, {"error": "internal_error"}
-            try:
-                response = await kit_respond(request, device, body)
-                status, payload = response.status_code, _ledger_body(response)
-                return response
-            finally:  # even a crash is an ending: the id must never stay "running"
-                self.ledger.ledger_finish(device.id, request_id, status, payload)
+            return await self.kit_ledgered(
+                device, request_id, name, lambda: kit_respond(request, device, body)
+            )
 
         return Route(path, kit_endpoint, methods=methods)
 
@@ -3374,10 +3400,12 @@ def build_remote_app(
     async def write_endpoint(request: Request) -> Response:
         """``POST api/{name}``: the plan's writes and the agent actions (SPEC §1.5).
 
-        In order: the name, the write gate, the body, the optional
-        ``request_id`` and the ledger, the handler in a worker thread, the
-        ledger again (refusals too, so a retry gets the same refusal), and the
-        audit line for a write that went through.
+        In order: the name, the write gate, the body and its optional
+        ``request_id``, then the handler in a worker thread, inside the ledger
+        flow every write-gated lane route goes through too
+        (:meth:`RemoteKit.kit_ledgered`: refusals are stored as well, so a retry
+        gets the same refusal), and last the audit line for a write that went
+        through.
         """
         device = kit.kit_device(request)
         name = request.path_params["name"]
@@ -3390,33 +3418,32 @@ def build_remote_app(
             body = await kit.kit_json_object(request)
             request_id = _ledger_request_id(body)
         except RequestError as exc:
-            return kit.kit_refuse(exc.status, exc.error, exc.message)
-        if request_id is not None:
-            replayed = kit.ledger.ledger_replay(device.id, request_id)
-            if replayed is not None:
-                status, payload = replayed
-                return JSONResponse(payload, status_code=status)
-            if not kit.ledger.ledger_begin(device.id, request_id, name):
-                return kit.kit_refuse(409, "in_progress", IN_PROGRESS)
+            return JSONResponse(exc.request_error_body(), status_code=exc.status)
         summary: str | None = None
-        try:
-            result, summary = await asyncio.to_thread(handler, body)
-            status, payload = 200, result
-        except RequestError as exc:
-            status, payload = exc.status, exc.request_error_body()
-            summary = exc.audit  # a refusal that still did something is on the trail too
-        except NoSuchAgent as exc:
-            status, payload = 404, _error_body("no_such_agent", str(exc))
-        except LookupError as exc:
-            status, payload = 404, _error_body("not_found", str(exc))
-        except Exception as exc:
-            log.warning("remote: write %s failed: %s", name, exc)
-            status, payload = 400, _error_body("write_failed", str(exc))
-        if request_id is not None:
-            kit.ledger.ledger_finish(device.id, request_id, status, payload)
+
+        async def dispatched() -> Response:
+            nonlocal summary
+            try:
+                result, summary = await asyncio.to_thread(handler, body)
+                status, payload = 200, result
+            except RequestError as exc:
+                status, payload = exc.status, exc.request_error_body()
+                summary = exc.audit  # a refusal that still did something is on the trail too
+            except NoSuchAgent as exc:
+                status, payload = 404, _error_body("no_such_agent", str(exc))
+            except LookupError as exc:
+                status, payload = 404, _error_body("not_found", str(exc))
+            except Exception as exc:
+                log.warning("remote: write %s failed: %s", name, exc)
+                status, payload = 400, _error_body("write_failed", str(exc))
+            return JSONResponse(payload, status_code=status)
+
+        response = await kit.kit_ledgered(device, request_id, name, dispatched)
+        # After the ledger has the ending: an audit log that cannot be written fails
+        # the request, and must not make a write that went through read as failed.
         if summary is not None:
             kit.kit_audit(device, name, summary)
-        return JSONResponse(payload, status_code=status)
+        return response
 
     async def api_missing(request: Request) -> Response:
         return _json_error(404, "not_found")

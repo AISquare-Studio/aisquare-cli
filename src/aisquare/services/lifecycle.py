@@ -469,13 +469,16 @@ def _beyond_pypi(route: install_route.InstallRoute) -> str | None:
 
 
 def _latest_for(route: install_route.InstallRoute) -> install_route.LatestRelease:
-    """PyPI's newest release, unless it says nothing about what this install's upgrade gets
+    """PyPI's newest release, pre-releases counted when this install's upgrade takes them
+    (``install_route.takes_prereleases``), unless PyPI says nothing about what it gets
     (:func:`_beyond_pypi`). With a cutoff, PyPI's newest was taken as the target, and the
     unchanged version uv correctly left was reported as §3.9.1's silent no-op on every run
     (sweep of #257)."""
     why = _beyond_pypi(route)
     if why is not None:
         return install_route.LatestRelease(None, f"PyPI was not asked: {why}")
+    if install_route.takes_prereleases(route, __version__):
+        return install_route.fetch_latest(prereleases=True)
     return install_route.fetch_latest()
 
 

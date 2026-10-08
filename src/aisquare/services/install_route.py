@@ -229,6 +229,12 @@ def is_newer(candidate: str, than: str) -> bool | None:
     return bool(candidate_key > than_key)
 
 
+def is_prerelease(text: str) -> bool:
+    """Whether ``text`` is a pre-release (``1.0.0rc1``) or a dev release, as PEP 440 counts them."""
+    match = _VERSION.match(text)
+    return match is not None and bool(match["pre_l"] or match["dev_l"])
+
+
 # --- the latest release -----------------------------------------------------------------
 
 
@@ -240,13 +246,21 @@ class LatestRelease:
     error: str | None = None
 
 
-def fetch_latest(timeout: float = LOOKUP_TIMEOUT_SECONDS) -> LatestRelease:
+def fetch_latest(
+    timeout: float = LOOKUP_TIMEOUT_SECONDS, *, prereleases: bool = False
+) -> LatestRelease:
     """The newest ``aisquare-cli`` on PyPI. Never raises; an unreachable PyPI is an answer.
 
     Called only when ``aisquare upgrade`` runs — never by ``doctor``, which stays
     offline unless ``--live``. PyPI's number decides only whether there is
     anything to do; whether an upgrade WORKED is decided by asking the new
     install its version, because a mirror may serve a different "latest".
+
+    ``info.version`` is PyPI's newest FINAL release, even after a pre-release was
+    uploaded (measured). With ``prereleases``, for an install whose upgrade takes them
+    (:func:`takes_prereleases`), it is the newest release PyPI lists with a file that
+    is not yanked, as uv picks: such an install was told "up to date" while uv would
+    have installed a newer pre-release (sweep of #257).
     """
     # Here, not at module top: see the module docstring's one exception.
     from http.client import HTTPException
@@ -267,7 +281,26 @@ def fetch_latest(timeout: float = LOOKUP_TIMEOUT_SECONDS) -> LatestRelease:
     version = info.get("version") if isinstance(info, dict) else None
     if not isinstance(version, str) or version_key(version) is None:
         return LatestRelease(None, "PyPI's answer named no version")
+    if prereleases:
+        listed = _newest_listed(payload.get("releases"))
+        if listed is not None and is_newer(listed, version):
+            version = listed
     return LatestRelease(version)
+
+
+def _newest_listed(releases: object) -> str | None:
+    """The newest version in PyPI's ``releases`` that has a file not yanked, or ``None``."""
+    if not isinstance(releases, dict):
+        return None
+    newest: str | None = None
+    for version, files in releases.items():
+        if not isinstance(version, str) or not isinstance(files, list):
+            continue
+        if not any(isinstance(file, dict) and file.get("yanked") is not True for file in files):
+            continue
+        if version_key(version) is not None and (newest is None or is_newer(version, newest)):
+            newest = version
+    return newest
 
 
 def open_url(request: Any, *, timeout: float) -> Any:
@@ -975,6 +1008,21 @@ def cutoff(route: InstallRoute) -> str | None:
         return None
     at = options.index(_CUTOFF_FLAG)
     return command_line(options[at : at + 2])
+
+
+def takes_prereleases(route: InstallRoute, current: str) -> bool:
+    """Whether uv takes pre-releases when this install upgrades to the latest release.
+
+    Then PyPI's ``info.version``, its newest FINAL release, is not what the install gets.
+    uv takes them when the receipt restates ``--prerelease allow``, or when the running
+    release ``current`` is itself one, which the command's ``>=`` names, under any mode
+    but ``disallow`` (measured, uv 0.12.19). Only a uv tool's command asks for ``>=``.
+    """
+    if route.kind != UV_TOOL or route.receipt is None:
+        return False
+    options = route.receipt.options
+    mode = options[options.index("--prerelease") + 1] if "--prerelease" in options[:-1] else None
+    return mode == "allow" or (mode != "disallow" and is_prerelease(current))
 
 
 def find_uv() -> str | None:

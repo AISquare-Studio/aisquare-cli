@@ -1051,6 +1051,57 @@ def test_an_answer_with_no_version_in_it_is_not_a_version(
     assert latest.version is None and latest.error
 
 
+#: PyPI's JSON when a pre-release is newer than the newest final: ``info.version`` stays on
+#: the final (measured: celery 5.6.3 beside 5.7.0b1, kombu 5.6.2 beside 5.7.0b1).
+_PRE_RELEASED = {
+    "info": {"version": "0.9.0"},
+    "releases": {
+        "0.4.0rc1": [{"yanked": False}],
+        "0.9.0": [{"yanked": False}],
+        "1.0.0rc1": [{"yanked": True}, {"yanked": False}],
+        "1.0.0rc2": [{"yanked": True}],
+        "1.1.0": [],
+    },
+}
+
+
+def test_the_lookup_counts_pre_releases_only_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """For an install whose upgrade takes pre-releases, the newest is read from every release
+    listed, as uv picks: a release whose every file is yanked, or that has none, is not one."""
+    body = json.dumps(_PRE_RELEASED).encode()
+    monkeypatch.setattr(install_route, "open_url", lambda _request, timeout: _Response(body))
+
+    assert _REAL_FETCH_LATEST() == LatestRelease("0.9.0")
+    assert _REAL_FETCH_LATEST(prereleases=True) == LatestRelease("1.0.0rc1")
+
+
+@pytest.mark.parametrize(
+    ("option", "current", "takes"),
+    [
+        ('prerelease = "allow"', "0.9.0", True),
+        (None, "0.9.0", False),
+        (None, "1.0.0rc1", True),
+        (None, "1.1.0.dev1", True),
+        ('prerelease = "if-necessary"', "1.0.0rc1", True),
+        ('prerelease = "disallow"', "1.0.0rc1", False),
+        ('prerelease = "explicit"', "0.9.0", False),
+    ],
+    ids=["allow", "a-final", "an-rc", "a-dev", "if-necessary-rc", "disallow-rc", "explicit"],
+)
+def test_an_upgrade_takes_pre_releases_where_uv_does(
+    tmp_path: Path, option: str | None, current: str, takes: bool
+) -> None:
+    """Measured with uv 0.12.19 resolving `demo-tool>=<current>` among 0.9.0, 1.0.0rc1,
+    1.0.0rc2, 1.1.0.dev1 and 1.1.0.dev2: `--prerelease allow` takes the newest of them all;
+    a pre-release floor takes them under every mode but disallow, if-necessary included."""
+    tail = f"\n[tool.options]\n{option}\n" if option else ""
+    route = _uv_route(tmp_path, _receipt('{ name = "aisquare-cli" }', tail=tail))
+    pipx = install_route.InstallRoute(install_route.PIPX, route.facts)
+
+    assert install_route.takes_prereleases(route, current) is takes
+    assert install_route.takes_prereleases(pipx, current) is False, "pipx upgrade takes none"
+
+
 # --- the run ---------------------------------------------------------------------------
 
 
@@ -1082,7 +1133,8 @@ class Tool:
 def machine(monkeypatch: pytest.MonkeyPatch) -> Machine:
     world = Machine()
 
-    def fetch_latest(timeout: float = 5.0) -> LatestRelease:
+    def fetch_latest(timeout: float = 5.0, *, prereleases: bool = False) -> LatestRelease:
+        # `prereleases` changes what the REAL lookup reads; its tests drive it through open_url.
         world.lookups += 1
         return world.latest
 
@@ -2217,6 +2269,54 @@ def test_check_tells_a_newer_build_from_the_latest_and_advises_only_an_upgrade(
     assert result.exit_code == 0, result.output
     assert verdict in lines and advice in lines, lines
     assert ("upgrade with: aisquare upgrade" in lines) is (latest == "0.8.1"), lines
+
+
+@pytest.mark.parametrize(
+    ("option", "running", "offered"),
+    [
+        ('prerelease = "allow"', "0.9.0", "1.0.0rc2"),
+        (None, "1.0.0rc1", "1.0.0rc2"),
+        (None, "0.9.0", None),
+    ],
+    ids=["opted-in", "running-an-rc", "neither"],
+)
+def test_an_install_that_takes_pre_releases_is_offered_the_newest_one(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    option: str | None,
+    running: str,
+    offered: str | None,
+) -> None:
+    """An install made with `--prerelease allow`, which the command restates, or one running a
+    pre-release, which its `>=` names, gets uv's newest pre-release. PyPI's info.version is
+    its newest final, so --check said "(you have it)" or "(yours is newer)" and "nothing to
+    upgrade", and `upgrade --yes` and asq's Update "nothing to do" (sweep of #257)."""
+    tail = f"\n[tool.options]\n{option}\n" if option else ""
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        _receipt(_OURS_PINNED, _TIKTOKEN, tail=tail), encoding="utf-8"
+    )
+    monkeypatch.setattr(lifecycle, "__version__", running)
+    releases = {version: [{"yanked": False}] for version in ("0.9.0", "1.0.0rc1", "1.0.0rc2")}
+    body = json.dumps({"info": {"version": "0.9.0"}, "releases": releases}).encode()
+    monkeypatch.setattr(install_route, "fetch_latest", _REAL_FETCH_LATEST)
+    monkeypatch.setattr(install_route, "open_url", lambda _request, timeout: _Response(body))
+    machine.new_version = offered or running
+
+    check = runner.invoke(app, ["upgrade", "--check"])
+    run = runner.invoke(app, ["upgrade", "--yes"])
+
+    lines = check.stdout.splitlines()
+    assert check.exit_code == 0 and run.exit_code == 0, check.output + run.output
+    if offered is None:
+        assert "latest: 0.9.0 (you have it)" in lines and "nothing to upgrade" in lines, lines
+        assert machine.installs == [] and "nothing to do" in run.stdout, run.stdout
+    else:
+        assert f"latest: {offered} (an update is available)" in lines, lines
+        [(argv, _env, _to_stderr)] = machine.installs
+        assert argv[-1] == f"aisquare-cli[serve]>={running}", argv
+        assert f"✓ aisquare {offered} (was {running})" in run.stdout, run.stdout
 
 
 @pytest.mark.parametrize(

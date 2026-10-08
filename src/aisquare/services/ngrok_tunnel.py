@@ -32,6 +32,7 @@ passphrase. A hand-started ngrok is told about with ``serve --public-url``.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -58,6 +59,8 @@ TOO_OLD_HINT = (
 )
 NGROK_URL_ENV = "AISQUARE_REMOTE_NGROK_URL"
 """A static ngrok domain (``name.ngrok-free.app``, with or without ``https://``) to serve on."""
+
+log = logging.getLogger(__name__)
 
 _TOO_OLD_FOR_URL = re.compile(r"(?:unknown flag|flag provided but not defined):\s*-{1,2}url\b")
 """What ngrok v3 (``unknown flag: --url``) and v2 (``flag provided but not defined: -url``)
@@ -173,6 +176,11 @@ class NgrokTunnel:
         self._url_ready = threading.Event()
         self.public_url: str | None = None
         self.error: str | None = None
+        self.on_announce: Callable[[str], None] | None = None
+        """Told each URL ngrok announces, on the log reader's thread, however late it comes:
+        whoever called :meth:`wait_for_url` may have stopped waiting long before (ngrok
+        retrying its session on a network that is not up yet). Set it before
+        :meth:`start_tunnel`."""
         self.static_host = ngrok_static_host(os.environ.get(NGROK_URL_ENV))
         """The static domain ngrok serves on (``--url``), from ``AISQUARE_REMOTE_NGROK_URL``;
         ``None``: ngrok picks a new URL every time it starts."""
@@ -250,3 +258,9 @@ class NgrokTunnel:
                 self._url_ready.set()
             elif event.error is not None and self.error is None:
                 self.error = event.error
+        announced = self.on_announce
+        if event.url is not None and announced is not None:
+            try:
+                announced(event.url)
+            except Exception:  # the reader must go on: a log nobody reads stalls ngrok
+                log.warning("ngrok: the announced URL could not be taken", exc_info=True)

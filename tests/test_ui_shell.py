@@ -46,6 +46,7 @@ from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HelpScreen, Panes
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.divider import WIDEST_ASK, Divider, cells
 from aisquare.cli.ui.groups import DropProject, GroupPicker
+from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.sidebar import (
     RESIZE_STEP,
     Activatable,
@@ -3482,6 +3483,7 @@ def test_run_ui_says_what_the_quit_could_not_save(
     class _Quit:
         def __init__(self, **options: object) -> None:
             self.unsaved = ["the theme was not saved: state.json.lock is held by another process"]
+            self.remote = RemoteController()  # off: nothing for run_ui to wait for
 
         def run(self) -> None:
             return None

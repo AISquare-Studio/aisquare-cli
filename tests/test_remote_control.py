@@ -12,17 +12,23 @@ branches — on/off, restore after a restart, auto-off, write actions default OF
 from __future__ import annotations
 
 import inspect
+import io
 import json
 import socket
+import subprocess
 import sys
+import threading
+import time
 import types
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from typer.testing import CliRunner
 
+from aisquare.cli import remote as remote_cli
 from aisquare.cli.app import app as cli
 from aisquare.cli.ui import remote_control
 from aisquare.cli.ui.remote_control import (
@@ -46,6 +52,8 @@ from aisquare.services.ngrok_tunnel import (
 )
 
 STARTED = {"lvl": "info", "msg": "started tunnel", "url": "https://abcd-12.ngrok-free.app"}
+PORT_ENV = remote_control.PORT_ENV
+AUTO_OFF_ENV = "AISQUARE_REMOTE_AUTO_OFF"
 
 # --- the URL builder: the modal's link text ---------------------------------------------
 
@@ -128,10 +136,19 @@ def test_a_tunnel_without_the_binary_reports_instead_of_raising() -> None:
 # --- the subprocess lifecycle against a fake ngrok ----------------------------------------
 
 
-def fake_ngrok(tmp_path: Path, *lines: dict[str, Any], linger: bool = True) -> list[str]:
-    """A command that prints ``lines`` as ngrok's JSON log would, then (optionally) stays up."""
+def fake_ngrok(tmp_path: Path, *lines: dict[str, Any] | float, linger: bool = True) -> list[str]:
+    """A command that prints ``lines`` as ngrok's JSON log would, then (optionally) stays up.
+
+    A number among them is a pause of that many seconds: ngrok retrying a session it could
+    not open yet, before it announces its tunnel.
+    """
     script = tmp_path / "fake-ngrok.py"
-    lines_out = [f"print({json.dumps(json.dumps(line))}, flush=True)" for line in lines]
+    lines_out = [
+        f"time.sleep({line})"
+        if isinstance(line, float)
+        else f"print({json.dumps(json.dumps(line))}, flush=True)"
+        for line in lines
+    ]
     if linger:
         lines_out.append("time.sleep(60)")
     script.write_text("import sys, time\n" + "\n".join(lines_out) + "\n")
@@ -151,12 +168,99 @@ def test_the_tunnel_learns_its_url_from_the_log_and_stop_ends_the_process(
 
 
 def test_a_tunnel_that_exits_without_a_url_says_so_instead_of_hanging(tmp_path: Path) -> None:
+    """The exit wakes whoever waits for the URL: a first run without an authtoken showed
+    "starting ngrok…" for the whole wait before the hint, had the reader not said so."""
     error = {"lvl": "eror", "err": "authentication failed: ERR_NGROK_4018"}
     tunnel = NgrokTunnel(8750, command=fake_ngrok(tmp_path, error, linger=False))
     assert tunnel.start_tunnel() is None
+    started = time.monotonic()
     assert tunnel.wait_for_url(timeout=10) is None
+    assert time.monotonic() - started < 5, "the exit was heard of only when the wait ran out"
     assert tunnel.error == AUTHTOKEN_HINT
     tunnel.stop_tunnel()
+
+
+class StubbornNgrok:
+    """A process that ignores SIGTERM: ``wait`` runs out until it is killed. Each call the
+    tunnel makes is in ``calls``; its log is empty."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.stdout = io.StringIO("")
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.calls.append("terminate")
+
+    def kill(self) -> None:
+        self.calls.append("kill")
+        self.returncode = -9
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.calls.append(f"wait {timeout}")
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("ngrok", timeout or 0)
+        return self.returncode
+
+
+def test_an_ngrok_that_cannot_be_spawned_is_a_sentence_and_remote_stays_local() -> None:
+    """A binary on the PATH that will not run (no execute bit, the wrong architecture):
+    ``start_tunnel`` says so, and Remote is on locally with that on its status line, never
+    an ``OSError`` out of the switch's handler."""
+
+    def refused(command: list[str], **kwargs: object) -> subprocess.Popen[str]:
+        raise PermissionError(13, "Permission denied", command[0])
+
+    tunnels: list[NgrokTunnel] = []
+
+    def factory(port: int) -> NgrokTunnel:
+        tunnels.append(NgrokTunnel(port, which=lambda _name: "/usr/bin/ngrok", popen=refused))
+        return tunnels[-1]
+
+    server = fake_server()
+    controller = RemoteController(server=server, tunnel_factory=factory)
+    controller.turn_on()
+    sentence = "could not start ngrok: [Errno 13] Permission denied: 'ngrok'"
+    assert controller.running and controller.message == sentence
+    assert controller.link_url() == f"http://127.0.0.1:8750/r/{server.token}/"
+    assert tunnels[0].error == sentence and not tunnels[0].running
+
+
+def test_an_ngrok_that_ignores_the_terminate_is_killed() -> None:
+    """Stopping waits 5 s for ngrok to end, then kills it: an ngrok left running would hold
+    the static domain, and the next Remote's tunnel could not have it (ERR_NGROK_334)."""
+    process = StubbornNgrok()
+    tunnel = NgrokTunnel(
+        8750,
+        which=lambda _name: "/usr/bin/ngrok",
+        popen=lambda command, **kwargs: cast("subprocess.Popen[str]", process),
+    )
+    assert tunnel.start_tunnel() is None
+    tunnel.stop_tunnel()
+    assert process.calls == ["terminate", "wait 5", "kill", "wait 5"]
+    assert not tunnel.running
+
+
+def test_a_url_its_listener_could_not_take_never_ends_the_log_reader(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The reader is what drains ngrok's log: a listener that raised on its thread ended it,
+    and an ngrok whose log nobody reads stalls once the pipe is full."""
+    tunnel = NgrokTunnel(8750, which=lambda _name: None)
+    heard: list[str] = []
+
+    def refuse(url: str) -> None:
+        heard.append(url)
+        raise RuntimeError("the controller is gone")
+
+    tunnel.on_announce = refuse
+    with caplog.at_level("WARNING", logger=ngrok_tunnel.__name__):
+        tunnel.handle_line(json.dumps(STARTED))
+    assert heard == [STARTED["url"]] and tunnel.public_url == STARTED["url"]
+    assert "the announced URL could not be taken" in caplog.text
 
 
 # --- the controller -------------------------------------------------------------------------
@@ -409,6 +513,55 @@ def test_the_switches_survive_a_restart_of_the_tui_next_to_the_theme_key() -> No
     assert second.write_actions_allowed() is True
 
 
+def test_a_switch_saves_its_own_key_and_never_the_other_tuis_start_of_day() -> None:
+    """Every save wrote both keys from what this TUI read at its start. Two ``asq ui`` open:
+    A turns Remote off, then B, which read it as on, picks an auto-off, and B's save wrote
+    Remote back on; the next start brought the public tunnel back against the human's last
+    off. Picking Never did it with no timer at all (sweep of #243)."""
+    server = fake_server()
+    first = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    first.turn_on()
+    second = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    assert second.state.remote_enabled is True, "B read Remote as on at its start"
+    first.turn_off()
+    second.set_auto_off(30)
+    second.set_auto_off(None)
+    saved = read_state()
+    assert (saved["remote_enabled"], saved["auto_off_minutes"]) == (False, "never")
+    third = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    third.restore()
+    assert not third.running, "the next start leaves the Remote turned off off"
+
+    first.set_auto_off(120)  # and the other way round: A's pick keeps B's Remote on
+    second.turn_on()
+    first.set_auto_off(30)
+    assert read_state()["remote_enabled"] is True
+    second.turn_off()
+
+
+def test_a_switch_state_json_refuses_is_said_until_a_save_of_it_lands() -> None:
+    """A refused save of a switch was dropped without a word: a refused off brought Remote
+    back at the next start with nothing said, nor anything at quit (sweep of #243)."""
+    server = fake_server()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    paths.ensure_home()
+    paths.state_path().write_text("[]")  # not an object: update_state refuses every key
+    controller.turn_on()
+    assert controller.running
+    line = controller.status_line()
+    assert line.startswith("Remote's on/off switch could not be saved — ")
+    assert f"{paths.state_path()} is not a JSON object" in line
+    controller.set_auto_off(30)
+    assert "the auto-off timer could not be saved — " in controller.status_line()
+    paths.state_path().write_text("{}")
+    controller.set_auto_off(120)
+    assert controller.status_line().startswith("Remote's on/off switch could not be saved")
+    assert "auto-off timer" not in controller.status_line(), "its own save landed"
+    controller.turn_off()
+    assert controller.status_line() == ""
+    assert read_state() == {"auto_off_minutes": 120, "remote_enabled": False}
+
+
 def test_restore_leaves_a_remote_that_was_off_alone() -> None:
     server = fake_server()
     controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
@@ -512,6 +665,316 @@ def test_turning_remote_off_revokes_every_device_before_the_server_stops() -> No
     ]
 
 
+def test_a_url_ngrok_announces_after_the_wait_is_the_link_and_the_push_origin_all_the_same(
+    tmp_path: Path,
+) -> None:
+    """``restore()`` brings Remote back at a TUI start, often before a waking laptop's Wi-Fi
+    is up, and ngrok retries its session until it is. The URL it announced a minute later
+    was never taken: the panel kept "ngrok did not announce a tunnel in time" and the local
+    link, and push links had no origin, until Remote was turned off and on (r3 review of
+    #243). A real tunnel's log reader hands it over whenever it comes."""
+    server = fake_server()
+    command = fake_ngrok(tmp_path, 1.0, STARTED)
+    controller = RemoteController(
+        server=server,
+        tunnel_factory=lambda port: NgrokTunnel(port, command=command),
+        url_timeout=0.2,
+    )
+    controller.turn_on()
+    try:
+        assert controller._waiter is not None
+        controller._waiter.join(5)
+        assert controller.message == "ngrok did not announce a tunnel in time"
+        assert controller.link_url() == f"http://127.0.0.1:8750/r/{server.token}/"
+        assert server.public_urls == []
+        deadline = time.monotonic() + 15
+        while controller.public_url is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        link = build_public_url(STARTED["url"], server.token)
+        assert controller.link_url() == link, "the URL that came late is the link"
+        assert server.public_urls == [link], "and where push links lead"
+        assert controller.message is None
+    finally:
+        controller.turn_off()
+
+
+def test_a_url_announced_again_is_taken_once_and_one_that_changed_is_taken_again() -> None:
+    """A URL is noted once however often it is announced: the thread that waited for it and
+    the log reader both hand it over. A new one, ngrok's session back on another address, is
+    the link from then on."""
+    server = fake_server()
+    tunnels: list[FakeTunnel] = []
+
+    def factory(port: int) -> FakeTunnel:
+        tunnels.append(FakeTunnel(port, url=None, failure=None))
+        return tunnels[-1]
+
+    controller = RemoteController(server=server, tunnel_factory=factory)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    assert controller.message == "ngrok did not announce a tunnel in time"
+    (tunnel,) = tunnels
+    tunnel.handle_line(json.dumps(STARTED))
+    tunnel.handle_line(json.dumps(STARTED))
+    link = build_public_url(STARTED["url"], server.token)
+    assert controller.link_url() == link and controller.message is None
+    assert server.public_urls == [link]
+    moved = {**STARTED, "url": "https://efgh-34.ngrok-free.app"}
+    tunnel.handle_line(json.dumps(moved))
+    assert controller.link_url() == build_public_url(moved["url"], server.token)
+    assert server.public_urls == [link, controller.link_url()]
+
+
+class QuietTunnel(FakeTunnel):
+    """A tunnel that is up and has not announced yet: its URL comes when the test feeds its
+    log a line, and its wait ends when the test says (``give_up``), whatever the timeout."""
+
+    def __init__(self, port: int) -> None:
+        super().__init__(port, url=None, failure=None)
+        self.give_up = threading.Event()
+
+    def start_tunnel(self) -> str | None:
+        return None
+
+    def wait_for_url(self, timeout: float = 15.0) -> str | None:
+        self.give_up.wait(10)
+        return self.public_url
+
+
+def test_an_old_tunnels_late_word_never_lands_on_the_remote_after_it() -> None:
+    """Remote off and on again while the old tunnel still had not announced: its wait running
+    out put "ngrok did not announce a tunnel in time" on the new Remote, whose own tunnel was
+    still starting, and its URL, landing late, became the new Remote's link and push origin."""
+    server = fake_server()
+    old, new = QuietTunnel(8750), QuietTunnel(8750)
+    made = [old, new]
+    controller = RemoteController(server=server, tunnel_factory=lambda port: made.pop(0))
+    controller.turn_on()
+    old_waiter = controller._waiter
+    assert old_waiter is not None
+    controller.turn_off()
+    controller.turn_on()
+    new_waiter = controller._waiter
+    assert new_waiter is not None and new_waiter is not old_waiter
+    assert controller.message == "starting ngrok…"
+
+    old.give_up.set()  # the old tunnel's wait runs out now
+    old_waiter.join(5)
+    assert controller.message == "starting ngrok…", "the old tunnel's timeout is not this one's"
+    new.handle_line(json.dumps({**STARTED, "url": "https://new-56.ngrok-free.app"}))
+    link = build_public_url("https://new-56.ngrok-free.app", server.token)
+    assert controller.link_url() == link and controller.message is None
+    old.handle_line(json.dumps(STARTED))  # and the old one's URL lands after all
+    assert controller.link_url() == link
+    assert server.public_urls[-1] == link, "push links still lead to the new tunnel"
+    new.give_up.set()
+    new_waiter.join(5)
+    assert server.public_urls.count(link) == 1
+
+
+def heard_news(controller: RemoteController) -> list[tuple[str, bool]]:
+    """What ``controller`` tells the fleet UI, and whether it is trouble, in order."""
+    heard: list[tuple[str, bool]] = []
+    controller.on_news = lambda text, trouble: heard.append((text, trouble))
+    return heard
+
+
+def test_a_remote_that_does_not_come_back_at_start_is_news() -> None:
+    """``restore()`` runs as the human sits down, often just before leaving the desk with the
+    phone. A Remote that did not come back, or came back with no tunnel, was said only on
+    the R panel's status line: the human found out from the phone (sweep of #243)."""
+    server = fake_server()
+    busy = "the remote server did not come up on 127.0.0.1:8750 — is the port in use?"
+    server.fail_start = remote_server.RemoteError(busy)
+    enabled = RemoteState(remote_enabled=True)
+    held = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), state=enabled
+    )
+    heard = heard_news(held)
+    held.restore()
+    assert heard == [(f"Remote could not start — {busy}", True)]
+
+    server.fail_start = None
+    no_ngrok = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(failure=INSTALL_HINT), state=enabled
+    )
+    heard = heard_news(no_ngrok)
+    no_ngrok.restore()
+    assert no_ngrok.running
+    assert heard == [(f"Remote is on, but phones cannot reach it — {INSTALL_HINT}", True)]
+    no_ngrok.turn_off()
+
+    back = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), state=enabled
+    )
+    heard = heard_news(back)
+    back.restore()
+    assert back._waiter is not None
+    back._waiter.join(5)
+    back.turn_off()
+    assert back.running is False and heard == [], "a Remote back as it was, and turned off, is none"
+
+
+def test_a_tunnel_that_does_not_come_up_is_news_and_so_is_its_url_when_it_comes() -> None:
+    server = fake_server()
+    tunnels: list[FakeTunnel] = []
+
+    def factory(port: int) -> FakeTunnel:
+        tunnels.append(FakeTunnel(port, url=None, failure=None))
+        return tunnels[-1]
+
+    controller = RemoteController(server=server, tunnel_factory=factory)
+    heard = heard_news(controller)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    assert heard == [
+        ("Remote is on, but phones cannot reach it — ngrok did not announce a tunnel in time", True)
+    ]
+    tunnels[0].handle_line(json.dumps(STARTED))
+    assert heard[1:] == [("ngrok is up — phones can reach Remote now", False)]
+
+
+def test_auto_off_and_what_turning_off_could_not_do_are_news() -> None:
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
+    server = fake_server()
+
+    def unwritable(reason: str) -> None:
+        raise OSError("remote.json: read-only file system")
+
+    server.revoke_every_remote_device = unwritable  # type: ignore[method-assign]
+    controller = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    heard = heard_news(controller)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    clock[0] += timedelta(minutes=60)
+    assert controller.enforce_auto_off() is True
+    assert heard == [
+        ("Remote turned off — the auto-off timer ran out", True),
+        (
+            "Remote is off, but its devices could not be revoked — "
+            "remote.json: read-only file system",
+            True,
+        ),
+    ]
+
+
+def test_ngrok_back_on_a_new_link_is_news_and_a_restart_failing_alike_is_said_once() -> None:
+    """A restart on a new link leaves every phone on a dead one, and the human at the desk
+    has the new one to give; a restart that keeps failing the same way, once a minute, is
+    said once, not every minute."""
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
+    made = [
+        FakeTunnel(8750, url="https://first.ngrok-free.app", failure=None),
+        FakeTunnel(8750, url="https://second.ngrok-free.app", failure=None),
+        FakeTunnel(8750, url=None, failure="could not start ngrok: gone"),
+        FakeTunnel(8750, url=None, failure="could not start ngrok: gone"),
+    ]
+    controller = RemoteController(
+        server=fake_server(), tunnel_factory=lambda port: made.pop(0), now=lambda: clock[0]
+    )
+    heard = heard_news(controller)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    assert controller.revive_tunnel_if_dead() is True  # a FakeTunnel never runs: it died
+    controller._waiter.join(5)
+    assert heard == [("ngrok stopped and came back on a new link — R shows it", True)]
+    for _ in range(2):
+        clock[0] += timedelta(minutes=1)
+        assert controller.revive_tunnel_if_dead() is False
+    assert heard[1:] == [
+        ("Remote is on, but phones cannot reach it — could not start ngrok: gone", True)
+    ]
+
+
+class SlowServer(FakeServer):
+    """A server whose stop takes until the test says: uvicorn waiting for a needs scan in
+    flight and the push sender, ngrok given its seconds to exit."""
+
+    def __init__(self, *, patience: float = 10.0) -> None:
+        super().__init__()
+        self.stopping = threading.Event()
+        self.release = threading.Event()
+        self.patience = patience
+
+    def stop_remote_server(self) -> None:
+        self.stopping.set()
+        self.release.wait(self.patience)
+        super().stop_remote_server()
+
+
+def test_turning_remote_off_reads_off_at_once_and_stops_on_a_thread_of_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The switch, auto-off and quit stopped uvicorn and ngrok on Textual's thread, which
+    froze the fleet UI for as long as they took: seconds when a needs scan was in flight
+    (r3 review of #243). The controller reads off at once, the status line says Remote is
+    turning off until the stopping is done, and a Remote turned on meanwhile waits a moment
+    for it and then says to try again, rather than starting one the old stop would undo."""
+    monkeypatch.setattr(remote_control, "OFF_WAIT_SECONDS", 0.2)
+    server = SlowServer()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    controller.turn_on()
+    tunnel = controller.tunnel
+    assert isinstance(tunnel, FakeTunnel)
+    started = time.monotonic()
+    controller.turn_off(wait=False)
+    assert time.monotonic() - started < 1.0, "turning off waited for the server to stop"
+    assert server.stopping.wait(5), "the stopping runs all the same"
+    assert not controller.running and controller.link_url() is None
+    assert controller.message == remote_control.TURNING_OFF
+    assert read_state()["remote_enabled"] is False
+    assert server.running and not tunnel.stopped, "still winding down"
+    assert controller.wait_until_off(0.05) is False
+
+    controller.turn_on()
+    assert not controller.running and server.running
+    assert controller.message == remote_control.STILL_TURNING_OFF
+
+    server.release.set()
+    assert controller.wait_until_off(5)
+    assert not server.running and tunnel.stopped, "ngrok goes last, as ever"
+    assert server.revoked_every == ["remote off"] and server.public_urls[-1] is None
+    assert controller.message is None
+    controller.turn_on()
+    assert controller.running
+
+
+def test_auto_off_stops_on_a_thread_and_says_what_the_stopping_could_not_do() -> None:
+    """The app's 30 s auto-off timer froze the fleet view for as long as the stopping took.
+    The sentence that Remote is off shows at once; what the stopping could not do follows
+    it once that is known."""
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
+    server = SlowServer()
+
+    def unwritable(reason: str) -> None:
+        raise OSError("remote.json: read-only file system")
+
+    server.revoke_every_remote_device = unwritable  # type: ignore[method-assign]
+    controller = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    controller.turn_on()
+    clock[0] += timedelta(minutes=60)
+    started = time.monotonic()
+    assert controller.enforce_auto_off(wait=False) is True
+    assert time.monotonic() - started < 1.0, "auto-off waited for the server to stop"
+    assert not controller.running
+    assert controller.message == "Remote turned off — the auto-off timer ran out"
+    assert server.stopping.wait(5)
+    server.release.set()
+    assert controller.wait_until_off(5) and not server.running
+    assert controller.message == (
+        "Remote turned off — the auto-off timer ran out. Remote is off, but its devices "
+        "could not be revoked — remote.json: read-only file system"
+    )
+
+
 def test_enforce_auto_off_adopts_a_later_deadline_the_phone_set() -> None:
     clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
     server = fake_server()
@@ -596,7 +1059,7 @@ def test_each_control_says_when_remote_json_will_not_write_instead_of_raising() 
     server.unwritable = DENIED
 
     controller.set_auto_off(30)
-    assert controller.message == (
+    assert controller.save_problem == (
         "auto-off could not be saved to remote.json — [Errno 13] Permission denied: 'remote.json'"
     )
     assert controller.state.auto_off_minutes == 30
@@ -605,28 +1068,80 @@ def test_each_control_says_when_remote_json_will_not_write_instead_of_raising() 
     assert controller.adopt_server_deadline() == shorter
 
     assert controller.regenerate_password() is None
-    assert (controller.message or "").startswith(
+    assert (controller.save_problem or "").startswith(
         "the new password could not be saved to remote.json — [Errno 13]"
     )
     assert controller.password() == "ember-glade-heron-indigo", "the one phones need now"
 
     assert controller.revoke_device("dev_0000000a") is False
-    assert (controller.message or "").startswith(
+    assert (controller.save_problem or "").startswith(
         "dev_0000000a could not be revoked in remote.json — [Errno 13]"
     )
     assert controller.devices() == [], "signed out of the running server all the same"
 
     controller.set_allow_write(True)
-    assert controller.message == (
+    assert controller.save_problem == (
         "write actions could not be saved to remote.json — "
         "[Errno 13] Permission denied: 'remote.json'"
     )
     assert controller.write_actions_allowed() is True
     assert controller.running and server.running
+    assert controller.message is None, "what Remote is doing has a line of its own"
 
     clock[0] += timedelta(minutes=30)
     assert controller.enforce_auto_off() is True, "the timer it could not save still ends it"
     assert not controller.running and not server.running
+
+
+def test_a_write_that_lands_takes_away_the_sentence_of_one_that_did_not() -> None:
+    """Every write of ``remote.json`` puts the whole state the server holds, the change that
+    did not land included, so the next one that lands has saved it too. The sentence that
+    it had not been saved stayed on the status line all the same, until ngrok had something
+    to say: writes off, or a phone revoked, read as not stuck when they had (sweep of #243).
+    Whichever control's write lands takes it away, and so does turning Remote off or on."""
+    server = fake_server()
+    server.devices = [
+        {"id": f"dev_0000000{tail}", "ua": "iPhone", "first_seen": "t0", "last_seen": "t1"}
+        for tail in "abcd"
+    ]
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    attempts: list[tuple[Callable[[], object], Callable[[], object]]] = [
+        (lambda: controller.set_allow_write(True), lambda: controller.set_allow_write(False)),
+        (lambda: controller.set_auto_off(30), lambda: controller.set_auto_off(120)),
+        (controller.regenerate_password, controller.regenerate_password),
+        (
+            lambda: controller.revoke_device("dev_0000000a"),
+            lambda: controller.revoke_device("dev_0000000b"),
+        ),
+        (
+            lambda: controller.revoke_device("dev_0000000c"),
+            lambda: controller.set_allow_write(True),
+        ),
+    ]
+    for refused, landed in attempts:
+        server.unwritable = DENIED
+        refused()
+        assert (controller.save_problem or "").endswith(
+            "[Errno 13] Permission denied: 'remote.json'"
+        )
+        assert controller.status_line() == controller.save_problem
+        server.unwritable = None
+        landed()
+        assert controller.save_problem is None and controller.status_line() == ""
+
+    server.unwritable = DENIED
+    controller.revoke_device("dev_0000000d")
+    server.unwritable = None
+    controller.turn_off()
+    assert controller.save_problem is None, "turning off wrote the whole state"
+    server.unwritable = DENIED
+    controller.set_allow_write(False)
+    server.unwritable = None
+    controller.turn_on()
+    assert controller.save_problem is None, "and so did turning on"
 
 
 def test_a_timer_remote_json_will_not_take_gives_way_to_the_files_once_it_is_read_again() -> None:
@@ -648,7 +1163,7 @@ def test_a_timer_remote_json_will_not_take_gives_way_to_the_files_once_it_is_rea
     server.unwritable = DENIED
     for minutes, picked in ((120, datetime(2026, 9, 11, 20, 0, tzinfo=UTC)), (None, None)):
         controller.set_auto_off(minutes)
-        assert (controller.message or "").startswith("auto-off could not be saved"), minutes
+        assert (controller.save_problem or "").startswith("auto-off could not be saved"), minutes
         assert server.server_auto_off_at == picked, "the running server took it"
         assert controller.adopt_server_deadline() == picked, minutes
         server.server_auto_off_at = in_the_file  # a shell's allow-write: the file, read again
@@ -790,15 +1305,16 @@ def test_a_real_remote_json_that_will_not_write_is_a_sentence_for_each_control(
     with pytest.MonkeyPatch.context() as home:
         home.setattr(remote_server, "replacement", unwritable)
         controller.set_auto_off(30)
-        assert (controller.message or "").startswith("auto-off could not be saved to remote.json")
+        problem = controller.save_problem or ""
+        assert problem.startswith("auto-off could not be saved to remote.json")
         assert controller.revoke_device(device_id) is False
-        assert (controller.message or "").startswith(f"{device_id} could not be revoked")
+        assert (controller.save_problem or "").startswith(f"{device_id} could not be revoked")
         assert controller.devices() == [], "signed out of the running server all the same"
         assert controller.regenerate_password() is None
-        assert (controller.message or "").startswith("the new password could not be saved")
+        assert (controller.save_problem or "").startswith("the new password could not be saved")
         assert controller.password() != passphrase, "the running server has the new one"
         controller.set_allow_write(True)
-        assert (controller.message or "").startswith(
+        assert (controller.save_problem or "").startswith(
             "write actions could not be saved to remote.json"
         )
         assert controller.write_actions_allowed() is True
@@ -905,3 +1421,64 @@ def test_a_port_the_panel_cannot_use_is_a_sentence_and_unset_is_the_default() ->
             given.turn_on()
             assert given.link_url() == f"http://127.0.0.1:18999/r/{server.token}/", raw
             given.turn_off()
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "65536", "70000"])
+def test_a_port_no_command_can_use_is_a_usage_error_never_a_dead_link_or_a_traceback(
+    raw: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The panel refuses an ``AISQUARE_REMOTE_PORT`` that is no port (the test above), and
+    every command reads the same variable: ``serve --port 0`` served on a port the system
+    picked while its banner printed ``:0`` links that refused every connection, ``status``
+    printed ``:70000``, and ``serve --port 70000`` ended in an ``OverflowError`` traceback
+    with nothing on stdout under ``--json`` (sweep of #243). The panel's port, and only
+    that, is every command's."""
+
+    def served(*args: object, **kwargs: object) -> bool:
+        raise AssertionError(f"served on port {raw}")
+
+    monkeypatch.setattr(remote_server, "run_foreground", served)
+    runner = CliRunner()
+    flagged = [
+        ["remote", "serve", "--port", raw],
+        ["remote", "status", "--port", raw],
+        ["remote", "regenerate-password", "--new-link", "--port", raw],
+    ]
+    exported = [["remote", "serve"], ["remote", "status"]]
+    for command, exports in [(c, {}) for c in flagged] + [(c, {PORT_ENV: raw}) for c in exported]:
+        result = runner.invoke(cli, ["--json", *command], env=exports)
+        assert result.exit_code == 2, (command, exports, result.output)
+        answer = json.loads(result.stdout)
+        assert answer["error"] == "usage", (command, exports)
+        assert "not in the range 1<=x<=65535" in answer["message"], (command, exports)
+    assert not paths.remote_state_path().exists(), "refused before anything was read or made"
+    with pytest.MonkeyPatch.context() as env:
+        env.setenv(PORT_ENV, raw)
+        assert RemoteController(server=fake_server())._port_problem is not None, "the panel too"
+
+
+def test_an_auto_off_past_a_week_is_a_usage_error_never_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``serve --auto-off 99999999999`` (or the variable) ended in an ``OverflowError``
+    traceback, a date past year 9999 (sweep of #243). A week, the longest a phone stays
+    signed in, is the most; ``0`` is never."""
+    timers: list[object] = []
+
+    def served(dist: object, port: int, auto_off: int, *args: object, **kwargs: object) -> bool:
+        timers.append(auto_off)
+        return False
+
+    monkeypatch.setattr(remote_server, "run_foreground", served)
+    week = remote_cli.MAX_AUTO_OFF_MINUTES
+    assert timedelta(minutes=week) == remote_server.DEVICE_LIFETIME, "the longest sign-in"
+    runner = CliRunner()
+    for raw in ("10081", "99999999999"):
+        flagged = runner.invoke(cli, ["--json", "remote", "serve", "--auto-off", raw])
+        exported = runner.invoke(cli, ["--json", "remote", "serve"], env={AUTO_OFF_ENV: raw})
+        for result in (flagged, exported):
+            assert result.exit_code == 2, result.output
+            assert "not in the range 0<=x<=10080" in json.loads(result.stdout)["message"]
+    for raw in ("10080", "0"):
+        assert runner.invoke(cli, ["remote", "serve", "--auto-off", raw]).exit_code == 0
+    assert timers == [10080, 0]

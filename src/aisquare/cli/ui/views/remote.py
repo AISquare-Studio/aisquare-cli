@@ -10,12 +10,14 @@ from ngrok's log on a background thread. Opened like the theme picker
 
 The QR is segno's compact terminal rendering (half-block characters, ~18 rows
 for an ngrok URL) of exactly the text in the link row — one string feeds both,
-so what the phone scans is what the human reads.
+so what the phone scans is what the human reads — in colours of its own, never
+the theme's (:data:`QR_COLOURS`).
 """
 
 from __future__ import annotations
 
 import io
+from datetime import tzinfo
 from typing import Any, ClassVar
 
 from rich.text import Text
@@ -30,8 +32,26 @@ from aisquare.cli.ui.remote_control import (
     READ_ONLY_REASON,
     RemoteController,
 )
+from aisquare.services.remote_server import _remote_instant
 
 QR_UNAVAILABLE = "QR unavailable — pip install segno"
+LOCAL_ZONE: tzinfo | None = None
+"""The zone the panel says its times in: ``None`` is this machine's own (a seam for tests)."""
+QR_COLOURS = "#ffffff on #000000"
+"""The QR's own colours: light glyphs on a dark ground, whatever the theme.
+
+segno's compact art draws the LIGHT modules as block glyphs and leaves the dark
+ones to the background, so it reads right only light-on-dark. In the theme's
+colours, every light theme (``t`` offers five) and an ANSI one on a light
+terminal drew it reflectance-reversed, its quiet zone a dark frame: a scanner
+without inversion support could not read it (sweep of #243). Not "black on
+white", which reverses it in every theme."""
+
+
+def qr_art(url: str) -> Text:
+    """The QR for ``url`` in :data:`QR_COLOURS`; the notice, plain, when segno is absent."""
+    art = qr_text(url)
+    return Text(art) if art == QR_UNAVAILABLE else Text(art, style=QR_COLOURS)
 
 
 def qr_text(url: str) -> str:
@@ -77,6 +97,9 @@ class RemotePanel(ModalScreen[None]):
         self._device_columns: list[ColumnKey] = []
         self._qr_url: str | None = ""
         """The link the QR was last drawn for; ``""`` before the first paint."""
+        self._painted: dict[str, bool] = {}
+        """What each switch was last painted to show, by id. A switch showing anything else
+        was moved by the user since, and its ``Changed`` is still on its way."""
 
     # --- layout ---------------------------------------------------------------------------
 
@@ -133,24 +156,25 @@ class RemotePanel(ModalScreen[None]):
 
     # --- paint from the controller -------------------------------------------------------------
 
-    def repaint(self) -> None:
+    def repaint(self, *, heard: str | None = None) -> None:
         """Paint everything from the controller; the one-second tick runs it too.
 
         On Textual's own thread, so a tick reads ``remote_server_status()`` once, for
         the devices and the failed unlocks both, and draws the link and its QR only when
         the link changed: every tick used to encode the QR anew (about 4 ms of segno)
         and read the status twice, each read three digests of ``remote.json``.
+        ``heard`` is the switch whose ``Changed`` was just handled (:meth:`_paint_switch`).
         """
         controller = self.controller
         running = controller.running
         writes = controller.write_actions_allowed()
         status = controller.remote_status()
-        # The echoes these two writes produce are filtered in on_switch_changed,
-        # by value rather than by a flag — see the note there.
-        self.query_one("#remote-on", Switch).value = running
-        self.query_one("#remote-allow-write", Switch).value = writes
+        self._paint_switch("remote-on", running, heard)
+        self._paint_switch("remote-allow-write", writes, heard)
         self.query_one("#remote-state", Static).update(self._state_text())
-        self.query_one("#remote-status", Static).update(controller.message or "")
+        # Text, never a str, which is read as markup: the sentences carry exception text
+        # and paths, where "[b]" was a tag and "[/b]" a MarkupError out of the repaint.
+        self.query_one("#remote-status", Static).update(Text(controller.status_line()))
         self.query_one("#remote-password", Static).update(
             Text(controller.password() or "—", style="bold")
         )
@@ -162,10 +186,28 @@ class RemotePanel(ModalScreen[None]):
         if url != self._qr_url:
             self._qr_url = url
             self.query_one("#remote-link", Static).update(Text(url or "turn Remote on for a link"))
-            self.query_one("#remote-qr", Static).update(qr_text(url) if url else "")
+            self.query_one("#remote-qr", Static).update(qr_art(url) if url else "")
         self.query_one("#remote-regen", Button).disabled = not running
         self.query_one("#remote-copy", Button).disabled = url is None
         self._paint_devices(controller.devices(status))
+
+    def _paint_switch(self, switch_id: str, value: bool, heard: str | None) -> None:
+        """Show the controller's ``value`` on a switch, posting no ``Changed`` of its own.
+
+        Each value written back used to come round as a ``Changed`` the handler took for
+        the user's, and with two presses in flight they never ran out: the handler flipped
+        the controller, this flipped the switch back, its echo flipped the controller again,
+        starting uvicorn and ngrok and revoking every phone, for as long as the panel stayed
+        open (sweep of #243). A switch the user moved since the last paint keeps the user's
+        word until :meth:`on_switch_changed` has handled it (``heard``): the one-second tick
+        landing between a press and its ``Changed`` turned it back, and the press was lost.
+        """
+        switch = self.query_one(f"#{switch_id}", Switch)
+        if heard != switch_id and switch.value != self._painted.get(switch_id, switch.value):
+            return
+        with self.prevent(Switch.Changed):
+            switch.value = value
+        self._painted[switch_id] = value
 
     def _state_text(self) -> Text:
         controller = self.controller
@@ -176,7 +218,7 @@ class RemotePanel(ModalScreen[None]):
             text.append("  · local only — no tunnel yet", style="dim")
         deadline = controller.adopt_server_deadline()  # a phone's extension shows here too
         if deadline is not None:
-            text.append(f"  · auto-off at {deadline.astimezone():%H:%M}", style="dim")
+            text.append(f"  · auto-off at {deadline.astimezone(LOCAL_ZONE):%H:%M}", style="dim")
         elif controller.state.auto_off_minutes is None:
             # Never: say so, rather than leave the slot the timer usually fills empty —
             # "on" with nothing after it reads like the timer simply has not armed yet.
@@ -226,31 +268,34 @@ class RemotePanel(ModalScreen[None]):
     # --- the controls ---------------------------------------------------------------------------
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
-        """A switch moved. Act only when it DISAGREES with the controller.
+        """A switch moved. Act on what it shows now, only when that DISAGREES with the
+        controller; a repaint posts no ``Changed`` of its own (:meth:`_paint_switch`).
 
-        The value a repaint writes back comes round as a ``Changed`` message of
-        its own, and Textual delivers those from the queue — so the ``_syncing``
-        flag this used to read was always back to ``False`` by the time the echo
-        arrived. Measured: a ``start_remote_server()`` that refuses (no page
-        installed) set the status line, ``repaint`` snapped the switch back to off, and that echo
-        ran ``turn_off()`` — which cleared the very sentence the user needed.
-        Comparing against the controller needs no flag and cannot go stale: the
-        switch always shows the current state, so a real toggle never matches it.
+        A ``Changed`` whose value the switch no longer shows is a press a later one has
+        taken back, still on its way, and acting on it is what flipped Remote on and off
+        for as long as the panel stayed open: two presses before the first was handled
+        (impatience while Remote stops, key repeat, keys batched over SSH) are the human's
+        net word, which the last of them carries. Comparing against the controller
+        needs no flag and cannot go stale: a real toggle never matches it.
         """
-        if event.switch.id == "remote-on":
-            if event.value == self.controller.running:
-                return
+        switch = event.switch
+        if event.value != switch.value:
+            return
+        if switch.id == "remote-on" and event.value != self.controller.running:
+            # Never waiting for a Remote to stop: its server and ngrok take seconds to wind
+            # down, on a thread of their own, and the status line says when they are done.
             if event.value:
-                self.controller.turn_on()
+                self.controller.turn_on(wait=False)
             else:
-                self.controller.turn_off()
-        elif event.switch.id == "remote-allow-write":
-            if event.value == self.controller.write_actions_allowed():
-                return
+                self.controller.turn_off(wait=False)
+        elif (
+            switch.id == "remote-allow-write"
+            and event.value != self.controller.write_actions_allowed()
+        ):
             self.controller.set_allow_write(event.value)
             if event.value:
                 self.notify("Write actions are ON for remote devices", severity="warning")
-        self.repaint()
+        self.repaint(heard=switch.id)
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id != "remote-auto-off" or event.value not in AUTO_OFF_CHOICES:
@@ -296,10 +341,27 @@ def _device_cells(device: dict[str, Any]) -> tuple[str, ...]:
     return (
         str(device["id"]),
         _short_cell(device.get("ua"), 40) or "unknown device",
-        _short_cell(device.get("last_seen"), 19) or "—",
-        _short_cell(device.get("expires_at"), 19) or "—",
+        _device_time(device.get("last_seen")),
+        _device_time(device.get("expires_at")),
         "signed in" if device.get("signed_in") else "signed out",
     )
+
+
+def _device_time(value: Any) -> str:
+    """A device's time as the auto-off line says its own: in this machine's zone, with the
+    date (``Oct 14 20:58``), since a sign-in ends a week on, on the same weekday.
+
+    The server's UTC stamps were cut to 19 characters, the offset and the seconds' last
+    digit gone: in Los Angeles at 20:58 a phone seen that second read ``2026-10-08T03:58:0…``,
+    tomorrow, two rows under "auto-off at 21:58" (sweep of #243). Read as the server reads
+    them (:func:`~aisquare.services.remote_server._remote_instant`: a stamp without its offset
+    is UTC); one that is no time at all shows as it came.
+    """
+    at = _remote_instant(value)
+    if at is None:
+        return _short_cell(value, 19) or "—"
+    here = at.astimezone(LOCAL_ZONE)
+    return f"{here:%b} {here.day} {here:%H:%M}"
 
 
 def _short_cell(value: Any, width: int) -> str:

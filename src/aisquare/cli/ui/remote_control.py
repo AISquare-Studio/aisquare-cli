@@ -8,8 +8,9 @@ restart — is a plain unit test.
 
 Persistence (PLAN §1): the two switch values ``remote_enabled`` and
 ``auto_off_minutes`` sit next to the theme key in ``~/.aisquare/state.json``
-through the file's one locked writer (``core.state_file.update_state``), as the
-theme autosave does. Token, password, devices and the write switch are the
+through the file's one locked writer (``core.state_file.update_state``), each
+key on its own, and in the fleet UI through the autosave the theme uses, off
+Textual's thread. Token, password, devices and the write switch are the
 SERVER's (``~/.aisquare/remote.json``) and are only read and written through its
 API, so ``aisquare remote allow-write`` and ``regenerate-password`` from a shell
 and this modal always agree.
@@ -21,6 +22,8 @@ path to ``allow_write=True`` is the user's switch.
 from __future__ import annotations
 
 import contextlib
+import functools
+import logging
 import os
 import threading
 from collections.abc import Callable
@@ -47,13 +50,29 @@ explicit pick (persisted as :data:`NEVER`) switches the timer off."""
 DEFAULT_AUTO_OFF = 60
 NEVER = "never"
 """How Never is stored under ``auto_off_minutes`` in ``state.json``."""
-STATE_KEYS = ("remote_enabled", "auto_off_minutes")
+SWITCHES = {"remote_enabled": "Remote's on/off switch", "auto_off_minutes": "the auto-off timer"}
+"""The two switches ``state.json`` keeps, by key, as a sentence names them."""
 PORT_ENV = "AISQUARE_REMOTE_PORT"
 """``serve --port``'s variable, read by ``status`` and ``regenerate-password`` for the link
 they print: the panel serves on it too, so one export moves all of them. The panel always
 served on 8750, and with the variable exported ``status`` printed a port it was not on."""
+TURNING_OFF = "turning Remote off…"
+"""The status line while the server and ngrok stop on their own thread (:meth:`turn_off`)."""
+STILL_TURNING_OFF = "Remote is still turning off — switch it on again in a moment"
+OFF_WAIT_SECONDS = 1.0
+"""How long :meth:`RemoteController.turn_on` waits for a Remote still turning off: its server
+must be down, its tunnel gone and ``remote.json`` cleared before another starts, or the old
+Remote's last steps would undo the new one's. Past that, the switch says to try again rather
+than hold Textual's thread for the rest of a slow stop."""
+
+UNREACHABLE = "Remote is on, but phones cannot reach it"
+"""How news of a tunnel that is not up begins (:attr:`RemoteController.on_news`)."""
 
 TunnelFactory = Callable[[int], NgrokTunnel]
+NewsListener = Callable[[str, bool], None]
+"""Told a sentence, and whether it is trouble (``False``: good news), on any thread."""
+
+log = logging.getLogger(__name__)
 
 
 def _panel_port() -> tuple[int, str | None]:
@@ -110,14 +129,9 @@ def load_remote_state() -> RemoteState:
     )
 
 
-def save_remote_state(state: RemoteState) -> None:
-    """Persist the two switches; a state.json that cannot be written keeps the old ones."""
-    minutes = NEVER if state.auto_off_minutes is None else state.auto_off_minutes
-    try:
-        update_state("remote_enabled", state.remote_enabled)
-        update_state("auto_off_minutes", minutes)
-    except StateUnwritableError:
-        return
+SwitchSaver = Callable[[str, object], None]
+"""Hands one switch's new value to ``state.json``, by key: :func:`update_state`'s shape, which
+raises :class:`StateUnwritableError` when the file refuses it."""
 
 
 class RemoteController:
@@ -153,12 +167,45 @@ class RemoteController:
         """``https://<ngrok-host>/r/<token>`` once the tunnel announced itself."""
         self.message: str | None = None
         """What the status line says: waiting for ngrok, the install hint, an error."""
+        self.save_problem: str | None = None
+        """The last write of ``remote.json`` a control could not make, until one goes through.
+
+        Every write puts the whole state the server holds, the failed change included, so
+        the next one that lands has saved that too, and the sentence goes then. A field
+        of its own: kept in :attr:`message`, nothing cleared it but a sentence about
+        ngrok, and the panel went on saying the write switch or a revoke had not been
+        saved long after both had been (sweep of #243)."""
         self.auto_off_at: datetime | None = None
         self._deadline_unsaved = False
         """Set by a write of the deadline that failed, until one goes through or the server is
         seen to read the file again: till then the running server may hold a deadline
         ``remote.json`` does not (:meth:`adopt_server_deadline`)."""
         self._waiter: threading.Thread | None = None
+        self._lock = threading.Lock()
+        """Around the tunnel, the link and the status line as a tunnel's URL lands on them: a URL
+        comes from ngrok's own threads, whenever ngrok announces it (:meth:`_adopt_tunnel_url`),
+        and must not land on a Remote turned off, or on a tunnel replaced, meanwhile."""
+        self._stopper: threading.Thread | None = None
+        """The thread that stops the server and ngrok after :meth:`turn_off`, the latest one."""
+        self.save_switch: SwitchSaver = update_state
+        """How a switch that changed reaches ``state.json``: that one key, at once, on the
+        caller's thread. The fleet UI hands it to a saver of its own instead, which writes on
+        a thread of its own and says a refusal itself, as the theme's does (``FleetApp``)."""
+        self._refused_switches: dict[str, str] = {}
+        """A switch ``state.json`` refused, by key, as the status line says it, until a later
+        save of that switch lands."""
+        self.on_news: NewsListener | None = None
+        """Told what the human should hear with the R panel closed, on whichever thread
+        learned it: a Remote that did not come back at a TUI start, a tunnel that did not
+        come up, came up late or came back on a new link, auto-off, and what turning off
+        could not do. Only the panel's status line said any of it, and a Remote that failed
+        to come back as the human sat down was found out from the phone, away from the
+        desk (sweep of #243). The fleet UI toasts it."""
+        self._news_lock = threading.Lock()
+        self._last_news: str | None = None
+        """The last sentence told, so a tunnel failing the same way every minute says it once."""
+        self._unreachable_told = False
+        """A tunnel not up was told of: the URL that comes after it is good news."""
 
     # --- on / off -----------------------------------------------------------------------
 
@@ -166,7 +213,7 @@ class RemoteController:
     def running(self) -> bool:
         return self.info is not None
 
-    def turn_on(self) -> None:
+    def turn_on(self, *, wait: bool = True) -> None:
         """Start the server, then the tunnel; the public URL arrives on a background thread.
 
         Remote stays on only when ``remote.json`` took its auto-off deadline. A file that
@@ -174,11 +221,21 @@ class RemoteController:
         and the ``PermissionError`` raised out of ``restore()`` in ``FleetApp.on_mount``
         ended the fleet UI at start with uvicorn still serving in its thread. The server
         is stopped again instead, which leaves Remote as any start that fails does: off,
-        the saved switch as it was, and the status line saying why.
+        the saved switch as it was, and the status line saying why. ``wait`` is
+        :meth:`turn_off`'s, for that stop.
+
+        A Remote still turning off is waited for, a moment at most (:data:`OFF_WAIT_SECONDS`):
+        its last steps clear the deadline and the public origin in the running process,
+        and would clear this Remote's.
         """
         if self.running:
             return
+        if not self.wait_until_off(OFF_WAIT_SECONDS):
+            self.message = STILL_TURNING_OFF
+            return
         self.public_url = None
+        with self._news_lock:  # a new Remote: what the last one said may be news again
+            self._last_news, self._unreachable_told = None, False
         if self._port_problem is not None:  # a sentence, never Remote on another port
             self.message = f"Remote could not start — {self._port_problem}"
             return
@@ -194,12 +251,19 @@ class RemoteController:
         try:
             self._arm_auto_off()
         except Exception as exc:  # remote.json will not write: no Remote without its deadline
-            self.turn_off(persist=False)  # never raises, and keeps the saved switch
-            self.message = f"Remote could not start — remote.json could not be written: {exc}"
+            # Never raises, and keeps the saved switch. The stopping's own failures are this
+            # one again (the deadline cleared in the same file), so the sentence stands alone.
+            self.turn_off(
+                persist=False,
+                wait=wait,
+                status=f"Remote could not start — remote.json could not be written: {exc}",
+                report=False,
+            )
             return
         self.message = None
+        self.save_problem = None  # the deadline's write put the whole state
         self._set_state(remote_enabled=True)
-        tunnel = self._tunnel_factory(self._port)
+        tunnel = self._watched_tunnel()
         failure = tunnel.start_tunnel()
         if failure is not None:
             # No tunnel, but the local server is up: the modal keeps the local link
@@ -207,25 +271,82 @@ class RemoteController:
             self.message = failure
             self.tunnel = None
             return
-        self.tunnel = tunnel
-        self.message = "starting ngrok…"
+        with self._lock:  # its URL may land at once, and must not find "starting" after it
+            self.tunnel = tunnel
+            self.message = "starting ngrok…"
         self._waiter = threading.Thread(
             target=self._await_url, args=(tunnel,), name="ngrok-url", daemon=True
         )
         self._waiter.start()
 
-    def _await_url(self, tunnel: NgrokTunnel) -> None:
-        url = tunnel.wait_for_url(self._url_timeout)
-        if tunnel is not self.tunnel:  # turned off (or restarted) while we waited
-            return
-        if url is not None and self.info is not None:
-            self.public_url = build_public_url(url, self.info.token)
-            self.message = None
-            self._note_public_url(self.public_url)
-        else:
-            self.message = tunnel.error or "ngrok did not announce a tunnel in time"
+    def _watched_tunnel(self) -> NgrokTunnel:
+        """A tunnel for this Remote's port that hands every URL it announces to
+        :meth:`_adopt_tunnel_url`, however late it comes."""
+        tunnel = self._tunnel_factory(self._port)
+        tunnel.on_announce = functools.partial(self._adopt_tunnel_url, tunnel)
+        return tunnel
 
-    def turn_off(self, *, persist: bool = True, reason: str = "remote off") -> None:
+    def _await_url(self, tunnel: NgrokTunnel) -> None:
+        """Wait for the tunnel's URL; past :attr:`_url_timeout`, say why there is none yet.
+
+        The wait ends there, the watching does not: ngrok retries a session it could not
+        open, and ``restore()`` brings Remote back at a TUI start, often before a waking
+        laptop's Wi-Fi is up. The URL announced a minute later reaches
+        :meth:`_adopt_tunnel_url` from the tunnel's log reader. Waited for once, it was
+        never shown, nor noted for push links, until Remote was turned off and on (r3
+        review of #243).
+        """
+        url = tunnel.wait_for_url(self._url_timeout)
+        if url is not None:
+            self._adopt_tunnel_url(tunnel, url)
+            return
+        with self._lock:
+            if tunnel is not self.tunnel or self.public_url is not None:
+                return
+            self.message = tunnel.error or "ngrok did not announce a tunnel in time"
+            why = self.message
+        self._unreachable(why)
+
+    def _adopt_tunnel_url(self, tunnel: NgrokTunnel, url: str) -> None:
+        """Show ``url`` as the link and note it for push links, while ``tunnel`` is this
+        Remote's: one turned off, or replaced by a restart, speaks for no Remote now.
+
+        From the thread that waited for the URL and from the tunnel's log reader, both:
+        the first to land shows it, and the same URL again changes nothing. A restarted
+        tunnel's says so, and whether the link changed (SPEC §5.8).
+        """
+        with self._lock:
+            info = self.info
+            if tunnel is not self.tunnel or info is None:
+                return
+            link = build_public_url(url, info.token)
+            if link == self.public_url:
+                return
+            self.public_url = link
+            moved = tunnel is self._revived_tunnel and link != self._link_before_revive
+            if tunnel is self._revived_tunnel:
+                changed = "; the link changed" if moved else ""
+                self.message = f"ngrok stopped — restarted it{changed}"
+            else:
+                self.message = None
+            # Under the lock, so a Remote turned off meanwhile forgets it after, not before.
+            self._note_public_url(link)
+        with self._news_lock:
+            told, self._unreachable_told, self._last_news = self._unreachable_told, False, None
+        if moved:  # every phone's link is dead: the human at the desk has the new one to give
+            self._remote_news("ngrok stopped and came back on a new link — R shows it")
+        elif told:
+            self._remote_news("ngrok is up — phones can reach Remote now", trouble=False)
+
+    def turn_off(
+        self,
+        *,
+        persist: bool = True,
+        reason: str = "remote off",
+        wait: bool = True,
+        status: str | None = None,
+        report: bool = True,
+    ) -> None:
         """Stop the server and the tunnel. ``persist=False`` keeps the saved switch (app exit).
 
         Turning Remote off (the switch, auto-off) revokes every device after the
@@ -235,16 +356,61 @@ class RemoteController:
         revokes nothing: ``restore()`` brings Remote back at the next start, and
         the devices' own expiry bounds them meanwhile.
 
+        The controller reads off at once, and the stopping runs on a thread of its
+        own (``remote-off``); ``wait=False`` returns without waiting for it, which is
+        how the fleet UI turns Remote off (the switch, auto-off and quit). Stopping
+        waits for uvicorn, whose shutdown waits for a needs scan in flight and the
+        push sender, then for ``remote.json``'s lock and for ngrok to exit, and on
+        Textual's thread that froze the fleet UI for seconds (r3 review of #243). The
+        status line says :data:`TURNING_OFF` meanwhile, or ``status`` when given;
+        once the thread is done it says ``status``, then what stopping could not do,
+        if anything and ``report`` says to. :meth:`turn_on` waits for the thread, and
+        so does :meth:`wait_until_off`.
+
         Nothing the server raises keeps Remote on. Each step runs whatever the one
         before it raised, the first failure is the status line's sentence, and
         ngrok stops and the controller reads off in any case: auto-off calls this
         from a Textual timer, where an exception ends the whole fleet UI, and a
         ``remote.json`` that would not write once left ngrok up and the switch on.
         """
-        tunnel, self.tunnel = self.tunnel, None
+        with self._lock:  # a URL landing now must find the Remote off (_adopt_tunnel_url)
+            served, tunnel = self.info is not None, self.tunnel
+            self.info = None
+            self.tunnel = None
+            self.public_url = None
+            self.auto_off_at = None
+        if persist:
+            self._set_state(remote_enabled=False)
+        if not served and tunnel is None:
+            self.message = status
+            return
+        self.message = status or TURNING_OFF
+        stopper = threading.Thread(
+            target=self._stop_remote,
+            args=(served, tunnel, persist, reason, status, report),
+            name="remote-off",
+            # Not a daemon: the interpreter waits for it at exit, so no ngrok outlives the
+            # TUI whatever quit did not wait for.
+            daemon=False,
+        )
+        self._stopper = stopper
+        stopper.start()
+        if wait:
+            stopper.join()
+
+    def _stop_remote(
+        self,
+        served: bool,
+        tunnel: NgrokTunnel | None,
+        persist: bool,
+        reason: str,
+        status: str | None,
+        report: bool,
+    ) -> None:
+        """:meth:`turn_off`'s stopping, on its own thread; the status line says how it ended."""
         failure: str | None = None
         try:
-            if self.info is not None:
+            if served:
                 if persist:
                     try:
                         self._server.revoke_every_remote_device(reason)
@@ -255,28 +421,63 @@ class RemoteController:
                     self._server.set_auto_off(None)
                 except Exception as exc:  # a deadline left in the file ends nothing
                     failure = failure or f"Remote is off, but remote.json was not updated — {exc}"
+                else:
+                    self.save_problem = None  # that write put the whole state
                 try:
                     self._server.stop_remote_server()
                 except Exception as exc:
                     failure = failure or f"Remote is off, but stopping its server failed — {exc}"
         finally:
             if tunnel is not None:
-                tunnel.stop_tunnel()
-            self.info = None
-            self.public_url = None
-            self.auto_off_at = None
-            self.message = failure
-            if persist:
-                self._set_state(remote_enabled=False)
+                try:
+                    tunnel.stop_tunnel()
+                except Exception as exc:  # a thread of its own: nobody else would hear of it
+                    failure = failure or f"Remote is off, but ngrok did not stop cleanly — {exc}"
+            if status is None:
+                self.message = failure
+            elif failure is None or not report:
+                self.message = status
+            else:
+                # What turning off could not do still shows: a revoke that failed leaves
+                # phones holding cookies the next Remote accepts.
+                self.message = f"{status}. {failure}"
+            if report:
+                self._remote_news(failure)
 
-    def restore(self) -> None:
-        """At TUI start: a Remote that was on when the TUI last exited comes back on."""
-        if self.state.remote_enabled and not self.running:
-            self.turn_on()
+    def wait_until_off(self, timeout: float | None = None) -> bool:
+        """Wait for the server and ngrok of a Remote turned off to stop; whether they had.
 
-    def shutdown_for_exit(self) -> None:
-        """At TUI exit: end the processes, keep the saved switches for ``restore``."""
-        self.turn_off(persist=False)
+        ``timeout`` bounds the wait, ``None`` waits as long as stopping takes (each of its
+        steps is bounded). ``run_ui`` waits here once the terminal is back, so the
+        process never ends before its ngrok.
+        """
+        stopper = self._stopper
+        if stopper is None or not stopper.is_alive():
+            return True
+        stopper.join(timeout)
+        return not stopper.is_alive()
+
+    def restore(self, *, wait: bool = True) -> None:
+        """At TUI start: a Remote that was on when the TUI last exited comes back on.
+
+        What kept it off, or kept ngrok from starting, is news (:attr:`on_news`): this runs
+        as the human sits down, often just before leaving the desk with the phone.
+        """
+        if not self.state.remote_enabled or self.running:
+            return
+        self.turn_on(wait=wait)
+        if not self.running:
+            self._remote_news(self.message)
+        elif self.tunnel is None:
+            self._unreachable(self.message)
+
+    def shutdown_for_exit(self, *, wait: bool = True) -> None:
+        """At TUI exit: end the processes, keep the saved switches for ``restore``.
+
+        ``wait=False`` leaves them stopping on their own thread (:meth:`turn_off`);
+        :meth:`wait_until_off` is then where the exit waits for them.
+        """
+        self.turn_off(persist=False, wait=wait)
 
     # --- the controls ---------------------------------------------------------------------
 
@@ -299,7 +500,9 @@ class RemoteController:
         try:
             self._server.set_allow_write(bool(enabled))
         except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
-            self.message = f"write actions could not be saved to remote.json — {exc}"
+            self.save_problem = f"write actions could not be saved to remote.json — {exc}"
+        else:
+            self.save_problem = None
 
     def set_auto_off(self, minutes: int | None) -> None:
         """Pick a timer, or ``None`` for Never. Takes effect at once while Remote is on.
@@ -318,7 +521,9 @@ class RemoteController:
             try:
                 self._arm_auto_off()
             except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
-                self.message = f"auto-off could not be saved to remote.json — {exc}"
+                self.save_problem = f"auto-off could not be saved to remote.json — {exc}"
+            else:
+                self.save_problem = None
 
     def regenerate_password(self) -> str | None:
         """A new passphrase from the server; ``None`` while Remote is off (nothing to unlock),
@@ -329,10 +534,12 @@ class RemoteController:
         if self.info is None:
             return None
         try:
-            return str(self._server.regenerate_password())
+            password = str(self._server.regenerate_password())
         except Exception as exc:  # raised into the Regenerate button's handler: the UI ended
-            self.message = f"the new password could not be saved to remote.json — {exc}"
+            self.save_problem = f"the new password could not be saved to remote.json — {exc}"
             return None
+        self.save_problem = None
+        return password
 
     def remote_status(self) -> dict[str, Any]:
         """``remote_server_status()``; ``{}`` while ``remote.json`` cannot be read. A paint
@@ -358,8 +565,9 @@ class RemoteController:
         try:
             self._server.revoke_remote_device(device_id)
         except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
-            self.message = f"{device_id} could not be revoked in remote.json — {exc}"
+            self.save_problem = f"{device_id} could not be revoked in remote.json — {exc}"
             return False
+        self.save_problem = None
         return True
 
     def unlock_failures(self, status: dict[str, Any] | None = None) -> tuple[int, str | None]:
@@ -373,6 +581,13 @@ class RemoteController:
         )
 
     # --- what the modal paints ---------------------------------------------------------------
+
+    def status_line(self) -> str:
+        """The status line: what Remote is doing or why it is not, then a write of
+        ``remote.json`` that did not land (:attr:`save_problem`) and a switch ``state.json``
+        refused, each on a line of its own."""
+        lines = (self.message, self.save_problem, *self._refused_switches.values())
+        return "\n".join(line for line in lines if line)
 
     def link_url(self) -> str | None:
         """The public link when ngrok is up, else the local one — ``None`` while Remote is off."""
@@ -444,23 +659,40 @@ class RemoteController:
                 self.auto_off_at = served
         return self.auto_off_at
 
-    def enforce_auto_off(self) -> bool:
-        """Turn Remote off when its timer has run out; ``True`` when it just did."""
+    def enforce_auto_off(self, *, wait: bool = True) -> bool:
+        """Turn Remote off when its timer has run out; ``True`` when it just did.
+
+        ``wait`` is :meth:`turn_off`'s: the app's 30 s timer passes ``False``, so the
+        fleet UI never waits for the stopping.
+        """
         deadline = self.adopt_server_deadline()
         if self.running and deadline is not None and _aware(self._now()) >= deadline:
-            self.turn_off(reason="auto-off")
             ran_out = "Remote turned off — the auto-off timer ran out"
-            # What turning off could not do still shows: a revoke that failed leaves phones
-            # holding cookies the next Remote accepts.
-            self.message = ran_out if self.message is None else f"{ran_out}. {self.message}"
+            self._remote_news(ran_out)  # before what the stopping could not do, if anything
+            self.turn_off(reason="auto-off", wait=wait, status=ran_out)
             return True
         return False
 
     # --- persistence -----------------------------------------------------------------------------
 
     def _set_state(self, **changes: Any) -> None:
+        """Take ``changes`` in hand, and save each switch that changed, on its own.
+
+        Only those keys: the whole snapshot this TUI read at its start went out with every
+        save, so a second ``asq ui`` that picked an auto-off wrote back the Remote it had read
+        as on, after the first had turned it off, and the next start brought the public
+        tunnel back against that off (sweep of #243). A save ``state.json`` refused was
+        dropped without a word; it is on the status line now, until one of that switch lands.
+        """
         self.state = replace(self.state, **changes)
-        save_remote_state(self.state)
+        for key, value in changes.items():
+            stored = NEVER if key == "auto_off_minutes" and value is None else value
+            try:
+                self.save_switch(key, stored)
+            except StateUnwritableError as exc:
+                self._refused_switches[key] = f"{SWITCHES[key]} could not be saved — {exc}"
+            else:
+                self._refused_switches.pop(key, None)
 
     # --- the tunnel watchdog ---------------------------------------------------------------------
 
@@ -501,43 +733,53 @@ class RemoteController:
         ):
             return False
         self._revived_at = now
-        tunnel = self._tunnel_factory(self._port)
+        tunnel = self._watched_tunnel()
         failure = tunnel.start_tunnel()
         if failure is not None:  # the dead one stays, so the next minute tries again
             self.message = failure
+            self._unreachable(failure)
             return False
         dead.stop_tunnel()
-        if self.public_url is not None:  # else the last restart never came up: keep the link
-            self._link_before_revive = self.public_url
-        self.tunnel = self._revived_tunnel = tunnel
-        self.public_url = None  # the modal shows the local link until ngrok announces one
-        self.message = "ngrok stopped — restarting it…"
+        with self._lock:
+            if self.public_url is not None:  # else the last restart never came up: keep it
+                self._link_before_revive = self.public_url
+            self.tunnel = self._revived_tunnel = tunnel
+            self.public_url = None  # the modal shows the local link until ngrok announces one
+            self.message = "ngrok stopped — restarting it…"
+        # Its URL says ngrok was restarted, and whether the link changed (_adopt_tunnel_url);
+        # a restart that dies before it announces leaves ngrok's own error on the status line.
         self._waiter = threading.Thread(
-            target=self._await_revived_url,
-            args=(tunnel, self._link_before_revive),
-            name="ngrok-url",
-            daemon=True,
+            target=self._await_url, args=(tunnel,), name="ngrok-url", daemon=True
         )
         self._waiter.start()
         return True
 
-    def _await_revived_url(self, tunnel: NgrokTunnel, dead_link: str | None) -> None:
-        """:meth:`_await_url`, then say ngrok was restarted, and whether the link changed.
+    def _unreachable(self, why: str | None) -> None:
+        """Tell that phones cannot reach this Remote, and ``why``: no tunnel is up."""
+        with self._news_lock:
+            self._unreachable_told = True
+        self._remote_news(f"{UNREACHABLE} — {why}" if why else UNREACHABLE)
 
-        A restart that dies before it announces leaves :meth:`_await_url`'s
-        message, ngrok's own error, on the status line until the next one.
-        """
-        self._await_url(tunnel)
-        if tunnel is self.tunnel and self.public_url is not None:
-            changed = "" if self.public_url == dead_link else "; the link changed"
-            self.message = f"ngrok stopped — restarted it{changed}"
+    def _remote_news(self, news: str | None, *, trouble: bool = True) -> None:
+        """Hand ``news`` to :attr:`on_news`, once for a run of the same sentence."""
+        hear = self.on_news
+        if not news or hear is None:
+            return
+        with self._news_lock:
+            if news == self._last_news:
+                return
+            self._last_news = news
+        try:
+            hear(news, trouble)
+        except Exception:  # on ngrok's or the stopper's thread: nobody else would hear of it
+            log.warning("remote: news could not be told: %s", news, exc_info=True)
 
     def _note_public_url(self, url: str) -> None:
         """Tell the server where phones reach it, so push links lead there (SPEC §5.8).
 
         Only an https URL on a DNS name is an origin: a tunnel that announces
         anything else leaves push links without one, rather than raising in the
-        thread that waited for it.
+        thread that took it (the one that waited for it, or ngrok's log reader).
         """
         with contextlib.suppress(ValueError):
             self._server.note_public_url(url)

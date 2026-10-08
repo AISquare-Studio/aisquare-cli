@@ -1809,6 +1809,87 @@ def test_every_command_says_why_remote_json_cannot_be_used(
     assert path.read_bytes() == b'{"version": 2,'
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["allow-write", "on"],
+        ["regenerate-password"],
+        ["regenerate-password", "--new-link"],
+        ["revoke", "--all"],
+        ["revoke", "<the device>"],
+    ],
+    ids=" ".join,
+)
+def test_every_command_says_when_remote_json_cannot_be_written(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch, command: list[str]
+) -> None:
+    """A ``remote.json`` the commands could read but not replace (a read-only or full home)
+    ended every one that writes in a hundred-line traceback, with nothing on stdout under
+    ``--json`` (sweep of #243): the file unreadable was already a clean answer, the file
+    unwritable was not."""
+    unlocked = runtime.unlock_device(PASSWORD, "Pixel")
+    assert unlocked is not None
+    command = [unlocked[1].id if part == "<the device>" else part for part in command]
+    monkeypatch.setattr(remote_server, "_runtime", None)  # the CLI is another process
+    path = remote_state_path()
+    before = path.read_bytes()
+
+    def unwritable(target: Path, **kwargs: object) -> object:
+        raise PermissionError(errno.EACCES, "Permission denied", str(target))
+
+    monkeypatch.setattr(remote_server, "replacement", unwritable)
+    result = CliRunner().invoke(cli, ["--json", "remote", *command])
+    assert result.exit_code == 1, result.output
+    answer = json.loads(result.stdout)
+    assert answer["error"] == "remote_state_unwritable"
+    assert "Permission denied" in answer["detail"]
+    assert path.read_bytes() == before, "nothing was changed"
+    monkeypatch.setattr(remote_server, "_runtime", None)  # another process again
+    human = CliRunner().invoke(cli, ["remote", *command])
+    assert human.exit_code == 1
+    assert isinstance(human.exception, SystemExit), "a sentence, never a traceback"
+    assert f"{path} could not be written" in human.stderr
+
+
+@pytest.mark.parametrize("command", [["status"], ["serve"]], ids=" ".join)
+def test_a_home_that_will_not_take_a_first_remote_json_is_a_sentence(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, command: list[str]
+) -> None:
+    """``status`` and ``serve`` make ``remote.json`` the first time; in a home that refused
+    it they ended in a traceback, before anything else was said."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+
+    def unwritable(target: Path, **kwargs: object) -> object:
+        raise PermissionError(errno.EACCES, "Permission denied", str(target))
+
+    monkeypatch.setattr(remote_server, "replacement", unwritable)
+    result = CliRunner().invoke(cli, ["--json", "remote", *command])
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout)["error"] == "remote_state_unwritable"
+    assert not remote_state_path().exists()
+
+
+def test_a_page_that_cannot_be_installed_is_a_sentence(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``install-page`` into a directory it could not write ended in a traceback, and a
+    ``--json`` caller got nothing."""
+    import shutil
+
+    built = tmp_path / "dist"
+    built.mkdir()
+    (built / "index.html").write_text("<!doctype html>", encoding="utf-8")
+
+    def refused(source: object, target: object, *args: object, **kwargs: object) -> object:
+        raise PermissionError(errno.EACCES, "Permission denied", str(target))
+
+    monkeypatch.setattr(shutil, "copytree", refused)
+    result = CliRunner().invoke(cli, ["--json", "remote", "install-page", str(built)])
+    assert result.exit_code == 1, result.output
+    answer = json.loads(result.stdout)
+    assert answer["error"] == "remote_page_unwritable" and "Permission denied" in answer["detail"]
+
+
 def test_a_write_waits_for_another_process_holding_the_lock(runtime: Runtime) -> None:
     """A CLI revoke landing inside a server's flush was undone by it: every read-modify-write
     now holds ``remote.json.lock``, and starts from what is on disk once it has it."""

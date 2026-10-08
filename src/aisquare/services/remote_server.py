@@ -307,13 +307,17 @@ REMOTE_KEY_VOCABULARY = (
     "Enter, Escape, Tab, BTab, BSpace, Space, Up, Down, Left, Right, Home, End, PageUp, "
     "PageDown, Delete, F1-F12, C-c, C-d, C-l, C-o, C-r, C-u, 0-9, y, n"
 )
-_TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-"""What typed ``text`` may not hold: a C0 control other than tab, newline and carriage return,
-or DEL (:func:`check_remote_text`)."""
+_TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+"""What typed ``text`` may not hold: a C0 control other than tab and newline, or DEL
+(:func:`check_remote_text`). A carriage return is the Enter key, byte for byte."""
+_PASTED_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+"""What a paste (a tell) may not hold: the same, but for the carriage return, which inside a
+bracketed paste is a line break of the message and submits nothing."""
 _TEXT_CONTROL_KEYS = {
     "\x03": "C-c",
     "\x04": "C-d",
     "\x0c": "C-l",
+    "\r": "Enter",
     "\x0f": "C-o",
     "\x12": "C-r",
     "\x15": "C-u",
@@ -1578,17 +1582,22 @@ def check_remote_key_names(keys: object) -> list[str]:
     return list(keys)
 
 
-def check_remote_text(text: str) -> None:
-    """Refuse typed ``text`` holding a control character other than tab, newline and
-    carriage return: 400 ``invalid``, naming the pad's key for it.
+def check_remote_text(text: str, *, pasted: bool = False) -> None:
+    """Refuse typed ``text`` holding a control character other than tab and newline: 400
+    ``invalid``, naming the pad's key for it. A ``pasted`` text (a tell) may also hold a
+    carriage return.
 
     Text reaches the pane as hex, byte for byte, so a control character in it IS a
     keystroke: ``"\\x03"`` was a Ctrl-C past the double-press guard, ``"\\x1a"`` the
     Ctrl-Z :data:`REMOTE_KEY_NAME` refuses as a key, and the audit line said
     ``text=1ch``, which cannot tell either from a letter. Keys go as ``keys``, where
-    the allowlist, the guard and the trail see them by name.
+    the allowlist, the guard and the trail see them by name. A carriage return is the
+    Enter key's own byte: ``{"text": "\\r"}`` took a dialog's highlighted option while
+    the trail said ``enter=False``, and each line of a CRLF text was a prompt of its own
+    (review of #243, round 3). Inside a tell's bracketed paste it is a line break of
+    the message, as a newline is.
     """
-    found = _TEXT_CONTROL.search(text)
+    found = (_PASTED_CONTROL if pasted else _TEXT_CONTROL).search(text)
     if found is None:
         return
     char = found.group()

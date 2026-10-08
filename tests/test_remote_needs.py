@@ -1814,7 +1814,7 @@ def test_an_answer_is_keys_or_words_never_both(
     assert live.tmux.typed == []
 
 
-@pytest.mark.parametrize("text", ["\x03", "yes\x1b[201~", "no\x7f", "ok\x04"])
+@pytest.mark.parametrize("text", ["\x03", "yes\x1b[201~", "no\x7f", "ok\x04", "1\r"])
 def test_an_answer_in_words_carries_no_control_character(live: Live, text: str) -> None:
     """Words reach the pane byte for byte, so a control in them would be a keystroke
     that no allowlist saw: a Ctrl-C past send-keys' double-press guard, written to the

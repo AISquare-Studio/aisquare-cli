@@ -299,6 +299,7 @@ def test_text_and_keys_in_one_body_are_refused_and_text_is_capped(pane: FakePane
         ("\x04", "the pad's C-d key"),
         ("\x1b", "the pad's Escape key"),
         ("\x7f", "the pad's BSpace key"),
+        ("\r", "the pad's Enter key"),
         ("\x1a", "no key of the pad sends it"),
         ("\x00", "no key of the pad sends it"),
     ],
@@ -318,10 +319,26 @@ def test_text_holding_a_control_character_is_refused_and_names_the_key(
     assert pane.sent == []
 
 
-def test_tab_newline_and_carriage_return_are_still_text(pane: FakePane) -> None:
+def test_tab_and_newline_are_still_text(pane: FakePane) -> None:
     send = live_writes().handlers["send-keys"]
-    send({"agent": "coder-1", "text": "a\tb\nc\r"})
-    assert pane.sent == [("literal", "a\tb\nc\r")]
+    send({"agent": "coder-1", "text": "a\tb\nc"})
+    assert pane.sent == [("literal", "a\tb\nc")]
+
+
+@pytest.mark.parametrize("text", ["\r", "first line\r\nsecond line"], ids=repr)
+def test_a_carriage_return_typed_is_the_enter_key_and_is_refused(pane: FakePane, text: str) -> None:
+    """``"\\r"`` is the Enter key's own byte: typed, it took a dialog's highlighted option
+    while the audit line said ``enter=False``, and each line of a CRLF text went in as a
+    prompt of its own (review of #243, round 3). ``enter`` and the pad's Enter key say
+    so on the trail."""
+    send = live_writes().handlers["send-keys"]
+    with pytest.raises(RequestError) as refused:
+        send({"agent": "coder-1", "text": text, "enter": False})
+    assert (refused.value.status, refused.value.error) == (400, "invalid")
+    assert refused.value.message == (
+        "'text' holds the control character U+000D — send the pad's Enter key instead"
+    )
+    assert pane.sent == []
 
 
 def test_a_send_that_fails_after_typing_is_still_on_the_audit_trail(

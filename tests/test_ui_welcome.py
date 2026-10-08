@@ -493,6 +493,52 @@ def test_a_typed_folder_is_judged_then_used(tmp_path: Path) -> None:
     assert machine.onboarded == [folder] and "✓ typed" in text
 
 
+@dataclass
+class SlowDisk(Machine):
+    """A machine whose first judgement of a typed folder takes until ``release`` is set."""
+
+    release: threading.Event = field(default_factory=threading.Event)
+    ui: threading.Thread | None = None
+    judged: list[tuple[str, bool]] = field(default_factory=list)
+    """Each text judged, and whether that ran on the UI thread."""
+
+    def validate(self, text: str) -> PathVerdict:
+        on_ui = threading.current_thread() is self.ui
+        self.judged.append((text, on_ui))
+        if len(self.judged) == 1 and not on_ui:
+            self.release.wait(10)
+        return super().validate(text)
+
+
+def test_a_typed_folder_is_judged_off_the_ui_thread_and_the_latest_text_wins(
+    tmp_path: Path,
+) -> None:
+    """Every keystroke ran the git probe and a store open on the UI thread, so a slow disk
+    stalled the shell between keys (review of #257). One judgement runs at a time, off the
+    UI thread; what is typed meanwhile is judged when it lands, and Enter waits for it."""
+    folder = tmp_path / "typed"
+    folder.mkdir()
+    machine = SlowDisk()
+
+    async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> tuple[str, str]:
+        machine.ui = threading.current_thread()
+        box = page.query_one("#welcome-path", Input)
+        box.focus()
+        for text in (str(tmp_path), f"{folder}-not-this", str(folder)):
+            box.value = text
+            await pilot.pause()
+        await pilot.press("enter")
+        held = page.verdict.text
+        machine.release.set()
+        await settle_page(host)
+        return held, page.verdict.text
+
+    held, verdict = hosted(machine, go)
+    assert machine.judged == [(str(tmp_path), False), (str(folder), False)], machine.judged
+    assert (held, verdict) == ("", str(folder)), "no verdict until its judgement lands"
+    assert machine.onboarded == [folder], "Enter used the folder once it was judged"
+
+
 def test_names_reach_the_screen_as_they_are(tmp_path: Path) -> None:
     folder = tmp_path / "[archive]"
     folder.mkdir()

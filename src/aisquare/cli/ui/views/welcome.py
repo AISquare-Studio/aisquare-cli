@@ -305,6 +305,10 @@ class WelcomeView(VerticalScroll):
         self.gh = True
         self.candidates: Candidates | None = None
         self.verdict: PathVerdict = _EMPTY_VERDICT
+        self._typed = ""
+        """What the path box holds now; :attr:`verdict` is for it once its judgement lands."""
+        self._use_owed = False
+        """Enter was pressed while the box's text was still being judged."""
         self.project: ProjectInfo | None = None
         """The project step 1 settled on; step 3's agents start in it."""
         self.busy: set[str] = set()
@@ -471,6 +475,8 @@ class WelcomeView(VerticalScroll):
             self._looked(result)
         elif name == "candidates":
             self._found(result, error)
+        elif name == "validate":
+            self._judged(result, error)
         elif name == "onboard":
             self._onboarded(result, error)
         elif name == "connect":
@@ -560,20 +566,42 @@ class WelcomeView(VerticalScroll):
         if event.input.id != "welcome-path":
             return
         event.stop()
-        try:
-            self.verdict = self.seams.validate(event.value)
-        except Exception as exc:  # a verdict must never take the page down
-            self.verdict = PathVerdict(
-                text=event.value,
-                path=None,
-                exists=False,
-                is_dir=False,
-                root=None,
-                registered=None,
-                is_git=False,
-                store_error=_reason(exc),
-            )
+        self._typed = event.value
+        self._use_owed = False  # Enter answers the text it was pressed on
+        self._judge()
         self.paint()
+
+    def _judge(self) -> None:
+        """Judge the typed folder off the UI thread: ``validate`` runs git and opens the store.
+
+        It ran on every keystroke, on the UI thread, so a slow disk or a network mount
+        stalled the shell between keys (review of #257). One judgement runs at a time,
+        and text typed meanwhile is judged when it lands (:meth:`_judged`), so the
+        verdict always ends on what the box holds — the latest text wins.
+        """
+        if self._in_flight("validate"):
+            return
+        text, validate = self._typed, self.seams.validate
+
+        def judge() -> PathVerdict:
+            try:
+                return validate(text)
+            except Exception as exc:  # a verdict must never take the page down
+                return _unjudged(text, _reason(exc))
+
+        self._run("validate", judge)
+
+    def _judged(self, result: Any, error: BaseException | None) -> None:
+        verdict = (
+            result if isinstance(result, PathVerdict) else _unjudged(self._typed, _reason(error))
+        )
+        if verdict.text != self._typed:
+            self._judge()  # the box moved on while that one ran
+            return
+        self.verdict = verdict
+        if self._use_owed:
+            self._use_owed = False
+            self._use_typed()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "welcome-path":
@@ -583,6 +611,9 @@ class WelcomeView(VerticalScroll):
 
     def _use_typed(self) -> None:
         verdict = self.verdict
+        if verdict.text != self._typed:
+            self._use_owed = True  # still judging what the box holds: used once it lands
+            return
         if not verdict.ok or verdict.path is None:
             return
         registered = verdict.registered
@@ -861,10 +892,12 @@ class WelcomeView(VerticalScroll):
         choosing = project is None
         self.query_one("#project-candidates", Vertical).display = choosing
         self.query_one("#project-other", Horizontal).display = choosing
+        # Only a verdict on what the box holds now: an older one waits for its successor.
+        current = self.verdict.text == self._typed
         verdict = self.query_one("#welcome-path-verdict", Static)
-        verdict.display = choosing and self.verdict.path is not None
+        verdict.display = choosing and current and self.verdict.path is not None
         verdict.update(render_verdict(self.verdict))
-        self.query_one("#welcome-path-use", Button).disabled = not self.verdict.ok
+        self.query_one("#welcome-path-use", Button).disabled = not (current and self.verdict.ok)
         self.query_one("#welcome-change", Button).display = project is not None
         self._card("step-project", done=done, waiting=False)
         return done
@@ -1019,3 +1052,17 @@ def _reason(error: BaseException | None) -> str:
     if error is None:
         return "no answer"
     return str(error) or type(error).__name__
+
+
+def _unjudged(text: str, why: str) -> PathVerdict:
+    """The verdict for ``text`` when judging it failed: not a folder to use, and why."""
+    return PathVerdict(
+        text=text,
+        path=None,
+        exists=False,
+        is_dir=False,
+        root=None,
+        registered=None,
+        is_git=False,
+        store_error=why,
+    )

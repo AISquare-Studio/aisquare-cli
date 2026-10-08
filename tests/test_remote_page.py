@@ -428,7 +428,7 @@ _HTML_SINKS = {
 }
 _SET_ATTRIBUTE = re.compile(r"setAttribute\s*\(")
 _LITERAL_NAME = re.compile(r"setAttribute\s*\(\s*([\"'])([a-z-]+)\1\s*,")
-_HASH_WRITE = re.compile(r"location\s*\.\s*hash\s*=(?!=)")
+_NAVIGATION = re.compile(r"location\s*\.\s*(?:hash\s*=(?!=)|replace\s*\(|assign\s*\()")
 
 
 def _sinks(source: str, patterns: dict[str, re.Pattern[str]]) -> list[str]:
@@ -445,12 +445,13 @@ def _bad_attributes(source: str) -> list[str]:
     return bad
 
 
-def _hash_writes_outside_page_go(source: str) -> tuple[int, list[int]]:
-    """(writes inside ``pageGo``, offsets of any outside it)."""
+def _navigations_outside_page_go(source: str) -> tuple[int, list[int]]:
+    """(navigations inside ``pageGo``, offsets of any outside it): a hash set, or a
+    ``location.replace`` or ``assign``."""
     start = source.index("function pageGo(")
     end = source.index("\n}\n", start)
-    inside = [m.start() for m in _HASH_WRITE.finditer(source) if start < m.start() < end]
-    outside = [m.start() for m in _HASH_WRITE.finditer(source) if not start < m.start() < end]
+    inside = [m.start() for m in _NAVIGATION.finditer(source) if start < m.start() < end]
+    outside = [m.start() for m in _NAVIGATION.finditer(source) if not start < m.start() < end]
     return len(inside), outside
 
 
@@ -469,9 +470,9 @@ def test_the_page_uses_none_of_the_sinks_a_server_string_could_reach() -> None:
     assert _scripts_without_src(html) == []
 
 
-def test_location_hash_is_set_in_page_go_and_nowhere_else() -> None:
-    inside, outside = _hash_writes_outside_page_go(_text("app.js"))
-    assert inside == 1, "pageGo is THE place the page navigates"
+def test_the_page_navigates_in_page_go_and_nowhere_else() -> None:
+    inside, outside = _navigations_outside_page_go(_text("app.js"))
+    assert inside == 2, "pageGo is THE place the page navigates: it pushes, or it replaces"
     assert outside == []
 
 
@@ -492,7 +493,9 @@ def test_the_sink_checks_can_fail() -> None:
     elsewhere = (
         "function pageGo(r) {\n  location.hash = r;\n}\nfunction other() { location.hash = x; }"
     )
-    assert _hash_writes_outside_page_go(elsewhere)[1] != []
+    assert _navigations_outside_page_go(elsewhere)[1] != []
+    replaced = "function pageGo(r) {\n  location.hash = r;\n}\nlocation.replace(x);"
+    assert len(_navigations_outside_page_go(replaced)[1]) == 1
 
 
 def test_the_document_is_markup_only() -> None:
@@ -1246,6 +1249,23 @@ def test_a_read_answered_after_a_newer_frame_of_its_kind_is_dropped(
     assert reads["wake"] == {"cards": 1, "writable": True}
     assert (reads["board"], reads["fleet"], reads["fleetFailed"]) == (2, 2, 2)
     assert reads["boardAlone"] == 1
+
+
+def test_back_leaves_the_page_once_a_redirect_took_the_place_of_the_screen_it_left(
+    boot_report: dict[str, Any],
+) -> None:
+    """Each redirect pushed an entry: Back from the feed went to ``#/unlock``, which sent the
+    unlocked page on to the feed again, so Back never left the tab or the installed app. A
+    gone agent's tab did the same: its 404 sent the page to the fleet, and Back to the tab
+    asked again. Signed out, Back went to the screen the lock had left, and back to the lock."""
+    report = boot_report["backLeaves"]
+    assert report["afterUnlock"] == {"at": "#/", "landed": [], "left": True}
+    assert report["afterGone"] == {
+        "at": "#/p/prj_x/fleet",
+        "landed": ["#/p/prj_x/a/coder-1/live", "#/p/prj_x/fleet"],
+        "left": True,
+    }
+    assert report["afterSignedOut"] == {"at": "#/unlock", "landed": ["#/unlock"], "left": True}
 
 
 # --- 11. the wheel --------------------------------------------------------------------------

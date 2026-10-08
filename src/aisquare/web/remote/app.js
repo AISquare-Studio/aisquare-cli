@@ -14,7 +14,7 @@
  *   as the --cols property that Fit width scales the pane's font by;
  * - setAttribute takes only literal names from a short list, handlers are
  *   added with addEventListener, and navigation goes through pageGo(), the
- *   one place location.hash is set, from ids it validated.
+ *   one place location.hash is set (or replaced), from ids it validated.
  *
  * ansiToRuns, renderRuns and renderNeedsCard are pure: node runs them against
  * a recording fake document (tests/js/remote_page_check.js). The page boots
@@ -903,7 +903,7 @@ function afterFailure(res, route) {
     }
     readOnlySheet(res.message);
   }
-  if (res.status === 404 && res.error === "no_such_agent" && route && route.pid) pageGo({ name: "project", pid: route.pid, tab: "fleet" });
+  if (res.status === 404 && res.error === "no_such_agent" && route && route.pid) pageGo({ name: "project", pid: route.pid, tab: "fleet" }, true);
 }
 
 // --- the socket (SPEC §1.6, §6.4) ---
@@ -1315,12 +1315,15 @@ function readOnlySheet(message) {
 
 // --- routing ---
 
-/* THE one place location.hash is set (SPEC §6.6): a route object, or a hash that
- * validates like any route (a notification's postMessage brings one). */
-function pageGo(target) {
+/* THE one place the page navigates (SPEC §6.6): a route object, or a hash that validates
+ * like any route (a notification's postMessage brings one). A redirect (replace) takes the
+ * place of the entry it leaves: pushed, Back went to #/unlock, or to a gone agent's tab,
+ * which sent the page on again, so Back never left it. */
+function pageGo(target, replace) {
   const route = typeof target === "string" ? parseRoute(target) : target;
   const hash = routeHash(route);
   if (location.hash === hash) renderRoute();
+  else if (replace) location.replace(hash);
   else location.hash = hash;
 }
 
@@ -1328,7 +1331,7 @@ const VIEWS = {};
 
 function renderRoute() {
   const route = parseRoute(location.hash);
-  if (!route) return pageGo("#/");
+  if (!route) return pageGo("#/", true);
   if (S.view && typeof S.view.cleanup === "function") S.view.cleanup();
   S.view = null;
   S.route = route;
@@ -1339,7 +1342,7 @@ function renderRoute() {
   if (S.off) return drawOff();
   if (S.booting) return UI.main.appendChild(el("p", "empty", "Connecting to the machine…"));
   if (route.name !== "unlock" && S.locked) return toUnlock();
-  if (route.name === "unlock" && !S.locked) return pageGo("#/");
+  if (route.name === "unlock" && !S.locked) return pageGo("#/", true);
   S.view = VIEWS[route.name](route, UI.main) || {};
   gateButtons();
   return undefined;
@@ -1359,7 +1362,7 @@ function toUnlock() {
   S.sock = null;
   S.sockState = "idle";
   if (sock) sock.close(1000);
-  if (!S.route || S.route.name !== "unlock") pageGo("#/unlock");
+  if (!S.route || S.route.name !== "unlock") pageGo("#/unlock", true);
   // Already at #/unlock, as a page (re)loaded there is: its route was drawn while
   // the boot still asked who this is, so no form is on screen and no hashchange
   // will come. Draw it now. A form already shown keeps what is typed in it.
@@ -1529,7 +1532,7 @@ async function unlocked(data) {
     // nothing was stored
   }
   goLive(res.ok ? res.data : S.remote);
-  pageGo(after);
+  pageGo(after, true);
   return true;
 }
 

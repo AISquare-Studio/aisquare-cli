@@ -268,23 +268,37 @@ function bootPage(hash, answer, globals) {
   const hold = () => ++timers; // a timer is an id and nothing more: none ever fires
   const win = { listeners: {} };
   let current = hash;
+  /* The tab's history from the page's own load on: setting the hash pushes an entry, as a
+   * browser does, and replace() takes the place of the one it is at. */
+  const entries = [hash];
+  let at = 0;
+  const changed = () => setImmediate(() => { for (const fn of win.listeners.hashchange || []) fn({ type: "hashchange" }); });
+  const go = (value, replace) => {
+    const next = String(value).charAt(0) === "#" ? String(value) : "#" + value;
+    if (next === current) return;
+    current = next;
+    if (replace) entries[at] = next;
+    else entries.splice(++at, entries.length, next);
+    changed();
+  };
   const location = {
     protocol: "http:",
     get hash() {
       return current;
     },
     set hash(value) {
-      const next = String(value).charAt(0) === "#" ? String(value) : "#" + value;
-      if (next === current) return;
-      current = next;
-      setImmediate(() => { for (const fn of win.listeners.hashchange || []) fn({ type: "hashchange" }); });
+      go(value, false);
+    },
+    replace(url) {
+      const value = String(url);
+      go(value.slice(value.indexOf("#")), true);
     },
     toString: () => BASE + current,
   };
   const fetch = async (url, init) => {
     const where = String(url).split("?")[0];
     const body = typeof init.body === "string" ? JSON.parse(init.body) : null;
-    requests.push({ method: init.method, path: where, body });
+    requests.push({ method: init.method, path: where, body, query: String(url).split("?")[1] || "" });
     const reply = await answer(init.method, where, body);
     if (reply === "network") throw new TypeError("Failed to fetch");
     const text = JSON.stringify(reply.json);
@@ -327,6 +341,14 @@ function bootPage(hash, answer, globals) {
     },
     live: () => sockets[sockets.length - 1],
     sent: (where) => requests.filter((one) => one.method === "POST" && one.path === where).map((one) => one.body),
+    requests,
+    /* The browser's Back: false once there is no entry of this page's before this one. */
+    back() {
+      if (at === 0) return false;
+      current = entries[--at];
+      changed();
+      return true;
+    },
   };
   return page;
 }
@@ -956,6 +978,52 @@ async function readsAfterFrames() {
   };
 }
 
+/* The browser's Back, pressed until it leaves the page (six times at most), and where each
+ * press landed: after an unlock, after a gone agent's tab sent the page to its fleet, and
+ * after the phone was signed out on a project's screen. */
+async function backLeaves() {
+  const backs = async (page) => {
+    const landed = [];
+    for (let n = 0; n < 6; n++) {
+      if (!page.back()) return { at: page.location.hash, landed, left: true };
+      await settle();
+      landed.push(page.location.hash);
+    }
+    return { at: page.location.hash, landed, left: false };
+  };
+  let unlocked = false;
+  const locked = bootPage("", (method, where, body) => {
+    if (method === "POST" && where === "api/unlock") {
+      unlocked = true;
+      return { status: 200, json: { ok: true, device: { id: "dev_0a1b2c3d" } } };
+    }
+    return unlocked ? signedIn()(method, where, body) : { status: 401, json: { error: "unauthorized" } };
+  });
+  await settle();
+  const { input, form } = unlockForm(locked);
+  input.value = PASSPHRASE;
+  form.dispatch("submit");
+  await settle();
+  const afterUnlock = await backs(locked);
+  const gone = bootPage("#/p/" + PROJECT + "/fleet", signedIn({
+    "GET api/transcript/coder-1": () => ({ status: 404, json: { error: "no_such_agent", message: "no live agent 'coder-1'" } }),
+  }));
+  await settle();
+  for (const tab of ["live", "transcript"]) {
+    gone.run("pageGo('#/p/" + PROJECT + "/a/coder-1/" + tab + "')");
+    await settle();
+  }
+  const afterGone = await backs(gone);
+  const out = bootPage("#/", signedIn());
+  await settle();
+  out.acceptSockets();
+  out.run("pageGo('#/p/" + PROJECT + "/fleet')");
+  await settle();
+  out.live().fire("close", { code: 4401 });
+  await settle();
+  return { afterUnlock, afterGone, afterSignedOut: await backs(out) };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -988,6 +1056,7 @@ async function main() {
     boardOnItsTab: await boardOnItsTab(),
     transcriptTimes: await transcriptTimes(),
     readsAfterFrames: await readsAfterFrames(),
+    backLeaves: await backLeaves(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

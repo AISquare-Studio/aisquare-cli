@@ -21,7 +21,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from typer.testing import CliRunner
 
+from aisquare.cli.app import app as cli
 from aisquare.cli.ui import remote_control
 from aisquare.cli.ui.remote_control import (
     READ_ONLY_REASON,
@@ -202,11 +204,23 @@ class FakeServer(types.ModuleType):
         self.public_urls: list[str | None] = []
         """``note_public_url`` calls, in order; ``None`` is the origin forgotten."""
         self.server_auto_off_at: datetime | None = None
-        """What ``remote_auto_off_at()`` answers: the last ``set_auto_off``, or a later
-        deadline a test sets to stand for one the phone extended."""
+        """What ``remote_auto_off_at()`` answers: the last ``set_auto_off``, to the second as
+        ``remote.json`` keeps it, or a deadline a test sets to stand for a phone's extension
+        or for the file's own, read again."""
+        self.unwritable: OSError | None = None
+        """Raised by every call that writes ``remote.json`` once it has made its change, as
+        the real module's ``Runtime`` does: it changes its state in memory, then the rename
+        over the file fails (a full disk, a read-only home), and nothing rolls the change
+        back. The server keeps it until it reads the file again after another process
+        rewrote it, which a test stands for by setting the field back."""
         self.calls: list[str] = []
         self.DEFAULT_PORT = 8750
         self.RemoteInfo = remote_server.RemoteInfo
+
+    def _write_remote_json(self) -> None:
+        """The rename over ``remote.json``, after the change in memory."""
+        if self.unwritable is not None:
+            raise self.unwritable
 
     def start_remote_server(
         self, dist_dir: Path | None, port: int = 8750
@@ -233,23 +247,28 @@ class FakeServer(types.ModuleType):
     def revoke_remote_device(self, device_id: str) -> None:
         self.revoked.append(device_id)
         self.devices = [d for d in self.devices if d.get("id") != device_id]
+        self._write_remote_json()
 
     def set_allow_write(self, enabled: bool) -> None:
         self.allow_write_calls.append(enabled)
         self.allow_write = enabled
+        self._write_remote_json()
 
     def set_auto_off(self, at: datetime | None) -> None:
         self.auto_off_calls.append(at)
-        self.server_auto_off_at = at
+        self.server_auto_off_at = None if at is None else at.replace(microsecond=0)
+        self._write_remote_json()
 
     def regenerate_password(self, new_link: bool = False) -> str:
         self.password = "ember-glade-heron-indigo"
+        self._write_remote_json()
         return self.password
 
     def revoke_every_remote_device(self, reason: str) -> None:
         self.calls.append("revoke_every_remote_device")
         self.revoked_every.append(reason)
         self.devices = []
+        self._write_remote_json()
 
     def note_public_url(self, url: str | None) -> None:
         self.calls.append("note_public_url")
@@ -433,7 +452,7 @@ def test_regenerate_devices_and_revoke_go_through_the_server() -> None:
     assert controller.regenerate_password() == "ember-glade-heron-indigo"
     assert controller.password() == "ember-glade-heron-indigo"
     assert [d["id"] for d in controller.devices()] == ["dev_0000000a", "dev_0000000b"]
-    controller.revoke_device("dev_0000000a")
+    assert controller.revoke_device("dev_0000000a") is True
     assert server.revoked == ["dev_0000000a"]
     assert [d["id"] for d in controller.devices()] == ["dev_0000000b"]
 
@@ -531,6 +550,148 @@ def test_a_revoke_that_cannot_be_written_still_turns_remote_off_and_says_so() ->
     assert controller.message is not None and "could not be revoked" in controller.message
 
 
+DENIED = PermissionError(13, "Permission denied", "remote.json")
+"""What a read-only home, or a full disk's twin, raises from every write of ``remote.json``."""
+
+
+def test_a_remote_json_that_will_not_write_keeps_remote_off_at_start_and_says_why() -> None:
+    """``restore()`` runs in ``FleetApp.on_mount``, and the deadline ``turn_on`` could not
+    record raised out of it: ``asq ui`` ended at start while the server kept serving in its
+    thread (r2 review of #243). A Remote that cannot write ``remote.json`` cannot sign a
+    phone in either, so it does not stay on; the saved switch stays on for the next start."""
+    server = fake_server()
+    server.unwritable = DENIED
+    tunnels: list[FakeTunnel] = []
+
+    def tunnel_factory(port: int) -> FakeTunnel:
+        tunnels.append(FakeTunnel(port, url="x.app", failure=None))
+        return tunnels[-1]
+
+    controller = RemoteController(
+        server=server, tunnel_factory=tunnel_factory, state=RemoteState(remote_enabled=True)
+    )
+    controller.restore()
+    assert not controller.running and not server.running
+    assert controller.link_url() is None and controller.auto_off_at is None
+    assert tunnels == [], "ngrok is never started for a Remote that did not come on"
+    assert controller.message == (
+        "Remote could not start — remote.json could not be written: "
+        "[Errno 13] Permission denied: 'remote.json'"
+    )
+    assert controller.state.remote_enabled is True, "the next start tries again"
+
+
+def test_each_control_says_when_remote_json_will_not_write_instead_of_raising() -> None:
+    """The Auto-off picker, Regenerate and Revoke raised into Textual's handlers, which
+    ended the fleet UI with Remote still serving. Each now says what was not saved, while
+    what it changed holds in the running server, as a failed write leaves the real one; the
+    write switch said it "could not be changed" beside a switch showing the change."""
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
+    server = fake_server()
+    server.devices = [{"id": "dev_0000000a", "ua": "iPhone", "first_seen": "t0", "last_seen": "t1"}]
+    controller = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    controller.turn_on()
+    server.unwritable = DENIED
+
+    controller.set_auto_off(30)
+    assert controller.message == (
+        "auto-off could not be saved to remote.json — [Errno 13] Permission denied: 'remote.json'"
+    )
+    assert controller.state.auto_off_minutes == 30
+    shorter = clock[0] + timedelta(minutes=30)
+    assert server.server_auto_off_at == shorter, "the running server took it all the same"
+    assert controller.adopt_server_deadline() == shorter
+
+    assert controller.regenerate_password() is None
+    assert (controller.message or "").startswith(
+        "the new password could not be saved to remote.json — [Errno 13]"
+    )
+    assert controller.password() == "ember-glade-heron-indigo", "the one phones need now"
+
+    assert controller.revoke_device("dev_0000000a") is False
+    assert (controller.message or "").startswith(
+        "dev_0000000a could not be revoked in remote.json — [Errno 13]"
+    )
+    assert controller.devices() == [], "signed out of the running server all the same"
+
+    controller.set_allow_write(True)
+    assert controller.message == (
+        "write actions could not be saved to remote.json — "
+        "[Errno 13] Permission denied: 'remote.json'"
+    )
+    assert controller.write_actions_allowed() is True
+    assert controller.running and server.running
+
+    clock[0] += timedelta(minutes=30)
+    assert controller.enforce_auto_off() is True, "the timer it could not save still ends it"
+    assert not controller.running and not server.running
+
+
+def test_a_timer_remote_json_will_not_take_gives_way_to_the_files_once_it_is_read_again() -> None:
+    """A timer ``remote.json`` would not take is the running server's too, and its gate and
+    the panel agree on it. When another process rewrites the file, the server reads it again
+    and goes back to the deadline the write failed to replace, its gate ending Remote there
+    (SPEC §2.5), and the panel takes it: a longer timer, or Never, kept in hand showed
+    Remote on while every phone was answered as if it were off. The clock's microseconds
+    are no part of a deadline: the server keeps it to the second, so the panel took its own,
+    cut to the second, for the file's coming back, and stopped looking for the file's."""
+    clock = [datetime(2026, 9, 11, 18, 0, 0, 250_000, tzinfo=UTC)]
+    server = fake_server()
+    controller = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    controller.turn_on()
+    in_the_file = datetime(2026, 9, 11, 19, 0, tzinfo=UTC)
+    assert server.server_auto_off_at == in_the_file
+    server.unwritable = DENIED
+    for minutes, picked in ((120, datetime(2026, 9, 11, 20, 0, tzinfo=UTC)), (None, None)):
+        controller.set_auto_off(minutes)
+        assert (controller.message or "").startswith("auto-off could not be saved"), minutes
+        assert server.server_auto_off_at == picked, "the running server took it"
+        assert controller.adopt_server_deadline() == picked, minutes
+        server.server_auto_off_at = in_the_file  # a shell's allow-write: the file, read again
+        assert controller.adopt_server_deadline() == in_the_file, minutes
+    clock[0] = in_the_file - timedelta(seconds=1)
+    assert controller.enforce_auto_off() is False and controller.running
+    clock[0] = in_the_file
+    assert controller.enforce_auto_off() is True, "off when the server stops waiting"
+    assert not controller.running and not server.running
+
+
+def test_a_later_deadline_of_the_servers_is_taken_while_the_timer_in_hand_is_unsaved() -> None:
+    """SPEC §2.5: the panel takes a later deadline of the server's, so a phone's extension
+    holds. While the timer in hand was one ``remote.json`` had not taken, a later one never
+    was: once the disk had room again, the server's own flush saved the timer, a phone
+    extended it an hour, and the panel still turned Remote off at the timer, the server and
+    the phone both waiting for the hour. A longer deadline the file held, read again after
+    a shorter timer failed to save, is taken as well: the gate waits for it too."""
+    clock = [datetime(2026, 9, 11, 18, 0, 0, 250_000, tzinfo=UTC)]
+    server = fake_server()
+    controller = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    controller.turn_on()
+    server.unwritable = DENIED
+    controller.set_auto_off(120)
+    server.unwritable = None
+    assert server.server_auto_off_at == datetime(2026, 9, 11, 20, 0, tzinfo=UTC)
+    clock[0] = datetime(2026, 9, 11, 19, 50, tzinfo=UTC)
+    server.server_auto_off_at = extended = datetime(2026, 9, 11, 21, 0, tzinfo=UTC)  # Extend 1 h
+    assert controller.enforce_auto_off() is False and controller.auto_off_at == extended
+    clock[0] = datetime(2026, 9, 11, 20, 0, tzinfo=UTC)
+    assert controller.enforce_auto_off() is False and controller.running, "the hour holds"
+
+    server.unwritable = DENIED
+    controller.set_auto_off(30)
+    assert controller.adopt_server_deadline() == datetime(2026, 9, 11, 20, 30, tzinfo=UTC)
+    server.server_auto_off_at = extended  # the file's, read again
+    assert controller.adopt_server_deadline() == extended
+    clock[0] = extended
+    assert controller.enforce_auto_off() is True and not server.running
+
+
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -586,3 +747,161 @@ def test_auto_off_with_a_remote_json_that_will_not_write_still_stops_everything(
     assert "flushing remote.json as the server stopped failed" in caplog.text
     assert read_state()["remote_enabled"] is False
     controller.shutdown_for_exit()  # the TUI's exit after it: nothing left to stop or raise
+
+
+def test_a_real_remote_json_that_will_not_write_is_a_sentence_for_each_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real module, a ``remote.json`` from an earlier Remote, and a home that refuses
+    the file's replacement: ``restore()`` raised ``PermissionError`` with the server up,
+    and so did the Auto-off picker, Regenerate and Revoke (r2 review of #243)."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    page = tmp_path / "page"
+    page.mkdir()
+    (page / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    earlier = remote_server.runtime()
+    assert earlier.unlock_device(earlier.password, "Pixel") is not None
+    (device_id,) = earlier.device_ids()
+    monkeypatch.setattr(remote_server, "_runtime", None)  # this TUI reads the file afresh
+
+    def unwritable(path: Path, **kwargs: object) -> object:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    controller = RemoteController(
+        tunnel_factory=fake_tunnel_factory(url=STARTED["url"]),
+        dist_dir=page,
+        port=_free_port(),
+        state=RemoteState(remote_enabled=True),
+    )
+    with pytest.MonkeyPatch.context() as home:
+        home.setattr(remote_server, "replacement", unwritable)
+        controller.restore()
+    assert not controller.running and remote_server._server is None
+    assert (controller.message or "").startswith(
+        "Remote could not start — remote.json could not be written: [Errno 13] Permission denied"
+    )
+
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)  # the URL lands, and its thread's word on the status line first
+    assert controller.running and controller.message is None
+    passphrase = controller.password()
+    with pytest.MonkeyPatch.context() as home:
+        home.setattr(remote_server, "replacement", unwritable)
+        controller.set_auto_off(30)
+        assert (controller.message or "").startswith("auto-off could not be saved to remote.json")
+        assert controller.revoke_device(device_id) is False
+        assert (controller.message or "").startswith(f"{device_id} could not be revoked")
+        assert controller.devices() == [], "signed out of the running server all the same"
+        assert controller.regenerate_password() is None
+        assert (controller.message or "").startswith("the new password could not be saved")
+        assert controller.password() != passphrase, "the running server has the new one"
+        controller.set_allow_write(True)
+        assert (controller.message or "").startswith(
+            "write actions could not be saved to remote.json"
+        )
+        assert controller.write_actions_allowed() is True
+        assert controller.running
+        controller.shutdown_for_exit()
+    assert remote_server._server is None
+
+
+def test_the_panel_takes_the_files_deadline_once_the_real_server_reads_it_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real module and a clock with microseconds. A timer ``remote.json`` would not take
+    is the running server's (its state changes before the rename fails), and a shell's
+    ``allow-write``, rewriting the file, makes it read the file again and go back to the
+    hour the file holds: every phone is answered 404 from then on. The panel had taken the
+    server's copy of its own deadline, cut to the second, for the file's, and went on
+    showing Remote on for the hour more (r2 verification of #243)."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    page = tmp_path / "page"
+    page.mkdir()
+    (page / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    start = datetime.now(UTC).replace(microsecond=250_000)
+    controller = RemoteController(
+        tunnel_factory=fake_tunnel_factory(url=STARTED["url"]),
+        dist_dir=page,
+        port=_free_port(),
+        now=lambda: start,
+        state=RemoteState(auto_off_minutes=60),
+    )
+    controller.turn_on()
+    in_the_file = remote_server.remote_auto_off_at()
+    assert in_the_file is not None
+
+    def unwritable(path: Path, **kwargs: object) -> object:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    with pytest.MonkeyPatch.context() as home:
+        home.setattr(remote_server, "replacement", unwritable)
+        controller.set_auto_off(120)
+    picked = in_the_file + timedelta(hours=1)
+    assert remote_server.remote_auto_off_at() == picked, "the running server took it"
+    assert controller.adopt_server_deadline() == picked, "and the panel agrees with its gate"
+    shell = remote_server.Runtime(paths.remote_state_path(), paths.remote_audit_path())
+    shell.set_allow_write(True)  # another process: it writes the file as it found it
+    assert remote_server.runtime().auto_off_passed(in_the_file), "phones get 404 from then on"
+    assert controller.adopt_server_deadline() == in_the_file
+    controller.shutdown_for_exit()
+
+
+def test_status_prints_the_port_the_panel_serves_on_when_one_is_exported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``status`` and ``regenerate-password`` read ``AISQUARE_REMOTE_PORT`` for the link they
+    print, as ``serve`` reads it for its port; the panel always served on 8750, so with the
+    variable exported, ``status`` printed a port the TUI was not on (r2 smoke of #243)."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    page = tmp_path / "page"
+    page.mkdir()
+    (page / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    port = _free_port()
+    monkeypatch.setenv("AISQUARE_REMOTE_PORT", str(port))
+    tunnels: list[int] = []
+
+    def tunnel_factory(on: int) -> FakeTunnel:
+        tunnels.append(on)
+        return FakeTunnel(on, url=None, failure=INSTALL_HINT)
+
+    controller = RemoteController(tunnel_factory=tunnel_factory, dist_dir=page)
+    controller.turn_on()
+    try:
+        served = remote_server._server
+        assert controller.running and served is not None and served.port == port
+        link = controller.link_url()
+        assert link is not None and link.startswith(f"http://127.0.0.1:{port}/r/")
+        assert tunnels == [port], "ngrok forwards to the port served"
+        status = CliRunner().invoke(cli, ["--json", "remote", "status"])
+        assert status.exit_code == 0, status.output
+        assert json.loads(status.stdout)["url_local"] == link
+    finally:
+        controller.shutdown_for_exit()
+
+
+def test_a_port_the_panel_cannot_use_is_a_sentence_and_unset_is_the_default() -> None:
+    """An ``AISQUARE_REMOTE_PORT`` that is no port is a sentence on the status line, never
+    Remote served on some other port. Unset, it is 8750; a port the caller gives wins."""
+    server = fake_server()
+    no_ngrok = fake_tunnel_factory(failure=INSTALL_HINT)
+    default = RemoteController(server=server, tunnel_factory=no_ngrok)
+    default.turn_on()
+    assert default.link_url() == f"http://127.0.0.1:8750/r/{server.token}/"
+    default.turn_off()
+    for raw in ("eighteen", "0", "70000", "-1"):
+        with pytest.MonkeyPatch.context() as env:
+            env.setenv("AISQUARE_REMOTE_PORT", raw)
+            refused = RemoteController(server=server, tunnel_factory=no_ngrok)
+            refused.turn_on()
+            assert not refused.running and not server.running, raw
+            assert refused.message == (
+                f"Remote could not start — AISQUARE_REMOTE_PORT is {raw!r}, not a port"
+            )
+            given = RemoteController(server=server, tunnel_factory=no_ngrok, port=18999)
+            given.turn_on()
+            assert given.link_url() == f"http://127.0.0.1:18999/r/{server.token}/", raw
+            given.turn_off()

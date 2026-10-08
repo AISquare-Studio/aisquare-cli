@@ -21,6 +21,7 @@ path to ``allow_write=True`` is the user's switch.
 from __future__ import annotations
 
 import contextlib
+import os
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -47,8 +48,26 @@ DEFAULT_AUTO_OFF = 60
 NEVER = "never"
 """How Never is stored under ``auto_off_minutes`` in ``state.json``."""
 STATE_KEYS = ("remote_enabled", "auto_off_minutes")
+PORT_ENV = "AISQUARE_REMOTE_PORT"
+"""``serve --port``'s variable, read by ``status`` and ``regenerate-password`` for the link
+they print: the panel serves on it too, so one export moves all of them. The panel always
+served on 8750, and with the variable exported ``status`` printed a port it was not on."""
 
 TunnelFactory = Callable[[int], NgrokTunnel]
+
+
+def _panel_port() -> tuple[int, str | None]:
+    """The port :data:`PORT_ENV` names, 8750 when it names none, and why not when it is no port."""
+    raw = os.environ.get(PORT_ENV, "").strip()
+    if not raw:
+        return remote_server.DEFAULT_PORT, None
+    try:
+        port = int(raw)  # as serve's --port reads it
+    except ValueError:
+        port = 0
+    if not 0 < port < 65536:
+        return remote_server.DEFAULT_PORT, f"{PORT_ENV} is {raw!r}, not a port"
+    return port, None
 
 
 def _utc_now() -> datetime:
@@ -107,7 +126,7 @@ class RemoteController:
     ``server`` is :mod:`aisquare.services.remote_server`, ``tunnel_factory``
     builds the ngrok subprocess wrapper, ``now`` is the clock — all three are
     seams for the tests. Every time here carries its offset; a naive one from
-    ``now`` is read as local time.
+    ``now`` is read as local time. ``port`` is :data:`PORT_ENV`'s when not given.
     """
 
     def __init__(
@@ -116,7 +135,7 @@ class RemoteController:
         server: ModuleType = remote_server,
         tunnel_factory: TunnelFactory = NgrokTunnel,
         dist_dir: Path | None = None,
-        port: int = remote_server.DEFAULT_PORT,
+        port: int | None = None,
         now: Callable[[], datetime] = _utc_now,
         state: RemoteState | None = None,
         url_timeout: float = 15.0,
@@ -124,7 +143,7 @@ class RemoteController:
         self._server = server
         self._tunnel_factory = tunnel_factory
         self._dist_dir = dist_dir
-        self._port = port
+        self._port, self._port_problem = (port, None) if port is not None else _panel_port()
         self._now = now
         self._url_timeout = url_timeout
         self.state = state if state is not None else load_remote_state()
@@ -135,6 +154,10 @@ class RemoteController:
         self.message: str | None = None
         """What the status line says: waiting for ngrok, the install hint, an error."""
         self.auto_off_at: datetime | None = None
+        self._deadline_unsaved = False
+        """Set by a write of the deadline that failed, until one goes through or the server is
+        seen to read the file again: till then the running server may hold a deadline
+        ``remote.json`` does not (:meth:`adopt_server_deadline`)."""
         self._waiter: threading.Thread | None = None
 
     # --- on / off -----------------------------------------------------------------------
@@ -144,10 +167,21 @@ class RemoteController:
         return self.info is not None
 
     def turn_on(self) -> None:
-        """Start the server, then the tunnel; the public URL arrives on a background thread."""
+        """Start the server, then the tunnel; the public URL arrives on a background thread.
+
+        Remote stays on only when ``remote.json`` took its auto-off deadline. A file that
+        will not be written (a full disk, a read-only home) cannot sign a phone in either,
+        and the ``PermissionError`` raised out of ``restore()`` in ``FleetApp.on_mount``
+        ended the fleet UI at start with uvicorn still serving in its thread. The server
+        is stopped again instead, which leaves Remote as any start that fails does: off,
+        the saved switch as it was, and the status line saying why.
+        """
         if self.running:
             return
         self.public_url = None
+        if self._port_problem is not None:  # a sentence, never Remote on another port
+            self.message = f"Remote could not start — {self._port_problem}"
+            return
         try:
             self.info = self._server.start_remote_server(self._dist_dir, port=self._port)
         except Exception as exc:  # the remote extra is missing, or the port is taken
@@ -157,7 +191,12 @@ class RemoteController:
             self.message = f"Remote could not start — {exc}"
             return
         # The write switch is not touched: it is remote.json's, as the shell left it.
-        self._arm_auto_off()
+        try:
+            self._arm_auto_off()
+        except Exception as exc:  # remote.json will not write: no Remote without its deadline
+            self.turn_off(persist=False)  # never raises, and keeps the saved switch
+            self.message = f"Remote could not start — remote.json could not be written: {exc}"
+            return
         self.message = None
         self._set_state(remote_enabled=True)
         tunnel = self._tunnel_factory(self._port)
@@ -250,45 +289,83 @@ class RemoteController:
 
     def set_allow_write(self, enabled: bool) -> None:
         """Flip the one write switch, in ``remote.json``, whether Remote is on or not: the
-        TUI's next Remote and ``asq remote serve`` both start with what it says."""
+        TUI's next Remote and ``asq remote serve`` both start with what it says.
+
+        A switch the file will not take still holds in this TUI until its server reads the
+        file again: a write that fails has already changed the server's state in memory,
+        and nothing rolls it back. So the status line says it was not saved; "could not be
+        changed" sat beside a switch that showed the change, which phones had too.
+        """
         try:
             self._server.set_allow_write(bool(enabled))
         except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
-            self.message = f"write actions could not be changed — {exc}"
+            self.message = f"write actions could not be saved to remote.json — {exc}"
 
     def set_auto_off(self, minutes: int | None) -> None:
-        """Pick a timer, or ``None`` for Never. Takes effect at once while Remote is on."""
+        """Pick a timer, or ``None`` for Never. Takes effect at once while Remote is on.
+
+        A timer ``remote.json`` will not take still takes effect, and the status line says
+        it was not saved: raised into the Auto-off picker's handler, the error ended the
+        fleet UI. The running server has the timer too, since a write that fails has
+        already changed its state in memory and nothing rolls that back, so the panel and
+        the server's gate end Remote at the same time until the server reads the file
+        again (:meth:`adopt_server_deadline`).
+        """
         if minutes not in AUTO_OFF_CHOICES:
             raise ValueError(f"auto-off must be one of {AUTO_OFF_CHOICES}, not {minutes}")
         self._set_state(auto_off_minutes=minutes)
         if self.running:
-            self._arm_auto_off()
+            try:
+                self._arm_auto_off()
+            except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
+                self.message = f"auto-off could not be saved to remote.json — {exc}"
 
     def regenerate_password(self) -> str | None:
-        """A new passphrase from the server; ``None`` while Remote is off (nothing to unlock)."""
+        """A new passphrase from the server; ``None`` while Remote is off (nothing to unlock),
+        or when ``remote.json`` would not take it, which the status line then says. The
+        running server has the new one all the same, and has signed every phone out: the
+        panel shows it until the server reads the file again after another process rewrote
+        it, which brings back the old passphrase, and the devices with it."""
         if self.info is None:
             return None
-        return str(self._server.regenerate_password())
+        try:
+            return str(self._server.regenerate_password())
+        except Exception as exc:  # raised into the Regenerate button's handler: the UI ended
+            self.message = f"the new password could not be saved to remote.json — {exc}"
+            return None
 
-    def _server_status(self) -> dict[str, Any]:
+    def remote_status(self) -> dict[str, Any]:
+        """``remote_server_status()``; ``{}`` while ``remote.json`` cannot be read. A paint
+        reads it once and hands it to :meth:`devices` and :meth:`unlock_failures`."""
         try:
             status = self._server.remote_server_status()
         except Exception:  # a half-written remote.json costs the list, not the modal
             return {}
         return status if isinstance(status, dict) else {}
 
-    def devices(self) -> list[dict[str, Any]]:
-        """The devices ``[{id, ua, first_seen, last_seen, expires_at, signed_in}]``, by id."""
-        rows = self._server_status().get("devices", [])
+    def devices(self, status: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """The devices ``[{id, ua, first_seen, last_seen, expires_at, signed_in}]``, by id,
+        from ``status`` (:meth:`remote_status`), read now when none is given."""
+        rows = (self.remote_status() if status is None else status).get("devices", [])
         rows = rows if isinstance(rows, list) else []
         return [row for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)]
 
-    def revoke_device(self, device_id: str) -> None:
-        self._server.revoke_remote_device(device_id)
+    def revoke_device(self, device_id: str) -> bool:
+        """Revoke one device; ``False`` when ``remote.json`` would not take it, which the
+        status line then says (raised into the Revoke button's handler, it ended the UI).
+        The running server has signed it out all the same, until it reads the file again
+        after another process rewrote it."""
+        try:
+            self._server.revoke_remote_device(device_id)
+        except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
+            self.message = f"{device_id} could not be revoked in remote.json — {exc}"
+            return False
+        return True
 
-    def unlock_failures(self) -> tuple[int, str | None]:
-        """Wrong passphrases in the last 30 min, and until when new unlocks are paused."""
-        status = self._server_status()
+    def unlock_failures(self, status: dict[str, Any] | None = None) -> tuple[int, str | None]:
+        """Wrong passphrases in the last 30 min, and until when new unlocks are paused, from
+        ``status`` (:meth:`remote_status`), read now when none is given."""
+        status = self.remote_status() if status is None else status
         failed, until = status.get("failed_unlocks"), status.get("locked_out_until")
         return (
             failed if isinstance(failed, int) else 0,
@@ -320,28 +397,51 @@ class RemoteController:
 
         An instant with its offset, from an aware clock: naive local time plus an
         hour ran an hour long across a DST fall-back, and was published without an
-        offset a phone elsewhere read in its own timezone.
+        offset a phone elsewhere read in its own timezone. To the second, as the server
+        keeps it: with the clock's microseconds the server's copy read as an EARLIER
+        deadline than the panel's own, which :meth:`adopt_server_deadline` took for the
+        file's coming back after a write that failed.
         """
         minutes = self.state.auto_off_minutes
-        now = _aware(self._now())
+        now = _aware(self._now()).replace(microsecond=0)
         self.auto_off_at = None if minutes is None else now + timedelta(minutes=minutes)
         # The server shows it as GET /api/remote's auto_off_at (PLAN §4-B); Never is
         # null there, which is the same thing it shows while Remote is off.
+        self._deadline_unsaved = True
         self._server.set_auto_off(self.auto_off_at)
+        self._deadline_unsaved = False
 
     def adopt_server_deadline(self) -> datetime | None:
         """The deadline, moved to the server's when that is later: a phone extended it.
 
         Called by :meth:`enforce_auto_off` and on every paint, so the extension holds
         and the modal shows the new time. The server enforces it either way.
+
+        A timer ``remote.json`` would not take is the running server's too: a write that
+        fails has already changed the server's state in memory, and nothing rolls it back,
+        so its gate and the panel end Remote at the same time. But the file keeps the
+        deadline the write failed to replace, and the server goes back to it when it reads
+        the file again after another process rewrote it (``asq remote allow-write`` in a
+        shell, say); its gate ends Remote there from then on (SPEC §2.5). So while the
+        deadline in hand is unsaved, an EARLIER deadline of the server's is taken too, and
+        so is any in place of Never: keeping the longer timer, or Never, showed Remote on
+        while every phone was answered as if it were off. A later one is taken as ever,
+        whether a phone extended the unsaved timer or the file held a longer one: the gate
+        waits for it.
         """
-        if self.running and self.auto_off_at is not None:
-            try:
-                served = self._server.remote_auto_off_at()
-            except Exception:  # unreadable for a moment: the deadline in hand still stands
-                served = None
-            if served is not None and _aware(served) > self.auto_off_at:
-                self.auto_off_at = _aware(served)
+        if not self.running or (self.auto_off_at is None and not self._deadline_unsaved):
+            return self.auto_off_at
+        try:
+            served = self._server.remote_auto_off_at()
+        except Exception:  # unreadable for a moment: the deadline in hand still stands
+            served = None
+        if served is not None:
+            served, held = _aware(served), self.auto_off_at
+            if self._deadline_unsaved and (held is None or served < held):
+                # the server read the file again: the deadline in hand is the file's now
+                self.auto_off_at, self._deadline_unsaved = served, False
+            elif held is not None and served > held:
+                self.auto_off_at = served
         return self.auto_off_at
 
     def enforce_auto_off(self) -> bool:

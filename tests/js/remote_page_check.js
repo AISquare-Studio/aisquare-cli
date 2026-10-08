@@ -155,16 +155,34 @@ report.cursor = page.markCursor(page.ansiToRuns("ab\x1b[31mcd"), 2);
 const cards = recorder();
 const QUESTION = "Should I cut the 0.8.0 release branch now, or wait until the remote-control PR lands?";
 const LONG = Array.from({ length: 12 }, (unused, n) => "Paragraph " + n + " of what was done, and why it took this long.").join("\n\n");
-const excerptsOver = (kind, excerpt, text) => {
-  const card = page.renderNeedsCard(Object.assign({}, ITEM, { kind, excerpt, detail: { text } }), cards.doc, { now });
+const excerptsOf = (kind, excerpt, detail) => {
+  const card = page.renderNeedsCard(Object.assign({}, ITEM, { kind, excerpt, detail }), cards.doc, { now });
   return card.children.filter((node) => node.className === "excerpt").map((node) => node.textContent);
 };
+const excerptsOver = (kind, excerpt, text) => excerptsOf(kind, excerpt, { text });
 report.excerpts = {
   whole: excerptsOver("interrupted", "I'll run the cache tests first.", "I'll run the cache tests first."),
   head: excerptsOver("board_question", LONG.replace(/\s+/g, " ").slice(0, 279).trimEnd() + "…", LONG),
   shortTail: excerptsOver("asked", QUESTION, "The board is quiet: the cache work is merged.\n\n" + QUESTION),
   longTail: excerptsOver("asked", QUESTION, LONG + "\n\n" + QUESTION),
   elsewhere: excerptsOver("asked", "Which store?", "The board is quiet."),
+};
+// The kinds whose excerpt the server builds from what their detail leads with, as it builds them.
+const STORE = {
+  header: "Cache", question: "Which store should the cache use?", multiSelect: false,
+  options: [{ label: "Redis", description: "shared" }, { label: "SQLite", description: "a local file" }, { label: "none", description: "" }],
+};
+const BASH = { tool: "Bash", input: { command: "pytest -q tests/test_cache.py", description: "Run the cache tests" } };
+report.builtExcerpts = {
+  question: excerptsOf("question", "Which store should the cache use? — Redis · SQLite · none", { questions: [STORE] }),
+  questions: excerptsOf("question", "Which store should the cache use? — Redis · SQLite · none (+1 more)", { questions: [STORE, STORE] }),
+  cutQuestion: excerptsOf("question", "Which store should the c…", { questions: [STORE] }),
+  permission: excerptsOf("permission", "Bash(pytest -q tests/test_cache.py)", BASH),
+  plan: excerptsOf("plan", "Cache plan", { plan: "## Cache plan\n\n1. Add Redis behind a flag\n2. Fall back to SQLite" }),
+  // The controls: an excerpt the detail does not lead with, and one with no detail to repeat.
+  otherQuestion: excerptsOf("question", "Pick one before the release", { questions: [STORE] }),
+  bareTool: excerptsOf("permission", "Bash(pytest -q tests/test_cache.py)", { input: BASH.input }),
+  dialog: excerptsOf("permission", "Allow access to the keychain?", { text: "Allow access to the keychain?" }),
 };
 
 for (const hash of [

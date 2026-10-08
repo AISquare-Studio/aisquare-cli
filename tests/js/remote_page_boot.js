@@ -155,6 +155,10 @@ class FakeElement extends FakeNode {
     this.dispatch("focus");
   }
 
+  blur() {
+    this.dispatch("blur");
+  }
+
   /* "tag" or "tag.class.class": all the page ever asks for. */
   querySelectorAll(selector) {
     const [tag, ...classes] = selector.split(".");
@@ -423,6 +427,26 @@ async function unlockKept() {
   form.dispatch("submit");
   await settle();
   return { hash: page.location.hash, form: !!unlockForm(page) };
+}
+
+/* The passphrase typed at a link the machine answers `status` for unlocking: 404 once a
+ * new link was made (regenerate-password --new-link) or auto-off passed, as everything
+ * under a token it no longer has is; 401 for a wrong passphrase, the control. */
+async function unlockAnswered(status, json) {
+  const page = bootPage("#/", signedOut(() => ({ status, json })));
+  await settle();
+  const { input, form } = unlockForm(page);
+  input.value = PASSPHRASE;
+  form.dispatch("submit");
+  await settle();
+  const after = unlockForm(page);
+  const heading = find(page.main(), (node) => node.tagName === "H2");
+  return {
+    form: !!after,
+    said: after ? find(after.form, (node) => node.className === "status").textContent : null,
+    heading: heading ? heading.textContent : null,
+    main: page.main().textContent,
+  };
 }
 
 /* The agent view, live, with its socket open: where Send is. */
@@ -748,12 +772,77 @@ async function stopAtAPrompt() {
   return { said, dismissed: page.sent("api/agent/stop").map((body) => body.dismiss_dialog === true), toast: page.toast() };
 }
 
+/* A pad key refused read_only: writes went off on the machine, and no remote frame has
+ * said so yet. */
+async function refusedReadOnly() {
+  const page = await agentView({
+    "POST api/send-keys": () => ({ status: 403, json: { error: "read_only", message: "writes are off" } }),
+  });
+  const pill = () => !page.run("UI.ro.hidden");
+  const before = { send: sendState(page), pill: pill() };
+  click(buttonNamed(page.main(), "1"));
+  await settle();
+  return {
+    before,
+    send: sendState(page),
+    keys: page.main().querySelectorAll("button.w.key").map((key) => key.disabled),
+    pill: pill(),
+    readOnly: page.run("document.body.classList.contains('ro')"),
+    sheet: page.run("UI.sheet").textContent,
+  };
+}
+
+/* The live tab's scroll: after a pane that could not be read, after the first screen,
+ * and after another screen once the human scrolled up to read. */
+async function liveScroll() {
+  const page = await agentView();
+  page.run("UI.main.scrollHeight = 2400; UI.main.scrollTop = 0;");
+  const pane = (rows, error) => page.live().frame("pane", { rows, cursor: [0, 39], width: 80, height: 40, error }, { agent: "coder-1", project: PROJECT });
+  pane([], "can't find pane");
+  await settle();
+  const unread = page.run("UI.main.scrollTop");
+  const rows = Array.from({ length: 40 }, (unused, n) => (n === 36 ? "❯ 1. Yes" : "line " + n));
+  pane(rows);
+  await settle();
+  const first = page.run("UI.main.scrollTop");
+  page.run("UI.main.scrollTop = 300;");
+  pane(rows.map((row, n) => (n === 39 ? "a spinner moved" : row)));
+  await settle();
+  return { unread, first, later: page.run("UI.main.scrollTop") };
+}
+
+/* The key pad opened at the foot of the pane, and again once the human scrolled up to read.
+ * Opening it grows the input bar; this fake has no layout, so the height stays put. */
+async function padScroll() {
+  const page = await agentView();
+  const keys = () => click(buttonNamed(page.main(), "Keys"));
+  page.run("UI.main.scrollHeight = 2400; UI.main.clientHeight = 600; UI.main.scrollTop = 1800;");
+  keys();
+  await settle();
+  const atFoot = page.run("UI.main.scrollTop");
+  keys();
+  page.run("UI.main.scrollTop = 300;");
+  keys();
+  await settle();
+  return { atFoot, reading: page.run("UI.main.scrollTop"), open: page.main().querySelectorAll("div.pad.open").length === 1 };
+}
+
+/* What a screen reader is given for each key of the pad, and for the ⏎ toggle beside Send. */
+async function keyNames() {
+  const page = await agentView();
+  const keys = page.main().querySelectorAll("button.key").map((key) => [key.textContent, key.attrs["aria-label"] || null]);
+  const toggle = find(page.main(), (node) => node.tagName === "INPUT" && node.type === "checkbox" && node.parentNode.textContent === "⏎");
+  return { keys, enterToggle: toggle ? toggle.attrs["aria-label"] || null : null };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
     reloadAtUnlock: await openedSignedOut("#/unlock"),
     unlockNotKept: await unlockNotKept(),
     unlockKept: await unlockKept(),
+    unlockMoved: await unlockAnswered(404, { error: "not_found" }),
+    unlockWrong: await unlockAnswered(401, { error: "wrong_password", message: "wrong password" }),
     lostWrite: await lostWrite(),
     lostTwice: await lostTwice(),
     lostKeyLongAgo: await lostKeyLongAgo(),
@@ -771,6 +860,10 @@ async function main() {
     tellNotSent: await tellNotSent(),
     paneCursor: await paneCursor(),
     stopAtAPrompt: await stopAtAPrompt(),
+    refusedReadOnly: await refusedReadOnly(),
+    keyNames: await keyNames(),
+    liveScroll: await liveScroll(),
+    padScroll: await padScroll(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

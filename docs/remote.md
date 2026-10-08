@@ -61,7 +61,8 @@ uses it for the links in notifications.
 panel starts the server and ngrok, shows the link, a QR code and the passphrase,
 the write switch, the auto-off timer (30, 60 or 120 minutes, or Never) and the
 devices that have unlocked. Scan the QR code with the phone. If ngrok stops, the
-UI restarts it within half a minute.
+UI restarts it within half a minute. The panel serves on port 8750, or on the
+one an exported `AISQUARE_REMOTE_PORT` names, as `serve` does.
 
 **From a shell**, for a machine without the UI open:
 
@@ -261,8 +262,10 @@ Every action is pinned to the agent you looked at: if a manager restarted or
 switched it in the meantime, the action is refused as `stale` rather than
 applied to the replacement.
 
-The key pad is one row (`Esc 1 2 3 ⏎ ↑ ↓ More`, ⏎ being Enter) and the rest
-under More.
+On a phone wide enough for eight keys (412 px is, 390 px is not) the key pad is
+one row, `Esc 1 2 3 ⏎ ↑ ↓ More` (⏎ being Enter), with the rest under More. On
+a narrower phone More takes the line under the seven, and below 360 px the
+eight are two rows of four, More last.
 Ctrl-C and Ctrl-D ask first, and a second one within 3 seconds asks again,
 because Claude Code exits on it. A second Esc within a second and a half asks
 too: two in a row open Claude Code's Rewind selector. The pad and the phone's
@@ -373,8 +376,9 @@ every device out but keeps Remote on. `regenerate-password` makes a new
 passphrase and signs every device out; with `--new-link` it also makes a new
 token, so a leaked link stops working everywhere. The TUI shows the new link
 after Remote is turned off and on. The link `status` and `--new-link` print is
-for port 8750: when `serve` runs on another, give them its `--port` too (an
-exported `AISQUARE_REMOTE_PORT` sets all three).
+for port 8750: when `serve` runs on another, give them its `--port` too. An
+exported `AISQUARE_REMOTE_PORT` sets the port for all of them, and for the R
+panel, whose server and ngrok use it as well.
 
 ---
 
@@ -447,5 +451,7 @@ domains; run `ngrok update`.
 Remove what `install-page` installed: `rm -rf ~/.aisquare/remote-dist`.
 
 **"Remote is off on the machine, or the link changed".** Remote was turned off,
-auto-off passed, or ngrok came back on a new address. Turn it on again, or open
-the link the machine shows now.
+auto-off passed, ngrok came back on a new address, or
+`regenerate-password --new-link` replaced the link (a phone still on the old one
+is told so when it tries to unlock). Turn it on again, or open the link the
+machine shows now.

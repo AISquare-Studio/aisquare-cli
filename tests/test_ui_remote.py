@@ -15,16 +15,17 @@ import json
 import shutil
 import socket
 from collections.abc import Awaitable, Callable, Iterator, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
 
 import pytest
 from textual.pilot import Pilot
-from textual.widgets import Button, Select, Static, Switch
+from textual.widgets import Button, DataTable, Select, Static, Switch
 
 from aisquare.cli.ui.app import FleetApp, HelpScreen
 from aisquare.cli.ui.remote_control import READ_ONLY_REASON, RemoteController
+from aisquare.cli.ui.views import remote as remote_view
 from aisquare.cli.ui.views.remote import RemotePanel, qr_text
 from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
@@ -494,6 +495,100 @@ def test_devices_list_shows_devices_from_remote_json_and_revoke_drops_one() -> N
     drive(go, tunnel=missing_ngrok)
 
 
+def test_the_devices_table_follows_last_seen_and_sign_in_while_the_devices_stay_the_same(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The table was built again only when a device came or went: a phone back on kept its
+    old "last seen", and one signed out after a day idle still read "signed in", the very
+    columns a revoke is decided from (r2 review of #243). The cells change in place, and
+    the cursor stays on the row the user put it on."""
+
+    async def go(pilot: Pilot[None]) -> None:
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        runtime = remote_server.runtime()
+        iphone = runtime.unlock_device(runtime.password, "iPhone Safari")
+        assert iphone is not None and runtime.unlock_device(runtime.password, "Firefox")
+        modal.repaint()
+        await pilot.pause()
+        table = modal.query_one("#remote-devices", DataTable)
+
+        def rows() -> list[list[str]]:
+            return [[str(cell) for cell in table.get_row_at(row)] for row in range(table.row_count)]
+
+        first = rows()
+        assert [row[1] for row in first] == ["iPhone Safari", "Firefox"]
+        assert [row[4] for row in first] == ["signed in", "signed in"]
+        table.move_cursor(row=1)
+        await pilot.pause()
+
+        clock = [datetime.now(UTC) + timedelta(hours=2)]
+        monkeypatch.setattr(remote_server, "_remote_now", lambda: clock[0])
+        assert runtime.device_for_cookie(iphone[0]) is not None  # the iPhone is back on
+        modal.repaint()
+        await pilot.pause()
+        back = rows()
+        seen = remote_view._short_cell(clock[0].isoformat(timespec="seconds"), 19)
+        assert back[0][2] == seen != first[0][2]
+        assert back[1] == first[1]
+
+        clock[0] += timedelta(hours=23)  # Firefox is a day idle now, the iPhone 23 h
+        modal.repaint()
+        await pilot.pause()
+        idle = rows()
+        assert [row[4] for row in idle] == ["signed in", "signed out"]
+        assert [row[0] for row in idle] == [row[0] for row in first]
+        assert table.cursor_row == 1, "the cursor stays on the row the user put it on"
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def test_a_repaint_reads_the_status_once_and_draws_the_qr_only_for_a_new_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every one-second repaint encoded the QR anew, about 4 ms of segno on Textual's own
+    thread, and read ``remote_server_status()`` twice, each read three digests of
+    ``remote.json`` (r2 review of #243). The QR is drawn again when the link changes."""
+    drawn: list[str] = []
+    reads: list[None] = []
+    status = remote_server.remote_server_status
+
+    def drawing(url: str) -> str:
+        drawn.append(url)
+        return qr_text(url)
+
+    def reading() -> dict[str, object]:
+        reads.append(None)
+        return status()
+
+    monkeypatch.setattr(remote_view, "qr_text", drawing)
+    monkeypatch.setattr(remote_server, "remote_server_status", reading)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        info = app.remote.info
+        assert info is not None and drawn[-1:] == [info.url_local]
+        qrs, statuses = len(drawn), len(reads)
+        modal.repaint()
+        modal.repaint()
+        assert len(drawn) == qrs, "the same link: no QR drawn again"
+        assert len(reads) == statuses + 2, "one status read a repaint"
+
+        app.remote.public_url = build_public_url(PUBLIC, info.token)  # ngrok announced it
+        modal.repaint()
+        assert drawn[qrs:] == [app.remote.public_url]
+        await pilot.pause()
+        assert shown(modal.query_one("#remote-qr", Static)) == qr_text(app.remote.public_url)
+        assert shown(modal.query_one("#remote-link", Static)) == app.remote.public_url
+
+    drive(go, tunnel=missing_ngrok)
+
+
 def test_qr_text_is_compact_half_block_art_of_the_url() -> None:
     art = qr_text("https://abcd-12.ngrok-free.app/r/AbCdEfGhIjKlMnOpQrStUv")
     rows = art.splitlines()
@@ -558,6 +653,91 @@ def test_the_write_switch_is_remote_jsons_whatever_an_older_state_json_says() ->
         await pilot.pause()
         assert modal.query_one("#remote-allow-write", Switch).value is True
         assert shown(modal.query_one("#remote-write-hint", Static)) == "writes reach the fleet"
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def refuse_remote_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    """From now on ``remote.json`` cannot be replaced, as in a read-only or full home."""
+
+    def refuse(path: Path, **kwargs: object) -> object:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(remote_server, "replacement", refuse)
+
+
+def test_a_remote_json_that_will_not_write_leaves_the_ui_up_at_start_and_remote_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Remote that was on comes back in ``on_mount``, and the deadline it could not write
+    raised out of it: ``asq ui`` ended at start, uvicorn still serving (r2 review of #243)."""
+    update_state("remote_enabled", True)
+    Runtime(paths.remote_state_path(), paths.remote_audit_path())  # an earlier Remote's file
+    refuse_remote_json(monkeypatch)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        assert not app.remote.running
+        assert remote_server.remote_server_status()["running"] is False
+        modal = await open_panel(pilot)
+        assert modal.query_one("#remote-on", Switch).value is False
+        status = shown(modal.query_one("#remote-status", Static))
+        assert status.startswith("Remote could not start — remote.json could not be written")
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def test_a_remote_json_that_will_not_write_is_a_sentence_for_each_control_of_the_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The switch, the Auto-off picker, Regenerate and Revoke raised into Textual's handlers,
+    and the exception ended the fleet UI while Remote kept serving (r2 review of #243). The
+    write switch said it "could not be changed" while it showed the change phones now got."""
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        runtime = remote_server.runtime()
+        assert runtime.unlock_device(runtime.password, "iPhone Safari") is not None
+        modal.repaint()
+        await pilot.pause()
+        refuse_remote_json(monkeypatch)
+
+        def status() -> str:
+            return shown(modal.query_one("#remote-status", Static))
+
+        modal.query_one("#remote-auto-off", Select).value = 30
+        await pilot.pause()
+        assert status().startswith("auto-off could not be saved to remote.json — [Errno 13]")
+        modal.query_one("#remote-revoke", Button).press()
+        await pilot.pause()
+        assert "could not be revoked in remote.json" in status()
+        modal.query_one("#remote-regen", Button).press()
+        await pilot.pause()
+        assert status().startswith("the new password could not be saved to remote.json")
+        modal.query_one("#remote-allow-write", Switch).toggle()
+        await pilot.pause()
+        assert status().startswith("write actions could not be saved to remote.json — [Errno 13]")
+        assert modal.query_one("#remote-allow-write", Switch).value is True
+        assert remote_server.remote_allow_write() is True, "the running server took it"
+        assert app.screen is modal and app.remote.running
+
+        modal.query_one("#remote-on", Switch).toggle()  # off still goes off
+        await pilot.pause()
+        assert not app.remote.running
+        assert remote_server.remote_server_status()["running"] is False
+        assert "devices could not be revoked" in status()
+
+        modal.query_one("#remote-on", Switch).toggle()  # and on does not stay on without it
+        await pilot.pause()
+        assert app.screen is modal and not app.remote.running
+        assert modal.query_one("#remote-on", Switch).value is False
+        assert status().startswith("Remote could not start — remote.json could not be written")
+        assert remote_server.remote_server_status()["running"] is False
 
     drive(go, tunnel=missing_ngrok)
 

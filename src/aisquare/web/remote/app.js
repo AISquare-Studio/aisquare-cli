@@ -396,13 +396,15 @@ function planBlock(box, plan, doc) {
   }
 }
 
-/* What the human must read before answering, by kind, as {box, text}: box is null when
- * there is nothing, and text is the full text the box shows, when that is what it shows. */
+/* What the human must read before answering, by kind, as {box, text, lead}: box is null
+ * when there is nothing, text is the full text the box shows, when that is what it shows,
+ * and lead is what the box opens with, when the server builds the excerpt from it. */
 function renderDetail(kind, detail, doc) {
   const d = detail && typeof detail === "object" && !Array.isArray(detail) ? detail : {};
   const box = mk(doc, "div", "detail");
   let shown = 0;
   let text = "";
+  let lead = "";
   const add = (node) => {
     box.appendChild(node);
     shown++;
@@ -412,6 +414,7 @@ function renderDetail(kind, detail, doc) {
       if (!q || typeof q !== "object") continue;
       if (isText(q.header)) add(mk(doc, "h3", null, q.header));
       add(mk(doc, "p", "q", q.question));
+      if (!lead && isText(q.question)) lead = q.question;
       if (q.multiSelect === true) add(mk(doc, "span", "flag", "multi-select"));
       const list = mk(doc, "ul", "options");
       const options = Array.isArray(q.options) ? q.options.slice(0, 20) : [];
@@ -425,8 +428,10 @@ function renderDetail(kind, detail, doc) {
   } else if (kind === "plan" && isText(d.plan)) {
     planBlock(box, d.plan, doc);
     shown++;
+    lead = (plainText(d.plan).split("\n").map((line) => line.trim()).find((line) => line) || "").replace(/^#+/, "");
   } else if (kind === "permission" && isText(d.tool)) {
     const lines = ["tool: " + plainText(d.tool)];
+    lead = d.tool;
     const input = d.input && typeof d.input === "object" && !Array.isArray(d.input) ? d.input : {};
     for (const key of Object.keys(input).slice(0, 20)) {
       const value = input[key];
@@ -443,18 +448,24 @@ function renderDetail(kind, detail, doc) {
     add(mk(doc, "pre", "text", d.text));
     text = d.text;
   }
-  return { box: shown ? box : null, text };
+  return { box: shown ? box : null, text, lead };
 }
 
-/* Whether an excerpt only says again what the detail's text shows in full. The server
- * cuts it from that text (all of it, its first 280 characters, its last paragraph, the
- * question it ends on), and said twice it doubled a card's height on a phone. A long
- * text keeps an excerpt from its end, which its box may hold below the fold. */
-function excerptRepeats(excerpt, text) {
+/* Whether an excerpt only says again what the card's detail shows in full: said twice it
+ * doubled a card's height on a phone, and a question, with the pane strip, said its own
+ * three times. The server cuts a text's excerpt from the text (all of it, its first 280
+ * characters, its last paragraph, the question it ends on); a long text keeps one from
+ * its end, which its box may hold below the fold. The others it builds from what their
+ * box leads with: a question's from its first question and options, a permission's from
+ * the tool and its command or path, a plan's from its first line. */
+function excerptRepeats(excerpt, detail) {
   const flat = (value) => plainText(value).replace(/\s+/g, " ").trim();
   const part = flat(excerpt).replace(/…$/, "").trim();
-  const whole = flat(text);
-  return part !== "" && (whole.startsWith(part) || (whole.length <= SHORT_TEXT && whole.includes(part)));
+  if (part === "") return false;
+  const lead = flat(detail.lead);
+  if (lead !== "" && (part.startsWith(lead) || lead.startsWith(part))) return true;
+  const whole = flat(detail.text);
+  return whole.startsWith(part) || (whole.length <= SHORT_TEXT && whole.includes(part));
 }
 
 /* One needs item as a card. Pure: the page passes its handlers in opts, and
@@ -476,7 +487,7 @@ function renderNeedsCard(item, doc, opts) {
   card.appendChild(head);
   card.appendChild(mk(doc, "p", "reason", it.reason));
   const detail = renderDetail(kind, it.detail, doc);
-  if (isText(it.excerpt) && !excerptRepeats(it.excerpt, detail.text)) card.appendChild(mk(doc, "p", "excerpt", it.excerpt));
+  if (isText(it.excerpt) && !excerptRepeats(it.excerpt, detail)) card.appendChild(mk(doc, "p", "excerpt", it.excerpt));
   if (detail.box) card.appendChild(detail.box);
   if (kind && STRIP_KINDS.has(kind)) {
     const strip = mk(doc, "pre", "strip", "the agent's screen shows here");
@@ -872,9 +883,18 @@ function failText(res, max) {
   return message || plainText(res.error) || "That did not work (" + res.status + ").";
 }
 
-/* What a refusal does beyond its sentence. */
+/* What a refusal does beyond its sentence. A read_only is the machine saying writes are
+ * off now: the page shows it at once, where it kept the pad and Send live until the next
+ * remote frame said so. */
 function afterFailure(res, route) {
-  if (res.status === 403 && res.error === "read_only") readOnlySheet(res.message);
+  if (res.status === 403 && res.error === "read_only") {
+    if (writable()) {
+      S.remote = Object.assign({}, S.remote, { allow_write: false });
+      drawStatus();
+      gateButtons();
+    }
+    readOnlySheet(res.message);
+  }
   if (res.status === 404 && res.error === "no_such_agent" && route && route.pid) pageGo({ name: "project", pid: route.pid, tab: "fleet" });
 }
 
@@ -1337,7 +1357,8 @@ function offScreen(kind) {
 
 const OFF_SCREENS = {
   off: ["Remote is off on the machine", "Turn it on again in the R panel of aisquare ui, or with aisquare remote serve, then retry."],
-  gone: [OFF_OR_MOVED, "If ngrok restarted without a static domain, open the new link the machine shows."],
+  gone: [OFF_OR_MOVED, "Turn it on again, or open the link the machine shows now: the link changes when ngrok " +
+    "restarts without a static domain, and with regenerate-password --new-link."],
   link: ["This link is no longer valid", "Open the link the machine shows now."],
   origin: ["Open this page from the link the machine shows", "This copy of the page came from somewhere else."],
 };
@@ -1453,6 +1474,9 @@ VIEWS.unlock = (route, main) => {
     }
     if (res.status === 401) said.textContent = "That is not the passphrase.";
     else if (res.status === 429) wait(res.retryAfter || 60, plainText(res.message) || "Too many tries");
+    // The token is wrong (a new link was made) or auto-off passed: no passphrase helps,
+    // and the bare "not_found" under the button never said to open the link anew.
+    else if (res.status === 404) offScreen("gone");
     else said.textContent = failText(res);
     return undefined;
   });
@@ -2160,6 +2184,13 @@ const PAD_MORE = [
   ["F8", "F8"], ["F9", "F9"], ["F10", "F10"], ["F11", "F11"], ["F12", "F12"],
   ["^L", "C-l"], ["^R", "C-r"], ["^U", "C-u"], ["^O", "C-o"], ["^C", "C-c"], ["^D", "C-d"],
 ];
+/* What a screen reader says for a key whose label is a glyph or a short form: "⏎" was
+ * read out as a symbol, or not at all, never as the Enter it sends. */
+const KEY_SPOKEN = Object.freeze({
+  Escape: "Escape", Enter: "Enter", Up: "Up arrow", Down: "Down arrow", Left: "Left arrow", Right: "Right arrow",
+  BTab: "Shift Tab", BSpace: "Backspace", PageUp: "Page up", PageDown: "Page down",
+  "C-l": "Control L", "C-r": "Control R", "C-u": "Control U", "C-o": "Control O", "C-c": "Control C", "C-d": "Control D",
+});
 
 VIEWS.agent = (route, main) => {
   const pid = route.pid;
@@ -2216,10 +2247,19 @@ VIEWS.agent = (route, main) => {
     };
     fit.box.addEventListener("change", fitNow);
     body.append(tools, pane);
+    let landed = false;
     cleanups.push(paneWatch(pid, label, (payload) => {
       width = clampInt(payload.width, 20, 400);
       fitNow();
       draw(payload);
+      // The first screen opens at its foot, where a prompt waits: it sat below the fold,
+      // half under the input bar, about 110 px of scrolling away. Later frames leave the
+      // scroll where the human put it. Scrolled once this view is built, since a cached
+      // frame is drawn before the input bar is added.
+      if (!landed && Array.isArray(payload.rows) && payload.rows.length) {
+        landed = true;
+        Promise.resolve().then(() => { UI.main.scrollTop = UI.main.scrollHeight; });
+      }
     }));
   } else if (route.tab === "transcript") {
     const older = button("ghost", "Load older", () => load(cursor));
@@ -2298,19 +2338,30 @@ function inputBar(pid, label, cleanups) {
   text.setAttribute("aria-label", "Type to the agent");
   text.maxLength = TEXT_MAX.keys;
   const enter = checkbox("⏎", true);
+  enter.box.setAttribute("aria-label", "Press Enter after the text");
   const send = button("w primary", "Send", () => sendText());
   const padToggle = button("ghost", "Keys", () => setPad(!pad.classList.contains("open")));
   line.append(text, enter.label, send, padToggle);
   const pad = el("div", "pad");
   const more = el("div", "pad-more");
-  for (const key of PAD_ROW) pad.appendChild(button("w key", key[0], () => sendKey(key[1])));
+  const keyButton = (key) => {
+    const control = button("w key", key[0], () => sendKey(key[1]));
+    if (Object.prototype.hasOwnProperty.call(KEY_SPOKEN, key[1])) control.setAttribute("aria-label", KEY_SPOKEN[key[1]]);
+    return control;
+  };
+  for (const key of PAD_ROW) pad.appendChild(keyButton(key));
   pad.appendChild(button("ghost key", "More", () => more.classList.toggle("open")));
-  for (const key of PAD_MORE) more.appendChild(button("w key", key[0], () => sendKey(key[1])));
+  for (const key of PAD_MORE) more.appendChild(keyButton(key));
   pad.appendChild(more);
   bar.append(line, pad);
   const setPad = (open) => {
+    // The pad grows the bar over the foot of the pane, where the prompt it answers waits:
+    // a view at its foot stays there. One scrolled up to read is left where it is.
+    const main = UI.main;
+    const atFoot = main.scrollHeight - main.scrollTop - main.clientHeight < 2;
     pad.classList.toggle("open", open);
     if (open) text.blur();
+    if (open && atFoot) main.scrollTop = main.scrollHeight;
   };
   text.addEventListener("focus", () => setPad(false));
   text.addEventListener("input", () => {

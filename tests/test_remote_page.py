@@ -633,6 +633,63 @@ def test_the_key_pad_fits_a_360_px_phone_and_every_label_its_key() -> None:
     assert _css_value(css, ".pad .key", "min-width") == "max-content", "so theirs widen"
 
 
+DOCS = Path(__file__).resolve().parents[1] / "docs" / "remote.md"
+
+
+def test_the_pad_is_one_row_where_eight_keys_fit_and_the_docs_say_where_they_do_not() -> None:
+    """SPEC §6.3 has the pad as one row, ``Esc 1 2 3 ⏎ ↑ ↓ More``, and so did the docs. Eight
+    44 px keys and their gaps need 380 px, more than a 390 px phone's row: there More went
+    to a line of its own, and at 320 px ↓ with it (r2 smoke of #243). More joins the row
+    where the eight fit, as headless Chromium measured at 412 and 430 px, and takes the
+    line under the seven where they do not; under 360 px, where not even seven fit, the
+    eight are two rows of four. The docs say which phone gets which."""
+    script, css = _text("app.js"), _text("app.css")
+    row = _pad_labels(script, "PAD_ROW")
+    (gap,) = _css_px(css, ".pad", "gap")
+    (basis,) = _css_px(css, ".pad .key", "flex")
+
+    eight = (len(row) + 1) * basis + len(row) * gap
+    assert 390 - 2 * 12 < eight < 412 - 2 * 12, "More under on a 390 px phone, not on a 412"
+    assert '"ghost key", "More"' in script, "More is a key of the row like the others"
+    assert not re.search(r"\.more\b", css), "and no rule sends it under where the eight fit"
+    narrow = re.search(
+        r"@media \(max-width: 359px\) \{\s*\.pad > \.key \{ flex-basis: calc\(25% - (\d+)px\); \}",
+        css,
+    )
+    assert narrow is not None, "under 360 px, four to a row"
+    assert 4 * int(narrow.group(1)) == 3 * gap, "four keys and their three gaps fill the row"
+    assert (320 - 2 * 12 - 3 * gap) / 4 >= KEY_PX
+    prose = " ".join(DOCS.read_text("utf-8").split())
+    wide = "On a phone wide enough for eight keys (412 px is, 390 px is not) the key pad is"
+    described = re.search(re.escape(wide) + r" one row, `([^`]+)`", prose)
+    assert described is not None and described.group(1).split() == [*row, "More"]
+    assert "with the rest under More. On a narrower phone More takes the line under the" in prose
+    assert "below 360 px the eight are two rows of four, More last" in prose
+
+
+def test_the_status_strip_and_the_bottom_nav_keep_to_one_line_on_a_phone() -> None:
+    """Read-only with an auto-off, the strip needs 400 px, and at 360 px Extend 1 h went to
+    a second line; the Needs tab put its count under its label in a 90 px tab. The strip's
+    name starts from nothing and takes what is left, so it gives way first and never pushes
+    the rest down, and a tab has 2 px of side padding where the button's 14 px crowded its
+    count out. Both still wrap where nothing else would fit: a strip that wrapped only under
+    300 px ran Extend 12 px past the edge of a 300 px screen, and a nowrap tab ran its
+    count over the next one at 280 px. Headless Chromium measured one line each from 325 px
+    up, and nothing past an edge from 280 px."""
+    css = _text("app.css")
+    strip = re.search(r"\n\.top \{([^}]*)\}", css)
+    assert strip is not None and re.search(r"(?:^|[;\s])flex-wrap:\s*wrap;", strip.group(1))
+    assert not re.search(r"@media[^{]*\{\s*\.top \{", css), "it wraps at whatever width it must"
+    assert _css_value(css, ".top > *", "flex") == "none"
+    assert _css_value(css, ".top > *", "white-space") == "nowrap"
+    assert _css_value(css, ".top .where", "flex") == "1 1 0", "never the reason for a wrap"
+    assert _css_value(css, ".top .where", "min-width") == "0"
+    assert _css_value(css, ".top .where", "text-overflow") == "ellipsis"
+    tab = re.search(r"\n\.bottom \.tab \{([^}]*)\}", css)
+    assert tab is not None and "nowrap" not in tab.group(1)
+    assert _css_px(css, ".bottom .tab", "padding") == [8, 2]
+
+
 # --- 10. the service worker -----------------------------------------------------------------
 
 NGROK_SUFFIXES = (".ngrok-free.app", ".ngrok.app", ".ngrok.io", ".ngrok-free.dev", ".ngrok.dev")
@@ -742,6 +799,21 @@ def test_a_card_says_once_what_its_detail_shows_in_full(node_report: dict[str, A
     assert shown["elsewhere"] == ["Which store?"]
 
 
+def test_a_question_permission_or_plan_card_says_once_what_its_detail_leads_with(
+    node_report: dict[str, Any],
+) -> None:
+    """The question card showed its question three times (the excerpt, the detail, the pane
+    strip), the permission card's ``Bash(pytest -q …)`` repeated the tool and command below
+    it, and a plan's excerpt was its first line: the server builds each excerpt from what
+    the detail shows whole. An excerpt the detail does not lead with stays, and so does one
+    with no detail to say it."""
+    shown = node_report["builtExcerpts"]
+    repeats = ("question", "questions", "cutQuestion", "permission", "plan", "dialog")
+    assert {name: shown[name] for name in repeats} == {name: [] for name in repeats}
+    assert shown["otherQuestion"] == ["Pick one before the release"]
+    assert shown["bareTool"] == ["Bash(pytest -q tests/test_cache.py)"]
+
+
 def test_routes_are_built_only_from_ids_that_validate(node_report: dict[str, Any]) -> None:
     routes = node_report["routes"]
     assert routes["#/n/ny_0123456789abcdef/p/prj_x/a/coder-1"] == {
@@ -845,6 +917,21 @@ def test_an_unlock_the_browser_did_not_keep_says_so_and_keeps_the_route(
     assert "did not keep the sign-in" in lost["said"]
     assert lost["remembered"] == "#/p/prj_x/board"
     assert boot_report["unlockKept"] == {"hash": "#/p/prj_x/board", "form": False}
+
+
+def test_an_unlock_at_a_link_that_moved_says_so_instead_of_not_found(
+    boot_report: dict[str, Any],
+) -> None:
+    """After ``regenerate-password --new-link``, or past auto-off, the machine answers the old
+    link's unlock 404, and the page put the bare code ``not_found`` under the button: nothing
+    said the link changed, or to open the new one. A wrong passphrase is the control."""
+    moved = boot_report["unlockMoved"]
+    assert not moved["form"]
+    assert moved["heading"] == "Remote is off on the machine, or the link changed"
+    assert "open the link the machine shows now" in moved["main"]
+    assert "not_found" not in moved["main"]
+    wrong = boot_report["unlockWrong"]
+    assert wrong["form"] and wrong["said"] == "That is not the passphrase."
 
 
 def test_a_write_whose_request_was_lost_goes_out_again_once_on_a_new_socket(
@@ -1021,6 +1108,49 @@ def test_a_stop_refused_at_a_prompt_is_explained_in_the_pages_own_words(
     )
     assert stop["dismissed"] == [False, True]
     assert stop["toast"] == "Stopped coder-1"
+
+
+def test_a_write_refused_read_only_shuts_every_write_button_at_once(
+    boot_report: dict[str, Any],
+) -> None:
+    """After a 403 ``read_only`` the pad and Send stayed live, and the READ-ONLY pill hidden,
+    until a ``remote`` frame or a reconnect said what the machine had just said itself."""
+    refused = boot_report["refusedReadOnly"]
+    assert refused["before"] == {"send": {"busy": False, "disabled": False}, "pill": False}
+    assert refused["send"] == {"busy": False, "disabled": True}
+    assert refused["keys"] and all(refused["keys"]), refused["keys"]
+    assert refused["pill"] is True and refused["readOnly"] is True
+    assert "can watch but not act" in refused["sheet"]
+
+
+def test_every_key_of_the_pad_has_a_name_a_screen_reader_can_say(
+    boot_report: dict[str, Any],
+) -> None:
+    """A glyph key (⏎ ↑ ↓ ← → ⌫ ⇧Tab) had no accessible name, so a screen reader read the
+    symbol, or nothing, never the Enter or the arrow it sends; nor did ``^C`` or the ⏎
+    toggle beside Send. A key whose label is a word or a digit is its own name."""
+    names = boot_report["keyNames"]
+    spoken = dict(names["keys"])
+    assert len(spoken) == len(names["keys"]) > 40, "every key, each label once"
+    assert (spoken["⏎"], spoken["↑"], spoken["↓"]) == ("Enter", "Up arrow", "Down arrow")
+    assert (spoken["←"], spoken["→"], spoken["⌫"]) == ("Left arrow", "Right arrow", "Backspace")
+    assert (spoken["⇧Tab"], spoken["^C"], spoken["PgUp"]) == ("Shift Tab", "Control C", "Page up")
+    unnamed = [label for label, name in spoken.items() if name is None]
+    assert [label for label in unnamed if not re.fullmatch(r"[A-Za-z0-9]+", label)] == []
+    assert {"1", "Space", "More", "F12"} <= set(unnamed), "words and digits say themselves"
+    assert names["enterToggle"] == "Press Enter after the text"
+
+
+def test_the_live_tab_opens_at_the_foot_of_the_pane_where_a_prompt_waits(
+    boot_report: dict[str, Any],
+) -> None:
+    """The Live tab opened at the top of a 40-row pane, and the prompt that needed the human
+    sat at its foot, below the fold and half under the input bar. Only the first screen
+    moves the scroll: a later frame leaves it where the human put it to read. The key pad,
+    opened at the foot, grew the bar back over the options it is there to answer: the view
+    stays at the foot, and one scrolled up to read stays where it is."""
+    assert boot_report["liveScroll"] == {"unread": 0, "first": 2400, "later": 300}
+    assert boot_report["padScroll"] == {"atFoot": 2400, "reading": 300, "open": True}
 
 
 # --- 11. the wheel --------------------------------------------------------------------------

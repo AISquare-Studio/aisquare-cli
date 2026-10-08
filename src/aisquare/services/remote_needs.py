@@ -1062,7 +1062,7 @@ def _needs_scan_project(
     tails: dict[str, TranscriptTail | None] = {}
     if statuses is not None:
         for status in statuses:
-            tail = tails[status.agent.id] = _needs_tail_of(sources.transcript_tail, status)
+            tail = tails[status.agent.id] = _needs_tail_of(sources, status)
             for item in needs_from_agent(
                 status,
                 tail,
@@ -1090,16 +1090,14 @@ def _needs_scan_project(
     return _NeedsProject(items=items, statuses=listed, ended=ended, tails=tails)
 
 
-def _needs_tail_of(
-    read: Callable[[str], TranscriptTail | None], status: FleetAgentStatus
-) -> TranscriptTail | None:
-    """The agent's transcript tail through ``read``, read only where a rule can use it."""
+def _needs_tail_of(sources: NeedsSources, status: FleetAgentStatus) -> TranscriptTail | None:
+    """The agent's transcript tail, read only where a rule can use it."""
     session = status.session
     path = None if session is None else session.transcript_path
     if not path or status.state in ("exited", "unknown", "lost"):
         return None
     try:
-        return read(path)
+        return sources.transcript_tail(path)
     except Exception:
         log.debug("remote: needs could not read the tail of %s", path, exc_info=True)
         return None
@@ -1385,7 +1383,8 @@ def needs_single_agent_now(
     ever had, its board, its sessions and every agent's tail, and a listing that
     ends dead rows on the way. This reads the newest row holding the label,
     derives it on its own server from its own session (``fleet.status_of``), asks
-    its pane what :func:`needs_agent_now` asks, and reads its own cached tail
+    its pane what :func:`needs_agent_now` asks, and reads its tail as the scan reads
+    every agent's: through the live sources' cached reader, the one of them it uses
     (review of #243, round 3, 4/13).
 
     So ``items`` are what :func:`needs_from_agent` derives for this agent without
@@ -1407,7 +1406,7 @@ def needs_single_agent_now(
     if row is None:
         raise fleet_service.NoSuchAgent(f"no agent {label!r} in {project.root.name or project.id}")
     status = fleet_service.status_of(row)
-    tail = _needs_tail_of(_needs_cached_tail, status)
+    tail = _needs_tail_of(live_needs_sources(), status)
     items = needs_from_agent(status, tail, project=project, events=(), now=when)
     return _needs_snapshot(project, status, tail, tuple(items), when)
 

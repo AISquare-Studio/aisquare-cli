@@ -1368,12 +1368,23 @@ def _never(*_args: object, **_kwargs: object) -> Any:
     raise AssertionError("a read of one agent went through its whole project")
 
 
+class _TailOnly:
+    """The live sources as a read of one agent may use them: the tail of its transcript, and
+    nothing of its project. Asking for any other source fails the test."""
+
+    def __init__(self, read: Callable[[str], TranscriptTail | None]) -> None:
+        self.transcript_tail = read
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"a read of one agent asked its project's sources for {name}")
+
+
 def _alone_of(
     fleet: Fleet, tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch, label: str = "coder-1"
 ) -> AgentNow:
     """``needs_single_agent_now`` over the facts :func:`_now_of` scans: the rows in the store,
     each derived as the fake fleet lists it, the tails as it holds them. Listing the project,
-    or building the scan's sources, fails the test."""
+    or asking the live sources for anything but a tail, fails the test."""
     statuses = {status.agent.id: status for status in fleet.agents}
     with store_session() as store:
         for status in fleet.agents:
@@ -1381,8 +1392,7 @@ def _alone_of(
     monkeypatch.setattr(fleet_service, "status_of", lambda row: statuses[row.id])
     monkeypatch.setattr(fleet_service, "list_agents", _never)
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
-    monkeypatch.setattr(remote_needs, "live_needs_sources", _never)
-    monkeypatch.setattr(remote_needs, "_needs_cached_tail", fleet.tails.get)
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: _TailOnly(fleet.tails.get))
     return needs_single_agent_now(PROJECT, label, now=NOW)
 
 
@@ -1485,8 +1495,7 @@ def test_the_agent_alone_is_derived_on_its_own_server_and_its_transcript_alone_i
     monkeypatch.setattr(fleet_service, "_now", lambda: NOW)
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
     monkeypatch.setattr(fleet_service, "list_agents", _never)
-    monkeypatch.setattr(remote_needs, "live_needs_sources", _never)
-    monkeypatch.setattr(remote_needs, "_needs_cached_tail", cached_tail)
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: _TailOnly(cached_tail))
     snap = needs_single_agent_now(PROJECT, "coder-1", now=NOW)
     assert snap.status is not None
     assert (snap.status.agent.id, snap.status.state) == (one.id, "attention")

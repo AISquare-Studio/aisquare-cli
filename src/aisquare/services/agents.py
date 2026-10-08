@@ -113,8 +113,12 @@ class AgentFileUnreadableError(ValueError):
     undecodable ``CLAUDE.md`` became, and an ``OSError`` (a directory where the
     file should be, a file this user may not read) was a traceback with nothing
     on stdout. So asq's Connect button named neither the file nor the reason.
-    The message names both.
+    The message names both, and ``path`` is the file.
     """
+
+    def __init__(self, message: str, path: Path | None = None) -> None:
+        super().__init__(message)
+        self.path = path
 
 
 def _read_agent_file(path: Path) -> str | None:
@@ -124,9 +128,9 @@ def _read_agent_file(path: Path) -> str | None:
     except FileNotFoundError:
         return None
     except UnicodeDecodeError as exc:
-        raise AgentFileUnreadableError(f"can't read {path}: it is not UTF-8 text") from exc
+        raise AgentFileUnreadableError(f"can't read {path}: it is not UTF-8 text", path) from exc
     except OSError as exc:
-        raise AgentFileUnreadableError(f"can't read {path}: {exc.strerror or exc}") from exc
+        raise AgentFileUnreadableError(f"can't read {path}: {exc.strerror or exc}", path) from exc
 
 
 def _check_settings(path: Path) -> None:
@@ -142,28 +146,57 @@ def _check_settings(path: Path) -> None:
     try:
         agent_core.read_settings(path)
     except agent_core.SettingsNotAnObjectError as exc:
-        raise AgentFileUnreadableError(str(exc)) from exc
+        raise AgentFileUnreadableError(str(exc), path) from exc
     unwritable = settings_unwritable(path)
     if unwritable is not None:
-        raise AgentFileUnreadableError(f"can't write {path}: {unwritable}")
+        raise AgentFileUnreadableError(f"can't write {path}: {unwritable}", path)
+
+
+def _read_before_writing(name: str, config_dir: Path | None) -> list[str]:
+    """Every file `agents connect` reads before it writes anything, read: the settings file
+    the hooks go into (:func:`_check_settings`), then the context files it imports, whose
+    text it returns. Raises :class:`AgentFileUnreadableError` for the first it cannot use.
+
+    One function for :func:`connect` and :func:`refused_file`, so what the doctor, Welcome
+    and the installer are told is what connect does: asking about settings.json alone,
+    they offered Connect for a CLAUDE.md connect refuses (review of #257).
+    """
+    spec = agent_core.spec(name, config_dir)
+    if spec is not None and spec.settings_path is not None:
+        _check_settings(spec.settings_path)
+    return [_read_agent_file(path) or "" for path in agent_core.context_files(name, config_dir)]
+
+
+def refused_file(name: str, config_dir: Path | None = None) -> tuple[Path, str] | None:
+    """The file `agents connect` would refuse in ``config_dir``, and why in its own words, or
+    ``None`` when it would write the hooks. Reads only, and returns the refusal rather than
+    raising it.
+
+    Every check connect makes before it writes (:func:`_read_before_writing`): a
+    settings.json that is not a JSON object, or that this user may not write, and a
+    context file (``CLAUDE.md``) that is not UTF-8 text this user can read. A Connect
+    offered there can only fail the click, so the doctor names the file instead.
+    """
+    spec = agent_core.spec(name, config_dir)
+    if spec is None or not spec.connectable:
+        return None
+    try:
+        _read_before_writing(name, config_dir)
+    except AgentFileUnreadableError as exc:
+        return (exc.path or spec.settings_path or spec.home), str(exc)
+    return None
 
 
 def connect_refusal(name: str, config_dir: Path | None = None) -> str | None:
-    """Why `agents connect` would refuse ``config_dir``'s settings file, in its own words,
-    or ``None`` when it would write the hooks. Reads only.
+    """Why `agents connect` would refuse ``config_dir``, in its own words, or ``None`` when
+    it would write the hooks: :func:`refused_file`'s reason. Reads only.
 
-    The doctor asks it before offering Connect: a settings.json that is not a JSON
-    object, or that this user may not write, can only fail the click (review of
-    #257).
+    Asked before Connect is offered, by the doctor's row and Welcome's step 2. A file
+    connect refuses can only fail the click, and a read-only settings.json
+    (home-manager's link into the Nix store) never cleared (review of #257).
     """
-    spec = agent_core.spec(name, config_dir)
-    if spec is None or spec.settings_path is None:
-        return None
-    try:
-        _check_settings(spec.settings_path)
-    except AgentFileUnreadableError as exc:
-        return str(exc)
-    return None
+    refused = refused_file(name, config_dir)
+    return None if refused is None else refused[1]
 
 
 def settings_unwritable(path: Path) -> str | None:
@@ -189,7 +222,7 @@ def _install_hooks(name: str, config_dir: Path | None, path: Path | None) -> boo
     try:
         return agent_core.install_hooks(name, config_dir)
     except OSError as exc:
-        raise AgentFileUnreadableError(f"can't write {path}: {exc.strerror or exc}") from exc
+        raise AgentFileUnreadableError(f"can't write {path}: {exc.strerror or exc}", path) from exc
 
 
 def _make_first_run_dir(name: str, config_dir: Path | None) -> None:
@@ -211,7 +244,9 @@ def _make_first_run_dir(name: str, config_dir: Path | None) -> None:
     try:
         where.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise AgentFileUnreadableError(f"can't create {where}: {exc.strerror or exc}") from exc
+        raise AgentFileUnreadableError(
+            f"can't create {where}: {exc.strerror or exc}", where
+        ) from exc
 
 
 def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
@@ -245,11 +280,11 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
 
     # Every file is read before anything is written: a settings.json that cannot
     # be read stopped connect after the context was ingested and the home built.
-    if spec.settings_path is not None:
-        _check_settings(spec.settings_path)
-    sections: list[str] = []
-    for path in agent_core.context_files(name, config_dir):
-        sections.extend(_split_sections(_read_agent_file(path) or ""))
+    sections = [
+        section
+        for text in _read_before_writing(name, config_dir)
+        for section in _split_sections(text)
+    ]
 
     added = 0
     with store_session() as store:

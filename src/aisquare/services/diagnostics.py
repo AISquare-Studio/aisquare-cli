@@ -955,16 +955,17 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
         for site in graded
         if site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT) and site not in dead
     ]
-    # A settings.json `agents connect` refuses (not a JSON object, or one this user may
-    # not write) reads here as one with no hooks, and its Connect could only fail: a
-    # read-only one, home-manager's link into the Nix store, never cleared. Named with
-    # connect's own reason, as a switched-off one is, and given no button (review of #257).
-    # Hooks it holds that run the wrong program still say so: that is the diagnosis, and
-    # read only as "cannot be written" the row hid that every event fails.
+    # A file `agents connect` refuses (a settings.json that is not a JSON object or that
+    # this user may not write, a CLAUDE.md it cannot read) leaves a directory with no
+    # hooks, and its Connect could only fail: a read-only settings.json, home-manager's
+    # link into the Nix store, never cleared. Named with connect's own reason, as a
+    # switched-off one is, and given no button (review of #257). Hooks it holds that run
+    # the wrong program still say so: that is the diagnosis, and read only as "cannot be
+    # written" the row hid that every event fails.
     refused = {
-        site.config_dir: why
+        site.config_dir: refusal
         for site in (*unhooked, *wrong_binary)
-        if (why := agents_service.connect_refusal("claude-code", site.config_dir)) is not None
+        if (refusal := agents_service.refused_file("claude-code", site.config_dir)) is not None
     }
     unhooked = [site for site in unhooked if site.config_dir not in refused]
     # Where the plugin is the route that runs, what it runs is graded like a hook.
@@ -1055,16 +1056,11 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
         this = f"{agent_core.current_install()} ({__version__})"
         problems.append(f"{clauses} — this install is {this}")
     stale = {site.config_dir for site in wrong_binary}
-    for directory, why in refused.items():
+    for directory, (path, why) in refused.items():
         problems.append(f"hooks cannot be written in {directory}: {why}")
-        fix = (
-            f"make {directory / 'settings.json'} a JSON object this user can write, then "
-            "connect again"
-        )
-        if directory in stale:
-            # Read-only by design (home-manager), the remedy is in what generates it.
-            fix += ", or point its hooks at this install where that file is generated"
-        fixes.append(fix)
+        # Read-only by design (home-manager), the remedy is in what generates it.
+        also = "point its hooks at this install" if directory in stale else None
+        fixes.append(_refused_fix(directory, path, also=also))
     live = [site for site in doubled if site not in dead]
     if dead:
         listed = ", ".join(str(site.config_dir) for site in dead)
@@ -1106,6 +1102,18 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     if runner_fix is not None:
         fixes.append(runner_fix)
     return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
+
+
+def _refused_fix(directory: Path, path: Path, *, also: str | None = None) -> str:
+    """What makes ``path``, the file `agents connect` refuses in ``directory``
+    (``agents_service.refused_file``), one it can use. ``also`` is what to change instead
+    where a settings.json that is read-only by design (home-manager) is generated."""
+    spec = agent_core.spec("claude-code", directory)
+    if spec is None or path != spec.settings_path:
+        # A context file connect imports (CLAUDE.md): the hooks need nothing else changed.
+        return f"make {path} UTF-8 text this user can read, then connect again"
+    fix = f"make {path} a JSON object this user can write, then connect again"
+    return fix if also is None else f"{fix}, or {also} where that file is generated"
 
 
 def _plugin_uninstall(site: agent_core.HookSiteHealth) -> str:

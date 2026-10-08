@@ -761,6 +761,61 @@ def test_a_settings_json_connect_refuses_is_named_and_never_offered_connect(
     assert fix_commands([fixable]) != [], "control: a settings.json it can write gets Connect"
 
 
+def _utf16(path: Path) -> None:
+    path.write_bytes("# Prefs\ncafé\n".encode("utf-16"))  # Windows PowerShell 5.1's `>`
+
+
+def _latin1(path: Path) -> None:
+    path.write_bytes("# Prefs\ncafé\n".encode("latin-1"))
+
+
+#: CLAUDE.md shapes `agents connect` refuses before it writes anything.
+_REFUSED_CLAUDE_MD = {
+    "UTF-16": _utf16,
+    "Latin-1": _latin1,
+    "a directory": _a_directory,
+    "mode 000": _mode_000,
+}
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param(name, marks=_NEEDS_DENIED_READS if name == "mode 000" else (), id=name)
+        for name in _REFUSED_CLAUDE_MD
+    ],
+)
+def test_a_claude_md_connect_refuses_is_named_and_never_offered_connect(
+    runner: CliRunner, claude_home: Path, shape: str
+) -> None:
+    """`agents connect` reads CLAUDE.md before it writes and refuses one it cannot read, but
+    the doctor, Welcome and the installer asked only about settings.json: Connect, the
+    default first-run click, was offered and every click failed (review of #257). They ask
+    connect's own checks now, all of them, and name the file."""
+    claude_md = claude_home / "CLAUDE.md"
+    _REFUSED_CLAUDE_MD[shape](claude_md)
+    try:
+        refusal = agents_service.connect_refusal("claude-code")
+        row = diagnostics._check_claude_code()
+        welcome = first_run.probe_claude(sign_in=False, which=lambda _name: None)
+        clicked = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+    finally:
+        _cleared(claude_md)
+    claude_md.write_text("# Prefs\ncafé\n", encoding="utf-8")
+    readable = agents_service.connect_refusal("claude-code"), diagnostics._check_claude_code()
+
+    reason = str(json.loads(clicked.stdout)["detail"])
+    assert clicked.exit_code == 1 and reason.startswith(f"can't read {claude_md}: "), reason
+    assert refusal == reason, "connect's own checks, in its own words"
+    assert row.status is CheckStatus.warn, row
+    assert f"hooks cannot be written in {claude_home}: {reason}" in row.detail, row
+    assert row.fix == f"make {claude_md} UTF-8 text this user can read, then connect again"
+    assert fix_commands([row]) == [], "no Connect: the click could only fail"
+    assert (welcome.connected, welcome.refused) == (False, reason), welcome
+    refusal, row = readable
+    assert refusal is None and fix_commands([row]) != [], "control: a UTF-8 CLAUDE.md is offered"
+
+
 def test_hooks_switched_off_are_not_connected_and_never_offered_connect(
     runner: CliRunner, claude_home: Path
 ) -> None:

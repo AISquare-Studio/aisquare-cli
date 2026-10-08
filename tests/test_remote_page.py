@@ -785,6 +785,57 @@ def test_fit_width_sizes_the_pane_inside_the_screens_side_insets() -> None:
     assert int(fixed.group(1)) >= sum(sides) + 2 * (pad + border)
 
 
+def _themes(css: str) -> dict[str, dict[str, str]]:
+    """Each theme's colour tokens: the dark one is ``:root``, the light one its media block."""
+    dark = re.search(r"\n:root \{([^}]*)\}", css)
+    light = re.search(r"prefers-color-scheme: light\) \{\s*:root \{([^}]*)\}", css)
+    assert dark is not None and light is not None
+    tokens = dict(re.findall(r"(--[a-z0-9-]+): (#[0-9a-f]{6})", dark.group(1)))
+    return {
+        "dark": tokens,
+        "light": {**tokens, **dict(re.findall(r"(--[a-z0-9-]+): (#[0-9a-f]{6})", light.group(1)))},
+    }
+
+
+def _contrast(ink: str, ground: str) -> float:
+    """WCAG 2's contrast ratio of two ``#rrggbb`` colours."""
+
+    def luminance(colour: str) -> float:
+        rgb = [int(colour[n : n + 2], 16) / 255 for n in (1, 3, 5)]
+        r, g, b = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    high, low = sorted((luminance(ink), luminance(ground)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def test_every_text_colour_reads_at_aa_contrast_in_both_themes() -> None:
+    """WCAG AA asks 4.5:1 of text this size. The filled badges were white on the dark
+    theme's --alarm and --ask, 2.5:1 and 2.2:1: Permission, Question, Plan, NEEDS YOU and the
+    Needs count, the page's most urgent words, were its hardest to read on the theme it
+    starts in. The light theme's accent (the primary button, a link, a waiting agent) and
+    warn (READ-ONLY, the auto-off, a usage limit) read at 3.3 to 4.2:1. Each ink the
+    stylesheet writes with, on each ground it is drawn on, in both themes."""
+    css = _text("app.css")
+    fills = (".k-urgent, .s-attention", ".k-ask", ".count:not(:empty)", "button.primary", ".toast")
+    inks = ("--fg", "--muted", "--accent", "--warn", "--alarm", "--ok")
+    for name, theme in _themes(css).items():
+
+        def colour(value: str, theme: dict[str, str] = theme) -> str:
+            token = re.fullmatch(r"var\((--[a-z0-9-]+)\)", value)
+            return theme[token.group(1)] if token else value
+
+        for rule in fills:
+            ink = colour(_css_value(css, rule, "color"))
+            ground = colour(_css_value(css, rule, "background"))
+            assert _contrast(ink, ground) >= 4.5, (name, rule, ink, ground)
+        for ink in inks:
+            for ground in ("--bg", "--panel", "--raise"):
+                assert _contrast(theme[ink], theme[ground]) >= 4.5, (name, ink, ground)
+        assert _contrast(theme["--fg"], theme["--pane"]) >= 4.5, name
+    assert _contrast("#ffffff", _themes(css)["dark"]["--alarm"]) < 3, "the control: white on it"
+
+
 # --- 10. the service worker -----------------------------------------------------------------
 
 NGROK_SUFFIXES = (".ngrok-free.app", ".ngrok.app", ".ngrok.io", ".ngrok-free.dev", ".ngrok.dev")

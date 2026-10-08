@@ -1339,13 +1339,37 @@ def team(monkeypatch: pytest.MonkeyPatch) -> FakeTeam:
 def test_a_note_records_who_it_claims_to_be_from_and_who_it_is_for(team: FakeTeam) -> None:
     handlers = live_writes().handlers
     _result, summary = handlers["note"]({"text": "ship it", "to": "manager", "as": "coder-1"})
-    assert summary == "note seq=7 to=manager as=coder-1"
+    assert summary == 'note seq=7 as=coder-1 to="manager"'
     _result, plain = handlers["note"]({"text": "hello", "kind": "decision"})
-    assert plain == "decision seq=7 to=- as=-"
+    assert plain == "decision seq=7 as=- to=-"
     assert (
         handlers["task/claim"]({"ref": "tsk_1", "as": "coder-2"})[1] == "claimed tsk_1 as=coder-2"
     )
     assert handlers["task/done"]({"ref": "tsk_1"})[1] == "done tsk_1 as=-"
+
+
+@pytest.mark.parametrize(
+    "to", ["coder-1 as=manager", "coder-1 as=-" + " " * 290, "a" * 400, 'x" as=manager'], ids=repr
+)
+def test_a_notes_to_can_neither_forge_its_as_nor_cut_it_off_the_audit_line(
+    runtime: Runtime, team: FakeTeam, tmp_path: Path, to: str
+) -> None:
+    """``to`` is whatever the body says, and it came first and bare: ``to=coder-1
+    as=manager as=-`` read as a note posted as the manager, and 300 characters of it
+    cut the real ``as=`` off the line (sweep of #243)."""
+    client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
+    device_id = unlock(client, runtime).json()["device"]["id"]
+    runtime.set_allow_write(True)
+    response = client.post(f"{base(runtime)}/api/note", json={"text": "ship it", "to": to})
+    assert response.status_code == 200, response.text
+    _ts, who, endpoint, summary = _audit_lines()[-1]
+    assert (who, endpoint) == (device_id, "note")
+    assert summary.startswith('note seq=7 as=- to="'), summary
+    fields = summary.split(" ", 3)
+    assert fields[2] == "as=-" and fields[3].startswith("to=")
+    quoted = fields[3].removeprefix("to=")
+    assert quoted == json.dumps(to.strip()) or (len(summary) == 300 and summary.endswith("…"))
+    assert team.notes[-1]["to_role"] == to.strip(), "the board gets the role as it was sent"
 
 
 @pytest.mark.parametrize("kind", ["attention", "limited", "agent_exited", "switched", "note\nx"])

@@ -2273,7 +2273,11 @@ def live_writes() -> Writes:
         the human's kinds (:data:`NOTE_KINDS`): ``kind`` went to the board and the
         audit line as it came, so a phone could forge the fleet's own reports and,
         with a newline in it, a line of the audit trail. The summary records who
-        the note claims to be from (``as=``) and who it is for (``to=``).
+        the note claims to be from (``as=``) and who it is for (``to=``), in that
+        order, and ``to`` quoted: it is whatever the body says, and written before
+        ``as=`` and bare, ``"to": "coder-1 as=manager"`` read as a note posted as
+        the manager, and 300 characters of it cut the real ``as=`` off the line
+        (sweep of #243). ``as`` must name a session, or the note is refused.
         """
         from aisquare.services import team as team_service
 
@@ -2294,7 +2298,8 @@ def live_writes() -> Writes:
             kind=kind,
             cwd=None if project is None else _resolve_project(project).root,
         )
-        summary = f"{event.kind} seq={event.seq} to={to or '-'} as={author or '-'}"
+        addressed = "-" if to is None else json.dumps(to)
+        summary = f"{event.kind} seq={event.seq} as={author or '-'} to={addressed}"
         return {"event": event.as_envelope().model_dump(mode="json")}, summary
 
     def project_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:

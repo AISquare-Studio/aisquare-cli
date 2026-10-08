@@ -15,6 +15,7 @@ button. Each claim has its negative control in the same test.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import socket
@@ -422,6 +423,42 @@ def test_connect_names_a_settings_json_it_cannot_read_and_leaves_it_alone(
     assert not built, "refused before the context was ingested or the home built"
     assert left == _content(reference), "the file is left exactly as it was"
     assert connected.exit_code == 0, "control: the same connect succeeds once it can read"
+
+
+def test_a_settings_json_this_user_may_not_write_is_refused_before_anything_is_ingested(
+    runner: CliRunner, claude_home: Path
+) -> None:
+    """A mode-444 settings.json (home-manager's, or a link into the read-only Nix store)
+    ended `agents connect` in a traceback with no JSON, after CLAUDE.md was ingested, and
+    `init --agent` blamed config.toml (review of #257)."""
+    settings_path = claude_home / "settings.json"
+    settings_path.write_text('{"model": "opus"}', encoding="utf-8")
+    (claude_home / "CLAUDE.md").write_text("# Prefs\nuse tabs\n", encoding="utf-8")
+    settings_path.chmod(0o444)
+    if os.access(settings_path, os.W_OK):
+        settings_path.chmod(0o644)
+        pytest.skip("this user can write a read-only file (root)")
+    try:
+        connect = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+        built = paths.aisquare_home().exists()
+        refresh = runner.invoke(app, ["--json", "agents", "refresh-hooks", "claude-code"])
+        init = runner.invoke(
+            app, ["--json", "init", "--yes", "--no-onboard", "--agent", "claude-code"]
+        )
+    finally:
+        settings_path.chmod(0o644)
+    left = settings_path.read_text(encoding="utf-8")
+    connected = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+
+    reason = f"can't write {settings_path}: "
+    payload = json.loads(connect.stdout)
+    assert (payload["error"], payload["ref"]) == ("agent_file_unreadable", "claude-code"), payload
+    assert str(payload["detail"]).startswith(reason), payload
+    assert not built, "refused before CLAUDE.md was ingested or the home built"
+    assert str(json.loads(refresh.stdout)["detail"]).startswith(reason), refresh.stdout
+    notes = " ".join(json.loads(init.stdout)["notes"])
+    assert f"Could not connect claude-code: {reason}" in notes, notes
+    assert left == '{"model": "opus"}' and connected.exit_code == 0, "control: writable again"
 
 
 _SETTINGS = {"model": "opus", "permissions": {"allow": ["Bash(git status)"]}, "env": {"FOO": "1"}}

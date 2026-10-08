@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -100,7 +101,8 @@ class AgentNotInstalledError(ValueError):
 
 class AgentFileUnreadableError(ValueError):
     """A file ``connect`` must read (``CLAUDE.md``, ``settings.json``) is not readable UTF-8
-    text, or a ``settings.json`` that is not a JSON object, which is never rewritten.
+    text, or a ``settings.json`` that is not a JSON object, which is never rewritten, or
+    one this user may not write.
 
     Any ``ValueError`` used to be reported as ``not_installed``, which is what an
     undecodable ``CLAUDE.md`` became, and an ``OSError`` (a directory where the
@@ -126,14 +128,33 @@ def _check_settings(path: Path) -> None:
     """Refuse, naming it, a settings file the hooks cannot be written into: before any write.
 
     ``install_hooks`` edits the object it parses and writes it back, so it raises
-    for text that is not a JSON object rather than replace it (review of #257).
-    Asked here first, so a refusal comes before the context is ingested.
+    for text that is not a JSON object rather than replace it, and a file this user
+    may not write (mode 444, or a link into a read-only ``/nix/store``) ended in a
+    traceback after the context was ingested (review of #257). Asked here first, so
+    a refusal comes before the context is ingested.
     """
     _read_agent_file(path)
     try:
         agent_core.read_settings(path)
     except agent_core.SettingsNotAnObjectError as exc:
         raise AgentFileUnreadableError(str(exc)) from exc
+    # The file when it is there, else the directory it will be made in. access(2)
+    # follows a link and reports a read-only file system as well.
+    target = path if path.exists() else path.parent
+    if target.exists() and not os.access(target, os.W_OK):
+        raise AgentFileUnreadableError(
+            f"can't write {path}: this user may not write it (it is read-only, or on a "
+            "read-only file system)"
+        )
+
+
+def _install_hooks(name: str, config_dir: Path | None, path: Path | None) -> bool:
+    """``install_hooks``, with a write that fails anyway (the file changed since it was
+    checked) reported like the check's refusal, never as a traceback."""
+    try:
+        return agent_core.install_hooks(name, config_dir)
+    except OSError as exc:
+        raise AgentFileUnreadableError(f"can't write {path}: {exc.strerror or exc}") from exc
 
 
 def _claude_on_path() -> str | None:
@@ -205,7 +226,7 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
             existing.add(text)
             added += 1
 
-    if not agent_core.install_hooks(name, config_dir):
+    if not _install_hooks(name, config_dir, spec.settings_path):
         # Unreachable while `connectable` means a settings file to write. Raised, not
         # reported: a connection that installed nothing is what the refusal above is
         # for, and it must never be recorded, or printed, as connected.
@@ -261,9 +282,10 @@ def refresh_hooks(name: str, config_dir: Path | None = None) -> bool:
     if not info.detected:
         raise ValueError(f"{name} is not installed on this machine")
     spec = agent_core.spec(name, config_dir)
-    if spec is not None and spec.settings_path is not None:
-        _check_settings(spec.settings_path)
-    written = agent_core.install_hooks(name, config_dir)
+    path = spec.settings_path if spec is not None else None
+    if path is not None:
+        _check_settings(path)
+    written = _install_hooks(name, config_dir, path)
     if written:
         agent_core.set_connected(name, True, config_dir)
     return written

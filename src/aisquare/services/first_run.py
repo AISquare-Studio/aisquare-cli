@@ -115,15 +115,19 @@ class ClaudeState:
     """aisquare's hooks are in the config dir a session from this shell reads, and run
     where the fleet's sessions start: the manager's folder, and the coders'."""
     manager_only: bool = False
-    """They run where the manager starts but not where the coders do: a plugin installed
-    for the project's folder alone, which the coders' worktrees do not load."""
+    """They run where the manager starts, and the shared check does not find them where the
+    coders do: a plugin enabled in the project folder's ``.claude`` settings, which a
+    coder's git worktree loads only where its own ``.claude/settings.json`` enables it (a
+    repository that commits that file). Step 2 offers Connect, whose hooks run in every
+    folder."""
     hooks_off: Path | None = None
     """The settings file that switches every hook off (``"disableAllHooks": true``),
     when one does: Connect cannot change it, so step 2 says so instead of offering it."""
     refused: str | None = None
-    """Why `agents connect` would refuse the settings file (not a JSON object, or one
-    this user may not write), when it would: Connect could only fail, so step 2 says
-    why instead of offering it (review of #257)."""
+    """Why `agents connect` would refuse, in its own words, when it would: a settings.json
+    that is not a JSON object or that this user may not write, or a CLAUDE.md it cannot
+    read (``agents.connect_refusal``). Connect could only fail, so step 2 says why
+    instead of offering it (review of #257)."""
     signed_in: bool | None = None
     """``None`` when this probe did not look (the periodic one skips it)."""
     problem: str | None = None
@@ -229,8 +233,9 @@ def probe_claude(
     try:
         # Asked about the folder the fleet starts in (``cwd``), where a project- or
         # local-scope plugin may be the route (review of #257), and where its coders
-        # start, which a plugin installed for that folder alone does not reach: the
-        # coders ran without aisquare under "Your fleet is up." (sweep 2 of #257).
+        # start, which a plugin enabled for that folder reaches only where a coder's
+        # worktree enables it too: unconfirmed, the coders may run without aisquare under
+        # "Your fleet is up." (sweep 2 of #257).
         is_connected = connected() if connected is not None else _connected_default(cwd)
         if is_connected and connected is None and cwd is not None:
             coders = coder_folder(cwd)

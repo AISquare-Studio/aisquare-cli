@@ -239,9 +239,12 @@ def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
         text.append("Connect cannot change that. Fix it; this page notices within a few seconds.")
     elif claude.manager_only:
         text.append("\n✗ ", style="red")
-        text.append("not connected in the coders' worktrees — the aisquare plugin is installed ")
-        text.append("for the project's folder alone. Connect installs aisquare's hooks, which run ")
-        text.append("in every folder")
+        # True either way: a repository that commits .claude/settings.json gives every
+        # worktree the plugin; one that does not gives them none.
+        text.append("the coders may run without aisquare — the aisquare plugin is enabled in ")
+        text.append("the project folder's .claude settings, and a coder's git worktree loads it ")
+        text.append("only where its own .claude/settings.json enables it. Connect installs ")
+        text.append("aisquare's hooks, which run in every folder")
     else:
         text.append("\n✗ ", style="red")
         text.append("not connected — Connect installs aisquare's hooks, which bring the manager ")

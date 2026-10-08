@@ -452,9 +452,10 @@ def test_hooks_switched_off_are_named_instead_of_offering_connect(tmp_path: Path
 def test_a_plugin_for_the_project_folder_alone_offers_connect_for_the_coders(
     tmp_path: Path,
 ) -> None:
-    """Connected where the manager starts but not in the coders' worktrees (a project-scope
-    plugin): step 2 said "✓ connected", and the coders ran without aisquare's hooks (sweep 2
-    of #257). It says where it is not connected, offers Connect, and step 3 waits for it."""
+    """Connected where the manager starts and not found where the coders do (a project-scope
+    plugin, which a worktree loads only if the repository commits .claude/settings.json):
+    step 2 said "✓ connected", and the coders could run without aisquare's hooks (sweep 2
+    of #257). It says so, offers Connect, and step 3 waits for it."""
     machine, _ = _ready_machine(tmp_path, claude=[dataclasses.replace(UNHOOKED, manager_only=True)])
 
     async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> tuple[str, bool, bool]:
@@ -462,7 +463,7 @@ def test_a_plugin_for_the_project_folder_alone_offers_connect_for_the_coders(
         return (card(page, "claude-status"), *offered)
 
     text, connect, manager = hosted(machine, go)
-    assert "✗ not connected in the coders' worktrees" in text and "✓ connected" not in text
+    assert "✗ the coders may run without aisquare" in text and "✓ connected" not in text
     assert connect and not manager, text
 
 

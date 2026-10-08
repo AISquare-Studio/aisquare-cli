@@ -332,6 +332,23 @@ def _never_offered(root: Path, home: Path) -> bool:
         return True
 
 
+def _git_inside(root: Path) -> bool | None:
+    """``fleet.is_git_project``'s answer for ``root``, or ``None`` when this user cannot look in.
+
+    One ``stat``, with "missing" split out, so every Python answers alike. For a
+    folder this user can see but not enter, ``Path.exists`` raises PermissionError
+    on 3.11 to 3.13 and answers False on 3.14, where step 1 offered the folder as
+    "not a git repository".
+    """
+    try:
+        (root / ".git").stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return None
+    return True
+
+
 def candidates(
     cwd: Path | None = None,
     *,
@@ -345,7 +362,8 @@ def candidates(
     No directory is scanned for repositories: the user's current directory and
     the projects already registered are the only guesses, and the path input
     beside them takes anything else. ``$HOME`` itself is never offered, and
-    nor is a registered project whose folder has gone.
+    nor is a registered project whose folder has gone, or one this user cannot
+    enter (another user's, a folder at mode 600): agents could not work there.
     """
     where = home if home is not None else Path.home()
     items: list[Candidate] = []
@@ -383,15 +401,16 @@ def candidates(
         try:
             root = project.root.resolve()
             present = project.root.is_dir()
-        except OSError:
+            is_git = _git_inside(project.root) if present else False
+        except (OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11/3.12
             continue
-        if root in taken or not present or _never_offered(project.root, where):
+        if root in taken or not present or is_git is None or _never_offered(project.root, where):
             continue
         taken.add(root)
         items.append(
             Candidate(
                 root=project.root,
-                is_git=fleet_service.is_git_project(project.root),
+                is_git=is_git,
                 # A captured row (the shell lists them while `a` is on) was never
                 # added on purpose: choosing it onboards it, as for any folder.
                 project=project if project.onboarded_at else None,

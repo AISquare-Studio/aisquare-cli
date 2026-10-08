@@ -33,6 +33,7 @@ from aisquare.services import first_run, onboarding
 from aisquare.services import fleet as fleet_service
 from aisquare.services.first_run import FleetStep
 from tests import fakebin
+from tests.fsperms import can_deny_reads, can_symlink
 from tests.test_fleet_service import FakeTmux
 
 T0 = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
@@ -348,6 +349,49 @@ def test_a_store_that_will_not_open_costs_the_list_only(tmp_path: Path) -> None:
     found = first_run.candidates(repo, home=tmp_path / "home", projects=locked)
     assert found.store_error == "database is locked"
     assert [c.root.resolve() for c in found.items] == [repo.resolve()]
+
+
+def test_a_registered_folder_this_user_cannot_enter_is_left_out(tmp_path: Path) -> None:
+    """The `.git` of a registered folder this user can see but not enter raised
+    PermissionError on 3.11 to 3.13, and step 1 lost every folder with it, the one asq
+    started in too; 3.14 offered it as "not a git repository" (review of #257)."""
+    if sys.platform == "win32" or not can_deny_reads():
+        pytest.skip("needs a directory this user cannot enter")
+    home = tmp_path / "home"
+    here = _repo(home / "good-app")
+    locked = _repo(home / "locked-app")
+    other = _repo(home / "other-app")
+    projects = [
+        ProjectInfo(id="prj_locked", root=locked, onboarded_at=T0),
+        ProjectInfo(id="prj_other", root=other, onboarded_at=T0),
+    ]
+    locked.chmod(0o600)
+    try:
+        found = first_run.candidates(here, home=home, projects=lambda: projects)
+    finally:
+        locked.chmod(0o755)
+    assert [(c.root.name, c.here) for c in found.items] == [
+        ("good-app", True),
+        ("other-app", False),
+    ]
+    assert found.store_error is None, "the store read fine: nothing to blame it for"
+    # Control: the same folder, enterable again, is offered as the repository it is.
+    again = first_run.candidates(here, home=home, projects=lambda: projects)
+    assert ("locked-app", True) in [(c.root.name, c.is_git) for c in again.items]
+
+
+def test_a_registered_folder_that_is_a_symlink_loop_is_left_out(tmp_path: Path) -> None:
+    """``Path.resolve`` raises RuntimeError, not OSError, for a link loop on 3.11/3.12."""
+    if not can_symlink():
+        pytest.skip("this machine cannot create symlinks")
+    home = tmp_path / "home"
+    here = _repo(home / "good-app")
+    loop = home / "loop-app"
+    loop.symlink_to(loop)
+    listed = ProjectInfo(id="prj_other", root=_repo(home / "other-app"), onboarded_at=T0)
+    projects = [ProjectInfo(id="prj_loop", root=loop, onboarded_at=T0), listed]
+    found = first_run.candidates(here, home=home, projects=lambda: projects)
+    assert [c.root.name for c in found.items] == ["good-app", "other-app"]
 
 
 def test_a_listed_folder_needs_no_onboarding_but_a_captured_one_does(tmp_path: Path) -> None:

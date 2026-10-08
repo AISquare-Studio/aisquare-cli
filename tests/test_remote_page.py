@@ -1426,6 +1426,18 @@ def test_extend_and_revoke_wait_for_their_answer_before_another_tap_goes(
     assert taps["revoke"] == {"sent": 1, "waited": True}
 
 
+def test_the_feed_keeps_to_six_pane_strips_as_prompts_come_in_above_the_rest(
+    boot_report: dict[str, Any],
+) -> None:
+    """Only a card built anew counted against the six strips, and a kept card held its own:
+    three permission prompts ranked above six plan cards made nine, past the socket's eight
+    panes, and the ninth was refused with a toast on every reconnect. The first six cards
+    that show a strip get one, and a card that loses its strip lets go first."""
+    cap = boot_report["stripCap"]
+    assert cap["most"] == 6
+    assert cap["held"] == ["coder-7", "coder-8", "coder-9", "planner-1", "planner-2", "planner-3"]
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

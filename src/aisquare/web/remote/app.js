@@ -1650,30 +1650,34 @@ VIEWS.home = (route, main) => {
     list.classList.toggle("behind", !!S.scannedBehind);
     empty.textContent = S.needs === null ? "Loading…" : "Nothing needs you.";
     empty.hidden = items.length > 0;
-    const seen = new Set();
-    let strips = 0;
-    let after = null;
+    // A strip for each of the first STRIPS_MAX cards that show one, in feed order, worked out
+    // before a card is built: a kept card held its strip while new ones came above it, and
+    // the socket went past its 8 panes. Cards that lose theirs go first, so their
+    // unsubscribes do too, and the socket never holds more.
+    const wanted = new Map();
+    let strips = STRIPS_MAX;
     for (const item of items) {
       const gone = S.gone.get(item.id);
       if (gone && gone.until > Date.now()) continue;
-      seen.add(item.id);
-      let entry = cards.get(item.id);
-      const json = JSON.stringify(item);
-      if (!entry || entry.json !== json) {
-        if (entry) entry.drop();
-        entry = cardEntry(item, STRIP_KINDS.has(item.kind) && strips < STRIPS_MAX);
-        cards.set(item.id, entry);
-      }
-      if (entry.strip) strips++;
-      const slot = after ? after.nextSibling : list.firstChild;
-      if (entry.node !== slot) list.insertBefore(entry.node, slot);
-      after = entry.node;
+      wanted.set(item.id, { item, json: JSON.stringify(item), strip: STRIP_KINDS.has(item.kind) && strips-- > 0 });
     }
     for (const [id, entry] of cards) {
-      if (!seen.has(id)) {
+      const want = wanted.get(id);
+      if (!want || entry.json !== want.json || entry.strip !== want.strip) {
         entry.drop();
         cards.delete(id);
       }
+    }
+    let after = null;
+    for (const [id, want] of wanted) {
+      let entry = cards.get(id);
+      if (!entry) {
+        entry = cardEntry(want.item, want.strip);
+        cards.set(id, entry);
+      }
+      const slot = after ? after.nextSibling : list.firstChild;
+      if (entry.node !== slot) list.insertBefore(entry.node, slot);
+      after = entry.node;
     }
     for (const [id, gone] of S.gone) {
       if (gone.until <= Date.now()) {

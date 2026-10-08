@@ -1427,6 +1427,37 @@ async function buttonsInFlight() {
   };
 }
 
+/* A card the feed shows: `n` makes its id, `kind` and `agent` the rest. */
+function card(n, kind, agent) {
+  return {
+    id: "ny_" + String(n).padStart(16, "0"), kind, project: { id: PROJECT, name: "x" }, agent,
+    reason: agent + " waits on you", since: "2026-10-07T10:00:00+00:00", detail: {}, answers: [], actions: ["open"],
+  };
+}
+
+/* The feed's pane strips over the socket: six plan cards, then three permission prompts
+ * ranked above them. Replaying what the page sent, in order: the most panes the socket held
+ * at once, and which it holds at the end. */
+async function stripCap() {
+  const page = bootPage("#/", signedIn());
+  await settle();
+  page.acceptSockets();
+  const plans = [1, 2, 3, 4, 5, 6].map((n) => card(n, "plan", "planner-" + n));
+  page.live().frame("needs_you", { items: plans });
+  await settle();
+  const prompts = [7, 8, 9].map((n) => card(n, "permission", "coder-" + n));
+  page.live().frame("needs_you", { items: prompts.concat(plans) });
+  await settle();
+  const held = new Set();
+  let most = 0;
+  for (const message of page.live().sent) {
+    if (typeof message.subscribe === "string") held.add(message.subscribe);
+    if (typeof message.unsubscribe === "string") held.delete(message.unsubscribe);
+    most = Math.max(most, held.size);
+  }
+  return { most, held: Array.from(held).sort() };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -1468,6 +1499,7 @@ async function main() {
     transcriptColumns: await transcriptColumns(),
     transcriptLoads: await transcriptLoads(),
     buttonsInFlight: await buttonsInFlight(),
+    stripCap: await stripCap(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

@@ -473,6 +473,54 @@ def test_a_listed_folder_asq_started_in_is_chosen_without_a_click(tmp_path: Path
     assert machine.onboarded == []  # listed: nothing to set up
 
 
+@dataclass
+class Frame:
+    """The shell's last frame, as ``FleetApp.snapshot`` holds it: what step 1 reads."""
+
+    projects: list[ProjectInfo]
+
+
+class FramedHost(Host):
+    """A host with a shell's frame, as asq's shell is."""
+
+    def __init__(self, page: WelcomeView, frame: Frame) -> None:
+        super().__init__(page)
+        self.snapshot = frame
+
+
+def test_step_one_lists_again_when_the_frame_changed_while_it_was_read(tmp_path: Path) -> None:
+    """Step 1 recorded the frame current when its list landed, not the one the list was made
+    from, so a project the shell listed during the read was never offered: after *Choose
+    another*, the folder just onboarded was missing until `w` (review of #257). A tick
+    after the read lists step 1 again from the newer frame."""
+    alpha = ProjectInfo(id="prj_alpha", root=tmp_path / "alpha", onboarded_at=T0)
+    beta = ProjectInfo(id="prj_beta", root=tmp_path / "beta", onboarded_at=T0)
+    frame = Frame(projects=[alpha])
+
+    def listing(listed: list[ProjectInfo] | None) -> Candidates:
+        frame.projects = [alpha, beta]  # a refresh that lands while the list is read
+        rows = [Candidate(root=p.root, is_git=True, project=p, here=False) for p in listed or []]
+        return Candidates(items=tuple(rows))
+
+    machine = Machine(found=listing)
+
+    async def run() -> tuple[list[str], list[str]]:
+        page = WelcomeView(seams=machine.seams(), recheck_seconds=0, id="welcome")
+        host = FramedHost(page, frame)
+        async with host.run_test(size=SIZE):
+            await settle_page(host)
+            first = candidate_buttons(page)
+            page._tick()  # what the page's interval runs
+            await settle_page(host)
+            return first, candidate_buttons(page)
+
+    first, after_a_tick = asyncio.run(run())
+    read = [sorted(p.id for p in listed or []) for listed in machine.frames]
+    assert first == ["Use alpha"], "control: the first list is the frame it read"
+    assert read == [["prj_alpha"], ["prj_alpha", "prj_beta"]], read
+    assert after_a_tick == ["Use alpha", "Use beta"], after_a_tick
+
+
 def test_choosing_an_unlisted_folder_onboards_it_first(tmp_path: Path) -> None:
     folder = tmp_path / "new-app"
     folder.mkdir()

@@ -596,23 +596,35 @@ class WelcomeView(VerticalScroll):
         shell = hasattr(app, "snapshot")
         seams = self.seams
 
-        def find() -> Candidates:
+        def find() -> tuple[frozenset[str] | None, Candidates | Exception]:
             listed = _frame_projects(app)
             waits = 0
             while shell and listed is None and waits < FRAME_WAITS and _frame_coming(app):
                 _nap(FRAME_WAIT_SECONDS)
                 waits += 1
                 listed = _frame_projects(app)
-            return seams.candidates(listed)
+            # The frame this list is made from goes with it (see `_found`).
+            read = frozenset(project.id for project in listed) if listed is not None else None
+            try:
+                return read, seams.candidates(listed)
+            except Exception as exc:  # step 1 says why, as for any read that failed
+                return read, exc
 
         self._run("candidates", find)
 
     def _found(self, result: Any, error: BaseException | None) -> None:
-        self._found_ids = self._frame_ids()
+        # The ids of the frame the list was made from, not of the one current when it
+        # lands: a frame that changed during the read was recorded as listed, so no tick
+        # listed step 1 again, and a folder just onboarded stayed missing (review of #257).
+        if isinstance(result, tuple):
+            self._found_ids, result = result
+        else:
+            self._found_ids = self._frame_ids()
         if isinstance(result, Candidates):
             self.candidates = result
         else:
-            self.candidates = Candidates(items=(), store_error=_reason(error))
+            failure = result if isinstance(result, BaseException) else error
+            self.candidates = Candidates(items=(), store_error=_reason(failure))
         first = self.candidates.items[0] if self.candidates.items else None
         unpicked = self.project is None and not self._picked and "onboard" not in self.busy
         if unpicked and first is not None and first.here and first.project:

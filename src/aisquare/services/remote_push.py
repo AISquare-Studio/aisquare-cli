@@ -57,6 +57,7 @@ import re
 import struct
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -105,6 +106,12 @@ PUSH_FAILURES_MAX = 3
 """Refusals in a row (400/401/403) after which a subscription is dropped as broken."""
 PUSH_TEST_INTERVAL_SECONDS = 10.0
 """One test push per device this often: a test is a tap, never a loop."""
+PUSH_SUBSCRIPTION_CALLS = 6
+PUSH_SUBSCRIPTION_WINDOW_SECONDS = 60.0
+"""At most :data:`PUSH_SUBSCRIPTION_CALLS` subscribes and unsubscribes per device in this
+window, together. Turning notifications on or off is a tap, and the page sends its
+subscription again after an unlock: a loop of them is refused (429), never written to the
+audit log, which nothing trims."""
 PUSH_SYSTEM_CHECK_SECONDS = 30.0
 """How often the sender looks at the auto-off deadline and the devices' expiry."""
 PUSH_STOP_SECONDS = 2.0
@@ -632,20 +639,33 @@ def push_subscription_from_body(
 
 def push_subscribe_device(
     device_id: str, record: PushSubscriptionRecord, live: Collection[str]
-) -> None:
-    """Make ``record`` this device's one subscription.
+) -> bool:
+    """Make ``record`` this device's one subscription; ``True`` when that changed it.
 
     A re-subscription replaces the device's old one. The same endpoint held by
     ANOTHER device moves here: a phone that unlocked again into a new device (a
     new ngrok origin, an installed iOS app) keeps one subscription, not two
     pushes per item. Devices no longer ``live`` lose theirs while the file is open.
+
+    The subscription the device already has, sent again, changes nothing: the
+    page sends it after every unlock, and the stored record stays as it is, its
+    failures in a row included. Only a change is audited (:func:`push_routes`).
     """
     with _push_state_edit() as state:
         _push_prune(state, live)
-        for other, held in list(state.subscriptions.items()):
-            if held.endpoint == record.endpoint and other != device_id:
+        held = state.subscriptions.get(device_id)
+        if held is not None and _push_same_subscription(held, record):
+            return False
+        for other, theirs in list(state.subscriptions.items()):
+            if theirs.endpoint == record.endpoint and other != device_id:
                 del state.subscriptions[other]
         state.subscriptions[device_id] = record
+        return True
+
+
+def _push_same_subscription(held: PushSubscriptionRecord, sent: PushSubscriptionRecord) -> bool:
+    """One browser's one subscription: the same endpoint and keys, whenever each was made."""
+    return (held.endpoint, held.p256dh, held.auth) == (sent.endpoint, sent.p256dh, sent.auth)
 
 
 def push_unsubscribe_device(device_id: str, live: Collection[str]) -> bool:
@@ -1315,24 +1335,78 @@ def start_push_sender(kit: RemoteKit) -> Callable[[], None] | None:
 # --- the routes (SPEC §5.8) -------------------------------------------------------------------
 
 
+class _PushPace:
+    """Per device, its recent calls of one route: at most ``calls`` within ``seconds``.
+
+    Read and written on the event loop only, with no ``await`` between a route's
+    check and its count, so it takes no lock. A device whose calls have all aged
+    out is forgotten at the next call of anyone's: the table holds the devices of
+    the last window, never every device the server has seen.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._calls: dict[str, deque[float]] = {}
+
+    def push_pace_wait(self, device_id: str, calls: int, seconds: float) -> int | None:
+        """Count one call by ``device_id``: ``None`` when it may go ahead, else the whole
+        seconds until it may (and nothing is counted)."""
+        now = self._clock()
+        for known, held in list(self._calls.items()):
+            while held and now - held[0] >= seconds:
+                held.popleft()
+            if not held:
+                del self._calls[known]
+        held = self._calls.setdefault(device_id, deque())
+        if len(held) >= calls:
+            return math.ceil(seconds - (now - held[0]))
+        held.append(now)
+        return None
+
+
 def push_routes(kit: RemoteKit) -> list[BaseRoute]:
     """``GET api/push``, ``POST api/push/subscribe``, ``DELETE api/push/subscription`` and
     ``POST api/push/test``.
 
     None is write-gated (each is in ``NOT_WRITE_GATED``): they change what this
     device is shown, never the fleet, and a phone that may not write must still
-    hear that something needs it. Every change is audited.
+    hear that something needs it. Every change is audited, and nothing else: the
+    subscription a device already has, sent again, and an unsubscribe with none
+    to remove, write no line. A device subscribes and unsubscribes at most
+    :data:`PUSH_SUBSCRIPTION_CALLS` times a minute, as it asks for one test every
+    10 s. Without both, a read-only device looping on these routes grew
+    ``remote-audit.log`` without bound (review of #243, sweep of round 3).
     """
     import asyncio
     from urllib.parse import urlsplit
 
     from starlette.responses import JSONResponse
 
-    tested: dict[str, float] = {}
-    """Per device id, when its last test push was queued (``time.monotonic``)."""
+    tested = _PushPace()
+    """Per device id, its test pushes (:data:`PUSH_TEST_INTERVAL_SECONDS`)."""
+    changed = _PushPace()
+    """Per device id, its subscribes and unsubscribes together (:data:`PUSH_SUBSCRIPTION_CALLS`)."""
 
     def push_unavailable(problem: str) -> RequestError:
         return RequestError(503, "push_unavailable", problem)
+
+    def push_too_often(error: str, rule: str, wait: int) -> Response:
+        return kit.kit_refuse(
+            429, error, f"{rule} — wait {wait} s", headers={"Retry-After": str(wait)}
+        )
+
+    def push_subscription_paced(device: Device) -> Response | None:
+        """The 429 for a device past :data:`PUSH_SUBSCRIPTION_CALLS`; ``None`` counts the call."""
+        wait = changed.push_pace_wait(
+            device.id, PUSH_SUBSCRIPTION_CALLS, PUSH_SUBSCRIPTION_WINDOW_SECONDS
+        )
+        if wait is None:
+            return None
+        rule = (
+            f"notifications can be turned on or off {PUSH_SUBSCRIPTION_CALLS} times in "
+            f"{PUSH_SUBSCRIPTION_WINDOW_SECONDS:.0f} s"
+        )
+        return push_too_often("push_subscription_throttled", rule, wait)
 
     async def push_status_endpoint(
         request: Request, device: Device, body: dict[str, Any]
@@ -1360,30 +1434,37 @@ def push_routes(kit: RemoteKit) -> list[BaseRoute]:
         missing = push_crypto_missing()
         if missing is not None:
             raise push_unavailable(missing)
+        paced = push_subscription_paced(device)
+        if paced is not None:
+            return paced
         live = push_device_ids(kit)
 
-        def push_subscribe_store() -> PushSubscriptionRecord:
+        def push_subscribe_store() -> tuple[PushSubscriptionRecord, bool]:
             record = push_subscription_from_body(body, now=_push_utc_now())
             load_or_create_vapid_keys()  # made on the first GET or subscribe (SPEC §5.2)
-            push_subscribe_device(device.id, record, live)
-            return record
+            return record, push_subscribe_device(device.id, record, live)
 
         try:
-            record = await asyncio.to_thread(push_subscribe_store)
+            record, new = await asyncio.to_thread(push_subscribe_store)
         except (OSError, ImportError) as exc:
             raise push_unavailable(f"the subscription could not be stored: {exc}") from exc
-        kit.kit_audit(device, "push/subscribe", urlsplit(record.endpoint).hostname or "-")
+        if new:
+            kit.kit_audit(device, "push/subscribe", urlsplit(record.endpoint).hostname or "-")
         return JSONResponse({"subscribed": True}, status_code=201)
 
     async def push_unsubscribe_endpoint(
         request: Request, device: Device, body: dict[str, Any]
     ) -> Response:
+        paced = push_subscription_paced(device)
+        if paced is not None:
+            return paced
         live = push_device_ids(kit)
         try:
-            await asyncio.to_thread(push_unsubscribe_device, device.id, live)
+            removed = await asyncio.to_thread(push_unsubscribe_device, device.id, live)
         except OSError as exc:
             raise push_unavailable(f"the subscription could not be removed: {exc}") from exc
-        kit.kit_audit(device, "push/subscription", "-")
+        if removed:
+            kit.kit_audit(device, "push/subscription", "-")
         return JSONResponse({"subscribed": False})
 
     async def push_test_endpoint(
@@ -1403,17 +1484,10 @@ def push_routes(kit: RemoteKit) -> list[BaseRoute]:
                 "not_subscribed",
                 "this device has no push subscription — turn notifications on",
             )
-        now = time.monotonic()
-        last = tested.get(device.id)
-        if last is not None and now - last < PUSH_TEST_INTERVAL_SECONDS:
-            wait = math.ceil(PUSH_TEST_INTERVAL_SECONDS - (now - last))
-            return kit.kit_refuse(
-                429,
-                "push_test_throttled",
-                f"one test push every {PUSH_TEST_INTERVAL_SECONDS:.0f} s — wait {wait} s",
-                headers={"Retry-After": str(wait)},
-            )
-        tested[device.id] = now
+        wait = tested.push_pace_wait(device.id, 1, PUSH_TEST_INTERVAL_SECONDS)
+        if wait is not None:
+            rule = f"one test push every {PUSH_TEST_INTERVAL_SECONDS:.0f} s"
+            return push_too_often("push_test_throttled", rule, wait)
         message = push_system_message(TEST_TITLE, TEST_BODY, kit.kit_public_url(), tag="asq-test")
         _push_in_background([(device.id, record)], message)
         kit.kit_audit(device, "push/test", "-")

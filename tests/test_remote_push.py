@@ -589,6 +589,21 @@ def test_a_resubscription_replaces_the_devices_old_one(isolated_home: Path) -> N
     assert load_push_state().subscriptions["dev_a"].endpoint == second.endpoint
 
 
+def test_the_subscription_a_device_has_sent_again_is_no_change(isolated_home: Path) -> None:
+    """The page sends its subscription again after every unlock. The record stays as it was,
+    its failures in a row included; a new subscription, or one moving here, is a change."""
+    phone, other = Browser(f"{FCM}phone"), Browser(f"{FCM}other")
+    assert push_subscribe_device("dev_a", phone.record(), {"dev_a"}) is True
+    push_record_outcome("dev_a", phone.endpoint, 403)
+    kept = load_push_state().subscriptions["dev_a"]
+    again = push_subscription_from_body(phone.subscription(), now=T0 + timedelta(hours=1))
+    assert push_subscribe_device("dev_a", again, {"dev_a"}) is False
+    assert load_push_state().subscriptions["dev_a"] == kept and kept.failures == 1
+    assert push_subscribe_device("dev_a", other.record(), {"dev_a"}) is True
+    assert push_subscribe_device("dev_b", other.record(), {"dev_a", "dev_b"}) is True
+    assert set(load_push_state().subscriptions) == {"dev_b"}
+
+
 # --- what the push service says (SPEC §5.7, §5.10 item 6) -------------------------------------
 
 
@@ -1383,6 +1398,71 @@ def test_deleting_the_subscription_forgets_it(app: Any, runtime: Runtime, roster
     assert device not in load_push_state().subscriptions
     assert client.get(f"{base(runtime)}/api/push").json()["subscribed"] is False
     assert audited("push/subscription") == ["-"]
+
+
+def test_only_a_change_of_subscription_is_audited(
+    app: Any, runtime: Runtime, roster: set[str]
+) -> None:
+    """Both routes need no write switch, and nothing trims the audit log: a read-only device
+    sending its subscription again, or unsubscribing with none, wrote a line each time, about
+    96 a second in a loop (review of #243, sweep of round 3). The answers are as before."""
+    client, _device = unlocked(app, runtime, roster)
+    assert runtime.allow_write is False
+    subscribe = f"{base(runtime)}/api/push/subscribe"
+    subscription = f"{base(runtime)}/api/push/subscription"
+    nothing = client.delete(subscription)
+    assert nothing.status_code == 200 and nothing.json() == {"subscribed": False}
+    phone = Browser(f"{FCM}phone")
+    for _ in range(3):
+        sent = client.post(subscribe, json=phone.subscription())
+        assert sent.status_code == 201 and sent.json() == {"subscribed": True}
+    assert client.delete(subscription).status_code == 200
+    assert client.delete(subscription).status_code == 200
+    assert audited("push/subscribe") == ["fcm.googleapis.com"]
+    assert audited("push/subscription") == ["-"]
+
+
+def test_turning_notifications_on_and_off_in_a_loop_is_paced(
+    app: Any, runtime: Runtime, roster: set[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every on and every off IS a change, so a loop of them still wrote two lines a round.
+    Six a minute per device, subscribes and unsubscribes together, as a test push is paced;
+    past that a 429 says how long to wait, and nothing is stored or audited. Another device
+    has six of its own."""
+    client, device = unlocked(app, runtime, roster)
+    other, _other_device = unlocked(app, runtime, roster)
+    phone = Browser(f"{FCM}phone")
+    subscribe = f"{base(runtime)}/api/push/subscribe"
+    subscription = f"{base(runtime)}/api/push/subscription"
+    answers = []
+    for _ in range(remote_push.PUSH_SUBSCRIPTION_CALLS // 2):
+        answers.append(client.post(subscribe, json=phone.subscription()).status_code)
+        answers.append(client.delete(subscription).status_code)
+    assert answers == [201, 200] * (remote_push.PUSH_SUBSCRIPTION_CALLS // 2)
+    refused = client.post(subscribe, json=phone.subscription())
+    assert (refused.status_code, refused.json()["error"]) == (429, "push_subscription_throttled")
+    assert 1 <= int(refused.headers["retry-after"]) <= 60
+    assert client.delete(subscription).status_code == 429
+    assert device not in load_push_state().subscriptions
+    assert len(audited("push/subscribe")) == len(audited("push/subscription")) == 3
+    theirs = Browser(f"{FCM}theirs")
+    assert other.post(subscribe, json=theirs.subscription()).status_code == 201
+    monkeypatch.setattr(remote_push, "PUSH_SUBSCRIPTION_WINDOW_SECONDS", 0.0)
+    assert client.post(subscribe, json=phone.subscription()).status_code == 201
+
+
+def test_the_pace_counts_within_its_window_and_forgets_a_device_once_it_is_quiet() -> None:
+    clock = [0.0]
+    pace = remote_push._PushPace(lambda: clock[0])
+    assert [pace.push_pace_wait("dev_a", 2, 60.0) for _ in range(3)] == [None, None, 60]
+    clock[0] = 59.5
+    assert pace.push_pace_wait("dev_a", 2, 60.0) == 1, "the first call ages out in half a second"
+    assert pace.push_pace_wait("dev_b", 2, 60.0) is None, "every device has its own"
+    clock[0] = 60.0
+    assert pace.push_pace_wait("dev_a", 2, 60.0) is None
+    clock[0] = 200.0
+    assert pace.push_pace_wait("dev_c", 2, 60.0) is None
+    assert list(pace._calls) == ["dev_c"], "the quiet devices are forgotten"
 
 
 def test_a_test_push_goes_to_this_device_only_once_in_ten_seconds(

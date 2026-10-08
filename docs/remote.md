@@ -363,7 +363,9 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   or a line break, and a switch's `reason` is one line of plain text: the pad
   sends Esc, Ctrl-C and its other control keys by name.
 - **Caps**: 64 KiB per request, 2 048 characters per keystroke message, 8 000
-  per note or tell, 4 live connections per device.
+  per note or tell, 4 live connections per device. A device turns its
+  notifications on or off at most 6 times a minute and sends one test every 10
+  seconds; only a change of its subscription is audited.
 
 From the machine:
 

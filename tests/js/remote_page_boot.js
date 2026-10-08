@@ -424,6 +424,11 @@ function asked(sock, kind) {
   return sock.sent.filter((message) => Object.prototype.hasOwnProperty.call(message, kind)).map((message) => message[kind]);
 }
 
+/* The text of each node, in order. */
+function textsOf(nodes) {
+  return nodes.map((node) => node.textContent);
+}
+
 // --- the machine's answers -------------------------------------------------------------------
 
 const FLEET = {
@@ -2018,6 +2023,111 @@ async function socketCloses() {
   };
 }
 
+/* The strip at the top and the bottom nav (SPEC §6.3): an auto-off 10 minutes away with writes
+ * on and two cards in the feed; then a remote frame with the auto-off two hours away and
+ * writes off; then the READ-ONLY pill tapped. */
+async function statusStrip() {
+  const at = (minutes) => new Date(Date.now() + minutes * 60000).toISOString();
+  const page = bootPage("#/", signedIn({
+    "GET api/remote": () => ({ status: 200, json: { allow_write: true, auto_off_at: at(10), version: "test" } }),
+    "GET api/needs": () => ({ status: 200, json: { items: [ITEM, Object.assign({}, ITEM, { id: "ny_00000000000000d5" })] } }),
+  }));
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const strip = () => page.run("({ off: UI.off.textContent, soon: UI.off.classList.contains('soon'), extend: !UI.extend.hidden, readOnly: !UI.ro.hidden, needs: UI.badge.textContent })");
+  const writesOn = strip();
+  page.live().frame("remote", { allow_write: false, auto_off_at: at(120), version: "test" });
+  await settle();
+  const writesOff = Object.assign(strip(), { toast: page.toast() });
+  click(page.run("UI.ro"));
+  return { writesOn, writesOff, tapped: sheetTitle(page) };
+}
+
+/* The screens that list (SPEC §6.3): the feed with nothing in it; the Projects screen and a
+ * project's Fleet tab with two cards for coder-1; the Tasks and Memory tabs; a card that
+ * cleared, opened from its push link, then Back to the feed; an agent's empty transcript; and
+ * its Card tab. */
+async function screensListed() {
+  const open = async (hash, routes) => {
+    const page = bootPage(hash, signedIn(routes));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    return page;
+  };
+  const twoCards = { "GET api/needs": () => ({ status: 200, json: { items: [ITEM, Object.assign({}, ITEM, { id: "ny_00000000000000d5" })] } }) };
+  const feed = await open("#/");
+  const projects = await open("#/projects", Object.assign({
+    "GET api/projects": () => ({ status: 200, json: [{ id: PROJECT, name: "x", agents: { working: 1, waiting: 1 } }] }),
+  }, twoCards));
+  const fleet = await open("#/p/" + PROJECT + "/fleet", twoCards);
+  const tasks = await open("#/p/" + PROJECT + "/tasks", {
+    "GET api/tasks": () => ({
+      status: 200,
+      json: [
+        { title: "write the docs", status: "todo" }, { title: "fix the bug", status: "doing" }, { title: "ship it", status: "done" },
+        { title: "look it over", status: "review", role: "reviewer", claimed_by: "ses_1" },
+      ],
+    }),
+  });
+  const memory = await open("#/p/" + PROJECT + "/memory", {
+    "GET api/memory": () => ({
+      status: 200,
+      json: [
+        { text: "kept", pool: "project", tags: ["db"], updated_at: null },
+        { text: "deleted", pool: "project", tags: [], updated_at: null, deleted_at: "2026-10-07T10:00:00+00:00" },
+      ],
+    }),
+  });
+  const cleared = await open("#/n/" + NEEDS_ID + "/p/" + PROJECT + "/a/coder-1");
+  const clearedSaid = textsOf(cleared.main().querySelectorAll("div.data")[0].childNodes);
+  click(buttonNamed(cleared.main(), "Back to the feed"));
+  await settle();
+  const transcript = await open("#/p/" + PROJECT + "/a/coder-1/transcript", { "GET api/transcript/coder-1": () => transcriptPage([], null, false) });
+  const card = await open("#/p/" + PROJECT + "/a/coder-1/card", {
+    "GET api/explainability/coder-1": () => ({ status: 200, json: { available: true, model: "claude-x", tokens_in: 1200, tokens_out: 300 } }),
+  });
+  return {
+    feed: find(feed.main(), (node) => node.className === "empty").textContent,
+    projects: textsOf(projects.main().querySelectorAll("span.badge")),
+    fleet: textsOf(fleet.main().querySelectorAll("span.badge")),
+    tasks: tasks.main().querySelectorAll("div.data")[0].childNodes.map((node) => (node.tagName === "H3" ? "# " + node.textContent : textsOf(node.childNodes).join(" | "))),
+    memory: textsOf(memory.main().querySelectorAll("p.text")),
+    cleared: { said: clearedSaid, back: cleared.location.hash },
+    transcript: textsOf(transcript.main().querySelectorAll("pre.transcript")[0].childNodes),
+    card: card.main().querySelectorAll("pre.mono")[0].textContent,
+  };
+}
+
+/* Notifications where the page offers them (SPEC §6.3): the feed of a device the machine
+ * sends nothing to yet; Settings with them on, and Send test answered not_subscribed; and
+ * Settings in Safari on an iPhone, the page not on its Home Screen. */
+async function pushScreens() {
+  const feed = bootPage("#/", signedIn(pushRoutes([])), fakePush(KEY_NOW).globals);
+  await settle();
+  const on = bootPage("#/settings", signedIn({
+    "GET api/push": () => ({ status: 200, json: { supported: true, vapid_public_key: Buffer.from(KEY_NOW).toString("base64url"), subscribed: true } }),
+    "POST api/push/test": () => ({ status: 404, json: { error: "not_subscribed", message: "no subscription for this device" } }),
+  }), fakePush(KEY_NOW).globals);
+  await settle();
+  on.acceptSockets();
+  await settle();
+  const said = find(on.main(), (node) => node.className === "muted").textContent;
+  click(buttonNamed(on.main(), "Send test"));
+  await settle();
+  const iphone = bootPage("#/settings", signedIn(), {
+    navigator: { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Safari", platform: "iPhone", standalone: false },
+  });
+  await settle();
+  const banner = find(feed.main(), (node) => node.tagName === "DIV" && node.className === "notice-line");
+  return {
+    banner: banner ? textsOf(banner.childNodes) : null,
+    on: { said, test: on.toast() },
+    iphone: find(iphone.main(), (node) => node.className === "muted").textContent,
+  };
+}
+
 /* Cards the machine answers 409 stale (SPEC §6.3, §6.4): a quick answer, the feed's read that
  * follows still listing the card (the machine has not scanned since), then the note's 6 s up
  * and a frame that lists the card still; a Tell from an asked card, nothing waiting on coder-1
@@ -2116,6 +2226,9 @@ async function main() {
     refusalSentences: await refusalSentences(),
     socketCloses: await socketCloses(),
     unlockWait: await unlockAnswered(429, { error: "rate_limited", message: "too many tries" }),
+    statusStrip: await statusStrip(),
+    screensListed: await screensListed(),
+    pushScreens: await pushScreens(),
     staleCards: await staleCards(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");

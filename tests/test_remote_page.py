@@ -1732,6 +1732,74 @@ def test_an_unlock_refused_for_too_many_tries_counts_down_to_the_next(
     assert wait["form"] and wait["said"] == "too many tries — try again in 60 s"
 
 
+def test_the_strip_and_the_nav_show_what_the_spec_lists(boot_report: dict[str, Any]) -> None:
+    """SPEC §6.3's status strip: "off in 23 min" while an auto-off is set, amber within 15
+    min, Extend 1 h, a READ-ONLY pill that shows the reason when tapped, a toast when writes
+    flip; and the Needs tab's count. None of it had a test."""
+    strip = boot_report["statusStrip"]
+    assert strip["writesOn"] == {
+        "off": "off in 10 min",
+        "soon": True,
+        "extend": True,
+        "readOnly": False,
+        "needs": "2",
+    }
+    assert strip["writesOff"] == {
+        "off": "off in 2 h",
+        "soon": False,
+        "extend": True,
+        "readOnly": True,
+        "needs": "2",
+        "toast": "Writes are off — read-only",
+    }
+    assert strip["tapped"] == "Read-only"
+
+
+def test_each_listing_screen_shows_what_the_spec_lists(boot_report: dict[str, Any]) -> None:
+    """SPEC §6.3's screens: the feed's empty state; a NEEDS YOU count on a project's row, and
+    a NEEDS YOU badge on an agent the feed has a card for; tasks grouped doing, review,
+    blocked, todo, done; memory without what was deleted; a cleared card that says what its
+    agent does now and leads back to the feed; an empty transcript; the Card tab's model.
+    Each could be dropped with every test green."""
+    screens = boot_report["screensListed"]
+    assert screens["feed"] == "Nothing needs you."
+    assert screens["projects"] == ["NEEDS YOU 2"]
+    assert screens["fleet"] == ["waiting", "NEEDS YOU"]
+    assert screens["tasks"] == [
+        *("# doing · 1", "fix the bug"),
+        *("# review · 1", "look it over | for reviewer · claimed"),
+        *("# todo · 1", "write the docs"),
+        *("# done · 1", "ship it"),
+    ]
+    assert screens["memory"] == ["kept"]
+    assert screens["cleared"] == {
+        "said": [
+            "No longer needs you",
+            "coder-1 is waiting at its prompt now.",
+            "Open coder-1",
+            "Back to the feed",
+        ],
+        "back": "#/",
+    }
+    assert screens["transcript"] == ["No conversation recorded yet."]
+    assert screens["card"].splitlines()[:2] == ["Explainability: on", "model: claude-x"]
+
+
+def test_notifications_say_where_they_stand_wherever_the_page_offers_them(
+    boot_report: dict[str, Any],
+) -> None:
+    """SPEC §6.3: the feed says when notifications are not on for this device and links to
+    Settings; Settings says when they are on, and what a test answered "no subscription"
+    means; in Safari on an iPhone it gives the Add to Home Screen steps. None had a test."""
+    push = boot_report["pushScreens"]
+    assert push["banner"] == ["Notifications are not on for this device.", "Settings", "Hide"]
+    assert push["on"] == {
+        "said": "Notifications are on for this device.",
+        "test": "The machine has no subscription for this device — turn notifications on again.",
+    }
+    assert push["iphone"].startswith("On iPhone and iPad, notifications need the page on the")
+
+
 def test_an_answer_after_its_screen_was_left_neither_lands_on_the_next_nor_goes_unsaid(
     boot_report: dict[str, Any],
 ) -> None:

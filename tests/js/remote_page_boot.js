@@ -2129,6 +2129,38 @@ async function screensListed() {
   };
 }
 
+/* The card screen, a push link's target, as its card clears, comes back (its pane printed, or a
+ * scan failed) before the cleared view's fleet read answered, and then clears and comes back
+ * twice more, each read answered at once. What the screen holds after each step, its card as
+ * "card". */
+async function cardFlicker() {
+  const prompt = Object.assign({}, ITEM, {
+    kind: "permission", detail: { tool: "Bash", input: { command: "rm -rf build" } }, answers: [{ label: "1", keys: ["1"] }],
+  });
+  const reads = [];
+  const page = bootPage("#/n/" + NEEDS_ID + "/p/" + PROJECT + "/a/coder-1", signedIn({
+    "GET api/needs": () => ({ status: 200, json: { items: [prompt] } }),
+    "GET api/fleet": () => (reads[reads.length] = deferred()).promise,
+  }));
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const shown = () => page.main().querySelectorAll("div.data")[0].childNodes.map((node) => (node.classList.contains("card") ? "card" : node.textContent));
+  const feed = async (items, answer) => {
+    page.live().frame("needs_you", { items });
+    await settle();
+    if (answer) for (const read of reads) read.settle({ status: 200, json: FLEET });
+    await settle();
+    return shown();
+  };
+  const steps = { first: await feed([]) };
+  await feed([prompt]);
+  for (const read of reads) read.settle({ status: 200, json: FLEET }); // answered under the card
+  await settle();
+  steps.readLate = shown();
+  return Object.assign(steps, { cleared: await feed([], true), back: await feed([prompt]), again: await feed([], true) });
+}
+
 /* The Tasks tab of a board whose tasks were all dropped, and of one with a dropped task among
  * the rest: what it shows under its tabs. */
 async function droppedTasks() {
@@ -2364,6 +2396,7 @@ async function main() {
     unlockWait: await unlockAnswered(429, { error: "rate_limited", message: "too many tries" }),
     statusStrip: await statusStrip(),
     screensListed: await screensListed(),
+    cardFlicker: await cardFlicker(),
     droppedTasks: await droppedTasks(),
     pushScreens: await pushScreens(),
     writeBodies: await writeBodies(),

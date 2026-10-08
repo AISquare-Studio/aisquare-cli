@@ -1736,10 +1736,13 @@ VIEWS.card = (route, main) => {
   const box = el("div", "data");
   main.appendChild(box);
   let entry = null;
+  // Whether the cleared view is on screen now. Set once for good, a card that came back (its
+  // pane printed, a scan failed) left the screen blank when it cleared again.
   let goneShown = false;
   const draw = () => {
     const item = (S.needs || []).find((one) => one.id === route.id);
     if (item) {
+      goneShown = false;
       if (!entry || entry.json !== JSON.stringify(item)) {
         if (entry) entry.drop();
         clear(box);
@@ -1765,15 +1768,16 @@ VIEWS.card = (route, main) => {
     box.appendChild(el("h2", null, "No longer needs you"));
     const what = el("p", "muted", route.label ? "Asking the machine about " + route.label + "…" : "It was answered, or it cleared by itself.");
     box.appendChild(what);
+    const back = button("ghost", "Back to the feed", () => pageGo("#/"));
     if (route.pid && route.label) {
-      box.appendChild(button("ghost", "Open " + route.label, () => pageGo({ name: "agent", pid: route.pid, label: route.label, tab: "live" })));
+      box.append(button("ghost", "Open " + route.label, () => pageGo({ name: "agent", pid: route.pid, label: route.label, tab: "live" })), back);
       const res = await apiCall("GET", API.fleet, { query: { project: route.pid } });
+      if (!what.isConnected) return; // the card came back meanwhile, in this view's place
       if (res.ok) {
         const row = findAgent(res.data, route.label);
         what.textContent = row ? route.label + " is " + stateSentence(row.state) + " now." : route.label + " is not in the fleet any more.";
       } else what.textContent = failText(res);
-    }
-    box.appendChild(button("ghost", "Back to the feed", () => pageGo("#/")));
+    } else box.appendChild(back);
   };
   draw();
   if (S.needs === null) refreshNeeds();

@@ -1859,6 +1859,23 @@ def test_a_board_whose_tasks_were_all_dropped_says_so_instead_of_drawing_nothing
     assert tasks["some"] == ["done · 1", "ship it", "Not shown: 1 dropped."]
 
 
+def test_a_card_screen_says_its_card_cleared_every_time_it_clears(
+    boot_report: dict[str, Any],
+) -> None:
+    """The card screen, a push link's target, said "No longer needs you" only the first time
+    its card cleared. A permission card goes for a few seconds when its pane prints, or for a
+    scan that failed, and comes back: when it then cleared for good, the screen was blank, no
+    card, no sentence and no way back but the nav. And the cleared view's fleet read, answered
+    after the card came back, put "Back to the feed" under the live card."""
+    flicker = boot_report["cardFlicker"]
+    cleared = ["No longer needs you", "coder-1 is waiting at its prompt now."]
+    links = ["Open coder-1", "Back to the feed"]
+    assert flicker["first"] == ["No longer needs you", "Asking the machine about coder-1…", *links]
+    assert flicker["readLate"] == ["card"]
+    assert flicker["cleared"] == flicker["again"] == [*cleared, *links]
+    assert flicker["back"] == ["card"]
+
+
 def test_notifications_say_where_they_stand_wherever_the_page_offers_them(
     boot_report: dict[str, Any],
 ) -> None:

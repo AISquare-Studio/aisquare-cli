@@ -1191,6 +1191,30 @@ def test_a_site_that_fails_to_reconnect_gets_the_whole_reason(
     assert hooks == [{"config_dir": str(site), "refreshed": False, "error": reason}], hooks
 
 
+@pytest.mark.parametrize("entry", ["archive-v0/AbC123", "environments-v2/c5764179/56172ecc"])
+def test_a_uvx_run_is_told_nothing_is_installed(
+    runner: CliRunner, machine: Machine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """uvx runs aisquare from an entry in uv's cache. Read as a user's venv, upgrade and
+    uninstall advised `uv pip` into the cache entry (review of #257)."""
+    prefix = tmp_path / "cache" / "uv" / entry
+    (prefix / "bin").mkdir(parents=True)
+    found = _facts(prefix, installer="uv")
+    monkeypatch.setattr(install_route, "facts", lambda: found)
+    venv = install_route.classify(_facts(tmp_path / "venvs" / "work", installer="uv"))
+
+    route = install_route.classify(found)
+    check = _one_object(runner.invoke(app, ["--json", "upgrade", "--check"]).stdout)
+    package = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)["package"]
+
+    assert route.kind == install_route.UVX, route
+    assert venv.kind == install_route.VENV, "control: a venv elsewhere is still a venv"
+    assert check["route"] == "uvx" and check["command"] == "uv tool install aisquare-cli", check
+    assert "nothing is installed to upgrade" in check["reason"], check
+    assert package["command"] == "uv cache clean aisquare-cli" and not package["runs"], package
+    assert "nothing is installed to remove" in package["reason"], package
+
+
 def _live_fleet_agent(root: Path, label: str = "coder-1") -> None:
     """A fleet row the board lists as live, as `fleet spawn` records one."""
     root.mkdir(parents=True, exist_ok=True)

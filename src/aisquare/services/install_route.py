@@ -74,11 +74,17 @@ EDITABLE = "editable"
 LOCAL_SOURCE = "local-source"
 PIPX = "pipx"
 HOMEBREW = "homebrew"
+UVX = "uvx"
 VENV = "venv"
 SYSTEM = "system"
 
-ROUTES = (UV_TOOL, EDITABLE, LOCAL_SOURCE, PIPX, HOMEBREW, VENV, SYSTEM)
+ROUTES = (UV_TOOL, EDITABLE, LOCAL_SOURCE, UVX, PIPX, HOMEBREW, VENV, SYSTEM)
 """Every route :func:`classify` can answer, in the order it decides them."""
+
+#: The directories of uv's cache that hold the environments ``uvx`` runs:
+#: ``archive-v0/<id>/`` is the environment, and ``environments-v2/<hash>/<hash>``
+#: links to one (measured, uv 0.12.19).
+_UV_CACHE_ENVIRONMENTS = re.compile(r"(?:archive|environments)-v\d+")
 
 PYPI_JSON_URL = f"https://pypi.org/pypi/{DISTRIBUTION}/json"
 LOOKUP_TIMEOUT_SECONDS = 5.0
@@ -508,6 +514,8 @@ class InstallRoute:
             return "pipx"
         if self.kind == HOMEBREW:
             return "Homebrew"
+        if self.kind == UVX:
+            return "uvx"
         return "uv pip" if self.facts.installer == "uv" else "pip"
 
     def describe(self) -> str:
@@ -523,6 +531,8 @@ class InstallRoute:
             return f"a pipx install at {where}"
         if self.kind == HOMEBREW:
             return f"a Homebrew install ({self.formula})"
+        if self.kind == UVX:
+            return f"a uvx run from uv's cache ({where}): nothing is installed"
         if self.kind == VENV:
             return f"a virtual environment at {where} ({self.manager})"
         return f"a {'user' if self.facts.user_install else 'system'} {self.manager} install"
@@ -633,6 +643,11 @@ def classify(found: Facts) -> InstallRoute:
                 source=where,
             )
         return InstallRoute(UV_TOOL, found, receipt=receipt)
+    if _uv_cache_environment(found.prefix):
+        # What `uvx --from aisquare-cli aisquare` (and the plugin's launcher) runs: an
+        # entry uv may drop or rebuild, not an install. Read as a user's venv, upgrade
+        # and uninstall advised `uv pip` into the cache (review of #257).
+        return InstallRoute(UVX, found)
     if (found.prefix / PIPX_METADATA_NAME).is_file():
         return InstallRoute(PIPX, found)
     # A formula installs its app into a venv under Cellar/<formula>/<version>/libexec,
@@ -649,6 +664,11 @@ def classify(found: Facts) -> InstallRoute:
     if found.prefix != found.base_prefix:
         return InstallRoute(VENV, found)
     return InstallRoute(SYSTEM, found)
+
+
+def _uv_cache_environment(prefix: Path) -> bool:
+    """Whether ``prefix`` is an environment in uv's cache, the kind ``uvx`` runs."""
+    return any(_UV_CACHE_ENVIRONMENTS.fullmatch(parent.name) for parent in prefix.parents[:2])
 
 
 def detect() -> InstallRoute:
@@ -738,6 +758,8 @@ def upgrade_argv(route: InstallRoute, target: str | None = None) -> list[str]:
         return ["pipx", "upgrade", DISTRIBUTION]
     if route.kind == HOMEBREW:
         return ["brew", "upgrade", route.formula or DISTRIBUTION]
+    if route.kind == UVX:
+        return ["uv", "tool", "install", pinned]  # an install to keep, as uvx keeps none
     user = ["--user"] if route.kind == SYSTEM and route.facts.user_install else []
     if target:
         return _pip_argv(route, "install", *user, pinned)
@@ -750,6 +772,8 @@ _NOT_AUTOMATED = {
     LOCAL_SOURCE: "it was installed from a local or VCS source, not from PyPI",
     PIPX: "pipx installs are upgraded with pipx",
     HOMEBREW: "Homebrew installs are upgraded with brew",
+    UVX: "it runs through uvx from uv's cache, so nothing is installed to upgrade: uvx runs "
+    "the release its --from names, and this installs one to keep",
     VENV: "it lives in a virtual environment this CLI does not manage",
     SYSTEM: "it was installed with pip outside a virtual environment",
 }
@@ -762,6 +786,8 @@ def not_automated(route: InstallRoute) -> str | None:
     receipt says exactly how to reinstall it, and the result is checked in a new
     process afterwards. Everything else is told the exact command instead.
     """
+    if route.kind == UVX:
+        return _NOT_AUTOMATED[UVX]  # before Windows: there is no install to lock
     windows = _windows_blocker(route, "replace")
     if route.kind == EDITABLE:
         # First on every platform: the pull is the step the printed reinstall
@@ -843,6 +869,8 @@ def remove_argv(route: InstallRoute) -> list[str]:
         return ["pipx", "uninstall", DISTRIBUTION]
     if route.kind == HOMEBREW:
         return ["brew", "uninstall", route.formula or DISTRIBUTION]
+    if route.kind == UVX:
+        return ["uv", "cache", "clean", DISTRIBUTION]
     return _pip_argv(route, "uninstall", DISTRIBUTION)
 
 
@@ -855,6 +883,11 @@ def not_removable(route: InstallRoute) -> str | None:
     may hold other things they installed, and pipx and Homebrew keep records of
     their own that only they should edit.
     """
+    if route.kind == UVX:
+        return (
+            "it runs through uvx from uv's cache, so nothing is installed to remove; "
+            "this frees the cache"
+        )
     windows = _windows_blocker(route, "remove")
     if windows is not None:
         return windows

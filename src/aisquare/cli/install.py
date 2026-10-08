@@ -271,7 +271,7 @@ def upgrade(
         plan = lifecycle_service.upgrade_plan(version, check=check)
     except lifecycle_service.InvalidVersion as exc:
         fail(
-            f"--version takes a version such as 0.9.1, not {str(exc)!r}",
+            f"--version takes a version such as 0.8.1, not {str(exc)!r}",
             error="invalid_version",
         )
     if check:

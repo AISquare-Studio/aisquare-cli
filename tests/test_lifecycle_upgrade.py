@@ -1742,6 +1742,20 @@ def test_a_version_that_is_not_a_version_is_refused_before_anything(
     assert machine.installs == [] and machine.lookups == 0
 
 
+def test_a_bad_version_is_answered_with_an_example_this_flag_takes(
+    runner: CliRunner, machine: Machine
+) -> None:
+    """The example was 0.9.1, a release of this product that does not exist; a user who
+    copied it asked uv for it (sweep of #257). It is a patch of this release series."""
+    result = runner.invoke(app, ["upgrade", "--version", "garbage"])
+
+    example = re.search(r"--version takes a version such as (\S+), not 'garbage'", result.stderr)
+    assert result.exit_code == 1
+    assert example is not None, result.stderr
+    assert example[1] == "0.8.1" and install_route.version_argument(example[1]) == example[1]
+    assert machine.installs == [] and machine.lookups == 0
+
+
 # --- which hook sites the new install re-connects --------------------------------------
 
 

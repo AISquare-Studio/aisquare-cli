@@ -168,7 +168,7 @@ def version_key(text: str) -> tuple[Any, ...] | None:
 
     Written here because a uv tool environment has no ``packaging`` to import,
     and a string comparison is wrong exactly where it matters: ``"0.10.0" <
-    "0.9.0"``. Release segments compare as numbers with trailing zeros ignored
+    "0.2.0"``. Release segments compare as numbers with trailing zeros ignored
     (``0.7`` is ``0.7.0``); a dev release sorts before its pre-releases, which
     sort before the final, which sorts before its post-releases — packaging's
     order. The local label (``+abc``) compares as text, a simplification no
@@ -202,7 +202,7 @@ def version_argument(text: str) -> str | None:
     """``--version``'s value as the bare version uv's ``name@version`` takes, or ``None``.
 
     It is pasted into the package spec, so it must be ONE version token: a
-    leading ``v`` (``v0.9.1``, how tags are written) is dropped, and anything
+    leading ``v`` (``v0.8.1``, how tags are written) is dropped, and anything
     that does not then parse as a PEP 440 version is refused.
     """
     candidate = text.strip()

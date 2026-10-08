@@ -192,21 +192,31 @@ def test_a_repo_scope_plugin_connects_the_sessions_that_load_it(
 
 
 @posix_route
-def test_hooks_beside_a_repo_scope_plugin_name_the_command_that_removes_it(
-    runner: CliRunner, claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("hooks", ["live", "dead"])
+def test_hooks_beside_a_repo_scope_plugin_are_graded_as_the_directorys_own(
+    runner: CliRunner, claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hooks: str
 ) -> None:
-    """Both routes in one repository: the way out that keeps the hooks must name the
-    plugin's scope, run in its repository, or Claude Code answers that it is not installed."""
+    """A project-scope install covers sessions in its repository alone. Graded as the
+    directory's plugin, ~/.claude's own hooks read as "two ways" inside that repository,
+    and "keep the plugin" disconnected the hooks every other repository runs on; beside
+    dead hooks it said the plugin runs in their place, which holds nowhere else
+    (review of #257). The directory is graded on its hooks: live, it is connected (the
+    launcher stands down beside them); dead, Connect rewrites them."""
     repo = _repo_plugin(claude, tmp_path / "repo", "project")
     _connect(runner)
+    if hooks == "dead":
+        _hooks_name(claude, str(tmp_path / "gone" / "aisquare"))
     monkeypatch.chdir(repo)
 
     row = diagnostics._check_claude_code()
 
-    assert row.status is CheckStatus.warn and "runs aisquare two ways" in row.detail, row
-    assert f"cd {repo} && claude plugin uninstall" in (row.fix or ""), row.fix
-    assert f"{agent_core.CLAUDE_PLUGIN_ID} --scope project" in (row.fix or ""), row.fix
-    assert _buttons(row) == [], "keeping one route is the operator's call"
+    assert "two ways" not in row.detail and "in their place" not in row.detail, row
+    assert "disconnect" not in (row.fix or ""), "never the hooks every other repository runs on"
+    if hooks == "live":
+        assert row.status is CheckStatus.ok, row
+        assert f"at project scope in {repo} stands down beside them" in row.detail, row
+    else:
+        assert row.status is CheckStatus.warn and _buttons(row) == [_CONNECT], row
 
 
 @posix_route

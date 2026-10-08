@@ -45,6 +45,8 @@ aisquare agents disconnect claude-code
 
 To keep the `settings.json` hooks instead, run `/plugin uninstall aisquare@aisquare-cli` inside Claude Code.
 
+A plugin installed at project or local scope is the exception: it runs only in its repository, and there it stands down beside the `settings.json` hooks every other repository runs on, so `aisquare doctor` reads them as connected and never suggests removing the hooks.
+
 ## Limits
 
 - macOS, Linux and WSL. Native Windows keeps the `settings.json` route (`aisquare agents connect claude-code`): the hooks run `sh`, and `aisquare doctor` there reads only that route.

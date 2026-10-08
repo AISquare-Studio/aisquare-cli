@@ -897,7 +897,9 @@ def _check_claude_code() -> DoctorCheck:
     hook fire twice. A directory with BOTH warns: the plugin's hooks stand down
     for the events settings.json runs, so nothing doubles, but two routes drift
     apart (the plugin pins its own release), and keeping one is a choice the
-    operator makes -- so that fix is not a button.
+    operator makes -- so that fix is not a button. Not a plugin installed for one
+    repository (project or local scope): it runs there alone, so the directory's
+    hooks, which every other repository runs on, are not doubled but graded.
 
     Read-only, like every check here: doctor never rewrites ``settings.json``.
     """
@@ -993,6 +995,15 @@ def _check_claude_code() -> DoctorCheck:
             else ""
         )
         routes = [f"all lifecycle hooks installed{note}"] if hooked else []
+        # A project- or local-scope plugin for this repository is not the directory's
+        # (`hook_site_health`): beside its hooks the plugin's launcher stands down, so
+        # they run once here, as in every other repository (review of #257).
+        if hooked and agent_core.plugin_route_supported():
+            routes.extend(
+                f"{_plugin_label(beside)} stands down beside them"
+                for site in hooked
+                if (beside := agent_core.claude_repo_plugin_here(site.config_dir)) is not None
+            )
         if len(plugins) == 1 and not hooked:
             routes.append(f"through {_plugin_label(plugins[0][1])}, which runs {runs}")
         else:

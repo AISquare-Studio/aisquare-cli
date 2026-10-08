@@ -1263,15 +1263,22 @@ def hook_site_health(
 ) -> HookSiteHealth:
     """Grade one config directory: are the hooks all there, and what do they run?
 
-    Its ``plugin`` is the one a session started here loads: the user-scope install,
-    else a project- or local-scope one for this repository (:func:`claude_repo_plugin_here`).
+    Its ``plugin`` is the user-scope install; else, only where the directory runs no
+    hooks of ours, a project- or local-scope one a session started here loads
+    (:func:`claude_repo_plugin_here`). That one covers sessions in its repository
+    alone. Beside the directory's own hooks it doubles nothing (the launcher stands
+    down there), and graded as the directory's plugin it read as "two ways" and the
+    advice removed the hooks every other repository runs on (review of #257).
     """
     installed = hooks_installed(name, config_dir)
+    commands = hook_commands(name, config_dir)
     plugin = None
     if name == "claude-code" and plugin_route_supported():
-        plugin = claude_plugin(config_dir) or claude_repo_plugin_here(config_dir)
+        plugin = claude_plugin(config_dir)
+        if plugin is None and not commands:
+            plugin = claude_repo_plugin_here(config_dir)
     binaries: list[HookBinary] = []
-    for command in hook_commands(name, config_dir):
+    for command in commands:
         binary = hook_binary(command)
         if binary is not None and binary not in binaries:
             binaries.append(binary)

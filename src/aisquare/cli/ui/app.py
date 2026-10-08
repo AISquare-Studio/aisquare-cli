@@ -57,7 +57,7 @@ from aisquare.cli.ui.groups import (
     TogglePin,
     UndoLayout,
 )
-from aisquare.cli.ui.remote_control import RemoteController
+from aisquare.cli.ui.remote_control import SWITCHES, RemoteController
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AddProject,
@@ -361,6 +361,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         super().__init__()
         self.remote = remote if remote is not None else RemoteController()
         """The Remote (``R``) model — one per app, so the tunnel outlives the dialog."""
+        self._remote_savers = {
+            key: Autosave(self, key, what=what) for key, what in SWITCHES.items()
+        }
+        """Remote's two switches' saves, as the theme's (``autosave.py``)."""
+        self.remote.save_switch = self._save_remote_switch
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
         self._accounts = accounts
@@ -507,6 +512,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     def action_remote_panel(self) -> None:
         self.push_screen(RemotePanel(self.remote))
+
+    def _save_remote_switch(self, key: str, value: object) -> None:
+        """A Remote switch's save, as the theme's: on a thread of its own, a refusal toasted
+        once and said again at quit. Saved where it changed, it waited for ``state.json``'s
+        lock on Textual's thread, two seconds a key while another process held it (r3 review
+        of #243: nothing that stops or saves Remote may hold that thread)."""
+        self._remote_savers[key].remember(value)
 
     def _remote_auto_off(self) -> None:
         """The 30 s auto-off check; a Remote whose timer ran out stops without this thread."""

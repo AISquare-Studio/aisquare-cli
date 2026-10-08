@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import socket
 import threading
@@ -31,9 +32,10 @@ from aisquare.cli.ui.app import FleetApp, HelpScreen
 from aisquare.cli.ui.remote_control import READ_ONLY_REASON, RemoteController
 from aisquare.cli.ui.views import remote as remote_view
 from aisquare.cli.ui.views.remote import RemotePanel, qr_text
-from aisquare.core import paths
+from aisquare.core import paths, state_file
 from aisquare.core import tmux as tmux_core
-from aisquare.core.state_file import update_state
+from aisquare.core.locking import lock_exclusive, unlock
+from aisquare.core.state_file import read_state, update_state
 from aisquare.core.tmux import Completed
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
@@ -849,6 +851,72 @@ def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended() -> Non
         assert app.remote.auto_off_at == extended, "the extension holds in the TUI too"
 
     drive(go, tunnel=missing_ngrok)
+
+
+def test_the_switches_save_off_textuals_thread_and_land_once_the_lock_is_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The R panel saved Remote's switches to ``state.json`` on Textual's thread: with the
+    file's lock held by another process (a second ``asq ui`` saving its theme, a ``project
+    switch``), the fleet UI froze for the lock's wait on every switch (r3 review of #243:
+    nothing that stops or saves Remote may hold that thread). They save as the theme does,
+    and what quit could not land is said after."""
+    monkeypatch.setattr(state_file, "LOCK_WAIT_S", 10.0)  # a holder that takes its time
+    update_state("board_theme", "nord")  # the lock file
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        fd = os.open(paths.state_path().with_name("state.json.lock"), os.O_RDONLY)
+        lock_exclusive(fd)
+        try:
+            started = time.monotonic()
+            modal.query_one("#remote-on", Switch).toggle()
+            await pilot.pause()
+            assert time.monotonic() - started < 5.0, "the switch waited for state.json's lock"
+            assert app.remote.running
+            assert "remote_enabled" not in read_state(), "not saved while the lock is held"
+        finally:
+            unlock(fd)
+            os.close(fd)
+        for _ in range(100):
+            if read_state().get("remote_enabled") is True:
+                break
+            await asyncio.sleep(0.05)
+        assert read_state()["remote_enabled"] is True, "saved once the lock was free"
+        modal.query_one("#remote-auto-off", Select).value = 120
+        await pilot.pause()  # picked, and quit inside the save's debounce: quit lands it
+
+    drive(go, tunnel=missing_ngrok)
+    assert read_state() == {"board_theme": "nord", "remote_enabled": True, "auto_off_minutes": 120}
+
+
+def test_a_switch_state_json_refuses_is_toasted_and_said_again_after_quit() -> None:
+    """A refused save of a switch was dropped without a word, and a refused off brought Remote
+    back at the next start (sweep of #243). It is said as a refused theme is: a toast, and a
+    line once the screen is gone."""
+    paths.ensure_home()
+    paths.state_path().write_text("[]")  # not an object: every save of it is refused
+
+    async def go(pilot: Pilot[None]) -> FleetApp:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        for _ in range(100):
+            if any("Remote's on/off switch could not be saved" in note for note in toasts(app)):
+                break
+            await asyncio.sleep(0.05)
+        assert any(
+            "is not a JSON object — Remote's on/off switch could not be saved" in note
+            for note in toasts(app)
+        )
+        return app
+
+    app = drive(go, tunnel=missing_ngrok)
+    assert any(line.startswith("Remote's on/off switch was not saved: ") for line in app.unsaved)
 
 
 # --- turning Remote off never waits on Textual's thread (r3 review of #243) ----------------------

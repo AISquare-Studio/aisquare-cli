@@ -8,8 +8,9 @@ restart — is a plain unit test.
 
 Persistence (PLAN §1): the two switch values ``remote_enabled`` and
 ``auto_off_minutes`` sit next to the theme key in ``~/.aisquare/state.json``
-through the file's one locked writer (``core.state_file.update_state``), as the
-theme autosave does. Token, password, devices and the write switch are the
+through the file's one locked writer (``core.state_file.update_state``), each
+key on its own, and in the fleet UI through the autosave the theme uses, off
+Textual's thread. Token, password, devices and the write switch are the
 SERVER's (``~/.aisquare/remote.json``) and are only read and written through its
 API, so ``aisquare remote allow-write`` and ``regenerate-password`` from a shell
 and this modal always agree.
@@ -179,7 +180,9 @@ class RemoteController:
         self._stopper: threading.Thread | None = None
         """The thread that stops the server and ngrok after :meth:`turn_off`, the latest one."""
         self.save_switch: SwitchSaver = update_state
-        """How a switch that changed reaches ``state.json``: that one key, at once."""
+        """How a switch that changed reaches ``state.json``: that one key, at once, on the
+        caller's thread. The fleet UI hands it to a saver of its own instead, which writes on
+        a thread of its own and says a refusal itself, as the theme's does (``FleetApp``)."""
         self._refused_switches: dict[str, str] = {}
         """A switch ``state.json`` refused, by key, as the status line says it, until a later
         save of that switch lands."""

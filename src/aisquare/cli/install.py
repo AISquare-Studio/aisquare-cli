@@ -64,6 +64,8 @@ def _plan_json(plan: lifecycle_service.UpgradePlan) -> dict[str, Any]:
         "argv": list(plan.argv),
         "refresh_hooks": [str(site.config_dir) for site in plan.refresh],
         "hooks_left": [_site_json(site) for site in plan.left],
+        "live_agents": list(plan.live_agents),
+        "fleet_error": plan.fleet_error,
     }
 
 
@@ -112,6 +114,15 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
         _say(f"  then:    re-connects the Claude Code hooks in {site.config_dir}")
     for site in plan.left:
         _say(f"  leaves:  {site.config_dir} — {site.reason}")
+    _fleet_lines(plan)
+
+
+def _fleet_lines(plan: lifecycle_service.UpgradePlan) -> None:
+    """The live fleet, said before anything is installed: in the plan, and under --yes."""
+    if plan.fleet_warning is not None:
+        _say(f"⚠ {plan.fleet_warning}")
+    elif plan.fleet_error is not None:
+        _say(f"⚠ the fleet's agents could not be counted ({plan.fleet_error}); make sure none run")
 
 
 def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
@@ -131,6 +142,7 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
                     for hook in report.hooks
                 ],
                 "hooks_left": [_site_json(site) for site in plan.left],
+                "live_agents": list(plan.live_agents),
                 "notes": list(report.notes),
             }
         )
@@ -265,13 +277,18 @@ def upgrade(
         if not _stdin_is_a_terminal():
             _say("dry run: nothing installed — re-run with --yes to upgrade")
             return
+        running = len(plan.live_agents)
+        during = (
+            f" while {running} fleet agent{'s run' if running != 1 else ' runs'}" if running else ""
+        )
         if not typer.confirm(
-            f"Upgrade aisquare {plan.current} → {plan.destination}?", default=False
+            f"Upgrade aisquare {plan.current} → {plan.destination}{during}?", default=False
         ):
             _say("nothing changed")
             _reopen(reopen)
             return
     elif not json_output:
+        _fleet_lines(plan)  # --yes skips the plan, not what it costs the fleet
         _say(f"upgrading aisquare {plan.current} → {plan.destination}: {plan.command}")
     report = lifecycle_service.upgrade(plan, to_stderr=json_output)
     if not report.installed:
@@ -310,6 +327,14 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
         "mcp": [
             {"name": entry.name, "file": str(entry.file), "project": entry.project}
             for entry in plan.mcp
+        ],
+        "plugins": [
+            {
+                "config_dir": str(plugin.config_dir),
+                "version": plugin.version,
+                "remove": lifecycle_service.plugin_removal(plugin),
+            }
+            for plugin in plan.plugins
         ],
         "package": {
             "route": plan.route.kind,
@@ -377,6 +402,11 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
         for entry in plan.mcp:
             where = f"{entry.file}" + (f", project {entry.project}" if entry.project else "")
             _say(f"    {entry.name} in {where}")
+    for plugin in plan.plugins:
+        # Claude Code's to remove, and it keeps running aisquare: said, never silent.
+        _say(f"  the aisquare plugin in {plugin.config_dir}, which keeps running aisquare")
+        _say("  there (through uvx once the package is gone) — remove it with:")
+        _say(f"    {lifecycle_service.plugin_removal(plugin)}")
     _say("  uv, tmux, Node, gh and Claude Code")
     if plan.fleet_error is not None:
         _say(f"⚠ the fleet's agents could not be counted ({plan.fleet_error}); make sure none run")
@@ -474,6 +504,12 @@ def _uninstall_question(plan: lifecycle_service.UninstallPlan) -> str | None:
             f" (the package stays: {blocked} other director{'ies' if blocked != 1 else 'y'} "
             "could not be checked)"
         )
+    if plan.plugins:
+        count = len(plan.plugins)
+        text += (
+            f" (the aisquare plugin stays enabled in {count} "
+            f"director{'ies' if count != 1 else 'y'} and keeps running aisquare)"
+        )
     return text[0].upper() + text[1:] + "?"
 
 
@@ -506,10 +542,11 @@ def uninstall(
     Takes aisquare's hooks out of every Claude Code directory it finds (the ones
     this machine connected, $CLAUDE_CONFIG_DIR, ~/.claude* and the account
     slots), leaving every other hook as it was. Refuses while fleet agents are
-    running. ~/.aisquare is kept unless --purge. The package goes last: a uv
-    tool install is removed with `uv tool uninstall`; any other install is told
-    its command. Asks first at a terminal; off a terminal it is a dry run unless
-    --yes.
+    running. ~/.aisquare is kept unless --purge, which waits until an enabled
+    aisquare plugin is removed (the plan names the command). The package goes
+    last: a uv tool install is removed with `uv tool uninstall`; any other
+    install is told its command. Asks first at a terminal; off a terminal it is
+    a dry run unless --yes.
     """
     json_output = get_state().json_output
     plan = lifecycle_service.uninstall_plan(purge=purge)

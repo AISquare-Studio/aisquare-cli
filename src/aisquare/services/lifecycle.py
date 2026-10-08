@@ -298,10 +298,34 @@ class UpgradePlan:
     """Recorded hook sites the new install re-connects afterwards (issue #58)."""
     left: tuple[HookSite, ...] = ()
     """Recorded hook sites left as they are, each with its reason."""
+    live_agents: tuple[str, ...] = ()
+    """Live fleet agents, counted as uninstall counts them (:func:`running_fleet`)."""
+    fleet_error: str | None = None
+    """Why the fleet's live agents could not be counted, when they could not."""
 
     @property
     def runnable(self) -> bool:
         return self.reason is None
+
+    @property
+    def fleet_warning(self) -> str | None:
+        """What upgrading now costs the live fleet agents, or ``None`` when none runs.
+
+        Uninstall refuses while they run, because the program their hooks call goes
+        for good. Here it goes only while ``uv tool install --force`` recreates the
+        environment, so it is said, in the plan and in the question, rather than
+        refused: stopping the fleet costs every session in it, and the window is
+        seconds (review of #257).
+        """
+        if not self.live_agents:
+            return None
+        count = len(self.live_agents)
+        return (
+            f"{count} fleet agent{'s are' if count != 1 else ' is'} running "
+            f"({', '.join(self.live_agents)}): a hook {'they fire' if count != 1 else 'it fires'} "
+            "while the install is being replaced fails, and that turn's board update is lost. "
+            f"To be safe, stop {'them' if count != 1 else 'it'} first: {FLEET_SHUTDOWN}"
+        )
 
     @property
     def command(self) -> str:
@@ -395,8 +419,11 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         )
     refresh: tuple[HookSite, ...] = ()
     left: tuple[HookSite, ...] = ()
+    live: tuple[str, ...] = ()
+    fleet_error: str | None = None
     if reason is None:
         refresh, left = refresh_sites(route.facts)
+        live, _unlistened, fleet_error = running_fleet()
     return UpgradePlan(
         route=route,
         current=__version__,
@@ -407,6 +434,8 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         reason=reason,
         refresh=refresh,
         left=left,
+        live_agents=live,
+        fleet_error=fleet_error,
     )
 
 
@@ -753,6 +782,10 @@ class UninstallPlan:
     """Live rows that do not block: no tmux here and no server on their socket."""
     fleet_error: str | None
     """Why the fleet's live agents could not be counted, when they could not."""
+    plugins: tuple[agent_core.ClaudePlugin, ...] = ()
+    """Directories where the aisquare Claude Code plugin is enabled. Uninstall leaves
+    it, as Claude Code owns it, and it keeps running aisquare there: through uvx
+    once the package is gone, which makes the home again (review of #257)."""
 
     @property
     def package_command(self) -> str:
@@ -774,7 +807,23 @@ class UninstallPlan:
                 f"--purge will not delete {self.home}: {self.purge_refusal}",
                 error="purge_refused",
             )
+        if self.purge and self.home_exists and self.plugins:
+            # A purge the next session undoes is not one: refused like the fleet, with
+            # the command that clears the way. A plain uninstall only says so.
+            where = ", ".join(str(plugin.config_dir) for plugin in self.plugins)
+            return UninstallRefused(
+                f"--purge would not last: the aisquare plugin is enabled in {where}, so "
+                f"Claude Code's next session there runs aisquare and makes {self.home} again. "
+                f"Remove the plugin first: "
+                f"{'; '.join(plugin_removal(plugin) for plugin in self.plugins)}",
+                error="plugin_enabled",
+            )
         return None
+
+
+def plugin_removal(plugin: agent_core.ClaudePlugin) -> str:
+    """The command that removes the aisquare plugin from its config dir."""
+    return agent_core.claude_plugin_command("uninstall", plugin.config_dir)
 
 
 @dataclass(frozen=True)
@@ -1076,18 +1125,35 @@ def _server_listening(socket_name: str) -> bool:
     return True
 
 
+def running_fleet() -> tuple[tuple[str, ...], int, str | None]:
+    """``(live, unlistened, error)``: the fleet agents that may be running, the live rows
+    that cannot be (no tmux here and no server on their socket), and why the fleet could
+    not be read. The one count upgrade and uninstall both act on."""
+    rows, fleet_error = _live_fleet_agents()
+    tmux_found = _tmux_on_path()
+    live = tuple(
+        label for label, socket_name in rows if tmux_found or _server_listening(socket_name)
+    )
+    return live, len(rows) - len(live), fleet_error
+
+
 def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
     """Decide what ``aisquare uninstall`` would do. Reads only; never creates the home."""
     route = install_route.detect()
     candidates = [*agent_core.hook_dirs(HOOK_AGENT), *_account_dirs(), *_siblings_hiding_hooks()]
     hooks: list[HookSite] = []
     unreadable: list[HookSite] = []
+    plugins: list[agent_core.ClaudePlugin] = []
+    plugin_route = agent_core.plugin_route_supported()
     seen: set[Path] = set()
     for directory in candidates:
         key = agent_core.dir_identity(directory)
         if key in seen:
             continue
         seen.add(key)
+        plugin = agent_core.claude_plugin(directory) if plugin_route else None
+        if plugin is not None:
+            plugins.append(plugin)
         binaries, error = hook_binaries(directory)
         if error is not None:
             unreadable.append(HookSite(directory, reason=error))
@@ -1098,11 +1164,7 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         entries = tuple(sorted(c.name for c in home.iterdir())) if home.is_dir() else ()
     except OSError:
         entries = ()
-    rows, fleet_error = _live_fleet_agents()
-    tmux_found = _tmux_on_path()
-    live = tuple(
-        label for label, socket_name in rows if tmux_found or _server_listening(socket_name)
-    )
+    live, unlistened, fleet_error = running_fleet()
     custom = custom_home(home)
     return UninstallPlan(
         route=route,
@@ -1120,8 +1182,9 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         purge=purge,
         purge_refusal=purge_refusal(home, custom=custom),
         live_agents=live,
-        unlistened=len(rows) - len(live),
+        unlistened=unlistened,
         fleet_error=fleet_error,
+        plugins=tuple(plugins),
     )
 
 
@@ -1231,11 +1294,22 @@ def _uninstall_notes(plan: UninstallPlan, removals: Iterable[HookRemoval]) -> li
             f"MCP servers that run aisquare are still registered ({names}); Claude Code owns "
             "that file — remove each with: claude mcp remove <name>"
         )
+    for plugin in plan.plugins:
+        notes.append(plugin_note(plugin))
     notes.append(
         "a running `aisquare serve` keeps running until you stop it; uv, tmux, Node, gh "
         "and Claude Code stay installed"
     )
     return notes
+
+
+def plugin_note(plugin: agent_core.ClaudePlugin) -> str:
+    """What an uninstall leaves running in a directory that enables the aisquare plugin."""
+    return (
+        f"the aisquare plugin is still enabled in {plugin.config_dir}, so Claude Code keeps "
+        f"running aisquare there (through uvx once the package is gone) — remove it: "
+        f"{plugin_removal(plugin)}"
+    )
 
 
 def remove_package(plan: UninstallPlan, *, stdout_to_stderr: bool) -> None:

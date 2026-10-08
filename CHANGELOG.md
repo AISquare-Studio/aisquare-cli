@@ -45,12 +45,15 @@ and an aisquare that upgrades and uninstalls itself.**
   `docs/claude-code-plugin.md` (#249).
 - **`aisquare upgrade`** reinstalls the one-liner's uv tool install in place,
   keeps its extras and rewrites the hooks without re-importing `CLAUDE.md`;
-  `--check` says whether PyPI has a newer release, and any other install is
-  shown the command that updates it (#251).
+  `--check` says whether PyPI has a newer release, any other install is shown
+  the command that updates it, and fleet agents still running are named
+  before their hooks' program is replaced (#251).
 - **`aisquare uninstall`** takes aisquare's hooks out of every Claude Code
   directory, then removes the package. It keeps `~/.aisquare` (your memory and
   boards) unless you add `--purge`, shows its plan and asks first, and
-  `--dry-run` removes nothing (#253).
+  `--dry-run` removes nothing. An enabled aisquare plugin, which keeps running
+  aisquare, is named with the command that removes it, and `--purge` waits
+  for it (#253).
 - **Update and Uninstall in asq's Doctor** hand the terminal to
   `aisquare upgrade` and `aisquare uninstall`, which show their plan and ask;
   after an update, asq reopens on the version just installed (#254).

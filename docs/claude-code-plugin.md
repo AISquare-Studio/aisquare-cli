@@ -55,3 +55,5 @@ To keep the `settings.json` hooks instead, run `/plugin uninstall aisquare@aisqu
 ## Removing it
 
 Run `/plugin uninstall aisquare@aisquare-cli`, and `/plugin marketplace remove aisquare-cli` if you no longer want the marketplace. Your memory stays in `~/.aisquare`.
+
+`aisquare uninstall` leaves the plugin to you, because the plugin is Claude Code's: it names the command that removes it, and `--purge` waits until it is gone, since the plugin would run aisquare again and make `~/.aisquare` anew.

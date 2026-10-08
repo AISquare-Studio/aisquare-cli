@@ -22,6 +22,7 @@ import re
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -34,6 +35,9 @@ from aisquare.cli import install as install_cli
 from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
 from aisquare.core import paths, spawn
+from aisquare.core.orchestrator import team_project
+from aisquare.core.store import store_session
+from aisquare.models import FleetAgent
 from aisquare.services import agents as agents_service
 from aisquare.services import install_route, lifecycle
 from aisquare.services.install_route import Captured, Facts, LatestRelease
@@ -1082,6 +1086,57 @@ def test_at_a_terminal_it_asks_and_no_means_nothing_runs(
 
     assert agreed.exit_code == 0, agreed.output
     assert len(machine.installs) == 1
+
+
+def _live_fleet_agent(root: Path, label: str = "coder-1") -> None:
+    """A fleet row the board lists as live, as `fleet spawn` records one."""
+    root.mkdir(parents=True, exist_ok=True)
+    project = team_project(root)
+    with store_session() as store:
+        store.ensure_project(project)
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=f"agt_{label}",
+                project_id=project.id,
+                label=label,
+                role="coder",
+                pane_id="%1",
+                cwd=project.root,
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+
+
+def test_live_fleet_agents_are_named_before_the_install_is_replaced_under_them(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """uninstall refuses while fleet agents run; upgrade never read the fleet, and a hook
+    fired while uv recreates the environment fails, losing that turn's board update and
+    the manager's wake-up (review of #257). Said in the plan, the question and under --yes."""
+    monkeypatch.setattr(lifecycle, "_tmux_on_path", lambda: True)
+    monkeypatch.setattr(install_cli, "_stdin_is_a_terminal", lambda: True)
+    asked: list[str] = []
+
+    def confirm(text: str, **_: object) -> bool:
+        asked.append(text)
+        return False
+
+    monkeypatch.setattr("aisquare.cli.install.typer.confirm", confirm)
+    quiet = runner.invoke(app, ["upgrade"])
+    _live_fleet_agent(tmp_path / "repo")
+    plan = _one_object(runner.invoke(app, ["--json", "upgrade"]).stdout)
+    declined = runner.invoke(app, ["upgrade"])
+    agreed = runner.invoke(app, ["upgrade", "--yes"])
+
+    warning = "⚠ 1 fleet agent is running (coder-1 (repo)): a hook it fires while the install"
+    assert plan["live_agents"] == ["coder-1 (repo)"], plan
+    assert asked == [
+        "Upgrade aisquare 0.9.0 → 0.9.1?",
+        "Upgrade aisquare 0.9.0 → 0.9.1 while 1 fleet agent runs?",
+    ]
+    assert warning in declined.stdout and "aisquare fleet shutdown --all --yes" in declined.stdout
+    assert warning in agreed.stdout and len(machine.installs) == 1, "--yes upgrades, having said it"
+    assert "fleet agent" not in quiet.stdout, "control: no fleet, no warning"
 
 
 def test_yes_runs_the_restated_command_checks_the_version_and_refreshes_the_hooks(

@@ -856,6 +856,59 @@ def test_a_purge_the_guard_refuses_changes_nothing(
     assert _snapshot(tmp_path) == before and world.events == []
 
 
+def _plugin_installed(config_dir: Path, *, enabled: bool = True) -> Path:
+    """The aisquare plugin installed in ``config_dir``, enabled unless told otherwise:
+    the two records Claude Code keeps (tests/test_doctor_plugin_route.py has them measured)."""
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {agent_core.CLAUDE_PLUGIN_ID: enabled}}), encoding="utf-8"
+    )
+    (config_dir / "plugins").mkdir(exist_ok=True)
+    record = {"scope": "user", "version": "0.9.0"}
+    (config_dir / "plugins" / "installed_plugins.json").write_text(
+        json.dumps({"version": 2, "plugins": {agent_core.CLAUDE_PLUGIN_ID: [record]}}),
+        encoding="utf-8",
+    )
+    return config_dir
+
+
+def test_an_enabled_plugin_is_named_with_its_removal_and_a_purge_waits_for_it(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plugin's launcher runs aisquare through uvx once the package is gone. The plan
+    read only settings.json hooks, so it said there was nothing in a plugin user's Claude
+    Code, and a purged home came back at the next session (review of #257)."""
+    monkeypatch.setattr(agent_core, "plugin_route_supported", lambda: True)  # the route's rule
+    _initialised(runner, tmp_path)
+    site = _plugin_installed(isolated_agent_home / ".claude")
+    removal = agent_core.claude_plugin_command("uninstall", site)
+    before = _snapshot(tmp_path)
+
+    plan = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+    purge = runner.invoke(app, ["--json", "uninstall", "--yes", "--purge"])
+    untouched = _snapshot(tmp_path) == before and world.events == []
+    plain = runner.invoke(app, ["uninstall", "--yes"])
+    _plugin_installed(site, enabled=False)
+    disabled = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+
+    assert removal.endswith("claude plugin uninstall aisquare@aisquare-cli"), removal
+    assert plan["plugins"] == [{"config_dir": str(site), "version": "0.9.0", "remove": removal}]
+    refused = _one_object(purge.stdout)
+    assert (purge.exit_code, refused["error"]) == (1, "plugin_enabled"), refused
+    assert removal in refused["detail"] and untouched, "refused with the command, nothing touched"
+    assert plain.exit_code == 0, plain.output
+    assert f"the aisquare plugin is still enabled in {site}" in plain.stdout, plain.stdout
+    assert f"remove it: {removal}" in plain.stdout and world.events[-1][0] == "package"
+    assert disabled["plugins"] == [], "control: a disabled plugin runs nothing"
+
+
 # --- the non-grading directory list ----------------------------------------------------
 
 

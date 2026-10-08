@@ -31,9 +31,11 @@ instead of running twice. Each write that goes through appends one line to
 ``remote-audit.log``. :data:`NOT_WRITE_GATED` lists the few routes that change
 something without the gate, frozen.
 
-**The stream** sends ``board``, ``fleet``, ``remote``, then ``needs_you``,
-``action`` and a ``heartbeat``, then one ``pane`` frame per ``(project, label)``
-subscription, each only when it changed.
+**The stream** sends ``fleet``, ``remote``, then ``needs_you`` and ``action``, each
+only when it changed, a ``heartbeat`` every :data:`HEARTBEAT_SECONDS` changed or not,
+then one ``pane`` frame per ``(project, label)`` subscription when its pane changed.
+A socket that asked with ``subscribe_board`` gets ``board`` frames too, ahead of the
+rest: the board's events and the sessions they name (:func:`remote_board_frame`).
 
 **The lanes** live in their own modules and plug in through :class:`RemoteKit`:
 ``remote_needs`` (what needs the human), ``remote_push`` (Web Push),

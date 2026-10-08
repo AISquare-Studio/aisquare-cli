@@ -595,12 +595,73 @@ def test_no_board_is_read_or_sent_until_the_socket_asks_and_none_once_it_stops(
     assert [frame for frame in later if frame["type"] == "board"] == []
 
 
+def test_a_false_that_lands_while_a_board_is_read_sends_no_board_frame(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """A tick was reading the board when ``{"subscribe_board": false}`` came, and the board
+    went out once the read was back: every session and task once more, to a page that had
+    left its Board tab. The tick looks at what the socket wants after the read too."""
+    reading, release = threading.Event(), threading.Event()
+
+    def board(project: str | None) -> object:
+        reading.set()
+        release.wait(5)
+        return {"project": {"id": "p1"}, "sessions": [], "events": []}
+
+    sources = dataclasses.replace(Reads().sources(), board=board, panes=Panes())
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
+    assert unlock(client, runtime).status_code == 200
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_board": None}))
+        assert reading.wait(5), "a tick is reading the board"
+        ws.send_text(json.dumps({"subscribe_board": False}))
+        time.sleep(0.2)  # the reader takes the false while that read still runs
+        release.set()
+        ws.send_text(json.dumps({"subscribe": "after"}))
+        frames = [frame_within(ws)]
+        while not _pane("after")(frames[-1]):
+            frames.append(frame_within(ws))
+    assert [frame["type"] for frame in frames if frame["type"] == "board"] == []
+
+
+def test_a_board_switch_while_a_board_is_read_never_sends_the_old_projects_board(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """The board's twin of the next test, which only the fleet had: a tick reading the
+    current project's board when ``{"subscribe_board": "prj_b"}`` landed would let that
+    board out as prj_b's once the read was back. The tick sends a board only for the
+    project still asked for, as it sends a fleet."""
+    reading, release = threading.Event(), threading.Event()
+    hold = [False]
+
+    def board(project: str | None) -> object:
+        if project is None and hold[0]:
+            reading.set()
+            release.wait(5)
+        return {"project": project, "sessions": [], "events": []}
+
+    sources = dataclasses.replace(Reads().sources(), board=board)
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
+    assert unlock(client, runtime).status_code == 200
+    is_board = lambda f: f["type"] == "board"  # noqa: E731
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_board": None}))
+        assert _until(ws, is_board)["payload"]["project"] is None
+        hold[0] = True
+        assert reading.wait(5), "a tick is reading the current project's board"
+        ws.send_text(json.dumps({"subscribe_board": "prj_b"}))
+        time.sleep(0.2)  # the reader takes the switch while that read still runs
+        release.set()
+        assert _until(ws, is_board)["payload"]["project"] == "prj_b"
+
+
 def test_a_switch_while_a_snapshot_is_read_never_sends_the_old_projects_frame(
     runtime: Runtime, tmp_path: Path
 ) -> None:
     """The tick read the current project's fleet, the switch landed meanwhile and dropped
     the last frame, and the old project's frame went out as if it were the new one's: the
-    page showed it for a tick, and the test above failed about one run in six."""
+    page showed it for a tick, and ``test_subscribe_board_picks_which_projects_board_frames_arrive``
+    failed about one run in six."""
     reading, release = threading.Event(), threading.Event()
     hold = [False]
 

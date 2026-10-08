@@ -950,6 +950,34 @@ async function boardOnItsTab() {
   return steps;
 }
 
+/* The Board tab with a board frame on it, left for the Fleet tab and opened again, its read
+ * held: what the tab shows meanwhile, the reads it made, and what it shows once answered. */
+async function boardReopened() {
+  const reads = [];
+  const page = bootPage("#/p/" + PROJECT + "/board", signedIn({
+    "GET api/board": () => (reads[reads.length] = deferred()).promise,
+  }));
+  await settle();
+  page.acceptSockets();
+  page.live().frame("board", { project: { id: PROJECT }, sessions: [], events: [note(1, "from before")] });
+  await settle();
+  reads[0].settle({ status: 200, json: { project: { id: PROJECT }, sessions: [], events: [note(1, "from before")] } });
+  await settle();
+  const shown = () => page.main().querySelectorAll("div.events")[0].childNodes.map((one) => {
+    const text = find(one, (node) => node.className === "text");
+    return text ? text.textContent : one.textContent;
+  });
+  const first = shown();
+  page.run("pageGo('#/p/" + PROJECT + "/fleet')");
+  await settle();
+  page.run("pageGo('#/p/" + PROJECT + "/board')");
+  await settle();
+  const reopened = { shown: shown(), reads: reads.length };
+  reads[reads.length - 1].settle({ status: 200, json: { project: { id: PROJECT }, sessions: [], events: [note(1, "from before"), note(2, "since")] } });
+  await settle();
+  return { first, reopened, answered: shown() };
+}
+
 /* A transcript read on a phone in UTC-7 from a machine that sends each turn's time as UTC:
  * the lines it draws. */
 async function transcriptTimes() {
@@ -1911,6 +1939,7 @@ async function main() {
     liveScroll: await liveScroll(),
     padScroll: await padScroll(),
     boardOnItsTab: await boardOnItsTab(),
+    boardReopened: await boardReopened(),
     transcriptTimes: await transcriptTimes(),
     readsAfterFrames: await readsAfterFrames(),
     backLeaves: await backLeaves(),

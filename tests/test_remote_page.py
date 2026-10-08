@@ -1289,6 +1289,19 @@ def test_the_page_asks_for_a_board_only_while_its_board_tab_shows(
     assert steps["sockets"] == 2 and steps["woken"] == ["prj_x"], "a new socket asks again"
 
 
+def test_a_board_tab_opened_again_reads_its_board_anew_and_never_shows_the_last_one(
+    boot_report: dict[str, Any],
+) -> None:
+    """No board frame comes while the tab is not asked for, so a board the page kept from its
+    last visit is as old as that visit: drawn again, it showed the board as it was then as
+    if it were now, notes posted since missing until a frame came, and the tab made no read.
+    It says Loading… until its read answers."""
+    board = boot_report["boardReopened"]
+    assert board["first"] == ["from before"]
+    assert board["reopened"] == {"shown": ["Loading…"], "reads": 2}
+    assert board["answered"] == ["since", "from before"]
+
+
 def test_a_transcript_tells_each_turns_time_by_the_phones_own_clock(
     boot_report: dict[str, Any],
 ) -> None:

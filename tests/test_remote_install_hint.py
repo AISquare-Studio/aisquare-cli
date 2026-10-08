@@ -331,7 +331,8 @@ def test_a_virtualenv_gets_the_extra_from_its_own_interpreter(
         (
             "",
             r"C:\Users\Jo Doe\.venv\Scripts\python.exe",
-            r'"C:\Users\Jo Doe\.venv\Scripts\python.exe" -m pip install "aisquare-cli[remote]"',
+            r'& "C:\Users\Jo Doe\.venv\Scripts\python.exe" -m pip install "aisquare-cli[remote]"'
+            " (in cmd.exe, without the &)",
         ),
         (
             "uv = 0.12.19\n",
@@ -346,7 +347,9 @@ def test_on_windows_a_virtualenv_is_told_a_command_its_shells_can_run(
 ) -> None:
     """``shlex.quote`` single-quoted every Windows path, for its ``\\``: PowerShell cannot run
     a quoted string as a command, and cmd.exe has no single quotes at all (nor for the
-    extra, which reached pip quotes and all)."""
+    extra, which reached pip quotes and all). A path that must be quoted, double quotes and
+    all, is a command only after PowerShell's ``&``, which cmd.exe refuses: the hint is
+    PowerShell's, saying what cmd.exe drops (verification of the sweep's second fix)."""
     (tmp_path / "pyvenv.cfg").write_text(f"home = C:\\Python313\n{made_by}")
     _installed(monkeypatch, tmp_path, platform="win32", executable=executable)
     assert remote_server.remote_install_hint() == command

@@ -4286,7 +4286,10 @@ def remote_install_hint() -> str:
     missing injected, which keeps what was injected before. A virtualenv, or any
     other Python, gets the extra from its own interpreter: ``uv pip`` when uv made
     it, since it has no pip, else ``-m pip``. Each word is quoted for the shells of
-    this platform (:func:`_remote_shell_word`).
+    this platform (:func:`_remote_shell_word`). An interpreter whose Windows path needs
+    quotes cannot come first as it is in both of that platform's shells: PowerShell reads
+    a quoted first word as a string, not a program, and needs ``&`` before it, which
+    cmd.exe refuses. That command is PowerShell's, saying what cmd.exe drops.
     """
     import importlib.util
     import sys
@@ -4303,6 +4306,8 @@ def remote_install_hint() -> str:
     extra = _remote_shell_word(f"{DISTRIBUTION}[remote]")
     if _remote_made_by_uv(prefix):
         return f"uv pip install --python {python} {extra}"
+    if sys.platform == "win32" and python.startswith('"'):
+        return f"& {python} -m pip install {extra} (in cmd.exe, without the &)"
     return f"{python} -m pip install {extra}"
 
 

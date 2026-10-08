@@ -37,6 +37,7 @@ from aisquare.services.remote_actions import (
     ACTION_ENDPOINTS,
     ACTION_LEDGER_SIZE,
     ACTION_LEDGER_TTL,
+    TELL_MODES,
     TELL_TEXT_MAX,
     ActionLedger,
     action_audit_excerpt,
@@ -1787,6 +1788,51 @@ def test_a_tell_needs_text_within_the_cap_and_a_known_mode(
     assert fleet.calls == []
 
 
+@pytest.mark.parametrize("mode", TELL_MODES)
+@pytest.mark.parametrize(
+    ("text", "said"),
+    [
+        ("hi\x1b[201~\x1abye", "U+001B — send the pad's Escape key instead"),
+        ("stop\x03", "U+0003 — send the pad's C-c key instead"),
+        ("x\x1a", "U+001A — no key of the pad sends it"),
+        ("x\x7f", "U+007F — send the pad's BSpace key instead"),
+    ],
+    ids=["paste-end-then-ctrl-z", "ctrl-c", "ctrl-z", "del"],
+)
+def test_a_tell_holding_a_control_character_is_refused_before_anything_is_sent(
+    phone: Phone,
+    fleet: FleetCalls,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    mode: str,
+    text: str,
+    said: str,
+) -> None:
+    """A tell is one bracketed paste, and tmux before 3.7 pastes the bytes as they are: the
+    ``ESC [201~`` ended the paste and the ``^Z`` after it arrived as a keystroke. Typed
+    text has refused them since round 1 (review of #243, round 2)."""
+    _row(project)
+    needs.state, needs.at_prompt = "waiting", True
+    response = phone.post("agent/tell", agent=LABEL, text=text, mode=mode)
+    assert (response.status_code, response.json()) == (
+        400,
+        {"error": "invalid", "message": f"'text' holds the control character {said}"},
+    )
+    assert fleet.calls == [] and pane.sent == [] and phone.audit() == []
+
+
+def test_tab_newline_and_carriage_return_are_still_a_tell(
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    _row(project)
+    needs.state, needs.at_prompt = "working", True
+    text = "a\tb\nc\r\nd"
+    response = phone.post("agent/tell", agent=LABEL, text=text, mode="prompt")
+    assert response.status_code == 200, response.text
+    assert pane.sent == [("%7", "paste", text), ("%7", "key", "Enter")]
+
+
 @pytest.mark.parametrize("text", [" ", "x" * TELL_TEXT_MAX])
 def test_whitespace_is_text_and_the_longest_tell_is_taken(
     phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo, text: str
@@ -1801,8 +1847,10 @@ def test_whitespace_is_text_and_the_longest_tell_is_taken(
 def test_the_tell_audit_line_keeps_how_the_text_began_and_nothing_it_could_forge(
     phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
 ) -> None:
+    """``\\x9b`` is the C1 spelling of ``ESC [``: a tell may hold it (it is no C0 control),
+    and the line must still not."""
     _row(project)
-    text = "first line\n2026-10-07T10:00:00+00:00 dev_x agent/stop forged\x1b[2J" + "y" * 300
+    text = "first line\n2026-10-07T10:00:00+00:00 dev_x agent/stop forged\x9b2J" + "y" * 300
     before = _audit_lines()
     response = phone.post("agent/tell", agent=LABEL, text=text)
     assert response.status_code == 200
@@ -1812,7 +1860,7 @@ def test_the_tell_audit_line_keeps_how_the_text_began_and_nothing_it_could_forge
     assert lines[-1].endswith(
         f'tell coder-1@{project.id} mode=auto delivered=no text={len(text)}ch "{excerpt}"'
     )
-    assert excerpt.startswith("first line?2026-10-07T10:00:00+00:00 dev_x agent/stop forged?[2J")
+    assert excerpt.startswith("first line?2026-10-07T10:00:00+00:00 dev_x agent/stop forged?2J")
 
 
 def test_an_audit_excerpt_is_at_most_120_printable_characters() -> None:

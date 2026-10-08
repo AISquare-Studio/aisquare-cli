@@ -291,13 +291,23 @@ def action_pinned(body: dict[str, Any]) -> tuple[str, str]:
 
 
 def action_tell_text(body: dict[str, Any]) -> str:
-    """The tell's ``text``, kept literally: whitespace is content. Empty is a 400, and
-    longer than :data:`TELL_TEXT_MAX` a 413."""
+    """The tell's ``text``, kept literally: whitespace is content. Empty is a 400, longer
+    than :data:`TELL_TEXT_MAX` a 413, and a control character other than tab, newline and
+    carriage return a 400 (``remote_server.check_remote_text``), as in typed text.
+
+    A tell goes into the pane as one bracketed paste, and tmux before 3.7 pastes the
+    buffer's bytes as they are: an ``ESC [201~`` in the text ended the paste early, and
+    what followed it arrived as keystrokes, a Ctrl-C past the double-press guard or the
+    Ctrl-Z no key may send. tmux 3.7 escapes them, so the agent got a mangled message
+    and the page no sign of it. Mode ``auto`` may file it as a board note instead, and
+    it is refused all the same: one rule for every tell.
+    """
     text = body.get("text")
     if not isinstance(text, str) or not text:
         raise RequestError(400, "invalid", "'text' is required: what to tell the agent")
     if len(text) > TELL_TEXT_MAX:
         raise RequestError(413, "too_large", f"'text' is over {TELL_TEXT_MAX} characters")
+    remote_server.check_remote_text(text)
     return text
 
 

@@ -354,6 +354,8 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   `--inspect=false`; start yours with it too.
 - **Keys**: the pad sends key names from a fixed list (no `;`, nothing that
   tmux reads as a command); typed text travels as literal text, never as keys.
+  Neither typed text nor a tell may hold a control character other than a tab
+  or a line break: the pad sends Esc, Ctrl-C and its other control keys by name.
 - **Caps**: 64 KiB per request, 2 048 characters per keystroke message, 8 000
   per note or tell, 4 live connections per device.
 

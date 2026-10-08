@@ -2629,32 +2629,43 @@ def _as_json(value: object) -> object:
 
 
 class _RateLimiter:
-    """``UNLOCK_LIMIT`` attempts per ``UNLOCK_WINDOW_SECONDS`` per client, then 429.
+    """At most ``limit`` calls per ``window`` seconds per key, then a wait: the one sliding
+    window every throttle of the server counts with, one instance per rule.
 
-    The client is uvicorn's resolved peer (:func:`_client_of`), never a header the
-    sender writes. A client whose window has emptied is forgotten on the next
-    attempt by anyone, so the table holds the addresses of the last minute and no
-    more: keyed on a header, a fresh invented address per request grew it forever.
+    Unlock attempts per client (:data:`UNLOCK_LIMIT` per :data:`UNLOCK_WINDOW_SECONDS`),
+    the client being uvicorn's resolved peer (:func:`_client_of`), never a header the
+    sender writes; and the push routes' calls per device (``remote_push.push_routes``),
+    which kept a copy of this that a fix to one would have missed (review of #243,
+    round 4). A key whose window has emptied is forgotten on the next call by anyone,
+    so the table holds the keys of the last window and no more: keyed on a header, a
+    fresh invented address per request grew it forever. Called on the event loop alone,
+    with no ``await`` between a route's check and its count, so it takes no lock.
     """
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._attempts: dict[str, deque[float]] = {}
 
-    def limiter_retry_after(self, client: str) -> float | None:
-        """Count an attempt by ``client``: ``None`` when it may go ahead, else the seconds
-        until it may (and nothing is counted)."""
+    def limiter_retry_after(self, key: str, limit: int, window: float) -> float | None:
+        """Count a call by ``key``: ``None`` when it may go ahead, else the seconds until
+        it may (and nothing is counted)."""
         now = self._clock()
-        for known, window in list(self._attempts.items()):
-            while window and now - window[0] >= UNLOCK_WINDOW_SECONDS:
-                window.popleft()
-            if not window:
+        for known, held in list(self._attempts.items()):
+            while held and now - held[0] >= window:
+                held.popleft()
+            if not held:
                 del self._attempts[known]
-        window = self._attempts.setdefault(client, deque())
-        if len(window) >= UNLOCK_LIMIT:
-            return UNLOCK_WINDOW_SECONDS - (now - window[0])
-        window.append(now)
+        held = self._attempts.setdefault(key, deque())
+        if len(held) >= limit:
+            return window - (now - held[0])
+        held.append(now)
         return None
+
+    def limiter_wait_seconds(self, key: str, limit: int, window: float) -> int | None:
+        """:meth:`limiter_retry_after` as a ``Retry-After`` says it: whole seconds, rounded up,
+        never 0."""
+        retry = self.limiter_retry_after(key, limit, window)
+        return None if retry is None else max(1, math.ceil(retry))
 
 
 @dataclass(frozen=True, eq=False)
@@ -3783,13 +3794,15 @@ def build_remote_app(
         never does). A right one reactivates the known device under its old id, or
         makes a new one. Everything after the body is :func:`unlock_decision`'s.
         """
-        retry = limiter.limiter_retry_after(_client_of(request.scope))
+        retry = limiter.limiter_wait_seconds(
+            _client_of(request.scope), UNLOCK_LIMIT, UNLOCK_WINDOW_SECONDS
+        )
         if retry is not None:
             return kit.kit_refuse(
                 429,
                 "too_many_attempts",
                 f"{UNLOCK_LIMIT} attempts a minute — wait",
-                headers={"Retry-After": str(max(1, math.ceil(retry)))},
+                headers={"Retry-After": str(retry)},
             )
         try:
             body = await kit.kit_json_object(request)

@@ -58,7 +58,6 @@ import re
 import struct
 import threading
 import time
-from collections import deque
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -1345,35 +1344,6 @@ def start_push_sender(kit: RemoteKit) -> Callable[[], None] | None:
 # --- the routes (SPEC §5.8) -------------------------------------------------------------------
 
 
-class _PushPace:
-    """Per device, its recent calls of one route: at most ``calls`` within ``seconds``.
-
-    Read and written on the event loop only, with no ``await`` between a route's
-    check and its count, so it takes no lock. A device whose calls have all aged
-    out is forgotten at the next call of anyone's: the table holds the devices of
-    the last window, never every device the server has seen.
-    """
-
-    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
-        self._clock = clock
-        self._calls: dict[str, deque[float]] = {}
-
-    def push_pace_wait(self, device_id: str, calls: int, seconds: float) -> int | None:
-        """Count one call by ``device_id``: ``None`` when it may go ahead, else the whole
-        seconds until it may (and nothing is counted)."""
-        now = self._clock()
-        for known, held in list(self._calls.items()):
-            while held and now - held[0] >= seconds:
-                held.popleft()
-            if not held:
-                del self._calls[known]
-        held = self._calls.setdefault(device_id, deque())
-        if len(held) >= calls:
-            return math.ceil(seconds - (now - held[0]))
-        held.append(now)
-        return None
-
-
 def push_routes(kit: RemoteKit) -> list[BaseRoute]:
     """``GET api/push``, ``POST api/push/subscribe``, ``DELETE api/push/subscription`` and
     ``POST api/push/test``.
@@ -1393,9 +1363,13 @@ def push_routes(kit: RemoteKit) -> list[BaseRoute]:
 
     from starlette.responses import JSONResponse
 
-    tested = _PushPace()
+    from aisquare.services import remote_server
+
+    # The server's one sliding window, keyed by device id: a copy of it here was one place
+    # too many to fix (review of #243, round 4).
+    tested = remote_server._RateLimiter()
     """Per device id, its test pushes (:data:`PUSH_TEST_INTERVAL_SECONDS`)."""
-    changed = _PushPace()
+    changed = remote_server._RateLimiter()
     """Per device id, its subscribes and unsubscribes together (:data:`PUSH_SUBSCRIPTION_CALLS`)."""
 
     def push_unavailable(problem: str) -> RequestError:
@@ -1408,7 +1382,7 @@ def push_routes(kit: RemoteKit) -> list[BaseRoute]:
 
     def push_subscription_paced(device: Device) -> Response | None:
         """The 429 for a device past :data:`PUSH_SUBSCRIPTION_CALLS`; ``None`` counts the call."""
-        wait = changed.push_pace_wait(
+        wait = changed.limiter_wait_seconds(
             device.id, PUSH_SUBSCRIPTION_CALLS, PUSH_SUBSCRIPTION_WINDOW_SECONDS
         )
         if wait is None:
@@ -1499,7 +1473,7 @@ def push_routes(kit: RemoteKit) -> list[BaseRoute]:
                 "not_subscribed",
                 "this device has no push subscription — turn notifications on",
             )
-        wait = tested.push_pace_wait(device.id, 1, PUSH_TEST_INTERVAL_SECONDS)
+        wait = tested.limiter_wait_seconds(device.id, 1, PUSH_TEST_INTERVAL_SECONDS)
         if wait is not None:
             rule = f"one test push every {PUSH_TEST_INTERVAL_SECONDS:.0f} s"
             return push_too_often("push_test_throttled", rule, wait)

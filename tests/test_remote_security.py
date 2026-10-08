@@ -51,6 +51,8 @@ from aisquare.services.remote_server import (
     SEND_KEYS_KEYS_MAX,
     SEND_KEYS_TEXT_MAX,
     UNLOCK_GLOBAL_FAILURES,
+    UNLOCK_LIMIT,
+    UNLOCK_WINDOW_SECONDS,
     WS_CLOSE_REMOTE_OFF,
     WS_CLOSE_UNAUTHORIZED,
     RequestError,
@@ -394,10 +396,11 @@ def test_the_limiter_forgets_a_client_whose_minute_is_over() -> None:
     """Keyed on invented addresses, the table grew by one entry per request, forever."""
     now = [0.0]
     limiter = _RateLimiter(lambda: now[0])
+    rule = (UNLOCK_LIMIT, UNLOCK_WINDOW_SECONDS)
     for n in range(500):
-        assert limiter.limiter_retry_after(f"198.51.{n // 250}.{n % 250}") is None
+        assert limiter.limiter_retry_after(f"198.51.{n // 250}.{n % 250}", *rule) is None
     now[0] += 61
-    assert limiter.limiter_retry_after("203.0.113.5") is None
+    assert limiter.limiter_retry_after("203.0.113.5", *rule) is None
     assert list(limiter._attempts) == ["203.0.113.5"]
 
 

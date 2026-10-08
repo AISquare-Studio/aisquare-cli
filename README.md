@@ -8,7 +8,7 @@
 **One terminal over your projects and your coding agents: task a manager in
 plain words, and it runs the coders, testers and reviewers for you.**
 
-![The first run in asq: add a project, then start its manager](https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/docs/demo.gif)
+![The Welcome walkthrough in asq: from an empty home to a project, Claude Code connected, then a manager and two coders (the agent is a stand-in)](https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/docs/demo.gif)
 
 Type `asq` and you get a full-screen, mouse-driven view: your projects on the
 left, and on the right a **manager** agent you task in prose — it plans, spawns

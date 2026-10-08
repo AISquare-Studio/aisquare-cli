@@ -1,6 +1,6 @@
 {
   "name": "aisquare",
-  "version": "0.7.0",
+  "version": "0.9.0",
   "description": "Portable memory for Claude Code: aisquare's lifecycle hooks, run by the aisquare CLI, or by uvx when the CLI is not installed.",
   "author": {
     "name": "AISquare",

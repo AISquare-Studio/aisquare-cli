@@ -6,6 +6,83 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-09
+
+**A first run you can follow, from an empty home to a manager and two coders,
+and an aisquare that upgrades and uninstalls itself.**
+- `asq` opens on Welcome: a project, Claude Code connected, then a manager and
+  two coders, all from the keyboard.
+- `aisquare upgrade` and `aisquare uninstall`, also as Update and Uninstall in
+  asq's Doctor.
+- A Claude Code plugin gives aisquare's memory hooks with no installer:
+  `/plugin install aisquare@aisquare-cli`.
+- `aisquare doctor` has a row for each coding agent, and with no Node the
+  codebase snapshot reads "off (optional)" instead of three warnings.
+- The README is a one-page front page, on GitHub and on PyPI, with a GIF of
+  the Welcome walkthrough; its long form moved into `docs/`.
+
+0.8.0 was not released: this release follows 0.7.0.
+
+**Upgrading:**
+- From 0.7.0 or earlier, re-run the one-line installer, or run
+  `uv tool install --force --python 3.13 --with tiktoken aisquare-cli@latest`.
+  Not `uv tool upgrade`: on a pinned install it silently does nothing. From
+  0.9.0 on, `aisquare upgrade` does it for you.
+- The store stays at schema v24; nothing migrates.
+- `aisquare agents connect codex` and `… cursor` now exit 1 with "can't connect
+  … yet", instead of reporting a connection that installed nothing.
+
+### Added
+- `asq` opens on **Welcome**, the guided first run: use the folder you are in
+  or choose another, connect Claude Code (Welcome names the install command if
+  it is missing and offers the sign-in if it is signed out), then start a
+  manager and two coders, each a real Claude Code session (#248).
+- **The Claude Code plugin route**: in Claude Code, run
+  `/plugin marketplace add AISquare-Studio/aisquare-cli`, then
+  `/plugin install aisquare@aisquare-cli`. Its six hooks run the installed
+  CLI, or `uvx` when there is none, and stand down where `settings.json`
+  already has aisquare's hooks, so nothing runs twice. See
+  `docs/claude-code-plugin.md` (#249).
+- **`aisquare upgrade`** reinstalls the one-liner's uv tool install in place,
+  keeps its extras and rewrites the hooks without re-importing `CLAUDE.md`;
+  `--check` says whether PyPI has a newer release, and any other install is
+  shown the command that updates it (#251).
+- **`aisquare uninstall`** takes aisquare's hooks out of every Claude Code
+  directory, then removes the package. It keeps `~/.aisquare` (your memory and
+  boards) unless you add `--purge`, shows its plan and asks first, and
+  `--dry-run` removes nothing (#253).
+- **Update and Uninstall in asq's Doctor** hand the terminal to
+  `aisquare upgrade` and `aisquare uninstall`, which show their plan and ask;
+  after an update, asq reopens on the version just installed (#254).
+- **A doctor row for each coding agent.** Claude Code keeps its one-click
+  Connect, Codex and Cursor say what was found and that aisquare cannot
+  connect them yet, and "is Claude Code connected?" is one shared check that
+  doctor, `agents list`/`status`, the Accounts page and Welcome all read
+  (#247).
+
+### Changed
+- The README is a front page under 250 lines whose every link is absolute, so
+  it renders on PyPI too; its long form moved verbatim into `docs/` (#245).
+- One identity sentence, the same in the README, on PyPI and in `--help`, held
+  together by a test; Quickstart 2 walks through Welcome (#255).
+- With no Node, the `repomix`, `snapshot` and `tiktoken` doctor rows, `init`
+  and `project onboard` say snapshots are "off (optional)", and the Pack
+  button that could never turn green is gone; the installer still exits 2
+  when its own Node install failed (#244).
+- PyPI lists aisquare as Beta, `SECURITY.md` says only what the code does,
+  issue templates send questions to Discussions, and CONTRIBUTING has a
+  "Where to start" (#246).
+- The README's GIF is rendered from `docs/demo.tape` (`docs/demo/render.sh`),
+  and a walkthrough that no longer matches the UI fails the render (#250).
+- The demo GIF is the Welcome walkthrough, from an empty home to a manager and
+  two coders, with a stand-in agent (#256).
+
+### Fixed
+- The Accounts page could say `usage: …` for up to a minute after it opened;
+  it now reads usage on its first frame. CI: the frequent Windows-leg flakes
+  are gone, CI also runs nightly and on demand, and ruff and mypy are pinned
+  (#252).
+
 ## [0.7.0] - 2026-09-25
 
 **Accounts, project groups and destinations, and a fleet that survives
@@ -2939,7 +3016,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.7.0...v0.9.0
 [0.7.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc2...v0.5.0

@@ -52,6 +52,14 @@ PORT_ENV = "AISQUARE_REMOTE_PORT"
 """``serve --port``'s variable, read by ``status`` and ``regenerate-password`` for the link
 they print: the panel serves on it too, so one export moves all of them. The panel always
 served on 8750, and with the variable exported ``status`` printed a port it was not on."""
+TURNING_OFF = "turning Remote off…"
+"""The status line while the server and ngrok stop on their own thread (:meth:`turn_off`)."""
+STILL_TURNING_OFF = "Remote is still turning off — switch it on again in a moment"
+OFF_WAIT_SECONDS = 1.0
+"""How long :meth:`RemoteController.turn_on` waits for a Remote still turning off: its server
+must be down, its tunnel gone and ``remote.json`` cleared before another starts, or the old
+Remote's last steps would undo the new one's. Past that, the switch says to try again rather
+than hold Textual's thread for the rest of a slow stop."""
 
 TunnelFactory = Callable[[int], NgrokTunnel]
 
@@ -159,6 +167,8 @@ class RemoteController:
         seen to read the file again: till then the running server may hold a deadline
         ``remote.json`` does not (:meth:`adopt_server_deadline`)."""
         self._waiter: threading.Thread | None = None
+        self._stopper: threading.Thread | None = None
+        """The thread that stops the server and ngrok after :meth:`turn_off`, the latest one."""
 
     # --- on / off -----------------------------------------------------------------------
 
@@ -166,7 +176,7 @@ class RemoteController:
     def running(self) -> bool:
         return self.info is not None
 
-    def turn_on(self) -> None:
+    def turn_on(self, *, wait: bool = True) -> None:
         """Start the server, then the tunnel; the public URL arrives on a background thread.
 
         Remote stays on only when ``remote.json`` took its auto-off deadline. A file that
@@ -174,9 +184,17 @@ class RemoteController:
         and the ``PermissionError`` raised out of ``restore()`` in ``FleetApp.on_mount``
         ended the fleet UI at start with uvicorn still serving in its thread. The server
         is stopped again instead, which leaves Remote as any start that fails does: off,
-        the saved switch as it was, and the status line saying why.
+        the saved switch as it was, and the status line saying why. ``wait`` is
+        :meth:`turn_off`'s, for that stop.
+
+        A Remote still turning off is waited for, a moment at most (:data:`OFF_WAIT_SECONDS`):
+        its last steps clear the deadline and the public origin in the running process,
+        and would clear this Remote's.
         """
         if self.running:
+            return
+        if not self.wait_until_off(OFF_WAIT_SECONDS):
+            self.message = STILL_TURNING_OFF
             return
         self.public_url = None
         if self._port_problem is not None:  # a sentence, never Remote on another port
@@ -194,8 +212,14 @@ class RemoteController:
         try:
             self._arm_auto_off()
         except Exception as exc:  # remote.json will not write: no Remote without its deadline
-            self.turn_off(persist=False)  # never raises, and keeps the saved switch
-            self.message = f"Remote could not start — remote.json could not be written: {exc}"
+            # Never raises, and keeps the saved switch. The stopping's own failures are this
+            # one again (the deadline cleared in the same file), so the sentence stands alone.
+            self.turn_off(
+                persist=False,
+                wait=wait,
+                status=f"Remote could not start — remote.json could not be written: {exc}",
+                report=False,
+            )
             return
         self.message = None
         self._set_state(remote_enabled=True)
@@ -225,7 +249,15 @@ class RemoteController:
         else:
             self.message = tunnel.error or "ngrok did not announce a tunnel in time"
 
-    def turn_off(self, *, persist: bool = True, reason: str = "remote off") -> None:
+    def turn_off(
+        self,
+        *,
+        persist: bool = True,
+        reason: str = "remote off",
+        wait: bool = True,
+        status: str | None = None,
+        report: bool = True,
+    ) -> None:
         """Stop the server and the tunnel. ``persist=False`` keeps the saved switch (app exit).
 
         Turning Remote off (the switch, auto-off) revokes every device after the
@@ -235,16 +267,60 @@ class RemoteController:
         revokes nothing: ``restore()`` brings Remote back at the next start, and
         the devices' own expiry bounds them meanwhile.
 
+        The controller reads off at once, and the stopping runs on a thread of its
+        own (``remote-off``); ``wait=False`` returns without waiting for it, which is
+        how the fleet UI turns Remote off (the switch, auto-off and quit). Stopping
+        waits for uvicorn, whose shutdown waits for a needs scan in flight and the
+        push sender, then for ``remote.json``'s lock and for ngrok to exit, and on
+        Textual's thread that froze the fleet UI for seconds (r3 review of #243). The
+        status line says :data:`TURNING_OFF` meanwhile, or ``status`` when given;
+        once the thread is done it says ``status``, then what stopping could not do,
+        if anything and ``report`` says to. :meth:`turn_on` waits for the thread, and
+        so does :meth:`wait_until_off`.
+
         Nothing the server raises keeps Remote on. Each step runs whatever the one
         before it raised, the first failure is the status line's sentence, and
         ngrok stops and the controller reads off in any case: auto-off calls this
         from a Textual timer, where an exception ends the whole fleet UI, and a
         ``remote.json`` that would not write once left ngrok up and the switch on.
         """
-        tunnel, self.tunnel = self.tunnel, None
+        served, tunnel = self.info is not None, self.tunnel
+        self.info = None
+        self.tunnel = None
+        self.public_url = None
+        self.auto_off_at = None
+        if persist:
+            self._set_state(remote_enabled=False)
+        if not served and tunnel is None:
+            self.message = status
+            return
+        self.message = status or TURNING_OFF
+        stopper = threading.Thread(
+            target=self._stop_remote,
+            args=(served, tunnel, persist, reason, status, report),
+            name="remote-off",
+            # Not a daemon: the interpreter waits for it at exit, so no ngrok outlives the
+            # TUI whatever quit did not wait for.
+            daemon=False,
+        )
+        self._stopper = stopper
+        stopper.start()
+        if wait:
+            stopper.join()
+
+    def _stop_remote(
+        self,
+        served: bool,
+        tunnel: NgrokTunnel | None,
+        persist: bool,
+        reason: str,
+        status: str | None,
+        report: bool,
+    ) -> None:
+        """:meth:`turn_off`'s stopping, on its own thread; the status line says how it ended."""
         failure: str | None = None
         try:
-            if self.info is not None:
+            if served:
                 if persist:
                     try:
                         self._server.revoke_every_remote_device(reason)
@@ -261,22 +337,44 @@ class RemoteController:
                     failure = failure or f"Remote is off, but stopping its server failed — {exc}"
         finally:
             if tunnel is not None:
-                tunnel.stop_tunnel()
-            self.info = None
-            self.public_url = None
-            self.auto_off_at = None
-            self.message = failure
-            if persist:
-                self._set_state(remote_enabled=False)
+                try:
+                    tunnel.stop_tunnel()
+                except Exception as exc:  # a thread of its own: nobody else would hear of it
+                    failure = failure or f"Remote is off, but ngrok did not stop cleanly — {exc}"
+            if status is None:
+                self.message = failure
+            elif failure is None or not report:
+                self.message = status
+            else:
+                # What turning off could not do still shows: a revoke that failed leaves
+                # phones holding cookies the next Remote accepts.
+                self.message = f"{status}. {failure}"
 
-    def restore(self) -> None:
+    def wait_until_off(self, timeout: float | None = None) -> bool:
+        """Wait for the server and ngrok of a Remote turned off to stop; whether they had.
+
+        ``timeout`` bounds the wait, ``None`` waits as long as stopping takes (each of its
+        steps is bounded). ``run_ui`` waits here once the terminal is back, so the
+        process never ends before its ngrok.
+        """
+        stopper = self._stopper
+        if stopper is None or not stopper.is_alive():
+            return True
+        stopper.join(timeout)
+        return not stopper.is_alive()
+
+    def restore(self, *, wait: bool = True) -> None:
         """At TUI start: a Remote that was on when the TUI last exited comes back on."""
         if self.state.remote_enabled and not self.running:
-            self.turn_on()
+            self.turn_on(wait=wait)
 
-    def shutdown_for_exit(self) -> None:
-        """At TUI exit: end the processes, keep the saved switches for ``restore``."""
-        self.turn_off(persist=False)
+    def shutdown_for_exit(self, *, wait: bool = True) -> None:
+        """At TUI exit: end the processes, keep the saved switches for ``restore``.
+
+        ``wait=False`` leaves them stopping on their own thread (:meth:`turn_off`);
+        :meth:`wait_until_off` is then where the exit waits for them.
+        """
+        self.turn_off(persist=False, wait=wait)
 
     # --- the controls ---------------------------------------------------------------------
 
@@ -444,15 +542,19 @@ class RemoteController:
                 self.auto_off_at = served
         return self.auto_off_at
 
-    def enforce_auto_off(self) -> bool:
-        """Turn Remote off when its timer has run out; ``True`` when it just did."""
+    def enforce_auto_off(self, *, wait: bool = True) -> bool:
+        """Turn Remote off when its timer has run out; ``True`` when it just did.
+
+        ``wait`` is :meth:`turn_off`'s: the app's 30 s timer passes ``False``, so the
+        fleet UI never waits for the stopping.
+        """
         deadline = self.adopt_server_deadline()
         if self.running and deadline is not None and _aware(self._now()) >= deadline:
-            self.turn_off(reason="auto-off")
-            ran_out = "Remote turned off — the auto-off timer ran out"
-            # What turning off could not do still shows: a revoke that failed leaves phones
-            # holding cookies the next Remote accepts.
-            self.message = ran_out if self.message is None else f"{ran_out}. {self.message}"
+            self.turn_off(
+                reason="auto-off",
+                wait=wait,
+                status="Remote turned off — the auto-off timer ran out",
+            )
             return True
         return False
 

@@ -414,8 +414,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.set_interval(self.refresh_seconds, self.refresh_data)
         self.run_doctor()
         self._restore_selection()
-        self.remote.restore()
-        self.set_interval(30.0, self.remote.enforce_auto_off)
+        # wait=False here and below: a Remote that stops runs down on a thread of its own,
+        # since stopping uvicorn and ngrok froze the fleet UI for seconds (r3 review of #243).
+        self.remote.restore(wait=False)
+        self.set_interval(30.0, self._remote_auto_off)
         self.set_interval(30.0, self.remote.revive_tunnel_if_dead)
 
     # --- what was open (#144) ---------------------------------------------------------
@@ -506,6 +508,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def action_remote_panel(self) -> None:
         self.push_screen(RemotePanel(self.remote))
 
+    def _remote_auto_off(self) -> None:
+        """The 30 s auto-off check; a Remote whose timer ran out stops without this thread."""
+        self.remote.enforce_auto_off(wait=False)
+
     def get_system_commands(self, screen: Screen[Any]) -> Iterable[SystemCommand]:
         yield from super().get_system_commands(screen)
         yield SystemCommand(
@@ -524,12 +530,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self._theme_autosave.remember(theme_name)
 
     def on_unmount(self) -> None:
+        # The TUI is leaving: no ngrok may outlive it. The saved switches stay, so a
+        # Remote that was on comes back on at the next start (restore()). It stops on a
+        # thread of its own, started first so the saves below overlap it; run_ui waits
+        # for it once the terminal is back.
+        self.remote.shutdown_for_exit(wait=False)
         # Every saver — the theme's here, the divider's — started first and joined
         # against ONE deadline, so quit waits once, not once per preference.
         self.unsaved = Autosave.flush_all(self)
-        # The TUI is leaving: no ngrok may outlive it. The saved switches stay,
-        # so a Remote that was on comes back on at the next start (restore()).
-        self.remote.shutdown_for_exit()
 
     # --- help / refresh ---------------------------------------------------------------
 
@@ -1121,9 +1129,21 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return store.list_projects()
 
 
+REMOTE_QUIT_QUIET_SECONDS = 0.5
+"""How long ``run_ui`` waits for a Remote still stopping before it says that it is."""
+
+
 def run_ui(**options: Any) -> None:
-    """Run the fleet UI until the user quits; then say what its last saves could not land."""
+    """Run the fleet UI until the user quits; then say what its last saves could not land.
+
+    A Remote that was on stops on a thread of its own at quit (``on_unmount``), so the
+    screen did not freeze while uvicorn and ngrok wound down; the process waits for
+    them here, with the terminal back, and never ends before its ngrok.
+    """
     app = FleetApp(**options)
     app.run()
+    if not app.remote.wait_until_off(REMOTE_QUIT_QUIET_SECONDS):
+        stderr_console().print("stopping Remote (its server and ngrok)…", markup=False)
+        app.remote.wait_until_off()
     for line in app.unsaved:
         stderr_console().print(f"⚠ {line}", markup=False, highlight=False)

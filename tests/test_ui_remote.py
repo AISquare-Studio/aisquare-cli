@@ -14,6 +14,8 @@ import asyncio
 import json
 import shutil
 import socket
+import threading
+import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,6 +25,8 @@ import pytest
 from textual.pilot import Pilot
 from textual.widgets import Button, DataTable, Select, Static, Switch
 
+from aisquare.cli.ui import app as app_mod
+from aisquare.cli.ui import remote_control
 from aisquare.cli.ui.app import FleetApp, HelpScreen
 from aisquare.cli.ui.remote_control import READ_ONLY_REASON, RemoteController
 from aisquare.cli.ui.views import remote as remote_view
@@ -36,7 +40,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_page, remote_server
 from aisquare.services.ngrok_tunnel import INSTALL_HINT, NgrokTunnel, build_public_url
 from aisquare.services.remote_server import UNLOCK_GLOBAL_FAILURES, Runtime, UnlockBudget
-from tests.test_remote_control import FakeTunnel, fake_tunnel_factory
+from tests.test_remote_control import FakeTunnel, SlowServer, fake_tunnel_factory
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -106,7 +110,11 @@ def drive(
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], remote=controller)
         async with app.run_test(size=size, notifications=True) as pilot:
             await pilot.pause()
-            return await fn(pilot)
+            result = await fn(pilot)
+        # Quit leaves a Remote stopping on its own thread; run_ui waits for it, and so must
+        # the next test, whose server would be the one a late stop took down.
+        assert controller.wait_until_off(10), "the Remote did not stop after quit"
+        return result
 
     return asyncio.run(run())
 
@@ -198,6 +206,7 @@ def test_shift_r_opens_the_remote_panel_and_the_switch_turns_remote_on_and_off()
         switch.toggle()
         await pilot.pause()
         assert not app.remote.running
+        assert app.remote.wait_until_off(10)
         assert remote_server.remote_server_status()["running"] is False
         assert shown(modal.query_one("#remote-state", Static)) == "off"
         assert shown(modal.query_one("#remote-qr", Static)) == ""
@@ -687,6 +696,7 @@ def test_a_remote_json_that_will_not_write_leaves_the_ui_up_at_start_and_remote_
         app = pilot.app
         assert isinstance(app, FleetApp)
         assert not app.remote.running
+        assert app.remote.wait_until_off(10), "the server it started stops on its own thread"
         assert remote_server.remote_server_status()["running"] is False
         modal = await open_panel(pilot)
         assert modal.query_one("#remote-on", Switch).value is False
@@ -738,6 +748,8 @@ def test_a_remote_json_that_will_not_write_is_a_sentence_for_each_control_of_the
         modal.query_one("#remote-on", Switch).toggle()  # off still goes off
         await pilot.pause()
         assert not app.remote.running
+        assert app.remote.wait_until_off(10), "the server and ngrok stop on their own thread"
+        modal.repaint()
         assert remote_server.remote_server_status()["running"] is False
         assert "devices could not be revoked" in status()
 
@@ -746,6 +758,7 @@ def test_a_remote_json_that_will_not_write_is_a_sentence_for_each_control_of_the
         assert app.screen is modal and not app.remote.running
         assert modal.query_one("#remote-on", Switch).value is False
         assert status().startswith("Remote could not start — remote.json could not be written")
+        assert app.remote.wait_until_off(10)
         assert remote_server.remote_server_status()["running"] is False
 
     drive(go, tunnel=missing_ngrok)
@@ -775,3 +788,108 @@ def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended() -> Non
         assert app.remote.auto_off_at == extended, "the extension holds in the TUI too"
 
     drive(go, tunnel=missing_ngrok)
+
+
+# --- turning Remote off never waits on Textual's thread (r3 review of #243) ----------------------
+
+
+def drive_controller(
+    fn: Callable[[Pilot[None]], Awaitable[T]], controller: RemoteController
+) -> tuple[T, float]:
+    """``drive`` for a controller the test built; also how long leaving the app took."""
+
+    async def run() -> tuple[T, float]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], remote=controller)
+        async with app.run_test(size=SIZE, notifications=True) as pilot:
+            await pilot.pause()
+            result = await fn(pilot)
+            leaving = time.monotonic()
+        return result, time.monotonic() - leaving
+
+    return asyncio.run(run())
+
+
+def test_the_switch_and_the_auto_off_timer_turn_remote_off_without_freezing_the_ui() -> None:
+    """Stopping uvicorn waits for a needs scan in flight and the push sender, then ngrok is
+    given its seconds to exit: on Textual's thread, the switch and the 30 s auto-off timer
+    froze the fleet UI for all of it. The panel reads off at once, says Remote is turning
+    off, and says what went wrong, if anything, once the stopping is done."""
+    server = SlowServer(patience=10.0)
+    clock = [datetime.now(UTC)]
+    controller = RemoteController(
+        server=server,
+        tunnel_factory=fake_tunnel_factory(url=PUBLIC),
+        url_timeout=2,
+        now=lambda: clock[0],
+    )
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        assert app.remote.running
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        assert server.stopping.is_set() and server.running, "the switch waited for it to stop"
+        assert shown(modal.query_one("#remote-state", Static)) == "off"
+        assert shown(modal.query_one("#remote-status", Static)) == remote_control.TURNING_OFF
+        server.release.set()
+        assert app.remote.wait_until_off(5)
+        modal.repaint()
+        assert shown(modal.query_one("#remote-status", Static)) == ""
+
+        server.stopping.clear()
+        server.release.clear()
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        assert app.remote.running
+        clock[0] += timedelta(minutes=61)
+        app._remote_auto_off()  # the app's 30 s timer
+        assert server.stopping.wait(5) and server.running, "the timer waited for it to stop"
+        assert not app.remote.running
+        server.release.set()
+
+    drive_controller(go, controller)
+    assert controller.wait_until_off(5) and not server.running
+
+
+def test_quitting_leaves_remote_stopping_and_run_ui_waits_for_it_with_the_terminal_back(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Quit stopped Remote in ``on_unmount``, with the screen frozen on its last frame for as
+    long as uvicorn and ngrok took. The app leaves at once and ``run_ui`` waits for them
+    once the terminal is back, saying so when they take a while: no ngrok outlives the TUI."""
+    server = SlowServer(patience=10.0)
+    controller = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url=PUBLIC), url_timeout=2
+    )
+
+    async def go(pilot: Pilot[None]) -> None:
+        controller.turn_on()
+        assert controller.running
+
+    _result, leaving = drive_controller(go, controller)
+    assert leaving < 5.0, f"quitting waited {leaving:.1f} s for Remote to stop"
+    assert server.stopping.wait(5) and controller.wait_until_off(0) is False
+    server.release.set()
+    assert controller.wait_until_off(5) and not server.running
+
+    slow = SlowServer(patience=3.0)
+    leaving_remote = RemoteController(server=slow, tunnel_factory=fake_tunnel_factory(url=PUBLIC))
+    leaving_remote.turn_on()
+
+    class Quit:
+        def __init__(self, **options: object) -> None:
+            self.unsaved: list[str] = []
+            self.remote = leaving_remote
+
+        def run(self) -> None:
+            self.remote.shutdown_for_exit(wait=False)  # what on_unmount does
+            threading.Timer(1.0, slow.release.set).start()
+
+    monkeypatch.setattr(app_mod, "FleetApp", Quit)
+    app_mod.run_ui()
+    assert slow.release.is_set() and not slow.running, "run_ui returned before Remote stopped"
+    assert "stopping Remote (its server and ngrok)…" in capsys.readouterr().err

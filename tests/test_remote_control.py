@@ -15,6 +15,8 @@ import inspect
 import json
 import socket
 import sys
+import threading
+import time
 import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -510,6 +512,89 @@ def test_turning_remote_off_revokes_every_device_before_the_server_stops() -> No
         "note_public_url",
         "stop_remote_server",
     ]
+
+
+class SlowServer(FakeServer):
+    """A server whose stop takes until the test says: uvicorn waiting for a needs scan in
+    flight and the push sender, ngrok given its seconds to exit."""
+
+    def __init__(self, *, patience: float = 10.0) -> None:
+        super().__init__()
+        self.stopping = threading.Event()
+        self.release = threading.Event()
+        self.patience = patience
+
+    def stop_remote_server(self) -> None:
+        self.stopping.set()
+        self.release.wait(self.patience)
+        super().stop_remote_server()
+
+
+def test_turning_remote_off_reads_off_at_once_and_stops_on_a_thread_of_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The switch, auto-off and quit stopped uvicorn and ngrok on Textual's thread, which
+    froze the fleet UI for as long as they took: seconds when a needs scan was in flight
+    (r3 review of #243). The controller reads off at once, the status line says Remote is
+    turning off until the stopping is done, and a Remote turned on meanwhile waits a moment
+    for it and then says to try again, rather than starting one the old stop would undo."""
+    monkeypatch.setattr(remote_control, "OFF_WAIT_SECONDS", 0.2)
+    server = SlowServer()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    controller.turn_on()
+    tunnel = controller.tunnel
+    assert isinstance(tunnel, FakeTunnel)
+    started = time.monotonic()
+    controller.turn_off(wait=False)
+    assert time.monotonic() - started < 1.0, "turning off waited for the server to stop"
+    assert server.stopping.wait(5), "the stopping runs all the same"
+    assert not controller.running and controller.link_url() is None
+    assert controller.message == remote_control.TURNING_OFF
+    assert read_state()["remote_enabled"] is False
+    assert server.running and not tunnel.stopped, "still winding down"
+    assert controller.wait_until_off(0.05) is False
+
+    controller.turn_on()
+    assert not controller.running and server.running
+    assert controller.message == remote_control.STILL_TURNING_OFF
+
+    server.release.set()
+    assert controller.wait_until_off(5)
+    assert not server.running and tunnel.stopped, "ngrok goes last, as ever"
+    assert server.revoked_every == ["remote off"] and server.public_urls[-1] is None
+    assert controller.message is None
+    controller.turn_on()
+    assert controller.running
+
+
+def test_auto_off_stops_on_a_thread_and_says_what_the_stopping_could_not_do() -> None:
+    """The app's 30 s auto-off timer froze the fleet view for as long as the stopping took.
+    The sentence that Remote is off shows at once; what the stopping could not do follows
+    it once that is known."""
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
+    server = SlowServer()
+
+    def unwritable(reason: str) -> None:
+        raise OSError("remote.json: read-only file system")
+
+    server.revoke_every_remote_device = unwritable  # type: ignore[method-assign]
+    controller = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    controller.turn_on()
+    clock[0] += timedelta(minutes=60)
+    started = time.monotonic()
+    assert controller.enforce_auto_off(wait=False) is True
+    assert time.monotonic() - started < 1.0, "auto-off waited for the server to stop"
+    assert not controller.running
+    assert controller.message == "Remote turned off — the auto-off timer ran out"
+    assert server.stopping.wait(5)
+    server.release.set()
+    assert controller.wait_until_off(5) and not server.running
+    assert controller.message == (
+        "Remote turned off — the auto-off timer ran out. Remote is off, but its devices "
+        "could not be revoked — remote.json: read-only file system"
+    )
 
 
 def test_enforce_auto_off_adopts_a_later_deadline_the_phone_set() -> None:

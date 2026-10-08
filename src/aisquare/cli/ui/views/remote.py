@@ -240,10 +240,12 @@ class RemotePanel(ModalScreen[None]):
         if event.switch.id == "remote-on":
             if event.value == self.controller.running:
                 return
+            # Never waiting for a Remote to stop: its server and ngrok take seconds to wind
+            # down, on a thread of their own, and the status line says when they are done.
             if event.value:
-                self.controller.turn_on()
+                self.controller.turn_on(wait=False)
             else:
-                self.controller.turn_off()
+                self.controller.turn_off(wait=False)
         elif event.switch.id == "remote-allow-write":
             if event.value == self.controller.write_actions_allowed():
                 return

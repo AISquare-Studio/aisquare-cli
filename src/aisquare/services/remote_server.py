@@ -18,7 +18,8 @@ bodies in one place (:meth:`RemoteKit.kit_json_object`).
 
 **Reads** are exactly what ``asq --json`` prints: the handlers call the builders
 the typer commands use (``projects_json``, ``agents_json``, ``board_json``, the
-task and entry dumps), so nobody invents a field here. Each takes ``?project=``
+task and entry dumps), so nobody invents a field here; the board carries its newest
+:data:`BOARD_EVENTS` events where the CLI's glance has five. Each takes ``?project=``
 (default: the CURRENT project; an unknown one is a 404 shaped like an unknown
 agent), and each cached snapshot is keyed by it. Remote's own state is
 ``GET api/remote``.
@@ -1892,12 +1893,20 @@ def _agent_state_counts(agents: list[FleetAgentStatus]) -> dict[str, int]:
     return counts
 
 
+BOARD_EVENTS = 200
+"""The newest board events ``api/board`` and the ``board`` frame carry: as many as the page's
+Board tab draws. ``asq board --json`` prints five, a glance in a terminal."""
+
+
 def remote_board_payload(project: str | None = None) -> dict[str, object]:
     """``GET api/board`` and the ``board`` frame — the ONE call into ``board_data``.
 
     The project's root as ``cwd`` is exactly what ``asq board --json`` prints when
     run there, ``AISQUARE_TEAM_HUB`` included (``team_service._project``); ``None``
-    is the current project, as it always was.
+    is the current project, as it always was. With :data:`BOARD_EVENTS` events,
+    not the CLI's five: the Board tab is the board, and with five a question a
+    card sent the human to "reply on the board" to was gone from it once five
+    newer lines were (review of #243, round 3).
 
     #240 fold: pass ``exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS`` here (one line).
     """
@@ -1905,7 +1914,7 @@ def remote_board_payload(project: str | None = None) -> dict[str, object]:
     from aisquare.services import team as team_service
 
     cwd = None if project is None else _resolve_project(project).root
-    return board_json(*team_service.board_data(cwd))
+    return board_json(*team_service.board_data(cwd, events=BOARD_EVENTS))
 
 
 def live_sources() -> Sources:

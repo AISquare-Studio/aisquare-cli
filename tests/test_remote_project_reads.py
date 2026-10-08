@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import threading
 import time
 from datetime import UTC, datetime
@@ -337,6 +338,44 @@ def test_the_board_is_read_from_the_projects_root_as_asq_board_there_would(
     remote_board_payload(other.id)
     remote_board_payload(None)
     assert asked == [other.root, None]
+
+
+def test_the_board_tab_gets_the_newest_events_it_draws_not_the_clis_five(
+    two_projects: tuple[ProjectInfo, ProjectInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``board_data``'s default is ``asq board --json``'s glance, five events, and the Board
+    tab was given no more: a question a card sent the human to "reply on the board" to was
+    gone from it once five newer lines were (review of #243, round 3)."""
+    current, _other = two_projects
+    for n in range(9):
+        team_service.add_note(f"line {n}", cwd=current.root)
+    lines = [text for text in _event_texts(remote_board_payload(None)) if text.startswith("line")]
+    assert sorted(lines) == [f"line {n}" for n in range(9)]
+    printed = _json_of_board()
+    assert len(printed["events"]) == 5, "the CLI's glance is unchanged"
+    board = remote_board_payload(None)
+    assert {key: board[key] for key in ("project", "sessions", "tasks")} == {
+        key: printed[key] for key in ("project", "sessions", "tasks")
+    }
+    monkeypatch.setattr(remote_server, "BOARD_EVENTS", 7)
+    newest = [text for text in _event_texts(remote_board_payload(None)) if text.startswith("line")]
+    assert sorted(newest) == [f"line {n}" for n in range(2, 9)], "the newest, as many as asked"
+
+
+def _json_of_board() -> dict[str, Any]:
+    result = CliRunner().invoke(cli, ["--json", "board"])
+    assert result.exit_code == 0, result.output
+    board: dict[str, Any] = json.loads(result.stdout.strip().splitlines()[-1])
+    return board
+
+
+def test_the_board_carries_as_many_events_as_the_board_tab_draws() -> None:
+    script = (Path(remote_server.__file__).parents[1] / "web" / "remote" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    drawn = re.search(r"for \(const event of events\.slice\(0, (\d+)\)\)", script)
+    assert drawn is not None, "the Board tab draws a slice of the board's events"
+    assert int(drawn.group(1)) == remote_server.BOARD_EVENTS
 
 
 def test_tasks_and_memory_of_another_project_are_that_projects(

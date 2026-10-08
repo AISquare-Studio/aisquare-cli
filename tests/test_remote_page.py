@@ -636,19 +636,22 @@ def test_the_key_pad_fits_a_360_px_phone_and_every_label_its_key() -> None:
 DOCS = Path(__file__).resolve().parents[1] / "docs" / "remote.md"
 
 
-def test_the_pad_has_one_shape_on_every_phone_and_the_docs_describe_it() -> None:
-    """The docs said the pad was one row, ``Esc 1 2 3 ⏎ ↑ ↓ More``. Headless Chromium put
-    More on a full-width line of its own at 360 and 390 px, the eight needing 380 px, in
-    the row past 400 px, and at 320 px ↓ went down with it. More now takes the line under
-    the seven on every phone, one under 360 px has two rows of four, and the docs say so."""
+def test_the_pad_is_one_row_where_eight_keys_fit_and_the_docs_say_where_they_do_not() -> None:
+    """SPEC §6.3 has the pad as one row, ``Esc 1 2 3 ⏎ ↑ ↓ More``, and so did the docs. Eight
+    44 px keys and their gaps need 380 px, more than a 390 px phone's row: there More went
+    to a line of its own, and at 320 px ↓ with it (r2 smoke of #243). More joins the row
+    where the eight fit, as headless Chromium measured at 412 and 430 px, and takes the
+    line under the seven where they do not; under 360 px, where not even seven fit, the
+    eight are two rows of four. The docs say which phone gets which."""
     script, css = _text("app.js"), _text("app.css")
     row = _pad_labels(script, "PAD_ROW")
     (gap,) = _css_px(css, ".pad", "gap")
     (basis,) = _css_px(css, ".pad .key", "flex")
 
-    assert (len(row) + 1) * basis + len(row) * gap > PHONE_ROW_PX, "eight do not fit the row"
-    assert '"ghost key more", "More"' in script
-    assert _css_value(css, ".pad > .more", "flex-basis") == "100%"
+    eight = (len(row) + 1) * basis + len(row) * gap
+    assert 390 - 2 * 12 < eight < 412 - 2 * 12, "More under on a 390 px phone, not on a 412"
+    assert '"ghost key", "More"' in script, "More is a key of the row like the others"
+    assert not re.search(r"\.more\b", css), "and no rule sends it under where the eight fit"
     narrow = re.search(
         r"@media \(max-width: 359px\) \{\s*\.pad > \.key \{ flex-basis: calc\(25% - (\d+)px\); \}",
         css,
@@ -656,11 +659,12 @@ def test_the_pad_has_one_shape_on_every_phone_and_the_docs_describe_it() -> None
     assert narrow is not None, "under 360 px, four to a row"
     assert 4 * int(narrow.group(1)) == 3 * gap, "four keys and their three gaps fill the row"
     assert (320 - 2 * 12 - 3 * gap) / 4 >= KEY_PX
-    described = re.search(r"The key pad is a row of seven keys, `([^`]+)`", DOCS.read_text("utf-8"))
-    assert described is not None and described.group(1).split() == row
     prose = " ".join(DOCS.read_text("utf-8").split())
-    assert "with More under them for the rest" in prose
-    assert "a phone narrower than 360 px takes them as two rows of four, More last" in prose
+    wide = "On a phone wide enough for eight keys (412 px is, 390 px is not) the key pad is"
+    described = re.search(re.escape(wide) + r" one row, `([^`]+)`", prose)
+    assert described is not None and described.group(1).split() == [*row, "More"]
+    assert "with the rest under More. On a narrower phone More takes the line under the" in prose
+    assert "below 360 px the eight are two rows of four, More last" in prose
 
 
 def test_the_status_strip_and_the_bottom_nav_keep_to_one_line_on_a_phone() -> None:

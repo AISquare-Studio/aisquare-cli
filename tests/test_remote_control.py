@@ -487,6 +487,55 @@ def test_the_switches_survive_a_restart_of_the_tui_next_to_the_theme_key() -> No
     assert second.write_actions_allowed() is True
 
 
+def test_a_switch_saves_its_own_key_and_never_the_other_tuis_start_of_day() -> None:
+    """Every save wrote both keys from what this TUI read at its start. Two ``asq ui`` open:
+    A turns Remote off, then B, which read it as on, picks an auto-off, and B's save wrote
+    Remote back on; the next start brought the public tunnel back against the human's last
+    off. Picking Never did it with no timer at all (sweep of #243)."""
+    server = fake_server()
+    first = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    first.turn_on()
+    second = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    assert second.state.remote_enabled is True, "B read Remote as on at its start"
+    first.turn_off()
+    second.set_auto_off(30)
+    second.set_auto_off(None)
+    saved = read_state()
+    assert (saved["remote_enabled"], saved["auto_off_minutes"]) == (False, "never")
+    third = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    third.restore()
+    assert not third.running, "the next start leaves the Remote turned off off"
+
+    first.set_auto_off(120)  # and the other way round: A's pick keeps B's Remote on
+    second.turn_on()
+    first.set_auto_off(30)
+    assert read_state()["remote_enabled"] is True
+    second.turn_off()
+
+
+def test_a_switch_state_json_refuses_is_said_until_a_save_of_it_lands() -> None:
+    """A refused save of a switch was dropped without a word: a refused off brought Remote
+    back at the next start with nothing said, nor anything at quit (sweep of #243)."""
+    server = fake_server()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    paths.ensure_home()
+    paths.state_path().write_text("[]")  # not an object: update_state refuses every key
+    controller.turn_on()
+    assert controller.running
+    line = controller.status_line()
+    assert line.startswith("Remote's on/off switch could not be saved — ")
+    assert f"{paths.state_path()} is not a JSON object" in line
+    controller.set_auto_off(30)
+    assert "the auto-off timer could not be saved — " in controller.status_line()
+    paths.state_path().write_text("{}")
+    controller.set_auto_off(120)
+    assert controller.status_line().startswith("Remote's on/off switch could not be saved")
+    assert "auto-off timer" not in controller.status_line(), "its own save landed"
+    controller.turn_off()
+    assert controller.status_line() == ""
+    assert read_state() == {"auto_off_minutes": 120, "remote_enabled": False}
+
+
 def test_restore_leaves_a_remote_that_was_off_alone() -> None:
     server = fake_server()
     controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))

@@ -48,7 +48,8 @@ explicit pick (persisted as :data:`NEVER`) switches the timer off."""
 DEFAULT_AUTO_OFF = 60
 NEVER = "never"
 """How Never is stored under ``auto_off_minutes`` in ``state.json``."""
-STATE_KEYS = ("remote_enabled", "auto_off_minutes")
+SWITCHES = {"remote_enabled": "Remote's on/off switch", "auto_off_minutes": "the auto-off timer"}
+"""The two switches ``state.json`` keeps, by key, as a sentence names them."""
 PORT_ENV = "AISQUARE_REMOTE_PORT"
 """``serve --port``'s variable, read by ``status`` and ``regenerate-password`` for the link
 they print: the panel serves on it too, so one export moves all of them. The panel always
@@ -119,14 +120,9 @@ def load_remote_state() -> RemoteState:
     )
 
 
-def save_remote_state(state: RemoteState) -> None:
-    """Persist the two switches; a state.json that cannot be written keeps the old ones."""
-    minutes = NEVER if state.auto_off_minutes is None else state.auto_off_minutes
-    try:
-        update_state("remote_enabled", state.remote_enabled)
-        update_state("auto_off_minutes", minutes)
-    except StateUnwritableError:
-        return
+SwitchSaver = Callable[[str, object], None]
+"""Hands one switch's new value to ``state.json``, by key: :func:`update_state`'s shape, which
+raises :class:`StateUnwritableError` when the file refuses it."""
 
 
 class RemoteController:
@@ -182,6 +178,11 @@ class RemoteController:
         and must not land on a Remote turned off, or on a tunnel replaced, meanwhile."""
         self._stopper: threading.Thread | None = None
         """The thread that stops the server and ngrok after :meth:`turn_off`, the latest one."""
+        self.save_switch: SwitchSaver = update_state
+        """How a switch that changed reaches ``state.json``: that one key, at once."""
+        self._refused_switches: dict[str, str] = {}
+        """A switch ``state.json`` refused, by key, as the status line says it, until a later
+        save of that switch lands."""
 
     # --- on / off -----------------------------------------------------------------------
 
@@ -537,8 +538,10 @@ class RemoteController:
 
     def status_line(self) -> str:
         """The status line: what Remote is doing or why it is not, then a write of
-        ``remote.json`` that did not land (:attr:`save_problem`), each on a line of its own."""
-        return "\n".join(line for line in (self.message, self.save_problem) if line)
+        ``remote.json`` that did not land (:attr:`save_problem`) and a switch ``state.json``
+        refused, each on a line of its own."""
+        lines = (self.message, self.save_problem, *self._refused_switches.values())
+        return "\n".join(line for line in lines if line)
 
     def link_url(self) -> str | None:
         """The public link when ngrok is up, else the local one — ``None`` while Remote is off."""
@@ -629,8 +632,23 @@ class RemoteController:
     # --- persistence -----------------------------------------------------------------------------
 
     def _set_state(self, **changes: Any) -> None:
+        """Take ``changes`` in hand, and save each switch that changed, on its own.
+
+        Only those keys: the whole snapshot this TUI read at its start went out with every
+        save, so a second ``asq ui`` that picked an auto-off wrote back the Remote it had read
+        as on, after the first had turned it off, and the next start brought the public
+        tunnel back against that off (sweep of #243). A save ``state.json`` refused was
+        dropped without a word; it is on the status line now, until one of that switch lands.
+        """
         self.state = replace(self.state, **changes)
-        save_remote_state(self.state)
+        for key, value in changes.items():
+            stored = NEVER if key == "auto_off_minutes" and value is None else value
+            try:
+                self.save_switch(key, stored)
+            except StateUnwritableError as exc:
+                self._refused_switches[key] = f"{SWITCHES[key]} could not be saved — {exc}"
+            else:
+                self._refused_switches.pop(key, None)
 
     # --- the tunnel watchdog ---------------------------------------------------------------------
 

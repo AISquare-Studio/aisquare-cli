@@ -267,7 +267,10 @@ the response SAYS so (``history_capped``) rather than truncating quietly, so a
 short answer is never mistaken for a short pane.
 """
 
-INSTALL_HINT = "pip install 'aisquare-cli[remote]' (or: pipx inject aisquare-cli websockets)"
+REMOTE_SERVER_NEEDS = ("starlette", "uvicorn", "websockets")
+"""What the server cannot start without (:func:`_remote_dependency_error`)."""
+REMOTE_EXTRA = (*REMOTE_SERVER_NEEDS, "cryptography")
+"""What the ``remote`` extra installs: the server's three, and what Web Push needs."""
 
 NO_PAGE_HINT = "the bundled remote page is missing from this install — reinstall aisquare-cli"
 """Shown by the modal's status line, ``asq remote serve``'s exit, and the raise of
@@ -3271,7 +3274,9 @@ def build_remote_app(
         from starlette.status import WS_1011_INTERNAL_ERROR
         from starlette.websockets import WebSocketDisconnect
     except ImportError as exc:  # pragma: no cover - exercised only in a base install
-        raise RemoteUnavailable(f"the remote extra is not installed — {INSTALL_HINT}") from exc
+        raise RemoteUnavailable(
+            f"the remote extra is not installed — {remote_install_hint()}"
+        ) from exc
 
     from aisquare.services import remote_actions, remote_needs, remote_push
 
@@ -3886,17 +3891,61 @@ assignment is not a def, so the alias bridges nothing."""
 # --- process lifecycle: the module API the TUI modal calls (PLAN §4-F) ----------------
 
 
+def remote_install_hint() -> str:
+    """The one command that adds the ``remote`` extra to the install that is running, made
+    the way that install was made.
+
+    It said ``pip install 'aisquare-cli[remote]' (or: pipx inject aisquare-cli
+    websockets)``, and neither fixed the install the docs give, a uv tool
+    (``install.sh``, the README): its environment has no pip, and there is no pipx
+    environment to inject into. Nor did the inject fix a pipx install made without
+    the extra, which misses starlette and uvicorn too: the same sentence came back
+    after it.
+
+    A uv tool is installed again with the extra. uv has no inject, and installing
+    a tool again resolves its environment from that command alone, so ``--with
+    tiktoken`` is said again, as ``install.sh`` says it, or tiktoken goes. A pipx
+    install gets what is missing injected, which keeps what was injected before.
+    A virtualenv, or any other Python, gets the extra from its own interpreter:
+    ``uv pip`` when uv made it, since it has no pip, else ``-m pip``.
+    """
+    import importlib.util
+    import shlex
+    import sys
+
+    from aisquare.core.version import DISTRIBUTION
+
+    prefix = Path(sys.prefix)
+    extra = f"'{DISTRIBUTION}[remote]'"
+    if (prefix / "uv-receipt.toml").is_file():
+        python = f"{sys.version_info.major}.{sys.version_info.minor}"
+        return f"uv tool install --python {python} --with tiktoken {extra}"
+    if (prefix / "pipx_metadata.json").is_file():
+        missing = [name for name in REMOTE_EXTRA if importlib.util.find_spec(name) is None]
+        return f"pipx inject {DISTRIBUTION} {' '.join(missing or REMOTE_EXTRA)}"
+    python = shlex.quote(sys.executable)
+    if _remote_made_by_uv(prefix):
+        return f"uv pip install --python {python} {extra}"
+    return f"{python} -m pip install {extra}"
+
+
+def _remote_made_by_uv(prefix: Path) -> bool:
+    """Whether uv made the virtualenv at ``prefix``: its ``pyvenv.cfg`` names uv's version."""
+    try:
+        lines = (prefix / "pyvenv.cfg").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return any(line.partition("=")[0].strip() == "uv" for line in lines)
+
+
 def _remote_dependency_error() -> str | None:
     import importlib.util
 
-    missing = [
-        name
-        for name in ("starlette", "uvicorn", "websockets")
-        if importlib.util.find_spec(name) is None
-    ]
+    missing = [name for name in REMOTE_SERVER_NEEDS if importlib.util.find_spec(name) is None]
     if not missing:
         return None
-    return f"the remote extra is not installed ({', '.join(missing)} missing) — {INSTALL_HINT}"
+    named = ", ".join(missing)
+    return f"the remote extra is not installed ({named} missing) — {remote_install_hint()}"
 
 
 def runtime() -> Runtime:
@@ -4405,6 +4454,7 @@ __all__ = [
     "regenerate_password",
     "remote_board_payload",
     "remote_gate_token",
+    "remote_install_hint",
     "remote_server_status",
     "revoke_remote_device",
     "run_foreground",

@@ -27,12 +27,17 @@ phone loads ships inside aisquare-cli.
 ## Install
 
 ```sh
-pipx install 'aisquare-cli[remote]'     # or: pip install 'aisquare-cli[remote]'
+uv tool install --python 3.13 --with tiktoken 'aisquare-cli[remote]'   # installed by install.sh or uv
+pipx inject aisquare-cli starlette uvicorn websockets cryptography     # installed with pipx
+pip install 'aisquare-cli[remote]'                                      # in a virtualenv
 ```
 
 The `remote` extra adds the web server (starlette, uvicorn, websockets) and
 `cryptography`, which Web Push needs; without it the page works and says
-notifications are unavailable.
+notifications are unavailable. Use the line for how aisquare-cli was installed:
+uv cannot add a package to a tool, so the first installs it again with the
+extra, and names tiktoken again so it stays. Without the extra, `aisquare remote
+serve` and the R panel say which line fits this machine.
 
 Then ngrok, which gives the machine an https address a phone can reach. Install
 it from ngrok.com, then sign in once:

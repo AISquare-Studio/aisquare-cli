@@ -77,8 +77,14 @@ def _latest_line(plan: lifecycle_service.UpgradePlan) -> str:
     available = plan.update_available
     if available is None:
         verdict = "cannot compare"
+    elif available:
+        verdict = "an update is available"
+    elif install_route.same_version(plan.latest.version, plan.current):
+        verdict = "you have it"
     else:
-        verdict = "an update is available" if available else "you have it"
+        # PyPI's newest is older than what runs (a release not yet published, a
+        # pre-release): "you have it" said otherwise (sweep of #257).
+        verdict = "yours is newer"
     return f"latest: {plan.latest.version} ({verdict})"
 
 
@@ -89,6 +95,10 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
     _say(f"aisquare {plan.current} — {plan.route.describe()}")
     _say(_latest_line(plan))
     if plan.runnable:
+        if plan.up_to_date:
+            # Not "upgrade with: aisquare upgrade", which answers "nothing to do" (sweep of #257).
+            _say("nothing to upgrade")
+            return
         pin = f" --version {plan.target}" if plan.target else ""
         _say(f"upgrade with: aisquare upgrade{pin}")
     else:

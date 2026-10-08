@@ -1899,6 +1899,37 @@ def test_check_with_a_pin_advises_the_pin(runner: CliRunner, tool: Tool, machine
     assert "upgrade with: aisquare upgrade --version 0.7.0" in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("latest", "verdict", "advice"),
+    [
+        ("0.7.0", "latest: 0.7.0 (yours is newer)", "nothing to upgrade"),
+        ("0.8.0", "latest: 0.8.0 (you have it)", "nothing to upgrade"),
+        ("0.8.1", "latest: 0.8.1 (an update is available)", "upgrade with: aisquare upgrade"),
+    ],
+    ids=["pypi-older", "the-same", "pypi-newer"],
+)
+def test_check_tells_a_newer_build_from_the_latest_and_advises_only_an_upgrade(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    latest: str,
+    verdict: str,
+    advice: str,
+) -> None:
+    """With 0.8.0 running and PyPI's newest 0.7.0, --check said "(you have it)" and "upgrade
+    with: aisquare upgrade", a command that then answered "nothing to do" (sweep of #257)."""
+    monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
+    machine.latest = LatestRelease(latest)
+
+    result = runner.invoke(app, ["upgrade", "--check"])
+
+    lines = result.stdout.splitlines()
+    assert result.exit_code == 0, result.output
+    assert verdict in lines and advice in lines, lines
+    assert ("upgrade with: aisquare upgrade" in lines) is (latest == "0.8.1"), lines
+
+
 def test_a_failing_sites_remedy_survives_a_space_in_its_path(
     runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path
 ) -> None:

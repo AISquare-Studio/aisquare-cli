@@ -405,12 +405,13 @@ from `POST api/unlock`) except unlock itself; every non-GET request needs an
 | POST | `api/send-keys`, `api/note`, `api/agent/{tell,stop,restart,switch}`, `api/task/…`, `api/project/…` | the writes |
 | WS | `ws` | the live stream |
 
-The stream sends `{"type", "payload", "ts"}` frames: `board`, `fleet` and `remote`
-when they change, `needs_you`, `action` (this device's write results), a
-`heartbeat` every 10 seconds, and `pane` for each pane the page subscribed to
-(`{"subscribe": "<agent>", "project": "<id>"}`). It closes with 4401 for a device
-that is no longer signed in, 4409 when the same device opened a fifth connection,
-and 4410 when Remote is turned off.
+The stream sends `{"type", "payload", "ts"}` frames: `fleet` and `remote` when they
+change, `board` too once asked for (`{"subscribe_board": "<id>"}`, `false` to stop;
+the board's events and the sessions they name), `needs_you`, `action` (this device's
+write results), a `heartbeat` every 10 seconds, and `pane` for each pane the page
+subscribed to (`{"subscribe": "<agent>", "project": "<id>"}`). It closes with 4401
+for a device that is no longer signed in, 4409 when the same device opened a fifth
+connection, and 4410 when Remote is turned off.
 
 With curl, unlock once and keep the cookie:
 

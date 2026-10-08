@@ -622,18 +622,21 @@ def _frames_until(ws: Any, kind: str, *, limit: int = 12) -> list[dict[str, Any]
     raise AssertionError(f"no {kind} frame in {seen}")
 
 
-def test_stream_sends_board_fleet_remote_then_only_changes(
+def test_stream_sends_fleet_remote_and_once_asked_the_board_then_only_changes(
     client: TestClient, runtime: Runtime, fake: Fake
 ) -> None:
     unlock(client, runtime)
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
         first = _frames_until(ws, "remote")
         kinds = [frame["type"] for frame in first]
-        assert kinds == ["board", "fleet", "remote"]
+        assert kinds == ["fleet", "remote"]
         for frame in first:
             assert set(frame) == {"type", "payload", "ts"}
-        assert first[0]["payload"] == fake.board
-        assert first[2]["payload"]["allow_write"] is False
+        assert first[1]["payload"]["allow_write"] is False
+        ws.send_text(json.dumps({"subscribe_board": None}))
+        board = frame_within(ws)
+        assert board["type"] == "board"
+        assert board["payload"] == {"project": {"id": "p1"}, "sessions": [], "events": []}
         # Nothing changed: no frame arrives for several ticks.
         fake.board = {**fake.board, "events": [{"seq": 1, "text": "hello from the desk"}]}
         changed = frame_within(ws)
@@ -642,6 +645,44 @@ def test_stream_sends_board_fleet_remote_then_only_changes(
         runtime.set_allow_write(True)
         flipped = _frames_until(ws, "remote")[-1]
         assert flipped["payload"]["allow_write"] is True
+
+
+def test_the_board_frame_is_the_events_and_the_sessions_they_name(
+    client: TestClient, runtime: Runtime, fake: Fake
+) -> None:
+    """r3 #6: the frame was the whole board, every session and task the project ever had,
+    and its sessions move with every session's heartbeat: the Board tab was sent all of it
+    again several times a minute. It is what the tab draws, so a heartbeat sends nothing."""
+
+    def session(sid: str, label: str, seen: str) -> dict[str, object]:
+        return {"id": sid, "label": label, "role": "coder", "last_seen_at": seen, "cursor": 3}
+
+    note = {"kind": "team.note", "payload": {"seq": 1, "session_id": "s1", "text": "hi"}}
+    fake.board = {
+        "project": {"id": "p1"},
+        "sessions": [session("s1", "coder-1", "10:00"), session("s2", "coder-2", "10:00")],
+        "tasks": [{"id": "t1", "title": "ship it"}],
+        "events": [note],
+    }
+    unlock(client, runtime)
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        _frames_until(ws, "remote")
+        ws.send_text(json.dumps({"subscribe_board": None}))
+        first = _frames_until(ws, "board")[-1]["payload"]
+        moved = [session("s1", "coder-1", "10:01"), session("s2", "coder-2", "10:01")]
+        fake.board = {**fake.board, "sessions": moved}
+        time.sleep(0.2)  # ten ticks: a frame for the heartbeats would be the next one
+        reply = {"kind": "team.note", "payload": {"seq": 2, "session_id": "s2", "text": "ok"}}
+        fake.board = {**fake.board, "events": [note, reply]}
+        later = frame_within(ws)
+    assert first == {
+        "project": {"id": "p1"},
+        "sessions": [{"id": "s1", "label": "coder-1", "role": "coder"}],
+        "events": [note],
+    }
+    assert later["type"] == "board" and later["payload"]["events"] == [note, reply]
+    assert [named["id"] for named in later["payload"]["sessions"]] == ["s1", "s2"]
+    assert client.get(f"{base(runtime)}/api/board").json() == fake.board, "the read is whole"
 
 
 def test_pane_frames_only_for_subscribed_agents(

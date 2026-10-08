@@ -989,7 +989,7 @@ async function probe() {
 
 function resubscribe() {
   wsSend("subscribe_fleet", S.wantFleet);
-  wsSend("subscribe_board", S.wantBoard);
+  if (S.wantBoard) wsSend("subscribe_board", S.wantBoard); // a new socket sends no board until asked
   for (const watcher of paneWatchers.values()) wsSend("subscribe", watcher.label, watcher.pid);
 }
 
@@ -1064,11 +1064,16 @@ function wantProject(pid) {
     if (projectIdOf(S.fleet) !== pid) S.fleet = null;
     wsSend("subscribe_fleet", pid);
   }
-  if (S.wantBoard !== pid) {
-    S.wantBoard = pid;
-    if (projectIdOf(S.board) !== pid) S.board = null;
-    wsSend("subscribe_board", pid);
-  }
+}
+
+/* Board frames only while the Board tab shows (null stops them): a board is every session
+ * and task of its project, sent again with every session's heartbeat, and no other screen
+ * draws it. One kept from before is not shown again: no frame came while it was not asked. */
+function wantBoard(pid) {
+  if (S.wantBoard === pid) return;
+  S.wantBoard = pid;
+  S.board = null;
+  wsSend("subscribe_board", pid || false);
 }
 
 // --- state that every screen shows ---
@@ -2010,6 +2015,8 @@ VIEWS.project = (route, main) => {
       });
     }
   } else if (route.tab === "board") {
+    wantBoard(pid);
+    view.cleanup = () => wantBoard(null);
     const compose = noteComposer(pid);
     const list = el("div", "events");
     body.append(compose, list);

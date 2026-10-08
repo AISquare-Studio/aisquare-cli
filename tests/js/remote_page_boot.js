@@ -182,6 +182,7 @@ class FakeSocket {
   constructor(sockets) {
     this.readyState = 0;
     this.listeners = {};
+    this.sent = [];
     sockets.push(this);
   }
 
@@ -193,7 +194,10 @@ class FakeSocket {
     for (const fn of (this.listeners[type] || []).slice()) fn(Object.assign({ type }, extra));
   }
 
-  send() {}
+  /* What the page told the machine on this socket, as parsed messages. */
+  send(text) {
+    this.sent.push(JSON.parse(text));
+  }
 
   close(code) {
     if (this.readyState === 3) return;
@@ -340,6 +344,16 @@ function click(control) {
 function unlockForm(page) {
   const input = find(page.main(), (node) => node.tagName === "INPUT" && node.type === "password");
   return input ? { input, form: input.parentNode } : null;
+}
+
+/* The browser fires `type` at "document" or "window": a wake, as the phone sees one. */
+function fire(page, target, type) {
+  page.run("for (const fn of (" + target + ".listeners." + type + " || []).slice()) fn({ type: " + JSON.stringify(type) + " });");
+}
+
+/* What the page sent on `sock` with `kind` in it, in order. */
+function asked(sock, kind) {
+  return sock.sent.filter((message) => Object.prototype.hasOwnProperty.call(message, kind)).map((message) => message[kind]);
 }
 
 // --- the machine's answers -------------------------------------------------------------------
@@ -835,6 +849,30 @@ async function keyNames() {
   return { keys, enterToggle: toggle ? toggle.attrs["aria-label"] || null : null };
 }
 
+/* The board the socket asks for, screen by screen, and on the socket a wake opens. */
+async function boardOnItsTab() {
+  const page = bootPage("#/", signedIn());
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const go = async (hash) => {
+    page.run("pageGo(" + JSON.stringify(hash) + ")");
+    await settle();
+    return asked(page.sockets[0], "subscribe_board");
+  };
+  const steps = { feed: asked(page.sockets[0], "subscribe_board") };
+  steps.fleet = await go("#/p/" + PROJECT + "/fleet");
+  steps.board = await go("#/p/" + PROJECT + "/board");
+  steps.agent = await go("#/p/" + PROJECT + "/a/coder-1/live");
+  await go("#/p/" + PROJECT + "/board");
+  fire(page, "document", "visibilitychange");
+  page.acceptSockets();
+  await settle();
+  steps.woken = asked(page.live(), "subscribe_board");
+  steps.sockets = page.sockets.length;
+  return steps;
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -864,6 +902,7 @@ async function main() {
     keyNames: await keyNames(),
     liveScroll: await liveScroll(),
     padScroll: await padScroll(),
+    boardOnItsTab: await boardOnItsTab(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

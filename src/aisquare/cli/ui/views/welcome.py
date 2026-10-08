@@ -14,12 +14,13 @@ the one it goes back to:
    Accounts page; *Connect* is the doctor's own one-click fix, and "connected"
    is the one shared answer (``services.agents.claude_code_connected``).
 3. **Fleet** — *Start manager*, then *Start the coders* (coder-1 and coder-2),
-   through ``services.first_run.start_fleet``, which never types into an agent:
-   Claude Code first asks whether to trust the folder, and the user answers that
-   in the manager's pane. The card waits for step 2's hooks, because they are
-   how the manager receives its instructions. Each agent reads as the shell's
-   frame sees it: one whose window is gone, or that tmux cannot answer for (as
-   after a reboot), is never called running.
+   through ``services.first_run.start_fleet``, which never types into an agent it
+   starts: Claude Code first asks whether to trust the folder, and the user
+   answers that in the manager's pane. The card waits for step 2's hooks, because
+   they are how the manager receives its instructions. Each agent reads as the
+   shell's frame sees it: one whose window is gone, or that tmux cannot answer for
+   (as after a reboot), is never called running, and a coder whose window is gone
+   is restarted under its own label, as its own page's Restart does it.
 
 **The page never takes the keyboard on its own.** The sidebar has it at mount,
 and the app's keys depend on that. A finished card's buttons leave the Tab
@@ -861,7 +862,8 @@ class WelcomeView(VerticalScroll):
         """The chosen project's agents by label, as the shell's frame sees them, and our starts.
 
         An agent this page just started is not in the frame until the shell reads
-        again, so until then what its start said stands in for it. A frame read
+        again, so until then what its start said stands in for it, and for the lost
+        row a restart replaced under the same label. A frame read
         after that start, for this project and not failed open, is the whole
         answer: an agent missing from it was stopped elsewhere (``fleet stop``
         kills its window and the row leaves the listing), and is not brought back
@@ -899,8 +901,13 @@ class WelcomeView(VerticalScroll):
             return live
         for step in self.steps.values():
             agent = step.agent
-            if agent is not None and step.outcome != "refused" and agent.id not in ended:
-                live.setdefault(agent.label, _Live(agent))
+            if agent is None or step.outcome == "refused" or agent.id in ended:
+                continue
+            seen = live.get(agent.label)
+            # A coder restarted under its own label is a new row: the frame current when the
+            # start landed still holds the lost row it replaced, which the start answers.
+            if seen is None or (seen.agent.id != agent.id and snapshot is self._frame_at_start):
+                live[agent.label] = _Live(agent)
         return live
 
     def _ready(self) -> bool:

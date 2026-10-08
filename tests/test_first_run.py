@@ -34,7 +34,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services.first_run import FleetStep
 from tests import fakebin
 from tests.fsperms import can_deny_reads, can_symlink
-from tests.test_fleet_service import FakeTmux
+from tests.test_fleet_service import FakeClock, FakeTmux
 
 T0 = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
 
@@ -92,6 +92,29 @@ class Spawns:
             raise fleet_service.FleetError(self.refuse[label])
         return fleet_service.SpawnReceipt(
             agent=_agent(label, role, project.id), asked_label=kwargs.get("label"), tmux_session="s"
+        )
+
+
+class Restarts:
+    """A ``fleet.restart`` stand-in: records the rows it is asked for, by label and id."""
+
+    def __init__(self, *, refuse: dict[str, str] | None = None) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+        self.refuse = refuse or {}
+
+    def __call__(
+        self, project: ProjectInfo, label: str, *, agent_id: str | None = None
+    ) -> fleet_service.RestartReceipt:
+        self.calls.append((label, agent_id))
+        if label in self.refuse:
+            raise fleet_service.FleetError(self.refuse[label])
+        old = _agent(label, "coder", project.id)
+        return fleet_service.RestartReceipt(
+            replaced=old,
+            started=old.model_copy(update={"id": f"{old.id}_again"}),
+            resumed=True,
+            was_running=False,
+            tmux_session="s",
         )
 
 
@@ -565,7 +588,10 @@ def _real_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[FakeTm
     monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
     monkeypatch.setattr(fleet_service, "settings", lambda: FleetSettings(tmux_socket="asq-test"))
     monkeypatch.setattr(tmux_core, "desktop_environment", lambda environ=None: {})
-    monkeypatch.setattr(fleet_service, "_sleep", lambda seconds: None)
+    # Time passes only when slept: a restart waits (bounded) for its agent before typing.
+    clock = FakeClock()
+    monkeypatch.setattr(fleet_service, "_sleep", clock.sleep)
+    monkeypatch.setattr(fleet_service, "_monotonic", clock.monotonic)
     fakebin.prepend_to_path(tmp_path / "bin", monkeypatch)
     fakebin.executable_fake(
         tmp_path / "bin",
@@ -603,25 +629,66 @@ def test_the_real_spawn_starts_three_windows_and_types_into_none(
     assert [s.outcome for s in again.steps] == ["running"] * 3 and len(tmux.spawned) == 3
 
 
-@pytest.mark.parametrize("state", ["lost", "unknown"])
-def test_a_coder_that_is_not_running_is_replaced_under_the_next_free_label(
-    tmp_path: Path, state: FleetAgentState
+@pytest.mark.parametrize(
+    ("state", "restarted", "spawned"),
+    [("lost", ["coder-1"], []), ("unknown", [], ["coder-3"])],
+)
+def test_a_coder_that_is_not_running_is_restarted_or_replaced(
+    tmp_path: Path, state: FleetAgentState, restarted: list[str], spawned: list[str]
 ) -> None:
     """A coder whose window is gone, or that tmux cannot answer for, was counted as running
     because its row had not ended, and no coder took its place (review of #257). Its row
-    still holds its label, as ``fleet.spawn`` holds it, so the new coder takes the next one."""
+    still holds its label and a place under the cap. A ``lost`` one is restarted under its
+    own label, pinned to its row; one tmux cannot answer for may still run, so the new
+    coder takes the next free label beside it. Each state is the other's control."""
     project = ProjectInfo(id="prj_demo", root=_repo(tmp_path / "demo"))
-    spawns = Spawns()
+    spawns, restarts = Spawns(), Restarts()
     listed = [
         *_seen(_agent("manager", "manager"), _agent("coder-2", "coder")),
         *_seen(_agent("coder-1", "coder"), state=state),
     ]
-    started = first_run.start_fleet(project, manager=False, spawn=spawns, live=lambda p: listed)
-    assert [kwargs["label"] for _, kwargs in spawns.calls] == ["coder-3"]
+    started = first_run.start_fleet(
+        project, manager=False, spawn=spawns, restart=restarts, live=lambda p: listed
+    )
+    assert restarts.calls == [(label, f"agt_{label}") for label in restarted]
+    assert [kwargs["label"] for _, kwargs in spawns.calls] == spawned
     assert [(s.label, s.outcome) for s in started.steps] == [
         ("coder-2", "running"),
-        ("coder-3", "started"),
+        ([*restarted, *spawned][0], "started"),
     ]
+    if restarted:
+        step = started.steps[-1]
+        assert step.agent is not None and step.agent.id == "agt_coder-1_again"  # the new row
+        assert step.notes[0] == "restarted — resumed its session", step.notes
+
+
+def test_two_lost_coders_are_restarted_and_a_refusal_stops_the_rest(tmp_path: Path) -> None:
+    """After a reboot (or kill-server) and the manager's Restart, both coders read ``lost``.
+    Started beside them, coder-3 took the fourth place under the default cap and coder-4
+    was refused on every press, so Start the coders never finished (review of #257)."""
+    project = ProjectInfo(id="prj_demo", root=_repo(tmp_path / "demo"))
+    listed = [
+        *_seen(_agent("manager", "manager")),
+        *_seen(_agent("coder-1", "coder"), _agent("coder-2", "coder"), state="lost"),
+    ]
+    spawns, restarts = Spawns(), Restarts()
+    started = first_run.start_fleet(
+        project, manager=False, spawn=spawns, restart=restarts, live=lambda p: listed
+    )
+    assert restarts.calls == [("coder-1", "agt_coder-1"), ("coder-2", "agt_coder-2")]
+    assert spawns.calls == [] and started.refused is None
+    assert [(s.label, s.outcome) for s in started.steps] == [
+        ("coder-1", "started"),
+        ("coder-2", "started"),
+    ]
+    # A restart that is refused is shown with its reason, and nothing is tried after it.
+    reason = "cannot restart 'coder-1': no account 3 on this machine"
+    refusing = Restarts(refuse={"coder-1": reason})
+    later = first_run.start_fleet(
+        project, manager=False, spawn=spawns, restart=refusing, live=lambda p: listed
+    )
+    assert refusing.calls == [("coder-1", "agt_coder-1")] and spawns.calls == []
+    assert [(s.label, s.outcome, s.detail) for s in later.steps] == [("coder-1", "refused", reason)]
 
 
 @pytest.mark.parametrize("state", ["lost", "unknown"])
@@ -637,24 +704,61 @@ def test_a_manager_that_is_not_running_is_never_called_running(
     assert [(s.label, s.outcome) for s in started.steps] == [("manager", "refused")]
 
 
-def test_through_the_real_listing_a_coder_whose_window_closed_is_replaced(
+def _unended(project: ProjectInfo) -> dict[str, FleetAgentState]:
+    """The project's rows that hold a place under the cap, as the listing reads them."""
+    return {
+        s.agent.label: s.state for s in fleet_service.list_agents(project) if not s.agent.ended_at
+    }
+
+
+def test_through_the_real_listing_a_coder_whose_window_closed_is_restarted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A coder's window closed by hand: the listing says ``lost``, and the top-up starts a
-    coder beside it, where it reported coder-1 running and started nothing."""
+    """A coder's window closed by hand: the listing says ``lost``, where it reported coder-1
+    running and started nothing; the top-up restarts it under its own label and row place,
+    in its own worktree, rather than starting coder-3 beside it."""
     tmux, project = _real_fleet(tmp_path, monkeypatch)
     first = first_run.start_fleet(project)
     coder = next(step.agent for step in first.steps if step.label == "coder-1")
     assert coder is not None
     tmux.vanish(coder.pane_id)
-    states = {s.agent.label: s.state for s in fleet_service.list_agents(project)}
+    states = _unended(project)
     again = first_run.start_fleet(project, manager=False)
     assert states == {"manager": "waiting", "coder-1": "lost", "coder-2": "waiting"}, states
     assert [(s.label, s.outcome) for s in again.steps] == [
         ("coder-2", "running"),
-        ("coder-3", "started"),
+        ("coder-1", "started"),
     ], [s.detail for s in again.steps]
-    assert len(tmux.spawned) == 4 and tmux.typed == []
+    restarted = again.steps[-1].agent
+    assert restarted is not None and restarted.id != coder.id and restarted.cwd == coder.cwd
+    assert _unended(project) == {"manager": "waiting", "coder-1": "waiting", "coder-2": "waiting"}
+    assert len(tmux.spawned) == 4  # the three, and coder-1 again
+
+
+def test_through_the_real_listing_the_coders_come_back_after_a_reboot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reboot (or kill-server), then the manager's Restart from its pane: both coders read
+    ``lost``, and each still holds a place under the default cap of 4. Started beside them,
+    coder-3 took the last place and coder-4 was refused on every press (review of #257)."""
+    tmux, project = _real_fleet(tmp_path, monkeypatch)
+    first_run.start_fleet(project)
+    tmux.kill_server()
+    fleet_service.restart(project, "manager")  # Welcome's Open, then the Restart there
+    states = _unended(project)
+    press = first_run.start_fleet(project, manager=False)
+    again = first_run.start_fleet(project, manager=False)
+    assert states == {"manager": "waiting", "coder-1": "lost", "coder-2": "lost"}, states
+    assert fleet_service.settings().max_agents_per_project == 4
+    assert [(s.label, s.outcome) for s in press.steps] == [
+        ("coder-1", "started"),
+        ("coder-2", "started"),
+    ], [s.detail for s in press.steps]
+    assert [(s.label, s.outcome) for s in again.steps] == [
+        ("coder-1", "running"),
+        ("coder-2", "running"),
+    ], [s.detail for s in again.steps]
+    assert _unended(project) == {"manager": "waiting", "coder-1": "waiting", "coder-2": "waiting"}
 
 
 def test_through_the_real_listing_a_fleet_whose_server_is_gone_is_not_called_running(

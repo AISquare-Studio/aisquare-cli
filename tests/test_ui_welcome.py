@@ -130,6 +130,9 @@ class Machine:
     live: list[FleetAgent] = field(default_factory=list)
     states: dict[str, FleetAgentState] = field(default_factory=dict)
     """What the fleet's listing says of an agent, by label, when not ``waiting``."""
+    cap: int = 4
+    """``max_agents_per_project``: ``spawn`` refuses at it, counting as ``fleet.spawn`` does."""
+    restarted: list[str] = field(default_factory=list)
 
     def seams(self, platform: str = "linux") -> Seams:
         def claude(sign_in: bool, root: Path | None) -> ClaudeState:
@@ -176,6 +179,7 @@ class Machine:
                 coders=coders,
                 spawn=self.spawn,
                 live=self.listing,
+                restart=self.restart,
             )
 
         return Seams(
@@ -210,9 +214,30 @@ class Machine:
         label = kwargs.get("label") or role
         if label in self.refuse:
             raise fleet_service.FleetError(self.refuse[label])
+        held = [agent for agent in self.live if agent.project_id == project.id]
+        if len(held) >= self.cap:  # every row not ended, running or not
+            raise fleet_service.FleetError(
+                f"{project.root.name} already runs {len(held)} agents "
+                f"(max_agents_per_project = {self.cap}) — stop one, or raise the limit in [fleet]"
+            )
         agent = _agent(project, label, role)
         self.live.append(agent)
         return fleet_service.SpawnReceipt(agent=agent, asked_label=None, tmux_session="asq-demo")
+
+    def restart(
+        self, project: ProjectInfo, label: str, *, agent_id: str | None = None
+    ) -> fleet_service.RestartReceipt:
+        """``fleet.restart``: the row ``agent_id`` names ends, and a new one takes its label."""
+        old = next(a for a in self.live if a.project_id == project.id and a.label == label)
+        assert agent_id == old.id, f"Welcome restarted {label} by its label, not its row"
+        new = old.model_copy(update={"id": f"{old.id}-again"})
+        self.live.remove(old)
+        self.live.append(new)
+        self.states.pop(label, None)  # its window is back
+        self.restarted.append(label)
+        return fleet_service.RestartReceipt(
+            replaced=old, started=new, resumed=True, was_running=False, tmux_session="asq-demo"
+        )
 
     def validate(self, text: str) -> PathVerdict:
         path = Path(text).expanduser() if text.strip() else None
@@ -1519,15 +1544,18 @@ def listed_by(machine: Machine, project: ProjectInfo, monkeypatch: pytest.Monkey
     monkeypatch.setattr(fleet_service, "list_agents", listing)
 
 
-def test_a_coder_whose_window_is_gone_is_not_counted_and_is_replaced(
+def test_coders_whose_windows_are_gone_are_not_counted_and_are_restarted(
     captain: str | None,
     scripted: Callable[[Machine], None],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Step 3 counted every row that had not ended as running (review of #257). With
-    coder-1's window closed by hand the sidebar showed ✗, while step 3 kept "✓ coder-1 —
-    started" and "Your fleet is up." and hid Start the coders, so nothing replaced it."""
+    """Step 3 counted every row that had not ended as running (review of #257). With the
+    coders' windows gone the sidebar showed ✗, while step 3 kept "Your fleet is up." and hid
+    Start the coders, so nothing replaced them. Each lost coder still holds a place under the
+    cap, so coders started beside both met it on every press, as after a reboot and the
+    manager's Restart (coder-4 refused at the default 4): they are restarted under their own
+    labels instead, and the card says so at once, before the shell reads its next frame."""
     machine, project = _ready_machine(tmp_path)
     listed_by(machine, project, monkeypatch)
     scripted(machine)
@@ -1536,20 +1564,23 @@ def test_a_coder_whose_window_is_gone_is_not_counted_and_is_replaced(
         await press(pilot, page, "fleet-manager")
         await press(pilot, page, "fleet-coders")
         seen: list[Any] = [card(page, "fleet-status")]
-        machine.states["coder-1"] = "lost"  # its window closed by hand
+        machine.states.update({"coder-1": "lost", "coder-2": "lost"})  # their windows gone
         app.refresh_data()
         page.paint()  # what the page's refresh tick does
         seen += [card(page, "fleet-status"), visible(page, "fleet-coders")]
         await press(pilot, page, "fleet-coders")
-        seen.append(card(page, "fleet-status"))
+        seen += [card(page, "fleet-status"), visible(page, "fleet-coders")]
         return seen
 
-    up, lost, offered, replaced = in_shell(machine, go)
+    up, lost, offered, restarted, offered_after = in_shell(machine, go)
     assert FLEET_UP in up and "✓ coder-1 — started" in up, "control: three running agents"
     assert "✗ coder-1 — lost (pane gone)" in lost and FLEET_UP not in lost, lost
     assert offered, "Start the coders is offered again"
-    assert [agent.label for agent in machine.live] == ["manager", "coder-1", "coder-2", "coder-3"]
-    assert "✓ coder-3 — started" in replaced and FLEET_UP in replaced, replaced
+    assert machine.restarted == ["coder-1", "coder-2"]
+    assert sorted(agent.label for agent in machine.live) == ["coder-1", "coder-2", "manager"]
+    assert "✓ coder-1 — started" in restarted and "✓ coder-2 — started" in restarted, restarted
+    assert "lost" not in restarted and FLEET_UP in restarted, restarted
+    assert not offered_after
 
 
 @pytest.mark.parametrize("state", ["unknown", "lost"])

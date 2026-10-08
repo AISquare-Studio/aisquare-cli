@@ -16,13 +16,16 @@ report is what they are handed back.
 
 Two rules shape :func:`start_fleet`:
 
-- **It never types into an agent.** No ``prompt=`` reaches ``fleet.spawn``
-  (:class:`Spawner` has no such parameter, so mypy holds this as well as the
-  tests). A folder Claude Code has not seen makes it ask, once, whether to trust
-  the folder, and the fleet's prompt typing decides when the agent is ready from
-  the pane's foreground process, not from its screen. #240's captain work
-  measured that typing into that question picks "No, exit". The user answers it
-  in the manager's pane, and the coders start after that, from their own button.
+- **It never types into an agent it starts.** No ``prompt=`` reaches
+  ``fleet.spawn`` (:class:`Spawner` has no such parameter, so mypy holds this as
+  well as the tests). A folder Claude Code has not seen makes it ask, once,
+  whether to trust the folder, and the fleet's prompt typing decides when the
+  agent is ready from the pane's foreground process, not from its screen. #240's
+  captain work measured that typing into that question picks "No, exit". The user
+  answers it in the manager's pane, and the coders start after that, from their
+  own button. A coder whose window is gone is not started but restarted
+  (:class:`Restarter`), as the agent view's Restart does it, and restart types its
+  own line: that coder has run in its folder before.
 - **It is idempotent.** It never starts a second manager, and it tops the coders
   up to :data:`CODERS` rather than adding two more each time it runs.
 """
@@ -489,6 +492,14 @@ class Spawner(Protocol):
     ) -> fleet_service.SpawnReceipt: ...
 
 
+class Restarter(Protocol):
+    """The part of ``fleet.restart`` Welcome uses: the row it means, by label and id."""
+
+    def __call__(
+        self, project: ProjectInfo, label: str, *, agent_id: str | None = None
+    ) -> fleet_service.RestartReceipt: ...
+
+
 RUNNING: frozenset[str] = frozenset({"working", "waiting", "attention", "limited"})
 """The states in which the fleet's listing sees an agent there: all the Welcome page
 calls running. ``unknown`` is no verdict (tmux could not be asked: after a reboot every
@@ -546,6 +557,31 @@ def _spawn(
     )
 
 
+def _restart(restart: Restarter, project: ProjectInfo, agent: FleetAgent) -> FleetStep:
+    try:
+        # Pinned to the row the listing read, as the agent view's Restart pins it: a label
+        # restarted elsewhere since (by the manager) is that agent's, and is left running.
+        receipt = restart(project, agent.label, agent_id=agent.id)
+    except fleet_service.FleetError as exc:
+        return FleetStep(label=agent.label, role=agent.role, outcome="refused", detail=_why(exc))
+    except Exception as exc:  # a bug in the fleet path is a refusal to show, not a crash
+        return FleetStep(
+            label=agent.label,
+            role=agent.role,
+            outcome="refused",
+            detail=f"{type(exc).__name__}: {_why(exc)}",
+        )
+    started = receipt.started
+    return FleetStep(
+        label=started.label,
+        role=agent.role,
+        outcome="started",
+        detail=started.id,
+        agent=started,
+        notes=(f"restarted — {receipt.how}", *receipt.notes),
+    )
+
+
 def start_fleet(
     project: ProjectInfo,
     *,
@@ -554,22 +590,28 @@ def start_fleet(
     spawn: Spawner | None = None,
     live: LiveAgents | None = None,
     on_step: Callable[[FleetStep], None] | None = None,
+    restart: Restarter | None = None,
 ) -> FleetStart:
     """Start the manager and top the coders up to ``coders``, one at a time; never raises.
 
     A running manager (:data:`RUNNING`) is reported as ``running`` and never
     spawned again; running coders count toward ``coders``, so a second call
-    starts only what is missing. A coder that is not running (its window gone,
-    or tmux unable to say) is not counted, and keeps its label until it is
-    restarted or reaped, so the one started in its place takes the next free
-    label. A manager in that state is ``fleet.spawn``'s to refuse, with the way
-    to clear it. Coders take the role's worktree default in a git repository
-    and ``worktree=False`` elsewhere, with a note. The first refusal (no tmux,
-    the agent cap, a worktree git will not make) stops the call, and its reason
-    is on its step. ``on_step`` hears each step as it lands, for a caller that
-    shows progress. Nothing is typed into any agent: see the module docstring.
+    starts only what is missing. A coder that is not running is not counted,
+    and its row keeps its label and a place under the cap until it is
+    restarted or reaped. One whose window is gone (``lost``: after a reboot, or
+    closed by hand) is restarted under its own label (``fleet.restart``), with
+    its worktree, its account and its session when that can be resumed; one
+    tmux cannot answer for (``unknown``) may still run, so the one started in
+    its place takes the next free label. A manager in either state is
+    ``fleet.spawn``'s to refuse, with the way to clear it. Coders take the
+    role's worktree default in a git repository and ``worktree=False``
+    elsewhere, with a note. The first refusal (no tmux, the agent cap, a
+    worktree git will not make) stops the call, and its reason is on its step.
+    ``on_step`` hears each step as it lands, for a caller that shows progress.
+    Nothing is typed into an agent it starts: see the module docstring.
     """
     spawner: Spawner = spawn if spawn is not None else fleet_service.spawn
+    restarter: Restarter = restart if restart is not None else fleet_service.restart
     steps: list[FleetStep] = []
 
     def done(step: FleetStep) -> bool:
@@ -601,6 +643,14 @@ def start_fleet(
     for agent in live_coders[:coders]:
         done(FleetStep(agent.label, "coder", "running", agent.id, agent))
     missing = max(0, coders - len(live_coders))
+    # Restarted, not started beside: each coder started in a lost one's place took a
+    # place of its own under the cap, and two lost coders (every coder, after a reboot)
+    # left none under the default 4, so Start the coders was refused for ever.
+    lost = [s.agent for s in listed if s.agent.role == "coder" and s.state == "lost"]
+    for agent in lost[:missing]:
+        if not done(_restart(restarter, project, agent)):
+            return FleetStart(tuple(steps))
+        missing -= 1
     if missing:
         git = fleet_service.is_git_project(project.root)
         held = {status.agent.label for status in listed}  # running or not, as spawn holds them

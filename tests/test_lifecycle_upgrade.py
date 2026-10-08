@@ -383,6 +383,20 @@ def test_the_seam_registry_names_the_command_the_new_install_runs() -> None:
     assert f"``{runs}``" in listed and "agents connect" not in listed, listed
 
 
+def test_the_reference_page_lists_the_hooks_connect_writes() -> None:
+    """docs/reference.md said five hooks and had no StopFailure row, while `agents connect`
+    writes six (review of #257): its count and its table follow `_HOOKS`."""
+    page = (Path(__file__).resolve().parents[1] / "docs" / "reference.md").read_text("utf-8")
+    events = [event for event, _ in agent_core._HOOKS]
+    words = {5: "five", 6: "six", 7: "seven", 8: "eight"}
+    table = page.split("| Hook | What it does |", 1)[1].split("\n\n", 1)[0]
+    rows = re.findall(r"^\| `(\w+)` \|", table, flags=re.MULTILINE)
+
+    assert f"writes {words[len(events)]} hooks" in page, "the count follows _HOOKS"
+    assert sorted(rows) == sorted(events), (rows, events)
+    assert "PreToolUse" not in rows, "control: an event aisquare does not hook is not listed"
+
+
 def test_contributing_names_the_security_md_section_that_exists() -> None:
     """CONTRIBUTING's rule named two SECURITY.md sections that never existed, so a
     contributor following it looked for headings that are not there (review of #257)."""

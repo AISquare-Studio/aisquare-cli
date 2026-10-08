@@ -2,7 +2,7 @@
 
 ## How it works
 
-`agents connect claude-code` writes five hooks into Claude Code's
+`agents connect claude-code` writes six hooks into Claude Code's
 `settings.json` (merged, never clobbering yours; `agents disconnect`
 removes exactly them):
 
@@ -13,6 +13,7 @@ removes exactly them):
 | `Stop` | mark the session waiting; renew its task leases |
 | `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |
 | `SessionEnd` | release claims, mark the session gone, final distill |
+| `StopFailure` | mark the session limited when its turn ends on an API error (a usage limit above all), and when the limit lifts |
 
 Every hook is **fail-open**: any error is swallowed and the session
 continues untouched. State lives in one SQLite database (WAL mode,

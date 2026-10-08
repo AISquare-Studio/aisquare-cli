@@ -1970,6 +1970,51 @@ async function afterLeaving() {
   return { note: board.toast(), scrolled: transcript.run("UI.main.scrollTop"), back: { landed, left: landed.length < 6 } };
 }
 
+/* Cards the machine answers 409 stale (SPEC §6.3, §6.4): a quick answer, the feed's read that
+ * follows still listing the card (the machine has not scanned since), then the note's 6 s up
+ * and a frame that lists the card still; a Tell from an asked card, nothing waiting on coder-1
+ * now; and a crashed card's Stop. What the feed shows, and the reads of api/needs that
+ * followed the quick answer. */
+async function staleCards() {
+  const feed = async (item, routes) => {
+    const page = bootPage("#/", signedIn(Object.assign({ "GET api/needs": () => ({ status: 200, json: { items: [item] } }) }, routes)));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    return page;
+  };
+  const shown = (page) => page.main().querySelectorAll("div.card").map((card) => (card.classList.contains("gone")
+    ? card.textContent : "card: " + find(card, (node) => node.className === "reason").textContent));
+  const reads = (page) => page.requests.filter((one) => one.method === "GET" && one.path === "api/needs").length;
+  const stale = (current) => () => ({ status: 409, json: { error: "stale", message: "coder-1 no longer shows that question", current } });
+  const now = [Object.assign({}, ITEM, { id: "ny_00000000000000e6", kind: "permission", reason: "coder-1 asks to run a command" })];
+  const answered = await feed(ITEM, { "POST api/needs/answer": stale(now) });
+  const before = reads(answered);
+  click(answered.main().querySelectorAll("button.qa")[0]);
+  await settle();
+  const answer = { shown: shown(answered), reads: reads(answered) - before };
+  answered.run("Date.now = ((then) => () => then + 7000)(Date.now());");
+  answered.live().frame("needs_you", { items: [ITEM] });
+  await settle();
+  answer.later = shown(answered);
+  const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell"] });
+  const told = await feed(asked, { "POST api/agent/tell": stale([]) });
+  click(buttonNamed(told.main(), "Tell…"));
+  find(told.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "yes, merge";
+  click(buttonNamed(told.run("UI.sheet"), "Tell"));
+  await settle();
+  const crashed = Object.assign({}, ITEM, { kind: "crashed", detail: {}, answers: [], actions: ["stop"] });
+  const stopped = await feed(crashed, { "POST api/agent/stop": stale([]) });
+  click(buttonNamed(stopped.main(), "Stop…"));
+  click(buttonNamed(stopped.run("UI.sheet"), "Stop"));
+  await settle();
+  return {
+    answer,
+    tell: { shown: shown(told), sheet: sheetTitle(told) },
+    stop: { shown: shown(stopped), sheet: sheetTitle(stopped) },
+  };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -2020,6 +2065,7 @@ async function main() {
     wakes: await wakes(),
     dismissals: await dismissals(),
     afterLeaving: await afterLeaving(),
+    staleCards: await staleCards(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

@@ -1662,6 +1662,25 @@ def test_a_card_is_dismissed_by_hand_and_after_a_tell_only_once_it_was_typed_in(
     assert gone["reply"] == {"sent": [{"id": "ny_00000000000000b2"}], "cards": 0}
 
 
+def test_a_card_refused_stale_says_so_in_its_place_and_the_feed_is_read_again(
+    boot_report: dict[str, Any],
+) -> None:
+    """SPEC §6.3 and §6.4: a 409 ``stale`` puts "No longer needs you" and what is current in
+    the card's place, and reads the feed again; the card stays hidden while the note shows,
+    even if that read still lists it, and comes back once the note's 6 s are up and the feed
+    lists it still. No test reached any of it: the note, the read, the hidden card and the
+    reason could each go with every test green."""
+    stale = boot_report["staleCards"]
+    assert stale["answer"] == {
+        "shown": ["No longer needs you: coder-1 asks to run a command"],
+        "reads": 1,
+        "later": ["card: coder-1 asks which approach to take"],
+    }
+    nothing = ["No longer needs you: nothing waits on coder-1 now."]
+    assert stale["tell"] == {"shown": nothing, "sheet": None}
+    assert stale["stop"] == {"shown": nothing, "sheet": None}
+
+
 def test_an_answer_after_its_screen_was_left_neither_lands_on_the_next_nor_goes_unsaid(
     boot_report: dict[str, Any],
 ) -> None:

@@ -1577,6 +1577,54 @@ def test_attention_is_a_dialog_until_an_interruption_follows_it(
     )
 
 
+def _printed_since_the_notice(tail: TranscriptTail, *, printed: datetime) -> Fleet:
+    """coder-1 at a dialog with no tool behind it, notified a minute ago, its row as the real
+    ``fleet._derive`` reads it once the pane printed at ``printed``."""
+    row = _row()
+    session = _session(row, state="attention", seen=NOW - timedelta(minutes=1))
+    view = fleet_service._PaneView(False, None, "claude", printed)
+    fleet = Fleet(agents=[fleet_service._status(row, session, {row.id: view}, None, NOW)])
+    fleet.tails["/transcripts/coder-1.jsonl"] = tail
+    return fleet
+
+
+def test_a_dialog_whose_pane_just_printed_is_still_a_dialog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``fleet._derive`` reads output after the notice as the dialog answered, for 5 s. A key
+    that moves the dialog's highlight prints too: a stop, a restart or a switch in those
+    seconds typed ``/exit`` and Enter into the usage-limit dialog and picked what was
+    highlighted, and the dialog's card went and came back, its Switch answered stale."""
+    from aisquare.services.remote_actions import action_may_answer
+
+    before = _tail(newest="assistant_text", text="Hit the limit.", at=NOW - timedelta(minutes=2))
+    still = _printed_since_the_notice(before, printed=NOW - timedelta(seconds=30))
+    quiet = _now_of(still, FakeTmux(reference=NOW), monkeypatch)
+    assert quiet.status is not None and quiet.status.state == "attention"
+    (card,) = quiet.items
+    moved = _printed_since_the_notice(before, printed=NOW - timedelta(seconds=1))
+    pressed = _now_of(moved, FakeTmux(reference=NOW, quiet_for=1), monkeypatch)
+    assert pressed.status is not None and pressed.status.state == "working"
+    assert needs_dialog_open(pressed) and action_may_answer(pressed)
+    assert needs_item_current(pressed, card.id), "the card stays, and its Switch is not stale"
+    replied = _tail(newest="assistant_text", text="Switched.", at=NOW - timedelta(seconds=2))
+    answered = _printed_since_the_notice(replied, printed=NOW - timedelta(seconds=1))
+    gone = _now_of(answered, FakeTmux(reference=NOW, quiet_for=1), monkeypatch)
+    assert not needs_dialog_open(gone) and gone.items == (), "it wrote since: answered"
+
+
+def test_a_granted_tool_at_work_is_not_its_own_prompt_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A granted tool prints while it runs and writes nothing until it ends: the board's
+    ``attention`` is no reason to read it as a prompt, which a stale card's "1" would answer."""
+    running = _tail(_tool("toolu_a", at=NOW - timedelta(minutes=2)), at=NOW - timedelta(minutes=2))
+    granted = _printed_since_the_notice(running, printed=NOW - timedelta(seconds=1))
+    snap = _now_of(granted, FakeTmux(reference=NOW, quiet_for=1), monkeypatch)
+    assert snap.items == () and not needs_dialog_open(snap)
+    assert needs_tool_pending(snap), "a stop still refuses for it, as it always did"
+
+
 @pytest.mark.parametrize(
     "tmux",
     [

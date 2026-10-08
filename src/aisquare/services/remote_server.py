@@ -18,7 +18,8 @@ bodies in one place (:meth:`RemoteKit.kit_json_object`).
 
 **Reads** are exactly what ``asq --json`` prints: the handlers call the builders
 the typer commands use (``projects_json``, ``agents_json``, ``board_json``, the
-task and entry dumps), so nobody invents a field here. Each takes ``?project=``
+task and entry dumps), so nobody invents a field here; the board carries its newest
+:data:`BOARD_EVENTS` events where the CLI's glance has five. Each takes ``?project=``
 (default: the CURRENT project; an unknown one is a 404 shaped like an unknown
 agent), and each cached snapshot is keyed by it. Remote's own state is
 ``GET api/remote``.
@@ -61,6 +62,7 @@ base install; :func:`start_remote_server` and the CLI say what to install.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import errno
 import functools
 import hashlib
@@ -167,6 +169,9 @@ lets the woken phone back in."""
 PANE_CAPTURE_WORKERS = 4
 """Threads in the pool every pane capture of the stream runs on
 (:meth:`RemoteKit.kit_pane_pool`)."""
+WRITE_WORKERS = 8
+"""Threads in the pool every write handler runs on (:meth:`RemoteKit.kit_write_pool`): keys
+waiting out an action's lock, and the actions themselves, which take seconds."""
 HEARTBEAT_SECONDS = 10.0
 """How often a socket gets a ``heartbeat`` frame, changed or not, so the page can tell a quiet
 fleet from a dead link (the default of ``build_app(heartbeat=)``)."""
@@ -285,12 +290,16 @@ EXIT_KEY_REPEAT_SECONDS = 3.0
 """A second Ctrl-C (or Ctrl-D) to one agent this soon exits Claude Code: refused unless meant."""
 EXIT_KEYS = frozenset({"C-c", "C-d"})
 SEND_KEYS_LOCK_WAIT_SECONDS = 2.0
-"""How long a send-keys waits for its agent's action lock (:func:`remote_agent_lock`). Keys
-tapped in a burst, or sent again together after a reconnect, wait out the milliseconds each
-other's tmux calls take; an action holds the lock for seconds (an interrupt's wait for the
-prompt, a stop's grace, a restart), and keys that would land in the middle of it are 409
-``busy`` instead."""
+"""How long a send-keys waits for its agent's action lock (:func:`remote_agent_lock`), counted
+from when the request reached the server, its wait for a thread of the write pool included
+(:func:`_remote_keys_turn`). Keys tapped in a burst, or sent again together
+after a reconnect, wait out the milliseconds each other's tmux calls take; an action holds
+the lock for seconds (an interrupt's wait for the prompt, a stop's grace, a restart), and keys
+that would land in the middle of it are 409 ``busy`` instead."""
 NOTE_TEXT_MAX = 8_000
+NOTE_TO_MAX = 200
+"""The longest ``to`` a note may name, a role or a label: what the page's composer takes. The
+board keeps it with the event, and every board read and frame carries it."""
 NOTE_KINDS = frozenset({"note", "decision", "question", "result"})
 """The kinds a phone may post. The others (``attention``, ``limited``, ``agent_exited``,
 ``switched``…) are the fleet's own reports, which wake the manager or set an agent's state."""
@@ -307,13 +316,17 @@ REMOTE_KEY_VOCABULARY = (
     "Enter, Escape, Tab, BTab, BSpace, Space, Up, Down, Left, Right, Home, End, PageUp, "
     "PageDown, Delete, F1-F12, C-c, C-d, C-l, C-o, C-r, C-u, 0-9, y, n"
 )
-_TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-"""What typed ``text`` may not hold: a C0 control other than tab, newline and carriage return,
-or DEL (:func:`check_remote_text`)."""
+_TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+"""What typed ``text`` may not hold: a C0 control other than tab and newline, or DEL
+(:func:`check_remote_text`). A carriage return is the Enter key, byte for byte."""
+_PASTED_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+"""What a paste (a tell) may not hold: the same, but for the carriage return, which inside a
+bracketed paste is a line break of the message and submits nothing."""
 _TEXT_CONTROL_KEYS = {
     "\x03": "C-c",
     "\x04": "C-d",
     "\x0c": "C-l",
+    "\r": "Enter",
     "\x0f": "C-o",
     "\x12": "C-r",
     "\x15": "C-u",
@@ -339,6 +352,10 @@ class RemoteUnavailable(RemoteError):
 
 class NoRemotePage(RemoteError):
     """No built ``aisquare-remote`` page is installed at the directory the server would serve."""
+
+
+class RemoteAlreadyOn(RemoteError):
+    """Another process serves Remote from this home already (:func:`_claim_remote_home`)."""
 
 
 class RequestError(Exception):
@@ -411,7 +428,7 @@ def _remote_now() -> datetime:
 
 
 def _stamp() -> str:
-    return _remote_now().isoformat(timespec="seconds")
+    return _iso_seconds(_remote_now())
 
 
 def new_token() -> str:
@@ -754,6 +771,19 @@ def _lock_state_file(path: Path) -> int | None:
             time.sleep(0.01)
 
 
+_WRITE_ARRIVED: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "asq_remote_write_arrived", default=None
+)
+"""When the write a handler runs for reached the server (``time.monotonic``): a wait it makes
+counts from then, not from when a thread of the write pool was free to run it."""
+
+_STATE_CHECKED: contextvars.ContextVar[Runtime | None] = contextvars.ContextVar(
+    "asq_remote_state_checked", default=None
+)
+"""The runtime whose ``remote.json`` this request, or this socket's tick, has checked already
+for another process's change (:meth:`Runtime.remote_state_checked`)."""
+
+
 class Runtime:
     """The server's mutable state: ``remote.json``, the live sockets, the audit log.
 
@@ -771,6 +801,11 @@ class Runtime:
         self._lock = threading.RLock()
         """Every read and change of the state in memory; the event loop takes it on every
         request, so it is never held while waiting on another process."""
+        self._audit_lock = threading.Lock()
+        """One audit line at a time, the log made and restricted before its first
+        (:meth:`audit`). Never :attr:`_lock`: that restriction is ``icacls`` on Windows,
+        another process, and a slow one held up every request's gate and every socket's
+        tick, for a line that touches nothing in memory."""
         self._writing = threading.RLock()
         """One read-modify-write of ``remote.json`` at a time in this process, held while
         ``remote.json.lock`` is waited for (:meth:`_state_file_lock`). Taken before
@@ -778,6 +813,9 @@ class Runtime:
         self._closers: dict[str, set[Callable[[int], None]]] = {}
         """Each device's live sockets, by device id, as closers that take the close code."""
         self._file_lock_depth = 0
+        self._writer: int | None = None
+        """The thread in :meth:`_state_file_lock`, while one is: what it writes must start from
+        the file, so its check is never one a request made earlier (:meth:`reload_if_changed`)."""
         self._unpublished: bytes | None = None
         """What the read-modify-write in hand decided to write (:meth:`_write_state`), until
         its outermost :meth:`_state_file_lock` publishes it."""
@@ -862,6 +900,7 @@ class Runtime:
                     unmade = exc
                 fd = _lock_state_file(self._state_path)
                 self._file_lock_depth = 1
+                self._writer = threading.get_ident()
                 try:
                     try:
                         with self._lock:
@@ -872,6 +911,7 @@ class Runtime:
                             self._publish_state(pending, unmade, body)
                 finally:
                     self._file_lock_depth = 0
+                    self._writer = None
                     if fd is not None:
                         with contextlib.suppress(OSError):
                             unlock(fd)
@@ -905,7 +945,12 @@ class Runtime:
         So a read made while :attr:`_disk` moved, by a write here or by another
         reload's adoption, is never adopted: what is in hand is that newer state,
         and anything newer still on disk is read by the next check.
+
+        Inside :meth:`remote_state_checked` the block's first check stands for the
+        rest, but never for a read-modify-write's own, under the file lock.
         """
+        if _STATE_CHECKED.get() is self and self._writer != threading.get_ident():
+            return False
         with self._lock:
             moves = self._disk_moves
         signature = self._signature()
@@ -935,6 +980,27 @@ class Runtime:
             for device_id in [device_id for device_id in known if device_id not in kept]:
                 self._close_sockets(device_id, WS_CLOSE_UNAUTHORIZED)
             return True
+
+    @contextlib.contextmanager
+    def remote_state_checked(self) -> Iterator[None]:
+        """Check ``remote.json`` for another process's change ONCE for everything inside:
+        one request, gates and route, or one tick of a socket.
+
+        Every read of the state checks the file (:meth:`reload_if_changed`), a read and a
+        digest each, and one request made three or four of them on the event loop that
+        serves every request and socket: the token, the deadline and the cookie's device
+        at the gate, then the route's own (``api/remote``, the write gate); and every
+        socket three a second (review of #243, round 3). Inside this block the first
+        check stands for the rest, so another process's change is still seen by the next
+        request and the next tick. A read-modify-write in it still reads the file under
+        the file lock: what it writes must start from what is on disk.
+        """
+        self.reload_if_changed()
+        token = _STATE_CHECKED.set(self)
+        try:
+            yield
+        finally:
+            _STATE_CHECKED.reset(token)
 
     def _read_state_file(self) -> tuple[bytes, dict[str, Any]] | None:
         """The file's bytes and its JSON object; ``None`` when there is nothing to keep.
@@ -1403,7 +1469,8 @@ class Runtime:
         to another device. The log names devices by id, never by cookie, and is
         still owner-only before it holds a line: created empty at 0600, then
         restricted to this account (on NTFS, where the bits protect nothing, the
-        DACL), the order ``core.atomic`` restricts a temp in.
+        DACL), the order ``core.atomic`` restricts a temp in, all under
+        :attr:`_audit_lock` alone.
         """
         fields = (
             _audit_clean(device_id, AUDIT_DEVICE_MAX),
@@ -1411,7 +1478,7 @@ class Runtime:
             _audit_clean(summary, AUDIT_SUMMARY_MAX),
         )
         line = f"{_stamp()} {' '.join(fields)}\n".encode()
-        with self._lock:
+        with self._audit_lock:
             self._audit_path.parent.mkdir(parents=True, exist_ok=True)
             try:
                 os.close(os.open(self._audit_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
@@ -1578,17 +1645,22 @@ def check_remote_key_names(keys: object) -> list[str]:
     return list(keys)
 
 
-def check_remote_text(text: str) -> None:
-    """Refuse typed ``text`` holding a control character other than tab, newline and
-    carriage return: 400 ``invalid``, naming the pad's key for it.
+def check_remote_text(text: str, *, pasted: bool = False) -> None:
+    """Refuse typed ``text`` holding a control character other than tab and newline: 400
+    ``invalid``, naming the pad's key for it. A ``pasted`` text (a tell) may also hold a
+    carriage return.
 
     Text reaches the pane as hex, byte for byte, so a control character in it IS a
     keystroke: ``"\\x03"`` was a Ctrl-C past the double-press guard, ``"\\x1a"`` the
     Ctrl-Z :data:`REMOTE_KEY_NAME` refuses as a key, and the audit line said
     ``text=1ch``, which cannot tell either from a letter. Keys go as ``keys``, where
-    the allowlist, the guard and the trail see them by name.
+    the allowlist, the guard and the trail see them by name. A carriage return is the
+    Enter key's own byte: ``{"text": "\\r"}`` took a dialog's highlighted option while
+    the trail said ``enter=False``, and each line of a CRLF text was a prompt of its own
+    (review of #243, round 3). Inside a tell's bracketed paste it is a line break of
+    the message, as a newline is.
     """
-    found = _TEXT_CONTROL.search(text)
+    found = (_PASTED_CONTROL if pasted else _TEXT_CONTROL).search(text)
     if found is None:
         return
     char = found.group()
@@ -1731,6 +1803,29 @@ def _remote_pane_outlived(server: TmuxServer, agent: FleetAgent) -> bool:
     return fleet_service._outlived(agent, started)
 
 
+PANE_NOT_AGENT = "{label}'s pane is not running the agent"
+"""409 ``not_agent`` for a row whose pane runs something else (:func:`_remote_pane_refusal`)."""
+
+
+def _remote_pane_refusal(server: TmuxServer, agent: FleetAgent) -> str | None:
+    """Why nothing may be typed into the row's pane, a sentence about ``{label}``; ``None``
+    when the pane is the agent's own.
+
+    It must run the agent (``fleet._pane_is_the_agent``), and on the server the row was
+    recorded on (:func:`_remote_pane_outlived`), asked in that order. ``send-keys`` and
+    needs-you's snapshot, which the quick answers and the agent actions type on the
+    strength of, both ask here: the stale-pane rule in one place, where a second copy
+    would miss the next restart signal it learns.
+    """
+    from aisquare.services import fleet as fleet_service
+
+    if not fleet_service._pane_is_the_agent(server, agent.pane_id):
+        return PANE_NOT_AGENT
+    if _remote_pane_outlived(server, agent):
+        return PANE_OUTLIVED
+    return None
+
+
 @contextlib.contextmanager
 def _remote_keys_turn(target: ProjectInfo, label: str) -> Iterator[FleetAgent]:
     """Hold the agent's action lock while keys go to its pane; the row, read under it.
@@ -1742,10 +1837,28 @@ def _remote_keys_turn(target: ProjectInfo, label: str) -> Iterator[FleetAgent]:
     up to :data:`SEND_KEYS_LOCK_WAIT_SECONDS`, and are 409 ``busy`` after that, as a
     second action is. A label no row holds makes no lock: the registry is process-wide
     and never shrinks, and a label is whatever a body says.
+
+    The wait counts from when the request reached the server (:data:`_WRITE_ARRIVED`).
+    Counted from when a thread was free to run it, keys tapped in a burst during an
+    action waited their 2 s each in turn, a pool's worth at a time, and the last ones
+    took the lock when the action let it go, seconds after their taps: typed into the
+    replacement a restart had started (sweep of #243). Keys whose wait ran out before a
+    thread was free to run them are 409 ``busy`` at a free lock as well: behind actions
+    that held every thread of the write pool (a restart holds one for 20 to 40 s), a key
+    ran as one of them ended, seconds after its tap, and typed into whatever its agent
+    showed by then, the replacement a restart had started when that action was on it
+    (review of #243, round 3).
     """
     _remote_live_row(target, label)
     lock = remote_agent_lock(target.id, label)
-    if not lock.acquire(timeout=SEND_KEYS_LOCK_WAIT_SECONDS):
+    arrived = _WRITE_ARRIVED.get()
+    wait = SEND_KEYS_LOCK_WAIT_SECONDS
+    if arrived is not None:
+        wait -= time.monotonic() - arrived
+    if wait <= 0:
+        busy = f"the machine was busy with other actions for {SEND_KEYS_LOCK_WAIT_SECONDS:g} s"
+        raise RequestError(409, "busy", f"{busy} — nothing was sent to {label}")
+    if not lock.acquire(timeout=wait):
         raise RequestError(
             409, "busy", f"another action on {label} is still running — nothing was sent"
         )
@@ -1860,12 +1973,20 @@ def _agent_state_counts(agents: list[FleetAgentStatus]) -> dict[str, int]:
     return counts
 
 
+BOARD_EVENTS = 200
+"""The newest board events ``api/board`` and the ``board`` frame carry: as many as the page's
+Board tab draws. ``asq board --json`` prints five, a glance in a terminal."""
+
+
 def remote_board_payload(project: str | None = None) -> dict[str, object]:
     """``GET api/board`` and the ``board`` frame — the ONE call into ``board_data``.
 
     The project's root as ``cwd`` is exactly what ``asq board --json`` prints when
     run there, ``AISQUARE_TEAM_HUB`` included (``team_service._project``); ``None``
-    is the current project, as it always was.
+    is the current project, as it always was. With :data:`BOARD_EVENTS` events,
+    not the CLI's five: the Board tab is the board, and with five a question a
+    card sent the human to "reply on the board" to was gone from it once five
+    newer lines were (review of #243, round 3).
 
     #240 fold: pass ``exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS`` here (one line).
     """
@@ -1873,7 +1994,7 @@ def remote_board_payload(project: str | None = None) -> dict[str, object]:
     from aisquare.services import team as team_service
 
     cwd = None if project is None else _resolve_project(project).root
-    return board_json(*team_service.board_data(cwd))
+    return board_json(*team_service.board_data(cwd, events=BOARD_EVENTS))
 
 
 def live_sources() -> Sources:
@@ -2072,7 +2193,14 @@ def _live_explainability(label: str, project: str | None = None) -> dict[str, ob
     )
 
 
-def _required(body: dict[str, Any], key: str) -> str:
+def _required(body: Mapping[str, Any], key: str) -> str:
+    """A string the write cannot go without; 400 ``invalid`` when it is missing or blank.
+
+    This and the readers below are the ONE way a write reads its body's fields, the
+    agent actions' and the quick answers' included (``remote_actions.action_required``
+    is this function): two copies drifted, one refusing a value of the wrong type and
+    the other reading it as absent.
+    """
     value = body.get(key)
     if not isinstance(value, str) or not value.strip():
         raise RequestError(400, "invalid", f"{key!r} is required")
@@ -2104,17 +2232,34 @@ def _audit_keys(keys: list[str] | None) -> str:
     return "[" + ",".join(scrubbed) + "]"
 
 
-def _optional_ref(body: dict[str, Any], key: str) -> str | None:
-    """An optional NAME or reference — blank and whitespace-only both mean absent.
+def _optional_ref(
+    body: Mapping[str, Any], key: str, *, limit: int | None = None, guard: bool = False
+) -> str | None:
+    """An optional NAME or reference — absent, null, blank and whitespace-only mean none.
+
+    Any other value that is not a string is a 400 ``invalid``, never none: read as
+    none, ``"project": 2048`` sent a write to the CURRENT project, keys typed into
+    its agent included. Over ``limit`` is a 413. A ``guard`` (an id that keeps an
+    action off the wrong agent: ``agent_id``, ``needs_id``) may not be blank either:
+    read as none, the blank one a page sent from a card that had none would turn
+    the guard off, and the action would still go through.
 
     Correct for a project ref, a note's task or a role. WRONG for literal text a
     human typed: see :func:`_literal`.
     """
     value = body.get(key)
-    return value if isinstance(value, str) and value.strip() else None
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RequestError(400, "invalid", f"{key!r} must be a string")
+    if limit is not None and len(value) > limit:
+        raise RequestError(413, "too_large", f"{key!r} is over {limit} characters")
+    if guard and not value.strip():
+        raise RequestError(400, "invalid", f"{key!r} is blank: send the id, or leave it out")
+    return value.strip() or None
 
 
-def _literal(body: dict[str, Any], key: str) -> str | None:
+def _literal(body: Mapping[str, Any], key: str) -> str | None:
     """Text to deliver verbatim — whitespace is CONTENT here, not emptiness.
 
     ``_optional_ref`` answers "did they name something", and a name that is all
@@ -2123,11 +2268,35 @@ def _literal(body: dict[str, Any], key: str) -> str | None:
     ``" "`` became ``None``, so a write carrying only a space delivered nothing
     while the endpoint answered 200 ``sent: true``, and the audit line recorded
     ``text=0ch`` — the trail honestly reporting that no text was sent, the loss
-    having happened before it. Absent or non-string is still absent; ``""`` is
-    still nothing to send.
+    having happened before it. Absent or null is still absent; ``""`` is still
+    nothing to send. A value that is not a string is a 400 ``invalid``: read as
+    absent, ``"text": 3`` with ``"enter": true`` sent the Enter alone, which takes a
+    dialog's highlighted option, and answered 200 ``sent: true``.
     """
     value = body.get(key)
-    return value if isinstance(value, str) else None
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RequestError(400, "invalid", f"{key!r} must be a string")
+    return value
+
+
+def _remote_flag(body: Mapping[str, Any], key: str) -> bool:
+    """An optional ``true`` or ``false``, and nothing else: absent or null is false, any
+    other value a 400 ``invalid``.
+
+    ``bool()`` of a JSON string is true for ``"false"``, ``"0"`` and ``"no"``: ``"enter":
+    "false"`` pressed Enter after the keys it came with, which takes a dialog's
+    highlighted option, and ``"force": "false"`` would kill an agent without its
+    ``/exit``. ``send-keys``, the quick answers and the agent actions all read their
+    flags here (``remote_actions.action_flag`` is this function).
+    """
+    value = body.get(key)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise RequestError(400, "invalid", f"{key!r} must be true or false")
+    return value
 
 
 DOUBLE_PRESS = (
@@ -2193,7 +2362,11 @@ def live_writes() -> Writes:
         the human's kinds (:data:`NOTE_KINDS`): ``kind`` went to the board and the
         audit line as it came, so a phone could forge the fleet's own reports and,
         with a newline in it, a line of the audit trail. The summary records who
-        the note claims to be from (``as=``) and who it is for (``to=``).
+        the note claims to be from (``as=``) and who it is for (``to=``), in that
+        order, and ``to`` quoted: it is whatever the body says, and written before
+        ``as=`` and bare, ``"to": "coder-1 as=manager"`` read as a note posted as
+        the manager, and 300 characters of it cut the real ``as=`` off the line
+        (sweep of #243). ``as`` must name a session, or the note is refused.
         """
         from aisquare.services import team as team_service
 
@@ -2205,7 +2378,7 @@ def live_writes() -> Writes:
         if kind not in NOTE_KINDS:
             kinds = ", ".join(sorted(NOTE_KINDS))
             raise RequestError(400, "invalid", f"'kind' must be one of {kinds}")
-        author, to = _optional_ref(body, "as"), _optional_ref(body, "to")
+        author, to = _optional_ref(body, "as"), _optional_ref(body, "to", limit=NOTE_TO_MAX)
         event = team_service.add_note(
             text,
             session_ref=author,
@@ -2214,7 +2387,8 @@ def live_writes() -> Writes:
             kind=kind,
             cwd=None if project is None else _resolve_project(project).root,
         )
-        summary = f"{event.kind} seq={event.seq} to={to or '-'} as={author or '-'}"
+        addressed = "-" if to is None else json.dumps(to)
+        summary = f"{event.kind} seq={event.seq} as={author or '-'} to={addressed}"
         return {"event": event.as_envelope().model_dump(mode="json")}, summary
 
     def project_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -2267,7 +2441,8 @@ def live_writes() -> Writes:
     def write_send_keys(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         """Type into one agent's pane: ``text`` (as hex, nothing parses it), or pad ``keys``.
 
-        Everything is checked before anything is sent: the keys against the
+        Everything is checked before anything is sent: each field's type (a
+        ``"enter": "false"`` is a 400, not an Enter), the keys against the
         allowlist, the caps, no control character in the text, one input per body
         (``text`` went first, so "Esc, then type" arrived as "type, then Esc"), the
         pane, and the double Ctrl-C. The pane must be running the agent, and be the
@@ -2282,7 +2457,9 @@ def live_writes() -> Writes:
         label = _required(body, "agent")
         text = _literal(body, "text")
         keys = [] if body.get("keys") is None else check_remote_key_names(body["keys"])
-        enter = bool(body.get("enter", False))
+        enter = _remote_flag(body, "enter")
+        confirmed = _remote_flag(body, "confirm_exit")
+        project = _optional_ref(body, "project")
         if text and len(text) > SEND_KEYS_TEXT_MAX:
             raise RequestError(
                 413,
@@ -2297,21 +2474,17 @@ def live_writes() -> Writes:
             )
         if not text and not keys and not enter:
             raise RequestError(400, "invalid", "give 'text', 'keys' or 'enter'")
-        target = _resolve_project(_optional_ref(body, "project"))
+        target = _resolve_project(project)
         summary = (
             f"{label}@{target.id} text={len(text or '')}ch keys={_audit_keys(keys)} enter={enter}"
         )
         with _remote_keys_turn(target, label) as agent:
             server = fleet_service.server_for(agent.tmux_socket)
-            if not fleet_service._pane_is_the_agent(server, agent.pane_id):
-                raise RequestError(
-                    409, "not_agent", f"{label}'s pane is not running the agent — nothing was sent"
-                )
-            if _remote_pane_outlived(server, agent):
-                gone = PANE_OUTLIVED.format(label=label)
-                raise RequestError(409, "not_agent", f"{gone} — nothing was sent")
+            refusal = _remote_pane_refusal(server, agent)
+            if refusal is not None:
+                said = refusal.format(label=label)
+                raise RequestError(409, "not_agent", f"{said} — nothing was sent")
             exits = sum(key in EXIT_KEYS for key in keys)
-            confirmed = body.get("confirm_exit") is True
             if exits and not exit_keys.exit_keys_allowed(
                 (target.id, label), exits, confirmed=confirmed
             ):
@@ -2632,6 +2805,8 @@ NOT_UNLOCKED = "no unlocked device for this request — unlock with the passphra
 """401 ``unauthorized``: no cookie, or one whose device is signed out, revoked or expired."""
 WRONG_PASSWORD = "that is not the passphrase"
 """401 ``wrong_password``."""
+NOT_TEXT = "the body holds a lone surrogate (an unpaired \\ud800-\\udfff escape), which is not text"
+"""400 ``invalid`` for a body string no UTF-8 can hold (:meth:`RemoteKit.kit_json_object`)."""
 CRASHED = "the machine hit an error answering that"
 """500 ``internal_error``: what the ledger answers a retry of a request that crashed, in the
 words the page uses for a crash."""
@@ -2643,8 +2818,12 @@ def _error_body(error: str, message: str) -> dict[str, object]:
     The message is always there: the docs promise one, and the page shows it, so a
     refusal without one left the unlock line saying ``not_found``. A message that came
     out empty, the ``str()`` of an exception that holds no text, is the code in words.
+    And a sentence that echoes what a request or the disk held, a name or a path, may
+    hold a lone surrogate, which no response can encode: each is a ``?``, or the
+    refusal would end as a bare 500 in plain text instead.
     """
-    return {"error": error, "message": message or error.replace("_", " ")}
+    said = message or error.replace("_", " ")
+    return {"error": error, "message": said.encode("utf-8", "replace").decode("utf-8")}
 
 
 def _json_error(status: int, error: str, message: str) -> Response:
@@ -2831,12 +3010,26 @@ class _TokenGate:
         if kind not in ("http", "websocket"):  # lifespan: the lanes start and stop with the app
             await self._app(scope, receive, send)
             return
+        # remote.json is checked for another process's change once, here, for the gates
+        # and, over HTTP, for the route behind them (Runtime.remote_state_checked).
+        with self._runtime.remote_state_checked():
+            passed = await self._remote_gated(scope, receive, send)
+            if passed is not None and kind == "http":
+                await self._app(scope, passed, send)
+                return
+        if passed is not None:
+            # A socket lives for hours: its stream checks the file once a tick instead.
+            await self._app(scope, passed, send)
+
+    async def _remote_gated(self, scope: Any, receive: Any, send: Any) -> Any | None:
+        """The five gates: the ``receive`` to hand the app, or ``None`` once a refusal went."""
         runtime = self._runtime
+        kind = scope.get("type")
         if not (remote_gate_token(runtime, scope) and remote_gate_auto_off(runtime, scope)):
             await _refuse_at_the_gate(
                 scope, receive, send, 404, "not_found", LINK_GONE, WS_CLOSE_NOT_FOUND
             )
-            return
+            return None
         method = scope.get("method")  # a handshake has none, and is always asked
         if method not in ("GET", "HEAD") and not remote_gate_origin(scope):
             await _refuse_at_the_gate(
@@ -2848,23 +3041,23 @@ class _TokenGate:
                 "this request did not come from the remote page",
                 WS_CLOSE_BAD_ORIGIN,
             )
-            return
+            return None
         if _needs_a_device(scope):
             device = remote_gate_device(runtime, scope)
             if device is None:
                 await _refuse_at_the_gate(
                     scope, receive, send, 401, "unauthorized", NOT_UNLOCKED, WS_CLOSE_UNAUTHORIZED
                 )
-                return
+                return None
             scope[DEVICE_SCOPE] = device
         if kind == "http" and method not in ("GET", "HEAD", "OPTIONS"):
             replayed = await remote_gate_body(scope, receive)
             if replayed is None:
                 too_large = f"the body is over {MAX_BODY_BYTES} bytes"
                 await _json_error(413, "too_large", too_large)(scope, receive, send)
-                return
-            receive = replayed
-        await self._app(scope, receive, send)
+                return None
+            return replayed
+        return receive
 
 
 # --- the kit: what every route of one app shares ---------------------------------------
@@ -2872,6 +3065,11 @@ class _TokenGate:
 
 IN_PROGRESS = "a request with this request_id is still running — its answer will follow"
 """409 ``in_progress``: a retry that arrived while the first try was still running."""
+REQUEST_ID_REUSED = (
+    "request_id {request_id} was sent with another request — give each write a request_id of "
+    "its own, and send one again only with the request it was first sent with"
+)
+"""409 ``request_id_reused``: an id the ledger holds, with another endpoint or body."""
 
 
 def _new_action_ledger() -> ActionLedger:
@@ -2890,6 +3088,18 @@ def _ledger_request_id(body: dict[str, Any]) -> str | None:
             400, "invalid", "'request_id' must be 1 to 64 letters, digits, '_' or '-'"
         )
     return request_id
+
+
+def _ledger_request(endpoint: str, body: dict[str, Any]) -> str:
+    """What a ``request_id`` stands for: the endpoint and the body, its id taken out, as one
+    digest. A retry sends both again as they were (the page resends the very body); a
+    write that reuses the id for anything else is another request (:meth:`RemoteKit.kit_gated`).
+    """
+    try:
+        canonical = json.dumps([endpoint, body], sort_keys=True, separators=(",", ":"))
+    except (ValueError, RecursionError):  # nested past what json recurses into
+        raise RequestError(400, "invalid", "the body must be a JSON object") from None
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
 
 
 def _ledger_body(response: Response) -> dict[str, object]:
@@ -2922,6 +3132,8 @@ class RemoteKit:
     """The request ledger every write-gated request passes (SPEC §1.5)."""
     pane_pool: ThreadPoolExecutor | None = None
     """Made on the first pane capture (:meth:`kit_pane_pool`); the lifespan shuts it down."""
+    write_pool: ThreadPoolExecutor | None = None
+    """Made on the first write (:meth:`kit_write_pool`); the lifespan shuts it down."""
     sockets: dict[str, list[Callable[[int], None]]] = field(default_factory=dict)
     """Each device's live sockets, oldest first, as closers that take a close code."""
     lane_state: dict[str, Any] = field(default_factory=dict)
@@ -2942,7 +3154,11 @@ class RemoteKit:
         pins it), so every route refuses a malformed one the same way: 400 ``invalid``.
         That includes a body nested deeper than ``json`` recurses into: it raises
         ``RecursionError``, not ``ValueError`` (from about 1 000 levels on 3.11), and
-        anyone holding only the URL can post one to ``unlock``.
+        anyone holding only the URL can post one to ``unlock``. And a string holding a
+        lone surrogate, which ``json`` reads from a ``\\ud800`` escape and no UTF-8
+        can hold: a refusal that echoed one (a stop's ``confirm=<label>``, a path
+        ``project/add`` would not take) could not be encoded, and answered a bare 500
+        in plain text that the ledger kept as a crash (sweep of #243).
         """
         from starlette.requests import ClientDisconnect
 
@@ -2958,6 +3174,12 @@ class RemoteKit:
             raise RequestError(400, "invalid", "the body must be a JSON object") from None
         if not isinstance(body, dict):
             raise RequestError(400, "invalid", "the body must be a JSON object")
+        try:
+            json.dumps(body, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError:
+            raise RequestError(400, "invalid", NOT_TEXT) from None
+        except (ValueError, RecursionError):
+            raise RequestError(400, "invalid", "the body must be a JSON object") from None
         return body
 
     def kit_refuse(
@@ -3000,7 +3222,8 @@ class RemoteKit:
     def kit_pane_pool(self) -> ThreadPoolExecutor:
         """The pool every pane capture of the stream runs on, made on first use.
 
-        Never the default thread pool, which serves every HTTP read and write:
+        Never the default thread pool, which serves every HTTP read and every
+        socket's board and fleet snapshot, nor the write pool (:meth:`kit_write_pool`):
         4 sockets x 8 subscriptions x N devices may queue captures here, but at
         most :data:`PANE_CAPTURE_WORKERS` run at once, and no request ever waits
         behind them.
@@ -3013,6 +3236,35 @@ class RemoteKit:
                     max_workers=PANE_CAPTURE_WORKERS, thread_name_prefix="asq-remote-pane"
                 )
             return self.pane_pool
+
+    def kit_write_pool(self) -> ThreadPoolExecutor:
+        """The pool every write handler runs on, made on first use.
+
+        Never the default thread pool either, which runs every read and every socket's
+        board and fleet snapshot: a send-keys waits there for its agent's lock while an
+        action holds it, and a burst of taps during a restart held all of that pool's
+        threads, so the stream and every read stalled for seconds (sweep of #243).
+        """
+        with self._lock:
+            if self.write_pool is None:
+                from concurrent.futures import ThreadPoolExecutor
+
+                self.write_pool = ThreadPoolExecutor(
+                    max_workers=WRITE_WORKERS, thread_name_prefix="asq-remote-write"
+                )
+            return self.write_pool
+
+    async def kit_run_write(
+        self, handler: WriteHandler, body: dict[str, Any], arrived: float
+    ) -> tuple[dict[str, object], str]:
+        """``handler(body)`` on the write pool, told when its request reached the server
+        (``arrived``, ``time.monotonic``), and in this request's context otherwise."""
+        import asyncio
+
+        context = contextvars.copy_context()
+        context.run(_WRITE_ARRIVED.set, arrived)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self.kit_write_pool(), context.run, handler, body)
 
     def kit_socket_opened(self, device_id: str, closer: Callable[[int], None]) -> None:
         """Count a device's new socket; past :data:`WS_SOCKETS_PER_DEVICE`, close its oldest."""
@@ -3036,34 +3288,78 @@ class RemoteKit:
             if not live:
                 self.sockets.pop(device_id, None)
 
+    async def kit_gated(
+        self,
+        request: Request,
+        device: Device,
+        endpoint: str,
+        respond: Callable[[dict[str, Any]], Awaitable[Response]],
+    ) -> Response:
+        """A write-gated request, the write dispatcher's and a lane route's alike (SPEC
+        §1.5): the body and its ``request_id``, the ledger, the write gate, then
+        ``respond(body)`` once per ``request_id`` (:meth:`kit_ledgered`).
+
+        A retry, its ``request_id`` known to the ledger with the same endpoint and body
+        (:func:`_ledger_request`), is answered from it before the write gate is asked:
+        the answer the first try got, or 409 ``in_progress`` while that still runs. A
+        retry changes nothing, and asked first, the gate answered one 403 ``read_only``
+        once writes were off: the page said "Read-only", greyed every write and settled
+        the pending request with the 403, though the restart it was for had run (review
+        of #243, round 3). Everything else needs the gate, and while writes are off a
+        body the ledger cannot answer is a 403 whatever else is wrong with it. Past the
+        gate, an id the ledger holds for another request is 409 ``request_id_reused``,
+        not that request's answer: replayed, a stop sent with a send-keys' id was
+        answered 200 and never ran (sweep of #243).
+        """
+        from starlette.responses import JSONResponse
+
+        allowed = self.kit_write_allowed()
+        try:
+            body = await self.kit_json_object(request)
+            request_id = _ledger_request_id(body)
+            asked = "" if request_id is None else _ledger_request(endpoint, body)
+        except RequestError as exc:
+            if not allowed:
+                return self.kit_refuse(403, "read_only", READ_ONLY_REASON)
+            return JSONResponse(exc.request_error_body(), status_code=exc.status)
+        seen = None if request_id is None else self.ledger.ledger_seen(device.id, request_id, asked)
+        if seen is not None and seen.same:
+            if seen.answer is None:
+                return self.kit_refuse(409, "in_progress", IN_PROGRESS)
+            status, payload = seen.answer
+            return JSONResponse(payload, status_code=status)
+        if not allowed:
+            return self.kit_refuse(403, "read_only", READ_ONLY_REASON)
+        if seen is not None:
+            reused = REQUEST_ID_REUSED.format(request_id=request_id)
+            return self.kit_refuse(409, "request_id_reused", reused)
+        return await self.kit_ledgered(
+            device, request_id, endpoint, lambda: respond(body), request=asked
+        )
+
     async def kit_ledgered(
         self,
         device: Device,
         request_id: str | None,
         endpoint: str,
         respond: Callable[[], Awaitable[Response]],
+        *,
+        request: str = "",
     ) -> Response:
         """``respond()``, once per ``request_id`` (SPEC §1.5): the ledger flow of every
-        write-gated request, the write dispatcher's and a lane route's alike.
+        write-gated request, once :meth:`kit_gated` found its id new to the ledger.
 
-        Without an id it just runs. A retried id is answered from the ledger
-        instead of running again, and one still running is 409 ``in_progress``.
-        How every request ended is stored, refusals included, so a retry gets the
-        answer the first try got, and it is stored in a ``finally``: a crash or a
-        cancellation is an ending too. The dispatcher kept a copy of this flow that
-        stored after its ``try``, which stops an ``Exception`` and nothing else, so
-        a cancelled write left its id running, and every retry of it was answered
-        ``in_progress`` until the ledger forgot the id.
+        Without an id it just runs. With one it is marked running as ``request`` (one
+        that runs already is 409 ``in_progress``), and how it ended is stored, refusals
+        included, so a retry gets the answer the first try got, and it is stored in
+        a ``finally``: a crash or a cancellation is an ending too. The dispatcher kept
+        a copy of this flow that stored after its ``try``, which stops an
+        ``Exception`` and nothing else, so a cancelled write left its id running, and
+        every retry of it was answered ``in_progress`` until the ledger forgot the id.
         """
-        from starlette.responses import JSONResponse
-
         if request_id is None:
             return await respond()
-        replayed = self.ledger.ledger_replay(device.id, request_id)
-        if replayed is not None:
-            status, payload = replayed
-            return JSONResponse(payload, status_code=status)
-        if not self.ledger.ledger_begin(device.id, request_id, endpoint):
+        if not self.ledger.ledger_begin(device.id, request_id, endpoint, request):
             return self.kit_refuse(409, "in_progress", IN_PROGRESS)
         status, payload = 500, _error_body("internal_error", CRASHED)
         try:
@@ -3078,11 +3374,11 @@ class RemoteKit:
     ) -> Route:
         """A lane's route: the endpoint gets the device and the parsed body (``{}`` for GET).
 
-        With ``write_gated``, the route answers 403 ``read_only`` until writes are
-        on, takes the optional ``request_id`` out of the body, and runs through the
-        ledger (:meth:`kit_ledgered`): a retried id is answered from it instead of
-        running again, one still running is 409 ``in_progress``, and how every
-        request ended is stored, refusals included, so a retry gets the answer the
+        With ``write_gated``, a POST, PUT or DELETE goes through :meth:`kit_gated`:
+        it takes the optional ``request_id`` out of the body, answers a retried id from
+        the ledger instead of running again (one still running is 409
+        ``in_progress``), answers 403 ``read_only`` while writes are off, and stores
+        how every request ended, refusals included, so a retry gets the answer the
         first try got.
 
         A route that changes something without the gate must be in
@@ -3112,18 +3408,19 @@ class RemoteKit:
 
         async def kit_endpoint(request: Request) -> Response:
             reading = request.method in ("GET", "HEAD")
-            gated = write_gated and not reading  # a read never waits on the write gate
             try:
                 device = self.kit_device(request)
-                if gated and not self.kit_write_allowed():
-                    raise RequestError(403, "read_only", READ_ONLY_REASON)
-                body = {} if reading else await self.kit_json_object(request)
-                request_id = _ledger_request_id(body) if gated else None
             except RequestError as exc:
                 return JSONResponse(exc.request_error_body(), status_code=exc.status)
-            return await self.kit_ledgered(
-                device, request_id, name, lambda: kit_respond(request, device, body)
-            )
+            if write_gated and not reading:  # a read never waits on the write gate
+                return await self.kit_gated(
+                    request, device, name, lambda body: kit_respond(request, device, body)
+                )
+            try:
+                body = {} if reading else await self.kit_json_object(request)
+            except RequestError as exc:
+                return JSONResponse(exc.request_error_body(), status_code=exc.status)
+            return await kit_respond(request, device, body)
 
         return Route(path, kit_endpoint, methods=methods)
 
@@ -3133,8 +3430,8 @@ async def remote_lifespan(kit: RemoteKit) -> AsyncIterator[None]:
     """The lanes' background work starts with the server and stops with it.
 
     The needs watcher first, then the push sender, which listens to it; at
-    shutdown their stoppers run in reverse, and then the pane pool is shut
-    down. A lane that fails to start costs its own feature and never the
+    shutdown their stoppers run in reverse, and then the pane and write pools
+    are shut down. A lane that fails to start costs its own feature and never the
     server: it is logged, and the rest carries on.
     """
     import asyncio
@@ -3159,9 +3456,10 @@ async def remote_lifespan(kit: RemoteKit) -> AsyncIterator[None]:
                 await asyncio.to_thread(stopper)
             except Exception:
                 log.warning("remote: a lane did not stop cleanly", exc_info=True)
-        pool, kit.pane_pool = kit.pane_pool, None
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
+        for pool in (kit.pane_pool, kit.write_pool):
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
+        kit.pane_pool = kit.write_pool = None
 
 
 def build_remote_app(
@@ -3362,7 +3660,9 @@ def build_remote_app(
         if extended is None:
             return kit.kit_refuse(409, "no_auto_off", "Remote has no auto-off deadline to extend")
         stamp = _iso_seconds(extended)
-        kit.kit_audit(device, "remote/extend", f"extend auto_off_at={stamp}")
+        await asyncio.to_thread(
+            kit.kit_audit, device, "remote/extend", f"extend auto_off_at={stamp}"
+        )
         return JSONResponse({"auto_off_at": stamp})
 
     async def devices_list_endpoint(request: Request) -> Response:
@@ -3389,7 +3689,9 @@ def build_remote_app(
             return kit.kit_refuse(403, "read_only", READ_ONLY_REASON)
         if not await asyncio.to_thread(runtime.revoke_device, device_id):
             return kit.kit_refuse(404, "not_found", "no such device")
-        kit.kit_audit(device, "devices/revoke", "self" if own else device_id)
+        await asyncio.to_thread(
+            kit.kit_audit, device, "devices/revoke", "self" if own else device_id
+        )
         response = JSONResponse({"ok": True, "id": device_id, "signed_out": own})
         if own:
             response.delete_cookie(COOKIE, path=cookie_path(request))
@@ -3454,31 +3756,25 @@ def build_remote_app(
     async def write_endpoint(request: Request) -> Response:
         """``POST api/{name}``: the plan's writes and the agent actions (SPEC §1.5).
 
-        In order: the name, the write gate, the body and its optional
-        ``request_id``, then the handler in a worker thread, inside the ledger
-        flow every write-gated lane route goes through too
-        (:meth:`RemoteKit.kit_ledgered`: refusals are stored as well, so a retry
-        gets the same refusal), and last the audit line for a write that went
+        In order: the name, then what every write-gated lane route goes through too
+        (:meth:`RemoteKit.kit_gated`): the body and its optional ``request_id``, a
+        retry answered from the ledger, the write gate, and the handler on the write
+        pool (:meth:`RemoteKit.kit_run_write`), its ending stored, refusals as well, so
+        a retry gets the same refusal. Last, the audit line for a write that went
         through.
         """
+        arrived = time.monotonic()
         device = kit.kit_device(request)
         name = request.path_params["name"]
         handler = handlers.get(name) if name in write_endpoint_names() else None
         if handler is None:
             return _json_error(404, "not_found", f"there is nothing to write at api/{name}")
-        if not kit.kit_write_allowed():
-            return kit.kit_refuse(403, "read_only", READ_ONLY_REASON)
-        try:
-            body = await kit.kit_json_object(request)
-            request_id = _ledger_request_id(body)
-        except RequestError as exc:
-            return JSONResponse(exc.request_error_body(), status_code=exc.status)
         summary: str | None = None
 
-        async def dispatched() -> Response:
+        async def dispatched(body: dict[str, Any]) -> Response:
             nonlocal summary
             try:
-                result, summary = await asyncio.to_thread(handler, body)
+                result, summary = await kit.kit_run_write(handler, body, arrived)
                 status, payload = 200, result
             except RequestError as exc:
                 status, payload = exc.status, exc.request_error_body()
@@ -3492,11 +3788,13 @@ def build_remote_app(
                 status, payload = 400, _error_body("write_failed", str(exc))
             return JSONResponse(payload, status_code=status)
 
-        response = await kit.kit_ledgered(device, request_id, name, dispatched)
+        response = await kit.kit_gated(request, device, name, dispatched)
         # After the ledger has the ending: an audit log that cannot be written fails
-        # the request, and must not make a write that went through read as failed.
+        # the request, and must not make a write that went through read as failed. In a
+        # worker thread: the first line creates the log and restricts it to this account,
+        # on Windows an icacls run, and every line opens and appends to a file.
         if summary is not None:
-            kit.kit_audit(device, name, summary)
+            await asyncio.to_thread(kit.kit_audit, device, name, summary)
         return response
 
     async def api_missing(request: Request) -> Response:
@@ -3700,7 +3998,9 @@ def build_remote_app(
                 if not isinstance(message, dict):
                     continue
                 ref = message.get("project")
-                project = ref if isinstance(ref, str) else ""
+                if ref is not None and not isinstance(ref, str):
+                    continue  # a project that is no name names none, never the CURRENT one
+                project = ref or ""
                 label = message.get("subscribe")
                 if isinstance(label, str) and label:
                     if (project, label) in panes_wanted or len(
@@ -3731,15 +4031,17 @@ def build_remote_app(
         reading = asyncio.ensure_future(reader())
         try:
             while not reading.done():
-                # By id, every tick: Remote off (auto-off included) is 4410, a device that is
-                # gone, expired or idle past the limit is 4401, whatever the cookie said.
-                if runtime.auto_off_passed(_remote_now()):
-                    await close_with(WS_CLOSE_REMOTE_OFF)
-                    break
-                if not runtime.device_is_live(device.id):
-                    await close_with(WS_CLOSE_UNAUTHORIZED)
-                    break
-                await tick_once()
+                # One check of remote.json a tick, for everything the tick reads of it.
+                with runtime.remote_state_checked():
+                    # By id, every tick: Remote off (auto-off included) is 4410, a device that
+                    # is gone, expired or idle past the limit is 4401, whatever the cookie said.
+                    if runtime.auto_off_passed(_remote_now()):
+                        await close_with(WS_CLOSE_REMOTE_OFF)
+                        break
+                    if not runtime.device_is_live(device.id):
+                        await close_with(WS_CLOSE_UNAUTHORIZED)
+                        break
+                    await tick_once()
                 await asyncio.wait([reading], timeout=tick)
         except WebSocketDisconnect:
             pass
@@ -3898,6 +4200,80 @@ _server: _Server | None = None
 _foreground: uvicorn.Server | None = None
 """The server :func:`run_foreground` runs (``asq remote serve``), while it runs."""
 _flusher: threading.Timer | None = None
+_home_claim: tuple[Path, int] | None = None
+"""``remote-serve.lock`` and its descriptor, while this process serves Remote from that home."""
+
+SERVE_LOCK_NAME = "remote-serve.lock"
+"""Beside ``remote.json``: held by the one process that serves Remote from that home."""
+REMOTE_ALREADY_ON = (
+    "another Remote is on for this ~/.aisquare (the fleet UI's R panel, or `aisquare remote "
+    "serve` in another shell) — turn it off first: two would share one link, one passphrase, "
+    "one auto-off and one list of phones"
+)
+
+
+def _claim_remote_home(state: Runtime) -> bool:
+    """Hold :data:`SERVE_LOCK_NAME` for as long as this process serves Remote; ``True`` when
+    this call took it, :class:`RemoteAlreadyOn` when another process holds it.
+
+    Two Remotes on one home, the TUI's and a ``serve`` on another port as the docs
+    once advised, share one ``remote.json`` and every file beside it, and undo each
+    other: the TUI's switch revoked the phones that had unlocked against ``serve``
+    and cleared the deadline, and ``serve``'s timer, reading none, never armed again,
+    so ``serve`` ran on past its printed deadline, publicly tunnelled; each server's
+    push sender kept its own record of what it had pushed, so every notification
+    came twice (sweep of #243). So the second is refused, whichever it is. The lock
+    is the operating system's: it goes with the process however that ends. A home
+    where the lock file cannot be made or locked for another reason serves without
+    it, and says so in the log.
+
+    Called holding :data:`_lock`, which :func:`start_remote_server` keeps until its
+    server is recorded. Claimed before that lock was taken, the home was let go by a
+    stop ending on another thread in between, which found nothing serving
+    (:func:`_release_remote_home`), and the new server ran unclaimed.
+    """
+    global _home_claim
+    path = state._state_path.with_name(SERVE_LOCK_NAME)
+    if _home_claim is not None and _home_claim[0] == path:
+        return False  # this process serves from here already
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        log.warning("remote: %s could not be opened (%s); serving without it", path, exc)
+        return False
+    try:
+        lock_exclusive(fd)
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in _LOCK_HELD:
+            raise RemoteAlreadyOn(REMOTE_ALREADY_ON) from None
+        log.warning("remote: %s could not be locked (%s); serving without it", path, exc)
+        return False
+    previous, _home_claim = _home_claim, (path, fd)
+    if previous is not None:  # another home's, which this process serves no more
+        _release_remote_claim(previous[1])
+    return True
+
+
+def _release_remote_home() -> None:
+    """Let :data:`SERVE_LOCK_NAME` go: this process serves Remote no more.
+
+    Unless it does again: a server started while an earlier one was still being stopped,
+    on a thread of its own, would serve on unclaimed once that stop came to its end.
+    """
+    global _home_claim
+    with _lock:
+        if (_server is not None and _server.running) or _foreground is not None:
+            return
+        claim, _home_claim = _home_claim, None
+    if claim is not None:
+        _release_remote_claim(claim[1])
+
+
+def _release_remote_claim(fd: int) -> None:
+    with contextlib.suppress(OSError):
+        unlock(fd)
+    os.close(fd)
 
 
 def _page_missing(dist_dir: Path | None) -> str | None:
@@ -3956,7 +4332,11 @@ def install_page(source: Path) -> Path:
 
 
 def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) -> RemoteInfo:
-    """Serve in the background; idempotent while running. ``allow_write`` is left as persisted."""
+    """Serve in the background; idempotent while running. ``allow_write`` is left as persisted.
+
+    :class:`RemoteAlreadyOn` while another process serves Remote from this home
+    (:func:`_claim_remote_home`): a ``serve``, or another fleet UI's panel.
+    """
     global _server
     problem = _remote_dependency_error()
     if problem is not None:
@@ -3965,13 +4345,20 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
     if page_problem is not None:
         raise NoRemotePage(page_problem)
     state = runtime()
-    with _lock:
-        if _server is not None and _server.running:
-            return state.connection_info(_server.port)
-        app = build_remote_app(state, dist_dir=dist_dir)
-        server = _Server(app, port)
-        server.start_serving()
-        _server = server
+    claimed = False
+    try:
+        with _lock:
+            if _server is not None and _server.running:
+                return state.connection_info(_server.port)
+            claimed = _claim_remote_home(state)
+            app = build_remote_app(state, dist_dir=dist_dir)
+            server = _Server(app, port)
+            server.start_serving()
+            _server = server
+    except BaseException:
+        if claimed:
+            _release_remote_home()
+        raise
     _schedule_flush()
     return state.connection_info(port)
 
@@ -3997,6 +4384,7 @@ def stop_remote_server() -> None:
             _runtime.flush_last_seen()
         except Exception:  # the server is already down; only last_seen is lost
             log.warning("remote: flushing remote.json as the server stopped failed", exc_info=True)
+    _release_remote_home()
 
 
 def remote_server_status() -> dict[str, object]:
@@ -4227,11 +4615,13 @@ def run_foreground(
 ) -> bool:
     """``asq remote serve``: serve in this thread until Ctrl-C or auto-off.
 
-    ``True`` when auto-off ended it. In order: the port is bound (:class:`RemoteBindError`
-    when another process holds it, before ``ready`` prints anything); the deadline is set
-    ``auto_off_minutes`` from now (0 is never) and ``public_url`` noted as the origin
-    of push links; ``ready`` runs (the CLI's banner); uvicorn serves on the bound
-    socket. A timer that reads the wall clock every 30 s turns Remote off at the
+    ``True`` when auto-off ended it. In order: this home is claimed
+    (:class:`RemoteAlreadyOn` while another process serves Remote from it,
+    :func:`_claim_remote_home`) and the port bound (:class:`RemoteBindError` when
+    another process holds it), both before ``ready`` prints anything; the deadline is
+    set ``auto_off_minutes`` from now (0 is never) and ``public_url`` noted as the
+    origin of push links; ``ready`` runs (the CLI's banner); uvicorn serves on the
+    bound socket. A timer that reads the wall clock every 30 s turns Remote off at the
     deadline, or at the first check after the machine slept past it, and waits
     on while a phone keeps extending it, with the farewell push and every device
     revoked (4410); the flusher writes ``last_seen`` and prunes devices every
@@ -4248,7 +4638,14 @@ def run_foreground(
 
     origin = None if public_url is None else check_public_origin(public_url)
     state = runtime()
-    sock = _bind_remote_socket(port)
+    with _lock:
+        claimed = _claim_remote_home(state)  # before anything is bound or printed
+    try:
+        sock = _bind_remote_socket(port)
+    except BaseException:
+        if claimed:
+            _release_remote_home()
+        raise
     try:
         app = build_remote_app(state, dist_dir=dist_dir)
         server = uvicorn.Server(_remote_uvicorn_config(app, port))
@@ -4285,6 +4682,8 @@ def run_foreground(
         return timer.fired
     finally:
         sock.close()
+        if claimed:
+            _release_remote_home()
 
 
 __all__ = [
@@ -4303,6 +4702,7 @@ __all__ = [
     "NoRemotePage",
     "NoSuchAgent",
     "NoSuchProject",
+    "RemoteAlreadyOn",
     "RemoteBindError",
     "RemoteError",
     "RemoteInfo",

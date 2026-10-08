@@ -60,8 +60,17 @@ def test_literal_keeps_whitespace_because_a_keystroke_is_a_keystroke() -> None:
 def test_literal_still_reports_a_genuinely_absent_value() -> None:
     assert _literal({}, "text") is None
     assert _literal({"text": None}, "text") is None
-    assert _literal({"text": 7}, "text") is None
     assert _literal({"text": ""}, "text") == "", "empty is present but has nothing to send"
+
+
+def test_literal_refuses_a_value_that_is_not_text() -> None:
+    """Read as absent, ``"text": 3`` with ``"enter": true`` sent the Enter alone, which
+    takes a dialog's highlighted option, and answered 200 ``sent: true`` (review of #243,
+    round 3)."""
+    for value in (7, ["x"], True):
+        with pytest.raises(RequestError) as refused:
+            _literal({"text": value}, "text")
+        assert (refused.value.status, refused.value.error) == (400, "invalid")
 
 
 # --- the write handler -----------------------------------------------------------------

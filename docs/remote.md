@@ -162,11 +162,12 @@ change only what you are shown, not the fleet, and need no write switch.
 `request_id`. If the phone loses the answer (a restart can take 40 seconds, long
 enough for a phone to sleep), the page asks again with the same id once it
 reconnects, and the server answers from what it recorded instead of doing it
-twice. A request that never reached the machine runs when the retry does, and a
-key pressed long before could answer a prompt that came up since, so the page
-sends it again only within 15 seconds of the tap, and never after the phone had
-to unlock again. Past that it says the write was not sent again, and still shows
-the result if the machine had it after all.
+twice, even if writes were switched off meanwhile. A request that never reached
+the machine runs when the retry does, and a key pressed long before could
+answer a prompt that came up since, so the page sends it again only within 15
+seconds of the tap, and never after the phone had to unlock again. Past that it
+says the write was not sent again, and still shows the result if the machine had
+it after all.
 
 **Every write is audited** in `~/.aisquare/remote-audit.log`, owner-only, one
 line each:
@@ -357,10 +358,12 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   `--inspect=false`; start yours with it too.
 - **Keys**: the pad sends key names from a fixed list (no `;`, nothing that
   tmux reads as a command); typed text travels as literal text, never as keys.
-  Neither typed text nor a tell may hold a control character other than a tab
-  or a line break: the pad sends Esc, Ctrl-C and its other control keys by name.
+  Typed text may hold no control character other than a tab or a newline, and a
+  tell, which goes in as one paste, a carriage return as well: the pad sends Esc,
+  Ctrl-C, Enter and its other control keys by name (a carriage return typed is
+  the Enter key itself).
 - **Caps**: 64 KiB per request, 2 048 characters per keystroke message, 8 000
-  per note or tell, 4 live connections per device.
+  per note or tell and 200 for whom a note is to, 4 live connections per device.
 
 From the machine:
 
@@ -395,7 +398,7 @@ from `POST api/unlock`) except unlock itself; every non-GET request needs an
 | POST | `api/unlock` | `{"password"}` → the device cookie |
 | GET | `api/remote` | `{allow_write, auto_off_at, version}` |
 | POST | `api/remote/extend` | another hour before auto-off |
-| GET | `api/projects`, `api/fleet`, `api/board`, `api/tasks`, `api/memory` | what `aisquare --json` prints for each, `?project=` for one project |
+| GET | `api/projects`, `api/fleet`, `api/board`, `api/tasks`, `api/memory` | what `aisquare --json` prints for each (the board with its newest 200 events, not 5), `?project=` for one project |
 | GET | `api/panes/<agent>`, `api/transcript/<agent>`, `api/explainability/<agent>` | one agent's screen, conversation (`?width=`, `?before=`) and card |
 | GET | `api/needs` | `{"items", "scanned_at"}` |
 | POST | `api/needs/answer`, `api/needs/dismiss` | a quick answer; hide a card |
@@ -423,6 +426,11 @@ curl -b jar -H "Origin: http://127.0.0.1:8750" -H "content-type: application/jso
   -d '{"agent": "coder-auth", "keys": ["Escape"], "request_id": "esc-1"}' "$BASE/api/send-keys"
 ```
 
+A write's `request_id` is optional. Sent again with the same request, it is
+answered with what the first one did instead of running twice; give every other
+write an id of its own, since for 15 minutes an id sent with another endpoint or
+body is refused with `request_id_reused`.
+
 The code is `src/aisquare/services/remote_server.py` (the server and its gates)
 and `src/aisquare/services/remote_page.py` (the bundled page, whose files are in
 `src/aisquare/web/remote/`); `tests/test_remote_page.py` holds the page to the
@@ -440,9 +448,13 @@ once: the page sends the header that skips it on every request it makes.
 rewrote the `Host` header; ngrok's `--host-header=rewrite` does exactly that.
 Start ngrok without it (the R panel never uses it).
 
-**`serve` says the port is in use.** Another Remote is running (the fleet UI's,
-perhaps), or something else took 8750. Turn the other one off, or pass `--port`
-and give ngrok (and `status`) the same port.
+**`serve`, or the R panel, says another Remote is on.** One `~/.aisquare` serves
+one Remote: the fleet UI's panel, or a `serve` in another shell, has it. Turn that
+one off, or use it. Two would share one link, one passphrase, one auto-off and
+one list of phones, and either going off would sign the other's phones out.
+
+**`serve` says the port is in use.** Something else took 8750. Pass `--port` and
+give ngrok (and `status`) the same port.
 
 **ngrok says `--url` is an unknown flag.** That ngrok is too old for static
 domains; run `ngrok update`.

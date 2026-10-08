@@ -1386,20 +1386,13 @@ def _needs_pane_is_the_agent(server: TmuxServer, agent: FleetAgent) -> bool:
     The listing vouches for a pane only when it could ask tmux: a fresh board
     row derives its state without it. And a server that started after the row
     was written numbers its panes from ``%0`` again, so the pane under the row's
-    id is another agent's (``fleet._outlived``). So once the pane answers as the
-    agent, the server is asked when it started, as ``fleet._pane_alive`` asks; a
-    start tmux will not give judges nothing, there as here.
+    id is another agent's (``fleet._outlived``). ``send-keys`` asks the same two
+    questions before it types, so both ask them in one place:
+    ``remote_server._remote_pane_refusal``.
     """
-    from aisquare.core.tmux import TmuxError
-    from aisquare.services import fleet as fleet_service
+    from aisquare.services import remote_server
 
-    if not fleet_service._pane_is_the_agent(server, agent.pane_id):
-        return False
-    try:
-        started = server.started_at()
-    except TmuxError:
-        started = None
-    return not fleet_service._outlived(agent, started)
+    return remote_server._remote_pane_refusal(server, agent) is None
 
 
 def _needs_pane_quiet(server: TmuxServer, pane_id: str, now: datetime) -> bool | None:
@@ -1798,6 +1791,7 @@ def _needs_answer_body(body: Mapping[str, object]) -> tuple[str, list[str], str,
     from aisquare.services.remote_server import (
         SEND_KEYS_TEXT_MAX,
         RequestError,
+        _remote_flag,
         check_remote_key_names,
         check_remote_text,
     )
@@ -1824,7 +1818,7 @@ def _needs_answer_body(body: Mapping[str, object]) -> tuple[str, list[str], str,
     if len(text) > SEND_KEYS_TEXT_MAX:
         raise RequestError(413, "too_large", f"'text' is at most {SEND_KEYS_TEXT_MAX} characters")
     check_remote_text(text)
-    return item_id, keys, text, bool(body.get("enter", False))
+    return item_id, keys, text, _remote_flag(body, "enter")
 
 
 def _needs_send(agent: FleetAgent, keys: Sequence[str], text: str, enter: bool) -> None:

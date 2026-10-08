@@ -66,7 +66,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, TypeVar
 
 from aisquare.services import remote_needs, remote_server
 from aisquare.services.remote_server import RequestError
@@ -122,6 +122,15 @@ class LedgerEntry(TypedDict):
     at: str
 
 
+class LedgerSeen(NamedTuple):
+    """What the ledger knows of a request id it has (:meth:`ActionLedger.ledger_seen`)."""
+
+    answer: tuple[int, dict[str, object]] | None
+    """How the request ended, ``(status, body)``; ``None`` while it still runs."""
+    same: bool = True
+    """Whether it was the request asking now: the id names one request, never another."""
+
+
 _Record = TypeVar("_Record")
 
 
@@ -165,10 +174,11 @@ class ActionLedger:
     def __init__(self, *, clock: Callable[[], datetime] = _ledger_now) -> None:
         self._clock = clock
         self._lock = threading.Lock()
-        self._finished: dict[str, dict[str, tuple[LedgerEntry, datetime]]] = {}
-        """device id → request id → (its entry, when it ended); oldest first."""
-        self._running: dict[str, dict[str, tuple[str, datetime]]] = {}
-        """device id → request id → (its endpoint, when it began)."""
+        self._finished: dict[str, dict[str, tuple[tuple[LedgerEntry, str], datetime]]] = {}
+        """device id → request id → ((its entry, its request), when it ended); oldest first.
+        A request is what :meth:`ledger_begin` was told the id stands for."""
+        self._running: dict[str, dict[str, tuple[tuple[str, str], datetime]]] = {}
+        """device id → request id → ((its endpoint, its request), when it began)."""
 
     def _ledger_forget_expired(self) -> datetime:
         now = self._clock()
@@ -183,16 +193,42 @@ class ActionLedger:
         with self._lock:
             self._ledger_forget_expired()
             held = self._finished.get(device_id, {}).get(request_id)
-        return None if held is None else (held[0]["status"], held[0]["body"])
+        return None if held is None else (held[0][0]["status"], held[0][0]["body"])
 
-    def ledger_begin(self, device_id: str, request_id: str, endpoint: str) -> bool:
-        """Mark a request as running; ``False`` while one with that id still is."""
+    def ledger_seen(self, device_id: str, request_id: str, request: str = "") -> LedgerSeen | None:
+        """How this device's request with this id ended, or that it still runs, and whether
+        it was ``request``; ``None`` when the ledger has no such id: never sent here, or
+        forgotten.
+
+        What the server asks before anything else of a write that carries an id, its
+        write gate included: a retry is answered from here whatever the switch says now.
+        But only a retry: the id was keyed on alone, so a script that reused one, say
+        docs/remote.md's ``esc-1``, for a stop within the TTL was answered 200 with the
+        keys' stored result, and the stop never ran (sweep of #243). ``request`` is what
+        the id stood for when it began (the server's digest of the endpoint and body).
+        """
+        with self._lock:
+            self._ledger_forget_expired()
+            held = self._finished.get(device_id, {}).get(request_id)
+            if held is not None:
+                (entry, began_as), _ended = held
+                return LedgerSeen((entry["status"], entry["body"]), began_as == request)
+            running = self._running.get(device_id, {}).get(request_id)
+            if running is not None:
+                (_endpoint, began_as), _began = running
+                return LedgerSeen(None, began_as == request)
+        return None
+
+    def ledger_begin(
+        self, device_id: str, request_id: str, endpoint: str, request: str = ""
+    ) -> bool:
+        """Mark a request as running, as ``request``; ``False`` while one with that id still is."""
         with self._lock:
             now = self._ledger_forget_expired()
             running = self._running.setdefault(device_id, {})
             if request_id in running:
                 return False
-            running[request_id] = (endpoint, now)
+            running[request_id] = ((endpoint, request), now)
             return True
 
     def ledger_finish(
@@ -205,16 +241,17 @@ class ActionLedger:
             began = running.pop(request_id, None)
             if not running:
                 self._running.pop(device_id, None)
+            endpoint, request = ("", "") if began is None else began[0]
             entry: LedgerEntry = {
                 "request_id": request_id,
-                "endpoint": "" if began is None else began[0],
+                "endpoint": endpoint,
                 "status": status,
                 "body": body,
-                "at": now.isoformat(timespec="seconds"),
+                "at": remote_server._iso_seconds(now),
             }
             finished = self._finished.setdefault(device_id, {})
             finished.pop(request_id, None)  # a repeat ends up newest, not where it first was
-            finished[request_id] = (entry, now)
+            finished[request_id] = ((entry, request), now)
             while len(finished) > ACTION_LEDGER_SIZE:
                 del finished[next(iter(finished))]
 
@@ -223,7 +260,7 @@ class ActionLedger:
         with self._lock:
             self._ledger_forget_expired()
             held = self._finished.get(device_id, {})
-            return [entry.copy() for entry, _ended in reversed(held.values())]
+            return [entry.copy() for (entry, _request), _ended in reversed(held.values())]
 
 
 def new_action_ledger() -> ActionLedger:
@@ -234,48 +271,11 @@ def new_action_ledger() -> ActionLedger:
 # --- the body ------------------------------------------------------------------------------
 
 
-def action_required(body: dict[str, Any], key: str) -> str:
-    """A string the action cannot go without; 400 ``invalid`` when it is missing or blank."""
-    value = body.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise RequestError(400, "invalid", f"{key!r} is required")
-    return value.strip()
-
-
-def action_ref(
-    body: dict[str, Any], key: str, *, limit: int | None = None, guard: bool = False
-) -> str | None:
-    """An optional string: absent and null mean none; over ``limit`` is a 413.
-
-    Blank means none as well, except for a ``guard``: an id that keeps the
-    action off the wrong agent (``agent_id``, ``needs_id``). A page that sends
-    one blank, say from a card that had none, gets a 400. Read as none, the blank
-    would turn the guard off and the action would still go through.
-    """
-    value = body.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise RequestError(400, "invalid", f"{key!r} must be a string")
-    if limit is not None and len(value) > limit:
-        raise RequestError(413, "too_large", f"{key!r} is over {limit} characters")
-    if guard and not value.strip():
-        raise RequestError(400, "invalid", f"{key!r} is blank: send the id, or leave it out")
-    return value.strip() or None
-
-
-def action_flag(body: dict[str, Any], key: str) -> bool:
-    """An optional ``true`` or ``false``, and nothing else.
-
-    ``"false"`` is a non-empty string, and read as true it would make ``force``
-    kill an agent without its ``/exit``.
-    """
-    value = body.get(key)
-    if value is None:
-        return False
-    if not isinstance(value, bool):
-        raise RequestError(400, "invalid", f"{key!r} must be true or false")
-    return value
+# An action reads its body as every write does, with the server's one set of readers: a
+# copy of them here refused what the server's own read as absent (review of #243, round 3).
+action_required = remote_server._required
+action_ref = remote_server._optional_ref
+action_flag = remote_server._remote_flag
 
 
 def action_pinned(body: dict[str, Any]) -> tuple[str, str]:
@@ -293,7 +293,8 @@ def action_pinned(body: dict[str, Any]) -> tuple[str, str]:
 def action_tell_text(body: dict[str, Any]) -> str:
     """The tell's ``text``, kept literally: whitespace is content. Empty is a 400, longer
     than :data:`TELL_TEXT_MAX` a 413, and a control character other than tab, newline and
-    carriage return a 400 (``remote_server.check_remote_text``), as in typed text.
+    carriage return a 400 (``remote_server.check_remote_text``). Typed text refuses the
+    carriage return too, which is the Enter key there; inside the paste it is a line break.
 
     A tell goes into the pane as one bracketed paste, and tmux before 3.7 pastes the
     buffer's bytes as they are: an ``ESC [201~`` in the text ended the paste early, and
@@ -307,7 +308,7 @@ def action_tell_text(body: dict[str, Any]) -> str:
         raise RequestError(400, "invalid", "'text' is required: what to tell the agent")
     if len(text) > TELL_TEXT_MAX:
         raise RequestError(413, "too_large", f"'text' is over {TELL_TEXT_MAX} characters")
-    remote_server.check_remote_text(text)
+    remote_server.check_remote_text(text, pasted=True)
     return text
 
 
@@ -328,11 +329,10 @@ def action_audit_excerpt(text: str) -> str:
     into a pane leaves no board event, so the trail keeps its start. A longer
     text is cut to :data:`ACTION_AUDIT_EXCERPT` characters, the last of them
     ``…``. Anything that would not print becomes ``?``: a newline would begin a
-    forged line of its own.
+    forged line of its own. That is ``remote_server._audit_clean``, the trail's one
+    scrub: a copy of it here would miss the next character class it learns.
     """
-    if len(text) > ACTION_AUDIT_EXCERPT:
-        text = text[: ACTION_AUDIT_EXCERPT - 1] + "…"
-    return "".join(ch if ch.isprintable() else "?" for ch in text)
+    return remote_server._audit_clean(text, ACTION_AUDIT_EXCERPT)
 
 
 def action_yes_no(flag: bool) -> str:
@@ -1055,6 +1055,7 @@ __all__ = [
     "TELL_TEXT_MAX",
     "ActionLedger",
     "LedgerEntry",
+    "LedgerSeen",
     "action_handlers",
     "action_restart",
     "action_routes",

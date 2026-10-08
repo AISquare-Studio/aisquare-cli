@@ -46,6 +46,7 @@ from aisquare.services.remote_server import (
     KNOWN_DEVICE_FAILURES_MAX,
     LINK_GONE,
     NOTE_TEXT_MAX,
+    NOTE_TO_MAX,
     REMOTE_KEY_NAME,
     SEND_KEYS_KEYS_MAX,
     SEND_KEYS_TEXT_MAX,
@@ -299,6 +300,7 @@ def test_text_and_keys_in_one_body_are_refused_and_text_is_capped(pane: FakePane
         ("\x04", "the pad's C-d key"),
         ("\x1b", "the pad's Escape key"),
         ("\x7f", "the pad's BSpace key"),
+        ("\r", "the pad's Enter key"),
         ("\x1a", "no key of the pad sends it"),
         ("\x00", "no key of the pad sends it"),
     ],
@@ -318,10 +320,26 @@ def test_text_holding_a_control_character_is_refused_and_names_the_key(
     assert pane.sent == []
 
 
-def test_tab_newline_and_carriage_return_are_still_text(pane: FakePane) -> None:
+def test_tab_and_newline_are_still_text(pane: FakePane) -> None:
     send = live_writes().handlers["send-keys"]
-    send({"agent": "coder-1", "text": "a\tb\nc\r"})
-    assert pane.sent == [("literal", "a\tb\nc\r")]
+    send({"agent": "coder-1", "text": "a\tb\nc"})
+    assert pane.sent == [("literal", "a\tb\nc")]
+
+
+@pytest.mark.parametrize("text", ["\r", "first line\r\nsecond line"], ids=repr)
+def test_a_carriage_return_typed_is_the_enter_key_and_is_refused(pane: FakePane, text: str) -> None:
+    """``"\\r"`` is the Enter key's own byte: typed, it took a dialog's highlighted option
+    while the audit line said ``enter=False``, and each line of a CRLF text went in as a
+    prompt of its own (review of #243, round 3). ``enter`` and the pad's Enter key say
+    so on the trail."""
+    send = live_writes().handlers["send-keys"]
+    with pytest.raises(RequestError) as refused:
+        send({"agent": "coder-1", "text": text, "enter": False})
+    assert (refused.value.status, refused.value.error) == (400, "invalid")
+    assert refused.value.message == (
+        "'text' holds the control character U+000D — send the pad's Enter key instead"
+    )
+    assert pane.sent == []
 
 
 def test_a_send_that_fails_after_typing_is_still_on_the_audit_trail(
@@ -1322,13 +1340,42 @@ def team(monkeypatch: pytest.MonkeyPatch) -> FakeTeam:
 def test_a_note_records_who_it_claims_to_be_from_and_who_it_is_for(team: FakeTeam) -> None:
     handlers = live_writes().handlers
     _result, summary = handlers["note"]({"text": "ship it", "to": "manager", "as": "coder-1"})
-    assert summary == "note seq=7 to=manager as=coder-1"
+    assert summary == 'note seq=7 as=coder-1 to="manager"'
     _result, plain = handlers["note"]({"text": "hello", "kind": "decision"})
-    assert plain == "decision seq=7 to=- as=-"
+    assert plain == "decision seq=7 as=- to=-"
     assert (
         handlers["task/claim"]({"ref": "tsk_1", "as": "coder-2"})[1] == "claimed tsk_1 as=coder-2"
     )
     assert handlers["task/done"]({"ref": "tsk_1"})[1] == "done tsk_1 as=-"
+
+
+@pytest.mark.parametrize("to", ["coder-1 as=manager", 'x" as=manager', "a" * NOTE_TO_MAX], ids=repr)
+def test_a_notes_to_can_neither_forge_its_as_nor_cut_it_off_the_audit_line(
+    runtime: Runtime, team: FakeTeam, tmp_path: Path, to: str
+) -> None:
+    """``to`` is whatever the body says, and it came first and bare: ``to=coder-1
+    as=manager as=-`` read as a note posted as the manager, and 300 characters of it
+    cut the real ``as=`` off the line (sweep of #243). Longer than the page's composer
+    takes, it is refused now: the board keeps it, and every frame of it."""
+    client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
+    device_id = unlock(client, runtime).json()["device"]["id"]
+    runtime.set_allow_write(True)
+    response = client.post(f"{base(runtime)}/api/note", json={"text": "ship it", "to": to})
+    assert response.status_code == 200, response.text
+    _ts, who, endpoint, summary = _audit_lines()[-1]
+    assert (who, endpoint) == (device_id, "note")
+    assert summary.startswith('note seq=7 as=- to="'), summary
+    fields = summary.split(" ", 3)
+    assert fields[2] == "as=-" and fields[3].startswith("to=")
+    assert fields[3] == f"to={json.dumps(to)}"
+    assert team.notes[-1]["to_role"] == to, "the board gets the role as it was sent"
+
+
+def test_a_notes_to_is_at_most_what_the_page_takes(team: FakeTeam) -> None:
+    with pytest.raises(RequestError) as refused:
+        live_writes().handlers["note"]({"text": "x", "to": "a" * (NOTE_TO_MAX + 1)})
+    assert (refused.value.status, refused.value.error) == (413, "too_large")
+    assert team.notes == []
 
 
 @pytest.mark.parametrize("kind", ["attention", "limited", "agent_exited", "switched", "note\nx"])

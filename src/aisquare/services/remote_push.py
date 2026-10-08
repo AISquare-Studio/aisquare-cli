@@ -64,7 +64,7 @@ from typing import TYPE_CHECKING, Any
 
 from aisquare.core.atomic import write_replacing
 from aisquare.core.paths import remote_push_path
-from aisquare.services.remote_server import RequestError
+from aisquare.services.remote_server import RequestError, _iso_seconds
 
 if TYPE_CHECKING:
     from cryptography.hazmat.primitives.asymmetric import ec
@@ -169,8 +169,8 @@ def _push_utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _push_iso(at: datetime) -> str:
-    return at.astimezone(UTC).isoformat(timespec="seconds")
+_push_iso = _iso_seconds
+"""A stamp as ``remote.json`` and the API carry it: the server's own, not a copy of it."""
 
 
 def _push_parse_time(raw: str) -> datetime | None:

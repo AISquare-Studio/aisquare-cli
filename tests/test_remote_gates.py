@@ -23,6 +23,7 @@ from starlette.testclient import WebSocketDenialResponse
 from aisquare.services import remote_server
 from aisquare.services.remote_server import (
     MAX_BODY_BYTES,
+    NOT_TEXT,
     NOT_UNLOCKED,
     NOT_WRITE_GATED,
     READ_ONLY_REASON,
@@ -439,3 +440,50 @@ def test_a_body_nested_too_deep_to_parse_is_400_on_every_write(
     assert response.status_code == 400, response.text
     assert response.json()["error"] == "invalid"
     assert ran == []
+
+
+LONE_SURROGATE = (
+    b'{"agent": "coder-\\ud800", "confirm": "coder-1", "agent_id": "a", "request_id": "r1"}'
+)
+"""A body ``json`` reads into a string holding a lone surrogate, which no UTF-8 can hold."""
+
+
+@pytest.mark.parametrize("call", GATED, ids=_ids)
+def test_a_body_holding_a_lone_surrogate_is_a_400_in_the_one_shape_on_every_write(
+    app: Any, runtime: Runtime, ran: list[str], call: tuple[str, str, str]
+) -> None:
+    """Read in, the string reached the refusals that echo a body's words, and no response
+    could encode it: a stop's ``confirm=<label>`` and project/add's path answered a bare
+    500 in plain text, which the ledger kept as a crash for every retry (sweep of #243)."""
+    method, _template, path = call
+    client = make_client(app)
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    response = client.request(method, f"{base(runtime)}{path}", content=LONE_SURROGATE)
+    assert response.status_code == 400, response.text
+    assert response.headers["content-type"] == "application/json"
+    assert response.json() == {"error": "invalid", "message": NOT_TEXT}
+    assert ran == []
+    assert client.get(f"{base(runtime)}/api/actions/recent").json() == {"actions": []}
+
+
+def test_a_surrogate_pair_is_text_and_reaches_the_route(
+    app: Any, runtime: Runtime, ran: list[str]
+) -> None:
+    client = make_client(app)
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    paired = b'{"agent": "coder-\\ud83d\\ude00", "keys": ["1"]}'
+    assert client.post(f"{base(runtime)}/api/send-keys", content=paired).status_code == 200
+    assert ran == ["send-keys"]
+
+
+def test_a_refusal_whose_sentence_holds_a_lone_surrogate_still_answers_in_the_one_shape() -> None:
+    """A path on disk that is not UTF-8 reads back with surrogates in it, and a refusal
+    that names one could not be encoded either."""
+    response = remote_server._json_error(400, "invalid", "/home/me/caf\udce9 is not a directory")
+    assert response.status_code == 400
+    assert json.loads(bytes(response.body)) == {
+        "error": "invalid",
+        "message": "/home/me/caf? is not a directory",
+    }

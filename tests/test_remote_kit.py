@@ -14,6 +14,7 @@ import itertools
 import json
 import logging
 import threading
+import time
 import tracemalloc
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -29,13 +30,14 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app as cli
 from aisquare.core.paths import remote_audit_path
 from aisquare.services import remote_actions, remote_needs, remote_push, remote_server
-from aisquare.services.remote_actions import ActionLedger, LedgerEntry
+from aisquare.services.remote_actions import ActionLedger, LedgerEntry, LedgerSeen
 from aisquare.services.remote_needs import NeedsItem, QuickAnswer
 from aisquare.services.remote_server import (
     CRASHED,
     IN_PROGRESS,
     NOT_WRITE_GATED,
     READ_ONLY_REASON,
+    REQUEST_ID_REUSED,
     WRITE_ENDPOINTS,
     Device,
     RemoteKit,
@@ -84,19 +86,26 @@ class RecordingLedger(ActionLedger):
         self.calls: list[tuple[object, ...]] = []
         self.finished: dict[tuple[str, str], tuple[int, dict[str, object]]] = {}
         self.running: set[tuple[str, str]] = set()
+        self.requests: dict[tuple[str, str], str] = {}
+        """What each id began as; one set by hand above stands for any request."""
         self.recent: dict[str, list[LedgerEntry]] = {}
 
-    def ledger_replay(
-        self, device_id: str, request_id: str
-    ) -> tuple[int, dict[str, object]] | None:
-        self.calls.append(("replay", request_id))
-        return self.finished.get((device_id, request_id))
+    def ledger_seen(self, device_id: str, request_id: str, request: str = "") -> LedgerSeen | None:
+        self.calls.append(("seen", request_id))
+        key = (device_id, request_id)
+        same = self.requests.get(key, request) == request
+        if key in self.finished:
+            return LedgerSeen(self.finished[key], same)
+        return LedgerSeen(None, same) if key in self.running else None
 
-    def ledger_begin(self, device_id: str, request_id: str, endpoint: str) -> bool:
+    def ledger_begin(
+        self, device_id: str, request_id: str, endpoint: str, request: str = ""
+    ) -> bool:
         self.calls.append(("begin", request_id, endpoint))
         if (device_id, request_id) in self.running:
             return False
         self.running.add((device_id, request_id))
+        self.requests[(device_id, request_id)] = request
         return True
 
     def ledger_finish(
@@ -310,10 +319,10 @@ def test_a_retried_request_id_is_answered_from_the_ledger_without_running_again(
     assert first.json() == again.json() == {"answered": "ny_1", "run": 1}
     assert ran == [{"id": "ny_1"}], "request_id is the ledger's, never the endpoint's"
     assert app.kit.ledger.calls == [
-        ("replay", "c0ffee"),
+        ("seen", "c0ffee"),
         ("begin", "c0ffee", "needs/answer"),
         ("finish", "c0ffee", 200, {"answered": "ny_1", "run": 1}),
-        ("replay", "c0ffee"),
+        ("seen", "c0ffee"),
     ]
 
 
@@ -334,6 +343,159 @@ def test_a_request_id_still_running_is_409_in_progress(
     assert response.status_code == 409
     assert response.json() == {"error": "in_progress", "message": IN_PROGRESS}
     assert ran == []
+
+
+def test_a_retry_is_answered_from_the_ledger_after_writes_were_switched_off(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """A retry changes nothing, and the gate answered it 403 ``read_only`` once writes were
+    off: the page said "Read-only", greyed every write and settled the request with it,
+    though what it asked for had run (review of #243, round 3)."""
+    ran: list[dict[str, Any]] = []
+
+    def note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        ran.append(body)
+        return {"event": len(ran)}, "note seq=1"
+
+    app = build_app(runtime, sources=_sources(), writes=Writes({"note": note}), dist_dir=tmp_path)
+    runtime.set_allow_write(True)
+    client = _unlocked(app, runtime)
+    url = f"{base(runtime)}/api/note"
+    first = client.post(url, json={"text": "hi", "request_id": "rq-1"})
+    assert (first.status_code, first.json()) == (200, {"event": 1})
+    runtime.set_allow_write(False)
+    again = client.post(url, json={"text": "hi", "request_id": "rq-1"})
+    assert (again.status_code, again.json()) == (200, {"event": 1})
+    assert ran == [{"text": "hi"}] and _audited("note") == 1
+    new = client.post(url, json={"text": "hi", "request_id": "rq-2"})
+    assert (new.status_code, new.json()["error"]) == (403, "read_only"), "a new id: the gate"
+    for body in (b"not json", b'{"text": "hi", "request_id": "../x"}'):
+        refused = client.post(url, content=body)
+        assert (refused.status_code, refused.json()["error"]) == (403, "read_only"), body
+    assert ran == [{"text": "hi"}]
+    recent = client.get(f"{base(runtime)}/api/actions/recent").json()["actions"]
+    assert [(entry["request_id"], entry["status"]) for entry in recent] == [("rq-1", 200)]
+
+
+def test_a_retry_of_a_lane_request_still_running_is_409_in_progress_with_writes_off(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Answered 403, the page settled the request it still waited on and never showed its
+    result; ``in_progress`` keeps it waiting for the ledger's ``action`` frame."""
+    ran: list[dict[str, Any]] = []
+
+    async def answer(request: Request, device: Device, body: dict[str, Any]) -> Response:
+        ran.append(body)
+        return JSONResponse({"answered": True})
+
+    app = _lane_app(runtime, tmp_path, monkeypatch, answer)
+    client = _unlocked(app, runtime)
+    device_id = _device_id(client, runtime)
+    app.kit.ledger.running.add((device_id, "slow-1"))
+    url = f"{base(runtime)}/api/needs/answer"
+    response = client.post(url, json={"id": "ny_1", "request_id": "slow-1"})
+    assert (response.status_code, response.json()) == (
+        409,
+        {"error": "in_progress", "message": IN_PROGRESS},
+    )
+    app.kit.ledger.running.discard((device_id, "slow-1"))
+    app.kit.ledger.finished[(device_id, "slow-1")] = (200, {"answered": True})
+    replayed = client.post(url, json={"id": "ny_1", "request_id": "slow-1"})
+    assert (replayed.status_code, replayed.json()) == (200, {"answered": True})
+    assert ran == [] and runtime.allow_write is False
+
+
+def test_a_request_id_answers_only_for_the_request_it_was_first_sent_with(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """The ledger keyed on the id alone: docs/remote.md's ``esc-1``, reused for a stop within
+    15 minutes, was answered 200 with the keys' stored result and the stop never ran, and
+    an extend under it never moved the deadline (sweep of #243)."""
+    ran: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(name: str) -> Callable[[dict[str, Any]], tuple[dict[str, object], str]]:
+        def handle(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+            ran.append((name, body))
+            return {"endpoint": name, "echo": body}, name
+
+        return handle
+
+    writes = Writes({"send-keys": handler("send-keys"), "agent/stop": handler("agent/stop")})
+    app = build_app(runtime, sources=_sources(), writes=writes, dist_dir=tmp_path)
+    runtime.set_allow_write(True)
+    runtime.set_auto_off(datetime.now(UTC) + timedelta(minutes=10))
+    deadline = runtime.auto_off_deadline()
+    client = _unlocked(app, runtime)
+    escape = {"agent": "coder-auth", "keys": ["Escape"], "request_id": "esc-1"}
+    first = client.post(f"{base(runtime)}/api/send-keys", json=escape)
+    assert first.status_code == 200
+    reused = REQUEST_ID_REUSED.format(request_id="esc-1")
+    for path, body in (
+        ("agent/stop", {"agent": "coder-2", "agent_id": "agt_x", "confirm": "coder-2"}),
+        ("send-keys", {"agent": "coder-9", "text": "hello", "enter": True}),
+        ("remote/extend", {}),
+    ):
+        response = client.post(f"{base(runtime)}/api/{path}", json={**body, "request_id": "esc-1"})
+        assert (response.status_code, response.json()) == (
+            409,
+            {"error": "request_id_reused", "message": reused},
+        ), path
+    assert runtime.auto_off_deadline() == deadline, "the extend never ran"
+    again = client.post(f"{base(runtime)}/api/send-keys", json=escape)
+    assert (again.status_code, again.json()) == (200, first.json()), "a retry is still a retry"
+    assert ran == [("send-keys", {"agent": "coder-auth", "keys": ["Escape"]})]
+    recent = client.get(f"{base(runtime)}/api/actions/recent").json()["actions"]
+    assert [(entry["request_id"], entry["endpoint"]) for entry in recent] == [
+        ("esc-1", "send-keys")
+    ]
+
+
+def test_an_id_still_running_is_another_requests_too_and_writes_off_is_still_the_gate(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    started, release = threading.Event(), threading.Event()
+
+    def note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        started.set()
+        release.wait(timeout=10)
+        return {"text": body["text"]}, "note"
+
+    app = build_app(runtime, sources=_sources(), writes=Writes({"note": note}), dist_dir=tmp_path)
+    runtime.set_allow_write(True)
+    url = f"{base(runtime)}/api/note"
+    with _unlocked(app, runtime) as client:
+        first: list[Any] = []
+        worker = threading.Thread(
+            target=lambda: first.append(client.post(url, json={"text": "a", "request_id": "n1"}))
+        )
+        worker.start()
+        try:
+            assert started.wait(timeout=10)
+            other = client.post(url, json={"text": "b", "request_id": "n1"})
+            assert (other.status_code, other.json()["error"]) == (409, "request_id_reused")
+            same = client.post(url, json={"text": "a", "request_id": "n1"})
+            assert (same.status_code, same.json()["error"]) == (409, "in_progress")
+        finally:
+            release.set()
+            worker.join(timeout=10)
+        assert first[0].json() == {"text": "a"}
+        runtime.set_allow_write(False)
+        off = client.post(url, json={"text": "b", "request_id": "n1"})
+        assert (off.status_code, off.json()["error"]) == (403, "read_only"), "another request"
+        replayed = client.post(url, json={"text": "a", "request_id": "n1"})
+        assert (replayed.status_code, replayed.json()) == (200, {"text": "a"})
+
+
+def test_the_ledger_tells_a_retry_from_another_request_under_its_id() -> None:
+    ledger = ActionLedger()
+    assert ledger.ledger_seen("dev_a", "r1", "keys") is None
+    assert ledger.ledger_begin("dev_a", "r1", "send-keys", "keys")
+    assert ledger.ledger_seen("dev_a", "r1", "keys") == LedgerSeen(None, True)
+    assert ledger.ledger_seen("dev_a", "r1", "stop") == LedgerSeen(None, False)
+    ledger.ledger_finish("dev_a", "r1", 200, {"sent": True})
+    assert ledger.ledger_seen("dev_a", "r1", "keys") == LedgerSeen((200, {"sent": True}), True)
+    assert ledger.ledger_seen("dev_a", "r1", "stop") == LedgerSeen((200, {"sent": True}), False)
+    assert ledger.ledger_seen("dev_b", "r1", "stop") is None, "another device's ids are its own"
 
 
 def test_a_refusal_is_stored_too_so_a_retry_gets_the_same_refusal(
@@ -487,6 +649,28 @@ def test_the_dispatcher_goes_through_the_ledger_and_audits_once(
     assert bad.status_code == 400 and len(ran) == 2
 
 
+def test_every_write_runs_on_the_write_pool_knowing_when_it_arrived(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """Off the loop's default pool, which runs the reads and the stream's snapshots: a write
+    may wait seconds there, on an agent's lock or an action (sweep of #243)."""
+    ran: list[tuple[str, float | None]] = []
+
+    def note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        ran.append((threading.current_thread().name, remote_server._WRITE_ARRIVED.get()))
+        return {}, "note"
+
+    app = build_app(runtime, sources=_sources(), writes=Writes({"note": note}), dist_dir=tmp_path)
+    runtime.set_allow_write(True)
+    client = _unlocked(app, runtime)
+    before = time.monotonic()
+    assert client.post(f"{base(runtime)}/api/note", json={"text": "x"}).status_code == 200
+    ((thread, arrived),) = ran
+    assert thread.startswith("asq-remote-write"), thread
+    assert arrived is not None and before <= arrived <= time.monotonic()
+    assert remote_server._WRITE_ARRIVED.get() is None, "set for the write alone"
+
+
 def test_a_write_cancelled_while_it_runs_never_leaves_its_request_id_running(
     runtime: Runtime, tmp_path: Path
 ) -> None:
@@ -580,6 +764,95 @@ def test_a_write_whose_audit_line_cannot_be_written_is_still_recorded_as_done(
     with pytest.raises(OSError, match="No space left"):
         client.post(f"{base(runtime)}/api/note", json={"text": "hi", "request_id": "n4"})
     assert ("finish", "n4", 200, {"event": 1}) in app.kit.ledger.calls
+
+
+def test_the_server_writes_its_audit_lines_off_the_event_loop(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first line creates the log and restricts it to this account, an icacls run on
+    Windows, and every line opens and appends to a file: on the loop, each held up every
+    request and every socket meanwhile."""
+    written: list[tuple[str, bool]] = []
+    audit = Runtime.audit
+
+    def watched(self: Runtime, device_id: str, endpoint: str, summary: str) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            written.append((endpoint, False))
+        else:
+            written.append((endpoint, True))
+        audit(self, device_id, endpoint, summary)
+
+    def note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        return {"event": 1}, "note seq=1"
+
+    monkeypatch.setattr(Runtime, "audit", watched)
+    app = build_app(runtime, sources=_sources(), writes=Writes({"note": note}), dist_dir=tmp_path)
+    runtime.set_allow_write(True)
+    runtime.set_auto_off(datetime.now(UTC) + timedelta(minutes=10))
+    mine, theirs = _unlocked(app, runtime), _unlocked(app, runtime)
+    assert mine.post(f"{base(runtime)}/api/note", json={"text": "hi"}).status_code == 200
+    assert mine.post(f"{base(runtime)}/api/remote/extend", json={}).status_code == 200
+    other = _device_id(theirs, runtime)
+    assert mine.delete(f"{base(runtime)}/api/devices/{other}").status_code == 200
+    assert written == [
+        ("unlock", False),
+        ("unlock", False),
+        ("note", False),
+        ("remote/extend", False),
+        ("devices/revoke", False),
+    ]
+
+
+def test_a_slow_first_audit_line_holds_up_no_other_request(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first line restricts the new log to this account, ``icacls`` on Windows, seconds
+    under an antivirus scan. Written off the loop, it still held the runtime's lock, which
+    every request's gate and every socket's tick take: a read sent meanwhile waited for it."""
+    from aisquare.core import paths
+
+    restricting, done = threading.Event(), threading.Event()
+    real = paths.restrict_to_owner
+
+    def icacls_under_a_scan(path: Path) -> bool:
+        if path == remote_audit_path():
+            restricting.set()
+            assert done.wait(10), "the test never let the restriction finish"
+        return real(path)
+
+    def note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        return {"event": 1}, "note seq=1"
+
+    app = build_app(runtime, sources=_sources(), writes=Writes({"note": note}), dist_dir=tmp_path)
+    runtime.set_allow_write(True)
+    mine, theirs = _unlocked(app, runtime), _unlocked(app, runtime)
+    remote_audit_path().unlink()  # the note's line is the log's first again
+    monkeypatch.setattr(remote_server, "restrict_to_owner", icacls_under_a_scan)
+    posted: list[int] = []
+    read: list[int] = []
+    poster = threading.Thread(
+        target=lambda: posted.append(
+            mine.post(f"{base(runtime)}/api/note", json={"text": "hi"}).status_code
+        )
+    )
+    reader = threading.Thread(
+        target=lambda: read.append(theirs.get(f"{base(runtime)}/api/remote").status_code)
+    )
+    poster.start()
+    try:
+        assert restricting.wait(5), "the note's line never reached the restriction"
+        reader.start()
+        reader.join(2)
+        assert read == [200], "the read waited for the audit log's restriction"
+    finally:
+        done.set()
+        for thread in (poster, reader):
+            if thread.is_alive():
+                thread.join(10)
+    assert posted == [200]
+    assert _audited("note") == 1
 
 
 def _audited(endpoint: str) -> int:

@@ -380,7 +380,7 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
     else:
         _say("  find no aisquare hooks in any Claude Code directory")
     for site in plan.unreadable:
-        _say(f"  ⚠ could not check {site.config_dir}: {site.reason}")
+        _say(f"  ⚠ cannot take the hooks out of {site.config_dir}: {site.reason}")
     if plan.purge and plan.home_exists:
         _say(f"  DELETE {_home_line(plan)}")
         if plan.keychain and plan.accounts:
@@ -483,9 +483,10 @@ def _emit_uninstall_report(report: lifecycle_service.UninstallReport) -> None:
 def _uninstall_question(plan: lifecycle_service.UninstallPlan) -> str | None:
     """The y/N question, naming every step that will happen — ``None`` when none will.
 
-    A site that could not be checked fails the run, which then keeps the package
-    and the home (``UninstallReport.package_runs``), so the question does not
-    offer them: it asks only what the run will really do (review of #254).
+    A site whose hooks cannot be taken out (``plan.unreadable``) fails the run, which
+    then keeps the package and the home (``UninstallReport.package_runs``), so the
+    question does not offer them: it asks only what the run will really do (review
+    of #254).
     """
     blocked = len(plan.unreadable)
     steps: list[str] = []
@@ -501,8 +502,8 @@ def _uninstall_question(plan: lifecycle_service.UninstallPlan) -> str | None:
     text = steps[0] if len(steps) == 1 else ", ".join(steps[:-1]) + " and " + steps[-1]
     if blocked:
         text += (
-            f" (the package stays: {blocked} other director{'ies' if blocked != 1 else 'y'} "
-            "could not be checked)"
+            f" (the package stays: the hooks in {blocked} other "
+            f"director{'ies' if blocked != 1 else 'y'} cannot be taken out)"
         )
     if plan.lasting_plugins:
         count = len(plan.lasting_plugins)
@@ -567,7 +568,11 @@ def uninstall(
         if question is None:
             if plan.unreadable:
                 checked = ", ".join(str(site.config_dir) for site in plan.unreadable)
-                _say(f"✗ nothing can be removed until {checked} can be checked (see above)")
+                _say(
+                    f"✗ nothing can be removed until the hooks in {checked} can be taken out "
+                    "(see above)"
+                )
+                _reopen(reopen)  # a refusal said in full, nothing removed: asq comes back
                 raise typer.Exit(1)
             _say(
                 f"nothing for aisquare to remove here — remove the package: {plan.package_command}"

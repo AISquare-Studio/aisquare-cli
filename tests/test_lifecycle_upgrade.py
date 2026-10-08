@@ -18,6 +18,7 @@ import inspect
 import io
 import itertools
 import json
+import os
 import re
 import sys
 from collections.abc import Iterator
@@ -1158,6 +1159,33 @@ def test_a_site_left_for_its_settings_file_is_not_told_its_hooks_were_removed(
     assert [entry["config_dir"] for entry in left] == [str(site)], left
     assert left[0]["reason"].endswith("so aisquare cannot rewrite it safely"), left
     assert "removed" not in left[0]["reason"], left
+
+
+def test_a_settings_json_this_user_may_not_write_is_left_not_promised(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path
+) -> None:
+    """refresh-hooks refuses a settings.json it may not write, so the planned refresh failed
+    after a good install: exit 1, asq's Update not reopened, and a remedy that failed the
+    same way (review of #257)."""
+    site = _hooked(tmp_path / "claude", tool.script)
+    _record(site)
+    settings_path = site / "settings.json"
+    settings_path.chmod(0o444)
+    if os.access(settings_path, os.W_OK):
+        settings_path.chmod(0o644)
+        pytest.skip("this user can write a read-only file (root)")
+    try:
+        plan = _one_object(runner.invoke(app, ["--json", "upgrade"]).stdout)
+        result = runner.invoke(app, ["--json", "upgrade", "--yes"])
+    finally:
+        settings_path.chmod(0o644)
+
+    assert plan["refresh_hooks"] == [], plan
+    left = plan["hooks_left"]
+    assert [entry["config_dir"] for entry in left] == [str(site)], left
+    assert "its settings.json cannot be rewritten" in left[0]["reason"], left
+    assert result.exit_code == 0, result.output
+    assert machine.connects() == [], "no refresh was run for it"
 
 
 def test_a_recorded_config_dir_this_user_cannot_enter_is_left_with_its_reason(

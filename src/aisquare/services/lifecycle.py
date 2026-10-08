@@ -489,6 +489,7 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
             (b for b in binaries if b.program.exists() and not runs_this_install(b, found)),
             None,
         )
+        unwritable = agents_service.settings_unwritable(directory / "settings.json")
         if foreign is not None:
             left.append(
                 HookSite(
@@ -497,9 +498,18 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
                     f"its hooks run {foreign.program}, another install of aisquare",
                 )
             )
+        elif unwritable is not None:
+            # Planned, it failed in the new install after a good upgrade, which then
+            # exited 1 and kept asq closed; the remedy it printed failed the same way
+            # (review of #257). The hooks name the tool path the reinstall keeps.
+            left.append(HookSite(directory, programs, _CANNOT_REWRITE.format(unwritable)))
         else:
             refresh.append(HookSite(directory, programs))
     return tuple(refresh), tuple(left)
+
+
+#: Why a site whose hooks are ours is left: aisquare may not write its settings.json.
+_CANNOT_REWRITE = "its settings.json cannot be rewritten: {}"
 
 
 #: A ``"command": "…"`` pair in settings.json text, found without parsing the JSON.
@@ -770,7 +780,8 @@ class UninstallPlan:
     hooks: tuple[HookSite, ...]
     """Every Claude Code directory holding aisquare hooks, with what they run."""
     unreadable: tuple[HookSite, ...]
-    """Directories that may hold hooks but whose settings.json could not be read."""
+    """Directories whose hooks cannot be taken out: a settings.json that could not be
+    read, which may hold some, or one holding ours that this user may not write."""
     mcp: tuple[McpRegistration, ...]
     package_argv: tuple[str, ...]
     package_env: dict[str, str]
@@ -1181,8 +1192,15 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         if plugin is not None:
             plugins.append(plugin)
         binaries, error = hook_binaries(directory)
+        unwritable = (
+            agents_service.settings_unwritable(directory / "settings.json") if binaries else None
+        )
         if error is not None:
             unreadable.append(HookSite(directory, reason=error))
+        elif unwritable is not None:
+            # Hooks of ours that cannot be taken out: the run would fail on the write,
+            # so the plan says so first and keeps the package (review of #257).
+            unreadable.append(HookSite(directory, reason=_CANNOT_REWRITE.format(unwritable)))
         elif binaries:
             hooks.append(HookSite(directory, tuple(str(b.program) for b in binaries)))
     home = paths.aisquare_home()

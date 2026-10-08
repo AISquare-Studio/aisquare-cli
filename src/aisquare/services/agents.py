@@ -138,14 +138,26 @@ def _check_settings(path: Path) -> None:
         agent_core.read_settings(path)
     except agent_core.SettingsNotAnObjectError as exc:
         raise AgentFileUnreadableError(str(exc)) from exc
-    # The file when it is there, else the directory it will be made in. access(2)
-    # follows a link and reports a read-only file system as well.
-    target = path if path.exists() else path.parent
-    if target.exists() and not os.access(target, os.W_OK):
-        raise AgentFileUnreadableError(
-            f"can't write {path}: this user may not write it (it is read-only, or on a "
-            "read-only file system)"
-        )
+    unwritable = settings_unwritable(path)
+    if unwritable is not None:
+        raise AgentFileUnreadableError(f"can't write {path}: {unwritable}")
+
+
+def settings_unwritable(path: Path) -> str | None:
+    """Why the hooks cannot be written into ``path``, or ``None`` when they can.
+
+    The one rule for `connect`, `refresh-hooks`, and the upgrade and uninstall plans
+    that promise them (review of #257). It asks about the file when it is there, else
+    the directory it will be made in. access(2) follows a link and reports a
+    read-only file system as well.
+    """
+    try:
+        target = path if path.exists() else path.parent
+        if not target.exists() or os.access(target, os.W_OK):
+            return None
+    except OSError as exc:
+        return f"it cannot be reached ({exc.strerror or exc})"
+    return "this user may not write it (it is read-only, or on a read-only file system)"
 
 
 def _install_hooks(name: str, config_dir: Path | None, path: Path | None) -> bool:

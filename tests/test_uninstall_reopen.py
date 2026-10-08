@@ -23,6 +23,7 @@ from tests.test_lifecycle_uninstall import (  # noqa: F401 — `tool` and `world
     Tool,
     World,
     _hooked,
+    _hooks_text,
     _initialised,
     _live_agent,
     tool,
@@ -98,6 +99,27 @@ def test_a_refusal_is_read_and_then_asq_comes_back(
 
     assert result.exit_code == 1
     assert "aisquare fleet shutdown --all --yes" in result.output
+    assert reopened == [("prompt", [_ENTER]), ("exec", ["ui"])] and world.events == []
+
+
+def test_a_site_whose_hooks_cannot_be_taken_out_is_read_and_then_asq_comes_back(
+    runner: CliRunner,
+    tool: Tool,  # noqa: F811
+    world: World,  # noqa: F811
+    isolated_agent_home: Path,
+    reopened: list[tuple[str, list[str]]],
+) -> None:
+    """Nothing can be removed while a site's hooks cannot be taken out (a settings.json
+    that is not valid JSON, here). That refusal is said in full and removes nothing, yet
+    it left asq's Uninstall in a bare shell (review of #257)."""
+    broken = isolated_agent_home / ".claude"
+    broken.mkdir(parents=True)
+    (broken / "settings.json").write_text(_hooks_text(tool.script, trailing_comma=True), "utf-8")
+
+    result = runner.invoke(app, ["uninstall", "--reopen"])
+
+    assert result.exit_code == 1
+    assert "nothing can be removed until" in result.stdout, result.output
     assert reopened == [("prompt", [_ENTER]), ("exec", ["ui"])] and world.events == []
 
 

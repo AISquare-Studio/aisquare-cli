@@ -1422,6 +1422,30 @@ def test_a_sibling_whose_hooks_only_show_leniently_keeps_the_package(
     assert run.exit_code == 1 and world.execs == []
 
 
+def test_hooks_in_a_settings_json_this_user_may_not_write_keep_the_package(
+    tool: Tool, world: World, runner: CliRunner, isolated_agent_home: Path
+) -> None:
+    """The plan offered to take out hooks it could not write out of a read-only
+    settings.json, and the run then failed on the write (review of #257)."""
+    site = _hooked(isolated_agent_home / ".claude", tool.script)
+    settings_path = site / "settings.json"
+    settings_path.chmod(0o444)
+    if os.access(settings_path, os.W_OK):
+        settings_path.chmod(0o644)
+        pytest.skip("this user can write a read-only file (root)")
+    try:
+        plan = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+        result = runner.invoke(app, ["uninstall", "--yes"])
+    finally:
+        settings_path.chmod(0o644)
+
+    assert plan["hooks"] == [], plan
+    assert [entry["config_dir"] for entry in plan["unreadable"]] == [str(site)], plan
+    assert "its settings.json cannot be rewritten" in plan["unreadable"][0]["reason"], plan
+    assert result.exit_code == 1 and world.execs == [], "the package stays while hooks call it"
+    assert agent_core.hook_commands("claude-code", site), "the hooks are untouched"
+
+
 def test_the_question_never_offers_what_an_unreadable_site_rules_out(
     tool: Tool,
     world: World,
@@ -1455,5 +1479,5 @@ def test_the_question_never_offers_what_an_unreadable_site_rules_out(
     assert with_a_readable_site.exit_code == 0, with_a_readable_site.output
     assert asked == [
         "Remove aisquare's hooks from 1 directory "
-        "(the package stays: 1 other directory could not be checked)?"
+        "(the package stays: the hooks in 1 other directory cannot be taken out)?"
     ]

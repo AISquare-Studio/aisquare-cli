@@ -1087,6 +1087,14 @@ class ContextStore(Protocol):
         task_id: str | None = None,
         limit: int = 30,
     ) -> list[TeamEvent]: ...
+    def team_events_since(
+        self,
+        project_id: str,
+        since: datetime,
+        *,
+        kinds: Sequence[str],
+        human_kinds: Sequence[str] = (),
+    ) -> list[TeamEvent]: ...
     def latest_seq(self, project_id: str) -> int: ...
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
@@ -2778,6 +2786,45 @@ class SqliteStore:
             (project_id, limit),
         ).fetchall()
         return [_row_to_event(row) for row in reversed(rows)]
+
+    def team_events_since(
+        self,
+        project_id: str,
+        since: datetime,
+        *,
+        kinds: Sequence[str],
+        human_kinds: Sequence[str] = (),
+    ) -> list[TeamEvent]:
+        """The project's events of ``kinds`` written at or after ``since``, and those of
+        ``human_kinds`` the human wrote (no session), oldest first.
+
+        For a reader that runs every few seconds over the last day of a board (``remote``'s
+        needs scan), however busy that day was. ``created_at`` has no index, so a filter on
+        it alone walks every event the project ever had. Events are written in ``seq``
+        order, each stamped as it is written, so the read starts past the newest event
+        written before ``since``, found walking back from the newest on the ``(project_id,
+        seq)`` index: it costs the events since ``since``, not the project's history.
+        ``since`` compares as the stored ISO-8601 UTC strings do.
+        """
+        moment = since.astimezone(UTC).isoformat()
+        wanted: list[str] = []
+        params: list[str] = [project_id, project_id, moment, moment]
+        if kinds:
+            wanted.append(f"kind IN ({', '.join('?' * len(kinds))})")
+            params += kinds
+        if human_kinds:
+            wanted.append(f"(session_id IS NULL AND kind IN ({', '.join('?' * len(human_kinds))}))")
+            params += human_kinds
+        if not wanted:
+            return []
+        rows = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE project_id = ? AND seq > COALESCE("
+            "(SELECT seq FROM team_event WHERE project_id = ? AND created_at < ? "
+            "ORDER BY seq DESC LIMIT 1), 0) "
+            f"AND created_at >= ? AND ({' OR '.join(wanted)}) ORDER BY seq",
+            params,
+        ).fetchall()
+        return [_row_to_event(row) for row in rows]
 
     def latest_seq(self, project_id: str) -> int:
         row = self._conn.execute(

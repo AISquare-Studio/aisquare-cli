@@ -1957,6 +1957,95 @@ def test_the_sessions_seen_since_and_the_ones_named_are_chosen_by_the_query(
     assert store.team_sessions_seen_since("prj_other", recent, ids=["ses_1"]) == []
 
 
+def _board(store: ContextStore, project_id: str, *events: tuple[str, str | None, datetime]) -> None:
+    """``(kind, session id, written at)`` events on ``project_id``'s board, in that order."""
+    from aisquare.core.ids import new_event_id
+    from aisquare.models import TeamEvent
+
+    for kind, session_id, at in events:
+        store.add_team_event(
+            TeamEvent(
+                id=new_event_id(), project_id=project_id, session_id=session_id, kind=kind,
+                text=kind, created_at=at,
+            )
+        )  # fmt: skip
+
+
+def test_the_events_since_a_time_are_the_kinds_asked_for_from_that_time_on(
+    store: ContextStore,
+) -> None:
+    """A board's last day, for a reader that asks every few seconds (remote's needs scan):
+    the agents' events of ``kinds``, the human's (no session) of ``human_kinds`` too, and
+    nothing written before ``since`` or on another board."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    store.ensure_project(ProjectInfo(id="prj_other", root=Path("/tmp/other")))
+    _board(
+        store,
+        PROJECT.id,
+        ("question", "ses_1", now - timedelta(days=2)),
+        ("question", "ses_1", now - timedelta(hours=3)),
+        ("note", "ses_1", now - timedelta(hours=2)),
+        ("note", None, now - timedelta(hours=2)),
+        ("decision", None, now - timedelta(hours=1)),
+        ("attention", None, now - timedelta(hours=1)),
+        ("result", "ses_2", now),
+    )
+    _board(store, "prj_other", ("question", "ses_9", now))
+    since = now - timedelta(days=1)
+    read = store.team_events_since(
+        PROJECT.id, since, kinds=["question", "result"], human_kinds=["note", "decision"]
+    )
+    assert [(e.kind, e.session_id) for e in read] == [
+        ("question", "ses_1"),
+        ("note", None),
+        ("decision", None),
+        ("result", "ses_2"),
+    ], "oldest first; an agent's note is not the human's"
+    assert all(event.created_at >= since for event in read)
+    assert store.team_events_since(PROJECT.id, now + timedelta(seconds=1), kinds=["result"]) == []
+    assert store.team_events_since(PROJECT.id, since, kinds=[]) == []
+
+
+def test_the_events_since_a_time_cost_that_time_not_the_boards_history(
+    store: ContextStore,
+) -> None:
+    """``created_at`` has no index, so filtered on it alone a read walks every event a board
+    ever had, which is never pruned. The read starts past the newest event written before
+    ``since``: a board with a hundred times the history costs the same to read."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    day = [("question", "ses_1", now - timedelta(minutes=n)) for n in range(30, 0, -1)]
+    for project_id, history in (("prj_short", 20), ("prj_long", 2_000)):
+        store.ensure_project(ProjectInfo(id=project_id, root=Path(f"/tmp/{project_id}")))
+        old = now - timedelta(days=30)
+        _board(
+            store,
+            project_id,
+            *[("note", "ses_1", old + timedelta(seconds=n)) for n in range(history)],
+        )
+        _board(store, project_id, *day)
+    steps: dict[str, int] = {}
+    connection = store._conn  # type: ignore[attr-defined]
+    for project_id in ("prj_short", "prj_long"):
+        counted = [0]
+
+        def step(counted: list[int] = counted) -> int:
+            counted[0] += 1
+            return 0
+
+        connection.set_progress_handler(step, 1)
+        try:
+            read = store.team_events_since(project_id, now - timedelta(days=1), kinds=["question"])
+        finally:
+            connection.set_progress_handler(None, 1)
+        assert len(read) == len(day)
+        steps[project_id] = counted[0]
+    assert steps["prj_long"] < steps["prj_short"] + 500, steps
+
+
 # --- the launch spec and ui_state (#144) ----------------------------------------------------
 
 

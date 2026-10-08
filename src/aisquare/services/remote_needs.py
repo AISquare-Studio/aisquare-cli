@@ -101,7 +101,8 @@ EXCERPT_CHARS = 280
 """The longest ``excerpt``: one plain line a card shows under its reason."""
 
 NEEDS_BOARD_EVENTS = 300
-"""How many of a project's newest board events one scan reads."""
+"""How many of a project's newest board events one scan reads for its agents' own events
+(:func:`_needs_own_events`). Its board items are read by time instead (``board_since``)."""
 
 CRASH_WINDOW = timedelta(hours=1)
 """How long after its end a crashed agent stays an item."""
@@ -129,6 +130,13 @@ OWNER_ROLES = frozenset({"", "owner", "user", "human", "all", "everyone"})
 
 _NEEDS_ANSWERABLE = frozenset({"permission", "question", "plan", "asked", "interrupted"})
 _NEEDS_BOARD_KINDS = frozenset({"board_question", "board_result"})
+
+_NEEDS_ASKED = ("question", "result", "decision")
+"""An agent's board events that open a board item (a question, a result) or move its author
+on from one (any of the three, later), in :func:`needs_from_board`."""
+
+_NEEDS_REPLIED = ("note", "decision", "result")
+"""The human's board events (no session) that answer an item addressed to its author."""
 
 _NEEDS_ACTIONS: dict[str, tuple[str, ...]] = {
     "permission": ("answer", "open", "dismiss"),
@@ -310,6 +318,13 @@ class NeedsSources:
     ended_agents: Callable[[str, datetime], list[FleetAgent]]
     """The project's rows that ended at or after the given time."""
     board_events: Callable[[str, int], list[TeamEvent]]
+    """The project's newest events, as many as given: a window, read for its agents' own."""
+    board_since: Callable[[str, datetime], list[TeamEvent]]
+    """The project's events written at or after the given time that open a board item or
+    close one: its agents' questions, results and decisions (:data:`_NEEDS_ASKED`), and
+    the human's notes, decisions and results (:data:`_NEEDS_REPLIED`). An item lives for
+    :data:`QUESTION_HORIZON` however busy the board is, so it is read by time, not from a
+    window of the newest events that 300 notes push it out of."""
     board_sessions: Callable[[str, datetime, Collection[str]], list[TeamSession]]
     """The project's sessions seen at or after the given time, and those with the given ids:
     the ones a live manager may be, and the authors of the board's open questions."""
@@ -1071,7 +1086,7 @@ def needs_from_board(
     items: list[NeedsItem] = []
     for event in sorted(events, key=_needs_seq, reverse=True):
         if event.session_id is None:
-            if event.kind in ("note", "decision", "result"):
+            if event.kind in _NEEDS_REPLIED:
                 addressed.add((event.to_role or "").strip().lower())
             continue
         if event.kind in ("question", "result") and now - event.created_at <= QUESTION_HORIZON:
@@ -1088,7 +1103,7 @@ def needs_from_board(
                 items.append(
                     _needs_board_item(event, project=project, row=row, author=label or role)
                 )
-        if event.kind in ("question", "result", "decision"):
+        if event.kind in _NEEDS_ASKED:
             moved_on.add(event.session_id)
     return items
 
@@ -1203,10 +1218,11 @@ def _needs_scan_project(
     ended = _needs_read(
         lambda: sources.ended_agents(project.id, now - RECENTLY_ENDED), "rows", project
     )
-    events = _needs_read(
-        lambda: sources.board_events(project.id, NEEDS_BOARD_EVENTS), "board", project
+    board = _needs_read(
+        lambda: sources.board_since(project.id, now - QUESTION_HORIZON), "board", project
     )
-    authors = _needs_board_authors(events, now)
+    window = _needs_window(sources, project)
+    authors = _needs_board_authors(board, now)
     sessions = _needs_read(
         lambda: sources.board_sessions(project.id, now - _MANAGER_FRESH, authors),
         "sessions",
@@ -1230,7 +1246,7 @@ def _needs_scan_project(
                 status,
                 tail,
                 project=project,
-                events=_needs_own_events(sources, project, status, events),
+                events=_needs_own_events(sources, project, status, window),
                 now=now,
                 manager_live=manager_live,
                 accounts=accounts,
@@ -1246,7 +1262,7 @@ def _needs_scan_project(
             _needs_manager_down(
                 statuses,
                 rows,
-                lambda session_id: _needs_newest_of(sources, project, events, session_id),
+                lambda session_id: _needs_newest_of(sources, project, window, session_id),
                 project=project,
                 now=now,
             )
@@ -1255,9 +1271,7 @@ def _needs_scan_project(
             _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
         )
     items.extend(
-        needs_from_board(
-            events, sessions, rows, project=project, now=now, manager_live=manager_live
-        )
+        needs_from_board(board, sessions, rows, project=project, now=now, manager_live=manager_live)
     )
     return _NeedsProject(items=items, statuses=listed, ended=ended, tails=tails)
 
@@ -1279,27 +1293,27 @@ def _needs_own_events(
     sources: NeedsSources,
     project: ProjectInfo,
     status: FleetAgentStatus,
-    events: Sequence[TeamEvent],
+    window: Callable[[], Sequence[TeamEvent]],
 ) -> list[TeamEvent]:
     """The board events :func:`needs_from_agent` reads of an agent: its session's newest
     ``attention`` and ``limited`` events, wherever they are.
 
-    ``events`` is the project's newest :data:`NEEDS_BOARD_EVENTS`. The team writes
-    ``limited`` once per park and ``attention`` once per turn, so while an agent
-    stays parked, or a dialog stays up overnight, its event leaves that window as
-    newer ones come in; and the item keyed on it became another: a new id, pushed
-    again, its dismissal lost, the usage-limit dialog read as a plain one. A kind
-    the window lacks is asked of the store, for that one session, where a rule
-    reads it.
+    ``window`` is the project's newest :data:`NEEDS_BOARD_EVENTS`, read only for a row
+    parked on its limit or a session marked ``attention``: no rule reads the events of any
+    other. The team writes ``limited`` once per park and ``attention`` once per turn, so
+    while an agent stays parked, or a dialog stays up overnight, its event leaves that
+    window as newer ones come in; and the item keyed on it became another: a new id,
+    pushed again, its dismissal lost, the usage-limit dialog read as a plain one. A kind
+    the window lacks is asked of the store, for that one session, where a rule reads it.
     """
     session = status.session
     if session is None or status.state in ("exited", "unknown", "lost"):
         return []
-    own = [event for event in events if event.session_id == session.id]
+    if status.state != "limited" and session.state != "attention":
+        return []
+    own = [event for event in window() if event.session_id == session.id]
     # A limit names its item by its own event, and falls back on the attention one.
     wanted = ("limited", "attention") if status.state == "limited" else ("attention",)
-    if status.state != "limited" and session.state != "attention":
-        return own
     for kind in wanted:
         if any(event.kind == kind for event in own):
             break
@@ -1324,13 +1338,34 @@ def _needs_output_of(sources: NeedsSources, agent: FleetAgent) -> Callable[[], d
 
 
 def _needs_newest_of(
-    sources: NeedsSources, project: ProjectInfo, events: Sequence[TeamEvent], session_id: str
+    sources: NeedsSources,
+    project: ProjectInfo,
+    window: Callable[[], Sequence[TeamEvent]],
+    session_id: str,
 ) -> TeamEvent | None:
     """A session's newest board event: the window's, or the store's once it left the window."""
-    own = [event for event in events if event.session_id == session_id]
+    own = [event for event in window() if event.session_id == session_id]
     if own:
         return max(own, key=_needs_seq)
     return _needs_session_event(sources, project, session_id, None)
+
+
+def _needs_window(sources: NeedsSources, project: ProjectInfo) -> Callable[[], list[TeamEvent]]:
+    """The project's newest :data:`NEEDS_BOARD_EVENTS` events, read the first time they are
+    asked for in a scan, and not at all by one that asks nothing of them: most scans of
+    most projects, whose agents are not at a dialog or parked on a limit."""
+    read: list[list[TeamEvent]] = []
+
+    def needs_window() -> list[TeamEvent]:
+        if not read:
+            read.append(
+                _needs_read(
+                    lambda: sources.board_events(project.id, NEEDS_BOARD_EVENTS), "board", project
+                )
+            )
+        return read[0]
+
+    return needs_window
 
 
 def _needs_session_event(
@@ -1894,6 +1929,12 @@ def live_needs_sources() -> NeedsSources:
         with store_session() as store:
             return store.recent_events(project_id, limit=limit)
 
+    def needs_board_since(project_id: str, since: datetime) -> list[TeamEvent]:
+        with store_session() as store:
+            return store.team_events_since(
+                project_id, since, kinds=_NEEDS_ASKED, human_kinds=_NEEDS_REPLIED
+            )
+
     def needs_board_sessions(
         project_id: str, since: datetime, ids: Collection[str]
     ) -> list[TeamSession]:
@@ -1927,6 +1968,7 @@ def live_needs_sources() -> NeedsSources:
         list_agents=needs_live_agents,
         ended_agents=needs_rows_ended,
         board_events=needs_board_events,
+        board_since=needs_board_since,
         board_sessions=needs_board_sessions,
         task_status=needs_task_status,
         transcript_tail=_needs_cached_tail,

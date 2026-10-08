@@ -541,6 +541,8 @@ class Fleet:
     """Every session the scan asked the store for its newest event of a kind."""
     output_at: datetime | None = None
     """When every pane last printed, as tmux tells it; ``None``: it would not say."""
+    windows: int = 0
+    """How many times the scan read the window of the newest events."""
 
 
 def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> NeedsSources:
@@ -549,6 +551,22 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
         if fleet.listing_fails:
             raise fleet_service.FleetUnavailable("tmux is not installed")
         return list(fleet.agents)
+
+    def board_events(pid: str, limit: int) -> list[TeamEvent]:
+        fleet.windows += 1
+        return fleet.events[-limit:]
+
+    def board_since(pid: str, since: datetime) -> list[TeamEvent]:
+        """The store's ``team_events_since`` over the kinds the live source asks for."""
+        return [
+            event
+            for event in fleet.events
+            if event.created_at >= since
+            and (
+                event.kind in remote_needs._NEEDS_ASKED
+                or (event.session_id is None and event.kind in remote_needs._NEEDS_REPLIED)
+            )
+        ]
 
     def tmux_answers(socket: str) -> bool:
         fleet.probed.append(socket)
@@ -565,7 +583,8 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
         ended_agents=lambda pid, since: [
             row for row in fleet.ended if row.ended_at is not None and row.ended_at >= since
         ],
-        board_events=lambda pid, limit: fleet.events[-limit:],
+        board_events=board_events,
+        board_since=board_since,
         board_sessions=lambda pid, since, ids: [
             session
             for session in fleet.sessions
@@ -1119,6 +1138,42 @@ def test_the_authors_next_post_moves_on_from_its_question() -> None:
 def test_a_question_older_than_a_day_needs_nobody() -> None:
     old = _event(10, "question", "Ship it?", session=MANAGING, at=NOW - timedelta(hours=25))
     assert _board([old]) == []
+
+
+def test_a_board_question_stays_open_however_busy_the_board_gets() -> None:
+    """The scan read the board's items from the project's newest 300 events, and a busy fleet
+    writes that many in a few hours: a question asked in the morning was gone by the
+    afternoon, neither answered nor dismissed. An item is read for its whole day, and what
+    answers it does so however many events came between the two."""
+    asked = _event(
+        5, "question", "Ship it on Friday?", session=MANAGING, at=NOW - timedelta(hours=3)
+    )
+    fleet = Fleet(
+        agents=[_status(MANAGER, "working", MANAGING)], sessions=[MANAGING], events=[asked]
+    )
+    (item,) = _scan(fleet)
+    _board_traffic(fleet)
+    assert [found.id for found in _scan(fleet)] == [item.id], "300 events later, still open"
+    later = NOW - timedelta(minutes=1)
+    fleet.events.append(_event(fleet.events[-1].seq + 1, "note", "Friday.", to="manager", at=later))
+    _board_traffic(fleet)
+    assert _scan(fleet) == [], "answered by a reply 300 events before the scan"
+
+
+def test_the_window_of_newest_events_is_read_only_for_an_agent_that_needs_it() -> None:
+    """The board's items are read by time; the window is for the events of an agent at a
+    dialog or parked on its limit. A scan of agents doing neither reads none of it, and one
+    with several such agents reads it once."""
+    coder, other = _row("coder-1"), _row("coder-2")
+    fleet = Fleet(agents=[_status(coder, "working", _session(coder))])
+    _scan(fleet)
+    assert fleet.windows == 0
+    fleet.agents = [
+        _status(row, "attention", _session(row, state="attention", seen=NOW - timedelta(minutes=n)))
+        for n, row in enumerate((coder, other), start=1)
+    ]
+    assert [item.agent for item in _scan(fleet)] == ["coder-2", "coder-1"]
+    assert fleet.windows == 1
 
 
 def test_whether_a_manager_is_live_is_read_from_its_rows_and_sessions() -> None:
@@ -1971,6 +2026,46 @@ def test_a_scan_builds_none_of_a_projects_history_it_cannot_use(
     listing = history + 1  # fleet.list_agents' own read of every row and session, once
     assert built["rows"].count(active.id) <= listing + 1, "and the live row the scan counts"
     assert built["sessions"].count(active.id) <= listing + 2, "the live one and the author"
+
+
+def test_the_live_sources_keep_a_board_question_however_busy_the_board_gets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the store: a manager's question three hours old, under 300 newer notes, is
+    still open, and a reply to the manager under 300 more still answers it."""
+    now = datetime.now(UTC)
+    project = ProjectInfo(id="prj_busy", root=tmp_path / "busy")
+
+    def written(
+        kind: str, at: datetime, *, session_id: str | None = None, to: str | None = None
+    ) -> TeamEvent:
+        return TeamEvent(
+            id=f"evt_{kind}_{at.timestamp()}_{session_id}_{to}", project_id=project.id,
+            session_id=session_id, kind=kind, text=kind, to_role=to, created_at=at,
+        )  # fmt: skip
+
+    def traffic(store: Any, start: datetime) -> None:
+        for n in range(remote_needs.NEEDS_BOARD_EVENTS):
+            note = written("note", start + timedelta(seconds=n), session_id="ses_c")
+            store.add_team_event(note.model_copy(update={"id": f"evt_{start}_{n}"}))
+
+    with store_session() as store:
+        store.onboard_project(project)
+        store.upsert_session(
+            TeamSession(
+                id="ses_m", project_id=project.id, role="manager", label="manager",
+                started_at=now - timedelta(hours=4), last_seen_at=now - timedelta(hours=3),
+            )
+        )  # fmt: skip
+        store.add_team_event(written("question", now - timedelta(hours=3), session_id="ses_m"))
+        traffic(store, now - timedelta(hours=2))
+    sources = remote_needs.live_needs_sources()
+    (item,) = scan_needs_you(sources, now=now, dismissed=())
+    assert (item.kind, item.reason) == ("board_question", "manager asks on the board")
+    with store_session() as store:
+        store.add_team_event(written("note", now - timedelta(hours=1), to="manager"))
+        traffic(store, now - timedelta(minutes=50))
+    assert scan_needs_you(sources, now=now, dismissed=()) == []
 
 
 # --- the watcher --------------------------------------------------------------------------

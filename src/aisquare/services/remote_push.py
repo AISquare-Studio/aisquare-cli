@@ -34,9 +34,10 @@ the phone subscribed from. Never from ngrok's local agent API either: anyone on
 the machine can answer on its port first.
 
 Nothing here blocks the event loop. Routes do their file work in a worker
-thread; every send runs on the sender's thread (``asq-remote-push``) or a
-one-shot daemon thread, with a 10 s timeout, and a process on its way out waits
-that long for its one-shot pushes (:func:`push_drain`), the farewell above all.
+thread, their audit lines included; every send runs on the sender's thread
+(``asq-remote-push``) or a one-shot daemon thread, with a 10 s timeout, and a
+process on its way out waits that long for its one-shot pushes
+(:func:`push_drain`), the farewell above all.
 Lock order: the module's file lock is never held while calling into the
 runtime, which takes its own.
 """
@@ -1449,7 +1450,8 @@ def push_routes(kit: RemoteKit) -> list[BaseRoute]:
         except (OSError, ImportError) as exc:
             raise push_unavailable(f"the subscription could not be stored: {exc}") from exc
         if new:
-            kit.kit_audit(device, "push/subscribe", urlsplit(record.endpoint).hostname or "-")
+            host = urlsplit(record.endpoint).hostname or "-"
+            await asyncio.to_thread(kit.kit_audit, device, "push/subscribe", host)
         return JSONResponse({"subscribed": True}, status_code=201)
 
     async def push_unsubscribe_endpoint(
@@ -1467,7 +1469,7 @@ def push_routes(kit: RemoteKit) -> list[BaseRoute]:
         except OSError as exc:
             raise push_unavailable(f"the subscription could not be removed: {exc}") from exc
         if removed:
-            kit.kit_audit(device, "push/subscription", "-")
+            await asyncio.to_thread(kit.kit_audit, device, "push/subscription", "-")
         return JSONResponse({"subscribed": False})
 
     async def push_test_endpoint(
@@ -1493,7 +1495,7 @@ def push_routes(kit: RemoteKit) -> list[BaseRoute]:
             return push_too_often("push_test_throttled", rule, wait)
         message = push_system_message(TEST_TITLE, TEST_BODY, kit.kit_public_url(), tag="asq-test")
         _push_in_background([(device.id, record)], message)
-        kit.kit_audit(device, "push/test", "-")
+        await asyncio.to_thread(kit.kit_audit, device, "push/test", "-")
         return JSONResponse({"queued": True}, status_code=202)
 
     return [

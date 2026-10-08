@@ -1478,6 +1478,43 @@ def test_the_subscription_routes_ask_for_the_devices_off_the_event_loop(
     assert on_the_loop == [False, False]
 
 
+def test_the_push_routes_write_their_audit_lines_off_the_event_loop(
+    app: Any, runtime: Runtime, roster: set[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An audit line opens ``remote-audit.log`` and appends to it, and the first one makes the
+    file and restricts it to this account, on Windows an ``icacls`` run: file work, which the
+    server's own routes do in a worker thread. These three did it on the event loop."""
+    transport = Transport()
+    monkeypatch.setattr(remote_push, "push_https_transport", transport)
+    client, _device = unlocked(app, runtime, roster)
+    written: list[tuple[str, bool]] = []
+    audit = runtime.audit
+
+    def audit_where_it_runs(device_id: str, endpoint: str, summary: str) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            written.append((endpoint, False))
+        else:
+            written.append((endpoint, True))
+        audit(device_id, endpoint, summary)
+
+    monkeypatch.setattr(runtime, "audit", audit_where_it_runs)
+    phone = Browser(f"{FCM}phone")
+    subscribed = client.post(f"{base(runtime)}/api/push/subscribe", json=phone.subscription())
+    assert subscribed.status_code == 201
+    assert client.post(f"{base(runtime)}/api/push/test").status_code == 202
+    transport.wait_for(1)
+    assert client.delete(f"{base(runtime)}/api/push/subscription").status_code == 200
+    assert written == [
+        ("push/subscribe", False),
+        ("push/test", False),
+        ("push/subscription", False),
+    ]
+    assert audited("push/subscribe") == ["fcm.googleapis.com"]
+    assert audited("push/test") == audited("push/subscription") == ["-"]
+
+
 def test_the_pace_counts_within_its_window_and_forgets_a_device_once_it_is_quiet() -> None:
     clock = [0.0]
     pace = remote_push._PushPace(lambda: clock[0])

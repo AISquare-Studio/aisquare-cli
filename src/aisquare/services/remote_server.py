@@ -32,9 +32,11 @@ instead of running twice. Each write that goes through appends one line to
 ``remote-audit.log``. :data:`NOT_WRITE_GATED` lists the few routes that change
 something without the gate, frozen.
 
-**The stream** sends ``board``, ``fleet``, ``remote``, then ``needs_you``,
-``action`` and a ``heartbeat``, then one ``pane`` frame per ``(project, label)``
-subscription, each only when it changed.
+**The stream** sends ``fleet``, ``remote``, then ``needs_you`` and ``action``, each
+only when it changed, a ``heartbeat`` every :data:`HEARTBEAT_SECONDS` changed or not,
+then one ``pane`` frame per ``(project, label)`` subscription when its pane changed.
+A socket that asked with ``subscribe_board`` gets ``board`` frames too, ahead of the
+rest: the board's events and the sessions they name (:func:`remote_board_frame`).
 
 **The lanes** live in their own modules and plug in through :class:`RemoteKit`:
 ``remote_needs`` (what needs the human), ``remote_push`` (Web Push),
@@ -1989,6 +1991,35 @@ def _pane_width(agent: FleetAgent) -> int:
     if facts is None or fleet_service._outlived(agent, facts.server_started):
         return 80
     return facts.width
+
+
+def remote_board_frame(board: object) -> dict[str, object]:
+    """The ``board`` frame: what the page's Board tab draws of ``board_json`` (r3 #6).
+
+    The events, and of the sessions only those an event names, by id, label and role.
+    The rest is every session and task the project ever had, and the sessions change
+    with every session's heartbeat (``last_seen_at``, ``cursor``): sent whole, the tab
+    was sent all of it again several times a minute. ``GET api/board`` still answers
+    the whole board, as ``asq board --json`` prints it.
+    """
+    whole = board if isinstance(board, dict) else {}
+    events = whole.get("events")
+    events = events if isinstance(events, list) else []
+    named = {
+        event["payload"].get("session_id")
+        for event in events
+        if isinstance(event, dict) and isinstance(event.get("payload"), dict)
+    } - {None}
+    sessions = whole.get("sessions")
+    return {
+        "project": whole.get("project"),
+        "sessions": [
+            {key: session.get(key) for key in ("id", "label", "role")}
+            for session in (sessions if isinstance(sessions, list) else [])
+            if isinstance(session, dict) and session.get("id") in named
+        ],
+        "events": events,
+    }
 
 
 def _agent_state_counts(agents: list[FleetAgentStatus]) -> dict[str, int]:
@@ -3976,13 +4007,14 @@ def build_remote_app(
     async def stream(websocket: WebSocket) -> None:
         """``/ws``: every tick, each frame that changed (SPEC §1.6).
 
-        In order: ``board``, ``fleet``, ``remote``, then ``needs_you`` and
-        ``action``, then the ``heartbeat`` (every ``heartbeat`` seconds, changed
-        or not, never on the first tick), then one ``pane`` frame per
-        subscription. Pane subscriptions are ``(project, label)``: the same
-        label in two projects is two agents, and a frame names the project its
-        subscription named. A lane seam that raises skips its own frame for the
-        tick; anything else that fails ends the socket with 1011.
+        In order: ``board`` (only to a socket that sent ``subscribe_board``),
+        ``fleet``, ``remote``, then ``needs_you`` and ``action``, then the
+        ``heartbeat`` (every ``heartbeat`` seconds, changed or not, never on the
+        first tick), then one ``pane`` frame per subscription. Pane
+        subscriptions are ``(project, label)``: the same label in two projects is
+        two agents, and a frame names the project its subscription named. A lane
+        seam that raises skips its own frame for the tick; anything else that
+        fails ends the socket with 1011.
         """
         device = kit.kit_device(websocket)  # the gate refused a socket without one
         await websocket.accept()
@@ -3999,6 +4031,12 @@ def build_remote_app(
         does not change, only WHICH project's ``fleet ls`` payload fills it."""
         board_project: str | None = None
         """The same, for ``board`` frames and ``{subscribe_board: "<project>"}``."""
+        board_wanted = False
+        """No ``board`` frame goes out until the socket asks with ``subscribe_board``, and
+        ``{subscribe_board: false}`` stops them. A board is every session and task its
+        project ever had, and it changes with every session's heartbeat: sent to every
+        socket, it reached each phone several times a minute, whatever screen it showed,
+        and only the page's Board tab draws it."""
         last: dict[str, str] = {}
         """The JSON of the last frame of every other kind, keyed by the kind alone and never by
         a string the client sent, so it cannot grow with what a client sends. Switching
@@ -4045,9 +4083,13 @@ def build_remote_app(
             # frame out after it: the page would show it as the new one's until next tick.
             board_ref = board_project
             try:
-                payload = await snapshot(f"board:{board_ref or ''}", lambda: reads.board(board_ref))
-                if board_ref == board_project:
-                    await push_if_changed("board", payload)
+                if board_wanted:
+                    payload = await snapshot(
+                        f"board-frame:{board_ref or ''}",
+                        lambda: remote_board_frame(reads.board(board_ref)),
+                    )
+                    if board_wanted and board_ref == board_project:
+                        await push_if_changed("board", payload)
             except Exception as exc:
                 log.debug("remote: board frame skipped: %s", exc)
             fleet_ref = fleet_project
@@ -4103,7 +4145,7 @@ def build_remote_app(
                     await send_frame("pane", payload, agent=label, project=project or None)
 
         async def reader() -> None:
-            nonlocal fleet_project, board_project
+            nonlocal fleet_project, board_project, board_wanted
             while True:
                 received = await websocket.receive()
                 if received["type"] == "websocket.disconnect":
@@ -4143,7 +4185,10 @@ def build_remote_app(
                     last.pop("fleet", None)
                 target = message.get("subscribe_board", False)
                 if target is None or isinstance(target, str):
-                    board_project = target or None
+                    board_project, board_wanted = target or None, True
+                    last.pop("board", None)
+                elif target is False and "subscribe_board" in message:
+                    board_wanted = False  # sent false: no board frames from now on
                     last.pop("board", None)
 
         runtime.register_socket(device.id, closer)

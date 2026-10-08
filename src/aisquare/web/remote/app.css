@@ -187,7 +187,12 @@ pre.pane, pre.transcript {
   background: var(--pane); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; min-height: 40vh;
 }
 pre.transcript { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 0; }
-pre.pane.fit { overflow-x: hidden; font-size: calc((100vw - 48px) / (var(--cols, 80) * 0.6)); }
+/* Fit width: the screen less what pads the pane across it, the side insets of a phone in
+ * landscape included (59 px a side on an iPhone: ten columns of eighty went unseen). */
+pre.pane.fit {
+  overflow-x: hidden;
+  font-size: calc((100vw - 48px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)) / (var(--cols, 80) * 0.6));
+}
 .ln { display: block; min-height: 1.25em; }
 .measure { position: absolute; visibility: hidden; white-space: pre; font: 12px/1.25 var(--mono); }
 .inputbar {
@@ -205,6 +210,8 @@ pre.pane.fit { overflow-x: hidden; font-size: calc((100vw - 48px) / (var(--cols,
 .pad { display: none; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
 .pad.open { display: flex; }
 .pad .key { flex: 1 0 44px; min-width: max-content; padding: 6px 4px; font-family: var(--mono); }
+/* a key on its way, or waiting its turn behind one: still a key to tap */
+.pad .key.sending { border-color: var(--accent); color: var(--accent); }
 @media (max-width: 359px) {
   .pad > .key { flex-basis: calc(25% - 3px); }
 }
@@ -232,8 +239,9 @@ pre.pane.fit { overflow-x: hidden; font-size: calc((100vw - 48px) / (var(--cols,
 .unlock, .off { max-width: 420px; margin: 8vh auto 0; display: flex; flex-direction: column; gap: 10px; }
 .pass { width: 100%; font-size: 18px; }
 
-/* stale: nothing heard for 25 s, so what is shown may be old */
-body.stale .data, .data.behind { opacity: .5; filter: grayscale(1); }
+/* stale: nothing heard for 25 s, so what is shown may be old; held: the Live tab's pane
+ * came before this socket did, and its keys wait for the socket's own */
+body.stale .data, .data.behind, body.held pre.pane { opacity: .5; filter: grayscale(1); }
 
 /* ANSI: the 16 colours follow the theme; 256 and true colour arrive as rgb() */
 .b { font-weight: 700; } .d { opacity: .6; } .i { font-style: italic; } .u { text-decoration: underline; }

@@ -47,7 +47,7 @@ import re
 import stat
 import textwrap
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -128,9 +128,17 @@ class Page:
     """Byte offset to pass back as ``before`` for the page before this one.
     ``None`` when the beginning of the transcript is included."""
     more: bool
+    stamps: dict[int, str] = field(default_factory=dict)
+    """When each turn was written, as ISO UTC, by the index of the turn's first line (its
+    speaker's). The one thing the page renders itself: only the phone knows its zone."""
 
     def page_json(self) -> dict[str, object]:
-        return {"lines": self.lines, "cursor": self.cursor, "more": self.more}
+        return {
+            "lines": self.lines,
+            "cursor": self.cursor,
+            "more": self.more,
+            "stamps": {str(index): stamp for index, stamp in self.stamps.items()},
+        }
 
 
 EMPTY = Page(lines=[], cursor=None, more=False)
@@ -167,7 +175,7 @@ def read_page(
     if end <= 0:
         return EMPTY
 
-    collected: list[tuple[int, list[str]]] = []
+    collected: list[tuple[list[str], str | None]] = []
     oldest = end
     reached_start = False
     try:
@@ -175,9 +183,10 @@ def read_page(
             oldest = offset
             if offset == 0:
                 reached_start = True
-            rendered = _render_transcript_record(_parse_transcript_line(raw), width)
-            if rendered:
-                collected.append((offset, rendered))
+            record = _parse_transcript_line(raw)
+            rendered = _render_transcript_record(record, width)
+            if record is not None and rendered:
+                collected.append((rendered, _stamp(record)))
                 if len(collected) >= limit:
                     break
         else:
@@ -203,8 +212,13 @@ def read_page(
     if not collected:
         return Page(lines=[], cursor=cursor, more=more)
     collected.reverse()
-    lines = [line for _offset, rendered in collected for line in rendered]
-    return Page(lines=lines, cursor=cursor, more=more)
+    lines: list[str] = []
+    stamps: dict[int, str] = {}
+    for rendered, stamp in collected:
+        if stamp is not None:
+            stamps[len(lines)] = stamp
+        lines.extend(rendered)
+    return Page(lines=lines, cursor=cursor, more=more, stamps=stamps)
 
 
 def _offset(before: str | int | None) -> int | None:
@@ -285,15 +299,17 @@ def _blocks(content: object) -> list[dict[str, Any]]:
     return []
 
 
-def _stamp(record: dict[str, Any]) -> str:
-    raw = record.get("timestamp")
-    if not isinstance(raw, str):
-        return ""
-    try:
-        when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return ""
-    return when.astimezone().strftime("%H:%M")
+def _stamp(record: dict[str, Any]) -> str | None:
+    """When ``record`` was written, as ISO UTC for :attr:`Page.stamps`; ``None`` without one.
+
+    Never a clock time: rendered here, ``astimezone()`` is the MACHINE's zone, and a fleet
+    on a UTC box read from a phone in UTC-7 said ``> you 17:05`` for a prompt typed at
+    10:05 by the phone's clock, on a page that tells every other time in the phone's own
+    zone. Read as :func:`_tail_time` reads it, a time without a zone being UTC (Claude
+    Code writes ``Z``): this read it as the machine's local time.
+    """
+    when = _tail_time(record)
+    return None if when is None else when.astimezone(UTC).isoformat(timespec="seconds")
 
 
 def _summarise_tool(block: dict[str, Any]) -> str:
@@ -428,10 +444,8 @@ def _render_transcript_record(record: dict[str, Any] | None, width: int) -> list
     if not body:
         return []
 
-    stamp = _stamp(record)
-    when = f"{_DIM} {stamp}{_OFF}" if stamp else ""
-    speaker = _SPEAKERS["user" if role == "user" else "assistant"]
-    return [f"{speaker}{when}", *body, ""]
+    # No time on the speaker's line: read_page sends it beside the lines (Page.stamps).
+    return [_SPEAKERS["user" if role == "user" else "assistant"], *body, ""]
 
 
 # --- the tail: what the needs-you scan classifies on (SPEC §4.3) ---------------------------

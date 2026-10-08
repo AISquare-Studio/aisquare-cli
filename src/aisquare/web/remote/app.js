@@ -14,7 +14,7 @@
  *   as the --cols property that Fit width scales the pane's font by;
  * - setAttribute takes only literal names from a short list, handlers are
  *   added with addEventListener, and navigation goes through pageGo(), the
- *   one place location.hash is set, from ids it validated.
+ *   one place location.hash is set (or replaced), from ids it validated.
  *
  * ansiToRuns, renderRuns and renderNeedsCard are pure: node runs them against
  * a recording fake document (tests/js/remote_page_check.js). The page boots
@@ -34,6 +34,13 @@ const API = Object.freeze({
   ws: "ws",
 });
 const WRITES = Object.freeze(["send-keys", "note", "agent/tell", "agent/stop", "agent/restart", "agent/switch"]);
+
+/* A dispatcher write's path, only ever a name WRITES lists: the CI test holds that list to
+ * the server's, where paths typed at each call site were held to nothing. */
+function writePath(name) {
+  if (WRITES.indexOf(name) < 0) throw new Error("not a write: " + name);
+  return "api/" + name;
+}
 
 /* The only messages the page sends on the socket (SPEC §1.6), through wsSend. */
 const SOCKET_MESSAGES = Object.freeze(["subscribe", "unsubscribe", "subscribe_fleet", "subscribe_board"]);
@@ -593,6 +600,7 @@ const S = {
   opened: false, backoff: 0, retryTimer: 0, lastFrameAt: 0, stale: false, offline: false, away: null,
   off: null, locked: false, booting: false, view: null, route: null, pending: new Map(), orphans: new Map(),
   gone: new Map(), since: new Set(), push: null, padOnOpen: false, lastWake: 0, me: null, names: new Map(), scannedBehind: "",
+  heard: { remote: 0, needs: 0 },
 };
 const UI = {};
 const paneWatchers = new Map();
@@ -634,6 +642,13 @@ function clock(iso) {
   const when = Date.parse(iso);
   if (!Number.isFinite(when)) return "";
   return new Date(when).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/* A transcript turn's time, dim after its speaker: the machine sends when (stamps), and the
+ * phone's clock tells it, as every other time here. The machine's own said 17:05 for 10:05. */
+function turnTime(iso) {
+  const shown = typeof iso === "string" ? clock(iso) : "";
+  return shown ? "\x1b[2m " + shown + "\x1b[0m" : "";
 }
 
 const STATES = {
@@ -740,11 +755,11 @@ async function apiCall(method, path, options) {
  * reconnect when the phone lost the request, if that comes soon enough
  * (flushRetries). The server's ledger answers a retried id from what it
  * recorded, so a restart never runs twice. onWait hears when the answer has
- * to wait for the phone to be back. */
-async function apiWrite(path, body, verb, onWait) {
+ * to wait for the phone to be back; at is when it was tapped, if not now. */
+async function apiWrite(path, body, verb, onWait, at) {
   const id = newRequestId();
   const pending = {
-    id, path, body: Object.assign({}, body, { request_id: id }), verb, at: Date.now(), resolve: null, retried: false, dropped: false,
+    id, path, body: Object.assign({}, body, { request_id: id }), verb, at: at || Date.now(), resolve: null, retried: false, dropped: false,
   };
   S.pending.set(id, pending);
   savePending();
@@ -799,6 +814,25 @@ function dropRetries() {
     pending.retried = true;
     finishPending(pending, notSentAgain("gone"));
   }
+}
+
+/* Keys to one agent go one at a time, each once the one before it was answered. Sent
+ * together (two quick taps, or two lost ones resent on a reconnect), the machine could
+ * type a later one first: ↓ ↓ ⏎ chose another option. A key queued behind one that did
+ * not go through, or that waited past RETRY_WITHIN_MS, is not sent ("held"): it was
+ * tapped for a screen that never came. send(at) sends it, at being when it was tapped. */
+const keyTurns = new Map();
+
+function keysInTurn(pid, label, send) {
+  const key = pid + "\n" + label;
+  const turn = keyTurns.get(key) || { tail: Promise.resolve(true), queued: 0 };
+  keyTurns.set(key, turn);
+  const at = Date.now();
+  turn.queued++;
+  const mine = turn.tail.then((before) => (before && Date.now() - at <= RETRY_WITHIN_MS ? send(at) : notSentAgain("held")));
+  // Nothing queued behind it: the next tap starts afresh, whatever this one came to.
+  turn.tail = mine.then((res) => --turn.queued === 0 || res.ok, () => --turn.queued === 0);
+  return mine;
 }
 
 /* The answer to a lost write that flushRetries or dropRetries kept from going out again. */
@@ -866,6 +900,7 @@ function settleFromLedger(entries) {
  * once nothing will retry it: a write's one retry was lost as well, or a call
  * that is never retried. */
 function failText(res, max) {
+  if (res.notSent === "held") return "Not sent — the key before it did not go through, or took too long. Look at the pane, then tap it again.";
   if (res.notSent) {
     const why = res.notSent === "late" ? "the phone was away too long to be sure the agent still shows what you saw" : "the phone was signed out, or Remote went off, before the machine answered";
     return "Not sent again — " + why + ". If the machine got it, its result shows here; if not, look, then send it again.";
@@ -885,17 +920,19 @@ function failText(res, max) {
 }
 
 /* What a refusal does beyond its sentence. A read_only means writes are off now: the page
- * shows it at once, where it kept the pad and Send live until the next remote frame. */
-function afterFailure(res, route) {
+ * shows it at once, where it kept the pad and Send live until the next remote frame. Late,
+ * its sheet never takes the place of one opened since (sheet: the one that sent it), and a
+ * gone agent sends the page to its fleet only from that agent's own screen. */
+function afterFailure(res, route, sheet) {
   if (res.status === 403 && res.error === "read_only") {
     if (writable()) {
       S.remote = Object.assign({}, S.remote, { allow_write: false });
       drawStatus();
       gateButtons();
     }
-    readOnlySheet(res.message);
+    if (!sheetOpen() || (sheet && sheet.isOpen())) readOnlySheet(res.message);
   }
-  if (res.status === 404 && res.error === "no_such_agent" && route && route.pid) pageGo({ name: "project", pid: route.pid, tab: "fleet" });
+  if (res.status === 404 && res.error === "no_such_agent" && onAgent(route)) pageGo({ name: "project", pid: route.pid, tab: "fleet" }, true);
 }
 
 // --- the socket (SPEC §1.6, §6.4) ---
@@ -938,7 +975,9 @@ function connect() {
     opened = true;
     S.sockState = "open";
     S.backoff = 0;
-    S.lastFrameAt = Date.now();
+    // An open is no update: a page gone stale stays so until a frame comes, as a phone that
+    // slept must not act on the screen it showed before. The first one starts the clock.
+    if (!S.lastFrameAt) S.lastFrameAt = Date.now();
     setOffline(false);
     resubscribe();
     flushRetries();
@@ -989,8 +1028,18 @@ async function probe() {
 
 function resubscribe() {
   wsSend("subscribe_fleet", S.wantFleet);
-  wsSend("subscribe_board", S.wantBoard);
-  for (const watcher of paneWatchers.values()) wsSend("subscribe", watcher.label, watcher.pid);
+  if (S.wantBoard) wsSend("subscribe_board", S.wantBoard); // a new socket sends no board until asked
+  for (const watcher of paneWatchers.values()) {
+    watcher.fresh = false; // what it shows came before this socket: held until its next frame
+    wsSend("subscribe", watcher.label, watcher.pid);
+  }
+  gateButtons();
+}
+
+/* Whether this pane's last frame came on the socket open now. */
+function paneFresh(pid, label) {
+  const watcher = paneWatchers.get(pid + "\n" + label);
+  return !!(watcher && watcher.fresh);
 }
 
 function onFrame(text) {
@@ -1005,9 +1054,13 @@ function onFrame(text) {
   setOffline(false); // a frame is the machine answering, whatever a lost fetch said
   if (S.stale) checkStale();
   const payload = frame.payload;
-  if (frame.type === "remote") setRemote(payload);
-  else if (frame.type === "needs_you") setNeeds(payload && payload.items);
-  else if (frame.type === "action") settleFromLedger(payload && payload.actions);
+  if (frame.type === "remote") {
+    S.heard.remote++;
+    setRemote(payload);
+  } else if (frame.type === "needs_you") {
+    S.heard.needs++;
+    setNeeds(payload && payload.items);
+  } else if (frame.type === "action") settleFromLedger(payload && payload.actions);
   else if (frame.type === "heartbeat") noteScan(frame.ts, payload);
   else if (frame.type === "fleet") {
     S.fleet = payload;
@@ -1021,7 +1074,10 @@ function onFrame(text) {
     const watcher = paneWatchers.get(key);
     if (watcher && payload && typeof payload === "object") {
       S.panes.set(key, payload);
+      const held = !watcher.fresh;
+      watcher.fresh = true;
       for (const fn of watcher.fns) fn(payload);
+      if (held) gateButtons();
     }
   } else if (frame.type === "error" && payload && typeof payload === "object") toast(plainText(payload.message));
 }
@@ -1043,7 +1099,7 @@ function paneWatch(pid, label, fn) {
   const key = pid + "\n" + label;
   let watcher = paneWatchers.get(key);
   if (!watcher) {
-    watcher = { pid, label, fns: new Set() };
+    watcher = { pid, label, fns: new Set(), fresh: false };
     paneWatchers.set(key, watcher);
     wsSend("subscribe", label, pid);
   }
@@ -1064,11 +1120,16 @@ function wantProject(pid) {
     if (projectIdOf(S.fleet) !== pid) S.fleet = null;
     wsSend("subscribe_fleet", pid);
   }
-  if (S.wantBoard !== pid) {
-    S.wantBoard = pid;
-    if (projectIdOf(S.board) !== pid) S.board = null;
-    wsSend("subscribe_board", pid);
-  }
+}
+
+/* Board frames only while the Board tab shows (null stops them): a board is every session
+ * and task of its project, sent again with every session's heartbeat, and no other screen
+ * draws it. One kept from before is not shown again: no frame came while it was not asked. */
+function wantBoard(pid) {
+  if (S.wantBoard === pid) return;
+  S.wantBoard = pid;
+  S.board = null;
+  wsSend("subscribe_board", pid || false);
 }
 
 // --- state that every screen shows ---
@@ -1093,8 +1154,13 @@ function setNeeds(items) {
   viewCall("needs");
 }
 
+/* A read answered after a frame of its kind came is no newer than the frame, and may be
+ * older (a wake reads and reconnects at once). It is dropped: the socket sends a kind again
+ * only once it changes, so an older answer kept stayed, a card hidden until the next. */
 async function refreshNeeds() {
+  const heard = S.heard.needs;
   const res = await apiCall("GET", API.needs);
+  if (S.heard.needs !== heard) return;
   if (res.ok && res.data && typeof res.data === "object") setNeeds(res.data.items);
   else if (res.status === 404 && !res.notJson && S.needs === null) setNeeds([]);
 }
@@ -1105,8 +1171,9 @@ async function refreshActions() {
 }
 
 async function refreshRemote() {
+  const heard = S.heard.remote;
   const res = await apiCall("GET", API.remote);
-  if (res.ok) setRemote(res.data);
+  if (res.ok && S.heard.remote === heard) setRemote(res.data);
 }
 
 /* Whether the browser says this phone has no network. Only then is the phone the one
@@ -1137,11 +1204,16 @@ function checkStale() {
 
 /* Writes off, or nothing heard for 25 s: every action button waits. "w" marks a
  * write, "a" an action that is not one. Sign out is neither: it is always there
- * (SPEC §6.3), and a plain DELETE that needs no live socket. */
+ * (SPEC §6.3), and a plain DELETE that needs no live socket. "pk" keys and Send act on
+ * the pane the Live tab shows: they also wait until that pane came on this socket, and the
+ * pane is greyed until then, as it may be the one from before: keys that waited beside a
+ * pane that looked live said nothing of why. */
 function gateButtons() {
   const shut = !writable() || S.stale;
+  const held = !!(S.view && S.view.held && S.view.held());
   document.body.classList.toggle("ro", !writable());
-  for (const control of document.querySelectorAll("button.w")) control.disabled = shut || control.classList.contains("busy");
+  document.body.classList.toggle("held", held);
+  for (const control of document.querySelectorAll("button.w")) control.disabled = shut || control.classList.contains("busy") || (held && control.classList.contains("pk"));
   for (const control of document.querySelectorAll("button.a")) control.disabled = S.stale || control.classList.contains("busy");
 }
 
@@ -1152,11 +1224,13 @@ function viewCall(name) {
 
 // --- the frame around every screen: status strip, banner, nav, sheet, toast ---
 
+const DOT_SAID = { down: "Not connected", live: "Live", stale: "Stale: nothing heard for 25 s", wait: "Connecting" };
+
 function buildShell() {
   const app = document.getElementById("app");
   UI.top = el("header", "top");
   UI.dot = el("span", "dot");
-  UI.dot.setAttribute("aria-hidden", "true");
+  UI.dot.setAttribute("role", "img");
   UI.where = el("span", "where", "aisquare");
   UI.ro = button("pill ro-pill", "READ-ONLY", () => readOnlySheet());
   UI.off = el("span", "autooff");
@@ -1173,9 +1247,13 @@ function buildShell() {
   UI.navDevices = button("tab", "Devices", () => pageGo("#/devices"));
   UI.navSettings = button("tab", "Settings", () => pageGo("#/settings"));
   UI.nav.append(UI.navNeeds, UI.navProjects, UI.navDevices, UI.navSettings);
+  UI.main.tabIndex = -1;
   UI.sheet = el("div", "sheet-wrap");
   UI.sheet.addEventListener("click", (event) => {
     if (event.target === UI.sheet && !UI.sheet.classList.contains("busy")) closeSheet();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && sheetOpen() && !UI.sheet.classList.contains("busy")) closeSheet();
   });
   UI.toast = el("div", "toast");
   UI.toast.setAttribute("role", "status");
@@ -1188,7 +1266,9 @@ function buildShell() {
 function drawStatus() {
   if (!UI.dot) return;
   const live = S.sockState === "open" && !S.stale;
-  UI.dot.className = "dot " + (S.offline ? "down" : live ? "live" : S.stale ? "stale" : "wait");
+  const state = S.offline ? "down" : live ? "live" : S.stale ? "stale" : "wait";
+  UI.dot.className = "dot " + state;
+  UI.dot.setAttribute("aria-label", DOT_SAID[state]); // its colour alone said stale to sight only
   UI.ro.hidden = !S.remote || writable();
   const at = S.remote && typeof S.remote.auto_off_at === "string" ? Date.parse(S.remote.auto_off_at) : NaN;
   if (Number.isFinite(at) && !S.locked) {
@@ -1222,10 +1302,14 @@ function drawNav() {
   const name = S.route ? S.route.name : "";
   const count = (S.needs || []).length;
   UI.badge.textContent = count ? String(count) : "";
-  UI.navNeeds.classList.toggle("on", name === "home" || name === "card");
-  UI.navProjects.classList.toggle("on", name === "projects" || name === "project" || name === "agent");
-  UI.navDevices.classList.toggle("on", name === "devices");
-  UI.navSettings.classList.toggle("on", name === "settings");
+  const here = [
+    [UI.navNeeds, name === "home" || name === "card"], [UI.navProjects, name === "projects" || name === "project" || name === "agent"],
+    [UI.navDevices, name === "devices"], [UI.navSettings, name === "settings"],
+  ];
+  for (const [tab, on] of here) {
+    tab.classList.toggle("on", on);
+    tab.setAttribute("aria-current", on ? "page" : "false"); // the class alone said it to sight only
+  }
   UI.nav.hidden = name === "unlock" || !!S.off;
 }
 
@@ -1239,11 +1323,20 @@ function toast(text) {
   UI.toastTimer = setTimeout(() => UI.toast.classList.remove("show"), Math.min(10000, 4000 + Math.max(0, shown.length - 60) * 60));
 }
 
+/* A modal sheet, as a screen reader is told it too: named by its heading, the page behind
+ * it inert, focus in it, and back on what opened it (the first, when one sheet takes the
+ * place of another) once it closes. It was an unnamed dialog that left focus behind it. */
 function openSheet(title, build) {
-  closeSheet();
+  if (!sheetOpen()) UI.opener = document.activeElement;
+  closeSheet(true);
   const panel = el("div", "sheet");
   panel.setAttribute("role", "dialog");
-  panel.appendChild(el("h2", null, title));
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-labelledby", "sheet-title");
+  panel.tabIndex = -1;
+  const heading = el("h2", null, title);
+  heading.id = "sheet-title";
+  panel.appendChild(heading);
   const body = el("div", "sheet-body");
   const status = el("p", "status");
   status.setAttribute("aria-live", "polite");
@@ -1251,9 +1344,13 @@ function openSheet(title, build) {
   panel.append(body, status, bar);
   UI.sheet.appendChild(panel);
   UI.sheet.classList.add("open");
+  /* An answer can come after Back closed this sheet, or another took its place: it then
+   * says what came of it in a toast that names it, and leaves the sheet on screen alone. */
   const sheet = {
     body, status, bar,
+    isOpen: () => panel.parentNode === UI.sheet,
     busy(on) {
+      if (!sheet.isOpen()) return;
       UI.sheet.classList.toggle("busy", on);
       for (const control of bar.querySelectorAll("button")) {
         control.classList.toggle("busy", on);
@@ -1261,24 +1358,49 @@ function openSheet(title, build) {
       }
       if (!on) gateButtons();
     },
+    say(text) {
+      if (sheet.isOpen()) status.textContent = text;
+      else toast(title + ": " + text);
+    },
+    close() {
+      if (sheet.isOpen()) closeSheet();
+    },
   };
+  for (const part of [UI.top, UI.banner, UI.main, UI.nav]) part.inert = true;
   build(sheet);
-  bar.appendChild(button("quiet", "Close", closeSheet));
+  bar.appendChild(button("quiet", "Close", () => closeSheet()));
   gateButtons();
+  if (!panel.contains(document.activeElement)) panel.focus();
   return sheet;
 }
 
-function closeSheet() {
-  if (!UI.sheet) return;
+/* replaced: another sheet takes its place, and keeps the page inert and the first opener. */
+function closeSheet(replaced) {
+  if (!sheetOpen()) return;
   UI.sheet.classList.remove("open", "busy");
   clear(UI.sheet);
+  if (replaced) return;
+  for (const part of [UI.top, UI.banner, UI.main, UI.nav]) part.inert = false;
+  const back = UI.opener && UI.opener.isConnected ? UI.opener : UI.main;
+  UI.opener = null;
+  back.focus();
+}
+
+function sheetOpen() {
+  return !!UI.sheet && UI.sheet.classList.contains("open");
+}
+
+/* Whether the page still shows this agent: an answer that comes later acts on it only then. */
+function onAgent(where) {
+  const r = S.route;
+  return !!(r && where && r.name === "agent" && r.pid === where.pid && r.label === where.label);
 }
 
 function confirmSheet(title, sentence, verb, onYes) {
   openSheet(title, (sheet) => {
     sheet.body.appendChild(el("p", "lead", sentence));
     sheet.bar.appendChild(button("w primary", verb, () => {
-      closeSheet();
+      sheet.close();
       onYes();
     }));
   });
@@ -1292,12 +1414,15 @@ function readOnlySheet(message) {
 
 // --- routing ---
 
-/* THE one place location.hash is set (SPEC §6.6): a route object, or a hash that
- * validates like any route (a notification's postMessage brings one). */
-function pageGo(target) {
+/* THE one place the page navigates (SPEC §6.6): a route object, or a hash that validates
+ * like any route (a notification's postMessage brings one). A redirect (replace) takes the
+ * place of the entry it leaves: pushed, Back went to #/unlock, or to a gone agent's tab,
+ * which sent the page on again, so Back never left it. */
+function pageGo(target, replace) {
   const route = typeof target === "string" ? parseRoute(target) : target;
   const hash = routeHash(route);
   if (location.hash === hash) renderRoute();
+  else if (replace) location.replace(hash);
   else location.hash = hash;
 }
 
@@ -1305,7 +1430,7 @@ const VIEWS = {};
 
 function renderRoute() {
   const route = parseRoute(location.hash);
-  if (!route) return pageGo("#/");
+  if (!route) return pageGo("#/", true);
   if (S.view && typeof S.view.cleanup === "function") S.view.cleanup();
   S.view = null;
   S.route = route;
@@ -1316,7 +1441,7 @@ function renderRoute() {
   if (S.off) return drawOff();
   if (S.booting) return UI.main.appendChild(el("p", "empty", "Connecting to the machine…"));
   if (route.name !== "unlock" && S.locked) return toUnlock();
-  if (route.name === "unlock" && !S.locked) return pageGo("#/");
+  if (route.name === "unlock" && !S.locked) return pageGo("#/", true);
   S.view = VIEWS[route.name](route, UI.main) || {};
   gateButtons();
   return undefined;
@@ -1336,7 +1461,7 @@ function toUnlock() {
   S.sock = null;
   S.sockState = "idle";
   if (sock) sock.close(1000);
-  if (!S.route || S.route.name !== "unlock") pageGo("#/unlock");
+  if (!S.route || S.route.name !== "unlock") pageGo("#/unlock", true);
   // Already at #/unlock, as a page (re)loaded there is: its route was drawn while
   // the boot still asked who this is, so no form is on screen and no hashchange
   // will come. Draw it now. A form already shown keeps what is typed in it.
@@ -1506,7 +1631,7 @@ async function unlocked(data) {
     // nothing was stored
   }
   goLive(res.ok ? res.data : S.remote);
-  pageGo(after);
+  pageGo(after, true);
   return true;
 }
 
@@ -1564,30 +1689,34 @@ VIEWS.home = (route, main) => {
     list.classList.toggle("behind", !!S.scannedBehind);
     empty.textContent = S.needs === null ? "Loading…" : "Nothing needs you.";
     empty.hidden = items.length > 0;
-    const seen = new Set();
-    let strips = 0;
-    let after = null;
+    // A strip for each of the first STRIPS_MAX cards that show one, in feed order, worked out
+    // before a card is built: a kept card held its strip while new ones came above it, and
+    // the socket went past its 8 panes. Cards that lose theirs go first, so their
+    // unsubscribes do too, and the socket never holds more.
+    const wanted = new Map();
+    let strips = STRIPS_MAX;
     for (const item of items) {
       const gone = S.gone.get(item.id);
       if (gone && gone.until > Date.now()) continue;
-      seen.add(item.id);
-      let entry = cards.get(item.id);
-      const json = JSON.stringify(item);
-      if (!entry || entry.json !== json) {
-        if (entry) entry.drop();
-        entry = cardEntry(item, STRIP_KINDS.has(item.kind) && strips < STRIPS_MAX);
-        cards.set(item.id, entry);
-      }
-      if (entry.strip) strips++;
-      const slot = after ? after.nextSibling : list.firstChild;
-      if (entry.node !== slot) list.insertBefore(entry.node, slot);
-      after = entry.node;
+      wanted.set(item.id, { item, json: JSON.stringify(item), strip: STRIP_KINDS.has(item.kind) && strips-- > 0 });
     }
     for (const [id, entry] of cards) {
-      if (!seen.has(id)) {
+      const want = wanted.get(id);
+      if (!want || entry.json !== want.json || entry.strip !== want.strip) {
         entry.drop();
         cards.delete(id);
       }
+    }
+    let after = null;
+    for (const [id, want] of wanted) {
+      let entry = cards.get(id);
+      if (!entry) {
+        entry = cardEntry(want.item, want.strip);
+        cards.set(id, entry);
+      }
+      const slot = after ? after.nextSibling : list.firstChild;
+      if (entry.node !== slot) list.insertBefore(entry.node, slot);
+      after = entry.node;
     }
     for (const [id, gone] of S.gone) {
       if (gone.until <= Date.now()) {
@@ -1661,7 +1790,8 @@ async function answerCard(item, answer, row) {
   const quick = row ? Array.from(row.querySelectorAll("button.qa")) : [];
   for (const control of quick) control.classList.add("busy");
   gateButtons();
-  const res = await apiWrite(API.needsAnswer, { id: item.id, keys }, "Answer " + label);
+  const project = item.project && typeof item.project === "object" ? item.project : {};
+  const res = await keysInTurn(project.id, item.agent, (at) => apiWrite(API.needsAnswer, { id: item.id, keys }, "Answer " + label, null, at));
   for (const control of quick) control.classList.remove("busy");
   gateButtons();
   if (res.ok) return toast("Sent " + label + " to " + plainText(item.agent || "the agent"));
@@ -1684,7 +1814,7 @@ async function dismissItem(item) {
   const res = await apiCall("POST", API.needsDismiss, { body: { id: item.id } });
   if (res.ok || res.status === 404) {
     setNeeds((S.needs || []).filter((one) => one.id !== item.id));
-    if (S.route && S.route.name === "card") pageGo("#/");
+    if (S.route && S.route.name === "card" && S.route.id === item.id) pageGo("#/");
     return;
   }
   toast(failText(res));
@@ -1731,15 +1861,16 @@ function tellSheet(ctx, mode) {
       }
       const body = { agent: ctx.label, project: ctx.pid, text: text.value, mode: current };
       if (ctx.needsId) body.needs_id = ctx.needsId;
+      if (!ctx.agentId && ctx.idNow) ctx.agentId = ctx.idNow();
       if (ctx.agentId) body.agent_id = ctx.agentId;
       sheet.busy(true);
       sheet.status.textContent = current === "interrupt" ? "Interrupting " + label + "…" : "Sending…";
-      const res = await apiWrite("api/agent/tell", body, "Tell " + label, () => {
+      const res = await apiWrite(writePath("agent/tell"), body, "Tell " + label, () => {
         sheet.status.textContent = "The phone lost the connection; this goes out again if it is back within 15 seconds.";
       });
       sheet.busy(false);
       if (res.ok) {
-        closeSheet();
+        sheet.close();
         const told = res.data && typeof res.data === "object" ? res.data : {};
         const delivered = told.delivered === true;
         // Not typed in, the machine says what happened instead: in "auto" a board note
@@ -1753,17 +1884,17 @@ function tellSheet(ctx, mode) {
         return;
       }
       if (res.status === 409 && res.error === "stale" && ctx.item) {
-        closeSheet();
+        sheet.close();
         noLonger(ctx.item, res.data && res.data.current);
         return;
       }
-      sheet.status.textContent = failText(res, TEXT_MAX.tell);
+      sheet.say(failText(res, TEXT_MAX.tell));
       if (res.status === 409 && res.error === "agent_busy" && current !== "interrupt") {
         current = "interrupt";
         go.textContent = "Interrupt & tell";
         lead.textContent = TELL_MODES.interrupt[1];
       }
-      afterFailure(res, ctx);
+      afterFailure(res, ctx, sheet);
     };
     const go = button("w primary", TELL_MODES[mode][0], send);
     sheet.bar.appendChild(go);
@@ -1788,16 +1919,16 @@ function replySheet(ctx) {
       const body = { text: text.value, kind: "note", project: ctx.pid };
       if (isText(author)) body.to = author;
       sheet.busy(true);
-      const res = await apiWrite("api/note", body, "Reply");
+      const res = await apiWrite(writePath("note"), body, "Reply");
       sheet.busy(false);
       if (res.ok) {
-        closeSheet();
+        sheet.close();
         toast("Posted on the board");
         dismissItem(ctx.item);
         return;
       }
-      sheet.status.textContent = failText(res, TEXT_MAX.note);
-      afterFailure(res, ctx);
+      sheet.say(failText(res, TEXT_MAX.note));
+      afterFailure(res, ctx, sheet);
     }));
     text.focus();
   });
@@ -1857,8 +1988,10 @@ function actionSheet(kind, ctx) {
     if (to) to.addEventListener("input", say);
     say();
     const run = async () => {
+      if (!ctx.agentId && ctx.idNow) ctx.agentId = ctx.idNow();
       if (!ctx.agentId) {
-        sheet.status.textContent = "Waiting for the fleet to say which " + label + " this is — try again in a second.";
+        sheet.say(ctx.idNow && projectIdOf(S.fleet) === ctx.pid ? label + " is not in this project's fleet any more."
+          : "Waiting for the fleet to say which " + label + " this is — try again in a second.");
         return;
       }
       const body = { agent: ctx.label, project: ctx.pid, agent_id: ctx.agentId, confirm: ctx.label };
@@ -1869,18 +2002,18 @@ function actionSheet(kind, ctx) {
       if (to && to.value.trim()) body.to = to.value.trim();
       sheet.busy(true);
       sheet.status.textContent = meta.busy + " " + label + "…";
-      const res = await apiWrite("api/agent/" + kind, body, meta.title + " " + label, () => {
+      const res = await apiWrite(writePath("agent/" + kind), body, meta.title + " " + label, () => {
         sheet.status.textContent = "The phone lost the connection. If the machine got this it carries on, and the result shows here once the phone is back.";
       });
       sheet.busy(false);
       if (res.ok) {
-        closeSheet();
+        sheet.close();
         toast(doneSentence(kind, label, res.data));
         refreshNeeds();
         return;
       }
       if (res.status === 409 && res.error === "stale") {
-        closeSheet();
+        sheet.close();
         if (ctx.item) noLonger(ctx.item, res.data && res.data.current);
         else toast(label + " changed since this screen loaded — look again, then retry.");
         return;
@@ -1888,13 +2021,13 @@ function actionSheet(kind, ctx) {
       if (res.status === 409 && res.error === "dialog_open" && !dismiss) {
         // The machine's sentence is for curl ("send dismiss_dialog: true"); here that
         // is the button. "May": a tool still waiting on its result counts as a prompt.
-        sheet.status.textContent = label + " may be showing a prompt that " + meta.busy.toLowerCase() +
-          " it now would answer. Press Esc (No) first to dismiss it.";
+        const why = label + " may be showing a prompt that " + meta.busy.toLowerCase() + " it now would answer.";
+        sheet.say(sheet.isOpen() ? why + " Press Esc (No) first to dismiss it." : why);
         dismiss = true;
         say();
         go.textContent = "Press Esc (No) first";
-      } else sheet.status.textContent = failText(res);
-      afterFailure(res, ctx);
+      } else sheet.say(failText(res));
+      afterFailure(res, ctx, sheet);
     };
     const go = button("w primary", meta.title, run);
     sheet.bar.appendChild(go);
@@ -1946,6 +2079,7 @@ function tabBar(tabs, current, go) {
   for (const tab of tabs) {
     const control = button("tab" + (tab[0] === current ? " on" : ""), tab[1], () => go(tab[0]));
     control.setAttribute("role", "tab");
+    control.setAttribute("aria-selected", tab[0] === current ? "true" : "false");
     bar.appendChild(control);
   }
   return bar;
@@ -1999,6 +2133,7 @@ VIEWS.project = (route, main) => {
     draw();
     if (projectIdOf(S.fleet) !== pid) {
       apiCall("GET", API.fleet, { query: { project: pid } }).then((res) => {
+        if (projectIdOf(S.fleet) === pid) return; // a frame came first, and is no older
         if (res.ok && S.wantFleet === pid && projectIdOf(res.data) === pid) {
           S.fleet = res.data;
           noteName(res.data);
@@ -2010,6 +2145,8 @@ VIEWS.project = (route, main) => {
       });
     }
   } else if (route.tab === "board") {
+    wantBoard(pid);
+    view.cleanup = () => wantBoard(null);
     const compose = noteComposer(pid);
     const list = el("div", "events");
     body.append(compose, list);
@@ -2040,7 +2177,7 @@ VIEWS.project = (route, main) => {
     draw();
     if (projectIdOf(S.board) !== pid) {
       apiCall("GET", API.board, { query: { project: pid } }).then((res) => {
-        if (res.ok && S.wantBoard === pid && projectIdOf(res.data) === pid) {
+        if (res.ok && S.wantBoard === pid && projectIdOf(res.data) === pid && projectIdOf(S.board) !== pid) {
           S.board = res.data;
           draw();
         }
@@ -2107,6 +2244,8 @@ function noteComposer(pid) {
   to.placeholder = "to (optional): a label or a role";
   to.maxLength = 200;
   const said = el("p", "status");
+  // Its answer may come after the tab was left: then a toast says what came of the note.
+  const say = (words) => { if (said.isConnected) said.textContent = words; else toast("Note: " + words); };
   const post = button("w primary", "Post", async () => {
     if (!text.value.trim()) {
       said.textContent = "Type something first.";
@@ -2116,15 +2255,15 @@ function noteComposer(pid) {
     if (to.value.trim()) body.to = to.value.trim();
     post.classList.add("busy");
     gateButtons();
-    const res = await apiWrite("api/note", body, "Note");
+    const res = await apiWrite(writePath("note"), body, "Note");
     post.classList.remove("busy");
     gateButtons();
     if (res.ok) {
       text.value = "";
-      said.textContent = "Posted.";
+      say("Posted.");
       return;
     }
-    said.textContent = failText(res, TEXT_MAX.note);
+    say(failText(res, TEXT_MAX.note));
     afterFailure(res);
   });
   const row = el("div", "row-inline");
@@ -2165,13 +2304,17 @@ function paneRenderer(pre) {
   };
 }
 
-/* Columns of the monospace font that fit, for transcript lines wrapped to this phone. */
+/* Columns of the monospace font that fit, for transcript lines wrapped to this phone: inside
+ * the box's padding, which clientWidth counts (8 px a side: lines one or two columns too wide
+ * wrapped again), and half a pixel short, as clientWidth may round a width up. */
 function measureColumns(box) {
   const probe = el("span", "measure", "0000000000");
   box.appendChild(probe);
   const width = probe.getBoundingClientRect().width / 10;
   box.removeChild(probe);
-  return clampInt(width > 0 ? Math.floor((box.clientWidth - 8) / width) : 40, 20, 200);
+  const style = getComputedStyle(box);
+  const inner = box.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0) - 0.5;
+  return clampInt(width > 0 ? Math.floor(inner / width) : 40, 20, 200);
 }
 
 /* Enter is ⏎, as on the input bar: "Enter" ran out of its key into ↑ on a 390 px phone. */
@@ -2216,10 +2359,12 @@ VIEWS.agent = (route, main) => {
     if (current) state.append(...stateBadges(current.state, needed));
     else if (needed) state.appendChild(el("span", "badge s-attention", "NEEDS YOU"));
   };
-  const ctx = () => {
+  const idNow = () => {
     const current = row();
-    return { pid, label, agentId: current && typeof current.agent.id === "string" ? current.agent.id : null, needsId: null, item: null };
+    return current && typeof current.agent.id === "string" ? current.agent.id : null;
   };
+  // idNow: a sheet opened before the fleet came looks again at its tap; it kept that null.
+  const ctx = () => ({ pid, label, agentId: idNow(), needsId: null, item: null, idNow });
   const actionsMenu = () => {
     const current = row();
     const limited = current && current.state === "limited";
@@ -2265,17 +2410,26 @@ VIEWS.agent = (route, main) => {
     const refresh = button("ghost", "Refresh", () => load(null));
     body.append(older, lines, refresh);
     let cursor = null;
+    let loads = 0;
     older.hidden = true;
+    // The newest read is the one drawn: Load older waits while one is out (a second tap put
+    // the same page in twice), a Refresh drops an older read still out (spliced onto the
+    // newest page, it left a gap Load older never filled), and so does leaving the tab.
     const load = async (before) => {
+      const seq = ++loads;
+      older.disabled = true;
       const query = { project: pid, width: measureColumns(lines) };
       if (before) query.before = before;
       const res = await apiCall("GET", apiPath(API.transcript, { agent: label }), { query });
+      if (seq !== loads || !lines.isConnected) return undefined;
+      older.disabled = false;
       if (!res.ok || !res.data || typeof res.data !== "object") {
         toast(failText(res));
         return afterFailure(res, route);
       }
       const page = res.data;
-      const nodes = (Array.isArray(page.lines) ? page.lines : []).map((line) => renderRuns(ansiToRuns(String(line)), document));
+      const stamps = page.stamps && typeof page.stamps === "object" ? page.stamps : {};
+      const nodes = (Array.isArray(page.lines) ? page.lines : []).map((line, n) => renderRuns(ansiToRuns(String(line) + turnTime(stamps[n])), document));
       if (before) {
         const first = lines.firstChild;
         for (const node of nodes) lines.insertBefore(node, first);
@@ -2304,7 +2458,8 @@ VIEWS.agent = (route, main) => {
   }
   if (route.tab !== "card") main.appendChild(inputBar(pid, label, cleanups));
   drawState();
-  return { fleet: drawState, needs: drawState, cleanup: () => { for (const fn of cleanups) fn(); } };
+  const held = route.tab === "live" ? () => !paneFresh(pid, label) : null;
+  return { fleet: drawState, needs: drawState, held, cleanup: () => { for (const fn of cleanups) fn(); } };
 };
 
 function drawExplainability(body, card) {
@@ -2337,18 +2492,21 @@ function inputBar(pid, label, cleanups) {
   text.maxLength = TEXT_MAX.keys;
   const enter = checkbox("⏎", true);
   enter.box.setAttribute("aria-label", "Press Enter after the text");
-  const send = button("w primary", "Send", () => sendText());
+  const send = button("w primary pk", "Send", () => sendText());
   const padToggle = button("ghost", "Keys", () => setPad(!pad.classList.contains("open")));
+  padToggle.setAttribute("aria-expanded", "false");
   line.append(text, enter.label, send, padToggle);
   const pad = el("div", "pad");
   const more = el("div", "pad-more");
   const keyButton = (key) => {
-    const control = button("w key", key[0], () => sendKey(key[1]));
+    const control = button("w key pk", key[0], () => sendKey(key[1], control));
     if (Object.prototype.hasOwnProperty.call(KEY_SPOKEN, key[1])) control.setAttribute("aria-label", KEY_SPOKEN[key[1]]);
     return control;
   };
   for (const key of PAD_ROW) pad.appendChild(keyButton(key));
-  pad.appendChild(button("ghost key", "More", () => more.classList.toggle("open")));
+  const moreToggle = button("ghost key", "More", () => moreToggle.setAttribute("aria-expanded", String(more.classList.toggle("open"))));
+  moreToggle.setAttribute("aria-expanded", "false");
+  pad.appendChild(moreToggle);
   for (const key of PAD_MORE) more.appendChild(keyButton(key));
   pad.appendChild(more);
   bar.append(line, pad);
@@ -2358,6 +2516,7 @@ function inputBar(pid, label, cleanups) {
     const main = UI.main;
     const atFoot = main.scrollHeight - main.scrollTop - main.clientHeight < 2;
     pad.classList.toggle("open", open);
+    padToggle.setAttribute("aria-expanded", String(open));
     if (open) text.blur();
     if (open && atFoot) main.scrollTop = main.scrollHeight;
   };
@@ -2371,24 +2530,39 @@ function inputBar(pid, label, cleanups) {
     setPad(true);
   }
   let lastEsc = 0;
-  const post = async (body, what) => {
-    const res = await apiWrite("api/send-keys", Object.assign({ agent: label, project: pid }, body), what);
+  // A pad key says "sending" until every tap of it was answered, and stays live: keys go one
+  // at a time (keysInTurn), and a tap behind a slow one showed nothing until its toast.
+  const sending = (tapped, by) => {
+    if (!tapped) return;
+    tapped.sending = (tapped.sending || 0) + by;
+    tapped.classList.toggle("sending", tapped.sending > 0);
+  };
+  const post = async (body, what, tapped) => {
+    sending(tapped, 1);
+    const res = await keysInTurn(pid, label, (at) => apiWrite(writePath("send-keys"), Object.assign({ agent: label, project: pid }, body), what, null, at));
+    sending(tapped, -1);
     if (res.ok) return true;
     if (res.status === 409 && res.error === "double_press") {
-      confirmSheet("Send it again?", "A second Ctrl-C or Ctrl-D within 3 s exits Claude Code, and the agent with it.", "Send and exit",
-        () => post(Object.assign({}, body, { confirm_exit: true }), what));
+      // Asked on this agent's own screen, over no other sheet: the answer can come after
+      // the human moved on, and a sheet in its place would put Send and exit where
+      // another agent's button was.
+      const which = (body.keys || []).indexOf("C-d") >= 0 ? "Ctrl-D" : "Ctrl-C";
+      if (onAgent({ pid, label }) && !sheetOpen()) {
+        confirmSheet("Send " + which + " to " + label + " again?", "A second " + which + " within 3 s exits Claude Code, and " + label + " with it.",
+          "Send and exit", () => post(Object.assign({}, body, { confirm_exit: true }), what, tapped));
+      } else toast(label + ": the second " + which + " was not sent — it would exit Claude Code.");
       return false;
     }
     toast(failText(res, TEXT_MAX.keys));
-    afterFailure(res, { pid });
+    afterFailure(res, { pid, label });
     return false;
   };
-  const sendKey = (key) => {
+  const sendKey = (key, tapped) => {
     if (key === "Escape") {
       const now = Date.now();
       if (now - lastEsc < ESC_REPEAT_MS) {
         lastEsc = 0;
-        confirmSheet("Press Esc again?", "Two Esc in a row open Claude Code's Rewind selector.", "Send Esc", () => post({ keys: [key] }, "Esc"));
+        confirmSheet("Press Esc again?", "Two Esc in a row open Claude Code's Rewind selector.", "Send Esc", () => post({ keys: [key] }, "Esc", tapped));
         return;
       }
       lastEsc = now;
@@ -2396,10 +2570,10 @@ function inputBar(pid, label, cleanups) {
     if (key === "C-c" || key === "C-d") {
       const which = key === "C-c" ? "Ctrl-C" : "Ctrl-D";
       confirmSheet("Send " + which + "?", which + " interrupts " + label + "; a second one within 3 s exits Claude Code.", "Send " + which,
-        () => post({ keys: [key] }, which));
+        () => post({ keys: [key] }, which, tapped));
       return;
     }
-    post({ keys: [key] }, "Key " + key);
+    post({ keys: [key] }, "Key " + key, tapped);
   };
   // Send needs words. An empty box with ⏎ on was a bare Enter into the pane, which
   // picks a dialog's highlighted option ("1. Yes"); Enter on its own is the pad's.
@@ -2454,14 +2628,19 @@ VIEWS.devices = (route, main) => {
       const id = device.id;
       if (own) line.appendChild(button(null, "Sign out", () => signOut(id)));
       else {
-        line.appendChild(button("w", "Revoke", async () => {
+        const revoke = button("w", "Revoke", async () => {
+          revoke.classList.add("busy"); // a second tap, answered "no such device", read as a failure
+          gateButtons();
           const out = await apiCall("DELETE", apiPath(API.device, { id }));
+          revoke.classList.remove("busy");
+          gateButtons();
           if (out.ok) load();
           else {
             toast(failText(out));
             afterFailure(out);
           }
-        }));
+        });
+        line.appendChild(revoke);
         line.appendChild(el("p", "ro-note", "Revoking another device is a write: " + READ_ONLY + "."));
       }
       list.appendChild(line);
@@ -2680,8 +2859,14 @@ VIEWS.settings = (route, main) => {
 
 // --- auto-off ---
 
+/* Busy while it runs, as every write button is: a second tap went out under a second
+ * request_id, and Remote stayed on another hour the human never asked for. */
 async function extendAutoOff() {
+  UI.extend.classList.add("busy");
+  gateButtons();
   const res = await apiWrite(API.remoteExtend, {}, "Extend");
+  UI.extend.classList.remove("busy");
+  gateButtons();
   if (res.ok && res.data && typeof res.data.auto_off_at === "string") {
     S.remote = Object.assign({}, S.remote, { auto_off_at: res.data.auto_off_at });
     drawStatus();

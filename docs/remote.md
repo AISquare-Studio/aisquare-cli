@@ -127,9 +127,9 @@ The screens, along the bottom bar:
   **Memory**, both read-only.
 - **An agent** — **Live** (its pane, colours included, the cursor where the
   program shows one, with Fit width), **Transcript** (the conversation, wrapped
-  to the phone, older pages on demand) and **Card** (model, tokens and the
-  explainability verdict). Under Live and Transcript sit the input bar and the
-  key pad.
+  to the phone, each turn's time in the phone's own time zone, older pages on
+  demand) and **Card** (model, tokens and the explainability verdict). Under Live
+  and Transcript sit the input bar and the key pad.
 - **Devices** — every device that unlocked, which one is this one, last seen, when
   its sign-in ends. Sign out of this one, or revoke another.
 - **Settings** — notifications for this device, the version, sign out.
@@ -138,7 +138,9 @@ The strip at the top shows the connection (green: live), **READ-ONLY** while
 writes are off (tap it for the reason), and "off in 23 min" with **Extend 1 h**
 when an auto-off is set. When nothing has arrived for 25 seconds, the page greys
 what it shows and holds every action until the next update: a phone that slept
-must not act on a screen that went stale. Waking the phone reconnects at once.
+must not act on a screen that went stale. Waking the phone reconnects at once,
+and an agent's Live tab stays grey, its keys and Send held, until its pane has
+come through again.
 If the machine stops checking what needs you while the link is fine, the feed
 greys and says when it last looked.
 
@@ -285,7 +287,10 @@ eight are two rows of four, More last.
 Ctrl-C and Ctrl-D ask first, and a second one within 3 seconds asks again,
 because Claude Code exits on it. A second Esc within a second and a half asks
 too: two in a row open Claude Code's Rewind selector. The pad and the phone's
-keyboard never share the screen.
+keyboard never share the screen. Keys reach an agent one at a time, in the order
+they were tapped, and a key shows in the accent colour until the machine has
+answered it; one that waits behind a key that did not get through, or for longer
+than 15 seconds, is not sent, and the page says so.
 
 ---
 
@@ -429,12 +434,13 @@ from `POST api/unlock`) except unlock itself; every non-GET request needs an
 | POST | `api/send-keys`, `api/note`, `api/agent/{tell,stop,restart,switch}`, `api/task/…`, `api/project/…` | the writes |
 | WS | `ws` | the live stream |
 
-The stream sends `{"type", "payload", "ts"}` frames: `board`, `fleet` and `remote`
-when they change, `needs_you`, `action` (this device's write results), a
-`heartbeat` every 10 seconds, and `pane` for each pane the page subscribed to
-(`{"subscribe": "<agent>", "project": "<id>"}`). It closes with 4401 for a device
-that is no longer signed in, 4409 when the same device opened a fifth connection,
-and 4410 when Remote is turned off.
+The stream sends `{"type", "payload", "ts"}` frames: `fleet` and `remote` when they
+change, `board` too once asked for (`{"subscribe_board": "<id>"}`, `false` to stop;
+the board's events and the sessions they name), `needs_you`, `action` (this device's
+write results), a `heartbeat` every 10 seconds, and `pane` for each pane the page
+subscribed to (`{"subscribe": "<agent>", "project": "<id>"}`). It closes with 4401
+for a device that is no longer signed in, 4409 when the same device opened a fifth
+connection, and 4410 when Remote is turned off.
 
 With curl, unlock once and keep the cookie:
 

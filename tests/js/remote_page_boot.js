@@ -5,7 +5,8 @@
  * loads app.js afresh in its own vm context, whose globals are a browser just
  * big enough for the page. Elements keep their children, classes and
  * listeners; location's hash fires hashchange; fetch and WebSocket are answered
- * by the scenario; timers never fire on their own, so nothing waits on a clock.
+ * by the scenario; timers never fire on their own, so nothing waits on a clock,
+ * but they are kept, and a scenario can fire one by its function's name.
  * Like the other harness it asserts nothing: it prints ONE JSON report, and
  * tests/test_remote_page.py asserts on it.
  *
@@ -19,10 +20,17 @@ const vm = require("vm");
 
 const APP = path.join(__dirname, "..", "..", "src", "aisquare", "web", "remote", "app.js");
 const SOURCE = fs.readFileSync(APP, "utf8");
+const CSS = fs.readFileSync(path.join(path.dirname(APP), "app.css"), "utf8");
+/* The transcript box's padding, a side, as the stylesheet sets it. */
+const PRE_PADDING = /pre\.pane, pre\.transcript \{[^}]*padding: (\d+)px;/.exec(CSS)[1] + "px";
 const BASE = "http://127.0.0.1:8750/r/" + "t".repeat(32) + "/";
 const PROJECT = "prj_x";
 const NEEDS_ID = "ny_0123456789abcdef";
 const PASSPHRASE = "amber birch cedar delta";
+/* A 12 px monospace character's advance (0.6 em), as the page measures one. */
+const CHAR_PX = 7.2;
+/* A pre's clientWidth: its width inside the border, padding in. A scenario sets it. */
+let preWidth = 0;
 
 // --- a browser just big enough for the page -------------------------------------------------
 
@@ -40,6 +48,12 @@ class FakeNode {
   get nextSibling() {
     const siblings = this.parentNode ? this.parentNode.childNodes : [];
     return siblings[siblings.indexOf(this) + 1] || null;
+  }
+
+  get isConnected() {
+    let node = this;
+    while (node.parentNode) node = node.parentNode;
+    return node === this.ownerDocument.documentElement;
   }
 
   get textContent() {
@@ -152,11 +166,28 @@ class FakeElement extends FakeNode {
   }
 
   focus() {
+    this.ownerDocument.activeElement = this;
     this.dispatch("focus");
   }
 
   blur() {
+    if (this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = this.ownerDocument.body;
     this.dispatch("blur");
+  }
+
+  contains(node) {
+    for (let at = node; at; at = at.parentNode) if (at === this) return true;
+    return false;
+  }
+
+  /* A layout of one kind: a monospace character is CHAR_PX wide, a pre is preWidth, and
+   * nothing else has a size. */
+  getBoundingClientRect() {
+    return { width: this.classList.contains("measure") ? Array.from(this.textContent).length * CHAR_PX : 0 };
+  }
+
+  get clientWidth() {
+    return this.tagName === "PRE" ? preWidth : 0;
   }
 
   /* "tag" or "tag.class.class": all the page ever asks for. */
@@ -182,6 +213,7 @@ class FakeSocket {
   constructor(sockets) {
     this.readyState = 0;
     this.listeners = {};
+    this.sent = [];
     sockets.push(this);
   }
 
@@ -193,7 +225,10 @@ class FakeSocket {
     for (const fn of (this.listeners[type] || []).slice()) fn(Object.assign({ type }, extra));
   }
 
-  send() {}
+  /* What the page told the machine on this socket, as parsed messages. */
+  send(text) {
+    this.sent.push(JSON.parse(text));
+  }
 
   close(code) {
     if (this.readyState === 3) return;
@@ -246,6 +281,7 @@ function bootPage(hash, answer, globals) {
   };
   doc.documentElement = new FakeElement(doc, "html");
   doc.body = new FakeElement(doc, "body");
+  doc.activeElement = doc.body;
   const app = new FakeElement(doc, "div");
   app.id = "app";
   doc.documentElement.appendChild(doc.body);
@@ -253,27 +289,45 @@ function bootPage(hash, answer, globals) {
 
   const requests = [];
   const sockets = [];
-  let timers = 0;
-  const hold = () => ++timers; // a timer is an id and nothing more: none ever fires
+  const timers = new Map();
+  let lastTimer = 0;
+  const hold = (fn) => { // kept, and never fired but by a scenario
+    timers.set(++lastTimer, fn);
+    return lastTimer;
+  };
   const win = { listeners: {} };
   let current = hash;
+  /* The tab's history from the page's own load on: setting the hash pushes an entry, as a
+   * browser does, and replace() takes the place of the one it is at. */
+  const entries = [hash];
+  let at = 0;
+  const changed = () => setImmediate(() => { for (const fn of win.listeners.hashchange || []) fn({ type: "hashchange" }); });
+  const go = (value, replace) => {
+    const next = String(value).charAt(0) === "#" ? String(value) : "#" + value;
+    if (next === current) return;
+    current = next;
+    if (replace) entries[at] = next;
+    else entries.splice(++at, entries.length, next);
+    changed();
+  };
   const location = {
     protocol: "http:",
     get hash() {
       return current;
     },
     set hash(value) {
-      const next = String(value).charAt(0) === "#" ? String(value) : "#" + value;
-      if (next === current) return;
-      current = next;
-      setImmediate(() => { for (const fn of win.listeners.hashchange || []) fn({ type: "hashchange" }); });
+      go(value, false);
+    },
+    replace(url) {
+      const value = String(url);
+      go(value.slice(value.indexOf("#")), true);
     },
     toString: () => BASE + current,
   };
   const fetch = async (url, init) => {
     const where = String(url).split("?")[0];
     const body = typeof init.body === "string" ? JSON.parse(init.body) : null;
-    requests.push({ method: init.method, path: where, body });
+    requests.push({ method: init.method, path: where, body, query: String(url).split("?")[1] || "" });
     const reply = await answer(init.method, where, body);
     if (reply === "network") throw new TypeError("Failed to fetch");
     const text = JSON.stringify(reply.json);
@@ -292,10 +346,11 @@ function bootPage(hash, answer, globals) {
     crypto: globalThis.crypto,
     URL,
     URLSearchParams,
+    getComputedStyle: (node) => (node.tagName === "PRE" ? { paddingLeft: PRE_PADDING, paddingRight: PRE_PADDING } : {}),
     setTimeout: hold,
     setInterval: hold,
-    clearTimeout() {},
-    clearInterval() {},
+    clearTimeout: (id) => timers.delete(id),
+    clearInterval: (id) => timers.delete(id),
     addEventListener(type, fn) {
       (this.listeners[type] = this.listeners[type] || []).push(fn);
     },
@@ -316,6 +371,23 @@ function bootPage(hash, answer, globals) {
     },
     live: () => sockets[sockets.length - 1],
     sent: (where) => requests.filter((one) => one.method === "POST" && one.path === where).map((one) => one.body),
+    requests,
+    /* The names of the functions timers still hold, and one fired (and gone) by its name. */
+    timers: () => Array.from(timers.values(), (fn) => fn.name).filter(Boolean).sort(),
+    fireTimer(name) {
+      for (const [id, fn] of Array.from(timers)) { // what it fires may set another: not this time
+        if (fn.name !== name) continue;
+        timers.delete(id);
+        fn();
+      }
+    },
+    /* The browser's Back: false once there is no entry of this page's before this one. */
+    back() {
+      if (at === 0) return false;
+      current = entries[--at];
+      changed();
+      return true;
+    },
   };
   return page;
 }
@@ -340,6 +412,21 @@ function click(control) {
 function unlockForm(page) {
   const input = find(page.main(), (node) => node.tagName === "INPUT" && node.type === "password");
   return input ? { input, form: input.parentNode } : null;
+}
+
+/* The browser fires `type` at "document" or "window": a wake, as the phone sees one. */
+function fire(page, target, type) {
+  page.run("for (const fn of (" + target + ".listeners." + type + " || []).slice()) fn({ type: " + JSON.stringify(type) + " });");
+}
+
+/* What the page sent on `sock` with `kind` in it, in order. */
+function asked(sock, kind) {
+  return sock.sent.filter((message) => Object.prototype.hasOwnProperty.call(message, kind)).map((message) => message[kind]);
+}
+
+/* The text of each node, in order. */
+function textsOf(nodes) {
+  return nodes.map((node) => node.textContent);
 }
 
 // --- the machine's answers -------------------------------------------------------------------
@@ -449,12 +536,19 @@ async function unlockAnswered(status, json) {
   };
 }
 
-/* The agent view, live, with its socket open: where Send is. */
+/* The frame the machine sends for a pane subscription on the socket open now, on its next
+ * tick; no rows, so nothing scrolls. The Live tab's keys wait for it. */
+function paneCame(page, label) {
+  page.live().frame("pane", { rows: [], width: 80, height: 0 }, { agent: label || "coder-1", project: PROJECT });
+}
+
+/* The agent view, live, with its socket open and its pane in: where Send is. */
 async function agentView(extra) {
   const page = bootPage("#/p/" + PROJECT + "/a/coder-1/live", signedIn(extra));
   await settle();
   page.acceptSockets();
   page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  paneCame(page);
   await settle();
   return page;
 }
@@ -484,6 +578,7 @@ async function lostWrite() {
   const say = await typeAndSend(page, "hello");
   const waiting = { sockets: page.sockets.length, firstClosed: page.sockets[0].readyState === 3, send: sendState(page) };
   page.acceptSockets();
+  paneCame(page);
   await settle();
   return {
     waiting,
@@ -501,6 +596,7 @@ async function lostTwice() {
   const page = await agentView({ "POST api/send-keys": () => "network" });
   await typeAndSend(page, "hello");
   page.acceptSockets();
+  paneCame(page);
   await settle();
   const bodies = page.sent("api/send-keys");
   const said = page.toast();
@@ -751,7 +847,8 @@ async function paneCursor() {
 }
 
 /* Stop, on an agent that shows a prompt: the machine refuses in its API's words, the
- * sheet says why in its own, and the next tap sends dismiss_dialog. */
+ * sheet says why in its own and adds the dismissal to what Stop will do, and the next tap
+ * sends dismiss_dialog. */
 async function stopAtAPrompt() {
   const refused = "coder-1 is showing a prompt; stopping would answer it — send dismiss_dialog: true to press Esc (No) first";
   const stopped = { agent: { id: "agt_1", label: "coder-1" }, claims_released: [], release_failed: null, project: PROJECT };
@@ -767,9 +864,10 @@ async function stopAtAPrompt() {
   click(buttonNamed(page.run("UI.sheet"), "Stop"));
   await settle();
   const said = find(page.run("UI.sheet"), (node) => node.className === "status").textContent;
+  const lead = find(page.run("UI.sheet"), (node) => node.className === "lead").textContent;
   click(buttonNamed(page.run("UI.sheet"), "Press Esc (No) first"));
   await settle();
-  return { said, dismissed: page.sent("api/agent/stop").map((body) => body.dismiss_dialog === true), toast: page.toast() };
+  return { said, lead, dismissed: page.sent("api/agent/stop").map((body) => body.dismiss_dialog === true), toast: page.toast() };
 }
 
 /* A pad key refused read_only: writes went off on the machine, and no remote frame has
@@ -835,6 +933,1341 @@ async function keyNames() {
   return { keys, enterToggle: toggle ? toggle.attrs["aria-label"] || null : null };
 }
 
+/* The board the socket asks for, screen by screen, and on the socket a wake opens. */
+async function boardOnItsTab() {
+  const page = bootPage("#/", signedIn());
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const go = async (hash) => {
+    page.run("pageGo(" + JSON.stringify(hash) + ")");
+    await settle();
+    return asked(page.sockets[0], "subscribe_board");
+  };
+  const steps = { feed: asked(page.sockets[0], "subscribe_board") };
+  steps.fleet = await go("#/p/" + PROJECT + "/fleet");
+  steps.board = await go("#/p/" + PROJECT + "/board");
+  steps.agent = await go("#/p/" + PROJECT + "/a/coder-1/live");
+  await go("#/p/" + PROJECT + "/board");
+  fire(page, "document", "visibilitychange");
+  page.acceptSockets();
+  await settle();
+  steps.woken = asked(page.live(), "subscribe_board");
+  steps.sockets = page.sockets.length;
+  return steps;
+}
+
+/* The Board tab with a board frame on it, left for the Fleet tab and opened again, its read
+ * held: what the tab shows meanwhile, the reads it made, and what it shows once answered. */
+async function boardReopened() {
+  const reads = [];
+  const page = bootPage("#/p/" + PROJECT + "/board", signedIn({
+    "GET api/board": () => (reads[reads.length] = deferred()).promise,
+  }));
+  await settle();
+  page.acceptSockets();
+  page.live().frame("board", { project: { id: PROJECT }, sessions: [], events: [note(1, "from before")] });
+  await settle();
+  reads[0].settle({ status: 200, json: { project: { id: PROJECT }, sessions: [], events: [note(1, "from before")] } });
+  await settle();
+  const shown = () => page.main().querySelectorAll("div.events")[0].childNodes.map((one) => {
+    const text = find(one, (node) => node.className === "text");
+    return text ? text.textContent : one.textContent;
+  });
+  const first = shown();
+  page.run("pageGo('#/p/" + PROJECT + "/fleet')");
+  await settle();
+  page.run("pageGo('#/p/" + PROJECT + "/board')");
+  await settle();
+  const reopened = { shown: shown(), reads: reads.length };
+  reads[reads.length - 1].settle({ status: 200, json: { project: { id: PROJECT }, sessions: [], events: [note(1, "from before"), note(2, "since")] } });
+  await settle();
+  return { first, reopened, answered: shown() };
+}
+
+/* A transcript read on a phone in UTC-7 from a machine that sends each turn's time as UTC:
+ * the lines it draws. */
+async function transcriptTimes() {
+  const zone = process.env.TZ;
+  process.env.TZ = "America/Los_Angeles";
+  try {
+    const page = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
+      "GET api/transcript/coder-1": () => ({
+        status: 200,
+        json: {
+          lines: ["\u001b[1;36m> you\u001b[0m", "  commit it", "", "\u001b[1;32m* claude\u001b[0m", "  done", ""],
+          cursor: null, more: false, stamps: { 0: "2026-10-07T17:05:00+00:00", 3: "2026-10-07T17:06:00+00:00" },
+        },
+      }),
+    }));
+    await settle();
+    return page.main().querySelectorAll("pre.transcript")[0].childNodes.map((line) => line.textContent);
+  } finally {
+    if (zone === undefined) delete process.env.TZ;
+    else process.env.TZ = zone;
+  }
+}
+
+const OLDER_REMOTE = { allow_write: false, auto_off_at: null, version: "test" };
+
+function note(seq, text) {
+  return { kind: "team.note", ts: "2026-10-07T10:00:00+00:00", payload: { seq, text, session_id: null } };
+}
+
+/* Reads the page makes while its socket sends the same kind, answered only after the socket's
+ * frame, and older than it: the feed and the strip on a wake, the Board and Fleet tabs as they
+ * open (one answered with a failure); and a board read no frame came before, the control. */
+async function readsAfterFrames() {
+  const held = {};
+  let holding = false;
+  const hold = (key, now) => () => (holding ? (held[key] = deferred()).promise : now);
+  const page = bootPage("#/", signedIn({
+    "GET api/needs": hold("needs", { status: 200, json: { items: [] } }),
+    "GET api/remote": hold("remote", { status: 200, json: OLDER_REMOTE }),
+  }));
+  await settle();
+  page.acceptSockets();
+  await settle();
+  holding = true;
+  fire(page, "document", "visibilitychange");
+  page.acceptSockets();
+  page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  page.live().frame("needs_you", { items: [ITEM] });
+  await settle();
+  held.needs.settle({ status: 200, json: { items: [] } });
+  held.remote.settle({ status: 200, json: OLDER_REMOTE });
+  await settle();
+  const wake = { cards: page.main().querySelectorAll("div.card").length, writable: page.run("writable()") };
+
+  const opened = async (tab, answer, frame) => {
+    const read = deferred();
+    const one = bootPage("#/p/" + PROJECT + "/" + tab, signedIn({ ["GET api/" + tab]: () => read.promise }));
+    await settle();
+    one.acceptSockets();
+    if (frame) one.live().frame(tab, frame);
+    await settle();
+    read.settle(answer);
+    await settle();
+    return one.main().querySelectorAll(tab === "board" ? "div.event" : "button.row").length;
+  };
+  const board = (events) => ({ project: { id: PROJECT }, sessions: [], events });
+  const two = Object.assign({}, FLEET, { agents: FLEET.agents.concat({ agent: { id: "agt_2", label: "coder-2", role: "coder" }, state: "working" }) });
+  return {
+    wake,
+    board: await opened("board", { status: 200, json: board([note(1, "first")]) }, board([note(1, "first"), note(2, "second")])),
+    fleet: await opened("fleet", { status: 200, json: FLEET }, two),
+    fleetFailed: await opened("fleet", { status: 503, json: { error: "unavailable", message: "tmux" } }, two),
+    boardAlone: await opened("board", { status: 200, json: board([note(1, "first")]) }, null),
+  };
+}
+
+/* The browser's Back, pressed until it leaves the page (six times at most), and where each
+ * press landed: after an unlock, after a gone agent's tab sent the page to its fleet, after
+ * the phone was signed out on a project's screen, and after a tab left at #/unlock was opened
+ * again once signed in (another tab unlocked, or a reload). */
+async function backLeaves() {
+  const backs = async (page) => {
+    const landed = [];
+    for (let n = 0; n < 6; n++) {
+      if (!page.back()) return { at: page.location.hash, landed, left: true };
+      await settle();
+      landed.push(page.location.hash);
+    }
+    return { at: page.location.hash, landed, left: false };
+  };
+  let unlocked = false;
+  const locked = bootPage("", (method, where, body) => {
+    if (method === "POST" && where === "api/unlock") {
+      unlocked = true;
+      return { status: 200, json: { ok: true, device: { id: "dev_0a1b2c3d" } } };
+    }
+    return unlocked ? signedIn()(method, where, body) : { status: 401, json: { error: "unauthorized" } };
+  });
+  await settle();
+  const { input, form } = unlockForm(locked);
+  input.value = PASSPHRASE;
+  form.dispatch("submit");
+  await settle();
+  const afterUnlock = await backs(locked);
+  const gone = bootPage("#/p/" + PROJECT + "/fleet", signedIn({
+    "GET api/transcript/coder-1": () => ({ status: 404, json: { error: "no_such_agent", message: "no live agent 'coder-1'" } }),
+  }));
+  await settle();
+  for (const tab of ["live", "transcript"]) {
+    gone.run("pageGo('#/p/" + PROJECT + "/a/coder-1/" + tab + "')");
+    await settle();
+  }
+  const afterGone = await backs(gone);
+  const out = bootPage("#/", signedIn());
+  await settle();
+  out.acceptSockets();
+  out.run("pageGo('#/p/" + PROJECT + "/fleet')");
+  await settle();
+  out.live().fire("close", { code: 4401 });
+  await settle();
+  const afterSignedOut = await backs(out);
+  const reopened = bootPage("#/unlock", signedIn());
+  await settle();
+  return { afterUnlock, afterGone, afterSignedOut, unlockedAtUnlock: await backs(reopened) };
+}
+
+/* The title of the sheet on screen, or null. */
+function sheetTitle(page) {
+  if (!page.run("UI.sheet.classList.contains('open')")) return null;
+  const title = find(page.run("UI.sheet"), (node) => node.tagName === "H2");
+  return title ? title.textContent : null;
+}
+
+/* Answers that come after the human moved on. A second ^C to coder-1 is refused
+ * double_press while coder-2's screen shows its own Ctrl-C sheet, on coder-1's own screen
+ * once its Actions sheet is open, and once coder-2's screen shows with no sheet on it; a
+ * restart answers after Back left its sheet and the human opened Tell and typed in it (done,
+ * failed and stale), and once more with that Tell sent and out; a Reply, and a card's Tell
+ * answered stale, once another is begun; and a Stop answered dialog_open once Back closed
+ * its sheet. */
+async function lateAnswers() {
+  const keys = [];
+  const page = await agentView({
+    "POST api/send-keys": () => (keys[keys.length] = deferred()).promise,
+  });
+  for (const answer of [{ status: 200, json: { sent: true } }, null]) {
+    click(buttonNamed(page.main(), "^C"));
+    click(buttonNamed(page.run("UI.sheet"), "Send Ctrl-C"));
+    await settle();
+    if (answer) keys[keys.length - 1].settle(answer);
+    await settle();
+  }
+  page.run("pageGo('#/p/" + PROJECT + "/a/coder-2/live')");
+  await settle();
+  paneCame(page, "coder-2");
+  await settle();
+  click(buttonNamed(page.main(), "^C"));
+  keys[1].settle({ status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits Claude Code — send confirm_exit: true" } });
+  await settle();
+  const doublePress = {
+    sheet: sheetTitle(page), toast: page.toast(), exits: page.sent("api/send-keys").filter((body) => body.confirm_exit).length,
+  };
+
+  const restartThenTell = async (answer) => {
+    const restart = deferred();
+    const one = await agentView({
+      "POST api/agent/restart": () => restart.promise,
+      "GET api/transcript/coder-1": () => ({ status: 200, json: { lines: [], cursor: null, more: false, stamps: {} } }),
+    });
+    one.live().frame("fleet", FLEET);
+    await settle();
+    click(buttonNamed(one.main(), "Actions…"));
+    click(buttonNamed(one.run("UI.sheet"), "Restart…"));
+    click(buttonNamed(one.run("UI.sheet"), "Restart"));
+    await settle();
+    one.run("pageGo('#/p/" + PROJECT + "/a/coder-1/transcript')");
+    await settle();
+    click(buttonNamed(one.main(), "Actions…"));
+    click(buttonNamed(one.run("UI.sheet"), "Tell…"));
+    const text = find(one.run("UI.sheet"), (node) => node.tagName === "TEXTAREA");
+    text.value = "carry on";
+    restart.settle(answer);
+    await settle();
+    return { sheet: sheetTitle(one), typed: text.isConnected ? text.value : null, toast: one.toast() };
+  };
+
+  /* The restart answered while the Tell opened since is out: the Tell's sheet still waits on
+   * its own answer, and neither Escape nor a tap beside it closes it. Then Back, Stop…, and
+   * the Tell's answer, which leaves the Stop sheet where it is. */
+  const restartUnderATell = async () => {
+    const restart = deferred();
+    const told = deferred();
+    const one = await agentView({
+      "POST api/agent/restart": () => restart.promise,
+      "POST api/agent/tell": () => told.promise,
+      "GET api/transcript/coder-1": () => transcriptPage([], null, false),
+    });
+    one.live().frame("fleet", FLEET);
+    await settle();
+    const menu = (item) => {
+      click(buttonNamed(one.main(), "Actions…"));
+      click(buttonNamed(one.run("UI.sheet"), item));
+    };
+    menu("Restart…");
+    click(buttonNamed(one.run("UI.sheet"), "Restart"));
+    await settle();
+    one.run("pageGo('#/p/" + PROJECT + "/a/coder-1/transcript')");
+    await settle();
+    menu("Tell…");
+    find(one.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "carry on";
+    click(buttonNamed(one.run("UI.sheet"), "Tell"));
+    await settle();
+    restart.settle({ status: 200, json: { agent: { id: "agt_1", label: "coder-1" }, resumed: true, project: PROJECT } });
+    await settle();
+    const wrap = one.run("UI.sheet");
+    const close = buttonNamed(wrap, "Close");
+    const waiting = { busy: wrap.classList.contains("busy"), close: close ? close.disabled : null };
+    one.run("for (const fn of document.listeners.keydown || []) fn({ type: 'keydown', key: 'Escape' });");
+    wrap.dispatch("click");
+    waiting.sheet = sheetTitle(one);
+    one.run("pageGo('#/p/" + PROJECT + "/a/coder-1/live')");
+    await settle();
+    menu("Stop…");
+    told.settle({ status: 200, json: { label: "coder-1", delivered: true, mode: "auto", project: PROJECT } });
+    await settle();
+    return { waiting, told: { sheet: sheetTitle(one), toast: one.toast() } };
+  };
+
+  /* A Reply posted on one question, then another question's card opened and a Reply begun
+   * there: the first one's answer leaves the second's sheet, and what is typed in it, alone. */
+  const replyUnderAReply = async () => {
+    const posted = deferred();
+    const first = Object.assign({}, ITEM, {
+      kind: "board_question", detail: { text: "Which store?", author: "lead-1" }, answers: [], actions: ["reply"],
+    });
+    const second = Object.assign({}, first, { id: "ny_00000000000000b2", detail: { text: "Which port?", author: "lead-1" } });
+    const page = bootPage("#/", signedIn({
+      "GET api/needs": () => ({ status: 200, json: { items: [first, second] } }),
+      "POST api/note": () => posted.promise,
+      "POST api/needs/dismiss": () => ({ status: 200, json: { dismissed: true } }),
+    }));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    click(buttonNamed(page.main(), "Reply…"));
+    find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "Postgres";
+    click(buttonNamed(page.run("UI.sheet"), "Post"));
+    await settle();
+    page.run("pageGo('#/n/" + second.id + "')");
+    await settle();
+    click(buttonNamed(page.main(), "Reply…"));
+    const draft = find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA");
+    draft.value = "8080";
+    posted.settle({ status: 200, json: { ok: true } });
+    await settle();
+    return {
+      typed: draft.isConnected ? draft.value : null, toast: page.toast(),
+      dismissed: page.sent("api/needs/dismiss").map((body) => body.id), at: page.location.hash,
+    };
+  };
+
+  /* A Tell from one card answered stale (the card cleared meanwhile) once another card's Tell
+   * is begun: that sheet, and what is typed in it, stays. */
+  const staleUnderATell = async () => {
+    const told = deferred();
+    const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell"] });
+    const other = Object.assign({}, asked, { id: "ny_00000000000000b3", agent: "coder-2", agent_id: "agt_2" });
+    const page = bootPage("#/n/" + asked.id, signedIn({
+      "GET api/needs": () => ({ status: 200, json: { items: [asked, other] } }),
+      "POST api/agent/tell": () => told.promise,
+    }));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    const tell = (words) => {
+      click(buttonNamed(page.main(), "Tell…"));
+      const text = find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA");
+      text.value = words;
+      return text;
+    };
+    tell("yes, merge");
+    click(buttonNamed(page.run("UI.sheet"), "Tell"));
+    await settle();
+    page.run("pageGo('#/n/" + other.id + "')");
+    await settle();
+    const draft = tell("not yet");
+    told.settle({ status: 409, json: { error: "stale", message: "the item no longer needs you", current: null } });
+    await settle();
+    return { sheet: sheetTitle(page), typed: draft.isConnected ? draft.value : null, told: page.sent("api/agent/tell").length };
+  };
+
+  /* A Stop answered dialog_open after Back closed its sheet: what the toast says. */
+  const promptAfterBack = async () => {
+    const stopped = deferred();
+    const one = await agentView({
+      "POST api/agent/stop": () => stopped.promise,
+      "GET api/transcript/coder-1": () => transcriptPage([], null, false),
+    });
+    one.live().frame("fleet", FLEET);
+    await settle();
+    click(buttonNamed(one.main(), "Actions…"));
+    click(buttonNamed(one.run("UI.sheet"), "Stop…"));
+    click(buttonNamed(one.run("UI.sheet"), "Stop"));
+    await settle();
+    one.run("pageGo('#/p/" + PROJECT + "/a/coder-1/transcript')");
+    await settle();
+    stopped.settle({ status: 409, json: { error: "dialog_open", message: "coder-1 is showing a prompt; send dismiss_dialog: true" } });
+    await settle();
+    return { sheet: sheetTitle(one), toast: one.toast() };
+  };
+
+  /* A second ^C to coder-1 refused double_press once the human moved on: `moveOn` opens
+   * coder-1's Actions sheet, or coder-2's screen with no sheet on it. */
+  const doubleLate = async (moveOn) => {
+    const sent = [];
+    const one = await agentView({ "POST api/send-keys": () => (sent[sent.length] = deferred()).promise });
+    for (const answer of [{ status: 200, json: { sent: true } }, null]) {
+      click(buttonNamed(one.main(), "^C"));
+      click(buttonNamed(one.run("UI.sheet"), "Send Ctrl-C"));
+      await settle();
+      if (answer) sent[sent.length - 1].settle(answer);
+      await settle();
+    }
+    await moveOn(one);
+    sent[1].settle({ status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits Claude Code — send confirm_exit: true" } });
+    await settle();
+    return { sheet: sheetTitle(one), toast: one.toast() };
+  };
+  const toActions = async (one) => click(buttonNamed(one.main(), "Actions…"));
+  const toCoder2 = async (one) => {
+    one.run("pageGo('#/p/" + PROJECT + "/a/coder-2/live')");
+    await settle();
+  };
+  return {
+    doublePress,
+    restartDone: await restartThenTell({ status: 200, json: { agent: { id: "agt_1", label: "coder-1" }, resumed: true, project: PROJECT } }),
+    restartFailed: await restartThenTell({ status: 503, json: { error: "fleet_unavailable", message: "tmux did not answer" } }),
+    restartStale: await restartThenTell({ status: 409, json: { error: "stale", message: "coder-1 is not the agent this was" } }),
+    restartUnderATell: await restartUnderATell(),
+    replyUnderAReply: await replyUnderAReply(),
+    staleUnderATell: await staleUnderATell(),
+    promptAfterBack: await promptAfterBack(),
+    doubleUnderASheet: await doubleLate(toActions),
+    doubleElsewhere: await doubleLate(toCoder2),
+    elsewhere: await lateElsewhere(),
+  };
+}
+
+/* More answers that come after the human moved on: a card's Dismiss once another card is
+ * open; a pad key refused read_only once a Tell sheet is open, typed in, and a Tell refused
+ * read_only on its own sheet, the control; a transcript read that finds coder-1 gone once
+ * coder-2's screen is open; and a pad key and a Tell to coder-1 answered "gone" once
+ * coder-2's screen is open, and on coder-1's own screen, the control. Where the page is
+ * after each, and for the last two whether Back then leaves the page. */
+async function lateElsewhere() {
+  const other = Object.assign({}, ITEM, { id: "ny_fedcba9876543210", agent: "coder-2" });
+  const dismissed = deferred();
+  const cards = bootPage("#/n/" + NEEDS_ID, signedIn({
+    "GET api/needs": () => ({ status: 200, json: { items: [ITEM, other] } }),
+    "POST api/needs/dismiss": () => dismissed.promise,
+  }));
+  await settle();
+  cards.acceptSockets();
+  await settle();
+  click(buttonNamed(cards.main(), "Dismiss"));
+  cards.run("pageGo('#/n/" + other.id + "')");
+  await settle();
+  dismissed.settle({ status: 200, json: { dismissed: true } });
+  await settle();
+
+  const key = deferred();
+  const pad = await agentView({ "POST api/send-keys": () => key.promise });
+  click(buttonNamed(pad.main(), "1"));
+  click(buttonNamed(pad.main(), "Actions…"));
+  click(buttonNamed(pad.run("UI.sheet"), "Tell…"));
+  const text = find(pad.run("UI.sheet"), (node) => node.tagName === "TEXTAREA");
+  text.value = "wait for me";
+  key.settle({ status: 403, json: { error: "read_only", message: "writes are off" } });
+  await settle();
+
+  const own = await agentView({ "POST api/agent/tell": () => ({ status: 403, json: { error: "read_only", message: "writes are off" } }) });
+  click(buttonNamed(own.main(), "Actions…"));
+  click(buttonNamed(own.run("UI.sheet"), "Tell…"));
+  find(own.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "go on";
+  click(buttonNamed(own.run("UI.sheet"), "Tell"));
+  await settle();
+
+  const read = deferred();
+  const gone = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({ "GET api/transcript/coder-1": () => read.promise }));
+  await settle();
+  gone.run("pageGo('#/p/" + PROJECT + "/a/coder-2/live')");
+  await settle();
+  read.settle({ status: 404, json: { error: "no_such_agent", message: "no live agent 'coder-1'" } });
+  await settle();
+
+  const goneAfter = async (send, moveOn) => {
+    const held = deferred();
+    const one = await agentView({ "POST api/send-keys": () => held.promise, "POST api/agent/tell": () => held.promise });
+    send(one);
+    await settle();
+    if (moveOn) {
+      one.run("pageGo('#/p/" + PROJECT + "/a/coder-2/live')");
+      await settle();
+    }
+    held.settle({ status: 404, json: { error: "no_such_agent", message: "no live agent 'coder-1'" } });
+    await settle();
+    return { at: one.location.hash, left: !one.back() };
+  };
+  const tapKey = (one) => click(buttonNamed(one.main(), "1"));
+  const sendTell = (one) => {
+    click(buttonNamed(one.main(), "Actions…"));
+    click(buttonNamed(one.run("UI.sheet"), "Tell…"));
+    find(one.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "go on";
+    click(buttonNamed(one.run("UI.sheet"), "Tell"));
+  };
+  return {
+    dismissedAt: cards.location.hash,
+    readOnly: { sheet: sheetTitle(pad), typed: text.isConnected ? text.value : null, writable: pad.run("writable()") },
+    readOnlyOwn: sheetTitle(own),
+    goneAt: gone.location.hash,
+    goneKey: { elsewhere: await goneAfter(tapKey, true), own: await goneAfter(tapKey, false) },
+    goneTell: { elsewhere: await goneAfter(sendTell, true), own: await goneAfter(sendTell, false) },
+  };
+}
+
+/* Stop… opened on an agent's screen before the fleet frame, tapped, then tapped again once
+ * the fleet came; Restart… on a fleet that came without the agent; and a Tell opened before
+ * the fleet frame and sent after it. */
+async function sheetBeforeFleet() {
+  const stopped = { agent: { id: "agt_1", label: "coder-1" }, claims_released: [], release_failed: null, project: PROJECT };
+  const status = (page) => find(page.run("UI.sheet"), (node) => node.className === "status").textContent;
+  const page = await agentView({ "POST api/agent/stop": () => ({ status: 200, json: stopped }) });
+  click(buttonNamed(page.main(), "Actions…"));
+  click(buttonNamed(page.run("UI.sheet"), "Stop…"));
+  click(buttonNamed(page.run("UI.sheet"), "Stop"));
+  await settle();
+  const waiting = status(page);
+  page.live().frame("fleet", FLEET);
+  await settle();
+  click(buttonNamed(page.run("UI.sheet"), "Stop"));
+  await settle();
+  const empty = await agentView();
+  click(buttonNamed(empty.main(), "Actions…"));
+  click(buttonNamed(empty.run("UI.sheet"), "Restart…"));
+  empty.live().frame("fleet", Object.assign({}, FLEET, { agents: [] }));
+  await settle();
+  click(buttonNamed(empty.run("UI.sheet"), "Restart"));
+  await settle();
+  const tell = await agentView({
+    "POST api/agent/tell": () => ({ status: 200, json: { label: "coder-1", delivered: true, mode: "auto", project: PROJECT } }),
+  });
+  click(buttonNamed(tell.main(), "Actions…"));
+  click(buttonNamed(tell.run("UI.sheet"), "Tell…"));
+  tell.live().frame("fleet", FLEET);
+  await settle();
+  find(tell.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "go on";
+  click(buttonNamed(tell.run("UI.sheet"), "Tell"));
+  await settle();
+  return {
+    waiting, stopped: page.sent("api/agent/stop").map((body) => body.agent_id), toast: page.toast(),
+    absent: status(empty), restarts: empty.sent("api/agent/restart").length,
+    told: tell.sent("api/agent/tell").map((body) => body.agent_id || null),
+  };
+}
+
+/* Pad keys tapped faster than the machine answers, in the order they reached it: ↓ ↓ ⏎
+ * with every answer held until the scenario gives it, and the keys marked sending once
+ * tapped and after each answer; a ⏎ tapped behind a ↓ the machine refused, then one tapped
+ * after; a ⏎ behind a ↓ answered only 16 s later; a ↓ the phone lost, a ⏎ tapped behind
+ * it, and the reconnect that sends the ↓ again; and a ⏎ tapped while a card's quick
+ * answer is typed. */
+async function keysInOrder() {
+  const held = async () => {
+    const calls = [];
+    const page = await agentView({
+      "POST api/send-keys": (body) => {
+        const answer = deferred();
+        calls.push({ key: body.keys[0], answer });
+        return answer.promise;
+      },
+    });
+    const marked = () => page.main().querySelectorAll("button.key.sending").map((key) => key.textContent);
+    return { page, calls, marked, tap: (name) => click(buttonNamed(page.main(), name)) };
+  };
+  const quick = await held();
+  for (const name of ["↓", "↓", "⏎"]) quick.tap(name);
+  await settle();
+  const atOnce = quick.calls.length;
+  const sending = [quick.marked()];
+  for (let n = 0; n < quick.calls.length && n < 3; n++) {
+    quick.calls[n].answer.settle({ status: 200, json: { sent: true } });
+    await settle();
+    sending.push(quick.marked());
+  }
+  const refused = await held();
+  refused.tap("↓");
+  refused.tap("⏎");
+  await settle();
+  refused.calls[0].answer.settle({ status: 409, json: { error: "busy", message: "keys are still being typed" } });
+  await settle();
+  const behind = { sent: refused.calls.length, toast: refused.page.toast(), marked: refused.marked() };
+  refused.tap("⏎");
+  await settle();
+  const slow = await held();
+  slow.tap("↓");
+  slow.tap("⏎");
+  await settle();
+  slow.page.run("Date.now = ((then) => () => then + 16000)(Date.now());"); // past RETRY_WITHIN_MS
+  slow.calls[0].answer.settle({ status: 200, json: { sent: true } });
+  await settle();
+  const waitedTooLong = { sent: slow.calls.map((call) => call.key), toast: slow.page.toast(), marked: slow.marked() };
+  const reached = [];
+  const lost = await agentView({
+    "POST api/send-keys": (body) => {
+      reached.push(body.keys[0]);
+      return reached.length === 1 ? "network" : { status: 200, json: { sent: true } };
+    },
+  });
+  click(buttonNamed(lost.main(), "↓"));
+  click(buttonNamed(lost.main(), "⏎"));
+  await settle();
+  lost.acceptSockets();
+  await settle();
+  const answered = deferred();
+  const card = bootPage("#/", signedIn({
+    "GET api/needs": () => ({ status: 200, json: { items: [ITEM] } }),
+    "POST api/needs/answer": () => answered.promise,
+    "POST api/send-keys": () => ({ status: 200, json: { sent: true } }),
+  }));
+  await settle();
+  card.acceptSockets();
+  await settle();
+  click(card.main().querySelectorAll("button.qa")[0]);
+  card.run("pageGo('#/p/" + PROJECT + "/a/coder-1/live')");
+  await settle();
+  paneCame(card);
+  await settle();
+  click(buttonNamed(card.main(), "⏎"));
+  await settle();
+  const whileAnswering = card.sent("api/send-keys").length;
+  answered.settle({ status: 200, json: { id: NEEDS_ID, sent: ["1"] } });
+  await settle();
+  return {
+    quick: { atOnce, order: quick.calls.map((call) => call.key), sending },
+    refused: Object.assign(behind, { after: refused.calls.map((call) => call.key) }),
+    waitedTooLong,
+    lost: reached,
+    afterAnswer: { whileAnswering, after: card.sent("api/send-keys").length },
+  };
+}
+
+/* The pad's guards, which only the page keeps: ^C and ^D each ask first; a second Esc within
+ * 1.5 s asks first (two open Claude Code's Rewind), and one 2 s after the last does not; a
+ * second ^C the machine refuses double_press goes again, with confirm_exit, only once the
+ * human says so. After each step: the sheet on screen and how many keys were sent. */
+async function padConfirms() {
+  let ctrlC = 0;
+  const page = await agentView({
+    "POST api/send-keys": (body) => (body.keys[0] === "C-c" && body.confirm_exit !== true && ++ctrlC > 1
+      ? { status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits Claude Code" } }
+      : { status: 200, json: { sent: true } }),
+  });
+  const steps = [];
+  const sent = () => page.sent("api/send-keys");
+  const act = async (where, name) => {
+    click(buttonNamed(where === "sheet" ? page.run("UI.sheet") : page.main(), name));
+    await settle();
+    steps.push([name, sheetTitle(page), sent().length]);
+  };
+  await act("pad", "^C");
+  await act("sheet", "Send Ctrl-C");
+  await act("pad", "^D");
+  await act("sheet", "Close");
+  await act("pad", "^C");
+  await act("sheet", "Send Ctrl-C");
+  await act("sheet", "Send and exit");
+  await act("pad", "Esc");
+  page.run("Date.now = ((then) => () => then + 2000)(Date.now());");
+  await act("pad", "Esc");
+  await act("pad", "Esc");
+  await act("sheet", "Send Esc");
+  return { steps, keys: sent().map((body) => (body.confirm_exit === true ? body.keys.concat("confirm_exit") : body.keys)) };
+}
+
+/* The Transcript tab's input bar, writes on and the socket open: it watches no pane, so
+ * nothing there waits for one. Send's state, and what ⏎ sends. */
+async function transcriptSend() {
+  const page = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
+    "GET api/transcript/coder-1": () => transcriptPage([], null, false),
+    "POST api/send-keys": () => ({ status: 200, json: { sent: true } }),
+  }));
+  await settle();
+  page.acceptSockets();
+  page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  await settle();
+  const send = sendState(page);
+  click(buttonNamed(page.main(), "⏎"));
+  await settle();
+  return { send, sent: page.sent("api/send-keys").map((body) => body.keys) };
+}
+
+/* Where focus goes: a card's Tell… opens a sheet whose message box takes it; the next feed
+ * frame draws the card anew, its button with it, and then Close. */
+async function sheetFocus() {
+  const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell"] });
+  const page = bootPage("#/", signedIn({ "GET api/needs": () => ({ status: 200, json: { items: [asked] } }) }));
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const tell = buttonNamed(page.main(), "Tell…");
+  tell.focus();
+  click(tell);
+  const typing = page.run("document.activeElement").tagName;
+  page.live().frame("needs_you", { items: [Object.assign({}, asked, { reason: "coder-1 asks again" })] });
+  await settle();
+  const redrawn = !tell.isConnected;
+  click(buttonNamed(page.run("UI.sheet"), "Close"));
+  return { typing, redrawn, closedOnto: page.run("document.activeElement === UI.main ? 'main' : document.activeElement.tagName") };
+}
+
+/* The Live tab across a sleep, as [stale, Send disabled, pane greyed as held]: with its pane
+ * in; after a minute with nothing heard; once a wake's socket opened and a second passed;
+ * once that socket's first frame came, not the pane; and once the pane came. */
+async function staleAcrossAWake() {
+  const page = await agentView();
+  const state = () => [page.run("S.stale"), buttonNamed(page.main(), "Send").disabled, page.run("document.body.classList.contains('held')")];
+  const steps = [state()];
+  page.run("S.lastFrameAt = Date.now() - 60000; checkStale();");
+  steps.push(state());
+  fire(page, "document", "visibilitychange");
+  page.acceptSockets();
+  await settle();
+  page.run("checkStale();");
+  steps.push(state());
+  page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  await settle();
+  steps.push(state());
+  page.live().frame("pane", { rows: ["❯ 1. Yes"], cursor: [0, 0], width: 80, height: 1 }, { agent: "coder-1", project: PROJECT });
+  await settle();
+  steps.push(state());
+  return steps;
+}
+
+/* The columns the Transcript asks the machine to wrap to, on 360, 390 and 412 px phones,
+ * whose transcript box is 334, 364 and 386 px inside its border; and a 340 px box, exactly 45
+ * columns inside its padding by clientWidth, which is whole pixels and may have rounded up. */
+async function transcriptColumns() {
+  const asked = {};
+  for (const width of [334, 340, 364, 386]) {
+    preWidth = width;
+    const page = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
+      "GET api/transcript/coder-1": () => ({ status: 200, json: { lines: [], cursor: null, more: false, stamps: {} } }),
+    }));
+    await settle();
+    const read = page.requests.find((one) => one.path === "api/transcript/coder-1");
+    asked[width] = Number(new URLSearchParams(read.query).get("width"));
+  }
+  preWidth = 0;
+  return { asked, padding: parseFloat(PRE_PADDING), charPx: CHAR_PX };
+}
+
+/* The Transcript's reads, each answered when the scenario says: Load older tapped twice
+ * while its read is out; and Load older, then Refresh, answered newest first. The reads
+ * asked for (their before cursors), the lines drawn, and whether Load older shows. */
+async function transcriptLoads() {
+  const opened = async () => {
+    const reads = [];
+    const page = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
+      "GET api/transcript/coder-1": () => (reads[reads.length] = deferred()).promise,
+    }));
+    await settle();
+    reads[0].settle(transcriptPage(["t3", "t4"], "100", true));
+    await settle();
+    const tap = (name) => click(buttonNamed(page.main(), name));
+    const result = () => ({
+      asked: page.requests.filter((one) => one.path === "api/transcript/coder-1").map((one) => new URLSearchParams(one.query).get("before")),
+      shown: page.main().querySelectorAll("pre.transcript")[0].childNodes.map((line) => line.textContent),
+      older: !buttonNamed(page.main(), "Load older").hidden,
+    });
+    return { reads, tap, result };
+  };
+  const twice = await opened();
+  twice.tap("Load older");
+  twice.tap("Load older");
+  await settle();
+  for (const read of twice.reads.slice(1)) read.settle(transcriptPage(["t1", "t2"], null, false));
+  await settle();
+  const spliced = await opened();
+  spliced.tap("Load older");
+  spliced.tap("Refresh");
+  await settle();
+  spliced.reads[2].settle(transcriptPage(["t5", "t6"], "300", true));
+  await settle();
+  spliced.reads[1].settle(transcriptPage(["t1", "t2"], null, false));
+  await settle();
+  return { twice: twice.result(), spliced: spliced.result() };
+}
+
+function transcriptPage(lines, cursor, more) {
+  return { status: 200, json: { lines, cursor, more, stamps: {} } };
+}
+
+const TWO_DEVICES = [
+  { id: "dev_0a1b2c3d", current: true, signed_in: true, ua: "this phone", last_seen: null },
+  { id: "dev_4e5f6a7b", current: false, signed_in: true, ua: "another", last_seen: null },
+];
+
+/* Extend 1 h and Revoke, each tapped twice before the machine answered the first: the
+ * requests that went out, and whether the button waited meanwhile. */
+async function buttonsInFlight() {
+  const extended = deferred();
+  const strip = bootPage("#/", signedIn({
+    "GET api/remote": () => ({ status: 200, json: { allow_write: true, auto_off_at: "2026-10-07T11:00:00+00:00", version: "test" } }),
+    "POST api/remote/extend": () => extended.promise,
+  }));
+  await settle();
+  strip.acceptSockets();
+  await settle();
+  const extend = buttonNamed(strip.run("UI.top"), "Extend 1 h");
+  click(extend);
+  await settle();
+  const extendWaited = extend.disabled;
+  click(extend);
+  extended.settle({ status: 200, json: { auto_off_at: "2026-10-07T12:00:00+00:00" } });
+  await settle();
+  const revoked = deferred();
+  const devices = bootPage("#/devices", signedIn({
+    "GET api/devices": () => ({ status: 200, json: TWO_DEVICES }),
+    "DELETE api/devices/dev_4e5f6a7b": () => revoked.promise,
+  }));
+  await settle();
+  devices.acceptSockets();
+  await settle();
+  const revoke = buttonNamed(devices.main(), "Revoke");
+  click(revoke);
+  await settle();
+  const revokeWaited = revoke.disabled;
+  click(revoke);
+  revoked.settle({ status: 200, json: { ok: true, id: "dev_4e5f6a7b", signed_out: false } });
+  await settle();
+  return {
+    extend: { sent: strip.sent("api/remote/extend").length, waited: extendWaited, after: extend.disabled },
+    revoke: { sent: devices.requests.filter((one) => one.method === "DELETE").map((one) => one.path), waited: revokeWaited },
+  };
+}
+
+/* A card the feed shows: `n` makes its id, `kind` and `agent` the rest. */
+function card(n, kind, agent) {
+  return {
+    id: "ny_" + String(n).padStart(16, "0"), kind, project: { id: PROJECT, name: "x" }, agent,
+    reason: agent + " waits on you", since: "2026-10-07T10:00:00+00:00", detail: {}, answers: [], actions: ["open"],
+  };
+}
+
+/* The feed's pane strips over the socket: six plan cards, then three permission prompts
+ * ranked above them. Replaying what the page sent, in order: the most panes the socket held
+ * at once, and which it holds at the end. */
+async function stripCap() {
+  const page = bootPage("#/", signedIn());
+  await settle();
+  page.acceptSockets();
+  const plans = [1, 2, 3, 4, 5, 6].map((n) => card(n, "plan", "planner-" + n));
+  page.live().frame("needs_you", { items: plans });
+  await settle();
+  const prompts = [7, 8, 9].map((n) => card(n, "permission", "coder-" + n));
+  page.live().frame("needs_you", { items: prompts.concat(plans) });
+  await settle();
+  const held = new Set();
+  let most = 0;
+  for (const message of page.live().sent) {
+    if (typeof message.subscribe === "string") held.add(message.subscribe);
+    if (typeof message.unsubscribe === "string") held.delete(message.unsubscribe);
+    most = Math.max(most, held.size);
+  }
+  return { most, held: Array.from(held).sort() };
+}
+
+/* What a screen reader is told on the agent view: the connection dot, live and then stale;
+ * each tab and each bottom nav button; the Actions… sheet (the dialog, the page behind it,
+ * where focus went), then Stop… in its place, then Escape; and the Keys and More toggles
+ * before and after a tap. */
+async function spoken() {
+  const page = await agentView();
+  const sheet = () => page.run("UI.sheet").childNodes[0];
+  const behind = () => page.run("[UI.top, UI.banner, UI.main, UI.nav].map((part) => part.inert === true)");
+  const dot = () => page.run("UI.dot").attrs["aria-label"] || null;
+  const live = dot();
+  page.run("S.lastFrameAt = Date.now() - 60000; checkStale();");
+  const dots = [live, dot()];
+  page.live().frame("heartbeat", { needs_scanned_at: null });
+  const tabs = page.main().querySelectorAll("div.tabs")[0].childNodes.map((tab) => [tab.textContent, tab.attrs["aria-selected"] || null]);
+  const nav = page.run("[UI.navNeeds, UI.navProjects, UI.navDevices, UI.navSettings]").map((tab) => tab.attrs["aria-current"] || null);
+  const actions = buttonNamed(page.main(), "Actions…");
+  actions.focus();
+  click(actions);
+  const opened = {
+    dialog: ["role", "aria-modal", "aria-labelledby"].map((name) => sheet().attrs[name] || null),
+    named: (find(sheet(), (node) => node.id && node.id === sheet().attrs["aria-labelledby"]) || { textContent: null }).textContent,
+    behind: behind(),
+    focusIn: sheet().contains(page.run("document.activeElement")),
+  };
+  click(buttonNamed(page.run("UI.sheet"), "Stop…"));
+  const replaced = { named: sheetTitle(page), behind: behind(), focusIn: sheet().contains(page.run("document.activeElement")) };
+  page.run("for (const fn of document.listeners.keydown || []) fn({ type: 'keydown', key: 'Escape' });");
+  const escaped = { open: page.run("UI.sheet.classList.contains('open')"), behind: behind(), focusBack: page.run("document.activeElement") === actions };
+  const toggles = () => ["Keys", "More"].map((name) => buttonNamed(page.main(), name).attrs["aria-expanded"] || null);
+  const shut = toggles();
+  click(buttonNamed(page.main(), "Keys"));
+  click(buttonNamed(page.main(), "More"));
+  return { dots, tabs, nav, opened, replaced, escaped, toggles: [shut, toggles()] };
+}
+
+/* The writes no other scenario sends, as the machine received them: Post on the Board tab,
+ * Reply on a board question, and Restart and Switch from an agent's Actions menu; and which
+ * names writePath refuses, a listed one the control. */
+async function writesReachTheirRoutes() {
+  const writes = (page) => page.requests.filter((one) => one.method !== "GET").map((one) => one.method + " " + one.path);
+  const ok = () => ({ status: 200, json: { ok: true } });
+  const board = bootPage("#/p/" + PROJECT + "/board", signedIn({ "POST api/note": ok }));
+  await settle();
+  board.acceptSockets();
+  await settle();
+  find(board.main(), (node) => node.tagName === "TEXTAREA").value = "shipping now";
+  click(buttonNamed(board.main(), "Post"));
+  await settle();
+  const question = Object.assign({}, ITEM, {
+    kind: "board_question", detail: { text: "Which store?", author: "lead-1" }, answers: [], actions: ["reply", "dismiss"],
+  });
+  const feed = bootPage("#/", signedIn({
+    "GET api/needs": () => ({ status: 200, json: { items: [question] } }), "POST api/note": ok, "POST api/needs/dismiss": ok,
+  }));
+  await settle();
+  feed.acceptSockets();
+  await settle();
+  click(buttonNamed(feed.main(), "Reply…"));
+  find(feed.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "Postgres";
+  click(buttonNamed(feed.run("UI.sheet"), "Post"));
+  await settle();
+  const agent = await agentView({ "POST api/agent/restart": ok, "POST api/agent/switch": ok });
+  agent.live().frame("fleet", FLEET);
+  await settle();
+  for (const [item, go] of [["Restart…", "Restart"], ["Switch account…", "Switch account"]]) {
+    click(buttonNamed(agent.main(), "Actions…"));
+    click(buttonNamed(agent.run("UI.sheet"), item));
+    click(buttonNamed(agent.run("UI.sheet"), go));
+    await settle();
+  }
+  const refused = {};
+  for (const name of ["agents/stop", "notes", "agent/stop"]) {
+    try {
+      agent.run("writePath(" + JSON.stringify(name) + ")");
+      refused[name] = false;
+    } catch (error) {
+      refused[name] = true;
+    }
+  }
+  return { board: writes(board), reply: writes(feed), agent: writes(agent), refused };
+}
+
+/* Waking and reconnecting (SPEC §6.4): a 4409 while the tab is hidden, then pageshow still
+ * hidden, then the tab shown; each of visibilitychange, pageshow and online on a shown tab;
+ * and what a new socket asks for after a wake (on the Board tab) and after a dropped
+ * connection (on an agent's Live tab). */
+async function wakes() {
+  const reads = (page, from) => page.requests.slice(from).filter((one) => one.method === "GET").map((one) => one.path).sort();
+  const page = bootPage("#/", signedIn());
+  await settle();
+  page.acceptSockets();
+  await settle();
+  page.run("document.visibilityState = 'hidden'");
+  page.live().fire("close", { code: 4409 });
+  await settle();
+  const banner = page.run("UI.banner.hidden") ? "" : page.run("UI.banner").textContent;
+  const replaced = { sockets: page.sockets.length, state: page.run("S.sockState"), banner, timers: page.timers() };
+  fire(page, "window", "pageshow");
+  await settle();
+  const hiddenShow = page.sockets.length;
+  const from = page.requests.length;
+  page.run("document.visibilityState = 'visible'");
+  fire(page, "document", "visibilitychange");
+  await settle();
+  const shown = { sockets: page.sockets.length, reads: reads(page, from) };
+  const each = {};
+  for (const [target, type] of [["document", "visibilitychange"], ["window", "pageshow"], ["window", "online"]]) {
+    const one = bootPage("#/", signedIn());
+    await settle();
+    one.acceptSockets();
+    await settle();
+    const at = one.requests.length;
+    fire(one, target, type);
+    await settle();
+    each[type] = { oldClosed: one.sockets[0].readyState === 3, sockets: one.sockets.length, reads: reads(one, at) };
+  }
+  const asks = {};
+  for (const [hash, how] of [["#/p/" + PROJECT + "/board", "wake"], ["#/p/" + PROJECT + "/a/coder-1/live", "drop"]]) {
+    const one = bootPage(hash, signedIn());
+    await settle();
+    one.acceptSockets();
+    await settle();
+    if (how === "wake") fire(one, "document", "visibilitychange");
+    else {
+      one.live().fire("close", { code: 1006 });
+      await settle();
+      one.fireTimer("connect");
+    }
+    one.acceptSockets();
+    await settle();
+    asks[how] = { sockets: one.sockets.length, sent: one.live().sent.map((message) => Object.keys(message).filter((key) => key !== "project").map((key) => key + " " + message[key]).join()) };
+  }
+  return { replaced, hiddenShow, shown, each, asks };
+}
+
+/* Cards dismissed: by hand (answered 200, and 404 for one already gone); after a Tell from
+ * an asked card that the machine typed in, and after one it did not; and after a Reply on a
+ * board question. The dismissals sent, the cards left, and the needs_id each Tell carried. */
+async function dismissals() {
+  const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell", "dismiss"] });
+  const question = Object.assign({}, ITEM, {
+    id: "ny_00000000000000b2", kind: "board_question", detail: { text: "Which store?", author: "lead-1" }, answers: [], actions: ["reply"],
+  });
+  const done = () => ({ status: 200, json: { dismissed: true } });
+  const feed = async (items, routes) => {
+    const page = bootPage("#/", signedIn(Object.assign({ "GET api/needs": () => ({ status: 200, json: { items } }) }, routes)));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    return page;
+  };
+  const result = (page) => ({ sent: page.sent("api/needs/dismiss"), cards: page.main().querySelectorAll("div.card").length });
+  const byHand = async (answer) => {
+    const page = await feed([ITEM], { "POST api/needs/dismiss": answer });
+    click(buttonNamed(page.main(), "Dismiss"));
+    await settle();
+    return result(page);
+  };
+  const tell = async (delivered) => {
+    const page = await feed([asked], {
+      "POST api/agent/tell": (body) => ({ status: 200, json: { label: "coder-1", delivered, mode: body.mode, project: PROJECT } }),
+      "POST api/needs/dismiss": done,
+    });
+    click(buttonNamed(page.main(), "Tell…"));
+    find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "yes, merge";
+    click(buttonNamed(page.run("UI.sheet"), "Tell"));
+    await settle();
+    return Object.assign(result(page), { told: page.sent("api/agent/tell").map((body) => body.needs_id) });
+  };
+  const reply = await feed([question], { "POST api/note": () => ({ status: 200, json: { ok: true } }), "POST api/needs/dismiss": done });
+  click(buttonNamed(reply.main(), "Reply…"));
+  find(reply.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "Postgres";
+  click(buttonNamed(reply.run("UI.sheet"), "Post"));
+  await settle();
+  return {
+    byHand: await byHand(done), gone: await byHand(() => ({ status: 404, json: { error: "not_found", message: "no such item" } })),
+    delivered: await tell(true), notDelivered: await tell(false), reply: result(reply),
+  };
+}
+
+/* Answers that come after the human left the screen that asked: a note posted on the Board
+ * tab, then the tab left; a transcript read, then the Live tab opened; and Back after a hash
+ * typed in by hand that is no route. The toast, where the page scrolled, and where Back went. */
+async function afterLeaving() {
+  const posted = deferred();
+  const board = bootPage("#/p/" + PROJECT + "/board", signedIn({ "POST api/note": () => posted.promise }));
+  await settle();
+  board.acceptSockets();
+  await settle();
+  find(board.main(), (node) => node.tagName === "TEXTAREA").value = "shipping now";
+  click(buttonNamed(board.main(), "Post"));
+  board.run("pageGo('#/')");
+  await settle();
+  posted.settle({ status: 200, json: { ok: true } });
+  await settle();
+  const read = deferred();
+  const transcript = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({ "GET api/transcript/coder-1": () => read.promise }));
+  await settle();
+  transcript.run("UI.main.scrollHeight = 2400; UI.main.scrollTop = 0;");
+  transcript.run("pageGo('#/p/" + PROJECT + "/a/coder-1/live')");
+  await settle();
+  read.settle(transcriptPage(["t1", "t2"], null, false));
+  await settle();
+  const typed = bootPage("#/", signedIn());
+  await settle();
+  typed.location.hash = "#/no/such/route";
+  await settle();
+  const landed = [];
+  while (typed.back() && landed.length < 6) {
+    await settle();
+    landed.push(typed.location.hash);
+  }
+  return { note: board.toast(), scrolled: transcript.run("UI.main.scrollTop"), back: { landed, left: landed.length < 6 } };
+}
+
+/* What the page says for each refusal and failure (SPEC §6.4), as failText words it; a 413
+ * names the most the box takes. */
+async function refusalSentences() {
+  const page = bootPage("#/", signedIn());
+  await settle();
+  const said = (res, max) => {
+    const full = Object.assign({ ok: false, status: 0, data: null, error: "", message: "", retryAfter: 0, network: false, notJson: false }, res);
+    return page.run("failText(" + JSON.stringify(full) + ", " + JSON.stringify(max || null) + ")");
+  };
+  return {
+    badOrigin: said({ status: 403, error: "bad_origin", message: "this origin may not write" }),
+    readOnly: said({ status: 403, error: "read_only", message: "writes are off" }),
+    gone: said({ status: 404, error: "no_such_agent", message: "no live agent 'coder-1'" }),
+    busy: said({ status: 409, error: "busy", message: "another action on coder-1 is still running" }),
+    inProgress: said({ status: 409, error: "in_progress" }),
+    other: said({ status: 409, error: "not_agent", message: "coder-1's pane is not running the agent — nothing was sent" }),
+    tooLong: said({ status: 413, error: "too_large", message: "the body is too large" }, 8000),
+    tooMany: said({ status: 429, error: "rate_limited", retryAfter: 30 }),
+    unavailable: said({ status: 503, error: "fleet_unavailable", message: "tmux did not answer" }),
+    notJson: said({ status: 200, notJson: true }),
+  };
+}
+
+/* The socket closed 4404 (the link changed) and 4410 (Remote went off) once open; a handshake
+ * that failed before open, the machine then answering its probe 404, and answering it; and a
+ * socket that dropped once open, the control: no probe. What the page shows, the probes it
+ * made, and the timers it holds by name. */
+async function socketCloses() {
+  const remote = { status: 200, json: { allow_write: true, auto_off_at: null, version: "test" } };
+  const closed = async (code, opened, probe) => {
+    let reads = 0;
+    const page = bootPage("#/", signedIn({ "GET api/remote": () => (++reads > 1 && probe ? probe : remote) }));
+    await settle();
+    if (opened) page.acceptSockets();
+    page.live().fire("close", { code });
+    await settle();
+    const heading = find(page.main(), (node) => node.tagName === "H2");
+    return { shown: heading ? heading.textContent : null, probes: reads - 1, timers: page.timers() };
+  };
+  return {
+    link: await closed(4404, true),
+    off: await closed(4410, true),
+    probedGone: await closed(1006, false, { status: 404, json: { error: "not_found", message: "no such link" } }),
+    probedHere: await closed(1006, false, remote),
+    dropped: await closed(1006, true),
+  };
+}
+
+/* The strip at the top and the bottom nav (SPEC §6.3): an auto-off 10 minutes away with writes
+ * on and two cards in the feed; then a remote frame with the auto-off two hours away and
+ * writes off; then the READ-ONLY pill tapped. */
+async function statusStrip() {
+  const at = (minutes) => new Date(Date.now() + minutes * 60000).toISOString();
+  const page = bootPage("#/", signedIn({
+    "GET api/remote": () => ({ status: 200, json: { allow_write: true, auto_off_at: at(10), version: "test" } }),
+    "GET api/needs": () => ({ status: 200, json: { items: [ITEM, Object.assign({}, ITEM, { id: "ny_00000000000000d5" })] } }),
+  }));
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const strip = () => page.run("({ off: UI.off.textContent, soon: UI.off.classList.contains('soon'), extend: !UI.extend.hidden, readOnly: !UI.ro.hidden, needs: UI.badge.textContent })");
+  const writesOn = strip();
+  page.live().frame("remote", { allow_write: false, auto_off_at: at(120), version: "test" });
+  await settle();
+  const writesOff = Object.assign(strip(), { toast: page.toast() });
+  click(page.run("UI.ro"));
+  return { writesOn, writesOff, tapped: sheetTitle(page) };
+}
+
+/* The screens that list (SPEC §6.3): the feed with nothing in it; the Projects screen and a
+ * project's Fleet tab with two cards for coder-1; the Tasks and Memory tabs; a card that
+ * cleared, opened from its push link, then Back to the feed; an agent's empty transcript; and
+ * its Card tab. */
+async function screensListed() {
+  const open = async (hash, routes) => {
+    const page = bootPage(hash, signedIn(routes));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    return page;
+  };
+  const twoCards = { "GET api/needs": () => ({ status: 200, json: { items: [ITEM, Object.assign({}, ITEM, { id: "ny_00000000000000d5" })] } }) };
+  const feed = await open("#/");
+  const projects = await open("#/projects", Object.assign({
+    "GET api/projects": () => ({ status: 200, json: [{ id: PROJECT, name: "x", agents: { working: 1, waiting: 1 } }] }),
+  }, twoCards));
+  const fleet = await open("#/p/" + PROJECT + "/fleet", twoCards);
+  const tasks = await open("#/p/" + PROJECT + "/tasks", {
+    "GET api/tasks": () => ({
+      status: 200,
+      json: [
+        { title: "write the docs", status: "todo" }, { title: "fix the bug", status: "doing" }, { title: "ship it", status: "done" },
+        { title: "look it over", status: "review", role: "reviewer", claimed_by: "ses_1" },
+      ],
+    }),
+  });
+  const memory = await open("#/p/" + PROJECT + "/memory", {
+    "GET api/memory": () => ({
+      status: 200,
+      json: [
+        { text: "kept", pool: "project", tags: ["db"], updated_at: null },
+        { text: "deleted", pool: "project", tags: [], updated_at: null, deleted_at: "2026-10-07T10:00:00+00:00" },
+      ],
+    }),
+  });
+  const cleared = await open("#/n/" + NEEDS_ID + "/p/" + PROJECT + "/a/coder-1");
+  const clearedSaid = textsOf(cleared.main().querySelectorAll("div.data")[0].childNodes);
+  click(buttonNamed(cleared.main(), "Back to the feed"));
+  await settle();
+  const transcript = await open("#/p/" + PROJECT + "/a/coder-1/transcript", { "GET api/transcript/coder-1": () => transcriptPage([], null, false) });
+  const card = await open("#/p/" + PROJECT + "/a/coder-1/card", {
+    "GET api/explainability/coder-1": () => ({ status: 200, json: { available: true, model: "claude-x", tokens_in: 1200, tokens_out: 300 } }),
+  });
+  return {
+    feed: find(feed.main(), (node) => node.className === "empty").textContent,
+    projects: textsOf(projects.main().querySelectorAll("span.badge")),
+    fleet: textsOf(fleet.main().querySelectorAll("span.badge")),
+    tasks: tasks.main().querySelectorAll("div.data")[0].childNodes.map((node) => (node.tagName === "H3" ? "# " + node.textContent : textsOf(node.childNodes).join(" | "))),
+    memory: textsOf(memory.main().querySelectorAll("p.text")),
+    cleared: { said: clearedSaid, back: cleared.location.hash },
+    transcript: textsOf(transcript.main().querySelectorAll("pre.transcript")[0].childNodes),
+    card: card.main().querySelectorAll("pre.mono")[0].textContent,
+  };
+}
+
+/* Notifications where the page offers them (SPEC §6.3): the feed of a device the machine
+ * sends nothing to yet; Settings with them on, and Send test answered not_subscribed; and
+ * Settings in Safari on an iPhone, the page not on its Home Screen. */
+async function pushScreens() {
+  const feed = bootPage("#/", signedIn(pushRoutes([])), fakePush(KEY_NOW).globals);
+  await settle();
+  const on = bootPage("#/settings", signedIn({
+    "GET api/push": () => ({ status: 200, json: { supported: true, vapid_public_key: Buffer.from(KEY_NOW).toString("base64url"), subscribed: true } }),
+    "POST api/push/test": () => ({ status: 404, json: { error: "not_subscribed", message: "no subscription for this device" } }),
+  }), fakePush(KEY_NOW).globals);
+  await settle();
+  on.acceptSockets();
+  await settle();
+  const said = find(on.main(), (node) => node.className === "muted").textContent;
+  click(buttonNamed(on.main(), "Send test"));
+  await settle();
+  const iphone = bootPage("#/settings", signedIn(), {
+    navigator: { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Safari", platform: "iPhone", standalone: false },
+  });
+  await settle();
+  const banner = find(feed.main(), (node) => node.tagName === "DIV" && node.className === "notice-line");
+  return {
+    banner: banner ? textsOf(banner.childNodes) : null,
+    on: { said, test: on.toast() },
+    iphone: find(iphone.main(), (node) => node.className === "muted").textContent,
+  };
+}
+
+/* What each write carries (SPEC §6.3), as the machine received it, its request_id left out:
+ * Send with ⏎ unticked; a note from the Board tab; a Reply on a board question; a card's
+ * Tell; a usage limit card's Switch account; and a Tell refused agent_busy, then sent again
+ * from its sheet. And an agent at its usage limit: its Actions menu, in order. */
+async function writeBodies() {
+  const ok = () => ({ status: 200, json: { ok: true } });
+  const bodies = (page, where) => page.sent(where).map((one) => {
+    const copy = Object.assign({}, one);
+    delete copy.request_id;
+    return copy;
+  });
+  const send = await agentView({ "POST api/send-keys": ok });
+  find(send.main(), (node) => node.tagName === "INPUT" && node.parentNode.textContent === "⏎").checked = false;
+  await typeAndSend(send, "hi");
+  const board = bootPage("#/p/" + PROJECT + "/board", signedIn({ "POST api/note": ok }));
+  await settle();
+  board.acceptSockets();
+  await settle();
+  find(board.main(), (node) => node.tagName === "TEXTAREA").value = "shipping now";
+  find(board.main(), (node) => node.tagName === "SELECT").value = "decision";
+  find(board.main(), (node) => node.tagName === "INPUT").value = "lead-1";
+  click(buttonNamed(board.main(), "Post"));
+  await settle();
+  const feed = async (item, routes) => {
+    const page = bootPage("#/", signedIn(Object.assign({ "GET api/needs": () => ({ status: 200, json: { items: [item] } }) }, routes)));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    return page;
+  };
+  const question = Object.assign({}, ITEM, { kind: "board_question", detail: { text: "Which store?", author: "lead-1" }, answers: [], actions: ["reply"] });
+  const reply = await feed(question, { "POST api/note": ok, "POST api/needs/dismiss": ok });
+  click(buttonNamed(reply.main(), "Reply…"));
+  find(reply.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "Postgres";
+  click(buttonNamed(reply.run("UI.sheet"), "Post"));
+  await settle();
+  const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell"] });
+  const tell = await feed(asked, { "POST api/agent/tell": () => ({ status: 200, json: { label: "coder-1", delivered: false, mode: "prompt", project: PROJECT } }) });
+  click(buttonNamed(tell.main(), "Tell…"));
+  find(tell.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "yes, merge";
+  click(buttonNamed(tell.run("UI.sheet"), "Tell"));
+  await settle();
+  const limited = Object.assign({}, ITEM, { kind: "limited", detail: {}, answers: [], actions: ["switch"] });
+  const switched = await feed(limited, { "POST api/agent/switch": ok });
+  click(buttonNamed(switched.main(), "Switch account…"));
+  click(buttonNamed(switched.run("UI.sheet"), "Switch account"));
+  await settle();
+  const busy = await agentView({
+    "POST api/agent/tell": (body) => (body.mode === "interrupt"
+      ? { status: 200, json: { label: "coder-1", delivered: true, mode: "interrupt", project: PROJECT } }
+      : { status: 409, json: { error: "agent_busy", message: "coder-1 is working: interrupt it to tell it now" } }),
+  });
+  busy.live().frame("fleet", FLEET);
+  await settle();
+  click(buttonNamed(busy.main(), "Actions…"));
+  click(buttonNamed(busy.run("UI.sheet"), "Tell…"));
+  find(busy.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "stop and commit";
+  click(buttonNamed(busy.run("UI.sheet"), "Tell"));
+  await settle();
+  const offered = buttonNamed(busy.run("UI.sheet"), "Interrupt & tell");
+  click(offered);
+  await settle();
+  const menu = await agentView();
+  menu.live().frame("fleet", Object.assign({}, FLEET, { agents: [Object.assign({}, FLEET.agents[0], { state: "limited" })] }));
+  await settle();
+  click(buttonNamed(menu.main(), "Actions…"));
+  return {
+    send: bodies(send, "api/send-keys"),
+    note: bodies(board, "api/note"),
+    reply: bodies(reply, "api/note"),
+    tell: bodies(tell, "api/agent/tell"),
+    switched: bodies(switched, "api/agent/switch"),
+    busy: { offered: !!offered, modes: busy.sent("api/agent/tell").map((body) => body.mode) },
+    limitedMenu: textsOf(menu.run("UI.sheet").querySelectorAll("button.row")),
+  };
+}
+
+/* The key pad and the phone's keyboard never share the screen (SPEC §6.3): the box focused,
+ * then Keys tapped, then the box focused again. After each: whether the pad is open, and
+ * whether the box has the focus. */
+async function padOrKeyboard() {
+  const page = await agentView();
+  const say = find(page.main(), (node) => node.tagName === "TEXTAREA" && node.className === "say");
+  const state = () => [page.main().querySelectorAll("div.pad.open").length === 1, page.run("document.activeElement") === say];
+  say.focus();
+  const steps = [state()];
+  click(buttonNamed(page.main(), "Keys"));
+  steps.push(state());
+  say.focus();
+  steps.push(state());
+  return steps;
+}
+
+/* Cards the machine answers 409 stale (SPEC §6.3, §6.4): a quick answer, the feed's read that
+ * follows still listing the card (the machine has not scanned since), then the note's 6 s up
+ * and a frame that lists the card still; a Tell from an asked card, nothing waiting on coder-1
+ * now; and a crashed card's Stop. What the feed shows, and the reads of api/needs that
+ * followed the quick answer. */
+async function staleCards() {
+  const feed = async (item, routes) => {
+    const page = bootPage("#/", signedIn(Object.assign({ "GET api/needs": () => ({ status: 200, json: { items: [item] } }) }, routes)));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    return page;
+  };
+  const shown = (page) => page.main().querySelectorAll("div.card").map((card) => (card.classList.contains("gone")
+    ? card.textContent : "card: " + find(card, (node) => node.className === "reason").textContent));
+  const reads = (page) => page.requests.filter((one) => one.method === "GET" && one.path === "api/needs").length;
+  const stale = (current) => () => ({ status: 409, json: { error: "stale", message: "coder-1 no longer shows that question", current } });
+  const now = [Object.assign({}, ITEM, { id: "ny_00000000000000e6", kind: "permission", reason: "coder-1 asks to run a command" })];
+  const answered = await feed(ITEM, { "POST api/needs/answer": stale(now) });
+  const before = reads(answered);
+  click(answered.main().querySelectorAll("button.qa")[0]);
+  await settle();
+  const answer = { shown: shown(answered), reads: reads(answered) - before };
+  answered.run("Date.now = ((then) => () => then + 7000)(Date.now());");
+  answered.live().frame("needs_you", { items: [ITEM] });
+  await settle();
+  answer.later = shown(answered);
+  const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell"] });
+  const told = await feed(asked, { "POST api/agent/tell": stale([]) });
+  click(buttonNamed(told.main(), "Tell…"));
+  find(told.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "yes, merge";
+  click(buttonNamed(told.run("UI.sheet"), "Tell"));
+  await settle();
+  const crashed = Object.assign({}, ITEM, { kind: "crashed", detail: {}, answers: [], actions: ["stop"] });
+  const stopped = await feed(crashed, { "POST api/agent/stop": stale([]) });
+  click(buttonNamed(stopped.main(), "Stop…"));
+  click(buttonNamed(stopped.run("UI.sheet"), "Stop"));
+  await settle();
+  return {
+    answer,
+    tell: { shown: shown(told), sheet: sheetTitle(told) },
+    stop: { shown: shown(stopped), sheet: sheetTitle(stopped) },
+  };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -864,6 +2297,36 @@ async function main() {
     keyNames: await keyNames(),
     liveScroll: await liveScroll(),
     padScroll: await padScroll(),
+    boardOnItsTab: await boardOnItsTab(),
+    boardReopened: await boardReopened(),
+    transcriptTimes: await transcriptTimes(),
+    readsAfterFrames: await readsAfterFrames(),
+    backLeaves: await backLeaves(),
+    lateAnswers: await lateAnswers(),
+    sheetBeforeFleet: await sheetBeforeFleet(),
+    keysInOrder: await keysInOrder(),
+    padConfirms: await padConfirms(),
+    staleAcrossAWake: await staleAcrossAWake(),
+    transcriptSend: await transcriptSend(),
+    sheetFocus: await sheetFocus(),
+    transcriptColumns: await transcriptColumns(),
+    transcriptLoads: await transcriptLoads(),
+    buttonsInFlight: await buttonsInFlight(),
+    stripCap: await stripCap(),
+    spoken: await spoken(),
+    writesReachTheirRoutes: await writesReachTheirRoutes(),
+    wakes: await wakes(),
+    dismissals: await dismissals(),
+    afterLeaving: await afterLeaving(),
+    refusalSentences: await refusalSentences(),
+    socketCloses: await socketCloses(),
+    unlockWait: await unlockAnswered(429, { error: "rate_limited", message: "too many tries" }),
+    statusStrip: await statusStrip(),
+    screensListed: await screensListed(),
+    pushScreens: await pushScreens(),
+    writeBodies: await writeBodies(),
+    padOrKeyboard: await padOrKeyboard(),
+    staleCards: await staleCards(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

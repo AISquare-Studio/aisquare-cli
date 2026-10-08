@@ -961,13 +961,13 @@ def test_the_heartbeat_is_never_on_the_first_tick(
     )
     _app, client = _stream_app(runtime, tmp_path, heartbeat=0)
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
-        first = _frames(ws, 6)
+        first = _frames(ws, 5)
     assert [frame["type"] for frame in first] == [
-        *("board", "fleet", "remote", "needs_you"),  # the first tick
+        *("fleet", "remote", "needs_you"),  # the first tick
         *("needs_you", "heartbeat"),  # the second
     ]
-    assert [frame["payload"] for frame in first[3:5]] == [{"tick": 1}, {"tick": 2}]
-    assert first[5]["payload"] == {"needs_scanned_at": None}
+    assert [frame["payload"] for frame in first[2:4]] == [{"tick": 1}, {"tick": 2}]
+    assert first[4]["payload"] == {"needs_scanned_at": None}
 
 
 def test_the_heartbeat_arrives_unchanged_or_not_and_carries_the_last_scan(
@@ -976,7 +976,7 @@ def test_the_heartbeat_arrives_unchanged_or_not_and_carries_the_last_scan(
     monkeypatch.setattr(remote_needs, "needs_scanned_iso", lambda kit: "2026-10-07T10:12:05+00:00")
     _app, client = _stream_app(runtime, tmp_path, heartbeat=0.05)
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
-        assert [frame["type"] for frame in _frames(ws, 3)] == ["board", "fleet", "remote"]
+        assert [frame["type"] for frame in _frames(ws, 2)] == ["fleet", "remote"]
         beats = [_until(ws, "heartbeat"), _until(ws, "heartbeat")]
     assert all(
         beat["payload"] == {"needs_scanned_at": "2026-10-07T10:12:05+00:00"} for beat in beats
@@ -986,14 +986,21 @@ def test_the_heartbeat_arrives_unchanged_or_not_and_carries_the_last_scan(
 def test_needs_frames_come_after_board_fleet_and_remote(
     runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A board goes out only to a socket that asked for one, and then before the needs
+    frame of its tick: one that changes on every tick shows where each tick goes on."""
+    ticks = itertools.count(1)
     monkeypatch.setattr(
-        remote_needs, "needs_ws_frames", lambda kit: [("needs_you", {"items": [{"id": "ny_1"}]})]
+        remote_needs, "needs_ws_frames", lambda kit: [("needs_you", {"tick": next(ticks)})]
     )
     _app, client = _stream_app(runtime, tmp_path)
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
-        first = _frames(ws, 4)
-    assert [frame["type"] for frame in first] == ["board", "fleet", "remote", "needs_you"]
-    assert first[3]["payload"] == {"items": [{"id": "ny_1"}]}
+        first = _frames(ws, 3)
+        ws.send_text(json.dumps({"subscribe_board": None}))
+        _until(ws, "board")
+        after = _frame_within(ws)
+    assert [frame["type"] for frame in first] == ["fleet", "remote", "needs_you"]
+    assert first[2]["payload"] == {"tick": 1}
+    assert after["type"] == "needs_you", "the board's tick goes on to its needs frame"
 
 
 def test_the_action_frame_shows_this_devices_ledger_only_when_it_has_entries(
@@ -1072,7 +1079,7 @@ def test_a_stream_that_fails_otherwise_closes_1011_not_a_dropped_link(
     _app, client = _stream_app(runtime, tmp_path)
     monkeypatch.setattr(runtime, "remote_json", _lane_bug)
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
-        assert [_frame_within(ws)["type"] for _ in range(2)] == ["board", "fleet"]
+        assert _frame_within(ws)["type"] == "fleet"
         closed = receive_within(ws)
     assert closed["type"] == "websocket.close" and closed["code"] == 1011, closed
 

@@ -831,6 +831,27 @@ def test_a_manager_tmux_cannot_reach_is_no_manager_to_leave_work_to() -> None:
     assert [item.kind for item in _scan(fleet)] == ["board_question", "crashed"]
 
 
+def test_a_manager_at_the_usage_limit_dialog_does_not_wait_for_itself() -> None:
+    """At the usage-limit dialog a manager reads attention, so it counted as the live manager
+    its own limit's push waited 90 s for: itself. Its items wait for another manager only;
+    a coder's limit still waits for it."""
+    paused = "Session paused — choose: continue on usage credits or switch models"
+    at = NOW - timedelta(minutes=1)
+    manager, coder = _row("manager", role="manager"), _row()
+    managing = _session(manager, state="attention", seen=at)
+    coding = _session(coder, state="attention", seen=at)
+    fleet = Fleet(
+        agents=[_status(manager, "attention", managing), _status(coder, "attention", coding)],
+        sessions=[managing],
+        events=[
+            _event(4, "attention", paused, session=managing, at=at),
+            _event(5, "attention", paused, session=coding, at=at),
+        ],
+    )
+    pushes = {item.agent: item.push_after for item in _scan(fleet) if item.kind == "limited"}
+    assert pushes == {"manager": at, "coder-1": at + timedelta(seconds=90)}
+
+
 def test_a_manager_session_parked_on_its_limit_is_not_live_without_its_row_either() -> None:
     """The session counts for a manager started outside the fleet, which has no row; a
     session whose row the scan read is that row's to decide, whatever the session says."""

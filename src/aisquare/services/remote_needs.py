@@ -1259,13 +1259,19 @@ def _needs_scan_project(
     if statuses is not None:
         for status in statuses:
             tail = tails[status.agent.id] = _needs_tail_of(sources, status)
+            live = manager_live
+            if _needs_is_manager(status.agent.role):
+                # Its own items wait for no manager but another: at the usage-limit dialog
+                # a manager reads attention, and its limit's push waited 90 s for itself.
+                others = [row for row in acting if row.id != status.agent.id]
+                live = _needs_manager_live(others, rowed, sessions, now)
             for item in needs_from_agent(
                 status,
                 tail,
                 project=project,
                 events=_needs_own_events(sources, project, status, window),
                 now=now,
-                manager_live=manager_live,
+                manager_live=live,
                 accounts=accounts,
                 pane_output=_needs_output_of(sources, status.agent),
             ):

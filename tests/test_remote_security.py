@@ -31,8 +31,12 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli
 from aisquare.core.paths import remote_audit_path, remote_state_path
+from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError
+from aisquare.core.workspace import project_id_for
+from aisquare.models import ProjectInfo
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project as project_service
 from aisquare.services import remote_push, remote_server
 from aisquare.services.remote_server import (
     AUTO_OFF_CHECK_SECONDS,
@@ -40,6 +44,7 @@ from aisquare.services.remote_server import (
     DEVICE_ID,
     EXIT_KEY_REPEAT_SECONDS,
     KNOWN_DEVICE_FAILURES_MAX,
+    LINK_GONE,
     NOTE_TEXT_MAX,
     REMOTE_KEY_NAME,
     SEND_KEYS_KEYS_MAX,
@@ -710,6 +715,28 @@ def test_a_version_1_file_is_migrated_once(isolated_home: Path) -> None:
     assert again.password == raw["password"], "once"
 
 
+@pytest.mark.parametrize("value", ["false", "off", "no", "true", 1, ["on"]], ids=repr)
+def test_writes_are_on_only_for_a_json_true(isolated_home: Path, value: object) -> None:
+    """``bool()`` read a hand edit's ``"false"`` as true: every write opened, ``api/remote``
+    told the page so, and the load wrote ``"allow_write": true`` back (review of #243,
+    round 2)."""
+    server = Runtime(remote_state_path(), remote_audit_path())
+    raw = json.loads(remote_state_path().read_bytes())
+    raw["allow_write"] = value
+    remote_state_path().write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    assert server.allow_write is False, "the running server adopts the edit as off"
+    assert Runtime(remote_state_path(), remote_audit_path()).allow_write is False
+    assert json.loads(remote_state_path().read_bytes())["allow_write"] is False
+
+
+def test_a_version_1_file_keeps_writes_on_only_for_a_json_true(isolated_home: Path) -> None:
+    remote_state_path().parent.mkdir(parents=True, exist_ok=True)
+    old = {"token": "T" * 32, "password": "x", "allow_write": "false", "sessions": []}
+    remote_state_path().write_text(json.dumps(old), encoding="utf-8")
+    assert Runtime(remote_state_path(), remote_audit_path()).allow_write is False
+    assert json.loads(remote_state_path().read_bytes())["allow_write"] is False
+
+
 # --- (3) device ids that are not cookies ----------------------------------------------
 
 
@@ -900,7 +927,8 @@ def test_past_the_deadline_everything_is_a_404_like_a_wrong_token(
     clock.advance(minutes=5)
     for path in ("/", "/api/board", "/api/remote"):
         response = client.get(f"{base(runtime)}{path}")
-        assert response.status_code == 404 and response.json() == {"error": "not_found"}
+        assert response.status_code == 404
+        assert response.json() == {"error": "not_found", "message": LINK_GONE}
     assert unlock(make_client(app), runtime).status_code == 404
     with (
         pytest.raises(WebSocketDenialResponse) as denied,
@@ -1392,33 +1420,43 @@ def test_a_path_over_the_cap_is_413(home: Path) -> None:
     assert (refused.value.status, refused.value.error) == (413, "too_large")
 
 
-def test_adding_a_known_project_says_it_was_not_added(
-    home: Path, monkeypatch: pytest.MonkeyPatch
+def test_an_added_project_is_listed_where_the_phone_and_the_cli_look(
+    home: Path, runtime: Runtime, tmp_path: Path
 ) -> None:
-    import aisquare.core.store as store_module
-
-    registered: dict[str, object] = {}
-
-    class Store:
-        def get_project(self, project_id: str) -> object:
-            return registered.get(project_id)
-
-        def ensure_project(self, project: Any) -> None:
-            registered[project.id] = project
-
-        def __enter__(self) -> Store:
-            return self
-
-        def __exit__(self, *exc: object) -> None:
-            return None
-
-    monkeypatch.setattr(store_module, "store_session", lambda: Store())
-    add = live_writes().handlers["project/add"]
+    """The add captured the directory as a hook does (``ensure_project``), and a capture is
+    never listed: the phone was told ``added``, and its Projects screen, ``project list``
+    and the sidebar stayed as they were (review of #243, round 2)."""
     root = _repo(home / "code" / "app")
-    first, summary = add({"path": str(root)})
-    again, _ = add({"path": str(root)})
-    assert (first["added"], again["added"]) == (True, False)
-    assert summary.startswith("added ") and summary.endswith(f" {root}")
+    sources = remote_server.live_sources()
+    app = build_app(runtime, sources=sources, writes=live_writes(), dist_dir=tmp_path)
+    client = make_client(app)
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    first = client.post(f"{base(runtime)}/api/project/add", json={"path": "~/code/app"})
+    again = client.post(f"{base(runtime)}/api/project/add", json={"path": str(root)})
+    assert (first.status_code, again.status_code) == (200, 200), first.text
+    assert (first.json()["added"], again.json()["added"]) == (True, False)
+    assert first.json()["project"]["onboarded_at"] is not None
+    listed = client.get(f"{base(runtime)}/api/projects").json()
+    assert [row["root"] for row in listed] == [str(root)]
+    assert [project.root for project in project_service.list_projects()] == [root]
+
+
+@pytest.mark.parametrize("before", ["captured by a hook", "forgotten"])
+def test_adding_a_directory_that_is_not_listed_lists_it(home: Path, before: str) -> None:
+    root = _repo(home / "code" / "app")
+    project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+    with store_session() as store:
+        if before == "forgotten":
+            store.onboard_project(project)
+            store.forget_project(project.id)
+        else:
+            store.ensure_project(project)
+    assert project_service.list_projects() == []
+    answer, summary = live_writes().handlers["project/add"]({"path": str(root)})
+    assert answer["added"] is True
+    assert [listed.root for listed in project_service.list_projects()] == [root]
+    assert summary == f"added {project.id} {root}"
 
 
 # --- (8) the Origin of a write or a socket ------------------------------------------------

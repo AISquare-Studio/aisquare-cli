@@ -663,7 +663,12 @@ class _State:
 
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> _State:
-        """A version-2 file; a missing token or password is made anew (and then written)."""
+        """A version-2 file; a missing token or password is made anew (and then written).
+
+        Writes are on only for a JSON ``true``. ``bool()`` of a hand edit's ``"false"``,
+        ``"off"`` or ``"no"`` is true: it opened every write, and the load wrote the file
+        back saying ``true``.
+        """
         token = raw.get("token")
         password = raw.get("password")
         rows = raw.get("devices")
@@ -672,7 +677,7 @@ class _State:
         return cls(
             token=token if isinstance(token, str) and token else new_token(),
             password=password if isinstance(password, str) and password else new_password(),
-            allow_write=bool(raw.get("allow_write", False)),
+            allow_write=raw.get("allow_write") is True,
             auto_off_at=auto_off if isinstance(auto_off, str) else None,
             devices=[d for d in map(Device.from_json, rows if isinstance(rows, list) else []) if d],
             unlock_failures=[
@@ -690,14 +695,15 @@ class _State:
         A v1 password is four words of 32, about 19.7 bits, so a new one comes from
         the 512-word list. Every v1 session was stored as its raw cookie, so the file
         (and every audit line) held replayable sessions: all of them go, and each
-        phone unlocks once more.
+        phone unlocks once more. Writes stay on only for a JSON ``true``, as in
+        :meth:`from_json`.
         """
         token = raw.get("token")
         auto_off = raw.get("auto_off_at")
         return cls(
             token=token if isinstance(token, str) and token else new_token(),
             password=new_password(),
-            allow_write=bool(raw.get("allow_write", False)),
+            allow_write=raw.get("allow_write") is True,
             auto_off_at=auto_off if isinstance(auto_off, str) else None,
         )
 
@@ -781,6 +787,10 @@ class Runtime:
         filesystem, so a regenerated passphrase of equal length went unnoticed.
         The file is a few hundred bytes; hashing it costs about what the stat did.
         """
+        self._disk_moves = 0
+        """How many times :attr:`_disk` has moved: every write this process renamed into
+        place, and every file it adopted. A reload that read the file while it moved adopts
+        nothing (:meth:`reload_if_changed`)."""
         self.reads = 0
         """How many times the file was parsed after startup — tests pin the short-circuit."""
         self._said_unrestricted = False
@@ -827,7 +837,9 @@ class Runtime:
         decided (:meth:`_write_state`) is published once ``_lock`` is let go,
         still under the file lock, so its fsyncs and rename hold up no request
         and no socket tick. Until the rename this process's digest of the file
-        stays the old one, so a reload meanwhile finds nothing new to adopt.
+        stays the old one, so a reload meanwhile finds nothing new to adopt; and
+        a reload that read the old file before the rename and compares after it
+        adopts nothing either (:attr:`_disk_moves`).
         """
         with self._writing:
             if self._file_lock_depth:
@@ -882,10 +894,21 @@ class Runtime:
         password also resets the failed-unlock budget); devices the file no longer
         lists are revoked here too (sockets closed with 4401); ``last_seen`` keeps
         the newer of memory and disk.
+
+        The file is read before ``_lock`` is taken, so a write this process renames
+        into place meanwhile can overtake the read. Compared after that write, the
+        file it replaced looked like another process's change: adopting it dropped
+        a device that had just unlocked, let a device just revoked make one more
+        request, and closed the sockets of every device the old file did not list.
+        So a read made while :attr:`_disk` moved, by a write here or by another
+        reload's adoption, is never adopted: what is in hand is that newer state,
+        and anything newer still on disk is read by the next check.
         """
+        with self._lock:
+            moves = self._disk_moves
         signature = self._signature()
         with self._lock:
-            if signature is None or signature[0] == self._disk:
+            if signature is None or signature[0] == self._disk or moves != self._disk_moves:
                 return False
             digest, data = signature
             try:
@@ -896,6 +919,7 @@ class Runtime:
                 return False
             self.reads += 1
             self._disk = digest
+            self._disk_moves += 1
             incoming = _State.from_json(raw)
             known = {device.id: device for device in self._state.devices}
             for device in incoming.devices:
@@ -1004,6 +1028,7 @@ class Runtime:
         pending.publish(body)
         with self._lock:
             self._disk = self._state_digest(body)
+            self._disk_moves += 1
         if not pending.restricted and not self._said_unrestricted:
             self._said_unrestricted = True  # once: the flush rewrites the file every 30 s
             log.warning(_UNRESTRICTED, self._state_path, "the password and the link token")
@@ -2203,8 +2228,15 @@ def live_writes() -> Writes:
         return {"project": project.model_dump(mode="json")}, f"switched to {project.id}"
 
     def project_add(body: dict[str, Any]) -> tuple[dict[str, object], str]:
-        """Register a project the phone names, within :func:`check_project_add_root`'s limits;
-        ``added`` is false when it was registered already."""
+        """Add a project the phone names, within :func:`check_project_add_root`'s limits;
+        ``added`` is false when it was listed already.
+
+        An add on purpose (``onboard_project``), as ``project switch`` and ``link``
+        are, never the hooks' capture (``ensure_project``): a capture is never listed,
+        so the phone was told ``added`` and its Projects screen, ``project list`` and
+        the sidebar did not change. A directory the hooks captured, or one forgotten,
+        is listed from now on, so it is added.
+        """
         from aisquare.core.store import store_session
         from aisquare.core.workspace import project_id_for
         from aisquare.models import ProjectInfo
@@ -2212,8 +2244,9 @@ def live_writes() -> Writes:
         root = check_project_add_root(body.get("path"))
         project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
         with store_session() as store:
-            added = store.get_project(project.id) is None
-            store.ensure_project(project)
+            known = store.get_project(project.id)
+            project = store.onboard_project(project)
+        added = known is None or known.onboarded_at is None
         payload = {"project": project.model_dump(mode="json"), "added": added}
         return payload, f"added {project.id} {root}"
 
@@ -2586,15 +2619,33 @@ def _cache_control(rel: str) -> str:
     return ASSET_CACHE_CONTROL if _HASHED_ASSET.search(stem) else MUTABLE_CACHE_CONTROL
 
 
-def _error_body(error: str, message: str | None = None) -> dict[str, object]:
-    """``{error, message}``, the one shape of every refusal (SPEC §0.5)."""
-    body: dict[str, object] = {"error": error}
-    if message:
-        body["message"] = message
-    return body
+LINK_GONE = (
+    "Remote is off on the machine, or the link changed — turn it on again, or open the "
+    "link the machine shows now"
+)
+"""404 ``not_found`` at the token gate, in the words of the page's screen for it and of
+docs/remote.md's troubleshooting. A wrong token and a passed auto-off answer alike, and
+with one sentence whatever was sent, so it tells a guess nothing about the token."""
+NOT_UNLOCKED = "no unlocked device for this request — unlock with the passphrase"
+"""401 ``unauthorized``: no cookie, or one whose device is signed out, revoked or expired."""
+WRONG_PASSWORD = "that is not the passphrase"
+"""401 ``wrong_password``."""
+CRASHED = "the machine hit an error answering that"
+"""500 ``internal_error``: what the ledger answers a retry of a request that crashed, in the
+words the page uses for a crash."""
 
 
-def _json_error(status: int, error: str, message: str | None = None) -> Response:
+def _error_body(error: str, message: str) -> dict[str, object]:
+    """``{error, message}``, the one shape of every refusal (SPEC §0.5).
+
+    The message is always there: the docs promise one, and the page shows it, so a
+    refusal without one left the unlock line saying ``not_found``. A message that came
+    out empty, the ``str()`` of an exception that holds no text, is the code in words.
+    """
+    return {"error": error, "message": message or error.replace("_", " ")}
+
+
+def _json_error(status: int, error: str, message: str) -> Response:
     from starlette.responses import JSONResponse
 
     return JSONResponse(_error_body(error, message), status_code=status)
@@ -2742,7 +2793,7 @@ async def _refuse_at_the_gate(
     send: Any,
     status: int,
     error: str,
-    message: str | None,
+    message: str,
     close_code: int,
 ) -> None:
     """JSON over HTTP; on a handshake, a denial response where the server can send one
@@ -2781,7 +2832,7 @@ class _TokenGate:
         runtime = self._runtime
         if not (remote_gate_token(runtime, scope) and remote_gate_auto_off(runtime, scope)):
             await _refuse_at_the_gate(
-                scope, receive, send, 404, "not_found", None, WS_CLOSE_NOT_FOUND
+                scope, receive, send, 404, "not_found", LINK_GONE, WS_CLOSE_NOT_FOUND
             )
             return
         method = scope.get("method")  # a handshake has none, and is always asked
@@ -2800,7 +2851,7 @@ class _TokenGate:
             device = remote_gate_device(runtime, scope)
             if device is None:
                 await _refuse_at_the_gate(
-                    scope, receive, send, 401, "unauthorized", None, WS_CLOSE_UNAUTHORIZED
+                    scope, receive, send, 401, "unauthorized", NOT_UNLOCKED, WS_CLOSE_UNAUTHORIZED
                 )
                 return
             scope[DEVICE_SCOPE] = device
@@ -2879,7 +2930,7 @@ class RemoteKit:
         device = request.scope.get(DEVICE_SCOPE)
         if not isinstance(device, Device):
             # Only a route outside the gate's reach can get here: refuse, never guess.
-            raise RequestError(401, "unauthorized", "no unlocked device for this request")
+            raise RequestError(401, "unauthorized", NOT_UNLOCKED)
         return device
 
     async def kit_json_object(self, request: Request) -> dict[str, Any]:
@@ -2911,7 +2962,7 @@ class RemoteKit:
         self,
         status: int,
         error: str,
-        message: str | None = None,
+        message: str,
         *,
         headers: Mapping[str, str] | None = None,
         **extra: object,
@@ -3012,7 +3063,7 @@ class RemoteKit:
             return JSONResponse(payload, status_code=status)
         if not self.ledger.ledger_begin(device.id, request_id, endpoint):
             return self.kit_refuse(409, "in_progress", IN_PROGRESS)
-        status, payload = 500, {"error": "internal_error"}
+        status, payload = 500, _error_body("internal_error", CRASHED)
         try:
             response = await respond()
             status, payload = response.status_code, _ledger_body(response)
@@ -3129,6 +3180,7 @@ def build_remote_app(
 
     try:
         from starlette.applications import Starlette
+        from starlette.exceptions import HTTPException
         from starlette.responses import FileResponse, JSONResponse
         from starlette.routing import Mount, Route, WebSocketRoute
         from starlette.status import WS_1011_INTERNAL_ERROR
@@ -3270,7 +3322,7 @@ def build_remote_app(
             wait = max(1, math.ceil((decided - _remote_now()).total_seconds()))
             return kit.kit_refuse(429, "locked_out", LOCKED_OUT, headers={"Retry-After": str(wait)})
         if decided is None:
-            return _json_error(401, "wrong_password")
+            return _json_error(401, "wrong_password", WRONG_PASSWORD)
         secret, device, reactivated = decided
         # A reactivated device keeps its expiry, so its cookie gets what is left of it: a
         # cookie never outlives its device.
@@ -3411,7 +3463,7 @@ def build_remote_app(
         name = request.path_params["name"]
         handler = handlers.get(name) if name in write_endpoint_names() else None
         if handler is None:
-            return _json_error(404, "not_found")
+            return _json_error(404, "not_found", f"there is nothing to write at api/{name}")
         if not kit.kit_write_allowed():
             return kit.kit_refuse(403, "read_only", READ_ONLY_REASON)
         try:
@@ -3446,7 +3498,24 @@ def build_remote_app(
         return response
 
     async def api_missing(request: Request) -> Response:
-        return _json_error(404, "not_found")
+        rest = request.path_params["rest"]
+        return _json_error(404, "not_found", f"there is nothing to read at api/{rest}")
+
+    async def wrong_method(request: Request, exc: Exception) -> Response:
+        """Starlette's 405, for a route asked with a method it does not take, in the one
+        shape: its own answer was ``Method Not Allowed`` as plain text.
+
+        The sentence says what ``Allow`` says, the methods of the route that matched,
+        and names no path: ``DELETE api/nuke`` matches the write catch-all, which takes
+        ``POST``, though a ``POST`` there is a 404.
+        """
+        headers = exc.headers if isinstance(exc, HTTPException) else None
+        named = (headers or {}).get("Allow", "").split(",")
+        allowed = ", ".join(sorted(method.strip() for method in named if method.strip()))
+        said = f"this route does not take {request.method} — it takes {allowed}"
+        response = _json_error(405, "method_not_allowed", said)
+        response.headers["Allow"] = allowed
+        return response
 
     async def static(request: Request) -> Response:
         """The page: ``--dist``, else the installed build, else the one aisquare-cli bundles.
@@ -3715,7 +3784,9 @@ def build_remote_app(
         Route("/{path:path}", static, methods=["GET"]),
     ]
     inner = Starlette(
-        routes=[Mount("/r/{token}", routes=api_routes)], lifespan=lambda app: remote_lifespan(kit)
+        routes=[Mount("/r/{token}", routes=api_routes)],
+        exception_handlers={405: wrong_method},
+        lifespan=lambda app: remote_lifespan(kit),
     )
     return _TokenGate(inner, runtime, kit)
 

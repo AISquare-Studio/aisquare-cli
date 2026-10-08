@@ -32,6 +32,7 @@ from aisquare.services import remote_actions, remote_needs, remote_push, remote_
 from aisquare.services.remote_actions import ActionLedger, LedgerEntry
 from aisquare.services.remote_needs import NeedsItem, QuickAnswer
 from aisquare.services.remote_server import (
+    CRASHED,
     IN_PROGRESS,
     NOT_WRITE_GATED,
     READ_ONLY_REASON,
@@ -363,8 +364,11 @@ def test_an_endpoint_that_crashes_never_leaves_its_request_id_running(
     client = _unlocked(app, runtime)
     with pytest.raises(RuntimeError, match="a bug"):
         client.post(f"{base(runtime)}/api/needs/answer", json={"request_id": "r2"})
-    assert ("finish", "r2", 500, {"error": "internal_error"}) in app.kit.ledger.calls
+    crashed = {"error": "internal_error", "message": CRASHED}
+    assert ("finish", "r2", 500, crashed) in app.kit.ledger.calls
     assert app.kit.ledger.running == set()
+    retried = client.post(f"{base(runtime)}/api/needs/answer", json={"request_id": "r2"})
+    assert (retried.status_code, retried.json()) == (500, crashed), "the one shape, sentence too"
 
 
 @pytest.mark.parametrize("request_id", ["../x", "a" * 65, "", "with space", 7, ["x"]])
@@ -525,10 +529,11 @@ def test_a_write_cancelled_while_it_runs_never_leaves_its_request_id_running(
                 release.set()
 
     asyncio.run(cancel_it_while_it_runs())
-    assert ("finish", "n3", 500, {"error": "internal_error"}) in app.kit.ledger.calls
+    crashed = {"error": "internal_error", "message": CRASHED}
+    assert ("finish", "n3", 500, crashed) in app.kit.ledger.calls
     assert app.kit.ledger.running == set()
     retry = client.post(url, json={"text": "hi", "request_id": "n3"})
-    assert (retry.status_code, retry.json()) == (500, {"error": "internal_error"})
+    assert (retry.status_code, retry.json()) == (500, crashed)
 
 
 def test_the_dispatcher_answers_a_refused_body_with_every_key_as_a_lane_route_does(

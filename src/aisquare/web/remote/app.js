@@ -1780,6 +1780,7 @@ function tellSheet(ctx, mode) {
       }
       const body = { agent: ctx.label, project: ctx.pid, text: text.value, mode: current };
       if (ctx.needsId) body.needs_id = ctx.needsId;
+      if (!ctx.agentId && ctx.idNow) ctx.agentId = ctx.idNow();
       if (ctx.agentId) body.agent_id = ctx.agentId;
       sheet.busy(true);
       sheet.status.textContent = current === "interrupt" ? "Interrupting " + label + "…" : "Sending…";
@@ -1906,8 +1907,10 @@ function actionSheet(kind, ctx) {
     if (to) to.addEventListener("input", say);
     say();
     const run = async () => {
+      if (!ctx.agentId && ctx.idNow) ctx.agentId = ctx.idNow();
       if (!ctx.agentId) {
-        sheet.status.textContent = "Waiting for the fleet to say which " + label + " this is — try again in a second.";
+        sheet.say(ctx.idNow && projectIdOf(S.fleet) === ctx.pid ? label + " is not in this project's fleet any more."
+          : "Waiting for the fleet to say which " + label + " this is — try again in a second.");
         return;
       }
       const body = { agent: ctx.label, project: ctx.pid, agent_id: ctx.agentId, confirm: ctx.label };
@@ -2270,10 +2273,12 @@ VIEWS.agent = (route, main) => {
     if (current) state.append(...stateBadges(current.state, needed));
     else if (needed) state.appendChild(el("span", "badge s-attention", "NEEDS YOU"));
   };
-  const ctx = () => {
+  const idNow = () => {
     const current = row();
-    return { pid, label, agentId: current && typeof current.agent.id === "string" ? current.agent.id : null, needsId: null, item: null };
+    return current && typeof current.agent.id === "string" ? current.agent.id : null;
   };
+  // idNow: a sheet opened before the fleet came looks again at its tap; it kept that null.
+  const ctx = () => ({ pid, label, agentId: idNow(), needsId: null, item: null, idNow });
   const actionsMenu = () => {
     const current = row();
     const limited = current && current.state === "limited";

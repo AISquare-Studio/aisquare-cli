@@ -1307,6 +1307,22 @@ def test_a_late_refusal_neither_moves_the_page_nor_covers_a_sheet_opened_since(
     assert elsewhere["goneAt"] == "#/p/prj_x/a/coder-2/live"
 
 
+def test_a_sheet_opened_before_the_fleet_came_finds_its_agent_when_tapped(
+    boot_report: dict[str, Any],
+) -> None:
+    """Stop, Restart and Switch need the agent's id, and a sheet opened before the fleet
+    frame kept the null it opened with: every tap after the fleet came said "try again in a
+    second" again, and nothing was sent until the sheet was closed and opened anew. A fleet
+    without the agent said the same, though no second would help; and a Tell opened that
+    early went out without the id that keeps it off a replacement agent."""
+    early = boot_report["sheetBeforeFleet"]
+    assert early["waiting"].startswith("Waiting for the fleet to say which coder-1 this is")
+    assert early["stopped"] == ["agt_1"] and early["toast"] == "Stopped coder-1"
+    assert early["absent"] == "coder-1 is not in this project's fleet any more."
+    assert early["restarts"] == 0
+    assert early["told"] == ["agt_1"]
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

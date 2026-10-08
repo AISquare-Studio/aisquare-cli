@@ -1135,6 +1135,46 @@ async function lateElsewhere() {
   };
 }
 
+/* Stop… opened on an agent's screen before the fleet frame, tapped, then tapped again once
+ * the fleet came; Restart… on a fleet that came without the agent; and a Tell opened before
+ * the fleet frame and sent after it. */
+async function sheetBeforeFleet() {
+  const stopped = { agent: { id: "agt_1", label: "coder-1" }, claims_released: [], release_failed: null, project: PROJECT };
+  const status = (page) => find(page.run("UI.sheet"), (node) => node.className === "status").textContent;
+  const page = await agentView({ "POST api/agent/stop": () => ({ status: 200, json: stopped }) });
+  click(buttonNamed(page.main(), "Actions…"));
+  click(buttonNamed(page.run("UI.sheet"), "Stop…"));
+  click(buttonNamed(page.run("UI.sheet"), "Stop"));
+  await settle();
+  const waiting = status(page);
+  page.live().frame("fleet", FLEET);
+  await settle();
+  click(buttonNamed(page.run("UI.sheet"), "Stop"));
+  await settle();
+  const empty = await agentView();
+  click(buttonNamed(empty.main(), "Actions…"));
+  click(buttonNamed(empty.run("UI.sheet"), "Restart…"));
+  empty.live().frame("fleet", Object.assign({}, FLEET, { agents: [] }));
+  await settle();
+  click(buttonNamed(empty.run("UI.sheet"), "Restart"));
+  await settle();
+  const tell = await agentView({
+    "POST api/agent/tell": () => ({ status: 200, json: { label: "coder-1", delivered: true, mode: "auto", project: PROJECT } }),
+  });
+  click(buttonNamed(tell.main(), "Actions…"));
+  click(buttonNamed(tell.run("UI.sheet"), "Tell…"));
+  tell.live().frame("fleet", FLEET);
+  await settle();
+  find(tell.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "go on";
+  click(buttonNamed(tell.run("UI.sheet"), "Tell"));
+  await settle();
+  return {
+    waiting, stopped: page.sent("api/agent/stop").map((body) => body.agent_id), toast: page.toast(),
+    absent: status(empty), restarts: empty.sent("api/agent/restart").length,
+    told: tell.sent("api/agent/tell").map((body) => body.agent_id || null),
+  };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -1169,6 +1209,7 @@ async function main() {
     readsAfterFrames: await readsAfterFrames(),
     backLeaves: await backLeaves(),
     lateAnswers: await lateAnswers(),
+    sheetBeforeFleet: await sheetBeforeFleet(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

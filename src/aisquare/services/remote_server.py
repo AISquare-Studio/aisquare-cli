@@ -291,7 +291,8 @@ EXIT_KEY_REPEAT_SECONDS = 3.0
 EXIT_KEYS = frozenset({"C-c", "C-d"})
 SEND_KEYS_LOCK_WAIT_SECONDS = 2.0
 """How long a send-keys waits for its agent's action lock (:func:`remote_agent_lock`), counted
-from when the request reached the server. Keys tapped in a burst, or sent again together
+from when the request reached the server, its wait for a thread of the write pool included
+(:func:`_remote_keys_turn`). Keys tapped in a burst, or sent again together
 after a reconnect, wait out the milliseconds each other's tmux calls take; an action holds
 the lock for seconds (an interrupt's wait for the prompt, a stop's grace, a restart), and keys
 that would land in the middle of it are 409 ``busy`` instead."""
@@ -1841,7 +1842,12 @@ def _remote_keys_turn(target: ProjectInfo, label: str) -> Iterator[FleetAgent]:
     Counted from when a thread was free to run it, keys tapped in a burst during an
     action waited their 2 s each in turn, a pool's worth at a time, and the last ones
     took the lock when the action let it go, seconds after their taps: typed into the
-    replacement a restart had started (sweep of #243).
+    replacement a restart had started (sweep of #243). Keys whose wait ran out before a
+    thread was free to run them are 409 ``busy`` at a free lock as well: behind actions
+    that held every thread of the write pool (a restart holds one for 20 to 40 s), a key
+    ran as one of them ended, seconds after its tap, and typed into whatever its agent
+    showed by then, the replacement a restart had started when that action was on it
+    (review of #243, round 3).
     """
     _remote_live_row(target, label)
     lock = remote_agent_lock(target.id, label)
@@ -1849,7 +1855,10 @@ def _remote_keys_turn(target: ProjectInfo, label: str) -> Iterator[FleetAgent]:
     wait = SEND_KEYS_LOCK_WAIT_SECONDS
     if arrived is not None:
         wait -= time.monotonic() - arrived
-    if not lock.acquire(timeout=max(0.0, wait)):
+    if wait <= 0:
+        busy = f"the machine was busy with other actions for {SEND_KEYS_LOCK_WAIT_SECONDS:g} s"
+        raise RequestError(409, "busy", f"{busy} — nothing was sent to {label}")
+    if not lock.acquire(timeout=wait):
         raise RequestError(
             409, "busy", f"another action on {label} is still running — nothing was sent"
         )
@@ -3213,7 +3222,8 @@ class RemoteKit:
     def kit_pane_pool(self) -> ThreadPoolExecutor:
         """The pool every pane capture of the stream runs on, made on first use.
 
-        Never the default thread pool, which serves every HTTP read and write:
+        Never the default thread pool, which serves every HTTP read and every
+        socket's board and fleet snapshot, nor the write pool (:meth:`kit_write_pool`):
         4 sockets x 8 subscriptions x N devices may queue captures here, but at
         most :data:`PANE_CAPTURE_WORKERS` run at once, and no request ever waits
         behind them.

@@ -389,8 +389,15 @@ def test_keys_wait_for_a_busy_agent_only_what_is_left_of_their_wait_since_they_a
         action.release()
     assert time.monotonic() - started < 1.0, "its wait had run out before a thread ran it"
     assert (refused.value.status, refused.value.error) == (409, "busy") and tmux.sent == []
-    late.run(send, {"agent": "coder-1", "keys": ["Down"]})
-    assert tmux.sent == [("keys", "%2", "Down")], "a free lock needs no wait at all"
+    with pytest.raises(RequestError) as at_a_free_lock:
+        late.run(send, {"agent": "coder-1", "keys": ["Down"]})
+    assert (at_a_free_lock.value.status, at_a_free_lock.value.error) == (409, "busy")
+    assert at_a_free_lock.value.message == (
+        "the machine was busy with other actions for 2 s — nothing was sent to coder-1"
+    )
+    assert tmux.sent == [], "nor at a free lock: it would land seconds after its tap"
+    send({"agent": "coder-1", "keys": ["Down"]})
+    assert tmux.sent == [("keys", "%2", "Down")], "a key on time takes a free lock at once"
 
 
 def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
@@ -432,6 +439,66 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
     assert [status for status, _ in answers] == [409] * taps and tmux.sent == []
     slowest = max(elapsed for _, elapsed in answers)
     assert slowest < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.0, slowest
+
+
+def test_keys_queued_behind_actions_holding_every_write_thread_are_not_typed_as_one_ends(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A restart holds a thread of the write pool for 20 to 40 s. A key tapped while actions
+    held every thread ran as one ended, took its agent's lock, free again, and typed into
+    the replacement that restart had started, seconds after its tap (review of #243, round 3)."""
+    tmux = _serving(monkeypatch, Tmux(OLDER))
+    monkeypatch.setattr(remote_server, "WRITE_WORKERS", 1)  # one restart holds them all
+    monkeypatch.setattr(remote_server, "SEND_KEYS_LOCK_WAIT_SECONDS", 0.3)
+    restarting, done = threading.Event(), threading.Event()
+
+    def restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        with remote_agent_lock(project.id, "coder-1"):
+            restarting.set()
+            assert done.wait(10), "the test never let the restart end"
+        return {"agent": "coder-1"}, "restart coder-1"
+
+    writes = live_writes()
+    writes.handlers["agent/restart"] = restart
+    runtime = make_runtime()
+    app = build_app(runtime, sources=_sources(), writes=writes, dist_dir=tmp_path)
+    queued: list[float] = []
+    run_write = app.kit.kit_run_write
+
+    async def watched(handler: Any, body: dict[str, Any], arrived: float) -> Any:
+        if handler is not restart:
+            queued.append(arrived)
+        return await run_write(handler, body, arrived)
+
+    monkeypatch.setattr(app.kit, "kit_run_write", watched)
+    answers: dict[str, int] = {}
+    with make_client(app) as client:
+        assert unlock(client, runtime).status_code == 200
+        runtime.set_allow_write(True)
+
+        def post(name: str, body: dict[str, Any]) -> None:
+            answers[name] = client.post(f"{base(runtime)}/api/{name}", json=body).status_code
+
+        key = {"agent": "coder-1", "keys": ["Down"]}
+        restarter = threading.Thread(target=post, args=("agent/restart", {"agent": "coder-1"}))
+        tapper = threading.Thread(target=post, args=("send-keys", key))
+        restarter.start()
+        try:
+            assert restarting.wait(5)
+            tapper.start()
+            deadline = time.monotonic() + 5
+            while not queued and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert queued, "the key never reached the server"
+            past_its_wait = queued[0] + remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 0.1
+            time.sleep(max(0.0, past_its_wait - time.monotonic()))
+        finally:
+            done.set()  # the restart ends: the thread and the agent's lock are free at once
+            for thread in (restarter, tapper):
+                if thread.is_alive():
+                    thread.join(10)
+    assert answers == {"agent/restart": 200, "send-keys": 409}
+    assert tmux.sent == [], "the key would have landed after its tap's 0.3 s"
 
 
 def test_a_label_no_row_holds_makes_no_lock(

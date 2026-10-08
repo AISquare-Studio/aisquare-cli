@@ -25,9 +25,11 @@ and an aisquare that upgrades and uninstalls itself.**
 
 **Upgrading:**
 - From 0.7.0 or earlier, re-run the one-line installer, or run
-  `uv tool install --force --python 3.13 --with tiktoken aisquare-cli@latest`.
-  Not `uv tool upgrade`: on a pinned install it silently does nothing. From
-  0.9.0 on, `aisquare upgrade` does it for you.
+  `UV_PYTHON_DOWNLOADS=automatic uv tool install --force --python 3.13 --with tiktoken 'aisquare-cli@latest'`.
+  Not `uv tool upgrade`: on a pinned install it silently does nothing. Both
+  replace the install and drop its extras; with the command, name yours, as in
+  `'aisquare-cli[serve]@latest'`. From 0.9.0 on, `aisquare upgrade` does it for
+  you and keeps them.
 - The store stays at schema v24; nothing migrates.
 - `aisquare agents connect codex` and `… cursor` now exit 1 with "can't connect
   … yet", instead of reporting a connection that installed nothing.

@@ -2354,6 +2354,15 @@ class _RateLimiter:
         return None
 
 
+@dataclass(eq=False)
+class _CacheTurn:
+    """Whose turn it is to compute one kind (:class:`_Cache`): the lock its callers take
+    turns on, and how many of them hold it or wait for it."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    callers: int = 0
+
+
 class _Cache:
     """One snapshot per kind per tick, however many sockets are open.
 
@@ -2365,28 +2374,62 @@ class _Cache:
     spelling for anyone unlocked, read-only included, until the process died.
     So each store first drops what has expired, and at most
     :data:`CACHE_KINDS_MAX` kinds are kept, the oldest going first.
+
+    One caller at a time computes a kind, and only that kind's callers wait for
+    it. The snapshots were computed under the one lock that guards the table,
+    so the slowest held up every other: ``projects`` lists every project's
+    fleet, a tmux call each, and a tmux that stops answering costs 30 s a call,
+    while every socket's board and fleet frames, and every cached read, waited
+    behind it.
     """
 
     def __init__(self, ttl: float, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._ttl = ttl
         self._clock = clock
         self._lock = threading.Lock()
+        """Guards the two tables, and is never held while a snapshot is computed."""
         self._values: dict[str, tuple[float, object]] = {}
+        self._turns: dict[str, _CacheTurn] = {}
+        """The kinds being computed or waited for now. A kind's turn goes with its last
+        caller, so this holds the kinds in flight and no more, whatever kinds are asked for."""
+
+    def _cache_fresh(self, kind: str) -> tuple[float, object] | None:
+        """``kind``'s snapshot while it is younger than the ttl; call it holding ``_lock``."""
+        hit = self._values.get(kind)
+        return hit if hit is not None and self._clock() - hit[0] < self._ttl else None
+
+    def _cache_store(self, kind: str, value: object) -> None:
+        """Keep ``value`` as ``kind``'s snapshot, once what expired is dropped; hold ``_lock``."""
+        now = self._clock()
+        for stale in [k for k, (at, _value) in self._values.items() if now - at >= self._ttl]:
+            del self._values[stale]
+        self._values.pop(kind, None)  # stored anew, so the dict stays oldest first
+        self._values[kind] = (now, value)
+        while len(self._values) > CACHE_KINDS_MAX:
+            del self._values[next(iter(self._values))]
 
     def cached_snapshot(self, kind: str, compute: Snapshot) -> object:
         with self._lock:
-            hit = self._values.get(kind)
-            if hit is not None and self._clock() - hit[0] < self._ttl:
+            hit = self._cache_fresh(kind)
+            if hit is not None:
                 return hit[1]
-            value = compute()
-            now = self._clock()
-            for stale in [k for k, (at, _value) in self._values.items() if now - at >= self._ttl]:
-                del self._values[stale]
-            self._values.pop(kind, None)  # stored anew, so the dict stays oldest first
-            self._values[kind] = (now, value)
-            while len(self._values) > CACHE_KINDS_MAX:
-                del self._values[next(iter(self._values))]
-            return value
+            turn = self._turns.setdefault(kind, _CacheTurn())
+            turn.callers += 1
+        try:
+            with turn.lock:
+                with self._lock:
+                    hit = self._cache_fresh(kind)  # the caller this one waited for made it
+                if hit is not None:
+                    return hit[1]
+                value = compute()
+                with self._lock:
+                    self._cache_store(kind, value)
+                return value
+        finally:
+            with self._lock:
+                turn.callers -= 1
+                if not turn.callers:
+                    del self._turns[kind]
 
 
 def _client_of(scope: Any) -> str:

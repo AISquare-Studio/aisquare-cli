@@ -35,7 +35,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from aisquare.core.paths import remote_dist_dir
-from aisquare.services import remote_page, remote_server
+from aisquare.services import remote_needs, remote_page, remote_server, transcript
 from aisquare.services.remote_server import (
     NO_PAGE_HINT,
     Runtime,
@@ -808,10 +808,38 @@ def test_a_question_permission_or_plan_card_says_once_what_its_detail_leads_with
     the detail shows whole. An excerpt the detail does not lead with stays, and so does one
     with no detail to say it."""
     shown = node_report["builtExcerpts"]
-    repeats = ("question", "questions", "cutQuestion", "permission", "plan", "dialog")
+    repeats = ["question", "questions", "cutQuestion", "permission", "heredoc", "longCommand"]
+    repeats += ["path", "plan", "dialog"]
     assert {name: shown[name] for name in repeats} == {name: [] for name in repeats}
     assert shown["otherQuestion"] == ["Pick one before the release"]
+    assert shown["otherCommand"] == ["Bash(rm -rf build)"]
     assert shown["bareTool"] == ["Bash(pytest -q tests/test_cache.py)"]
+
+
+def test_a_permission_whose_input_was_too_large_to_send_keeps_the_excerpt_naming_the_call(
+    node_report: dict[str, Any],
+) -> None:
+    """An input over 16 KiB, a Write of a whole file or a Bash heredoc, reaches the card as
+    ``{"tool": "Write", "input": {}}``, while its excerpt is built from the whole call. The
+    excerpt was hidden because it opens with the tool, and with it went the only line that
+    named the file or the command: the card said ``tool: Write``, and a 1 or a 2 on the
+    phone approved blind."""
+    shown = node_report["builtExcerpts"]
+    assert shown["droppedWrite"] == ["Write(/home/me/app/src/big_module.py)"]
+    assert shown["droppedHeredoc"] == ["Bash(cat > schema.sql <<'EOF')"]
+
+
+def test_the_page_names_a_tool_call_by_the_keys_the_server_summarises_it_by() -> None:
+    """The page hides a permission's excerpt only when the detail holds the value the
+    server built it from, so its keys must be the summariser's, in the summariser's order,
+    and each one the card's detail carries."""
+    keys = re.findall(r'"([^"]*)"', _js_table("SUMMARY_KEYS", r"\[", r"\]"))
+    for n, key in enumerate(keys):
+        call = {"name": "Tool", "input": {later: f"{later} value" for later in keys[n:]}}
+        assert transcript._summarise_tool(call) == f"Tool({key} value)"
+    others = {key: "value" for key in remote_needs._DETAIL_INPUT_KEYS if key not in keys}
+    assert transcript._summarise_tool({"name": "Tool", "input": others}) == "Tool"
+    assert set(keys) <= set(remote_needs._DETAIL_INPUT_KEYS)
 
 
 def test_routes_are_built_only_from_ids_that_validate(node_report: dict[str, Any]) -> None:

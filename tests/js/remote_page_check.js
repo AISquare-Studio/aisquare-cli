@@ -173,16 +173,26 @@ const STORE = {
   options: [{ label: "Redis", description: "shared" }, { label: "SQLite", description: "a local file" }, { label: "none", description: "" }],
 };
 const BASH = { tool: "Bash", input: { command: "pytest -q tests/test_cache.py", description: "Run the cache tests" } };
+const HEREDOC = "cat > schema.sql <<'EOF'\n" + "CREATE TABLE t (id INTEGER);\n".repeat(3) + "EOF";
+const LONG_COMMAND = "pytest -q " + Array.from({ length: 12 }, (unused, n) => "tests/test_part_" + n + ".py").join(" ");
+const EDIT = { tool: "Edit", input: { file_path: "/home/me/app/cache.py", old_string: "redis", new_string: "sqlite" } };
 report.builtExcerpts = {
   question: excerptsOf("question", "Which store should the cache use? — Redis · SQLite · none", { questions: [STORE] }),
   questions: excerptsOf("question", "Which store should the cache use? — Redis · SQLite · none (+1 more)", { questions: [STORE, STORE] }),
   cutQuestion: excerptsOf("question", "Which store should the c…", { questions: [STORE] }),
   permission: excerptsOf("permission", "Bash(pytest -q tests/test_cache.py)", BASH),
+  heredoc: excerptsOf("permission", "Bash(cat > schema.sql <<'EOF')", { tool: "Bash", input: { command: HEREDOC } }),
+  longCommand: excerptsOf("permission", "Bash(" + LONG_COMMAND.slice(0, 72) + ")", { tool: "Bash", input: { command: LONG_COMMAND } }),
+  path: excerptsOf("permission", "Edit(/home/me/app/cache.py)", EDIT),
   plan: excerptsOf("plan", "Cache plan", { plan: "## Cache plan\n\n1. Add Redis behind a flag\n2. Fall back to SQLite" }),
   // The controls: an excerpt the detail does not lead with, and one with no detail to repeat.
   otherQuestion: excerptsOf("question", "Pick one before the release", { questions: [STORE] }),
+  otherCommand: excerptsOf("permission", "Bash(rm -rf build)", BASH),
   bareTool: excerptsOf("permission", "Bash(pytest -q tests/test_cache.py)", { input: BASH.input }),
   dialog: excerptsOf("permission", "Allow access to the keychain?", { text: "Allow access to the keychain?" }),
+  // An input over 16 KiB reaches the card as {}, its excerpt still built from the whole call.
+  droppedWrite: excerptsOf("permission", "Write(/home/me/app/src/big_module.py)", { tool: "Write", input: {} }),
+  droppedHeredoc: excerptsOf("permission", "Bash(cat > schema.sql <<'EOF')", { tool: "Bash", input: {} }),
 };
 
 for (const hash of [

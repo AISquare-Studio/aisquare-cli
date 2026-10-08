@@ -351,6 +351,8 @@ const CARD_ACTIONS = [
   ["restart", "Restart…", true], ["stop", "Stop…", true], ["open", "Open", false], ["dismiss", "Dismiss", false],
 ];
 const STRIP_KINDS = new Set(["permission", "question", "plan"]);
+/* transcript._summarise_tool's keys, in its order. */
+const SUMMARY_KEYS = Object.freeze(["command", "file_path", "path", "pattern", "query", "prompt", "url"]);
 
 function isText(value) {
   return typeof value === "string" && value.trim() !== "";
@@ -431,8 +433,10 @@ function renderDetail(kind, detail, doc) {
     lead = (plainText(d.plan).split("\n").map((line) => line.trim()).find((line) => line) || "").replace(/^#+/, "");
   } else if (kind === "permission" && isText(d.tool)) {
     const lines = ["tool: " + plainText(d.tool)];
-    lead = d.tool;
     const input = d.input && typeof d.input === "object" && !Array.isArray(d.input) ? d.input : {};
+    // An input over 16 KiB comes as {}: no lead, as only the excerpt names what is approved.
+    const named = SUMMARY_KEYS.find((key) => isText(input[key]));
+    if (named) lead = d.tool + "(" + input[named].trim().split(/[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/)[0].slice(0, 72);
     for (const key of Object.keys(input).slice(0, 20)) {
       const value = input[key];
       if (["string", "number", "boolean"].indexOf(typeof value) >= 0) lines.push(plainText(key) + ": " + plainText(value));
@@ -451,13 +455,10 @@ function renderDetail(kind, detail, doc) {
   return { box: shown ? box : null, text, lead };
 }
 
-/* Whether an excerpt only says again what the card's detail shows in full: said twice it
- * doubled a card's height on a phone, and a question, with the pane strip, said its own
- * three times. The server cuts a text's excerpt from the text (all of it, its first 280
- * characters, its last paragraph, the question it ends on); a long text keeps one from
- * its end, which its box may hold below the fold. The others it builds from what their
- * box leads with: a question's from its first question and options, a permission's from
- * the tool and its command or path, a plan's from its first line. */
+/* Whether an excerpt only says again what the detail shows whole: said twice, it doubled a
+ * card on a phone. A text's is cut from the text (all of it, its first 280 characters, its
+ * last paragraph, the question it ends on), and one from the end of a long text stays, as
+ * its box may hold it below the fold; the others are built from what the box leads with. */
 function excerptRepeats(excerpt, detail) {
   const flat = (value) => plainText(value).replace(/\s+/g, " ").trim();
   const part = flat(excerpt).replace(/…$/, "").trim();
@@ -883,9 +884,8 @@ function failText(res, max) {
   return message || plainText(res.error) || "That did not work (" + res.status + ").";
 }
 
-/* What a refusal does beyond its sentence. A read_only is the machine saying writes are
- * off now: the page shows it at once, where it kept the pad and Send live until the next
- * remote frame said so. */
+/* What a refusal does beyond its sentence. A read_only means writes are off now: the page
+ * shows it at once, where it kept the pad and Send live until the next remote frame. */
 function afterFailure(res, route) {
   if (res.status === 403 && res.error === "read_only") {
     if (writable()) {
@@ -2252,10 +2252,8 @@ VIEWS.agent = (route, main) => {
       width = clampInt(payload.width, 20, 400);
       fitNow();
       draw(payload);
-      // The first screen opens at its foot, where a prompt waits: it sat below the fold,
-      // half under the input bar, about 110 px of scrolling away. Later frames leave the
-      // scroll where the human put it. Scrolled once this view is built, since a cached
-      // frame is drawn before the input bar is added.
+      // The first screen opens at its foot, where a prompt waits; later ones keep the scroll.
+      // Once the view is built: a cached frame is drawn before the input bar is added.
       if (!landed && Array.isArray(payload.rows) && payload.rows.length) {
         landed = true;
         Promise.resolve().then(() => { UI.main.scrollTop = UI.main.scrollHeight; });

@@ -49,6 +49,28 @@ _p5='[^"]* -m '            # python -P -m
 _program="($_p1|$_p2|$_p3|$_p4|$_p5)?(aisquare|asq)(\\.[eE][xX][eE])?(\\\\\"|$_a)?"
 _ours="\"command\" *: *\"$_program($_ws+-[^\"]*)?$_ws+hook$_ws+$event$_ws*\""
 
+# Whether the program at path $1 can start: an executable file and, when it is a
+# script, its #! interpreter is one too. A console script whose environment lost
+# its Python (uv python uninstall, a removed Homebrew python@3.x) stays executable
+# and fails every run with "bad interpreter", exit 126. Only an absolute
+# interpreter is checked; `#!/usr/bin/env python3` and binaries are trusted.
+_starts() {
+    [ -f "$1" ] && [ -x "$1" ] || return 1
+    _first=
+    IFS= read -r _first <"$1" 2>/dev/null
+    case $_first in
+        '#!'*) ;;
+        *) return 0 ;;
+    esac
+    _interp=${_first#??}
+    _interp=${_interp#"${_interp%%[!	 ]*}"}
+    _interp=${_interp%%[	 ]*}
+    case $_interp in
+        /*) [ -f "$_interp" ] && [ -x "$_interp" ] ;;
+        *) return 0 ;;
+    esac
+}
+
 # Whether the program one matching hook ($1, the text grep matched) names can
 # start. A hook naming an aisquare that is gone -- the CLI uninstalled after
 # `agents connect` -- fails on every event, and standing down beside it would
@@ -74,8 +96,14 @@ _runnable() {
         \~/*) _prog=$HOME/${_prog#??} ;;
     esac
     case $_prog in
-        */*) [ -f "$_prog" ] && [ -x "$_prog" ] ;;
-        *) command -v "$_prog" >/dev/null 2>&1 ;;
+        */*) _starts "$_prog" ;;
+        *)
+            _prog=$(command -v "$_prog" 2>/dev/null) || return 1
+            case $_prog in
+                /*) _starts "$_prog" ;;
+                *) return 0 ;;
+            esac
+            ;;
     esac
 }
 _nl='
@@ -108,15 +136,16 @@ for _dir in "$_installed_in" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; do
     done
 done
 
-# The first executable named $1: on PATH, then where uv installs tools.
+# The first program named $1 that can start (_starts): on PATH, then where uv
+# installs tools. One that cannot is passed over, so the uvx fallback still runs.
 _find() {
     _found=$(command -v "$1" 2>/dev/null)
-    if [ -n "$_found" ]; then
+    if [ -n "$_found" ] && _starts "$_found"; then
         printf '%s\n' "$_found"
         return 0
     fi
     for _found in "$HOME/.local/bin/$1" "$HOME/.cargo/bin/$1"; do
-        if [ -f "$_found" ] && [ -x "$_found" ]; then
+        if _starts "$_found"; then
             printf '%s\n' "$_found"
             return 0
         fi

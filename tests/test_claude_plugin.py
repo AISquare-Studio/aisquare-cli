@@ -514,6 +514,52 @@ def test_it_grades_the_program_in_our_hook_not_the_first_on_its_line(
     assert machine.ran("aisquare") == (["hook", "stop"] if runs else None)
 
 
+def _cannot_start(path: Path) -> Path:
+    """An executable script whose ``#!`` interpreter is gone: a console script after its
+    environment lost its Python (``uv python uninstall``, a removed ``python@3.x``)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!{path.parent / 'gone' / 'python'}\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+@posix_only
+def test_it_runs_in_place_of_a_hook_whose_script_cannot_start(machine: Machine) -> None:
+    """Executable is not runnable: a script whose interpreter is gone fails every event
+    with exit 126, and the launcher stood down beside it (review of #257)."""
+    machine.fake("aisquare")
+    dead = _cannot_start(machine.home / "venv" / "bin" / "aisquare")
+    machine.settings(machine.home / ".claude", ("Stop", f"{dead} hook stop"))
+    with pytest.raises(OSError):  # the premise: exec refuses it (a bad interpreter)
+        subprocess.run([str(dead)], capture_output=True, check=False)
+
+    result = machine.run("stop")
+
+    assert result.returncode == 0
+    assert machine.ran("aisquare") == ["hook", "stop"]
+
+
+@posix_only
+def test_an_aisquare_that_cannot_start_is_passed_over_for_uvx(machine: Machine) -> None:
+    """The first aisquare on PATH (uv's ~/.local/bin link) can be a script that cannot
+    start; picked, it failed every event instead of reaching the uvx fallback."""
+    _cannot_start(machine.bin / "aisquare")
+    machine.fake("uvx")
+
+    result = machine.run("stop")
+
+    assert result.returncode == 0
+    assert machine.ran("uvx") == [
+        "--python",
+        ">=3.11,<3.14",
+        "--from",
+        f"aisquare-cli=={_release()}",
+        "aisquare",
+        "hook",
+        "stop",
+    ]
+
+
 @posix_only
 def test_it_reads_the_settings_json_the_session_reads(machine: Machine) -> None:
     """CLAUDE_CONFIG_DIR, else ~/.claude -- and the config dir the plugin is installed in."""

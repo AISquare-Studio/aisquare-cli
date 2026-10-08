@@ -41,7 +41,7 @@ from aisquare.core.workspace import current_project
 from aisquare.models import SetupReport
 from aisquare.services import agents as agents_service
 from aisquare.services import explainability as explainability_service
-from aisquare.services import install_route
+from aisquare.services import install_route, onboarding
 from aisquare.services import project as project_service
 
 
@@ -642,12 +642,15 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
 
 
 def _reason_line(*texts: str) -> str:
-    """Why a command failed: the LAST non-empty line of the first text that has one,
-    where this CLI's ``✗ …`` and a traceback's exception both land."""
+    """Why a command failed, whole: from the first text that says anything, the line that
+    names the failure, read past Rich's wrapping and box borders. The child writes to a
+    pipe, so Rich lays it out at 80 columns, and the last line was a wrapped path's tail
+    (``n'``) or a usage box's bottom border (review of #257). A traceback's exception
+    line comes with what follows it; this CLI's own ``✗ …`` loses its mark."""
     for text in texts:
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        if lines:
-            return lines[-1].removeprefix("✗ ")
+        verdict = onboarding.stderr_verdict(text)
+        if verdict:
+            return verdict.removeprefix("✗ ")
     return ""
 
 

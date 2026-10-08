@@ -870,6 +870,7 @@ class Machine:
     installer_exit: int = 0
     new_version: str = "0.9.1"
     connect_exit: int = 0
+    connect_stderr: str = "✗ claude-code is not installed on this machine\n"
     lookups: int = 0
     installs: list[tuple[list[str], dict[str, str], bool]] = field(default_factory=list)
     captured: list[list[str]] = field(default_factory=list)
@@ -902,9 +903,7 @@ def machine(monkeypatch: pytest.MonkeyPatch) -> Machine:
         if argv[-1] == "--version":
             return Captured(0, f"aisquare {world.new_version}\n")
         if world.connect_exit:
-            return Captured(
-                world.connect_exit, "", "✗ claude-code is not installed on this machine\n"
-            )
+            return Captured(world.connect_exit, "", world.connect_stderr)
         return Captured(0, "connected\n")
 
     monkeypatch.setattr(install_route, "fetch_latest", fetch_latest)
@@ -1145,6 +1144,51 @@ def test_a_recorded_config_dir_this_user_cannot_enter_is_left_with_its_reason(
     left = _one_object(result.stdout)["hooks_left"]
     assert [entry["config_dir"] for entry in left] == [str(site)], left
     assert "its settings.json could not be read" in left[0]["reason"], left
+
+
+#: What the new install's own process wrote to a pipe, laid out by Rich at 80 columns.
+_WRAPPED_TRACEBACK = (
+    "╭───────────────────── Traceback (most recent call last) ──────────────────────╮\n"
+    "│ /home/u/.local/share/uv/tools/aisquare-cli/lib/python3.13/site-packages/aisq │\n"
+    "│ uare/core/agents.py:347 in install_hooks                                     │\n"
+    "╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    "PermissionError: [Errno 13] Permission denied:\n"
+    "'/home/u/.claude/settings.json'\n"
+)
+_USAGE_BOX = (
+    "Usage: aisquare agents [OPTIONS] COMMAND [ARGS]...\n"
+    "Try 'aisquare agents -h' for help.\n"
+    "╭─ Error ──────────────────────────────────────────────────────────────────────╮\n"
+    "│ No such command 'refresh-hooks'.                                             │\n"
+    "╰──────────────────────────────────────────────────────────────────────────────╯\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("stderr", "reason"),
+    [
+        (
+            _WRAPPED_TRACEBACK,
+            "PermissionError: [Errno 13] Permission denied: '/home/u/.claude/settings.json'",
+        ),
+        (_USAGE_BOX, "No such command 'refresh-hooks'."),
+    ],
+    ids=["wrapped-traceback", "usage-box"],
+)
+def test_a_site_that_fails_to_reconnect_gets_the_whole_reason(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path, stderr: str, reason: str
+) -> None:
+    """The reason was the last line of the child's stderr: the tail of a wrapped path
+    (``n'``), or a usage box's bottom border (review of #257)."""
+    site = _hooked(tmp_path / "claude", tool.script)
+    _record(site)
+    machine.connect_exit = 1
+    machine.connect_stderr = stderr
+
+    result = runner.invoke(app, ["--json", "upgrade", "--yes"])
+
+    hooks = _one_object(result.stdout)["hooks"]
+    assert hooks == [{"config_dir": str(site), "refreshed": False, "error": reason}], hooks
 
 
 def _live_fleet_agent(root: Path, label: str = "coder-1") -> None:

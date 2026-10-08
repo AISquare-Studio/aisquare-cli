@@ -274,6 +274,16 @@ def _stderr_verdict(lines: Sequence[str]) -> str | None:
     return lines[-1] if lines else None
 
 
+def stderr_verdict(text: str) -> str | None:
+    """:func:`_stderr_verdict` of a child's output held as text, not a :class:`CliResult`.
+
+    ``lifecycle``'s upgrade reports what the new install's own processes said, and the
+    last line it took was the tail of a wrapped path, or a usage box's border
+    (review of #257).
+    """
+    return _stderr_verdict(_stderr_lines(CliResult(argv=[], returncode=1, stdout="", stderr=text)))
+
+
 def failure_reason(result: CliResult, step: str) -> str:
     """Why a non-zero step failed, in the words the CLI itself used.
 

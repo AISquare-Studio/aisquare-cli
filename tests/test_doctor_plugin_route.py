@@ -246,6 +246,7 @@ def test_reading_the_plugin_creates_no_aisquare_state(claude: Path) -> None:
     assert not home.exists(), "doctor created the aisquare home"
 
 
+@posix_route  # on win32 neither mentions the plugin: test_on_native_windows_connect_and_...
 def test_disconnect_says_the_plugin_keeps_aisquare_running(runner: CliRunner, claude: Path) -> None:
     _connect(runner)
     _install_plugin(claude)
@@ -268,6 +269,7 @@ def test_disconnect_without_the_plugin_says_nothing_about_it(
     assert "/plugin" not in result.stderr
 
 
+@posix_route  # on win32 neither mentions the plugin: test_on_native_windows_connect_and_...
 def test_connect_beside_the_plugin_says_its_hooks_stand_down(
     runner: CliRunner, claude: Path
 ) -> None:

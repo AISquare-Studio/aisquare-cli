@@ -641,7 +641,9 @@ def _starts(program: Path) -> bool:
     when it has one, is an executable file too. A console script whose environment lost
     its Python stays executable and fails every run; ``env`` lines and binaries are
     trusted, as the launcher trusts them."""
-    if not (program.is_file() and os.access(program, os.X_OK)):
+    # os.path.isfile, here and below: a #! may name a path this user cannot reach, where
+    # Path.is_file raises on 3.11/3.12; the launcher's `[ -f ]` answers no.
+    if not (os.path.isfile(program) and os.access(program, os.X_OK)):
         return False
     try:
         with program.open("rb") as handle:
@@ -654,7 +656,7 @@ def _starts(program: Path) -> bool:
     interpreter = Path(re.split(rb"[ \t]", line, maxsplit=1)[0].decode(errors="replace"))
     if not interpreter.is_absolute():
         return True
-    return interpreter.is_file() and os.access(interpreter, os.X_OK)
+    return os.path.isfile(interpreter) and os.access(interpreter, os.X_OK)
 
 
 def launcher_finds(name: str) -> Path | None:
@@ -1049,7 +1051,9 @@ def classify_hook_binary(binary: HookBinary) -> tuple[str, str | None]:
     directory is asked its version, and it is asked ONCE per doctor run however
     many directories name it (see ``hook_site_health``'s cache).
     """
-    if not binary.program.exists():
+    # os.path.exists: Path.exists raises on 3.11/3.12 for a program in a directory this
+    # user cannot enter, which cost `doctor` its report; such a program is as good as gone.
+    if not os.path.exists(binary.program):
         return HOOK_BINARY_MISSING, None
     if _same_install(binary):
         return HOOK_BINARY_CURRENT, __version__

@@ -497,8 +497,11 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
         if not binaries:
             continue
         programs = tuple(str(binary.program) for binary in binaries)
+        # os.path.exists, not Path.exists: on 3.11/3.12 the latter raises PermissionError
+        # for a program in a directory this user cannot enter, and upgrade crashed. Such a
+        # program counts as gone, whose hooks fail every session (review of #257).
         foreign = next(
-            (b for b in binaries if b.program.exists() and not runs_this_install(b, found)),
+            (b for b in binaries if os.path.exists(b.program) and not runs_this_install(b, found)),
             None,
         )
         unwritable = agents_service.settings_unwritable(directory / "settings.json")

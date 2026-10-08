@@ -38,6 +38,7 @@ from aisquare.models import CheckStatus, DoctorCheck
 from aisquare.services import agents as agents_service
 from aisquare.services import diagnostics
 from aisquare.services.onboarding import fix_commands
+from tests.fsperms import can_deny_reads
 
 _CONNECT = ("agents", "connect", "claude-code")
 
@@ -425,6 +426,31 @@ def test_a_settings_json_that_is_not_utf8_costs_its_row_nothing(
     assert rows["claude-code"].status is CheckStatus.ok, rows["claude-code"]
     (claude / "settings.json").write_bytes(b"\xff\xfe{\x00}\x00")
     assert diagnostics._check_claude_code().status is CheckStatus.warn
+
+
+def test_a_hook_program_this_user_cannot_reach_costs_the_doctor_nothing(
+    runner: CliRunner, claude: Path, tmp_path: Path
+) -> None:
+    """Path.exists raised PermissionError on 3.11/3.12 for a hook's program in a directory
+    this user cannot enter, and `aisquare --json doctor` ended in a traceback with no
+    report (review of #257). The program reads as gone, as it is to this user."""
+    if sys.platform == "win32" or not can_deny_reads():
+        pytest.skip("needs a directory this user cannot enter")
+    locked = tmp_path / "someone-else"
+    program = locked / "bin" / "aisquare"
+    program.parent.mkdir(parents=True)
+    program.write_text("#!/bin/sh\n", encoding="utf-8")
+    _connect(runner)
+    _hooks_name(claude, str(program))
+    locked.chmod(0)
+    try:
+        result = runner.invoke(app, ["--json", "doctor"])
+    finally:
+        locked.chmod(0o700)
+
+    rows = {row["name"]: row for row in json.loads(result.stdout)}
+    assert rows["claude-code"]["status"] == "warn", rows["claude-code"]
+    assert f"{program}, which does not exist" in rows["claude-code"]["detail"], rows
 
 
 def test_native_windows_reads_only_the_settings_json_route(

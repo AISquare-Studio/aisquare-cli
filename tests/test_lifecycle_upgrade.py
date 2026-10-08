@@ -1206,6 +1206,31 @@ def test_a_settings_json_this_user_may_not_write_is_left_not_promised(
     assert machine.connects() == [], "no refresh was run for it"
 
 
+def test_a_hook_naming_a_program_this_user_cannot_reach_counts_as_gone(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path
+) -> None:
+    """Path.exists raised PermissionError on 3.11/3.12 for a hook's program in a directory
+    this user cannot enter (another user's ~/.local/bin), so upgrade, --check and asq's
+    Update ended in a traceback (review of #257). Such a program is gone, and its hooks
+    fail every session: re-connecting is the fix."""
+    if sys.platform == "win32" or not can_deny_reads():
+        pytest.skip("needs a directory this user cannot enter")
+    locked = tmp_path / "someone-else"
+    program = locked / ".local" / "bin" / "aisquare"
+    program.parent.mkdir(parents=True)
+    program.write_text("#!/bin/sh\n", encoding="utf-8")
+    site = _hooked(tmp_path / "claude", program)
+    _record(site)
+    locked.chmod(0)
+    try:
+        result = runner.invoke(app, ["--json", "upgrade", "--check"])
+    finally:
+        locked.chmod(0o700)
+
+    assert result.exit_code == 0, result.output
+    assert _one_object(result.stdout)["refresh_hooks"] == [str(site)], result.stdout
+
+
 def test_a_recorded_config_dir_this_user_cannot_enter_is_left_with_its_reason(
     runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path
 ) -> None:

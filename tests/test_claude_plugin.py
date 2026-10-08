@@ -38,6 +38,7 @@ from typing import Any
 import pytest
 
 from aisquare.core import agents as agent_core
+from tests.fsperms import can_deny_reads
 
 REPO = Path(__file__).resolve().parents[1]
 MARKETPLACE = REPO / ".claude-plugin" / "marketplace.json"
@@ -564,6 +565,39 @@ def test_an_aisquare_that_cannot_start_is_passed_over(
     ran = (machine.ran("aisquare"), machine.ran("uvx"))
     assert ran == ((["hook", "stop"], None) if good else (None, expected_uvx)), ran
     assert doctor_sees == good and doctor_sees != dead, doctor_sees
+
+
+@posix_only
+def test_a_script_whose_interpreter_this_user_cannot_reach_is_passed_over(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The doctor's search asked Path.is_file of a #! path in a directory this user cannot
+    enter, which raises on 3.11/3.12; the launcher's `[ -f ]` answers no, and so does the
+    doctor now (review of #257)."""
+    if not can_deny_reads():
+        pytest.skip("needs a directory this user cannot enter")
+    locked = machine.home / "someone-else"
+    interpreter = locked / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+    script = machine.bin / "aisquare"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(f"#!{interpreter}\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+    machine.fake("uvx")
+    monkeypatch.setenv("PATH", os.pathsep.join([str(machine.bin), str(machine.tools)]))
+    monkeypatch.setattr(agent_core, "_home", lambda: machine.home)
+    locked.chmod(0)
+    try:
+        doctor_sees = agent_core.plugin_runner()
+        result = machine.run("stop")
+    finally:
+        locked.chmod(0o700)
+
+    assert result.returncode == 0
+    assert doctor_sees is None, doctor_sees
+    assert machine.ran("uvx") is not None, "the launcher passed it over the same way"
 
 
 @posix_only

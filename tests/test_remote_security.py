@@ -69,6 +69,7 @@ from aisquare.services.remote_server import (
     normalize_passphrase,
 )
 from aisquare.services.remote_words import REMOTE_PASSPHRASE_WORDS
+from tests.cli_tree import root_command
 from tests.remote_kit_helpers import (
     PASSWORD,
     base,
@@ -1178,12 +1179,57 @@ def test_serve_sets_the_deadline_notes_the_public_url_and_reports_auto_off(
     assert seen["origin"] == "https://abcd-12.ngrok-free.app"
     assert seen["proxy"] == (True, "127.0.0.1") and seen["ws_max_size"] == 65_536
     assert seen["bound"] == [port]
-    assert "auto-off: at" in result.stderr and "a phone can extend it" in result.stderr
+    assert "auto-off: at" in result.stderr
+    assert "no phone can extend it while writes are off" in result.stderr
     token = remote_server.runtime().token
     assert f"public link: https://abcd-12.ngrok-free.app/r/{token}/" in result.stderr
     assert remote_server.runtime().auto_off_deadline() is None, "no server, no deadline"
     never = CliRunner().invoke(cli, ["remote", "serve", "--port", str(port), "--auto-off", "0"])
     assert "auto-off: never (--auto-off 0)" in never.stderr
+
+
+@pytest.mark.parametrize(
+    ("writes", "gate", "extend"),
+    [
+        (True, "ON — writes are audited", "a phone can extend it"),
+        (False, "off (read-only)", "no phone can extend it while writes are off"),
+    ],
+    ids=["writes-on", "writes-off"],
+)
+def test_serves_banner_offers_the_extension_only_while_writes_are_on(
+    page: Path, monkeypatch: pytest.MonkeyPatch, writes: bool, gate: str, extend: str
+) -> None:
+    """Extending auto-off is a write: with writes off, the default, the page's Extend is
+    greyed out and ``api/remote/extend`` answers 403 ``read_only``. The banner said a phone
+    could extend it all the same, on the line under "write actions: off" (review of #243,
+    round 3, 12/13)."""
+    import uvicorn
+
+    class Served:
+        def __init__(self, config: Any) -> None:
+            self.should_exit = False
+
+        def run(self, sockets: Any = None) -> None:
+            pass
+
+    monkeypatch.setattr(uvicorn, "Server", Served)
+    remote_server.runtime().set_allow_write(writes)
+    result = CliRunner().invoke(
+        cli, ["remote", "serve", "--port", str(_free_port()), "--auto-off", "5"]
+    )
+    assert result.exit_code == 0, result.output
+    lines = result.stderr.splitlines()
+    assert next(line for line in lines if line.startswith("write actions: ")).startswith(
+        f"write actions: {gate}   · "
+    )
+    auto_off = next(line for line in lines if line.startswith("auto-off: at "))
+    assert auto_off.endswith(" (in 5 min) · " + extend), auto_off
+
+
+def test_serves_auto_off_help_offers_the_extension_only_while_writes_are_on() -> None:
+    remote: Any = root_command().commands["remote"]
+    (auto_off,) = [param for param in remote.commands["serve"].params if "--auto-off" in param.opts]
+    assert "a phone can extend it while writes are on" in auto_off.help
 
 
 def test_serves_auto_off_stops_the_server_even_when_remote_json_cannot_be_written(

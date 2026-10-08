@@ -17,7 +17,9 @@ the one it goes back to:
    through ``services.first_run.start_fleet``, which never types into an agent:
    Claude Code first asks whether to trust the folder, and the user answers that
    in the manager's pane. The card waits for step 2's hooks, because they are
-   how the manager receives its instructions.
+   how the manager receives its instructions. Each agent reads as the shell's
+   frame sees it: one whose window is gone, or that tmux cannot answer for (as
+   after a reboot), is never called running.
 
 **The page never takes the keyboard on its own.** The sidebar has it at mount,
 and the app's keys depend on that. A finished card's buttons leave the Tab
@@ -243,6 +245,40 @@ def step_line(step: FleetStep) -> Text:
     for note in step.notes:
         text.append(f"\n    note: {note}", style="dim")
     return text
+
+
+def state_line(label: str, state: str, detail: str | None) -> Text:
+    """One agent of step 3 that the shell's frame does not see running, as the frame says.
+
+    ``unknown`` is no verdict (tmux could not be asked, as after a reboot), so it gets
+    the sidebar's dim ``·``; a ``lost`` agent (its window is gone) or an ``exited`` one gets ``✗``.
+    """
+    text = Text()
+    if state == "unknown":
+        text.append("· ", style="dim")
+        text.append(f"{label} — state unknown")
+    else:
+        text.append("✗ ", style="red")
+        text.append(f"{label} — {state}")
+    if detail:
+        text.append(f" ({detail})", style="dim")
+    return text
+
+
+@dataclass(frozen=True)
+class _Live:
+    """An agent of the chosen project whose row has not ended, and what the frame says of it."""
+
+    agent: FleetAgent
+    state: str | None = None
+    """The shell frame's state (``models.FleetAgentState``); ``None`` for an agent this page
+    started that no frame has read yet, which its start stands in for."""
+    detail: str | None = None
+
+    @property
+    def running(self) -> bool:
+        """Seen there by the listing (``first_run.RUNNING``), or just started by this page."""
+        return self.state is None or self.state in first_run.RUNNING
 
 
 # --------------------------------------------------------------------------- the page
@@ -731,8 +767,8 @@ class WelcomeView(VerticalScroll):
         elif button.id == "fleet-open":
             manager = self._live().get("manager")
             if manager is not None:
-                self.opened = manager.id
-                self.post_message(AgentSelected(manager.project_id, manager.id))
+                self.opened = manager.agent.id
+                self.post_message(AgentSelected(manager.agent.project_id, manager.agent.id))
                 self.paint()
 
     def _start_work(self, name: str, work: Callable[[], object]) -> None:
@@ -777,20 +813,22 @@ class WelcomeView(VerticalScroll):
 
     # ------------------------------------------------------------------ the frame
 
-    def _live(self) -> dict[str, FleetAgent]:
-        """The chosen project's live agents by label: the shell's frame, and what we started.
+    def _live(self) -> dict[str, _Live]:
+        """The chosen project's agents by label, as the shell's frame sees them, and our starts.
 
         An agent this page just started is not in the frame until the shell reads
         again, so until then what its start said stands in for it. A frame read
         after that start, for this project and not failed open, is the whole
         answer: an agent missing from it was stopped elsewhere (``fleet stop``
         kills its window and the row leaves the listing), and is not brought back
-        from what this page last heard. An ENDED row is never live.
+        from what this page last heard. An ENDED row is never here. A row the
+        frame does not see running (its window gone, or tmux unable to say, as
+        after a reboot) is here with that state, and never counts as running.
         """
         project = self.project
         if project is None:
             return {}
-        live: dict[str, FleetAgent] = {}
+        live: dict[str, _Live] = {}
         ended: set[str] = set()
         snapshot = getattr(self.app, "snapshot", None)
         frame = getattr(snapshot, "agents", None)
@@ -800,7 +838,8 @@ class WelcomeView(VerticalScroll):
             if not isinstance(agent, FleetAgent):
                 continue
             if agent.ended_at is None:
-                live[agent.label] = agent
+                state = getattr(status, "state", "unknown")
+                live[agent.label] = _Live(agent, state, getattr(status, "detail", None))
             else:
                 ended.add(agent.id)
         notices = getattr(snapshot, "notices", None)
@@ -817,7 +856,7 @@ class WelcomeView(VerticalScroll):
         for step in self.steps.values():
             agent = step.agent
             if agent is not None and step.outcome != "refused" and agent.id not in ended:
-                live.setdefault(agent.label, agent)
+                live.setdefault(agent.label, _Live(agent))
         return live
 
     def _ready(self) -> bool:
@@ -952,8 +991,9 @@ class WelcomeView(VerticalScroll):
     def _paint_fleet(self, *, waiting: bool) -> None:
         live = self._live()
         manager = live.get("manager")
-        coders = [agent for agent in live.values() if agent.role == "coder"]
-        up = manager is not None and len(coders) >= first_run.CODERS
+        manager_running = manager is not None and manager.running
+        coders = [row for row in live.values() if row.agent.role == "coder" and row.running]
+        up = manager_running and len(coders) >= first_run.CODERS
         ready = self._ready()
         title = Text("3  Fleet", style="bold")
         if up:
@@ -975,7 +1015,9 @@ class WelcomeView(VerticalScroll):
             if status.plain:
                 status.append("\n")
             status.append_text(line)
-        if manager is not None and not up:
+        if manager is not None and not manager_running:
+            status.append("\nOpen the manager to restart it.", style="dim")
+        elif manager is not None and not up:
             if "coders" in self.busy:
                 status.append("\nStarting the coders…", style="dim")
             else:
@@ -1003,31 +1045,42 @@ class WelcomeView(VerticalScroll):
         start.disabled = not ready
         # Before the coders, the next step is the manager's pane (the trust question),
         # so Open is the primary and takes the keyboard; once it has been opened the
-        # coders are, and Open leaves the Tab order until the fleet is up.
-        opened = manager is not None and self.opened == manager.id
+        # coders are, and Open leaves the Tab order until the fleet is up. A manager
+        # that is not running is restarted from its pane, so Open stays the next step.
+        opened = manager is not None and self.opened == manager.agent.id
+        coders_next = manager_running and opened and not up
         open_button = self.query_one("#fleet-open", Button)
         open_button.display = manager is not None
-        open_button.variant = "default" if opened and not up else "primary"
-        open_button.can_focus = up or not opened
+        open_button.variant = "default" if coders_next else "primary"
+        open_button.can_focus = not coders_next
         coders_button = self.query_one("#fleet-coders", Button)
-        coders_button.display = manager is not None and not up
+        coders_button.display = manager_running and not up
         coders_button.disabled = not ready
         coders_button.variant = "primary" if opened else "default"
         self._card("step-fleet", done=up, waiting=waiting, keep_keys=True)
 
-    def _fleet_lines(self, live: dict[str, FleetAgent]) -> list[Text]:
-        """One line per agent of the chosen project's fleet, then any refusal."""
+    def _fleet_lines(self, live: dict[str, _Live]) -> list[Text]:
+        """One line per agent of the chosen project's fleet, then any refusal.
+
+        An agent the frame does not see running says what the frame says instead,
+        never "started" or "running" from what this page last heard.
+        """
         lines: list[Text] = []
         shown: set[str] = set()
-        for label in ("manager", *sorted(a.label for a in live.values() if a.role == "coder")):
-            agent = live.get(label)
-            if agent is None:
+        coders = sorted(row.agent.label for row in live.values() if row.agent.role == "coder")
+        for label in ("manager", *coders):
+            row = live.get(label)
+            if row is None:
                 continue
+            shown.add(label)
+            if not row.running:
+                lines.append(state_line(label, row.state or "unknown", row.detail))
+                continue
+            agent = row.agent
             step = self.steps.get(label)
             if step is None or step.agent is None or step.agent.id != agent.id:
                 step = FleetStep(label, agent.role, "running", agent.id, agent)
             lines.append(step_line(step))
-            shown.add(label)
         for label, step in self.steps.items():
             if step.outcome == "refused" and label not in shown:
                 lines.append(step_line(step))

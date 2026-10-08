@@ -27,7 +27,7 @@ from aisquare.core.orchestrator import team_project
 from aisquare.core.selfcli import CliResult
 from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed, TmuxServer
-from aisquare.models import FleetAgent, ProjectInfo
+from aisquare.models import FleetAgent, FleetAgentState, FleetAgentStatus, ProjectInfo
 from aisquare.services import agents as agents_service
 from aisquare.services import first_run, onboarding
 from aisquare.services import fleet as fleet_service
@@ -69,6 +69,11 @@ def _agent(label: str, role: str, project_id: str = "prj_demo") -> FleetAgent:
         cwd=Path("/w"),
         created_at=T0,
     )
+
+
+def _seen(*agents: FleetAgent, state: FleetAgentState = "waiting") -> list[FleetAgentStatus]:
+    """``agents`` as the fleet's listing reports them, all in ``state``."""
+    return [FleetAgentStatus(agent=agent, state=state) for agent in agents]
 
 
 class Spawns:
@@ -440,7 +445,7 @@ def test_the_fleet_starts_manager_then_two_coders_and_types_nothing(tmp_path: Pa
 def test_a_live_manager_is_never_started_twice(tmp_path: Path) -> None:
     project = ProjectInfo(id="prj_demo", root=_repo(tmp_path / "demo"))
     spawns = Spawns()
-    running = [_agent("manager", "manager")]
+    running = _seen(_agent("manager", "manager"))
     started = first_run.start_fleet(project, coders=0, spawn=spawns, live=lambda p: running)
     assert spawns.calls == []
     assert [(s.label, s.outcome) for s in started.steps] == [("manager", "running")]
@@ -452,14 +457,14 @@ def test_a_live_manager_is_never_started_twice(tmp_path: Path) -> None:
 def test_coders_are_topped_up_not_added(tmp_path: Path) -> None:
     project = ProjectInfo(id="prj_demo", root=_repo(tmp_path / "demo"))
     spawns = Spawns()
-    running = [_agent("manager", "manager"), _agent("coder-1", "coder")]
+    running = _seen(_agent("manager", "manager"), _agent("coder-1", "coder"))
     started = first_run.start_fleet(project, manager=False, spawn=spawns, live=lambda p: running)
     assert [kwargs["label"] for _, kwargs in spawns.calls] == ["coder-2"]
     assert [(s.label, s.outcome) for s in started.steps] == [
         ("coder-1", "running"),
         ("coder-2", "started"),
     ]
-    both = [*running, _agent("coder-2", "coder")]
+    both = [*running, *_seen(_agent("coder-2", "coder"))]
     again = Spawns()
     first_run.start_fleet(project, manager=False, spawn=again, live=lambda p: both)
     assert again.calls == []
@@ -468,7 +473,7 @@ def test_coders_are_topped_up_not_added(tmp_path: Path) -> None:
 def test_a_coder_label_held_by_a_live_agent_is_skipped(tmp_path: Path) -> None:
     project = ProjectInfo(id="prj_demo", root=_repo(tmp_path / "demo"))
     spawns = Spawns()
-    running = [_agent("coder-1", "reviewer")]  # someone else holds the label
+    running = _seen(_agent("coder-1", "reviewer"))  # someone else holds the label
     first_run.start_fleet(project, manager=False, spawn=spawns, live=lambda p: running)
     assert [kwargs["label"] for _, kwargs in spawns.calls] == ["coder-2", "coder-3"]
 
@@ -513,7 +518,7 @@ def test_a_crash_in_the_fleet_path_is_a_refusal_not_a_raise(tmp_path: Path) -> N
     def crash(project: ProjectInfo, role: str, **kwargs: Any) -> fleet_service.SpawnReceipt:
         raise KeyError("boom")
 
-    def unreadable(project: ProjectInfo) -> list[FleetAgent]:
+    def unreadable(project: ProjectInfo) -> list[FleetAgentStatus]:
         raise RuntimeError("database is locked")
 
     crashed = first_run.start_fleet(project, spawn=crash, live=lambda p: [])
@@ -523,15 +528,8 @@ def test_a_crash_in_the_fleet_path_is_a_refusal_not_a_raise(tmp_path: Path) -> N
     assert [step.outcome for step in blind.steps] == ["refused"]
 
 
-def test_the_real_spawn_starts_three_windows_and_types_into_none(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The same calls through ``fleet.spawn`` itself, on a tmux kept in memory.
-
-    What the fakes above cannot show: that the keyword-only call Welcome makes is
-    one ``fleet.spawn`` accepts, that the labels come out as coder-1 and coder-2
-    in their own worktrees, and that no pane is typed into.
-    """
+def _real_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[FakeTmux, ProjectInfo]:
+    """``fleet.spawn`` and the fleet's listing as they are, on a tmux kept in memory."""
     tmux = FakeTmux()
     monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
     monkeypatch.setattr(fleet_service, "settings", lambda: FleetSettings(tmux_socket="asq-test"))
@@ -547,6 +545,19 @@ def test_the_real_spawn_starts_three_windows_and_types_into_none(
     project = team_project(_repo(tmp_path / "demo"))
     with store_session() as store:
         store.ensure_project(project)
+    return tmux, project
+
+
+def test_the_real_spawn_starts_three_windows_and_types_into_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same calls through ``fleet.spawn`` itself, on a tmux kept in memory.
+
+    What the fakes above cannot show: that the keyword-only call Welcome makes is
+    one ``fleet.spawn`` accepts, that the labels come out as coder-1 and coder-2
+    in their own worktrees, and that no pane is typed into.
+    """
+    tmux, project = _real_fleet(tmp_path, monkeypatch)
     started = first_run.start_fleet(project)
     assert [(s.label, s.outcome) for s in started.steps] == [
         ("manager", "started"),
@@ -559,6 +570,76 @@ def test_the_real_spawn_starts_three_windows_and_types_into_none(
     # Idempotent through the real service too: nothing new on a second call.
     again = first_run.start_fleet(project)
     assert [s.outcome for s in again.steps] == ["running"] * 3 and len(tmux.spawned) == 3
+
+
+@pytest.mark.parametrize("state", ["lost", "unknown"])
+def test_a_coder_that_is_not_running_is_replaced_under_the_next_free_label(
+    tmp_path: Path, state: FleetAgentState
+) -> None:
+    """A coder whose window is gone, or that tmux cannot answer for, was counted as running
+    because its row had not ended, and no coder took its place (review of #257). Its row
+    still holds its label, as ``fleet.spawn`` holds it, so the new coder takes the next one."""
+    project = ProjectInfo(id="prj_demo", root=_repo(tmp_path / "demo"))
+    spawns = Spawns()
+    listed = [
+        *_seen(_agent("manager", "manager"), _agent("coder-2", "coder")),
+        *_seen(_agent("coder-1", "coder"), state=state),
+    ]
+    started = first_run.start_fleet(project, manager=False, spawn=spawns, live=lambda p: listed)
+    assert [kwargs["label"] for _, kwargs in spawns.calls] == ["coder-3"]
+    assert [(s.label, s.outcome) for s in started.steps] == [
+        ("coder-2", "running"),
+        ("coder-3", "started"),
+    ]
+
+
+@pytest.mark.parametrize("state", ["lost", "unknown"])
+def test_a_manager_that_is_not_running_is_never_called_running(
+    tmp_path: Path, state: FleetAgentState
+) -> None:
+    """It is ``fleet.spawn``'s to refuse a second manager, with the way to clear the first."""
+    project = ProjectInfo(id="prj_demo", root=_repo(tmp_path / "demo"))
+    spawns = Spawns(refuse={"manager": "demo already has a manager"})
+    listed = _seen(_agent("manager", "manager"), state=state)
+    started = first_run.start_fleet(project, coders=0, spawn=spawns, live=lambda p: listed)
+    assert [role for role, _ in spawns.calls] == ["manager"]
+    assert [(s.label, s.outcome) for s in started.steps] == [("manager", "refused")]
+
+
+def test_through_the_real_listing_a_coder_whose_window_closed_is_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A coder's window closed by hand: the listing says ``lost``, and the top-up starts a
+    coder beside it, where it reported coder-1 running and started nothing."""
+    tmux, project = _real_fleet(tmp_path, monkeypatch)
+    first = first_run.start_fleet(project)
+    coder = next(step.agent for step in first.steps if step.label == "coder-1")
+    assert coder is not None
+    tmux.vanish(coder.pane_id)
+    states = {s.agent.label: s.state for s in fleet_service.list_agents(project)}
+    again = first_run.start_fleet(project, manager=False)
+    assert states == {"manager": "waiting", "coder-1": "lost", "coder-2": "waiting"}, states
+    assert [(s.label, s.outcome) for s in again.steps] == [
+        ("coder-2", "running"),
+        ("coder-3", "started"),
+    ], [s.detail for s in again.steps]
+    assert len(tmux.spawned) == 4 and tmux.typed == []
+
+
+def test_through_the_real_listing_a_fleet_whose_server_is_gone_is_not_called_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a reboot (or kill-server) every row reads ``unknown``: it was reported as
+    running, all three, and Welcome said the fleet was up. ``fleet.spawn`` now answers."""
+    tmux, project = _real_fleet(tmp_path, monkeypatch)
+    first_run.start_fleet(project)
+    tmux.running = False  # the server is gone; the rows are not ended
+    states = {s.agent.label: s.state for s in fleet_service.list_agents(project)}
+    after = first_run.start_fleet(project)
+    assert set(states.values()) == {"unknown"}, states
+    assert [(s.label, s.outcome) for s in after.steps] == [("manager", "refused")]
+    assert "already has a manager" in after.steps[0].detail
+    assert len(tmux.spawned) == 3, "nothing was started"
 
 
 def test_fleet_step_lines_up_with_what_welcome_reads() -> None:

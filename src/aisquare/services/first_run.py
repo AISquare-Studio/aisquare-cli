@@ -42,7 +42,7 @@ from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import harness, selfcli
 from aisquare.core import tmux as tmux_core
 from aisquare.core.store import store_session
-from aisquare.models import FleetAgent, ProjectInfo
+from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import agents as agents_service
 from aisquare.services import diagnostics, onboarding
 from aisquare.services import fleet as fleet_service
@@ -468,12 +468,21 @@ class Spawner(Protocol):
     ) -> fleet_service.SpawnReceipt: ...
 
 
-LiveAgents = Callable[[ProjectInfo], list[FleetAgent]]
+RUNNING: frozenset[str] = frozenset({"working", "waiting", "attention", "limited"})
+"""The states in which the fleet's listing sees an agent there: all the Welcome page
+calls running. ``unknown`` is no verdict (tmux could not be asked: after a reboot every
+row reads so), and ``lost`` (its window is gone) and ``exited`` agents are not there."""
+
+LiveAgents = Callable[[ProjectInfo], list[FleetAgentStatus]]
 
 
-def live_agents(project: ProjectInfo) -> list[FleetAgent]:
-    """The project's agents whose rows are not ended — what ``fleet.spawn`` counts as live."""
-    return [s.agent for s in fleet_service.list_agents(project) if s.agent.ended_at is None]
+def live_agents(project: ProjectInfo) -> list[FleetAgentStatus]:
+    """The project's agents whose rows are not ended, with the state the listing derives.
+
+    Each holds its label and a place under the cap, as ``fleet.spawn`` counts them,
+    whether it is running or not.
+    """
+    return [s for s in fleet_service.list_agents(project) if s.agent.ended_at is None]
 
 
 def _free_labels(role: str, count: int, held: set[str]) -> Iterator[str]:
@@ -527,12 +536,16 @@ def start_fleet(
 ) -> FleetStart:
     """Start the manager and top the coders up to ``coders``, one at a time; never raises.
 
-    A live manager is reported as ``running`` and never spawned again; live
-    coders count toward ``coders``, so a second call starts only what is
-    missing. Coders take the role's worktree default in a git repository and
-    ``worktree=False`` elsewhere, with a note. The first refusal (no tmux, the
-    agent cap, a worktree git will not make) stops the call, and its reason is
-    on its step. ``on_step`` hears each step as it lands, for a caller that
+    A running manager (:data:`RUNNING`) is reported as ``running`` and never
+    spawned again; running coders count toward ``coders``, so a second call
+    starts only what is missing. A coder that is not running (its window gone,
+    or tmux unable to say) is not counted, and keeps its label until it is
+    restarted or reaped, so the one started in its place takes the next free
+    label. A manager in that state is ``fleet.spawn``'s to refuse, with the way
+    to clear it. Coders take the role's worktree default in a git repository
+    and ``worktree=False`` elsewhere, with a note. The first refusal (no tmux,
+    the agent cap, a worktree git will not make) stops the call, and its reason
+    is on its step. ``on_step`` hears each step as it lands, for a caller that
     shows progress. Nothing is typed into any agent: see the module docstring.
     """
     spawner: Spawner = spawn if spawn is not None else fleet_service.spawn
@@ -545,7 +558,7 @@ def start_fleet(
         return step.outcome != "refused"
 
     try:
-        running = (live or live_agents)(project)
+        listed = (live or live_agents)(project)
     except Exception as exc:
         done(
             FleetStep(
@@ -556,6 +569,7 @@ def start_fleet(
             )
         )
         return FleetStart(tuple(steps))
+    running = [status.agent for status in listed if status.state in RUNNING]
     if manager:
         existing = next((agent for agent in running if agent.role == "manager"), None)
         if existing is not None:
@@ -568,7 +582,7 @@ def start_fleet(
     missing = max(0, coders - len(live_coders))
     if missing:
         git = fleet_service.is_git_project(project.root)
-        held = {agent.label for agent in running}
+        held = {status.agent.label for status in listed}  # running or not, as spawn holds them
         for label in _free_labels("coder", missing, held):
             step = _spawn(spawner, project, "coder", label=label, worktree=None if git else False)
             if not git and step.outcome == "started":

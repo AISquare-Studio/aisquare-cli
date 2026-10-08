@@ -48,6 +48,7 @@ from aisquare.models import (
     CheckStatus,
     DoctorCheck,
     FleetAgent,
+    FleetAgentState,
     FleetAgentStatus,
     ProjectInfo,
     SetupReport,
@@ -76,6 +77,8 @@ UNHOOKED = ClaudeState(
     wanted="claude", source="default", binary="/opt/bin/claude", version="2.1.300", signed_in=True
 )
 READY = dataclasses.replace(UNHOOKED, connected=True)
+DETAIL = {"lost": "pane gone", "unknown": "tmux unavailable"}
+"""What the fleet's listing says beside those states (``services.fleet._derive``)."""
 
 
 # --------------------------------------------------------------------------- the machine
@@ -121,6 +124,8 @@ class Machine:
     connects: int = 0
     starts: list[tuple[str, bool, int]] = field(default_factory=list)
     live: list[FleetAgent] = field(default_factory=list)
+    states: dict[str, FleetAgentState] = field(default_factory=dict)
+    """What the fleet's listing says of an agent, by label, when not ``waiting``."""
 
     def seams(self, platform: str = "linux") -> Seams:
         def claude(sign_in: bool) -> ClaudeState:
@@ -178,10 +183,19 @@ class Machine:
             platform=platform,
         )
 
-    def listing(self, project: ProjectInfo) -> list[FleetAgent]:
+    def listing(self, project: ProjectInfo) -> list[FleetAgentStatus]:
         if self.blind is not None:
             raise RuntimeError(self.blind)
-        return list(self.live)
+        return self.statuses(project)
+
+    def statuses(self, project: ProjectInfo) -> list[FleetAgentStatus]:
+        """``live`` as ``fleet.list_agents`` reports it for ``project``, each in its state."""
+        rows: list[FleetAgentStatus] = []
+        for agent in self.live:
+            if agent.project_id == project.id:
+                state = self.states.get(agent.label, "waiting")
+                rows.append(FleetAgentStatus(agent=agent, state=state, detail=DETAIL.get(state)))
+        return rows
 
     def spawn(self, project: ProjectInfo, role: str, **kwargs: Any) -> fleet_service.SpawnReceipt:
         assert kwargs.get("prompt") is None, "Welcome typed into an agent"
@@ -1341,7 +1355,7 @@ def test_an_agent_stopped_elsewhere_is_not_brought_back(
         store.onboard_project(ProjectInfo(id=project.id, root=project.root))
 
     def listing(p: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
-        return [FleetAgentStatus(agent=a) for a in machine.live if a.project_id == p.id]
+        return machine.statuses(p)
 
     monkeypatch.setattr(fleet_service, "list_agents", listing)
     scripted(machine)
@@ -1376,7 +1390,7 @@ def test_a_clock_that_steps_back_does_not_keep_a_stopped_agent_started(
         store.onboard_project(ProjectInfo(id=project.id, root=project.root))
 
     def listing(p: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
-        return [FleetAgentStatus(agent=a) for a in machine.live if a.project_id == p.id]
+        return machine.statuses(p)
 
     monkeypatch.setattr(fleet_service, "list_agents", listing)
     scripted(machine)
@@ -1394,6 +1408,87 @@ def test_a_clock_that_steps_back_does_not_keep_a_stopped_agent_started(
     start_again, status = in_shell(machine, go)
     assert start_again, "the frame read after the start answers, whatever the clock says"
     assert "manager — started" not in status
+
+
+def listed_by(machine: Machine, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shell lists ``project``, and its frame reads the agents ``machine`` holds."""
+    with store_session() as store:
+        store.onboard_project(ProjectInfo(id=project.id, root=project.root))
+
+    def listing(p: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        return machine.statuses(p)
+
+    monkeypatch.setattr(fleet_service, "list_agents", listing)
+
+
+def test_a_coder_whose_window_is_gone_is_not_counted_and_is_replaced(
+    captain: str | None,
+    scripted: Callable[[Machine], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Step 3 counted every row that had not ended as running (review of #257). With
+    coder-1's window closed by hand the sidebar showed ✗, while step 3 kept "✓ coder-1 —
+    started" and "Your fleet is up." and hid Start the coders, so nothing replaced it."""
+    machine, project = _ready_machine(tmp_path)
+    listed_by(machine, project, monkeypatch)
+    scripted(machine)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[Any]:
+        await press(pilot, page, "fleet-manager")
+        await press(pilot, page, "fleet-coders")
+        seen: list[Any] = [card(page, "fleet-status")]
+        machine.states["coder-1"] = "lost"  # its window closed by hand
+        app.refresh_data()
+        page.paint()  # what the page's refresh tick does
+        seen += [card(page, "fleet-status"), visible(page, "fleet-coders")]
+        await press(pilot, page, "fleet-coders")
+        seen.append(card(page, "fleet-status"))
+        return seen
+
+    up, lost, offered, replaced = in_shell(machine, go)
+    assert FLEET_UP in up and "✓ coder-1 — started" in up, "control: three running agents"
+    assert "✗ coder-1 — lost (pane gone)" in lost and FLEET_UP not in lost, lost
+    assert offered, "Start the coders is offered again"
+    assert [agent.label for agent in machine.live] == ["manager", "coder-1", "coder-2", "coder-3"]
+    assert "✓ coder-3 — started" in replaced and FLEET_UP in replaced, replaced
+
+
+@pytest.mark.parametrize("state", ["unknown", "lost"])
+def test_a_fleet_whose_server_is_gone_is_not_called_up(
+    captain: str | None,
+    scripted: Callable[[Machine], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    state: FleetAgentState,
+) -> None:
+    """asq opened again after a reboot or a kill-server: every row reads ``unknown`` (tmux
+    cannot be asked), or ``lost`` once a new server runs. Step 3 said all three were
+    running and the fleet was up, with both start buttons hidden (review of #257). It
+    now says what the frame says, and Open leads to the manager's Restart."""
+    machine, project = _ready_machine(tmp_path)
+    labels = {"manager": "manager", "coder-1": "coder", "coder-2": "coder"}
+    machine.live = [_agent(project, label, role) for label, role in labels.items()]
+    listed_by(machine, project, monkeypatch)
+    scripted(machine)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[Any]:
+        buttons = [visible(page, b) for b in ("fleet-manager", "fleet-open", "fleet-coders")]
+        next_step = page.next_button()
+        return [card(page, "fleet-title"), card(page, "fleet-status"), buttons, next_step]
+
+    title, status, _, _ = in_shell(machine, go)
+    assert "✓" in title and FLEET_UP in status, "control: three running agents are a fleet"
+    machine.states = dict.fromkeys(labels, state)
+    title, status, buttons, next_step = in_shell(machine, go)
+    line = {
+        "unknown": "· manager — state unknown (tmux unavailable)",
+        "lost": "✗ manager — lost (pane gone)",
+    }[state]
+    assert line in status and "Open the manager to restart it." in status, status
+    assert FLEET_UP not in status and "running" not in status and "✓" not in title, status
+    assert buttons == [False, True, False], "Open the manager, not Start manager"
+    assert next_step is not None and next_step.id == "fleet-open"
 
 
 def test_step_one_follows_the_frame_when_a_folder_is_listed_elsewhere(

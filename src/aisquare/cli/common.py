@@ -566,7 +566,11 @@ def emit_onboard(report: OnboardReport) -> None:
         return
     console = stdout_console()
     snapshot = report.snapshot
-    if snapshot is not None and snapshot.status == "ready":
+    if report.snapshot_note is not None:
+        # Nothing packed: off, a pack that failed and why, or a --refresh that kept
+        # the last pack -- the service's sentence, which `init` prints too.
+        console.print(f"snapshot: {report.snapshot_note}")
+    elif snapshot is not None and snapshot.status == "ready":
         line = f"✓ snapshot: {snapshot.file_count} files, {snapshot.token_count} tokens"
         if snapshot.skeleton_token_count:
             line += f" (skeleton {snapshot.skeleton_token_count} tokens)"

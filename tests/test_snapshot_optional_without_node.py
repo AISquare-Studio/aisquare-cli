@@ -40,6 +40,36 @@ from aisquare.services.onboarding import fix_commands
 _NODE_TOOLS = ("node", "npx", "repomix")
 _REAL_WHICH = shutil.which
 _REAL_HAS_MODULE = diagnostics._has_module
+# Taken before the autouse ``no_repomix`` fixture swaps it: with no packer on PATH it
+# raises from ``_repomix_base`` without starting anything, as on a machine with no Node.
+_REAL_RUN_REPOMIX = snapshot_core._run_repomix
+
+_PACK = (
+    '<files>\n<file path="a.py">\nprint("a")\n</file>\n'
+    '<file path="b.py">\nprint("b")\n</file>\n</files>\n'
+)
+
+#: What npm prints when ``npx`` cannot reach the registry (measured with npm 11).
+_NPM_OFFLINE = (
+    "npm error code ENOTFOUND\n"
+    "npm error syscall getaddrinfo\n"
+    "npm error network request to https://registry.npmjs.org/repomix failed, "
+    "reason: getaddrinfo ENOTFOUND registry.npmjs.org\n"
+)
+_NPM_REASON = (
+    "npm error network request to https://registry.npmjs.org/repomix failed, "
+    "reason: getaddrinfo ENOTFOUND registry.npmjs.org"
+)
+
+
+def _packs(_root: Path, *, compress: bool, ignore: Sequence[str] = ()) -> tuple[str, str]:
+    return _PACK, "Total Tokens: 42"
+
+
+def _offline(*_args: object, **_kwargs: object) -> tuple[str, str]:
+    raise subprocess.CalledProcessError(
+        1, ["/opt/node/bin/npx", "--yes", "repomix"], output="", stderr=_NPM_OFFLINE
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -178,11 +208,12 @@ def test_a_repomix_that_ran_and_failed_is_not_called_off(
     onboard = runner.invoke(app, ["project", "onboard"])
     init = runner.invoke(app, ["--json", "init", "--local"])
 
+    said = f"{snapshot_core.FAILED_DETAIL}: repomix exited 1 without saying why"
     assert onboard.exit_code == 0, onboard.output
-    assert f"snapshot: {snapshot_core.FAILED_DETAIL}" in onboard.stdout
+    assert f"snapshot: {said}" in onboard.stdout
     assert "Node.js" not in onboard.stdout
     assert init.exit_code == 0, init.output
-    assert f"Snapshot: {snapshot_core.FAILED_DETAIL}." in json.loads(init.stdout)["notes"]
+    assert f"Snapshot: {said}." in json.loads(init.stdout)["notes"]
 
 
 @pytest.mark.usefixtures("node_without_npm")
@@ -199,3 +230,77 @@ def test_a_node_with_nothing_to_pack_with_is_told_what_is_missing(runner: CliRun
     assert rows["snapshot"].detail == snapshot_core.NO_PACKER_DETAIL
     assert "Node.js 22+ (optional" not in onboard.stdout + rows["snapshot"].detail
     assert rows["repomix"].status is CheckStatus.warn, "the row with the fix still warns"
+
+
+def test_a_refresh_without_node_keeps_the_last_pack_and_says_so(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
+) -> None:
+    """Packed while a Node was on PATH, refreshed from a shell without one (review of #257).
+
+    The installer's fnm Node is on PATH for its own run only, and an nvm Node only in
+    the shells that load it. A failed pack rewrites nothing, so the last pack stays and
+    session start keeps handing it to every agent. ``--refresh`` said "off", and the
+    doctor's snapshot row said "ready" beside a repomix row that said "off".
+    """
+    monkeypatch.setattr(shutil, "which", _which("/opt/node/bin"))
+    monkeypatch.setattr(snapshot_core, "node_version", lambda: (26, 7, 0))
+    monkeypatch.setattr(snapshot_core, "_run_repomix", _packs)
+    packed = runner.invoke(app, ["project", "onboard"])
+    assert packed.exit_code == 0, packed.output
+    with_node = _rows(diagnostics.doctor())
+
+    monkeypatch.setattr(shutil, "which", _which(None))
+    monkeypatch.setattr(snapshot_core, "_run_repomix", _REAL_RUN_REPOMIX)
+    refreshed = runner.invoke(app, ["project", "onboard", "--refresh"])
+    report = json.loads(runner.invoke(app, ["--json", "project", "onboard", "--refresh"]).stdout)
+    started = runner.invoke(
+        app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)})
+    )
+    rows = _rows(diagnostics.doctor())
+
+    assert refreshed.exit_code == 0, refreshed.output
+    line = refreshed.stdout.strip()
+    assert line.startswith("snapshot: not refreshed — "), line
+    assert "Agents still get the last pack, made " in line
+    assert snapshot_core.OFF_DETAIL not in refreshed.stdout
+    assert f"— {snapshot_core.NEEDS_NODE}. " in line
+    assert report["snapshot"]["status"] == "ready" and report["snapshot"]["file_count"] == 2
+    assert report["snapshot_note"] == line.removeprefix("snapshot: ")
+    assert "packed snapshot" in started.stdout, "what the line says: agents still get it"
+    assert rows["snapshot"].status is CheckStatus.ok and rows["snapshot"].fix is None
+    assert "cannot be refreshed here" in rows["snapshot"].detail, rows["snapshot"].detail
+    assert rows["snapshot"].detail.startswith("snapshot ready (2 files, ")
+    assert rows["snapshot"].detail.endswith(f"here: {snapshot_core.NEEDS_NODE}")
+    assert rows["repomix"].detail == snapshot_core.OFF_DETAIL
+    # The control: where something can pack, the row is what it was.
+    tokens = report["snapshot"]["token_count"]
+    assert with_node["snapshot"].detail == f"snapshot ready (2 files, {tokens} tokens)"
+
+
+@pytest.mark.usefixtures("with_node")
+def test_a_pack_that_failed_says_why_and_sends_nobody_to_the_doctor(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """npx could not reach the registry (review of #257).
+
+    The reason was thrown away, and the line said "run: aisquare doctor": a doctor that
+    reads PATH and snapshot.json, whose repomix row says "enabled" and whose only fix
+    runs the same pack again. A ``--refresh`` that fails beside a kept pack says why too.
+    """
+    monkeypatch.setattr(snapshot_core, "_run_repomix", _offline)
+    onboard = runner.invoke(app, ["project", "onboard", "--refresh"])
+    init = runner.invoke(app, ["--json", "init", "--local"])
+    monkeypatch.setattr(snapshot_core, "_run_repomix", _packs)
+    assert runner.invoke(app, ["project", "onboard", "--refresh"]).exit_code == 0
+    monkeypatch.setattr(snapshot_core, "_run_repomix", _offline)
+    kept = runner.invoke(app, ["project", "onboard", "--refresh"])
+
+    said = f"skipped — the pack failed: {_NPM_REASON}"
+    assert onboard.exit_code == 0, onboard.output
+    assert f"snapshot: {said}" in onboard.stdout
+    assert "doctor" not in onboard.stdout
+    assert init.exit_code == 0, init.output
+    assert f"Snapshot: {said}." in json.loads(init.stdout)["notes"]
+    assert kept.exit_code == 0, kept.output
+    assert f"snapshot: not refreshed — the pack failed: {_NPM_REASON}. " in kept.stdout
+    assert "Agents still get the last pack" in kept.stdout

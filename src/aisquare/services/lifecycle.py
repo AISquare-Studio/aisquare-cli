@@ -185,8 +185,8 @@ def initialize(
             )
         elif report.snapshot is None:
             # Off (no Node, or no packer: optional, not a fault) or a pack that
-            # failed -- the same sentence `project onboard` prints, from one place.
-            notes.append(f"Snapshot: {snapshot_core.skipped_detail()}.")
+            # failed and why -- the same sentence `project onboard` prints, from one place.
+            notes.append(f"Snapshot: {report.snapshot_note or snapshot_core.skipped_detail()}.")
 
     for agent in agents:
         try:

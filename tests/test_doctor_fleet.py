@@ -825,6 +825,9 @@ def test_doctor_treats_a_skeleton_only_snapshot_as_usable_and_offers_no_fix(
     monkeypatch.chdir(root)
     monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
     monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    # A machine that can pack. Where nothing can, the row also says the skeleton cannot
+    # be refreshed there (test_snapshot_optional_without_node.py), whatever is on PATH.
+    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     verdict = _skeleton_only_snapshot(_seed(root).id)
 
     check = _by_name(diagnostics.doctor())["snapshot"]

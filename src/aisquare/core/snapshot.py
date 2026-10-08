@@ -17,8 +17,10 @@ the full pack. A ``too_large`` verdict, nothing stored, is only ever loaded from
 a snapshot.json written before ``skeleton_only`` existed. Repomix
 is a Node CLI — we shell out to ``repomix`` (or ``npx repomix``); if neither is
 available the snapshot is skipped, not fatal. The whole feature is optional: when
-:func:`can_pack` is False every surface reports it as off (:func:`off_detail`),
-because memory and the hooks never needed it.
+:func:`can_pack` is False every surface reports packing as off (:func:`off_detail`),
+because memory and the hooks never needed it. A pack made before then stays, and
+agents still get it, so the surfaces say that too (:func:`not_refreshed_detail`,
+:func:`unrefreshable_note`).
 """
 
 from __future__ import annotations
@@ -93,29 +95,43 @@ MIN_NODE = (22,)
 #: :data:`MIN_NODE` as a sentence names it ("22"), for every message that does.
 MIN_NODE_TEXT = ".".join(str(part) for part in MIN_NODE)
 
+#: Why nothing packs on a machine with no Node at all, with no verdict word: the
+#: reason inside :data:`OFF_DETAIL`, and what a kept pack's line names
+#: (:func:`skipped_reason`).
+NEEDS_NODE = f"codebase snapshots need Node.js {MIN_NODE_TEXT}+"
+
 #: What every surface says on a machine with no Node at all: the doctor's repomix
 #: and snapshot rows, ``init`` and ``project onboard``. One sentence, so the places
 #: that describe the feature cannot drift apart. Snapshots are optional (the memory
 #: route needs nothing from Node), so this is a state, not a fault, and nothing
 #: that prints it offers a fix.
-OFF_DETAIL = (
-    f"off — codebase snapshots need Node.js {MIN_NODE_TEXT}+ (optional; memory works without them)"
-)
+OFF_DETAIL = f"off — {NEEDS_NODE} (optional; memory works without them)"
+
+#: Why nothing packs where a Node IS on PATH but neither ``repomix`` nor ``npx`` is,
+#: with no verdict word, as :data:`NEEDS_NODE` is for no Node.
+NO_PACKER = "no repomix or npx on PATH"
 
 #: The same surfaces when a Node IS on PATH but neither ``repomix`` nor ``npx`` is,
 #: which is how Arch, Alpine and Debian's own ``nodejs`` arrive (npm is a separate
 #: package there). :data:`OFF_DETAIL` would tell that Node 26 user to install Node.
 NO_PACKER_DETAIL = (
-    "off — no repomix or npx on PATH (npm install -g repomix; "
-    "some distributions package npm separately)"
+    f"off — {NO_PACKER} (npm install -g repomix; some distributions package npm separately)"
 )
 
+#: A pack that ran and failed, with no verdict word.
+PACK_FAILED = "the pack failed"
+
 #: What ``init`` and ``project onboard`` say when :func:`can_pack` was True and
-#: still no snapshot came back. This line cannot see why: repomix failing on the
-#: repo, an ``npx`` that could not fetch repomix (offline), or a Node older than
-#: repomix needs. :func:`skipped_detail` names the last when it can tell; the
-#: others are the doctor's to say.
-FAILED_DETAIL = "skipped — the pack failed; run: aisquare doctor"
+#: still no snapshot came back. :func:`skipped_detail` adds the packer's own words
+#: when it gave any (:func:`failure_reason`): repomix failing on the repo, or an
+#: ``npx`` that could not fetch repomix (offline, a proxy). It no longer ends in
+#: "run: aisquare doctor": the doctor reads PATH and snapshot.json, so it could
+#: never say which (review of #257).
+FAILED_DETAIL = f"skipped — {PACK_FAILED}"
+
+#: How much of the packer's line :func:`failure_reason` keeps: a line, not a log.
+_REASON_MAX = 240
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 _NODE_VERSION = re.compile(r"v?(\d+(?:\.\d+)*)")
 
@@ -259,12 +275,13 @@ def can_pack() -> bool:
     """Whether this machine has what a pack runs on: a repomix (or ``npx`` to fetch
     one) and a Node on PATH to run it.
 
-    The one answer to "are codebase snapshots possible here". The doctor's snapshot
-    and tiktoken rows and the line ``init`` and ``project onboard`` print when no
-    snapshot came back all read it, so they cannot disagree about whether the
-    feature is off. ``repomix`` and ``npx`` are both ``#!/usr/bin/env node``
-    scripts, so either without a Node cannot pack -- the ruling the doctor's
-    repomix row already makes (tests/test_repomix_check_gates_on_node.py).
+    The one answer to "can anything pack here". The doctor's snapshot and tiktoken
+    rows and the line ``init`` and ``project onboard`` print when no snapshot came
+    back all read it, so they cannot disagree about it -- nor, where a pack made
+    earlier is kept, about whether it can be refreshed (:func:`unrefreshable_note`).
+    ``repomix`` and ``npx`` are both ``#!/usr/bin/env node`` scripts, so either
+    without a Node cannot pack -- the ruling the doctor's repomix row already makes
+    (tests/test_repomix_check_gates_on_node.py).
 
     PATH lookups only. No process is started, so a doctor run can ask it once per
     row; whether the Node is NEW enough is the repomix row's question, answered
@@ -296,25 +313,98 @@ def pack_node_floor() -> tuple[tuple[int, ...], bool]:
     return (floor or MIN_NODE), floor is not None
 
 
-def skipped_detail() -> str:
-    """Why a pack that returned nothing returned nothing, as ``init`` and ``onboard`` say it.
+def skipped_reason(failure: str | None = None) -> str:
+    """Why no pack came back, with no verdict word: the part every line about it shares.
 
-    One ``node --version``, and only on this failure path: a Node older than the
+    No Node, or a Node with no packer, is the optional feature being off. Otherwise
+    one ``node --version``, and only on this failure path: a Node older than the
     repomix that ran needs is the documented common cause (Debian 12, Ubuntu 22.04),
-    so it is named, judged by the same per-path floor as the doctor's repomix row.
-    An unreadable Node is not presumed old.
+    so it is named, judged by the same per-path floor as the doctor's repomix row,
+    which carries the upgrade. An unreadable Node is not presumed old. Anything else
+    is a pack that ran and failed, in the packer's own words when it gave any
+    (``failure``, from :func:`failure_reason`).
     """
+    if shutil.which("node") is None:
+        return NEEDS_NODE
     if not can_pack():
-        return off_detail()
+        return NO_PACKER
     node = node_version()
     required, _own = pack_node_floor()
     if node is not None and node < required:
         found = ".".join(str(part) for part in node)
         wanted = ".".join(str(part) for part in required)
-        return (
-            f"skipped — Node {found} is older than repomix needs ({wanted}+); run: aisquare doctor"
-        )
-    return FAILED_DETAIL
+        return f"Node {found} is older than repomix needs ({wanted}+); run: aisquare doctor"
+    return f"{PACK_FAILED}: {failure}" if failure else PACK_FAILED
+
+
+def skipped_detail(failure: str | None = None) -> str:
+    """Why a pack that returned nothing returned nothing, as ``init`` and ``onboard`` say it."""
+    if not can_pack():
+        return off_detail()
+    return f"skipped — {skipped_reason(failure)}"
+
+
+def _made(meta: Snapshot) -> str:
+    """When ``meta`` was packed, in local time: the date a kept pack's lines name."""
+    return meta.generated_at.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def not_refreshed_detail(meta: Snapshot, failure: str | None = None) -> str:
+    """A ``--refresh`` that packed nothing while the last pack stays, as ``onboard`` says it.
+
+    A failed pack rewrites nothing, so snapshot.json, the pack and its index are
+    still the last pack's, and the session-start directive keeps handing them to
+    every agent. "off" said the feature was gone while agents oriented from a pack
+    the tree may have moved on from (review of #257).
+    """
+    return (
+        f"not refreshed — {skipped_reason(failure)}. "
+        f"Agents still get the last pack, made {_made(meta)}"
+    )
+
+
+def unrefreshable_note(meta: Snapshot) -> str:
+    """What a stored pack's doctor line adds where nothing can pack; ``""`` where something can.
+
+    The doctor's repomix and tiktoken rows read :func:`can_pack` and say packing is
+    off, and the snapshot row read only snapshot.json, so one run said "off" and
+    "ready" about the same feature. Both halves are true -- agents still get the
+    last pack, and it cannot be refreshed here -- so the row says both.
+    """
+    if can_pack():
+        return ""
+    return f" — made {_made(meta)}, and it cannot be refreshed here: {skipped_reason()}"
+
+
+def failure_reason(exc: BaseException) -> str:
+    """Why a pack raised ``exc``: one line, in the packer's own words where it gave any.
+
+    A packer that exits non-zero says why on stderr, and the line that says it is
+    picked: repomix marks its own error with ``✖``; npm (``npx`` fetching repomix)
+    names the cause after ``reason:`` -- offline, a proxy, a registry that refused;
+    else the first line that says "error", else the first line. Colour codes go:
+    repomix colours stderr on Windows and in CI even into a pipe. Dropped, as it
+    was, the cause reached no surface at all, and the doctor the old line sent
+    people to reads only PATH and snapshot.json (review of #257).
+    """
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"repomix ran longer than {exc.timeout:g} seconds"
+    if not isinstance(exc, subprocess.CalledProcessError):
+        return _clip(str(exc) or type(exc).__name__)
+    stderr = exc.stderr
+    text = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else (stderr or "")
+    lines = [line for line in (_ANSI.sub("", raw).strip() for raw in text.splitlines()) if line]
+    marked = [line.lstrip("✖").strip() for line in lines if line.startswith("✖")]
+    caused = [line for line in lines if "reason:" in line]
+    errors = [line for line in lines if "error" in line.lower()]
+    for picked in (*marked, *caused, *errors, *lines):
+        return _clip(picked)
+    command = exc.cmd[0] if isinstance(exc.cmd, list | tuple) and exc.cmd else exc.cmd
+    return f"{Path(str(command)).name or 'repomix'} exited {exc.returncode} without saying why"
+
+
+def _clip(text: str) -> str:
+    return text if len(text) <= _REASON_MAX else text[: _REASON_MAX - 1].rstrip() + "…"
 
 
 def _repomix_base() -> list[str]:

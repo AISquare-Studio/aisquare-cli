@@ -703,6 +703,11 @@ class OnboardReport(BaseModel):
 
     seeded: list[ContextEntry] = Field(default_factory=list)
     snapshot: Snapshot | None = None
+    snapshot_note: str | None = None
+    """Why this run packed nothing, as ``init`` and ``onboard`` say it: off, or the
+    pack failed and why. ``None`` when a pack was made or reused. Set beside a
+    ``snapshot``, it is a ``--refresh`` that failed: that is the last pack, kept,
+    and agents still get it."""
 
 
 class ProjectForgetReport(BaseModel):

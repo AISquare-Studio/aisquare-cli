@@ -1740,6 +1740,29 @@ def _remote_pane_outlived(server: TmuxServer, agent: FleetAgent) -> bool:
     return fleet_service._outlived(agent, started)
 
 
+PANE_NOT_AGENT = "{label}'s pane is not running the agent"
+"""409 ``not_agent`` for a row whose pane runs something else (:func:`_remote_pane_refusal`)."""
+
+
+def _remote_pane_refusal(server: TmuxServer, agent: FleetAgent) -> str | None:
+    """Why nothing may be typed into the row's pane, a sentence about ``{label}``; ``None``
+    when the pane is the agent's own.
+
+    It must run the agent (``fleet._pane_is_the_agent``), and on the server the row was
+    recorded on (:func:`_remote_pane_outlived`), asked in that order. ``send-keys`` and
+    needs-you's snapshot, which the quick answers and the agent actions type on the
+    strength of, both ask here: the stale-pane rule in one place, where a second copy
+    would miss the next restart signal it learns.
+    """
+    from aisquare.services import fleet as fleet_service
+
+    if not fleet_service._pane_is_the_agent(server, agent.pane_id):
+        return PANE_NOT_AGENT
+    if _remote_pane_outlived(server, agent):
+        return PANE_OUTLIVED
+    return None
+
+
 @contextlib.contextmanager
 def _remote_keys_turn(target: ProjectInfo, label: str) -> Iterator[FleetAgent]:
     """Hold the agent's action lock while keys go to its pane; the row, read under it.
@@ -2363,13 +2386,10 @@ def live_writes() -> Writes:
         )
         with _remote_keys_turn(target, label) as agent:
             server = fleet_service.server_for(agent.tmux_socket)
-            if not fleet_service._pane_is_the_agent(server, agent.pane_id):
-                raise RequestError(
-                    409, "not_agent", f"{label}'s pane is not running the agent — nothing was sent"
-                )
-            if _remote_pane_outlived(server, agent):
-                gone = PANE_OUTLIVED.format(label=label)
-                raise RequestError(409, "not_agent", f"{gone} — nothing was sent")
+            refusal = _remote_pane_refusal(server, agent)
+            if refusal is not None:
+                said = refusal.format(label=label)
+                raise RequestError(409, "not_agent", f"{said} — nothing was sent")
             exits = sum(key in EXIT_KEYS for key in keys)
             if exits and not exit_keys.exit_keys_allowed(
                 (target.id, label), exits, confirmed=confirmed

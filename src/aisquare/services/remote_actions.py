@@ -292,11 +292,10 @@ def action_audit_excerpt(text: str) -> str:
     into a pane leaves no board event, so the trail keeps its start. A longer
     text is cut to :data:`ACTION_AUDIT_EXCERPT` characters, the last of them
     ``…``. Anything that would not print becomes ``?``: a newline would begin a
-    forged line of its own.
+    forged line of its own. That is ``remote_server._audit_clean``, the trail's one
+    scrub: a copy of it here would miss the next character class it learns.
     """
-    if len(text) > ACTION_AUDIT_EXCERPT:
-        text = text[: ACTION_AUDIT_EXCERPT - 1] + "…"
-    return "".join(ch if ch.isprintable() else "?" for ch in text)
+    return remote_server._audit_clean(text, ACTION_AUDIT_EXCERPT)
 
 
 def action_yes_no(flag: bool) -> str:

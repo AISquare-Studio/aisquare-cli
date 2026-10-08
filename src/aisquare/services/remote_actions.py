@@ -64,6 +64,7 @@ import functools
 import logging
 import threading
 import time
+import unicodedata
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypedDict, TypeVar
@@ -311,28 +312,42 @@ def action_tell_text(body: dict[str, Any]) -> str:
     return text
 
 
+_REASON_REFUSED = {
+    "Cc": "a control character",
+    "Zl": "a line separator",
+    "Zp": "a paragraph separator",
+    "Cs": "half of a surrogate pair",
+}
+"""What a switch's ``reason`` may not hold, by Unicode category (:func:`action_switch_reason`)."""
+
+
 def action_switch_reason(body: dict[str, Any]) -> str | None:
-    """``agent/switch``'s optional ``reason``: one line of printable text, at most
+    """``agent/switch``'s optional ``reason``: one line of text, at most
     :data:`ACTION_FIELD_MAX` characters. Anything else is a 400 (413 past the cap).
 
     The reason is typed into the replacement's pane, inside the one line a resumed
     agent goes on from (``fleet._resume_prompt``) or the hand-off a fresh one
     starts with, and the board's ``switched`` event repeats it. So it is held to
-    more than a tell (:func:`action_tell_text`). A control character in it was a
-    keystroke in that pane: tmux before 3.7 pastes the bytes as they are, and an
-    ``ESC [201~`` ended the paste early. A line break made the one line two, and
-    the fleet types no prompt of two lines once the replacement is slow to start.
-    So a tab and a line break are refused too, and anything else that would not
-    print (review of #243, sweep of round 3).
+    more than a tell (:func:`action_tell_text`): no control character at all, and
+    no line or paragraph separator (:data:`_REASON_REFUSED`). A control character
+    in it was a keystroke in that pane: tmux before 3.7 pastes the bytes as they
+    are, and an ``ESC [201~`` ended the paste early. A line break made the one line
+    two, and the fleet types no prompt of two lines once the replacement is slow to
+    start; a tab typed past that wait is the Tab key. Half a surrogate pair cannot
+    be sent to tmux at all. Whatever else a line of text holds stays, though it
+    does not print on its own: a no-break space, a CJK space, the joiner inside an
+    emoji, a right-to-left mark, a character newer than this Python's Unicode
+    (review of #243, sweep of round 3).
     """
     reason = action_ref(body, "reason", limit=ACTION_FIELD_MAX)
-    bad = next((ch for ch in reason or "" if not ch.isprintable()), None)
-    if bad is not None:
-        raise RequestError(
-            400,
-            "invalid",
-            f"'reason' holds U+{ord(bad):04X}, which does not print — a reason is one line of text",
-        )
+    for char in reason or "":
+        refused = _REASON_REFUSED.get(unicodedata.category(char))
+        if refused is not None:
+            raise RequestError(
+                400,
+                "invalid",
+                f"'reason' holds U+{ord(char):04X}, {refused} — a reason is one line of text",
+            )
     return reason
 
 
@@ -1014,7 +1029,7 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX, guard=True)
     target = action_project(body)
     # As a restart's: the row it acted on. The reason, the one field typed in the body that the
-    # line keeps, ends it, as a tell's text ends a tell's: it may hold anything printable.
+    # line keeps, ends it, as a tell's text ends a tell's, and is cleaned as that is.
     audit_start = f"switch {label}@{target.id} agent={agent_id}"
     said = "" if reason is None else f' reason="{action_audit_excerpt(reason)}"'
     with action_locked(target, label, agent_id) as row:

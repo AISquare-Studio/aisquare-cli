@@ -698,6 +698,28 @@ def test_a_version_1_file_is_migrated_once(isolated_home: Path) -> None:
     assert again.password == raw["password"], "once"
 
 
+@pytest.mark.parametrize("value", ["false", "off", "no", "true", 1, ["on"]], ids=repr)
+def test_writes_are_on_only_for_a_json_true(isolated_home: Path, value: object) -> None:
+    """``bool()`` read a hand edit's ``"false"`` as true: every write opened, ``api/remote``
+    told the page so, and the load wrote ``"allow_write": true`` back (review of #243,
+    round 2)."""
+    server = Runtime(remote_state_path(), remote_audit_path())
+    raw = json.loads(remote_state_path().read_bytes())
+    raw["allow_write"] = value
+    remote_state_path().write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    assert server.allow_write is False, "the running server adopts the edit as off"
+    assert Runtime(remote_state_path(), remote_audit_path()).allow_write is False
+    assert json.loads(remote_state_path().read_bytes())["allow_write"] is False
+
+
+def test_a_version_1_file_keeps_writes_on_only_for_a_json_true(isolated_home: Path) -> None:
+    remote_state_path().parent.mkdir(parents=True, exist_ok=True)
+    old = {"token": "T" * 32, "password": "x", "allow_write": "false", "sessions": []}
+    remote_state_path().write_text(json.dumps(old), encoding="utf-8")
+    assert Runtime(remote_state_path(), remote_audit_path()).allow_write is False
+    assert json.loads(remote_state_path().read_bytes())["allow_write"] is False
+
+
 # --- (3) device ids that are not cookies ----------------------------------------------
 
 

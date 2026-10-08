@@ -656,7 +656,12 @@ class _State:
 
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> _State:
-        """A version-2 file; a missing token or password is made anew (and then written)."""
+        """A version-2 file; a missing token or password is made anew (and then written).
+
+        Writes are on only for a JSON ``true``. ``bool()`` of a hand edit's ``"false"``,
+        ``"off"`` or ``"no"`` is true: it opened every write, and the load wrote the file
+        back saying ``true``.
+        """
         token = raw.get("token")
         password = raw.get("password")
         rows = raw.get("devices")
@@ -665,7 +670,7 @@ class _State:
         return cls(
             token=token if isinstance(token, str) and token else new_token(),
             password=password if isinstance(password, str) and password else new_password(),
-            allow_write=bool(raw.get("allow_write", False)),
+            allow_write=raw.get("allow_write") is True,
             auto_off_at=auto_off if isinstance(auto_off, str) else None,
             devices=[d for d in map(Device.from_json, rows if isinstance(rows, list) else []) if d],
             unlock_failures=[
@@ -683,14 +688,15 @@ class _State:
         A v1 password is four words of 32, about 19.7 bits, so a new one comes from
         the 512-word list. Every v1 session was stored as its raw cookie, so the file
         (and every audit line) held replayable sessions: all of them go, and each
-        phone unlocks once more.
+        phone unlocks once more. Writes stay on only for a JSON ``true``, as in
+        :meth:`from_json`.
         """
         token = raw.get("token")
         auto_off = raw.get("auto_off_at")
         return cls(
             token=token if isinstance(token, str) and token else new_token(),
             password=new_password(),
-            allow_write=bool(raw.get("allow_write", False)),
+            allow_write=raw.get("allow_write") is True,
             auto_off_at=auto_off if isinstance(auto_off, str) else None,
         )
 

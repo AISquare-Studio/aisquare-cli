@@ -12,15 +12,17 @@ branches — on/off, restore after a restart, auto-off, write actions default OF
 from __future__ import annotations
 
 import inspect
+import io
 import json
 import socket
+import subprocess
 import sys
 import threading
 import time
 import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -162,12 +164,57 @@ def test_the_tunnel_learns_its_url_from_the_log_and_stop_ends_the_process(
 
 
 def test_a_tunnel_that_exits_without_a_url_says_so_instead_of_hanging(tmp_path: Path) -> None:
+    """The exit wakes whoever waits for the URL: a first run without an authtoken showed
+    "starting ngrok…" for the whole wait before the hint, had the reader not said so."""
     error = {"lvl": "eror", "err": "authentication failed: ERR_NGROK_4018"}
     tunnel = NgrokTunnel(8750, command=fake_ngrok(tmp_path, error, linger=False))
     assert tunnel.start_tunnel() is None
+    started = time.monotonic()
     assert tunnel.wait_for_url(timeout=10) is None
+    assert time.monotonic() - started < 5, "the exit was heard of only when the wait ran out"
     assert tunnel.error == AUTHTOKEN_HINT
     tunnel.stop_tunnel()
+
+
+class StubbornNgrok:
+    """A process that ignores SIGTERM: ``wait`` runs out until it is killed. Each call the
+    tunnel makes is in ``calls``; its log is empty."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.stdout = io.StringIO("")
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.calls.append("terminate")
+
+    def kill(self) -> None:
+        self.calls.append("kill")
+        self.returncode = -9
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.calls.append(f"wait {timeout}")
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("ngrok", timeout or 0)
+        return self.returncode
+
+
+def test_an_ngrok_that_ignores_the_terminate_is_killed() -> None:
+    """Stopping waits 5 s for ngrok to end, then kills it: an ngrok left running would hold
+    the static domain, and the next Remote's tunnel could not have it (ERR_NGROK_334)."""
+    process = StubbornNgrok()
+    tunnel = NgrokTunnel(
+        8750,
+        which=lambda _name: "/usr/bin/ngrok",
+        popen=lambda command, **kwargs: cast("subprocess.Popen[str]", process),
+    )
+    assert tunnel.start_tunnel() is None
+    tunnel.stop_tunnel()
+    assert process.calls == ["terminate", "wait 5", "kill", "wait 5"]
+    assert not tunnel.running
 
 
 def test_a_url_its_listener_could_not_take_never_ends_the_log_reader(
@@ -601,6 +648,53 @@ def test_a_url_announced_again_is_taken_once_and_one_that_changed_is_taken_again
     tunnel.handle_line(json.dumps(moved))
     assert controller.link_url() == build_public_url(moved["url"], server.token)
     assert server.public_urls == [link, controller.link_url()]
+
+
+class QuietTunnel(FakeTunnel):
+    """A tunnel that is up and has not announced yet: its URL comes when the test feeds its
+    log a line, and its wait ends when the test says (``give_up``), whatever the timeout."""
+
+    def __init__(self, port: int) -> None:
+        super().__init__(port, url=None, failure=None)
+        self.give_up = threading.Event()
+
+    def start_tunnel(self) -> str | None:
+        return None
+
+    def wait_for_url(self, timeout: float = 15.0) -> str | None:
+        self.give_up.wait(10)
+        return self.public_url
+
+
+def test_an_old_tunnels_late_word_never_lands_on_the_remote_after_it() -> None:
+    """Remote off and on again while the old tunnel still had not announced: its wait running
+    out put "ngrok did not announce a tunnel in time" on the new Remote, whose own tunnel was
+    still starting, and its URL, landing late, became the new Remote's link and push origin."""
+    server = fake_server()
+    old, new = QuietTunnel(8750), QuietTunnel(8750)
+    made = [old, new]
+    controller = RemoteController(server=server, tunnel_factory=lambda port: made.pop(0))
+    controller.turn_on()
+    old_waiter = controller._waiter
+    assert old_waiter is not None
+    controller.turn_off()
+    controller.turn_on()
+    new_waiter = controller._waiter
+    assert new_waiter is not None and new_waiter is not old_waiter
+    assert controller.message == "starting ngrok…"
+
+    old.give_up.set()  # the old tunnel's wait runs out now
+    old_waiter.join(5)
+    assert controller.message == "starting ngrok…", "the old tunnel's timeout is not this one's"
+    new.handle_line(json.dumps({**STARTED, "url": "https://new-56.ngrok-free.app"}))
+    link = build_public_url("https://new-56.ngrok-free.app", server.token)
+    assert controller.link_url() == link and controller.message is None
+    old.handle_line(json.dumps(STARTED))  # and the old one's URL lands after all
+    assert controller.link_url() == link
+    assert server.public_urls[-1] == link, "push links still lead to the new tunnel"
+    new.give_up.set()
+    new_waiter.join(5)
+    assert server.public_urls.count(link) == 1
 
 
 class SlowServer(FakeServer):

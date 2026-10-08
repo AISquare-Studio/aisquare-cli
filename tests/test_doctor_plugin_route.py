@@ -235,10 +235,12 @@ def test_the_first_run_probe_answers_for_the_folder_the_fleet_starts_in(
     claude: Path, tmp_path: Path, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Welcome's step 2 asked about the folder asq started in, not the project step 1 chose,
-    where the fleet starts: a project-scope plugin in the chosen repository read as not
+    where the fleet starts: a repository's plugin in the chosen repository read as not
     connected, and one where asq started read as connecting a fleet elsewhere (review of
-    #257). Asked about the chosen folder, both ways; unchosen, asq's own folder."""
-    repo = _repo_plugin(claude, tmp_path / "repo", "project")
+    #257). Asked about the chosen folder, both ways; unchosen, asq's own folder. A local
+    install, which the coders' worktrees load as well; a project-scope one connects the
+    manager's folder alone (``test_step_two_answers_for_where_the_coders_start_too``)."""
+    repo = _repo_plugin(claude, tmp_path / "repo", "local")
     stand_in = str(tmp_path / "bin" / "claude")
 
     def connected(started: Path, chosen: Path | None) -> bool:

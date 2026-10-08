@@ -34,6 +34,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services.first_run import FleetStep
 from tests import fakebin
 from tests.fsperms import can_deny_reads, can_symlink
+from tests.test_doctor_plugin_route import _repo_plugin
 from tests.test_fleet_service import FakeClock, FakeTmux
 
 T0 = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
@@ -217,6 +218,44 @@ def test_connected_is_the_shared_check(monkeypatch: pytest.MonkeyPatch, tmp_path
     first = first_run.probe_claude(which=lambda name: binary, signed_in=lambda: True)
     second = first_run.probe_claude(which=lambda name: binary, signed_in=lambda: True)
     assert (first.connected, second.connected) == (True, False)
+
+
+@pytest.fixture
+def claude_dir(isolated_agent_home: Path) -> Path:
+    """Claude Code installed in ~/.claude, with nothing of aisquare's in it yet."""
+    directory = isolated_agent_home / ".claude"
+    directory.mkdir(parents=True)
+    return directory
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the plugin route runs sh: native Windows reads only the settings.json route",
+)
+@pytest.mark.parametrize(
+    ("scope", "git", "fleet"),
+    [("project", True, False), ("local", True, True), ("project", False, True)],
+    ids=["project-scope-in-git", "local-scope-in-git", "project-scope-not-git"],
+)
+def test_step_two_answers_for_where_the_coders_start_too(
+    claude_dir: Path, tmp_path: Path, scope: str, git: bool, fleet: bool
+) -> None:
+    """A plugin installed at project scope runs only where a session starts in the folder it
+    was installed for. Step 2 asked about the chosen root alone and said connected, while
+    the coders started in git worktrees under it, where the same shared check says not
+    connected: they ran without aisquare's hooks under "Your fleet is up." (sweep 2 of
+    #257). The coders' folder is asked about too. A local-scope install, which a session
+    inside the repository finds, still connects them; so does a project-scope one in a
+    folder that is not git, where the coders work in the root itself."""
+    repo = _repo_plugin(claude_dir, tmp_path / "repo", scope)
+    if not git:
+        (repo / ".git").rmdir()
+    state = first_run.probe_claude(
+        sign_in=False, which=lambda name: str(tmp_path / "claude"), cwd=repo
+    )
+    assert agents_service.claude_code_connected(cwd=repo), "premise: the manager's folder has it"
+    assert (state.connected, state.manager_only) == (fleet, not fleet), state
+    assert first_run.coder_folder(repo) == (repo / ".aisquare-worktrees" if git else repo)
 
 
 def test_the_periodic_look_skips_the_login(tmp_path: Path) -> None:
@@ -702,6 +741,19 @@ def test_a_manager_that_is_not_running_is_never_called_running(
     started = first_run.start_fleet(project, coders=0, spawn=spawns, live=lambda p: listed)
     assert [role for role, _ in spawns.calls] == ["manager"]
     assert [(s.label, s.outcome) for s in started.steps] == [("manager", "refused")]
+
+
+def test_the_coders_start_in_the_folder_step_two_asks_about(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Step 2 asks the shared check about ``coder_folder`` for the coders: it is the folder
+    ``fleet.spawn`` makes their worktrees in, or the answer would be about another one."""
+    _, project = _real_fleet(tmp_path, monkeypatch)
+    started = first_run.start_fleet(project)
+    folder = first_run.coder_folder(project.root)
+    coders = [step.agent for step in started.steps if step.role == "coder"]
+    assert len(coders) == 2 and folder != project.root
+    assert all(agent is not None and agent.cwd.parent == folder for agent in coders), coders
 
 
 def _unended(project: ProjectInfo) -> dict[str, FleetAgentState]:

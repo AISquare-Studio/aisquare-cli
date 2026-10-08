@@ -112,7 +112,11 @@ class ClaudeState:
     """Where it was found on ``PATH``; ``None`` when it is not there."""
     version: str | None = None
     connected: bool = False
-    """aisquare's hooks are in the config dir a session from this shell reads."""
+    """aisquare's hooks are in the config dir a session from this shell reads, and run
+    where the fleet's sessions start: the manager's folder, and the coders'."""
+    manager_only: bool = False
+    """They run where the manager starts but not where the coders do: a plugin installed
+    for the project's folder alone, which the coders' worktrees do not load."""
     hooks_off: Path | None = None
     """The settings file that switches every hook off (``"disableAllHooks": true``),
     when one does: Connect cannot change it, so step 2 says so instead of offering it."""
@@ -143,6 +147,26 @@ class ClaudeState:
 
 def _connected_default(cwd: Path | None = None) -> bool:
     return agents_service.claude_code_connected(cwd=cwd)
+
+
+def coder_folder(root: Path) -> Path:
+    """The folder the shared "connected?" check is asked about for the coders started in ``root``.
+
+    ``root`` itself, unless it is a git repository whose coder role takes worktrees (the
+    default): each coder then works in a worktree made in ``<root>/<worktree_dir>``, and
+    that folder is asked about. The check reads a session there as it reads a coder's: a
+    plugin installed at project scope for ``root`` counts only in ``root``, and ``root``'s
+    local settings are found from inside it. Asked about a coder's worktree itself, it
+    stops at the worktree's ``.git`` file, short of the local settings Claude Code
+    follows a worktree to.
+    """
+    config = fleet_service.settings()
+    try:
+        worktrees = fleet_service.role_settings("coder", config).worktree
+        git = fleet_service.is_git_project(root)
+    except OSError:  # a root this user cannot look into: no worktree is made there either
+        return root
+    return root / config.worktree_dir if worktrees and git else root
 
 
 def _hooks_off_default() -> Path | None:
@@ -183,7 +207,9 @@ def probe_claude(
     first, as the shared check's contract says: ``"disableAllHooks": true`` reads as
     not connected, and no Connect can change it. Nor can it write a settings file
     ``agents connect`` refuses (``refusal``). ``cwd`` is the folder the fleet starts
-    in, which decides a project- or local-scope plugin; asq's own unless given.
+    in, which decides a project- or local-scope plugin; asq's own unless given. Given,
+    the coders' folder (:func:`coder_folder`) is asked about too: connected for the
+    manager alone is ``manager_only``, and not connected.
     """
     problems: list[str] = []
     try:
@@ -199,13 +225,20 @@ def probe_claude(
     version = None
     if binary is not None and harness.is_default_agent(resolution.binary):
         version = diagnostics.claude_code_version(binary)
+    manager_only = False
     try:
         # Asked about the folder the fleet starts in (``cwd``), where a project- or
-        # local-scope plugin may be the route (review of #257).
+        # local-scope plugin may be the route (review of #257), and where its coders
+        # start, which a plugin installed for that folder alone does not reach: the
+        # coders ran without aisquare under "Your fleet is up." (sweep 2 of #257).
         is_connected = connected() if connected is not None else _connected_default(cwd)
+        if is_connected and connected is None and cwd is not None:
+            coders = coder_folder(cwd)
+            manager_only = coders != cwd and not _connected_default(coders)
+            is_connected = not manager_only
     except Exception as exc:
         problems.append(f"could not read the hooks: {_why(exc)}")
-        is_connected = False
+        is_connected, manager_only = False, False
     switched_off: Path | None = None
     if not is_connected:
         try:
@@ -230,6 +263,7 @@ def probe_claude(
         binary=binary,
         version=version,
         connected=is_connected,
+        manager_only=manager_only,
         hooks_off=switched_off,
         refused=refused,
         signed_in=signed,

@@ -12,7 +12,8 @@ the one it goes back to:
    names this platform's install command, and the page looks again on every
    refresh tick while it is shown, and on *Check again*. *Sign in* opens the
    Accounts page; *Connect* is the doctor's own one-click fix, and "connected"
-   is the one shared answer (``services.agents.claude_code_connected``).
+   is the one shared answer (``services.agents.claude_code_connected``), asked
+   where the manager starts and where the coders do.
 3. **Fleet** — *Start manager*, then *Start the coders* (coder-1 and coder-2),
    through ``services.first_run.start_fleet``, which never types into an agent it
    starts: Claude Code first asks whether to trust the folder, and the user
@@ -236,6 +237,11 @@ def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
         text.append("\n✗ ", style="red")
         text.append(f"aisquare's hooks cannot be written: {claude.refused} — ")
         text.append("Connect cannot change that. Fix it; this page notices within a few seconds.")
+    elif claude.manager_only:
+        text.append("\n✗ ", style="red")
+        text.append("not connected in the coders' worktrees — the aisquare plugin is installed ")
+        text.append("for the project's folder alone. Connect installs aisquare's hooks, which run ")
+        text.append("in every folder")
     else:
         text.append("\n✗ ", style="red")
         text.append("not connected — Connect installs aisquare's hooks, which bring the manager ")

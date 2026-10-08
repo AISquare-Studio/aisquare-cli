@@ -1122,7 +1122,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
 
 def run_ui(**options: Any) -> None:
-    """Run the fleet UI until the user quits; then say what its last saves could not land."""
+    """Run the fleet UI until the user quits; then say what its last saves could not land,
+    and see out a phone's write that still runs, saying so: a Ctrl-C there quits at once."""
     app = FleetApp(**options)
     app.run()
     for line in app.unsaved:

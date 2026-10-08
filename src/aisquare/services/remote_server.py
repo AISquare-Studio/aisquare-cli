@@ -4265,10 +4265,18 @@ def remote_writes_running() -> list[str]:
 
 def _remote_say(line: str) -> None:
     """One line on stderr, written once and unbuffered: it may be said from a signal handler,
-    which must not re-enter a write the interrupted code was making. A stderr that is gone
-    loses the line, never the shutdown saying it."""
-    with contextlib.suppress(OSError):
-        os.write(2, f"{line}\n".encode(errors="replace"))
+    which must not re-enter a write the interrupted code was making.
+
+    In the encoding the terminal reads (a Windows console's code page), else in
+    ``sys.stderr``'s: UTF-8 bytes written past ``sys.stderr`` showed an agent's ``é`` as
+    two other characters on a legacy console. A stderr that is gone loses the line,
+    never the shutdown saying it.
+    """
+    import sys
+
+    encoding = os.device_encoding(2) or getattr(sys.stderr, "encoding", None) or "utf-8"
+    with contextlib.suppress(OSError, LookupError):
+        os.write(2, f"{line}\n".encode(encoding, errors="replace"))
 
 
 def _remote_writes_announced(ctrl_c: str) -> bool:
@@ -4277,10 +4285,20 @@ def _remote_writes_announced(ctrl_c: str) -> bool:
     running = remote_writes_running()
     if running:
         _remote_say(
-            f"waiting for {', '.join(running)} to finish (a restart or switch can take 40 s) "
-            f"— {ctrl_c} quits now and leaves it unfinished"
+            f"waiting for {', '.join(running)} to finish (a restart or switch can take 40 s); "
+            f"{ctrl_c} quits now and leaves it unfinished"
         )
     return bool(running)
+
+
+REMOTE_QUIT_PUSH_SECONDS = 2.0
+"""How long quitting at once (:func:`_remote_quit_now`) still gives the one-shot pushes in
+flight, such as the farewell ``serve``'s auto-off queued just before: the exit it skips would
+have given them ``remote_push.PUSH_DRAIN_SECONDS``."""
+
+_quitting = False
+"""Set once :func:`_remote_quit_now` has begun. A plain flag, read and set without a lock: a
+Ctrl-C's handler may run it again while it waits for a push."""
 
 
 def _remote_quit_now() -> NoReturn:
@@ -4289,16 +4307,31 @@ def _remote_quit_now() -> NoReturn:
     At once is the point: Python's own exit waits for every worker thread, the ones
     still running a write included (``concurrent.futures`` joins them all), so an exit
     any other way waits as long as the write does, and a Ctrl-C at that point only
-    prints a traceback. ``serve``'s ``remote.json`` cleanup is skipped with it: the
-    next Remote sets its own deadline, and the devices' expiry bounds them.
+    prints a traceback. What that exit runs is skipped with it. ``serve``'s
+    ``remote.json`` cleanup: the next Remote sets its own deadline, and the devices'
+    expiry bounds them. And the wait that lets a one-shot push in flight arrive
+    (``remote_push.push_drain``), which runs here instead, for
+    :data:`REMOTE_QUIT_PUSH_SECONDS` at most, so the farewell an auto-off sent still
+    goes out; one more Ctrl-C ends that wait too.
     """
-    left = remote_writes_running()
-    if left:
-        _remote_say(
-            f"Remote quit with {', '.join(left)} unfinished — "
-            "`aisquare fleet ls` shows where the agent is"
-        )
-    os._exit(130)
+    import sys
+
+    global _quitting
+    if _quitting:  # a Ctrl-C landing while it waits: serve's handler, calling it again
+        os._exit(130)
+    _quitting = True
+    try:
+        left = remote_writes_running()
+        if left:
+            _remote_say(
+                f"Remote quit with {', '.join(left)} unfinished: "
+                "`aisquare fleet ls` shows where the agent is"
+            )
+        pushes = sys.modules.get("aisquare.services.remote_push")  # loaded by all that push
+        if pushes is not None:
+            pushes.push_drain(REMOTE_QUIT_PUSH_SECONDS)
+    finally:
+        os._exit(130)
 
 
 def remote_wait_for_writes() -> None:

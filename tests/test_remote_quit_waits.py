@@ -72,6 +72,7 @@ def quit_now(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[int]]:
         raise SystemExit(code)
 
     monkeypatch.setattr(os, "_exit", recorded)
+    monkeypatch.setattr(remote_server, "_quitting", False)
     yield codes
 
 
@@ -135,8 +136,8 @@ def test_a_quit_says_which_write_it_waits_for_and_waits_for_it(said: list[str]) 
     assert release.is_set(), "it returned before the write was done"
     writer.join(5)
     assert said == [
-        "waiting for agent/restart for coder-1 to finish (a restart or switch can take 40 s) "
-        "— Ctrl-C quits now and leaves it unfinished"
+        "waiting for agent/restart for coder-1 to finish (a restart or switch can take 40 s); "
+        "Ctrl-C quits now and leaves it unfinished"
     ]
 
 
@@ -169,7 +170,7 @@ def test_a_ctrl_c_while_a_quit_waits_quits_at_once_and_says_what_it_left(
         writer.join(5)
     assert quit_now == [130]
     assert said[-1] == (
-        "Remote quit with agent/switch for coder-2 unfinished — "
+        "Remote quit with agent/switch for coder-2 unfinished: "
         "`aisquare fleet ls` shows where the agent is"
     )
 
@@ -277,7 +278,7 @@ def test_serves_ctrl_c_says_what_it_waits_for_and_a_second_one_quits_only_mid_wr
         busy.handle_exit(signal.SIGINT, None)
         assert said == [
             "waiting for agent/restart for coder-1 to finish (a restart or switch can take "
-            "40 s) — Ctrl-C again quits now and leaves it unfinished"
+            "40 s); Ctrl-C again quits now and leaves it unfinished"
         ]
         with pytest.raises(SystemExit):
             busy.handle_exit(signal.SIGINT, None)
@@ -318,8 +319,8 @@ def test_serves_auto_off_says_which_write_its_way_out_waits_for(
         remote_server._remote_serve_off(state, busy)  # type: ignore[arg-type]
     assert busy.should_exit is True
     assert said == [
-        "waiting for agent/switch for coder-2 to finish (a restart or switch can take 40 s) "
-        "— Ctrl-C quits now and leaves it unfinished"
+        "waiting for agent/switch for coder-2 to finish (a restart or switch can take 40 s); "
+        "Ctrl-C quits now and leaves it unfinished"
     ]
 
 
@@ -334,6 +335,126 @@ def test_a_line_said_on_stderr_is_written_whole_and_a_stderr_that_is_gone_loses_
 
     monkeypatch.setattr(os, "write", gone)
     remote_server._remote_say("said to no one")
+
+
+def test_a_line_is_said_in_the_encoding_the_terminal_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Written past ``sys.stderr``, the line was UTF-8 whatever the terminal read: a Windows
+    console on its legacy code page showed an agent's ``é`` as two other characters."""
+    written: list[bytes] = []
+
+    def write(fd: int, data: bytes) -> int:
+        written.append(data)
+        return len(data)
+
+    monkeypatch.setattr(os, "device_encoding", lambda fd: "cp437" if fd == 2 else None)
+    monkeypatch.setattr(os, "write", write)
+    remote_server._remote_say("waiting for agent/restart for écrivain to finish")
+    assert written == ["waiting for agent/restart for écrivain to finish\n".encode("cp437")]
+
+
+def test_what_quitting_says_is_plain_text_that_any_console_shows_as_it_is(
+    said: list[str], quit_now: list[int]
+) -> None:
+    """Its em dashes are in no legacy console's code page but one."""
+    with remote_server._remote_write_running("agent/restart for coder-1"):
+        remote_server._remote_writes_announced("Ctrl-C")
+        with pytest.raises(SystemExit):
+            remote_server._remote_quit_now()
+    assert len(said) == 2 and all(line.isascii() for line in said)
+
+
+@pytest.fixture
+def push_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[Callable[[float], threading.Event]]:
+    """Put a one-shot push in flight that takes ``seconds`` to arrive; the event says it did."""
+    from aisquare.services import remote_push
+
+    flying: set[threading.Thread] = set()
+    monkeypatch.setattr(remote_push, "_push_in_flight", flying)
+    over = threading.Event()
+
+    def send_for(seconds: float) -> threading.Event:
+        arrived = threading.Event()
+
+        def send() -> None:
+            if not over.wait(seconds):
+                arrived.set()
+
+        thread = threading.Thread(target=send, name="asq-remote-push-now", daemon=True)
+        flying.add(thread)
+        thread.start()
+        return arrived
+
+    yield send_for
+    over.set()
+
+
+def test_a_quit_at_once_still_lets_a_farewell_in_flight_arrive(
+    said: list[str], quit_now: list[int], push_in_flight: Callable[[float], threading.Event]
+) -> None:
+    """``os._exit`` skips the exit handler that waits for one (``push_drain``): ``serve``'s
+    auto-off queued its farewell, said it waits for a write, and the Ctrl-C that followed
+    cut the farewell off in its TLS handshake."""
+    arrived = push_in_flight(0.3)
+    with pytest.raises(SystemExit):
+        remote_server._remote_quit_now()
+    assert arrived.is_set() and quit_now == [130]
+
+
+def test_a_push_that_does_not_arrive_holds_a_quit_at_once_for_moments_at_most(
+    said: list[str],
+    quit_now: list[int],
+    push_in_flight: Callable[[float], threading.Event],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(remote_server, "REMOTE_QUIT_PUSH_SECONDS", 0.3)
+    arrived = push_in_flight(60)
+    began = time.monotonic()
+    with pytest.raises(SystemExit):
+        remote_server._remote_quit_now()
+    assert 0.2 <= time.monotonic() - began < 3 and not arrived.is_set()
+
+
+def test_a_ctrl_c_while_the_fleet_uis_quit_waits_for_a_push_ends_the_wait(
+    said: list[str], quit_now: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once the UI is gone, a Ctrl-C is a KeyboardInterrupt wherever it lands."""
+    from aisquare.services import remote_push
+
+    def interrupted(timeout: float) -> bool:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(remote_push, "push_drain", interrupted)
+    with pytest.raises(SystemExit):
+        remote_server._remote_quit_now()
+    assert quit_now == [130]
+
+
+def test_a_ctrl_c_while_serves_quit_waits_for_a_push_ends_the_wait_and_says_nothing_again(
+    said: list[str], quit_now: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``serve``'s next Ctrl-C runs its handler, which calls the quit again: that one leaves
+    at once, where it would have said its line again and waited again."""
+    from aisquare.services import remote_push
+
+    def handled_again(timeout: float) -> bool:
+        remote_server._remote_quit_now()
+        raise AssertionError("the second quit returned")
+
+    monkeypatch.setattr(remote_push, "push_drain", handled_again)
+    with (
+        remote_server._remote_write_running("agent/restart for coder-1"),
+        pytest.raises(SystemExit),
+    ):
+        remote_server._remote_quit_now()
+    assert quit_now[0] == 130
+    assert said == [
+        "Remote quit with agent/restart for coder-1 unfinished: "
+        "`aisquare fleet ls` shows where the agent is"
+    ]
 
 
 CHILD = r"""

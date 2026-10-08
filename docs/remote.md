@@ -84,8 +84,9 @@ ngrok http --url=your-name.ngrok-free.app --inspect=false 8750
 `serve` prints the local link and the passphrase and runs until Ctrl-C or until
 auto-off. A Ctrl-C while a phone's write is still running (a restart or switch
 can take 40 seconds) says which, and waits for it: cut short, it can leave the
-agent down. A second Ctrl-C quits at once and leaves it unfinished. Quitting the
-fleet UI waits, and says so, the same way. Its options:
+agent down. A second Ctrl-C quits at once and leaves it unfinished, giving a
+notification still on its way, such as auto-off's farewell, two seconds at most.
+Quitting the fleet UI waits, and says so, the same way. Its options:
 
 | option | default | what it does |
 | --- | --- | --- |

@@ -330,6 +330,46 @@ def test_the_second_prompt_of_one_turn_is_a_new_item() -> None:
     assert first.id != second.id
 
 
+def _in_a_sub_agent(
+    seen: datetime, label: str = "coder-1"
+) -> tuple[FleetAgentStatus, TranscriptTail]:
+    """``label`` at a prompt of a sub-agent's, notified at ``seen``: the ``Task`` it runs in is
+    the one tool pending in the agent's own transcript."""
+    row = _row(label)
+    session = _session(row, state="attention", seen=seen)
+    task = _tool("toolu_task", "Task", at=BORN + timedelta(minutes=5), description="the cache")
+    return _status(row, "attention", session), _tail(task, at=BORN + timedelta(minutes=5))
+
+
+def test_every_prompt_of_a_sub_agent_is_a_new_item() -> None:
+    """The ``Task`` is pending through all of its sub-agent's prompts. Named after it, each
+    prompt after the first was the first again: never pushed, hidden by its dismissal, and
+    answered by a card left from it, whose "1" approved what the sub-agent asked next. Every
+    prompt is notified, and each notification moves ``last_seen_at``."""
+    first = _one(_classify(*_in_a_sub_agent(NOW - timedelta(minutes=4))))
+    second = _one(_classify(*_in_a_sub_agent(NOW - timedelta(seconds=30))))
+    assert first.kind == second.kind == "permission" and first.id != second.id
+    assert (first.since, second.since) == (NOW - timedelta(minutes=4), NOW - timedelta(seconds=30))
+    assert second.push_after == second.since, "pushed, as the first was"
+    assert second.reason == "coder-1 waits for a permission answer (in a sub-agent)"
+
+
+def test_a_sub_agents_next_prompt_has_no_item_until_its_notice() -> None:
+    """The pane goes quiet 5 s after the next prompt is drawn and its notice comes at 6 s: in
+    between, ``last_seen_at`` still names the prompt before, whose id an item would carry."""
+    seen = NOW - timedelta(minutes=1)
+    status, tail = _in_a_sub_agent(seen)
+    drawn = NOW - timedelta(seconds=6)
+    assert _classify(status, tail, pane_output=lambda: drawn) == []
+    noticed = _one(
+        _classify(*_in_a_sub_agent(NOW - timedelta(seconds=1)), pane_output=lambda: drawn)
+    )
+    assert noticed.since == NOW - timedelta(seconds=1)
+    redrawn = _one(_classify(status, tail, pane_output=lambda: NOW - timedelta(seconds=40)))
+    assert redrawn.since == seen, "output long after the notice is a redraw, not a prompt"
+    assert _one(_classify(status, tail, pane_output=lambda: None)).since == seen
+
+
 def test_rule_6_a_prompt_dismissed_with_esc_is_interrupted_not_a_prompt() -> None:
     """Esc fires no Stop: the row keeps reading ``attention`` for its whole stale window."""
     row = _row()
@@ -499,6 +539,8 @@ class Fleet:
     """Every socket the scan asked tmux about, once per question."""
     asked_events: list[tuple[str, str | None]] = field(default_factory=list)
     """Every session the scan asked the store for its newest event of a kind."""
+    output_at: datetime | None = None
+    """When every pane last printed, as tmux tells it; ``None``: it would not say."""
 
 
 def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> NeedsSources:
@@ -535,6 +577,7 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
         has_live_agents=lambda pid: any(status.agent.ended_at is None for status in fleet.agents),
         tmux_answers=tmux_answers,
         session_event=session_event,
+        pane_output=lambda agent: fleet.output_at,
     )
 
 
@@ -2172,6 +2215,23 @@ def test_a_card_that_changed_under_the_phone_is_stale(live: Live) -> None:
     assert [item["id"] for item in body["current"]] == [
         needs_item_id(PROJECT.id, "permission", "toolu_next")
     ]
+    assert live.tmux.typed == []
+
+
+def test_a_sub_agents_card_is_stale_once_it_asks_again(live: Live) -> None:
+    """The ``Task`` is pending through every prompt of its sub-agent's, so the card for the
+    first prompt still matched the second, and its "1" approved whatever that one asked."""
+    live.runtime.set_allow_write(True)
+    now = datetime.now(UTC)
+    status, tail = _in_a_sub_agent(now - timedelta(minutes=2))
+    live.fleet.agents[0], live.fleet.tails["/transcripts/coder-1.jsonl"] = status, tail
+    card = live.card("permission")
+    asks_again, _same = _in_a_sub_agent(now - timedelta(seconds=1))
+    live.fleet.agents[0] = asks_again  # answered at the machine; the sub-agent asked again
+    stale = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert stale.status_code == 409 and stale.json()["error"] == "stale"
+    (current,) = stale.json()["current"]
+    assert current["kind"] == "permission" and current["id"] != card["id"]
     assert live.tmux.typed == []
 
 

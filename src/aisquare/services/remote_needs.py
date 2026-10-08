@@ -14,13 +14,14 @@ rules (:func:`needs_from_agent`), each project by a few more (``crashed``,
 (:func:`needs_from_board`).
 
 Every item has an id derived from what it is about (the OLDEST pending
-``tool_use`` of a permission prompt, the marker record of an interruption, the
-seq of a board event), so it keeps its id from scan to scan and a new prompt is a
-new id — and a new push. A ``reason`` is a fixed template with every interpolated
-name passed through :func:`needs_push_safe`, because it is what a lock screen
-shows; the content a human must read before answering (the full command, every
-question and option, the plan) lives in ``excerpt`` and ``detail``, which are
-served to an unlocked page and never pushed.
+``tool_use`` of a permission prompt, with its notification when a sub-agent
+asks, the marker record of an interruption, the seq of a board event), so it
+keeps its id from scan to scan and a new prompt is a new id — and a new push.
+A ``reason`` is a fixed template with every interpolated name passed through
+:func:`needs_push_safe`, because it is what a lock screen shows; the content a
+human must read before answering (the full command, every question and option,
+the plan) lives in ``excerpt`` and ``detail``, which are served to an unlocked
+page and never pushed.
 
 A phone answers a card through ``POST api/needs/answer``, which re-derives the
 agent right then (:func:`needs_agent_now`) and types only while the card is
@@ -167,6 +168,11 @@ _TOOL_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,40}")
 _SUBAGENT_TOOLS = frozenset({"Task", "Agent"})
 """The tools a sub-agent runs inside: a prompt pending under one is the sub-agent's."""
 
+_NOTICE_WAIT = timedelta(seconds=10)
+"""How long after its pane printed a dialog may still be waiting for its notification:
+Claude Code sends it 6 s after the dialog opens, tmux tells the time of output to the
+second, and the hook takes a moment to land."""
+
 _DETAIL_INPUT_KEYS = (
     "command",
     "description",
@@ -284,6 +290,11 @@ def _needs_no_event(project_id: str, session_id: str, kind: str | None) -> TeamE
     return None
 
 
+def _needs_no_output(agent: FleetAgent) -> datetime | None:
+    """A source's ``pane_output`` when it says nothing: tmux would not say."""
+    return None
+
+
 @dataclass(frozen=True)
 class NeedsSources:
     """Everything the scan reads, as callables: the live store and tmux, or a test's fakes.
@@ -316,6 +327,9 @@ class NeedsSources:
     session_event: Callable[[str, str, str | None], TeamEvent | None] = _needs_no_event
     """A session's newest board event of a kind (of any kind with ``None``), for the facts
     the window of ``board_events`` no longer holds (:func:`_needs_own_events`)."""
+    pane_output: Callable[[FleetAgent], datetime | None] = _needs_no_output
+    """When the row's pane last printed (``#{window_activity}``); ``None``: tmux would not
+    say. Asked only of an agent whose sub-agent waits on a prompt (:func:`needs_from_agent`)."""
 
 
 # --- names on a lock screen, and text on a card -------------------------------------------
@@ -506,6 +520,7 @@ def needs_from_agent(
     now: datetime,
     manager_live: bool = False,
     accounts: AccountsSettings | None = None,
+    pane_output: Callable[[], datetime | None] | None = None,
 ) -> list[NeedsItem]:
     """What one agent needs from the human: at most one item, by the first rule that holds.
 
@@ -516,7 +531,10 @@ def needs_from_agent(
     3. a pending ``AskUserQuestion`` → ``question``;
     4. a pending ``ExitPlanMode`` → ``plan``;
     5. any other pending tool, with attention → ``permission``, about the OLDEST one: each
-       prompt has its own tool use, so the 2nd prompt of a turn is a new item;
+       prompt has its own tool use, so the 2nd prompt of a turn is a new item. Not under
+       a ``Task``, whose sub-agent's tool uses are in its own records: every prompt of the
+       sub-agent's has that one pending tool, so the prompt is also its notice, the
+       ``last_seen_at`` each notification moves (:func:`_needs_subagent_prompt`);
     6. no pending tool, and the newest record an interruption later than the session's last
        hook → ``interrupted``, whatever the row reads (Esc fires no Stop, so a dismissed
        prompt still reads ``attention`` and an interrupted turn ``working``);
@@ -534,7 +552,8 @@ def needs_from_agent(
     or closing question belong to the process before it. Without a readable tail, rules
     3 to 6 and 9 cannot hold. ``exited`` and ``unknown`` agents need nothing here; ``crashed``,
     ``manager_down`` and ``fleet_down`` speak for them. ``manager_live`` and ``accounts``
-    decide only when a push may go out.
+    decide only when a push may go out. ``pane_output`` says when the agent's pane last
+    printed, asked only of a sub-agent's prompt.
     """
     if status.state in ("exited", "unknown"):
         return []
@@ -580,6 +599,10 @@ def needs_from_agent(
     if pending:
         if not attention:
             return []  # a tool running, or the 6 s before Claude Code's notification
+        if pending[0].name in _SUBAGENT_TOOLS and session is not None:
+            return _needs_subagent_prompt(
+                pending[0], session, pane_output, project=project, agent=agent, now=now
+            )
         return [
             _needs_permission_item(pending[0], project=project, agent=agent, name=name, now=now)
         ]
@@ -857,15 +880,61 @@ def _needs_plan_item(
     )
 
 
+def _needs_subagent_prompt(
+    tool: PendingTool,
+    session: TeamSession,
+    pane_output: Callable[[], datetime | None] | None,
+    *,
+    project: ProjectInfo,
+    agent: FleetAgent,
+    now: datetime,
+) -> list[NeedsItem]:
+    """A prompt of a sub-agent's: one item per notification, never the one before's.
+
+    The sub-agent's own tool uses are in its own records, so the ``Task`` it runs
+    in is the one pending tool through all its prompts. Named after it alone,
+    every prompt after the first was the first again: never pushed, hidden by its
+    dismissal, and answered by a card left from it, whose "1" approved whatever
+    the sub-agent asked next. Each prompt sends its own notification, which moves
+    ``last_seen_at``, so the item is about the tool and that moment. In the second
+    or so between a new prompt's drawing and its notification, the pane printed
+    after ``last_seen_at``, which still names the prompt before: there is no item
+    until the notification lands.
+    """
+    seen = session.last_seen_at
+    output = None if pane_output is None else pane_output()
+    if output is not None and output > seen and now - output < _NOTICE_WAIT:
+        return []
+    return [
+        _needs_permission_item(
+            tool,
+            project=project,
+            agent=agent,
+            name=needs_push_safe(agent.label),
+            now=now,
+            subject=f"{tool.tool_use_id}:{seen.isoformat()}",
+            since=seen,
+        )
+    ]
+
+
 def _needs_permission_item(
-    tool: PendingTool, *, project: ProjectInfo, agent: FleetAgent, name: str, now: datetime
+    tool: PendingTool,
+    *,
+    project: ProjectInfo,
+    agent: FleetAgent,
+    name: str,
+    now: datetime,
+    subject: str | None = None,
+    since: datetime | None = None,
 ) -> NeedsItem:
     """A permission prompt: the full command or path in ``detail``, so nobody approves blind.
 
     The buttons are the dialog's own digits and Esc; the card shows the live
     pane beside them, so the options' real text is on screen. A prompt under a
     ``Task``/``Agent`` tool is a sub-agent's, whose own tool use is in its own
-    records, not this transcript.
+    records, not this transcript. ``subject`` and ``since`` default to the
+    tool use's.
     """
     if tool.name in _SUBAGENT_TOOLS:
         reason = f"{name} waits for a permission answer (in a sub-agent)"
@@ -880,10 +949,10 @@ def _needs_permission_item(
             shown[key] = _needs_cut(value, _DETAIL_STRING_MAX)
         elif isinstance(value, bool | int) or (isinstance(value, float) and math.isfinite(value)):
             shown[key] = value
-    since = tool.at or now
+    since = since or tool.at or now
     return _needs_item(
         "permission",
-        tool.tool_use_id,
+        subject or tool.tool_use_id,
         project=project,
         agent=agent,
         reason=reason,
@@ -1139,6 +1208,7 @@ def _needs_scan_project(
                 now=now,
                 manager_live=manager_live,
                 accounts=accounts,
+                pane_output=_needs_output_of(sources, status.agent),
             ):
                 items.append(_needs_dated(item, first_seen, seen) if item.kind == "lost" else item)
         items.extend(
@@ -1199,6 +1269,19 @@ def _needs_own_events(
             own.append(found)
             break
     return own
+
+
+def _needs_output_of(sources: NeedsSources, agent: FleetAgent) -> Callable[[], datetime | None]:
+    """When ``agent``'s pane last printed, asked of tmux only when called."""
+
+    def needs_output() -> datetime | None:
+        try:
+            return sources.pane_output(agent)
+        except Exception:
+            log.debug("remote: needs could not ask tmux about %s", agent.pane_id, exc_info=True)
+            return None
+
+    return needs_output
 
 
 def _needs_newest_of(
@@ -1671,13 +1754,18 @@ def _needs_pane_quiet(server: TmuxServer, pane_id: str, now: datetime) -> bool |
     """
     from aisquare.services import fleet as fleet_service
 
+    output = _needs_pane_output_at(server, pane_id)
+    return None if output is None else now - output > fleet_service.ACTIVITY_WINDOW
+
+
+def _needs_pane_output_at(server: TmuxServer, pane_id: str) -> datetime | None:
+    """When the pane's window last printed (``#{window_activity}``, to the second rounded
+    down); ``None`` when tmux would not say."""
     try:
         raw = server.run("display-message", "-p", "-t", pane_id, "#{window_activity}").strip()
     except Exception:
         return None
-    if not raw.isdigit():
-        return None
-    return now - datetime.fromtimestamp(int(raw), tz=UTC) > fleet_service.ACTIVITY_WINDOW
+    return datetime.fromtimestamp(int(raw), tz=UTC) if raw.isdigit() else None
 
 
 def needs_dialog_open(snap: AgentNow) -> bool:
@@ -1796,6 +1884,9 @@ def live_needs_sources() -> NeedsSources:
     def needs_tmux_answers(socket: str) -> bool:
         return fleet_service.server_for(socket).answers()
 
+    def needs_pane_output(agent: FleetAgent) -> datetime | None:
+        return _needs_pane_output_at(fleet_service.server_for(agent.tmux_socket), agent.pane_id)
+
     def needs_session_event(project_id: str, session_id: str, kind: str | None) -> TeamEvent | None:
         with store_session() as store:
             found = store.filtered_events(project_id, session_id=session_id, kind=kind, limit=1)
@@ -1813,6 +1904,7 @@ def live_needs_sources() -> NeedsSources:
         has_live_agents=needs_rows_live,
         tmux_answers=needs_tmux_answers,
         session_event=needs_session_event,
+        pane_output=needs_pane_output,
     )
 
 

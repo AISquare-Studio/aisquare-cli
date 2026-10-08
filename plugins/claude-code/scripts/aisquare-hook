@@ -99,9 +99,14 @@ _runnable() {
             _prog=${_prog%%\"*}
             ;;
     esac
+    # $HOME/ and ${HOME}/ as the hook's own shell expands them, like ~/: read
+    # literally, a working hook graded as gone and every event ran twice.
+    # shellcheck disable=SC2016
     case $_prog in
         *\\*) return 0 ;;
         \~/*) _prog=$HOME/${_prog#??} ;;
+        '$HOME/'*) _prog=$HOME/${_prog#'$HOME/'} ;;
+        '${HOME}/'*) _prog=$HOME/${_prog#'${HOME}/'} ;;
     esac
     case $_prog in
         */*) _starts "$_prog" ;;

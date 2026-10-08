@@ -409,6 +409,9 @@ _OURS = [
     ("{bin}/aisquare\thook\tstop", True),
     ("{bin}/aisquare  hook  stop", True),
     ("{bin}/aisquare --no-color hook stop", True),
+    # The hook's shell expands these, as it does ~/ (review of #257).
+    ("$HOME/programs/aisquare hook stop", True),
+    ("${{HOME}}/programs/aisquare hook stop", True),
     (r"C:\Users\u\.local\bin\aisquare.exe hook stop", False),
     (r'"C:\Program Files\aisquare\bin\aisquare.EXE" hook stop', False),
 ]
@@ -430,6 +433,21 @@ def test_it_recognises_every_shape_of_our_hook(
     assert machine.ran("aisquare") is None, f"ran beside settings.json's {command!r}"
     if posix_shape:
         assert agent_core._is_aisquare_hook_command(command), "the CLI must agree it is ours"
+
+
+@posix_only
+@pytest.mark.parametrize("written", ["$HOME/.local/bin", "${HOME}/.local/bin", "~/.local/bin"])
+def test_the_doctor_reads_a_home_relative_program_as_its_shell_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, written: str
+) -> None:
+    """Read literally, `$HOME/.local/bin/aisquare` was a relative path that graded as
+    missing, so beside the plugin the row said the plugin ran in place of hooks that
+    were running (review of #257)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    binary = agent_core.hook_binary(f"{written}/aisquare hook stop")
+
+    assert binary is not None and binary.program == tmp_path / ".local" / "bin" / "aisquare"
 
 
 @posix_only

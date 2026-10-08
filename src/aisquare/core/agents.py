@@ -1138,8 +1138,14 @@ def _resolve_program(token: str) -> Path:
     ``_aisquare_command`` has written absolute paths since the bare-name bug was
     fixed, but hooks installed before that are still on disk; a bare name goes
     through PATH exactly as the shell would send it, and an unfindable one is
-    returned as written so it grades as missing rather than crashing.
+    returned as written so it grades as missing rather than crashing. ``$HOME/``
+    and ``${HOME}/`` are expanded as ``~/`` is: the hook's shell expands them, and
+    read literally a working hook graded as missing (review of #257).
     """
+    for prefix in ("$HOME/", "${HOME}/"):
+        if token.startswith(prefix):
+            token = str(Path("~").expanduser() / token[len(prefix) :])
+            break
     path = Path(token).expanduser()
     if not path.is_absolute() and path.parent == Path("."):
         found = shutil.which(token)

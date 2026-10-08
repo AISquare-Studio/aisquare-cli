@@ -44,6 +44,12 @@ class FakeNode {
     return siblings[siblings.indexOf(this) + 1] || null;
   }
 
+  get isConnected() {
+    let node = this;
+    while (node.parentNode) node = node.parentNode;
+    return node === this.ownerDocument.documentElement;
+  }
+
   get textContent() {
     return this.childNodes.map((child) => child.textContent).join("");
   }
@@ -1024,6 +1030,111 @@ async function backLeaves() {
   return { afterUnlock, afterGone, afterSignedOut: await backs(out) };
 }
 
+/* The title of the sheet on screen, or null. */
+function sheetTitle(page) {
+  if (!page.run("UI.sheet.classList.contains('open')")) return null;
+  const title = find(page.run("UI.sheet"), (node) => node.tagName === "H2");
+  return title ? title.textContent : null;
+}
+
+/* Answers that come after the human moved on. A second ^C to coder-1 is refused
+ * double_press while coder-2's screen shows its own Ctrl-C sheet; and a restart answers
+ * after Back left its sheet and the human opened Tell and typed in it, once done and once
+ * failed. */
+async function lateAnswers() {
+  const keys = [];
+  const page = await agentView({
+    "POST api/send-keys": () => (keys[keys.length] = deferred()).promise,
+  });
+  for (const answer of [{ status: 200, json: { sent: true } }, null]) {
+    click(buttonNamed(page.main(), "^C"));
+    click(buttonNamed(page.run("UI.sheet"), "Send Ctrl-C"));
+    await settle();
+    if (answer) keys[keys.length - 1].settle(answer);
+    await settle();
+  }
+  page.run("pageGo('#/p/" + PROJECT + "/a/coder-2/live')");
+  await settle();
+  click(buttonNamed(page.main(), "^C"));
+  keys[1].settle({ status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits Claude Code — send confirm_exit: true" } });
+  await settle();
+  const doublePress = {
+    sheet: sheetTitle(page), toast: page.toast(), exits: page.sent("api/send-keys").filter((body) => body.confirm_exit).length,
+  };
+
+  const restartThenTell = async (answer) => {
+    const restart = deferred();
+    const one = await agentView({
+      "POST api/agent/restart": () => restart.promise,
+      "GET api/transcript/coder-1": () => ({ status: 200, json: { lines: [], cursor: null, more: false, stamps: {} } }),
+    });
+    one.live().frame("fleet", FLEET);
+    await settle();
+    click(buttonNamed(one.main(), "Actions…"));
+    click(buttonNamed(one.run("UI.sheet"), "Restart…"));
+    click(buttonNamed(one.run("UI.sheet"), "Restart"));
+    await settle();
+    one.run("pageGo('#/p/" + PROJECT + "/a/coder-1/transcript')");
+    await settle();
+    click(buttonNamed(one.main(), "Actions…"));
+    click(buttonNamed(one.run("UI.sheet"), "Tell…"));
+    const text = find(one.run("UI.sheet"), (node) => node.tagName === "TEXTAREA");
+    text.value = "carry on";
+    restart.settle(answer);
+    await settle();
+    return { sheet: sheetTitle(one), typed: text.isConnected ? text.value : null, toast: one.toast() };
+  };
+  return {
+    doublePress,
+    restartDone: await restartThenTell({ status: 200, json: { agent: { id: "agt_1", label: "coder-1" }, resumed: true, project: PROJECT } }),
+    restartFailed: await restartThenTell({ status: 503, json: { error: "fleet_unavailable", message: "tmux did not answer" } }),
+    elsewhere: await lateElsewhere(),
+  };
+}
+
+/* More answers that come after the human moved on: a card's Dismiss once another card is
+ * open; a pad key refused read_only once a Tell sheet is open, typed in; and a transcript
+ * read that finds coder-1 gone once coder-2's screen is open. Where the page is after each. */
+async function lateElsewhere() {
+  const other = Object.assign({}, ITEM, { id: "ny_fedcba9876543210", agent: "coder-2" });
+  const dismissed = deferred();
+  const cards = bootPage("#/n/" + NEEDS_ID, signedIn({
+    "GET api/needs": () => ({ status: 200, json: { items: [ITEM, other] } }),
+    "POST api/needs/dismiss": () => dismissed.promise,
+  }));
+  await settle();
+  cards.acceptSockets();
+  await settle();
+  click(buttonNamed(cards.main(), "Dismiss"));
+  cards.run("pageGo('#/n/" + other.id + "')");
+  await settle();
+  dismissed.settle({ status: 200, json: { dismissed: true } });
+  await settle();
+
+  const key = deferred();
+  const pad = await agentView({ "POST api/send-keys": () => key.promise });
+  click(buttonNamed(pad.main(), "1"));
+  click(buttonNamed(pad.main(), "Actions…"));
+  click(buttonNamed(pad.run("UI.sheet"), "Tell…"));
+  const text = find(pad.run("UI.sheet"), (node) => node.tagName === "TEXTAREA");
+  text.value = "wait for me";
+  key.settle({ status: 403, json: { error: "read_only", message: "writes are off" } });
+  await settle();
+
+  const read = deferred();
+  const gone = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({ "GET api/transcript/coder-1": () => read.promise }));
+  await settle();
+  gone.run("pageGo('#/p/" + PROJECT + "/a/coder-2/live')");
+  await settle();
+  read.settle({ status: 404, json: { error: "no_such_agent", message: "no live agent 'coder-1'" } });
+  await settle();
+  return {
+    dismissedAt: cards.location.hash,
+    readOnly: { sheet: sheetTitle(pad), typed: text.isConnected ? text.value : null, writable: pad.run("writable()") },
+    goneAt: gone.location.hash,
+  };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -1057,6 +1168,7 @@ async function main() {
     transcriptTimes: await transcriptTimes(),
     readsAfterFrames: await readsAfterFrames(),
     backLeaves: await backLeaves(),
+    lateAnswers: await lateAnswers(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

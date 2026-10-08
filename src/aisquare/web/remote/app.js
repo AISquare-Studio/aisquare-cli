@@ -893,17 +893,19 @@ function failText(res, max) {
 }
 
 /* What a refusal does beyond its sentence. A read_only means writes are off now: the page
- * shows it at once, where it kept the pad and Send live until the next remote frame. */
-function afterFailure(res, route) {
+ * shows it at once, where it kept the pad and Send live until the next remote frame. Late,
+ * its sheet never takes the place of one opened since (sheet: the one that sent it), and a
+ * gone agent sends the page to its fleet only from that agent's own screen. */
+function afterFailure(res, route, sheet) {
   if (res.status === 403 && res.error === "read_only") {
     if (writable()) {
       S.remote = Object.assign({}, S.remote, { allow_write: false });
       drawStatus();
       gateButtons();
     }
-    readOnlySheet(res.message);
+    if (!sheetOpen() || (sheet && sheet.isOpen())) readOnlySheet(res.message);
   }
-  if (res.status === 404 && res.error === "no_such_agent" && route && route.pid) pageGo({ name: "project", pid: route.pid, tab: "fleet" }, true);
+  if (res.status === 404 && res.error === "no_such_agent" && onAgent(route)) pageGo({ name: "project", pid: route.pid, tab: "fleet" }, true);
 }
 
 // --- the socket (SPEC §1.6, §6.4) ---
@@ -1274,15 +1276,26 @@ function openSheet(title, build) {
   panel.append(body, status, bar);
   UI.sheet.appendChild(panel);
   UI.sheet.classList.add("open");
+  /* An answer can come after Back closed this sheet, or another took its place: it then
+   * says what came of it in a toast that names it, and leaves the sheet on screen alone. */
   const sheet = {
     body, status, bar,
+    isOpen: () => panel.parentNode === UI.sheet,
     busy(on) {
+      if (!sheet.isOpen()) return;
       UI.sheet.classList.toggle("busy", on);
       for (const control of bar.querySelectorAll("button")) {
         control.classList.toggle("busy", on);
         control.disabled = on;
       }
       if (!on) gateButtons();
+    },
+    say(text) {
+      if (sheet.isOpen()) status.textContent = text;
+      else toast(title + ": " + text);
+    },
+    close() {
+      if (sheet.isOpen()) closeSheet();
     },
   };
   build(sheet);
@@ -1297,11 +1310,21 @@ function closeSheet() {
   clear(UI.sheet);
 }
 
+function sheetOpen() {
+  return !!UI.sheet && UI.sheet.classList.contains("open");
+}
+
+/* Whether the page still shows this agent: an answer that comes later acts on it only then. */
+function onAgent(where) {
+  const r = S.route;
+  return !!(r && where && r.name === "agent" && r.pid === where.pid && r.label === where.label);
+}
+
 function confirmSheet(title, sentence, verb, onYes) {
   openSheet(title, (sheet) => {
     sheet.body.appendChild(el("p", "lead", sentence));
     sheet.bar.appendChild(button("w primary", verb, () => {
-      closeSheet();
+      sheet.close();
       onYes();
     }));
   });
@@ -1710,7 +1733,7 @@ async function dismissItem(item) {
   const res = await apiCall("POST", API.needsDismiss, { body: { id: item.id } });
   if (res.ok || res.status === 404) {
     setNeeds((S.needs || []).filter((one) => one.id !== item.id));
-    if (S.route && S.route.name === "card") pageGo("#/");
+    if (S.route && S.route.name === "card" && S.route.id === item.id) pageGo("#/");
     return;
   }
   toast(failText(res));
@@ -1765,7 +1788,7 @@ function tellSheet(ctx, mode) {
       });
       sheet.busy(false);
       if (res.ok) {
-        closeSheet();
+        sheet.close();
         const told = res.data && typeof res.data === "object" ? res.data : {};
         const delivered = told.delivered === true;
         // Not typed in, the machine says what happened instead: in "auto" a board note
@@ -1779,17 +1802,17 @@ function tellSheet(ctx, mode) {
         return;
       }
       if (res.status === 409 && res.error === "stale" && ctx.item) {
-        closeSheet();
+        sheet.close();
         noLonger(ctx.item, res.data && res.data.current);
         return;
       }
-      sheet.status.textContent = failText(res, TEXT_MAX.tell);
+      sheet.say(failText(res, TEXT_MAX.tell));
       if (res.status === 409 && res.error === "agent_busy" && current !== "interrupt") {
         current = "interrupt";
         go.textContent = "Interrupt & tell";
         lead.textContent = TELL_MODES.interrupt[1];
       }
-      afterFailure(res, ctx);
+      afterFailure(res, ctx, sheet);
     };
     const go = button("w primary", TELL_MODES[mode][0], send);
     sheet.bar.appendChild(go);
@@ -1817,13 +1840,13 @@ function replySheet(ctx) {
       const res = await apiWrite("api/note", body, "Reply");
       sheet.busy(false);
       if (res.ok) {
-        closeSheet();
+        sheet.close();
         toast("Posted on the board");
         dismissItem(ctx.item);
         return;
       }
-      sheet.status.textContent = failText(res, TEXT_MAX.note);
-      afterFailure(res, ctx);
+      sheet.say(failText(res, TEXT_MAX.note));
+      afterFailure(res, ctx, sheet);
     }));
     text.focus();
   });
@@ -1900,13 +1923,13 @@ function actionSheet(kind, ctx) {
       });
       sheet.busy(false);
       if (res.ok) {
-        closeSheet();
+        sheet.close();
         toast(doneSentence(kind, label, res.data));
         refreshNeeds();
         return;
       }
       if (res.status === 409 && res.error === "stale") {
-        closeSheet();
+        sheet.close();
         if (ctx.item) noLonger(ctx.item, res.data && res.data.current);
         else toast(label + " changed since this screen loaded — look again, then retry.");
         return;
@@ -1914,13 +1937,13 @@ function actionSheet(kind, ctx) {
       if (res.status === 409 && res.error === "dialog_open" && !dismiss) {
         // The machine's sentence is for curl ("send dismiss_dialog: true"); here that
         // is the button. "May": a tool still waiting on its result counts as a prompt.
-        sheet.status.textContent = label + " may be showing a prompt that " + meta.busy.toLowerCase() +
-          " it now would answer. Press Esc (No) first to dismiss it.";
+        const why = label + " may be showing a prompt that " + meta.busy.toLowerCase() + " it now would answer.";
+        sheet.say(sheet.isOpen() ? why + " Press Esc (No) first to dismiss it." : why);
         dismiss = true;
         say();
         go.textContent = "Press Esc (No) first";
-      } else sheet.status.textContent = failText(res);
-      afterFailure(res, ctx);
+      } else sheet.say(failText(res));
+      afterFailure(res, ctx, sheet);
     };
     const go = button("w primary", meta.title, run);
     sheet.bar.appendChild(go);
@@ -2136,6 +2159,8 @@ function noteComposer(pid) {
   to.placeholder = "to (optional): a label or a role";
   to.maxLength = 200;
   const said = el("p", "status");
+  // Its answer may come after the tab was left: then a toast says what came of the note.
+  const say = (words) => { if (said.isConnected) said.textContent = words; else toast("Note: " + words); };
   const post = button("w primary", "Post", async () => {
     if (!text.value.trim()) {
       said.textContent = "Type something first.";
@@ -2150,10 +2175,10 @@ function noteComposer(pid) {
     gateButtons();
     if (res.ok) {
       text.value = "";
-      said.textContent = "Posted.";
+      say("Posted.");
       return;
     }
-    said.textContent = failText(res, TEXT_MAX.note);
+    say(failText(res, TEXT_MAX.note));
     afterFailure(res);
   });
   const row = el("div", "row-inline");
@@ -2405,12 +2430,18 @@ function inputBar(pid, label, cleanups) {
     const res = await apiWrite("api/send-keys", Object.assign({ agent: label, project: pid }, body), what);
     if (res.ok) return true;
     if (res.status === 409 && res.error === "double_press") {
-      confirmSheet("Send it again?", "A second Ctrl-C or Ctrl-D within 3 s exits Claude Code, and the agent with it.", "Send and exit",
-        () => post(Object.assign({}, body, { confirm_exit: true }), what));
+      // Asked on this agent's own screen, over no other sheet: the answer can come after
+      // the human moved on, and a sheet in its place would put Send and exit where
+      // another agent's button was.
+      const which = (body.keys || []).indexOf("C-d") >= 0 ? "Ctrl-D" : "Ctrl-C";
+      if (onAgent({ pid, label }) && !sheetOpen()) {
+        confirmSheet("Send " + which + " to " + label + " again?", "A second " + which + " within 3 s exits Claude Code, and " + label + " with it.",
+          "Send and exit", () => post(Object.assign({}, body, { confirm_exit: true }), what));
+      } else toast(label + ": the second " + which + " was not sent — it would exit Claude Code.");
       return false;
     }
     toast(failText(res, TEXT_MAX.keys));
-    afterFailure(res, { pid });
+    afterFailure(res, { pid, label });
     return false;
   };
   const sendKey = (key) => {

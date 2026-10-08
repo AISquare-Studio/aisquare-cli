@@ -1268,6 +1268,45 @@ def test_back_leaves_the_page_once_a_redirect_took_the_place_of_the_screen_it_le
     assert report["afterSignedOut"] == {"at": "#/unlock", "landed": ["#/unlock"], "left": True}
 
 
+def test_an_answer_that_comes_after_the_human_moved_on_acts_on_its_own_sheet_only(
+    boot_report: dict[str, Any],
+) -> None:
+    """There is one sheet, and a write's answer acted on whatever was open by then. A second
+    ^C to coder-1 refused double_press opened an agent-less "Send it again?" over coder-2's
+    own Ctrl-C sheet, its Send and exit where coder-2's button was. A restart answered after
+    Back closed the Tell sheet opened since, and what was typed in it; failed, it said why in
+    its own sheet, off the screen, so nothing was said at all."""
+    late = boot_report["lateAnswers"]
+    assert late["doublePress"] == {
+        "sheet": "Send Ctrl-C?",
+        "toast": "coder-1: the second Ctrl-C was not sent — it would exit Claude Code.",
+        "exits": 0,
+    }
+    told = {"sheet": "Tell coder-1", "typed": "carry on"}
+    assert late["restartDone"] == {**told, "toast": "Restarted coder-1 on its own conversation"}
+    assert late["restartFailed"] == {
+        **told,
+        "toast": "Restart coder-1: The machine could not answer — try again in a moment.",
+    }
+
+
+def test_a_late_refusal_neither_moves_the_page_nor_covers_a_sheet_opened_since(
+    boot_report: dict[str, Any],
+) -> None:
+    """So it went for what a refusal does besides its sentence: a Dismiss answered once
+    another card was open sent the page to the feed, a read_only answered once a Tell sheet
+    was open put the read-only sheet in its place, and a gone agent sent the page to its
+    fleet from another agent's screen."""
+    elsewhere = boot_report["lateAnswers"]["elsewhere"]
+    assert elsewhere["dismissedAt"] == "#/n/ny_fedcba9876543210"
+    assert elsewhere["readOnly"] == {
+        "sheet": "Tell coder-1",
+        "typed": "wait for me",
+        "writable": False,
+    }
+    assert elsewhere["goneAt"] == "#/p/prj_x/a/coder-2/live"
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

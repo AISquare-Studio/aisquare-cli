@@ -53,7 +53,10 @@ every session and capture your prompts:
 - `aisquare init --agent claude-code`;
 - the one-line installer, unless you pass `--no-agent`;
 - `aisquare agents connect claude-code`;
-- each `aisquare accounts add`, into that account's own settings.
+- each `aisquare accounts add`, into that account's own settings;
+- `aisquare upgrade`, and asq's Update, which rewrite them for the new version in
+  every directory this machine connected (`agents.json`), through
+  `aisquare agents refresh-hooks`.
 
 `aisquare agents disconnect claude-code` removes them from one config directory:
 `$CLAUDE_CONFIG_DIR` or `~/.claude`, or the one `--config-dir` names.
@@ -64,6 +67,14 @@ that mode, Claude Code's classifier, not you, approves each tool call.
 
 **Sent:**
 
+- **Upgrades.** `aisquare upgrade` and `aisquare upgrade --check` ask PyPI for
+  the latest release (`https://pypi.org/pypi/aisquare-cli/json`), with a
+  `User-Agent` that names the installed version. `aisquare upgrade` then runs
+  `uv tool install`, which downloads from PyPI, or from the index the install
+  was made from.
+- **The Claude Code plugin.** With no aisquare CLI installed, its hooks run
+  `uvx --from aisquare-cli==<version>`, which downloads that release from PyPI
+  on the first session.
 - **Snapshots.** Packing a snapshot (`aisquare init`, `aisquare project
   onboard`) runs `npx --yes repomix` when no `repomix` is installed, which
   fetches the latest Repomix from npm. With tiktoken installed, the first token

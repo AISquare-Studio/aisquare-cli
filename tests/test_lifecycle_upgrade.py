@@ -371,6 +371,24 @@ def test_the_seam_registry_names_the_command_the_new_install_runs() -> None:
     assert f"``{runs}``" in listed and "agents connect" not in listed, listed
 
 
+def test_security_md_lists_what_upgrade_and_the_plugin_change_and_send() -> None:
+    """SECURITY.md is an inventory that says only what the code does, and it predated
+    upgrade's hook rewrite, its PyPI requests and the plugin's uvx (review of #257)."""
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "SECURITY.md").read_text(encoding="utf-8")
+    changed = text.split("**Changed in Claude Code's settings:**")[1].split("**Sent:**")[0]
+    sent = text.split("**Sent:**")[1]
+    launcher = (root / "plugins" / "claude-code" / "scripts" / "aisquare-hook").read_text("utf-8")
+
+    assert (
+        "`aisquare upgrade`" in changed
+        and f"`aisquare {' '.join(lifecycle.REFRESH_HOOKS[:2])}`" in changed
+    )
+    assert install_route.PYPI_JSON_URL in sent and "User-Agent" in sent
+    assert '--from "$_from" aisquare hook' in launcher, "the launcher still runs uvx --from"
+    assert f"uvx --from {install_route.DISTRIBUTION}==" in sent
+
+
 # --- the uv receipt, restated ----------------------------------------------------------
 
 

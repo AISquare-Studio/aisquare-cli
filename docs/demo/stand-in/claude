@@ -6,6 +6,10 @@
 # network, no account, nothing signed in. It says so in its banner, then hands
 # the pane to `cat`, which echoes what is typed at it.
 #
+# Its directory is named stand-in so that what the Welcome page prints for it,
+# "Claude Code · …/stand-in/claude", says so on the GIF's last screen; render.sh
+# fails the render if that line is not there (review of #256).
+#
 # `exec cat`, never a `while read` loop: the fleet tells a live agent from the
 # shell an agent leaves behind by the pane's foreground process
 # (services/fleet.py, _NOT_AN_AGENT). A loop in sh IS a shell, so the row would

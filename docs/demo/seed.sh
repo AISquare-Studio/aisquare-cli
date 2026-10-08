@@ -3,7 +3,7 @@
 #   - an empty demo home: no ~/.aisquare and no agent config, a machine that has
 #     never run aisquare;
 #   - ~/acme-api, a small git repository with one commit, to onboard;
-#   - the stand-in agent (docs/demo/bin/claude) first on PATH.
+#   - the stand-in agent (docs/demo/stand-in/claude) first on PATH.
 #
 # Inside the render image only (docs/demo/Dockerfile sets AISQUARE_DEMO_IMAGE).
 # Anywhere else it refuses: it re-points PATH and writes into $HOME.
@@ -17,12 +17,12 @@ aisquare_demo_seed() {
         echo "seed.sh: runs only inside the demo image (docs/demo/Dockerfile)" >&2
         return 1
     fi
-    if [ ! -e docs/demo/bin/claude ]; then
+    if [ ! -e docs/demo/stand-in/claude ]; then
         echo "seed.sh: source it from the repository root, where docs/demo.tape runs" >&2
         return 1
     fi
-    if [ ! -x docs/demo/bin/claude ]; then
-        echo "seed.sh: docs/demo/bin/claude is not executable (chmod +x it; git stages" \
+    if [ ! -x docs/demo/stand-in/claude ]; then
+        echo "seed.sh: docs/demo/stand-in/claude is not executable (chmod +x it; git stages" \
             "it as 100755; a noexec mount does this too)" >&2
         return 1
     fi
@@ -35,7 +35,7 @@ aisquare_demo_seed() {
 
     # Exported before `asq` starts: the fleet's tmux server is started by asq,
     # and every agent window inherits the SERVER's environment, not the shell's.
-    export PATH="$PWD/docs/demo/bin:$PATH"
+    export PATH="$PWD/docs/demo/stand-in:$PATH"
     # The model-availability probe would start the stand-in to ask a question it
     # cannot answer; skip it, as an offline machine does.
     export AISQUARE_HARNESS_PROBE=0

@@ -22,6 +22,8 @@ FROM ghcr.io/charmbracelet/vhs:v0.12.1@sha256:ea49a6a1c529be83153e88321892b55859
 #   python3-venv     the image's Python 3.13 has no pip and no ensurepip
 #   fonts-noto-cjk   U+FF0B, the sidebar's "＋ spawn agent", drew as an empty box
 #   gifsicle         render.sh shrinks the GIF with it (about a third, measured)
+#   gh               without it the walkthrough's last screen warns that the image
+#                    lacks it, which says nothing about aisquare (review of #256)
 # The base's apt sources name the suite `stable`, which is trixie today and moves
 # at Debian 14's release; apt then refuses the base's cached lists ("changed its
 # 'Codename' value", measured in the review of #250) and this build would fail.
@@ -30,7 +32,7 @@ RUN . /etc/os-release \
     && sed -i "s/\bstable\b/$VERSION_CODENAME/g" /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        tmux git python3-venv fonts-noto-cjk gifsicle \
+        tmux git python3-venv fonts-noto-cjk gifsicle gh \
     && rm -rf /var/lib/apt/lists/*
 
 # /src stays: doctor's provenance check warns about a build whose source

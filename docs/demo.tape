@@ -14,7 +14,7 @@
 # The Welcome walkthrough, from an empty home to a manager and two coders, all
 # from the keyboard: asq in ~/acme-api, use that folder (init and doctor run),
 # connect Claude Code, start the manager, start the coders. The agent is a
-# stand-in (docs/demo/bin/claude), because nothing is signed in where this
+# stand-in (docs/demo/stand-in/claude), because nothing is signed in where this
 # renders; it asks no trust question, so the walkthrough goes straight from the
 # manager to the coders. Opening the manager's pane would need F12 to come
 # back, and vhs has no F12.
@@ -55,7 +55,10 @@ Type "asq"
 Sleep 300ms
 Enter
 Wait+Screen /Pick the folder your agents will work in/
-Sleep 3s
+# The "Use acme-api" row comes from a worker after the first paint; until it is
+# drawn, Tab would land on the path box (review of #256).
+Wait+Screen /· this folder/
+Sleep 2.5s
 
 # From the sidebar, Tab reaches "Use acme-api": init and doctor run, as + does.
 Tab
@@ -81,7 +84,8 @@ Sleep 600ms
 Enter
 
 # The manager and both coders are live, each in its own tmux window, the coders
-# in worktrees. render.sh also checks the last snapshot shows coder-1 and coder-2.
+# in worktrees. render.sh also checks the last snapshot shows coder-1, coder-2
+# and step 2's ".../stand-in/claude", the screen's disclosure of the stand-in.
 Wait+Screen /Your fleet is up/
 Sleep 4s
 Screenshot out/welcome.png

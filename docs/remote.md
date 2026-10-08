@@ -177,12 +177,13 @@ line each:
 ```
 
 That is the time, the device, the route and what it did. Typed text is recorded
-as a length; a tell keeps its first 120 characters, because it is the one write
-that hands an agent free-form instructions. A write refused after part of it
-already reached the agent is on the trail too, with how it ended: keys typed
-before tmux failed (`failed`), an Esc sent before the action stopped short
-(`refused=<error>`), a restart that stopped the agent and could not start its
-replacement (`failed=<error>`).
+as a length; a tell keeps its first 120 characters, and a switch the start of the
+`reason` it types into the replacement's prompt, because they hand an agent
+free-form instructions. A write refused after part of it already reached the
+agent is on the trail too, with how it ended: keys typed before tmux failed
+(`failed`), an Esc sent before the action stopped short (`refused=<error>`), a
+restart that stopped the agent and could not start its replacement
+(`failed=<error>`).
 
 ---
 
@@ -359,7 +360,8 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
 - **Keys**: the pad sends key names from a fixed list (no `;`, nothing that
   tmux reads as a command); typed text travels as literal text, never as keys.
   Neither typed text nor a tell may hold a control character other than a tab
-  or a line break: the pad sends Esc, Ctrl-C and its other control keys by name.
+  or a line break, and a switch's `reason` is one line of plain text: the pad
+  sends Esc, Ctrl-C and its other control keys by name.
 - **Caps**: 64 KiB per request, 2 048 characters per keystroke message, 8 000
   per note or tell, 4 live connections per device.
 

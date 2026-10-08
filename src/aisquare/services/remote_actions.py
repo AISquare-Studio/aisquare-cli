@@ -311,6 +311,31 @@ def action_tell_text(body: dict[str, Any]) -> str:
     return text
 
 
+def action_switch_reason(body: dict[str, Any]) -> str | None:
+    """``agent/switch``'s optional ``reason``: one line of printable text, at most
+    :data:`ACTION_FIELD_MAX` characters. Anything else is a 400 (413 past the cap).
+
+    The reason is typed into the replacement's pane, inside the one line a resumed
+    agent goes on from (``fleet._resume_prompt``) or the hand-off a fresh one
+    starts with, and the board's ``switched`` event repeats it. So it is held to
+    more than a tell (:func:`action_tell_text`). A control character in it was a
+    keystroke in that pane: tmux before 3.7 pastes the bytes as they are, and an
+    ``ESC [201~`` ended the paste early. A line break made the one line two, and
+    the fleet types no prompt of two lines once the replacement is slow to start.
+    So a tab and a line break are refused too, and anything else that would not
+    print (review of #243, sweep of round 3).
+    """
+    reason = action_ref(body, "reason", limit=ACTION_FIELD_MAX)
+    bad = next((ch for ch in reason or "" if not ch.isprintable()), None)
+    if bad is not None:
+        raise RequestError(
+            400,
+            "invalid",
+            f"'reason' holds U+{ord(bad):04X}, which does not print — a reason is one line of text",
+        )
+    return reason
+
+
 def action_tell_mode(body: dict[str, Any]) -> str:
     """The tell's ``mode``, ``auto`` when there is none (:data:`TELL_MODES`)."""
     mode = body.get("mode")
@@ -974,18 +999,24 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     under the lock is all that keeps a phone from moving a replacement that the
     automatic hand-over or the manager already started. There is no ``force``
     (SPEC §9.3).
+
+    A ``reason`` (:func:`action_switch_reason`) is typed into the replacement's
+    prompt, so once the hand-over has been asked for, the audit line keeps how it
+    began, last, as a tell's keeps its text.
     """
     from aisquare.services import fleet as fleet_service
 
     label, agent_id = action_pinned(body)
     to = action_ref(body, "to", limit=ACTION_FIELD_MAX)
     fresh = action_flag(body, "fresh")
-    reason = action_ref(body, "reason", limit=ACTION_FIELD_MAX)
+    reason = action_switch_reason(body)
     dismiss = action_flag(body, "dismiss_dialog")
     needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX, guard=True)
     target = action_project(body)
-    # As a restart's: the row it acted on, and nothing a body typed (``to``, ``reason``).
+    # As a restart's: the row it acted on. The reason, the one field typed in the body that the
+    # line keeps, ends it, as a tell's text ends a tell's: it may hold anything printable.
     audit_start = f"switch {label}@{target.id} agent={agent_id}"
+    said = "" if reason is None else f' reason="{action_audit_excerpt(reason)}"'
     with action_locked(target, label, agent_id) as row:
         snap = action_check_needs(target, label, row.id, needs_id)
         dismissed = row.ended_at is None and action_dialog_guard(
@@ -999,7 +1030,7 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         )
         # The hand-over stops the agent before it starts it on the other account.
         with action_audited(
-            lambda error: f"{audit_start} dismissed={action_yes_no(dismissed)} failed={error}"
+            lambda error: f"{audit_start} dismissed={action_yes_no(dismissed)} failed={error}{said}"
         ):
             receipt = action_fleet_call(
                 lambda: fleet_service.switch(
@@ -1021,7 +1052,7 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     summary = (
         f"switch {label}@{target.id} slot={from_slot}->{receipt.to_slot} "
         f"dismissed={action_yes_no(dismissed)} resumed={action_yes_no(receipt.resumed)} "
-        f"started={receipt.started.id}"
+        f"started={receipt.started.id}{said}"
     )
     return result, summary
 

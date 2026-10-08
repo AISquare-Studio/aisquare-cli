@@ -13,22 +13,34 @@ from aisquare.models import AgentConnection, AgentInfo
 
 def list_agents() -> list[AgentInfo]:
     """List agents aisquare knows about and their connection state."""
-    return agent_core.detect_all()
+    return _refusals_named(agent_core.detect_all())
 
 
 def scan() -> list[AgentInfo]:
     """Scan this machine for installed agents."""
-    return agent_core.detect_all()
+    return _refusals_named(agent_core.detect_all())
 
 
 def status(name: str | None = None) -> list[AgentInfo]:
     """Integration state for one agent, or all of them. Raises ``KeyError`` if unknown."""
     if name is None:
-        return agent_core.detect_all()
+        return _refusals_named(agent_core.detect_all())
     info = agent_core.detect(name)
     if info is None:
         raise KeyError(name)
-    return [info]
+    return _refusals_named([info])
+
+
+def _refusals_named(agents: list[AgentInfo]) -> list[AgentInfo]:
+    """``agents``, with each site whose hooks are not installed (and not switched off) given
+    the reason `agents connect` would refuse it (:func:`connect_refusal`), as the doctor and
+    Welcome name it. Read as "missing", a settings.json with our hooks and one trailing comma
+    sent the user to Connect, which can only fail there (review of #257)."""
+    for agent in agents:
+        for site in agent.sites:
+            if not site.hooks_installed and site.hooks_off is None:
+                site.refused = connect_refusal(agent.name, site.config_dir)
+    return agents
 
 
 def claude_code_connected(config_dir: Path | None = None, *, cwd: Path | None = None) -> bool:
@@ -191,9 +203,10 @@ def connect_refusal(name: str, config_dir: Path | None = None) -> str | None:
     """Why `agents connect` would refuse ``config_dir``, in its own words, or ``None`` when
     it would write the hooks: :func:`refused_file`'s reason. Reads only.
 
-    Asked before Connect is offered, by the doctor's row and Welcome's step 2. A file
-    connect refuses can only fail the click, and a read-only settings.json
-    (home-manager's link into the Nix store) never cleared (review of #257).
+    Asked before Connect is offered or implied: by the doctor's row, Welcome's step 2
+    and ``agents list``/``status``. A file connect refuses can only fail the click, and
+    a read-only settings.json (home-manager's link into the Nix store) never cleared
+    (review of #257).
     """
     refused = refused_file(name, config_dir)
     return None if refused is None else refused[1]

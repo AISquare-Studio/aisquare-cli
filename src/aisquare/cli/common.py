@@ -510,27 +510,30 @@ def _hook_sites(agent: AgentInfo) -> str:
 
     Parallel installs each own a config dir, so a bare yes/no would hide a dir
     whose hooks went missing — name the broken ones explicitly. A dir whose
-    settings switch every hook off is named as that: "missing" pointed at Connect,
-    which cannot change it (review of #257).
+    settings switch every hook off is named as that, and so is one whose files
+    `agents connect` refuses: "missing" pointed at Connect, which cannot change
+    either (review of #257). ``--json`` carries connect's reason (``refused``).
     """
     if not agent.sites:
         return "—"
     off = [site.config_dir for site in agent.sites if site.hooks_off is not None]
-    missing = [
-        site.config_dir
-        for site in agent.sites
-        if not site.hooks_installed and site.hooks_off is None
-    ]
-    if not off and not missing:
+    down = [site for site in agent.sites if not site.hooks_installed and site.hooks_off is None]
+    missing = [site.config_dir for site in down if site.refused is None]
+    refused = [site.config_dir for site in down if site.refused is not None]
+    if not off and not down:
         if len(agent.sites) == 1:
             return str(agent.sites[0].config_dir)
         return f"{len(agent.sites)} dirs, all ok"
     clauses = [
         f"{what} in {', '.join(str(path) for path in dirs)}"
-        for what, dirs in (("missing", missing), ("switched off", off))
+        for what, dirs in (
+            ("missing", missing),
+            ("switched off", off),
+            ("cannot be written", refused),
+        )
         if dirs
     ]
-    ok = len(agent.sites) - len(off) - len(missing)
+    ok = len(agent.sites) - len(off) - len(down)
     return f"{ok}/{len(agent.sites)} ok — {'; '.join(clauses)}"
 
 

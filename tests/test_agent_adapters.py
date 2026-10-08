@@ -872,6 +872,41 @@ def test_short_timeouts_connect_cannot_raise_are_named_and_never_offered_connect
     )
 
 
+def test_agents_status_names_a_directory_connect_refuses_as_the_doctor_does(
+    runner: CliRunner, claude_home: Path
+) -> None:
+    """A connected ~/.claude whose settings.json gained one trailing comma: `agents list` and
+    `agents status` read it as no hooks and said "missing", which points at Connect, while
+    the doctor and Welcome named connect's refusal (review of #257). They name it too."""
+    from aisquare.cli.common import _hook_sites
+
+    _connect(runner)
+    settings_path = claude_home / "settings.json"
+    hooked = settings_path.read_text(encoding="utf-8").rstrip()
+    settings_path.write_text(hooked.removesuffix("}").rstrip() + ",\n}\n", encoding="utf-8")
+    damaged = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
+    cell = _hook_sites(agents_service.status("claude-code")[0])
+    refusal = agents_service.connect_refusal("claude-code")
+    row = diagnostics._check_claude_code()
+    settings_path.write_text("{}\n", encoding="utf-8")  # readable, and the hooks are gone
+    plain = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
+    missing = _hook_sites(agents_service.status("claude-code")[0])
+
+    assert refusal is not None and "it is not valid JSON" in refusal, refusal
+    assert damaged[0]["sites"] == [
+        {
+            "config_dir": str(claude_home),
+            "hooks_installed": False,
+            "hooks_off": None,
+            "refused": refusal,
+        }
+    ], damaged
+    assert cell == f"0/1 ok — cannot be written in {claude_home}", cell
+    assert f"hooks cannot be written in {claude_home}: {refusal}" in row.detail, row
+    assert plain[0]["sites"][0]["refused"] is None, "control: a file connect can write"
+    assert missing == f"0/1 ok — missing in {claude_home}", missing
+
+
 def test_hooks_switched_off_are_not_connected_and_never_offered_connect(
     runner: CliRunner, claude_home: Path
 ) -> None:
@@ -967,6 +1002,7 @@ def test_agents_list_status_connect_and_init_name_hooks_switched_off(
         "config_dir": str(claude_home),
         "hooks_installed": False,
         "hooks_off": str(settings_path),
+        "refused": None,
     }
     assert (sites[str(work)]["hooks_installed"], sites[str(work)]["hooks_off"]) == (False, None)
     notes = " ".join(json.loads(init.stdout)["notes"])

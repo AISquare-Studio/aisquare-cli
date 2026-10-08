@@ -79,6 +79,11 @@ class AgentHookSite(BaseModel):
     """The directory's settings file, when it switches every hook off (``"disableAllHooks":
     true``): Claude Code runs none of them however complete they are, so ``hooks_installed``
     is False, and ``agents connect`` cannot change that. ``None`` otherwise."""
+    refused: str | None = None
+    """Why ``agents connect`` would refuse the directory, in its words, when its hooks are
+    not installed and it would: a settings.json that is not a JSON object or that this
+    user may not write, or a CLAUDE.md it cannot read. Connect can only fail there, as the
+    doctor and Welcome say. ``None`` otherwise."""
 
 
 class AgentInfo(BaseModel):

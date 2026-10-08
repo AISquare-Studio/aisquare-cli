@@ -366,7 +366,7 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
             "entries": len(plan.home_entries),
             "accounts": list(plan.accounts),
             "keychain_tokens_kept": plan.keychain and bool(plan.accounts),
-            "action": "delete" if plan.purge and not plan.blocked else "keep",
+            "action": "delete" if plan.purges else "keep",
         },
         "purge_refusal": plan.purge_refusal,
         "live_agents": list(plan.live_agents),
@@ -383,6 +383,18 @@ def _blocked_reason(plan: lifecycle_service.UninstallPlan) -> str:
         f"the hooks in {count} director{'ies' if count != 1 else 'y'} cannot be taken out, "
         "and they still call it"
     )
+
+
+def _package_kept(report: lifecycle_service.UninstallReport) -> str | None:
+    """Why the run leaves the package, in the plan's words; ``None`` when it removes it."""
+    plan = report.plan
+    if plan.package_reason is not None:
+        return plan.package_reason
+    if plan.blocked:
+        return _blocked_reason(plan)
+    if report.failed:
+        return "a step before it failed, so it stays and `aisquare uninstall` can be run again"
+    return None
 
 
 def _home_line(plan: lifecycle_service.UninstallPlan) -> str:
@@ -419,8 +431,12 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
             _say("    (/logout in Claude Code) first to remove them")
     if plan.blocked:
         # What the run does: a site it cannot clean fails it, and it keeps both.
-        stays = f"the package and {plan.home}" if plan.purge and plan.home_exists else "the package"
-        _say(f"  then stop: {stays} stay, as {_blocked_reason(plan)}")
+        stays = (
+            f"the package and {plan.home} stay"
+            if plan.purge and plan.home_exists
+            else "the package stays"
+        )
+        _say(f"  then stop: {stays}, as {_blocked_reason(plan)}")
     elif plan.package_reason is None:
         _say(f"  then remove the package: {plan.package_command}")
     else:
@@ -473,7 +489,7 @@ def _emit_uninstall_report(report: lifecycle_service.UninstallReport) -> None:
                 "package": {
                     "command": plan.package_command,
                     "runs": report.package_runs,
-                    "reason": plan.package_reason,
+                    "reason": _package_kept(report),
                 },
                 "fleet_error": plan.fleet_error,
                 "record_error": report.record_error,

@@ -364,7 +364,7 @@ def test_json_without_yes_is_one_plan_object(
     assert plan["hooks"] == [{"config_dir": str(site), "programs": [str(tool.script)]}]
     assert plan["package"]["command"] == "uv tool uninstall aisquare-cli"
     assert plan["package"]["runs"] is True
-    assert plan["home"]["action"] == "delete"
+    assert (plan["home"]["exists"], plan["home"]["action"]) == (False, "keep"), "no home here"
 
 
 def test_at_a_terminal_it_asks_and_no_means_nothing_is_removed(
@@ -1775,3 +1775,63 @@ def test_a_slot_that_links_out_of_the_home_still_holds_the_purge_up(
         (str(slot), True)
     ]
     assert (plan["package"]["runs"], plan["home"]["action"]) == (False, "keep"), plan
+
+
+@pytest.mark.parametrize("case", ["clean", "blocked", "fails-at-run"])
+def test_the_run_report_says_why_the_package_stays_whenever_it_does(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """The run's --json gave {"runs": false, "reason": null} for a blocked or failed run,
+    where the plan's --json, for the same state, gave the reason (sweep of #257)."""
+    site = isolated_agent_home / ".claude"
+    if case == "blocked":
+        site.mkdir(parents=True)
+        (site / "settings.json").write_text(_hooks_text(tool.script, trailing_comma=True), "utf-8")
+    else:
+        _hooked(site, tool.script)
+    if case == "fails-at-run":
+
+        def refuse(name: str, config_dir: Path | None = None) -> bool:
+            raise PermissionError(13, "Permission denied", str(config_dir))
+
+        monkeypatch.setattr(agent_core, "remove_hooks", refuse)
+
+    plan = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)["package"]
+    ran = runner.invoke(app, ["--json", "uninstall", "--yes"])
+    report = _one_object(ran.stdout)["package"]
+
+    assert ran.exit_code == (0 if case == "clean" else 1), ran.output
+    assert report["runs"] is (case == "clean"), report
+    assert (report["reason"] is None) is report["runs"], "a reason exactly when it does not run"
+    if case == "blocked":
+        assert report["reason"] == plan["reason"], (plan, report)
+
+
+@pytest.mark.parametrize("home", [True, False], ids=["a-home", "no-home"])
+def test_the_json_plan_deletes_the_home_exactly_when_the_text_plan_does(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    home: bool,
+) -> None:
+    """With --purge and no home, the --json plan said "action": "delete" while the text
+    plan had no DELETE line and the run deleted nothing (sweep of #257)."""
+    if home:
+        _initialised(runner, tmp_path)
+    _hooked(isolated_agent_home / ".claude", tool.script)
+
+    machine = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)["home"]
+    human = runner.invoke(app, ["uninstall", "--purge", "--dry-run"]).stdout
+
+    assert machine["exists"] is home, machine
+    assert machine["action"] == ("delete" if home else "keep"), machine
+    assert ("DELETE" in human) is home, human

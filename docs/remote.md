@@ -363,7 +363,7 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   Ctrl-C, Enter and its other control keys by name (a carriage return typed is
   the Enter key itself).
 - **Caps**: 64 KiB per request, 2 048 characters per keystroke message, 8 000
-  per note or tell, 4 live connections per device.
+  per note or tell and 200 for whom a note is to, 4 live connections per device.
 
 From the machine:
 

@@ -296,6 +296,9 @@ after a reconnect, wait out the milliseconds each other's tmux calls take; an ac
 the lock for seconds (an interrupt's wait for the prompt, a stop's grace, a restart), and keys
 that would land in the middle of it are 409 ``busy`` instead."""
 NOTE_TEXT_MAX = 8_000
+NOTE_TO_MAX = 200
+"""The longest ``to`` a note may name, a role or a label: what the page's composer takes. The
+board keeps it with the event, and every board read and frame carries it."""
 NOTE_KINDS = frozenset({"note", "decision", "question", "result"})
 """The kinds a phone may post. The others (``attention``, ``limited``, ``agent_exited``,
 ``switched``…) are the fleet's own reports, which wake the manager or set an agent's state."""
@@ -2360,7 +2363,7 @@ def live_writes() -> Writes:
         if kind not in NOTE_KINDS:
             kinds = ", ".join(sorted(NOTE_KINDS))
             raise RequestError(400, "invalid", f"'kind' must be one of {kinds}")
-        author, to = _optional_ref(body, "as"), _optional_ref(body, "to")
+        author, to = _optional_ref(body, "as"), _optional_ref(body, "to", limit=NOTE_TO_MAX)
         event = team_service.add_note(
             text,
             session_ref=author,

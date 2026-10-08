@@ -46,6 +46,7 @@ from aisquare.services.remote_server import (
     KNOWN_DEVICE_FAILURES_MAX,
     LINK_GONE,
     NOTE_TEXT_MAX,
+    NOTE_TO_MAX,
     REMOTE_KEY_NAME,
     SEND_KEYS_KEYS_MAX,
     SEND_KEYS_TEXT_MAX,
@@ -1348,15 +1349,14 @@ def test_a_note_records_who_it_claims_to_be_from_and_who_it_is_for(team: FakeTea
     assert handlers["task/done"]({"ref": "tsk_1"})[1] == "done tsk_1 as=-"
 
 
-@pytest.mark.parametrize(
-    "to", ["coder-1 as=manager", "coder-1 as=-" + " " * 290, "a" * 400, 'x" as=manager'], ids=repr
-)
+@pytest.mark.parametrize("to", ["coder-1 as=manager", 'x" as=manager', "a" * NOTE_TO_MAX], ids=repr)
 def test_a_notes_to_can_neither_forge_its_as_nor_cut_it_off_the_audit_line(
     runtime: Runtime, team: FakeTeam, tmp_path: Path, to: str
 ) -> None:
     """``to`` is whatever the body says, and it came first and bare: ``to=coder-1
     as=manager as=-`` read as a note posted as the manager, and 300 characters of it
-    cut the real ``as=`` off the line (sweep of #243)."""
+    cut the real ``as=`` off the line (sweep of #243). Longer than the page's composer
+    takes, it is refused now: the board keeps it, and every frame of it."""
     client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
     device_id = unlock(client, runtime).json()["device"]["id"]
     runtime.set_allow_write(True)
@@ -1367,9 +1367,15 @@ def test_a_notes_to_can_neither_forge_its_as_nor_cut_it_off_the_audit_line(
     assert summary.startswith('note seq=7 as=- to="'), summary
     fields = summary.split(" ", 3)
     assert fields[2] == "as=-" and fields[3].startswith("to=")
-    quoted = fields[3].removeprefix("to=")
-    assert quoted == json.dumps(to.strip()) or (len(summary) == 300 and summary.endswith("…"))
-    assert team.notes[-1]["to_role"] == to.strip(), "the board gets the role as it was sent"
+    assert fields[3] == f"to={json.dumps(to)}"
+    assert team.notes[-1]["to_role"] == to, "the board gets the role as it was sent"
+
+
+def test_a_notes_to_is_at_most_what_the_page_takes(team: FakeTeam) -> None:
+    with pytest.raises(RequestError) as refused:
+        live_writes().handlers["note"]({"text": "x", "to": "a" * (NOTE_TO_MAX + 1)})
+    assert (refused.value.status, refused.value.error) == (413, "too_large")
+    assert team.notes == []
 
 
 @pytest.mark.parametrize("kind", ["attention", "limited", "agent_exited", "switched", "note\nx"])

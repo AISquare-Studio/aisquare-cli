@@ -318,10 +318,14 @@ def upgrade(
             detail=report.problem,
         )
     if not report.upgraded:
+        # Landed on an older release: the same command would land there again, so the
+        # way out is the one back to the release that ran.
+        back = report.way_back
+        then = f"Go back to {plan.current} with: {back}" if back else _fallback(plan)
         fail(
-            f"the upgrade could not be confirmed: {report.problem}. {_fallback(plan)}",
+            f"the upgrade could not be confirmed: {report.problem}. {then}",
             error="upgrade_not_confirmed",
-            hint=plan.command,
+            hint=back or plan.command,
             detail=report.problem,
         )
     _emit_report(report)

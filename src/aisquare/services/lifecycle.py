@@ -397,6 +397,19 @@ class UpgradeReport:
         """Whether a NEW process reports the version this upgrade was for."""
         return self.installed and self.problem is None and self.version is not None
 
+    @property
+    def way_back(self) -> str | None:
+        """The command that reinstalls the release that ran, when a run with no ``--version``
+        landed on an older one (:func:`_verify`); ``None`` otherwise. Running the same
+        command again would land there again."""
+        if self.plan.target is not None or self.version is None:
+            return None
+        if install_route.is_newer(self.plan.current, self.version) is not True:
+            return None
+        return install_route.command_line(
+            install_route.upgrade_argv(self.plan.route, self.plan.current)
+        )
+
 
 def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePlan:
     """Decide what ``aisquare upgrade`` would do. Reads only; starts nothing.
@@ -697,7 +710,8 @@ def _verify(plan: UpgradePlan) -> tuple[str | None, str | None]:
 
     The exit code of the installer is not the evidence: §3.9.1's failure was a
     success code over an unchanged version. So success is a version the new
-    process reports — the pin when one was asked for, otherwise any MOVE. An
+    process reports — the pin when one was asked for, otherwise any move that is
+    not BACK: a downgrade is only done by asking for one with ``--version``. An
     unchanged version is a failure exactly when PyPI said there is something
     newer; when PyPI was not asked or could not answer, it is the newest release
     the index serves, or the install's uv cutoff allows (:func:`_latest_for`).
@@ -716,6 +730,16 @@ def _verify(plan: UpgradePlan) -> tuple[str | None, str | None]:
         if install_route.same_version(found, plan.target):
             return found, None
         return found, f"{plan.target} was asked for, but the new install reports {found}"
+    if install_route.is_newer(plan.current, found):
+        # uv's @latest went back: a cutoff set in uv's settings after the install, which the
+        # receipt therefore does not record, or an index that is behind. Reported as a
+        # success, it said ✓, exit 0 and reopened asq, possibly on a release with no
+        # `upgrade` of its own (sweep of #257).
+        return found, (
+            f"the new install reports {found}, which is older than {plan.current} — an "
+            "exclude-newer cutoff in uv's settings (uv.toml, UV_EXCLUDE_NEWER) or an index "
+            "that is behind can make uv take an older release"
+        )
     latest = plan.latest_version
     if not install_route.same_version(found, plan.current) or latest is None:
         return found, None

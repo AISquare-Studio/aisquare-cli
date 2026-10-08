@@ -1576,6 +1576,55 @@ def test_a_build_ahead_of_pypi_is_not_moved_back_without_a_pin(
     assert machine.installs == [], "0.9.1 is OLDER than 0.10.0rc1 — that is a downgrade"
 
 
+@pytest.mark.parametrize(
+    "index", [None, "https://mirror.example/simple"], ids=["pypi", "own-index"]
+)
+def test_a_reinstall_that_lands_on_an_older_release_is_no_upgrade(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    index: str | None,
+) -> None:
+    """A cooldown added to uv.toml after the install, which the receipt therefore does not
+    record, or an index that is behind, lands uv's @latest on an OLDER release with exit 0
+    (measured, uv 0.12.19). That was "✓ aisquare 0.8.0 (was 0.8.1)", exit 0 and asq
+    reopened, maybe on a release with no `upgrade` of its own (sweep of #257). It fails,
+    names the way back, and asq stays shut."""
+    monkeypatch.setattr(lifecycle, "__version__", "0.8.1")
+    machine.latest = LatestRelease("0.8.2")
+    machine.new_version = "0.8.0"
+    if index is not None:
+        options = f"\n[tool.options]\nindex-url = {_toml(index)}\n"
+        (tool.prefix / install_route.RECEIPT_NAME).write_text(
+            _receipt(_OURS_PINNED, _TIKTOKEN, tail=options), encoding="utf-8"
+        )
+    _record(_hooked(tmp_path / "claude", tool.script))
+    back = install_route.command_line(
+        install_route.upgrade_argv(install_route.classify(tool.facts), "0.8.1")
+    )
+    prompts: list[str] = []
+
+    def enter(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr(install_cli, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr("builtins.input", enter)
+
+    human = runner.invoke(app, ["upgrade", "--yes", "--reopen"])
+    error = _one_object(runner.invoke(app, ["--json", "upgrade", "--yes"]).stdout)
+
+    assert human.exit_code == 1, human.output
+    assert "the new install reports 0.8.0, which is older than 0.8.1" in human.stderr
+    assert f"Go back to 0.8.1 with: {back}" in human.stderr, human.stderr
+    assert "aisquare-cli[serve]@0.8.1" in back and (index is None or index in back), back
+    assert "✓" not in human.stdout and prompts == [], "no success, and asq is not reopened"
+    assert machine.connects() == [], "no hook refresh for a release that moved back"
+    assert error["error"] == "upgrade_not_confirmed" and error["hint"] == back, error
+
+
 def test_a_version_that_is_not_a_version_is_refused_before_anything(
     runner: CliRunner, machine: Machine
 ) -> None:

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
+from rich.color import Color
 from textual.pilot import Pilot
 from textual.widgets import Button, DataTable, Select, Static, Switch
 
@@ -749,6 +750,47 @@ def test_a_repaint_reads_the_status_once_and_draws_the_qr_only_for_a_new_link(
         assert shown(modal.query_one("#remote-link", Static)) == app.remote.public_url
 
     drive(go, tunnel=missing_ngrok)
+
+
+def brightness(color: Color | None) -> float:
+    assert color is not None, "a QR cell painted in no colour of its own"
+    red, green, blue = color.get_truecolor()
+    return 0.299 * red + 0.587 * green + 0.114 * blue
+
+
+@pytest.mark.parametrize("theme", ["textual-dark", "textual-light", "solarized-light"])
+def test_the_qr_is_light_on_dark_in_every_theme(theme: str) -> None:
+    """segno's compact art draws the light modules as glyphs, so in a light theme's colours
+    the QR came out reflectance-reversed, its quiet zone a dark frame, and a scanner without
+    inversion support could not read it (sweep of #243). Every glyph of it is painted
+    lighter than the ground it stands on, whatever the theme."""
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        app.theme = theme
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        qr = modal.query_one("#remote-qr", Static)
+        region = qr.region
+        assert region.height >= 15, "the QR is on screen"
+        update = app.screen._compositor.render_full_update(simplify=True)
+        rows = [strip for (strip,) in update.strips]  # simplified: one strip a row
+        glyphs = 0
+        for row in rows[region.y : region.y + region.height]:
+            x = 0
+            for segment in row:
+                inside = region.x <= x < region.x + region.width
+                x += len(segment.text)
+                if not inside or not set(segment.text) & set("█▀▄") or segment.style is None:
+                    continue
+                glyphs += 1
+                style = segment.style
+                assert brightness(style.color) > brightness(style.bgcolor), (theme, style)
+        assert glyphs > 10
+
+    drive(go, tunnel=missing_ngrok, size=(160, 100))
 
 
 def test_qr_text_is_compact_half_block_art_of_the_url() -> None:

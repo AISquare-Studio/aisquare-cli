@@ -10,7 +10,8 @@ from ngrok's log on a background thread. Opened like the theme picker
 
 The QR is segno's compact terminal rendering (half-block characters, ~18 rows
 for an ngrok URL) of exactly the text in the link row — one string feeds both,
-so what the phone scans is what the human reads.
+so what the phone scans is what the human reads — in colours of its own, never
+the theme's (:data:`QR_COLOURS`).
 """
 
 from __future__ import annotations
@@ -32,6 +33,21 @@ from aisquare.cli.ui.remote_control import (
 )
 
 QR_UNAVAILABLE = "QR unavailable — pip install segno"
+QR_COLOURS = "#ffffff on #000000"
+"""The QR's own colours: light glyphs on a dark ground, whatever the theme.
+
+segno's compact art draws the LIGHT modules as block glyphs and leaves the dark
+ones to the background, so it reads right only light-on-dark. In the theme's
+colours, every light theme (``t`` offers five) and an ANSI one on a light
+terminal drew it reflectance-reversed, its quiet zone a dark frame: a scanner
+without inversion support could not read it (sweep of #243). Not "black on
+white", which reverses it in every theme."""
+
+
+def qr_art(url: str) -> Text:
+    """The QR for ``url`` in :data:`QR_COLOURS`; the notice, plain, when segno is absent."""
+    art = qr_text(url)
+    return Text(art) if art == QR_UNAVAILABLE else Text(art, style=QR_COLOURS)
 
 
 def qr_text(url: str) -> str:
@@ -166,7 +182,7 @@ class RemotePanel(ModalScreen[None]):
         if url != self._qr_url:
             self._qr_url = url
             self.query_one("#remote-link", Static).update(Text(url or "turn Remote on for a link"))
-            self.query_one("#remote-qr", Static).update(qr_text(url) if url else "")
+            self.query_one("#remote-qr", Static).update(qr_art(url) if url else "")
         self.query_one("#remote-regen", Button).disabled = not running
         self.query_one("#remote-copy", Button).disabled = url is None
         self._paint_devices(controller.devices(status))

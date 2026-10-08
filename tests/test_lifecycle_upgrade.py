@@ -1107,6 +1107,46 @@ def test_at_a_terminal_it_asks_and_no_means_nothing_runs(
     assert len(machine.installs) == 1
 
 
+def test_a_site_left_for_its_settings_file_is_not_told_its_hooks_were_removed(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path
+) -> None:
+    """The reason came from uninstall: "so they cannot be removed safely", in a plan that
+    removes nothing (review of #257)."""
+    site = _hooked(tmp_path / "claude", tool.script)
+    text = (site / "settings.json").read_text(encoding="utf-8")
+    (site / "settings.json").write_text(text[: text.rindex("\n}")] + ",\n}", encoding="utf-8")
+    _record(site)
+
+    result = runner.invoke(app, ["--json", "upgrade", "--check"])
+
+    left = _one_object(result.stdout)["hooks_left"]
+    assert [entry["config_dir"] for entry in left] == [str(site)], left
+    assert left[0]["reason"].endswith("so aisquare cannot rewrite it safely"), left
+    assert "removed" not in left[0]["reason"], left
+
+
+def test_a_recorded_config_dir_this_user_cannot_enter_is_left_with_its_reason(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path
+) -> None:
+    """exists() before the read raised PermissionError on 3.11/3.12, so `upgrade --check`
+    and asq's Update failed outright; on 3.13 the directory passed as one with no hooks
+    (review of #257)."""
+    if sys.platform == "win32" or not can_deny_reads():
+        pytest.skip("needs a directory this user cannot enter")
+    site = _hooked(tmp_path / "claude-old", tool.script)
+    _record(site)
+    site.chmod(0)
+    try:
+        result = runner.invoke(app, ["--json", "upgrade", "--check"])
+    finally:
+        site.chmod(0o700)
+
+    assert result.exit_code == 0, result.output
+    left = _one_object(result.stdout)["hooks_left"]
+    assert [entry["config_dir"] for entry in left] == [str(site)], left
+    assert "its settings.json could not be read" in left[0]["reason"], left
+
+
 def _live_fleet_agent(root: Path, label: str = "coder-1") -> None:
     """A fleet row the board lists as live, as `fleet spawn` records one."""
     root.mkdir(parents=True, exist_ok=True)

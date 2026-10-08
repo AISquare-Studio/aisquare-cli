@@ -554,10 +554,13 @@ def settings_unreadable(directory: Path) -> str | None:
     command's business (review of #254).
     """
     settings = directory / "settings.json"
-    if not settings.exists():
-        return None
+    # One read, "missing" split out. An exists() first raised PermissionError on
+    # 3.11/3.12 for a directory this user cannot enter, and answered False on 3.13,
+    # passing it as one with no hooks; either broke the promise above (review of #257).
     try:
         raw = settings.read_bytes()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
     except OSError as exc:
         return f"its settings.json could not be read ({exc})"
     problem: str | None = None
@@ -570,7 +573,12 @@ def settings_unreadable(directory: Path) -> str | None:
             problem = "is not a JSON object with a hooks object"
     if problem is None or not lenient_hook_commands(lenient_text(raw)):
         return None
-    return f"its settings.json holds aisquare hooks but {problem}, so they cannot be removed safely"
+    # Said by upgrade's plan and by uninstall's: both act on the hooks by rewriting the
+    # file, so the ending names that, not either command's verb (review of #257).
+    return (
+        f"its settings.json holds aisquare hooks but {problem}, "
+        "so aisquare cannot rewrite it safely"
+    )
 
 
 def hook_binaries(directory: Path) -> tuple[list[agent_core.HookBinary], str | None]:

@@ -983,6 +983,28 @@ def test_an_unreadable_settings_file_is_reported_not_raised(
     assert plan.hooks == ()
 
 
+def test_a_recorded_config_dir_this_user_cannot_enter_is_reported_not_raised(
+    tool: Tool, world: World, runner: CliRunner, isolated_agent_home: Path
+) -> None:
+    """An exists() before the read raised PermissionError on 3.11/3.12 for a directory this
+    user cannot enter (a backup left at mode 000), so the plan never printed; on 3.13 it
+    read as a directory with no hooks (review of #257)."""
+    if sys.platform == "win32" or not can_deny_reads():
+        pytest.skip("needs a directory this user cannot enter")
+    old = _hooked(isolated_agent_home / ".claude-old", tool.script)
+    _record(old)
+    old.chmod(0)
+    try:
+        result = runner.invoke(app, ["--json", "uninstall"])
+    finally:
+        old.chmod(0o700)
+
+    assert result.exit_code == 0, result.output
+    unreadable = _one_object(result.stdout)["unreadable"]
+    assert [site["config_dir"] for site in unreadable] == [str(old)], unreadable
+    assert "its settings.json could not be read" in unreadable[0]["reason"], unreadable
+
+
 # --- review of #253, round 1 -------------------------------------------------------------
 
 
@@ -1373,7 +1395,7 @@ def test_hooks_in_a_file_that_is_not_valid_json_keep_the_package(
 
     if ours:
         assert result.exit_code == 1
-        assert "cannot be removed safely" in result.stdout
+        assert "so aisquare cannot rewrite it safely" in result.stdout
         assert world.execs == [], "the package stays while hooks may still call it"
     else:
         assert result.exit_code == 0, result.output

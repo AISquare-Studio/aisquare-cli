@@ -57,6 +57,7 @@ from aisquare.services.remote_needs import (
     needs_item_current,
     needs_item_id,
     needs_push_safe,
+    needs_single_agent_now,
     needs_tool_pending,
     record_needs_dismissal,
     scan_needs_you,
@@ -1358,6 +1359,182 @@ def test_a_listing_that_fails_is_not_an_answer(monkeypatch: pytest.MonkeyPatch) 
     fleet.listing_fails = True
     with pytest.raises(fleet_service.FleetUnavailable):
         _now_of(fleet, FakeTmux(reference=NOW), monkeypatch)
+
+
+# --- the agent alone: what an action reads while its Escape lands -------------------------
+
+
+def _never(*_args: object, **_kwargs: object) -> Any:
+    raise AssertionError("a read of one agent went through its whole project")
+
+
+def _alone_of(
+    fleet: Fleet, tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch, label: str = "coder-1"
+) -> AgentNow:
+    """``needs_single_agent_now`` over the facts :func:`_now_of` scans: the rows in the store,
+    each derived as the fake fleet lists it, the tails as it holds them. Listing the project,
+    or building the scan's sources, fails the test."""
+    statuses = {status.agent.id: status for status in fleet.agents}
+    with store_session() as store:
+        for status in fleet.agents:
+            store.upsert_fleet_agent(status.agent)
+    monkeypatch.setattr(fleet_service, "status_of", lambda row: statuses[row.id])
+    monkeypatch.setattr(fleet_service, "list_agents", _never)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    monkeypatch.setattr(remote_needs, "live_needs_sources", _never)
+    monkeypatch.setattr(remote_needs, "_needs_cached_tail", fleet.tails.get)
+    return needs_single_agent_now(PROJECT, label, now=NOW)
+
+
+def _attention_answered() -> Fleet:
+    escaped = _tail(newest="interrupted", at=NOW - timedelta(minutes=1), text="Stopping.")
+    return _working(escaped, state="attention")
+
+
+def _lost() -> Fleet:
+    row = _row()
+    return Fleet(agents=[_status(row, "lost", _session(row, state="attention"))])
+
+
+@pytest.mark.parametrize(
+    ("situation", "tmux"),
+    [
+        pytest.param(
+            lambda: _working(_tail(_tool("toolu_a"))),
+            FakeTmux(reference=NOW),
+            id="a tool pending in a quiet pane",
+        ),
+        pytest.param(
+            lambda: _working(_tail(_tool("toolu_a"))),
+            FakeTmux(reference=NOW, quiet_for=1),
+            id="a tool at work",
+        ),
+        pytest.param(
+            lambda: _working(_tail(_tool("toolu_q", "AskUserQuestion", **QUESTION))),
+            FakeTmux(reference=NOW, quiet_for=0),
+            id="a question in a busy pane",
+        ),
+        pytest.param(
+            lambda: _working(None, state="attention"),
+            FakeTmux(reference=NOW),
+            id="attention",
+        ),
+        pytest.param(_attention_answered, FakeTmux(reference=NOW), id="attention escaped"),
+        pytest.param(
+            lambda: _working(None, state="waiting"),
+            FakeTmux(reference=NOW),
+            id="waiting at its prompt",
+        ),
+        pytest.param(
+            lambda: _working(_tail(_tool("toolu_a")), state="attention"),
+            FakeTmux(reference=NOW, command="zsh"),
+            id="a shell in its pane",
+        ),
+        pytest.param(_lost, FakeTmux(reference=NOW), id="lost"),
+    ],
+)
+def test_the_agent_alone_answers_what_an_action_asks_as_its_projects_scan_does(
+    situation: Callable[[], Fleet], tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every poll after an action's Escape read the project's whole scan, up to 32 of them
+    for one Interrupt & tell (review of #243, round 3, 4/13). The agent's own facts are
+    enough for what a poll asks: the dialog, the pending tool, the prompt."""
+    scanned = _now_of(situation(), tmux, monkeypatch)
+    alone = _alone_of(situation(), tmux, monkeypatch)
+    for predicate in (needs_dialog_open, needs_tool_pending, needs_at_input_prompt):
+        assert predicate(alone) == predicate(scanned), predicate.__name__
+    assert (alone.pane_is_agent, alone.pane_quiet) == (scanned.pane_is_agent, scanned.pane_quiet)
+    assert alone.status == scanned.status and alone.tail == scanned.tail
+    assert alone.items == scanned.items, "no board here, so even the ids are the scan's"
+
+
+def test_without_the_board_a_dialogs_item_is_still_a_dialog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The board names the usage-limit dialog (its notification's text). Without it the item
+    is the plain dialog's, with another id: the kind a predicate reads, never a card's id,
+    which an action matches before its Escape, on the project's scan."""
+    fleet = _working(None, state="attention")
+    session = fleet.agents[0].session
+    fleet.events = [_event(9, "attention", "Session paused: usage limit", session=session)]
+    scanned = _now_of(fleet, FakeTmux(reference=NOW), monkeypatch)
+    alone = _alone_of(fleet, FakeTmux(reference=NOW), monkeypatch)
+    assert [item.kind for item in scanned.items] == ["limited"]
+    assert [item.kind for item in alone.items] == ["permission"]
+    assert needs_dialog_open(scanned) and needs_dialog_open(alone)
+
+
+def test_the_agent_alone_is_derived_on_its_own_server_and_its_transcript_alone_is_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``fleet.status_of`` for real, over the store: coder-1's row and session derive it
+    ``attention``, only its pane is asked about and only its transcript read. The reviewer's
+    pane and transcript, and the project's listing, are never touched."""
+    one, other = _row(), _row("reviewer", role="reviewer")
+    with store_session() as store:
+        for row in (one, other):
+            store.upsert_fleet_agent(row)
+            store.upsert_session(_session(row, state="attention", seen=NOW - timedelta(seconds=30)))
+    read: list[str] = []
+
+    def cached_tail(path: str) -> TranscriptTail:
+        read.append(path)
+        return _tail(_tool("toolu_a"))
+
+    tmux = FakeTmux(reference=NOW)
+    monkeypatch.setattr(fleet_service, "_now", lambda: NOW)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    monkeypatch.setattr(fleet_service, "list_agents", _never)
+    monkeypatch.setattr(remote_needs, "live_needs_sources", _never)
+    monkeypatch.setattr(remote_needs, "_needs_cached_tail", cached_tail)
+    snap = needs_single_agent_now(PROJECT, "coder-1", now=NOW)
+    assert snap.status is not None
+    assert (snap.status.agent.id, snap.status.state) == (one.id, "attention")
+    assert set(tmux.asked) == {one.pane_id}, "the reviewer's pane is never asked about"
+    assert read == ["/transcripts/coder-1.jsonl"]
+    assert snap.pane_is_agent and snap.pane_quiet is True
+    assert [item.kind for item in snap.items] == ["permission"] and needs_dialog_open(snap)
+
+
+def test_the_agent_alone_is_the_newest_row_holding_the_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restart since the Escape: the label reads as the newcomer, whom the action's pin
+    then refuses. A label no row holds is no agent."""
+    old = _row(ended=NOW - timedelta(seconds=5), exit_status=0)
+    new = _row(created=NOW - timedelta(seconds=2), row_id="agt_new")
+    with store_session() as store:
+        store.upsert_fleet_agent(old)
+        store.upsert_fleet_agent(new)
+    tmux = FakeTmux(reference=NOW)
+    monkeypatch.setattr(fleet_service, "_now", lambda: NOW)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    snap = needs_single_agent_now(PROJECT, "coder-1", now=NOW)
+    assert snap.status is not None and snap.status.agent.id == "agt_new"
+    with pytest.raises(fleet_service.NoSuchAgent):
+        needs_single_agent_now(PROJECT, "ghost", now=NOW)
+
+
+def test_the_agent_alone_never_asks_about_the_pane_of_a_row_that_ended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent exited while its Escape landed. Its row reads ``exited``, and the pane under
+    its id, which the next server may have given another agent, is never asked about: no
+    dialog, no prompt, nothing to type into."""
+    row = _row(ended=NOW - timedelta(seconds=1), exit_status=0)
+    with store_session() as store:
+        store.upsert_fleet_agent(row)
+        store.upsert_session(_session(row, state="attention", seen=NOW - timedelta(seconds=30)))
+    tmux = FakeTmux(reference=NOW)
+    monkeypatch.setattr(fleet_service, "_now", lambda: NOW)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    monkeypatch.setattr(remote_needs, "_needs_cached_tail", lambda path: _tail(_tool("toolu_a")))
+    snap = needs_single_agent_now(PROJECT, "coder-1", now=NOW)
+    assert snap.status is not None and snap.status.state == "exited"
+    assert tmux.asked == [] and not snap.pane_is_agent and snap.pane_quiet is None
+    assert snap.items == () and snap.tail is None
+    for predicate in (needs_dialog_open, needs_tool_pending, needs_at_input_prompt):
+        assert not predicate(snap), predicate.__name__
 
 
 # --- the live sources, over a real store --------------------------------------------------

@@ -2,9 +2,10 @@
 
 The fleet service is replaced by recorders (``fleet_service.tell/stop/restart/switch``),
 tmux by a pane that writes down what it was sent, and needs-you's view of the agent
-(``remote_needs.needs_agent_now`` and its predicates) by a fake whose dialog closes on
-an Escape, as Claude Code's does. The project and its rows are real, in the isolated
-store, so a pin is checked against what ``fleet ls --all`` would show.
+(``remote_needs.needs_agent_now``, ``needs_single_agent_now`` and the predicates) by a
+fake whose dialog closes on an Escape, as Claude Code's does. The project and its rows
+are real, in the isolated store, so a pin is checked against what ``fleet ls --all``
+would show.
 """
 
 from __future__ import annotations
@@ -637,7 +638,10 @@ class FakeNeeds:
 
     ``tail`` and ``pane_quiet`` are handed over as they are, for the predicates that read
     them: an Escape that closes the dialog answers the tail's pending tools too, as Claude
-    Code records a rejected or interrupted tool use."""
+    Code records a rejected or interrupted tool use.
+
+    Both reads give the same view: the project's scan (``needs_agent_now``, counted in
+    ``scans``) and the one agent's (``needs_single_agent_now``). ``reads`` counts both."""
 
     def __init__(self, pane: FakePane) -> None:
         self.pane = pane
@@ -657,11 +661,18 @@ class FakeNeeds:
         self.pane_quiet: bool | None = True
         self.before_read: Callable[[], None] | None = None
         self.reads = 0
+        self.scans = 0
         self._escapes = 0
         self._since_escape: int | None = None
         self._views: list[tuple[AgentNow, bool, bool, bool]] = []
 
     def needs_agent_now(
+        self, project: ProjectInfo, label: str, *, now: datetime | None = None
+    ) -> AgentNow:
+        self.scans += 1
+        return self.needs_single_agent_now(project, label, now=now)
+
+    def needs_single_agent_now(
         self, project: ProjectInfo, label: str, *, now: datetime | None = None
     ) -> AgentNow:
         self.reads += 1
@@ -707,7 +718,7 @@ class FakeNeeds:
         for seen, dialog, prompt, interrupted in reversed(self._views):
             if seen is snap:
                 return dialog, prompt, interrupted
-        raise AssertionError("a snapshot needs_agent_now never gave")
+        raise AssertionError("a snapshot this fake never gave")
 
     def needs_dialog_open(self, snap: AgentNow) -> bool:
         if snap.status is None or not snap.pane_is_agent:
@@ -736,6 +747,7 @@ def _a_dialog(item: NeedsItem, state: str) -> bool:
 def needs(monkeypatch: pytest.MonkeyPatch, pane: FakePane) -> FakeNeeds:
     fake = FakeNeeds(pane)
     monkeypatch.setattr(remote_needs, "needs_agent_now", fake.needs_agent_now)
+    monkeypatch.setattr(remote_needs, "needs_single_agent_now", fake.needs_single_agent_now)
     monkeypatch.setattr(remote_needs, "needs_dialog_open", fake.needs_dialog_open)
     monkeypatch.setattr(remote_needs, "needs_at_input_prompt", fake.needs_at_input_prompt)
     monkeypatch.setattr(remote_needs, "needs_item_current", fake.needs_item_current)
@@ -1159,7 +1171,10 @@ def test_dismiss_dialog_sends_one_escape_then_acts_once_the_dialog_closed(
     assert response.status_code == 200, response.text
     assert log == ["key Escape", f"fleet {name.removeprefix('agent/')}"]
     assert pane.sent == [("%7", "key", "Escape")] and pane.sockets == ["asq-test"]
-    assert needs.reads == 4, "the guard's read, then a poll until the dialog had closed"
+    assert (needs.scans, needs.reads) == (1, 4), (
+        "the guard's read of the project, then polls of the agent alone until the dialog had "
+        "closed: never the project's scan again while the Escape lands"
+    )
     assert "dismissed=yes" in phone.audit()[0][1]
 
 
@@ -1602,7 +1617,9 @@ def test_interrupt_sends_one_escape_then_types_once_at_the_prompt(
         == "interrupted it with Escape, then typed into its pane at its prompt"
     )
     assert log == ["key Escape", "paste", "key Enter"], "one Escape: two open the Rewind selector"
-    assert needs.reads == 4, "the first read, then a poll until the prompt was back"
+    assert (needs.scans, needs.reads) == (1, 4), (
+        "the first read, of the project, then polls of the agent alone until the prompt was back"
+    )
     assert fleet.calls == []
 
 
@@ -1669,7 +1686,7 @@ def test_the_interrupt_reads_the_agent_every_quarter_second_until_the_wait_is_ov
     response = phone.post("agent/tell", agent=LABEL, text="hi", mode="interrupt")
     assert response.status_code == 409 and response.json()["error"] == "still_busy"
     assert fake_time.slept == [0.25] * 32, "8 s of polls: the quiet window, then the settle time"
-    assert needs.reads == 1 + 32
+    assert (needs.scans, needs.reads) == (1, 1 + 32), "32 polls, each of the agent alone"
 
 
 @pytest.mark.parametrize("pin", [{"agent_id": "agt_one"}, {}])

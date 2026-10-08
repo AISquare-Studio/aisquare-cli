@@ -51,10 +51,10 @@ hand-over. ``GET api/actions/recent`` (:func:`action_routes`) and the stream's
 no other.
 
 What the agent shows right now comes from needs-you (``needs_agent_now`` and its
-predicates), always called through the ``remote_needs`` module, so a test can
-stand in for it. ``remote_server`` imports this module inside functions only, so
-neither is on the hook path (SPEC §0.2, §7.3). The fleet service is imported
-where it is used.
+predicates, and ``needs_single_agent_now`` while an Escape lands), always called
+through the ``remote_needs`` module, so a test can stand in for it.
+``remote_server`` imports this module inside functions only, so neither is on
+the hook path (SPEC §0.2, §7.3). The fleet service is imported where it is used.
 """
 
 from __future__ import annotations
@@ -500,17 +500,24 @@ def action_locked(target: ProjectInfo, label: str, agent_id: str | None) -> Iter
 # --- what the agent shows now ------------------------------------------------------------------
 
 
-def action_snapshot(
-    target: ProjectInfo, label: str, pin: str, *, escaped: bool = False
+def action_snapshot(target: ProjectInfo, label: str, pin: str) -> AgentNow:
+    """The agent as needs-you's scan of its project reads it now, which must still be the
+    row ``pin`` names: what an action decides on before it sends anything."""
+    snap = action_fleet_call(lambda: remote_needs.needs_agent_now(target, label))
+    return action_still_pinned(target, label, pin, snap, escaped=False)
+
+
+def action_still_pinned(
+    target: ProjectInfo, label: str, pin: str, snap: AgentNow, *, escaped: bool
 ) -> AgentNow:
-    """The agent as needs-you reads it now, which must still be the row ``pin`` names.
+    """``snap``, while it is of the row ``pin`` names; 409 ``stale`` once another row holds
+    the label.
 
     The pin is the row read under the lock: the body's ``agent_id`` when it had
     one, else whoever held the label then. Every snapshot is checked, not only
     the first. The reads after an Escape go on for seconds, and the pane the
     paste goes to must belong to the agent the Escape went to.
     """
-    snap = action_fleet_call(lambda: remote_needs.needs_agent_now(target, label))
     if snap.status is not None and snap.status.agent.id != pin:
         raise action_stale(target, label, snap.status.agent, escaped=escaped)
     return snap
@@ -586,12 +593,19 @@ def action_settle(
 
     The first read comes one poll after the Escape, never at once. Until Claude
     Code redraws, the pane still shows what it showed before.
+
+    Each read is of this one agent (``needs_single_agent_now``): its row, its
+    session, its pane and its tail. The project's scan ran before the Escape, and
+    all a poll asks is whether the agent's dialog closed or its prompt came back.
+    One Interrupt & tell was up to 32 scans of the project, with this agent's lock
+    held: tmux on every socket, every row the project ever had, its board and
+    every agent's transcript (review of #243, round 3, 4/13).
     """
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         time.sleep(ACTION_POLL_SECONDS)
-        snap = action_snapshot(target, label, pin, escaped=True)
-        if reached(snap):
+        snap = action_fleet_call(lambda: remote_needs.needs_single_agent_now(target, label))
+        if reached(action_still_pinned(target, label, pin, snap, escaped=True)):
             return snap
     return None
 

@@ -31,6 +31,17 @@ DEFAULT_PORT = 8750
 #: ``serve --auto-off``: an hour, like the TUI's. A server nobody turns off is a link
 #: anyone holding it can keep reaching; ``0`` (never) is a choice the banner names.
 DEFAULT_AUTO_OFF_MINUTES = 60
+#: The longest ``--auto-off``: a week, the longest a phone stays signed in (the server's
+#: ``DEVICE_LIFETIME``); longer is what ``0`` says. Unbounded, a value past year 9999
+#: ended ``serve`` in an ``OverflowError`` traceback (sweep of #243).
+MAX_AUTO_OFF_MINUTES = 7 * 24 * 60
+
+#: Every option naming the port takes a port, as the R panel reads ``AISQUARE_REMOTE_PORT``
+#: (``remote_control._panel_port``). ``0`` served on whatever port the system picked while
+#: the banner and ``status`` printed ``:0`` links that refused every connection, and one
+#: past 65535 ended ``serve`` in an ``OverflowError`` traceback, with no ``--json`` answer
+#: (sweep of #243). Out of range, each is a usage error, in ``--json`` too.
+MIN_PORT, MAX_PORT = 1, 65535
 
 #: The port in the link ``status`` and ``regenerate-password --new-link`` print: serve's,
 #: from the same option and variable. Built for the default port, the link of a serve on
@@ -41,6 +52,8 @@ LinkPort = Annotated[
         "--port",
         help="The port serve runs on, for the link (serve's --port).",
         envvar="AISQUARE_REMOTE_PORT",
+        min=MIN_PORT,
+        max=MAX_PORT,
     ),
 ]
 
@@ -96,7 +109,10 @@ def _describe_remote(info: RemoteInfo, *, allow_write: bool) -> dict[str, object
 @app.command("serve")
 def serve_remote(
     port: Annotated[
-        int, typer.Option("--port", help="Local port.", envvar="AISQUARE_REMOTE_PORT")
+        int,
+        typer.Option(
+            "--port", help="Local port.", envvar="AISQUARE_REMOTE_PORT", min=MIN_PORT, max=MAX_PORT
+        ),
     ] = DEFAULT_PORT,
     dist: Annotated[
         Path | None,
@@ -110,9 +126,11 @@ def serve_remote(
         typer.Option(
             "--auto-off",
             min=0,
+            max=MAX_AUTO_OFF_MINUTES,
             metavar="MINUTES",
             envvar="AISQUARE_REMOTE_AUTO_OFF",
-            help="Turn Remote off after this many minutes; a phone can extend it. 0: never.",
+            help="Turn Remote off after this many minutes, a week at most; a phone can "
+            "extend it. 0: never.",
         ),
     ] = DEFAULT_AUTO_OFF_MINUTES,
     public_url: Annotated[

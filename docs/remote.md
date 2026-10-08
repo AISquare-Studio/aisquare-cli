@@ -81,8 +81,8 @@ auto-off. Its options:
 
 | option | default | what it does |
 | --- | --- | --- |
-| `--port N` | 8750 (`AISQUARE_REMOTE_PORT`) | the local port |
-| `--auto-off MINUTES` | 60 (`AISQUARE_REMOTE_AUTO_OFF`) | Remote turns itself off after this long; `0` means never, and the banner says so |
+| `--port N` | 8750 (`AISQUARE_REMOTE_PORT`) | the local port, 1 to 65535 |
+| `--auto-off MINUTES` | 60 (`AISQUARE_REMOTE_AUTO_OFF`) | Remote turns itself off after this long, a week (10080) at most; `0` means never, and the banner says so |
 | `--public-url URL` | `AISQUARE_REMOTE_NGROK_URL` | the https address phones use, for the links in notifications; without it a notification opens the page, not its card |
 | `--dist DIR` | the page aisquare-cli carries | serve another build of the page |
 

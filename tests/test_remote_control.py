@@ -28,6 +28,7 @@ from typing import Any, cast
 import pytest
 from typer.testing import CliRunner
 
+from aisquare.cli import remote as remote_cli
 from aisquare.cli.app import app as cli
 from aisquare.cli.ui import remote_control
 from aisquare.cli.ui.remote_control import (
@@ -51,6 +52,8 @@ from aisquare.services.ngrok_tunnel import (
 )
 
 STARTED = {"lvl": "info", "msg": "started tunnel", "url": "https://abcd-12.ngrok-free.app"}
+PORT_ENV = remote_control.PORT_ENV
+AUTO_OFF_ENV = "AISQUARE_REMOTE_AUTO_OFF"
 
 # --- the URL builder: the modal's link text ---------------------------------------------
 
@@ -1395,3 +1398,64 @@ def test_a_port_the_panel_cannot_use_is_a_sentence_and_unset_is_the_default() ->
             given.turn_on()
             assert given.link_url() == f"http://127.0.0.1:18999/r/{server.token}/", raw
             given.turn_off()
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "65536", "70000"])
+def test_a_port_no_command_can_use_is_a_usage_error_never_a_dead_link_or_a_traceback(
+    raw: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The panel refuses an ``AISQUARE_REMOTE_PORT`` that is no port (the test above), and
+    every command reads the same variable: ``serve --port 0`` served on a port the system
+    picked while its banner printed ``:0`` links that refused every connection, ``status``
+    printed ``:70000``, and ``serve --port 70000`` ended in an ``OverflowError`` traceback
+    with nothing on stdout under ``--json`` (sweep of #243). The panel's port, and only
+    that, is every command's."""
+
+    def served(*args: object, **kwargs: object) -> bool:
+        raise AssertionError(f"served on port {raw}")
+
+    monkeypatch.setattr(remote_server, "run_foreground", served)
+    runner = CliRunner()
+    flagged = [
+        ["remote", "serve", "--port", raw],
+        ["remote", "status", "--port", raw],
+        ["remote", "regenerate-password", "--new-link", "--port", raw],
+    ]
+    exported = [["remote", "serve"], ["remote", "status"]]
+    for command, exports in [(c, {}) for c in flagged] + [(c, {PORT_ENV: raw}) for c in exported]:
+        result = runner.invoke(cli, ["--json", *command], env=exports)
+        assert result.exit_code == 2, (command, exports, result.output)
+        answer = json.loads(result.stdout)
+        assert answer["error"] == "usage", (command, exports)
+        assert "not in the range 1<=x<=65535" in answer["message"], (command, exports)
+    assert not paths.remote_state_path().exists(), "refused before anything was read or made"
+    with pytest.MonkeyPatch.context() as env:
+        env.setenv(PORT_ENV, raw)
+        assert RemoteController(server=fake_server())._port_problem is not None, "the panel too"
+
+
+def test_an_auto_off_past_a_week_is_a_usage_error_never_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``serve --auto-off 99999999999`` (or the variable) ended in an ``OverflowError``
+    traceback, a date past year 9999 (sweep of #243). A week, the longest a phone stays
+    signed in, is the most; ``0`` is never."""
+    timers: list[object] = []
+
+    def served(dist: object, port: int, auto_off: int, *args: object, **kwargs: object) -> bool:
+        timers.append(auto_off)
+        return False
+
+    monkeypatch.setattr(remote_server, "run_foreground", served)
+    week = remote_cli.MAX_AUTO_OFF_MINUTES
+    assert timedelta(minutes=week) == remote_server.DEVICE_LIFETIME, "the longest sign-in"
+    runner = CliRunner()
+    for raw in ("10081", "99999999999"):
+        flagged = runner.invoke(cli, ["--json", "remote", "serve", "--auto-off", raw])
+        exported = runner.invoke(cli, ["--json", "remote", "serve"], env={AUTO_OFF_ENV: raw})
+        for result in (flagged, exported):
+            assert result.exit_code == 2, result.output
+            assert "not in the range 0<=x<=10080" in json.loads(result.stdout)["message"]
+    for raw in ("10080", "0"):
+        assert runner.invoke(cli, ["remote", "serve", "--auto-off", raw]).exit_code == 0
+    assert timers == [10080, 0]

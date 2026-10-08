@@ -203,7 +203,7 @@ aisquare --json remote needs
 | plan | an agent asks you to approve its plan |
 | board_question | the manager (or a coder with no manager left) asks on the board |
 | manager_down | the manager stopped while agents still work, or crashed |
-| crashed | an agent exited with an error in the last hour, its task unfinished, while no manager runs to handle it (one parked on its usage limit does not count) |
+| crashed | an agent exited with an error in the last hour, or was stopped for a switch or a restart that could not start its replacement, its task unfinished, while no manager runs to handle it (one parked on its usage limit does not count) |
 | limited | an agent hit its usage limit |
 | lost | an agent's pane is gone |
 | fleet_down | tmux is not answering for a project |

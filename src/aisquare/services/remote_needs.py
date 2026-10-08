@@ -1256,7 +1256,13 @@ def _needs_scan_project(
                 items.append(_needs_dated(item, first_seen, seen) if item.kind == "lost" else item)
         items.extend(
             _needs_crashed(
-                ended, rows, project=project, now=now, manager_live=manager_live, sources=sources
+                ended,
+                rows,
+                board,
+                project=project,
+                now=now,
+                manager_live=manager_live,
+                sources=sources,
             )
         )
         items.extend(_needs_manager_down(statuses, rows, board, project=project, now=now))
@@ -1460,6 +1466,7 @@ def _needs_still_remembered(
 def _needs_crashed(
     ended: Sequence[FleetAgent],
     rows: Sequence[FleetAgent],
+    board: Sequence[TeamEvent],
     *,
     project: ProjectInfo,
     now: datetime,
@@ -1469,7 +1476,10 @@ def _needs_crashed(
     """Agents that died with a failing exit status in the last hour, with nobody on it.
 
     A clean ``/exit`` is 0 and a forced stop has no status: neither is a crash.
-    An agent whose task is closed did its work; one a live manager has (it was
+    Except the ``/exit`` of a switch or a restart that then could not start the
+    replacement: nothing took the agent's place, and the exit it announced says
+    so (``fleet.HANDOVER_FAILED``, read from the board's day, ``board``). An
+    agent whose task is closed did its work; one a live manager has (it was
     nudged on the exit) is the manager's; one that was restarted since — a newer
     row holds its label — was handled. The manager's own crash is
     ``manager_down``.
@@ -1483,19 +1493,27 @@ def _needs_crashed(
     for row in ended:
         if row.ended_at is None or now - row.ended_at > CRASH_WINDOW:
             continue
-        if row.exit_status in (0, None) or _needs_is_manager(row.role):
+        if _needs_is_manager(row.role):
+            continue
+        abandoned = row.exit_status == 0 and _needs_handover_failed(_needs_exit_of(row, board))
+        if row.exit_status in (0, None) and not abandoned:
             continue
         if newest.get(row.label, row.created_at) > row.created_at:
             continue
         if row.task_id is not None and _needs_task_closed(sources, row.task_id):
             continue
+        name = needs_push_safe(row.label)
         items.append(
             _needs_item(
                 "crashed",
                 row.id,
                 project=project,
                 agent=row,
-                reason=f"{needs_push_safe(row.label)} exited unexpectedly (exit {row.exit_status})",
+                reason=(
+                    f"{name} stopped, and its replacement did not start"
+                    if abandoned
+                    else f"{name} exited unexpectedly (exit {row.exit_status})"
+                ),
                 excerpt=None,
                 detail={"exit_status": row.exit_status, "task_id": row.task_id},
                 since=row.ended_at,

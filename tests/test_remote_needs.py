@@ -759,6 +759,29 @@ def test_a_manager_whose_hand_over_never_started_its_replacement_is_down() -> No
     assert _scan(fleet) == [], "and with nobody at work, nothing needs a manager"
 
 
+def test_a_coder_whose_hand_over_never_started_its_replacement_is_reported() -> None:
+    """A switch (by hand, or on its usage limit with ``on_limit = "switch"``) or a restart
+    stops the coder with its own ``/exit``, status 0, and then starts the replacement. When
+    that start failed, nothing took its place, and with no manager live nobody was told: its
+    limit card went with its row, and a clean exit is no crash. The exit announced for a
+    hand-over that failed says so, and it reads as a crash that a restart answers."""
+    from aisquare.services.fleet import HANDOVER_FAILED
+
+    coder = _row(ended=NOW - timedelta(minutes=10), exit_status=0, task_id="tsk_1")
+    coding = _session(coder, ended=NOW - timedelta(minutes=10))
+    failed = _event(7, "agent_exited", f"coder-1 exited (0): {HANDOVER_FAILED}", session=coding)
+    fleet = Fleet(ended=[coder], events=[failed], tasks={"tsk_1": "todo"})
+    item = _one(_scan(fleet))
+    assert (item.kind, item.agent) == ("crashed", "coder-1")
+    assert item.reason == "coder-1 stopped, and its replacement did not start"
+    assert item.detail == {"exit_status": 0, "task_id": "tsk_1"}
+    assert item.actions == ("restart", "dismiss")
+    fleet.events = [_event(7, "agent_exited", "coder-1 exited (0)", session=coding)]
+    assert _scan(fleet) == [], "an /exit that meant it"
+    fleet.events = [failed]
+    assert _scan(_with_live_manager(fleet)) == [], "a live manager was nudged on it"
+
+
 def test_a_new_manager_ends_manager_down() -> None:
     old = _row("manager", role="manager", ended=NOW - timedelta(minutes=5), exit_status=3)
     new = _row("manager", role="manager", row_id="agt_new", created=NOW - timedelta(minutes=1))

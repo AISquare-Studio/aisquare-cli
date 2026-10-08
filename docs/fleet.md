@@ -541,7 +541,10 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   and is told in one line to continue, and no exit is announced for it —
   `--fresh` (or a transcript that is not on disk) starts new with a hand-off
   prompt built from the board instead; that agent takes the claims over too,
-  on its new session, and no exit is announced for it either. An agent whose
+  on its new session, and no exit is announced for it either. Should the
+  replacement not start, the agent stays stopped, its task goes back to the
+  pool, and the board says `agent_exited` after all, as *exited (0): its
+  replacement did not start*. An agent whose
   role, task (done or dropped) or binary would refuse the replacement is
   refused before it is stopped, and a task that closes while it is being
   stopped is left off the replacement.

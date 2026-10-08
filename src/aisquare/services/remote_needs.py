@@ -176,10 +176,14 @@ _TOOL_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,40}")
 _SUBAGENT_TOOLS = frozenset({"Task", "Agent"})
 """The tools a sub-agent runs inside: a prompt pending under one is the sub-agent's."""
 
-_NOTICE_WAIT = timedelta(seconds=10)
-"""How long after its pane printed a dialog may still be waiting for its notification:
-Claude Code sends it 6 s after the dialog opens, tmux tells the time of output to the
-second, and the hook takes a moment to land."""
+_NOTICE_WAIT = timedelta(seconds=20)
+"""How long after its pane printed a sub-agent's prompt may still be waiting for the
+notification that names it (:func:`_needs_subagent_prompt`). Claude Code sends it 6 s after
+the prompt is drawn; the hook's process starts in a second or so, and may wait out the
+store's busy timeout (5 s) for its write; tmux tells the time of output to the second,
+rounded down. That is about 13 s at worst. A notification later than this leaves the
+prompt named after the one before until it lands, and a redraw (an attach, a resize, a
+key that moves the highlight) hides the card this long."""
 
 _DETAIL_INPUT_KEYS = (
     "command",
@@ -954,10 +958,10 @@ def _needs_subagent_prompt(
     every prompt after the first was the first again: never pushed, hidden by its
     dismissal, and answered by a card left from it, whose "1" approved whatever
     the sub-agent asked next. Each prompt sends its own notification, which moves
-    ``last_seen_at``, so the item is about the tool and that moment. In the second
-    or so between a new prompt's drawing and its notification, the pane printed
-    after ``last_seen_at``, which still names the prompt before: there is no item
-    until the notification lands.
+    ``last_seen_at``, so the item is about the tool and that moment. In the seconds
+    between a new prompt's drawing and its notification, the pane printed after
+    ``last_seen_at``, which still names the prompt before: there is no item until the
+    notification lands, or :data:`_NOTICE_WAIT` passes without one.
     """
     seen = session.last_seen_at
     output = None if pane_output is None else pane_output()

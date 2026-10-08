@@ -356,11 +356,14 @@ def test_every_prompt_of_a_sub_agent_is_a_new_item() -> None:
 
 def test_a_sub_agents_next_prompt_has_no_item_until_its_notice() -> None:
     """The pane goes quiet 5 s after the next prompt is drawn and its notice comes at 6 s: in
-    between, ``last_seen_at`` still names the prompt before, whose id an item would carry."""
+    between, ``last_seen_at`` still names the prompt before, whose id an item would carry.
+    A notice whose hook waited out the store's lock comes some seconds later still."""
     seen = NOW - timedelta(minutes=1)
     status, tail = _in_a_sub_agent(seen)
     drawn = NOW - timedelta(seconds=6)
     assert _classify(status, tail, pane_output=lambda: drawn) == []
+    slow = NOW - timedelta(seconds=13)
+    assert _classify(status, tail, pane_output=lambda: slow) == [], "a hook slowed by the lock"
     noticed = _one(
         _classify(*_in_a_sub_agent(NOW - timedelta(seconds=1)), pane_output=lambda: drawn)
     )

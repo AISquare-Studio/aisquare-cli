@@ -322,7 +322,8 @@ class NeedsSources:
     board_since: Callable[[str, datetime], list[TeamEvent]]
     """The project's events written at or after the given time that open a board item or
     close one: its agents' questions, results and decisions (:data:`_NEEDS_ASKED`), and
-    the human's notes, decisions and results (:data:`_NEEDS_REPLIED`). An item lives for
+    the human's notes, decisions and results (:data:`_NEEDS_REPLIED`); and the exits the
+    fleet announces (``agent_exited``), which say how a row ended. An item lives for
     :data:`QUESTION_HORIZON` however busy the board is, so it is read by time, not from a
     window of the newest events that 300 notes push it out of."""
     board_sessions: Callable[[str, datetime, Collection[str]], list[TeamSession]]
@@ -1258,15 +1259,7 @@ def _needs_scan_project(
                 ended, rows, project=project, now=now, manager_live=manager_live, sources=sources
             )
         )
-        items.extend(
-            _needs_manager_down(
-                statuses,
-                rows,
-                lambda session_id: _needs_newest_of(sources, project, window, session_id),
-                project=project,
-                now=now,
-            )
-        )
+        items.extend(_needs_manager_down(statuses, rows, board, project=project, now=now))
         items.extend(
             _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
         )
@@ -1335,19 +1328,6 @@ def _needs_output_of(sources: NeedsSources, agent: FleetAgent) -> Callable[[], d
             return None
 
     return needs_output
-
-
-def _needs_newest_of(
-    sources: NeedsSources,
-    project: ProjectInfo,
-    window: Callable[[], Sequence[TeamEvent]],
-    session_id: str,
-) -> TeamEvent | None:
-    """A session's newest board event: the window's, or the store's once it left the window."""
-    own = [event for event in window() if event.session_id == session_id]
-    if own:
-        return max(own, key=_needs_seq)
-    return _needs_session_event(sources, project, session_id, None)
 
 
 def _needs_window(sources: NeedsSources, project: ProjectInfo) -> Callable[[], list[TeamEvent]]:
@@ -1544,10 +1524,44 @@ def _needs_handover_failed(event: TeamEvent | None) -> bool:
     )
 
 
+def _needs_exit_of(row: FleetAgent, board: Sequence[TeamEvent]) -> TeamEvent | None:
+    """The exit the fleet announced for ``row`` (``agent_exited``, under its session), from
+    the board's day; none older than the row, which is an earlier row's of the session."""
+    if row.session_id is None:
+        return None
+    return max(
+        (
+            event
+            for event in board
+            if event.kind == "agent_exited"
+            and event.session_id == row.session_id
+            and event.created_at >= row.created_at
+        ),
+        key=_needs_seq,
+        default=None,
+    )
+
+
+def _needs_last_word(row: FleetAgent, board: Sequence[TeamEvent]) -> TeamEvent | None:
+    """What ``row``'s session last posted of its own on the board's day: its newest question,
+    result or decision. Not its notes, and not the exits the fleet announces under it."""
+    if row.session_id is None:
+        return None
+    return max(
+        (
+            event
+            for event in board
+            if event.session_id == row.session_id and event.kind in _NEEDS_ASKED
+        ),
+        key=_needs_seq,
+        default=None,
+    )
+
+
 def _needs_manager_down(
     statuses: Sequence[FleetAgentStatus],
     rows: Sequence[FleetAgent],
-    newest_of: Callable[[str], TeamEvent | None],
+    board: Sequence[TeamEvent],
     *,
     project: ProjectInfo,
     now: datetime,
@@ -1558,11 +1572,13 @@ def _needs_manager_down(
     reported only while another agent still works, waits on a prompt or is
     limited, and the manager's last word on the board was not its ``result``:
     a manager stopped after reporting, or exiting cleanly, finished its job.
-    Not a clean exit a switch or a restart made, though, and then could not
-    start the replacement for: the hand-over's own ``/exit`` is status 0, and
-    the exit it announces says so (``fleet.HANDOVER_FAILED``). That one is
-    reported as a stop is. ``newest_of`` is a session's newest board event,
-    however long ago.
+    Its last word is its newest question, result or decision of the board's
+    day (``board``), not the exit the fleet announces for it under its session
+    once it is stopped, which followed every result and hid it. Not a clean
+    exit a switch or a restart made, though, and then could not start the
+    replacement for: the hand-over's own ``/exit`` is status 0, and the exit it
+    announces says so (``fleet.HANDOVER_FAILED``). That one is reported as a
+    stop is.
     """
     managers = [row for row in rows if _needs_is_manager(row.role)]
     if not managers or any(row.ended_at is None for row in managers):
@@ -1582,10 +1598,10 @@ def _needs_manager_down(
         ]
         if not busy:
             return []
-        last = newest_of(manager.session_id) if manager.session_id else None
-        if manager.exit_status == 0 and not _needs_handover_failed(last):
+        if manager.exit_status == 0 and not _needs_handover_failed(_needs_exit_of(manager, board)):
             return []
-        if last is not None and last.kind == "result":
+        said = _needs_last_word(manager, board)
+        if said is not None and said.kind == "result":
             return []
         count = len(busy)
         reason = (
@@ -1932,7 +1948,7 @@ def live_needs_sources() -> NeedsSources:
     def needs_board_since(project_id: str, since: datetime) -> list[TeamEvent]:
         with store_session() as store:
             return store.team_events_since(
-                project_id, since, kinds=_NEEDS_ASKED, human_kinds=_NEEDS_REPLIED
+                project_id, since, kinds=(*_NEEDS_ASKED, "agent_exited"), human_kinds=_NEEDS_REPLIED
             )
 
     def needs_board_sessions(

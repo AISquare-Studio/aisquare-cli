@@ -563,7 +563,7 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
             for event in fleet.events
             if event.created_at >= since
             and (
-                event.kind in remote_needs._NEEDS_ASKED
+                event.kind in (*remote_needs._NEEDS_ASKED, "agent_exited")
                 or (event.session_id is None and event.kind in remote_needs._NEEDS_REPLIED)
             )
         ]
@@ -702,6 +702,31 @@ def test_a_stopped_manager_whose_work_is_done_is_not_down() -> None:
     assert [item.kind for item in _scan(reported)] == ["board_result"], "its last word: a result"
     clean = _row("manager", role="manager", ended=NOW - timedelta(minutes=5), exit_status=0)
     assert _scan(Fleet(ended=[clean], agents=working)) == []
+
+
+def test_a_managers_last_word_is_its_own_not_the_exit_the_fleet_announced_for_it() -> None:
+    """``fleet stop`` announces the exit under the manager's own session (``agent_exited``),
+    so the session's newest event was that announcement after every stop, never the result
+    before it: a manager stopped once it reported read as one stopped mid-work. Its last
+    word is what it posted itself, a question, a result or a decision."""
+    manager = _row("manager", role="manager", ended=NOW - timedelta(minutes=5))
+    managing = _session(manager, ended=NOW - timedelta(minutes=5))
+    coder = _row()
+    stopped = NOW - timedelta(minutes=5)
+    fleet = Fleet(
+        ended=[manager],
+        agents=[_status(coder, "working", _session(coder))],
+        sessions=[managing],
+        events=[
+            _event(5, "result", "Shipped.", session=managing, at=stopped - timedelta(minutes=1)),
+            _event(6, "note", "Signing off.", session=managing, at=stopped - timedelta(minutes=1)),
+            _event(7, "agent_exited", "manager exited (?)", session=managing, at=stopped),
+        ],
+    )
+    assert [item.kind for item in _scan(fleet)] == ["board_result"], "it reported, then stopped"
+    asked = _event(6, "question", "Anything else?", session=managing, at=stopped)
+    fleet.events[1] = asked
+    assert [item.kind for item in _scan(fleet)] == ["board_question", "manager_down"]
 
 
 def test_a_manager_whose_hand_over_never_started_its_replacement_is_down() -> None:
@@ -941,7 +966,8 @@ def test_an_item_keeps_its_id_however_many_board_events_follow_its_own() -> None
 
 def test_a_managers_last_word_is_read_however_long_ago_it_was() -> None:
     """A manager stopped after its ``result`` finished its job, however busy the board has
-    been since: 300 newer events made its last word unknown, and it read as down."""
+    been since: 300 newer events made its last word unknown, and it read as down. It is
+    read with the board's day, and nothing is asked of the store for it."""
     manager = _row("manager", role="manager", ended=NOW - timedelta(minutes=5))
     managing = _session(manager, ended=NOW - timedelta(minutes=5))
     coder = _row()
@@ -952,8 +978,12 @@ def test_a_managers_last_word_is_read_however_long_ago_it_was() -> None:
         events=[_event(5, "result", "Shipped.", session=managing, at=NOW - timedelta(hours=2))],
     )
     _board_traffic(fleet)
+    exited = _event(
+        fleet.events[-1].seq + 1, "agent_exited", "manager exited (?)", session=managing
+    )
+    fleet.events.append(exited)
     assert "manager_down" not in [item.kind for item in _scan(fleet)]
-    assert fleet.asked_events == [("ses_manager", None)]
+    assert fleet.asked_events == []
 
 
 def test_a_lost_pane_is_dated_from_the_first_scan_that_saw_it() -> None:
@@ -2066,6 +2096,48 @@ def test_the_live_sources_keep_a_board_question_however_busy_the_board_gets(
         store.add_team_event(written("note", now - timedelta(hours=1), to="manager"))
         traffic(store, now - timedelta(minutes=50))
     assert scan_needs_you(sources, now=now, dismissed=()) == []
+
+
+def test_the_live_sources_take_a_manager_stopped_after_its_result_for_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the store, with the exit announced as ``fleet stop`` announces it, under the
+    manager's own session (``fleet._emit_exit``): a manager that reported and was then
+    stopped, while a coder still works, finished its job."""
+    now = datetime.now(UTC)
+    hour_ago = now - timedelta(hours=1)
+    root = tmp_path / "alpha"
+    with store_session() as store:
+        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        for session_id, role in (("ses_m", "manager"), ("ses_c", "coder")):
+            store.upsert_session(
+                TeamSession(
+                    id=session_id, project_id=project.id, role=role, started_at=hour_ago,
+                    last_seen_at=now - timedelta(seconds=30),
+                )
+            )  # fmt: skip
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_c", project_id=project.id, label="coder-1", role="coder", pane_id="%1",
+                session_id="ses_c", cwd=root, created_at=hour_ago,
+            )
+        )  # fmt: skip
+        manager = FleetAgent(
+            id="agt_m", project_id=project.id, label="manager", role="manager", pane_id="%2",
+            session_id="ses_m", cwd=root, created_at=hour_ago, ended_at=now - timedelta(minutes=5),
+        )  # fmt: skip
+        store.upsert_fleet_agent(manager)
+        store.add_team_event(
+            TeamEvent(
+                id="evt_r", project_id=project.id, session_id="ses_m", kind="result",
+                text="Shipped.", created_at=now - timedelta(minutes=6),
+            )
+        )  # fmt: skip
+        fleet_service._emit_exit(store, manager)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+    assert [item.kind for item in items] == ["board_result"]
 
 
 # --- the watcher --------------------------------------------------------------------------

@@ -1365,6 +1365,23 @@ def test_the_pads_exit_and_rewind_guards_each_ask_before_a_key_goes(
     assert pad["keys"] == [["C-c"], ["C-c"], ["C-c", "confirm_exit"], *escapes]
 
 
+def test_a_page_that_slept_holds_its_keys_until_the_machine_says_what_is_on_screen(
+    boot_report: dict[str, Any],
+) -> None:
+    """A wake's new socket counted as an update the moment it opened, before any frame: the
+    next second's check found the page fresh and let the pad and Send act on the screen from
+    before the sleep, for as long as the first frame took. And the pane comes a tick after the
+    other frames, so even a quick wake left a second of that: the Live tab's keys now wait
+    for its pane from the socket open now. Each step is [stale, Send disabled]."""
+    assert boot_report["staleAcrossAWake"] == [
+        [False, False],  # the pane is in
+        [True, True],  # a minute with nothing heard
+        [True, True],  # a wake's socket opened, and the next second's check ran
+        [False, True],  # its first frame came, not the pane
+        [False, False],  # the pane came
+    ]
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

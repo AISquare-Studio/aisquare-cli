@@ -968,7 +968,9 @@ function connect() {
     opened = true;
     S.sockState = "open";
     S.backoff = 0;
-    S.lastFrameAt = Date.now();
+    // An open is no update: a page gone stale stays so until a frame comes, as a phone that
+    // slept must not act on the screen it showed before. The first one starts the clock.
+    if (!S.lastFrameAt) S.lastFrameAt = Date.now();
     setOffline(false);
     resubscribe();
     flushRetries();
@@ -1020,7 +1022,17 @@ async function probe() {
 function resubscribe() {
   wsSend("subscribe_fleet", S.wantFleet);
   if (S.wantBoard) wsSend("subscribe_board", S.wantBoard); // a new socket sends no board until asked
-  for (const watcher of paneWatchers.values()) wsSend("subscribe", watcher.label, watcher.pid);
+  for (const watcher of paneWatchers.values()) {
+    watcher.fresh = false; // what it shows came before this socket: held until its next frame
+    wsSend("subscribe", watcher.label, watcher.pid);
+  }
+  gateButtons();
+}
+
+/* Whether this pane's last frame came on the socket open now. */
+function paneFresh(pid, label) {
+  const watcher = paneWatchers.get(pid + "\n" + label);
+  return !!(watcher && watcher.fresh);
 }
 
 function onFrame(text) {
@@ -1055,7 +1067,10 @@ function onFrame(text) {
     const watcher = paneWatchers.get(key);
     if (watcher && payload && typeof payload === "object") {
       S.panes.set(key, payload);
+      const held = !watcher.fresh;
+      watcher.fresh = true;
       for (const fn of watcher.fns) fn(payload);
+      if (held) gateButtons();
     }
   } else if (frame.type === "error" && payload && typeof payload === "object") toast(plainText(payload.message));
 }
@@ -1077,7 +1092,7 @@ function paneWatch(pid, label, fn) {
   const key = pid + "\n" + label;
   let watcher = paneWatchers.get(key);
   if (!watcher) {
-    watcher = { pid, label, fns: new Set() };
+    watcher = { pid, label, fns: new Set(), fresh: false };
     paneWatchers.set(key, watcher);
     wsSend("subscribe", label, pid);
   }
@@ -1182,11 +1197,13 @@ function checkStale() {
 
 /* Writes off, or nothing heard for 25 s: every action button waits. "w" marks a
  * write, "a" an action that is not one. Sign out is neither: it is always there
- * (SPEC §6.3), and a plain DELETE that needs no live socket. */
+ * (SPEC §6.3), and a plain DELETE that needs no live socket. "pk" keys and Send act on
+ * the pane the Live tab shows: they also wait until that pane came on this socket. */
 function gateButtons() {
   const shut = !writable() || S.stale;
+  const held = !!(S.view && S.view.held && S.view.held());
   document.body.classList.toggle("ro", !writable());
-  for (const control of document.querySelectorAll("button.w")) control.disabled = shut || control.classList.contains("busy");
+  for (const control of document.querySelectorAll("button.w")) control.disabled = shut || control.classList.contains("busy") || (held && control.classList.contains("pk"));
   for (const control of document.querySelectorAll("button.a")) control.disabled = S.stale || control.classList.contains("busy");
 }
 
@@ -2385,7 +2402,8 @@ VIEWS.agent = (route, main) => {
   }
   if (route.tab !== "card") main.appendChild(inputBar(pid, label, cleanups));
   drawState();
-  return { fleet: drawState, needs: drawState, cleanup: () => { for (const fn of cleanups) fn(); } };
+  const held = route.tab === "live" ? () => !paneFresh(pid, label) : null;
+  return { fleet: drawState, needs: drawState, held, cleanup: () => { for (const fn of cleanups) fn(); } };
 };
 
 function drawExplainability(body, card) {
@@ -2418,13 +2436,13 @@ function inputBar(pid, label, cleanups) {
   text.maxLength = TEXT_MAX.keys;
   const enter = checkbox("⏎", true);
   enter.box.setAttribute("aria-label", "Press Enter after the text");
-  const send = button("w primary", "Send", () => sendText());
+  const send = button("w primary pk", "Send", () => sendText());
   const padToggle = button("ghost", "Keys", () => setPad(!pad.classList.contains("open")));
   line.append(text, enter.label, send, padToggle);
   const pad = el("div", "pad");
   const more = el("div", "pad-more");
   const keyButton = (key) => {
-    const control = button("w key", key[0], () => sendKey(key[1]));
+    const control = button("w key pk", key[0], () => sendKey(key[1]));
     if (Object.prototype.hasOwnProperty.call(KEY_SPOKEN, key[1])) control.setAttribute("aria-label", KEY_SPOKEN[key[1]]);
     return control;
   };

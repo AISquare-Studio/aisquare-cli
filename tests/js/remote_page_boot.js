@@ -498,12 +498,19 @@ async function unlockAnswered(status, json) {
   };
 }
 
-/* The agent view, live, with its socket open: where Send is. */
+/* The frame the machine sends for a pane subscription on the socket open now, on its next
+ * tick; no rows, so nothing scrolls. The Live tab's keys wait for it. */
+function paneCame(page, label) {
+  page.live().frame("pane", { rows: [], width: 80, height: 0 }, { agent: label || "coder-1", project: PROJECT });
+}
+
+/* The agent view, live, with its socket open and its pane in: where Send is. */
 async function agentView(extra) {
   const page = bootPage("#/p/" + PROJECT + "/a/coder-1/live", signedIn(extra));
   await settle();
   page.acceptSockets();
   page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  paneCame(page);
   await settle();
   return page;
 }
@@ -533,6 +540,7 @@ async function lostWrite() {
   const say = await typeAndSend(page, "hello");
   const waiting = { sockets: page.sockets.length, firstClosed: page.sockets[0].readyState === 3, send: sendState(page) };
   page.acceptSockets();
+  paneCame(page);
   await settle();
   return {
     waiting,
@@ -550,6 +558,7 @@ async function lostTwice() {
   const page = await agentView({ "POST api/send-keys": () => "network" });
   await typeAndSend(page, "hello");
   page.acceptSockets();
+  paneCame(page);
   await settle();
   const bodies = page.sent("api/send-keys");
   const said = page.toast();
@@ -1055,6 +1064,8 @@ async function lateAnswers() {
   }
   page.run("pageGo('#/p/" + PROJECT + "/a/coder-2/live')");
   await settle();
+  paneCame(page, "coder-2");
+  await settle();
   click(buttonNamed(page.main(), "^C"));
   keys[1].settle({ status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits Claude Code — send confirm_exit: true" } });
   await settle();
@@ -1232,6 +1243,8 @@ async function keysInOrder() {
   click(card.main().querySelectorAll("button.qa")[0]);
   card.run("pageGo('#/p/" + PROJECT + "/a/coder-1/live')");
   await settle();
+  paneCame(card);
+  await settle();
   click(buttonNamed(card.main(), "⏎"));
   await settle();
   const whileAnswering = card.sent("api/send-keys").length;
@@ -1278,6 +1291,29 @@ async function padConfirms() {
   return { steps, keys: sent().map((body) => (body.confirm_exit === true ? body.keys.concat("confirm_exit") : body.keys)) };
 }
 
+/* The Live tab across a sleep, as [stale, Send disabled]: with its pane in; after a minute
+ * with nothing heard; once a wake's socket opened and a second passed; once that socket's
+ * first frame came, not the pane; and once the pane came. */
+async function staleAcrossAWake() {
+  const page = await agentView();
+  const state = () => [page.run("S.stale"), buttonNamed(page.main(), "Send").disabled];
+  const steps = [state()];
+  page.run("S.lastFrameAt = Date.now() - 60000; checkStale();");
+  steps.push(state());
+  fire(page, "document", "visibilitychange");
+  page.acceptSockets();
+  await settle();
+  page.run("checkStale();");
+  steps.push(state());
+  page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  await settle();
+  steps.push(state());
+  page.live().frame("pane", { rows: ["❯ 1. Yes"], cursor: [0, 0], width: 80, height: 1 }, { agent: "coder-1", project: PROJECT });
+  await settle();
+  steps.push(state());
+  return steps;
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -1315,6 +1351,7 @@ async function main() {
     sheetBeforeFleet: await sheetBeforeFleet(),
     keysInOrder: await keysInOrder(),
     padConfirms: await padConfirms(),
+    staleAcrossAWake: await staleAcrossAWake(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

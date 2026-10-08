@@ -420,6 +420,45 @@ def test_a_claude_code_on_path_that_never_started_is_connected_not_refused(
     assert "Connected claude-code: hooks installed" in notes, notes
 
 
+@pytest.mark.parametrize("shape", ["new-profile", "never-started"])
+def test_a_config_dir_claude_code_has_not_made_is_offered_connect_beside_other_sites(
+    runner: CliRunner, isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    """The directory sessions from this shell read, not made yet (CLAUDE_CONFIG_DIR naming a
+    new profile, or an npm/Homebrew Claude Code never started beside a fleet slot): nothing
+    graded it, so beside any other site the doctor's row was green with no Connect while
+    those sessions ran no hooks, and Welcome said not connected. The test above covers no
+    other site (review of #257)."""
+    on_path = "/opt/homebrew/bin/claude"
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: on_path)
+    if shape == "new-profile":
+        _connect(runner)  # makes and connects ~/.claude
+        ambient = isolated_agent_home / ".claude-work"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(ambient))
+    else:
+        slot = isolated_agent_home / ".claude-account1"
+        slot.mkdir(parents=True)
+        _connect(runner, slot)
+        ambient = isolated_agent_home / ".claude"
+
+    row = diagnostics._check_claude_code()
+    buttons = [fix.argv for fix in fix_commands([row])]
+    welcome = first_run.probe_claude(sign_in=False, which=lambda _name: on_path)
+    made_by_asking = ambient.exists()
+    with monkeypatch.context() as no_claude_here:
+        no_claude_here.setattr(agent_core, "claude_on_path", lambda: None)
+        no_claude = diagnostics._check_claude_code()
+    clicked = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+    after = diagnostics._check_claude_code()
+
+    assert row.status is CheckStatus.warn and f"missing in {ambient}" in row.detail, row
+    assert buttons == [("agents", "connect", "claude-code")], "bare: --config-dir makes nothing"
+    assert (welcome.found, welcome.connected) == (True, False), "Welcome said so all along"
+    assert not made_by_asking, "asking makes nothing"
+    assert clicked.exit_code == 0 and after.status is CheckStatus.ok, (clicked.output, after)
+    assert no_claude.status is CheckStatus.ok, "control: no claude on PATH, nothing to connect"
+
+
 @pytest.mark.parametrize("shape", _shapes(_UNREADABLE_SHAPES))
 def test_connect_names_a_settings_json_it_cannot_read_and_leaves_it_alone(
     runner: CliRunner, claude_home: Path, tmp_path: Path, shape: str

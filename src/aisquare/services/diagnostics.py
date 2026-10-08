@@ -845,12 +845,30 @@ def _plugin_runner(pin: str | None) -> tuple[str, str | None, str | None]:
     )
 
 
+def _unmade_ambient_dir(sites: list[agent_core.HookSiteHealth]) -> Path | None:
+    """The config dir sessions from this shell read, when Claude Code is on PATH and has
+    not made it yet, and no graded site is that dir; else ``None``.
+
+    Paths only, like the rest of the row: ``claude_on_path`` reads PATH and starts
+    nothing, and nothing is made here (``agents connect`` makes it).
+    """
+    ambient = agent_core.ambient_hook_dir("claude-code")
+    if ambient is None or ambient.exists() or agent_core.claude_on_path() is None:
+        return None
+    key = agent_core.dir_identity(ambient)
+    if any(agent_core.dir_identity(site.config_dir) == key for site in sites):
+        return None
+    return ambient
+
+
 def _check_claude_code() -> DoctorCheck:
     """Claude Code: are our hooks in every config dir, and do they run THIS install?
 
     Graded per directory over recorded sites UNION the ambient dir UNION every
     ``~/.claude*`` on disk that carries our hooks or enables our plugin
-    (``agent_core.hook_sites``). Two ways a directory goes red, both with the
+    (``agent_core.hook_sites``). An ambient dir Claude Code has not made yet, with
+    ``claude`` on PATH, has nothing to grade and is reported missing, with the bare
+    Connect that makes it. Two ways a directory goes red, both with the
     same one-line fix:
 
     * not connected (hooks missing or partial) — the check this always made,
@@ -890,6 +908,12 @@ def _check_claude_code() -> DoctorCheck:
     if not sites:
         return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
     graded = [site for site in sites if site not in switched_off]
+    # The directory sessions from this shell read, when Claude Code is on PATH and has
+    # not made it yet: npm and Homebrew make it on the first start, and
+    # CLAUDE_CONFIG_DIR can name a new profile. No site grades it, so beside any other
+    # site this row was green while those sessions ran no hooks, and Welcome offered
+    # Connect. Only the bare `agents connect` makes it (review of #257).
+    unmade = _unmade_ambient_dir(sites)
 
     # The shared answer, which counts the plugin route as connected.
     unhooked = [
@@ -918,7 +942,13 @@ def _check_claude_code() -> DoctorCheck:
         if plugin_runs
         else ("", None, None)
     )
-    healthy = not unhooked and not wrong_binary and not doubled and runner_problem is None
+    healthy = (
+        not unhooked
+        and not wrong_binary
+        and not doubled
+        and runner_problem is None
+        and unmade is None
+    )
     if healthy and not switched_off:
         # Installed, firing, and running THIS install — but a context hook may
         # still carry a shorter timeout than the CI hook can wait for (a
@@ -971,6 +1001,11 @@ def _check_claude_code() -> DoctorCheck:
     if unhooked:
         listed = ", ".join(_site_label(site) for site in unhooked)
         problems.append(f"{_STALE_HOOKS} in: {listed}")
+    if unmade is not None:
+        problems.append(
+            f"hooks are missing in {unmade}, which sessions from this shell read and Claude "
+            "Code has not made yet"
+        )
     if wrong_binary:
         clauses = "; ".join(_hook_binary_problems(wrong_binary))
         this = f"{agent_core.current_install()} ({__version__})"
@@ -999,6 +1034,10 @@ def _check_claude_code() -> DoctorCheck:
         if site in unhooked or site in wrong_binary:
             broken.append(site.config_dir)
     fixes.extend(f"aisquare agents connect claude-code --config-dir {p}" for p in broken)
+    if unmade is not None:
+        # Bare: connect makes the directory a session from this shell reads, and never
+        # a --config-dir one, so that form would refuse with "not installed".
+        fixes.append(_RECONNECT)
     fixes.extend(
         "remove them, and the plugin runs alone: "
         f"aisquare agents disconnect claude-code --config-dir {site.config_dir}"

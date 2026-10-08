@@ -328,6 +328,9 @@ def test_a_sibling_dir_on_disk_is_discovered_and_labelled(
     sibling = isolated_agent_home / ".claude3"
     _write_hooks(sibling, str(current))
     # Nothing recorded, and no ~/.claude at all: before #84 this was "not detected".
+    # No `claude` on PATH either: with one, the unmade ~/.claude that sessions from this
+    # shell read is reported missing (test_agent_adapters.py).
+    monkeypatch.setattr(agents, "claude_on_path", lambda: None)
 
     check = diagnostics._check_claude_code()
 
@@ -343,6 +346,7 @@ def test_a_stale_sibling_on_disk_gets_its_own_fix_line(
     old = _fake_aisquare(tmp_path / "old" / "aisquare", prints=f"aisquare {OLD}")
     sibling = isolated_agent_home / ".claude3"
     _write_hooks(sibling, str(old))
+    monkeypatch.setattr(agents, "claude_on_path", lambda: None)  # and no ~/.claude to make
 
     check = diagnostics._check_claude_code()
 

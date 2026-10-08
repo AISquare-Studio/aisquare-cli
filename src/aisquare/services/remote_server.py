@@ -3018,6 +3018,11 @@ class _TokenGate:
 
 IN_PROGRESS = "a request with this request_id is still running — its answer will follow"
 """409 ``in_progress``: a retry that arrived while the first try was still running."""
+REQUEST_ID_REUSED = (
+    "request_id {request_id} was sent with another request — give each write a request_id of "
+    "its own, and send one again only with the request it was first sent with"
+)
+"""409 ``request_id_reused``: an id the ledger holds, with another endpoint or body."""
 
 
 def _new_action_ledger() -> ActionLedger:
@@ -3036,6 +3041,18 @@ def _ledger_request_id(body: dict[str, Any]) -> str | None:
             400, "invalid", "'request_id' must be 1 to 64 letters, digits, '_' or '-'"
         )
     return request_id
+
+
+def _ledger_request(endpoint: str, body: dict[str, Any]) -> str:
+    """What a ``request_id`` stands for: the endpoint and the body, its id taken out, as one
+    digest. A retry sends both again as they were (the page resends the very body); a
+    write that reuses the id for anything else is another request (:meth:`RemoteKit.kit_gated`).
+    """
+    try:
+        canonical = json.dumps([endpoint, body], sort_keys=True, separators=(",", ":"))
+    except (ValueError, RecursionError):  # nested past what json recurses into
+        raise RequestError(400, "invalid", "the body must be a JSON object") from None
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
 
 
 def _ledger_body(response: Response) -> dict[str, object]:
@@ -3193,13 +3210,17 @@ class RemoteKit:
         §1.5): the body and its ``request_id``, the ledger, the write gate, then
         ``respond(body)`` once per ``request_id`` (:meth:`kit_ledgered`).
 
-        A ``request_id`` the ledger knows is answered from it before the write gate is
-        asked: the answer the first try got, or 409 ``in_progress`` while that still
-        runs. A retry changes nothing, and asked first, the gate answered one 403
-        ``read_only`` once writes were off: the page said "Read-only", greyed every write
-        and settled the pending request with the 403, though the restart it was for had
-        run (review of #243, round 3). Everything else needs the gate, and while writes
-        are off a body the ledger cannot answer is a 403 whatever else is wrong with it.
+        A retry, its ``request_id`` known to the ledger with the same endpoint and body
+        (:func:`_ledger_request`), is answered from it before the write gate is asked:
+        the answer the first try got, or 409 ``in_progress`` while that still runs. A
+        retry changes nothing, and asked first, the gate answered one 403 ``read_only``
+        once writes were off: the page said "Read-only", greyed every write and settled
+        the pending request with the 403, though the restart it was for had run (review
+        of #243, round 3). Everything else needs the gate, and while writes are off a
+        body the ledger cannot answer is a 403 whatever else is wrong with it. Past the
+        gate, an id the ledger holds for another request is 409 ``request_id_reused``,
+        not that request's answer: replayed, a stop sent with a send-keys' id was
+        answered 200 and never ran (sweep of #243).
         """
         from starlette.responses import JSONResponse
 
@@ -3207,19 +3228,25 @@ class RemoteKit:
         try:
             body = await self.kit_json_object(request)
             request_id = _ledger_request_id(body)
+            asked = "" if request_id is None else _ledger_request(endpoint, body)
         except RequestError as exc:
             if not allowed:
                 return self.kit_refuse(403, "read_only", READ_ONLY_REASON)
             return JSONResponse(exc.request_error_body(), status_code=exc.status)
-        seen = None if request_id is None else self.ledger.ledger_seen(device.id, request_id)
-        if seen is not None:
+        seen = None if request_id is None else self.ledger.ledger_seen(device.id, request_id, asked)
+        if seen is not None and seen.same:
             if seen.answer is None:
                 return self.kit_refuse(409, "in_progress", IN_PROGRESS)
             status, payload = seen.answer
             return JSONResponse(payload, status_code=status)
         if not allowed:
             return self.kit_refuse(403, "read_only", READ_ONLY_REASON)
-        return await self.kit_ledgered(device, request_id, endpoint, lambda: respond(body))
+        if seen is not None:
+            reused = REQUEST_ID_REUSED.format(request_id=request_id)
+            return self.kit_refuse(409, "request_id_reused", reused)
+        return await self.kit_ledgered(
+            device, request_id, endpoint, lambda: respond(body), request=asked
+        )
 
     async def kit_ledgered(
         self,
@@ -3227,12 +3254,14 @@ class RemoteKit:
         request_id: str | None,
         endpoint: str,
         respond: Callable[[], Awaitable[Response]],
+        *,
+        request: str = "",
     ) -> Response:
         """``respond()``, once per ``request_id`` (SPEC §1.5): the ledger flow of every
         write-gated request, once :meth:`kit_gated` found its id new to the ledger.
 
-        Without an id it just runs. With one it is marked running (one that runs
-        already is 409 ``in_progress``), and how it ended is stored, refusals
+        Without an id it just runs. With one it is marked running as ``request`` (one
+        that runs already is 409 ``in_progress``), and how it ended is stored, refusals
         included, so a retry gets the answer the first try got, and it is stored in
         a ``finally``: a crash or a cancellation is an ending too. The dispatcher kept
         a copy of this flow that stored after its ``try``, which stops an
@@ -3241,7 +3270,7 @@ class RemoteKit:
         """
         if request_id is None:
             return await respond()
-        if not self.ledger.ledger_begin(device.id, request_id, endpoint):
+        if not self.ledger.ledger_begin(device.id, request_id, endpoint, request):
             return self.kit_refuse(409, "in_progress", IN_PROGRESS)
         status, payload = 500, _error_body("internal_error", CRASHED)
         try:

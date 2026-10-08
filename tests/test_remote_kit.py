@@ -36,6 +36,7 @@ from aisquare.services.remote_server import (
     IN_PROGRESS,
     NOT_WRITE_GATED,
     READ_ONLY_REASON,
+    REQUEST_ID_REUSED,
     WRITE_ENDPOINTS,
     Device,
     RemoteKit,
@@ -84,19 +85,26 @@ class RecordingLedger(ActionLedger):
         self.calls: list[tuple[object, ...]] = []
         self.finished: dict[tuple[str, str], tuple[int, dict[str, object]]] = {}
         self.running: set[tuple[str, str]] = set()
+        self.requests: dict[tuple[str, str], str] = {}
+        """What each id began as; one set by hand above stands for any request."""
         self.recent: dict[str, list[LedgerEntry]] = {}
 
-    def ledger_seen(self, device_id: str, request_id: str) -> LedgerSeen | None:
+    def ledger_seen(self, device_id: str, request_id: str, request: str = "") -> LedgerSeen | None:
         self.calls.append(("seen", request_id))
-        if (device_id, request_id) in self.finished:
-            return LedgerSeen(self.finished[(device_id, request_id)])
-        return LedgerSeen(None) if (device_id, request_id) in self.running else None
+        key = (device_id, request_id)
+        same = self.requests.get(key, request) == request
+        if key in self.finished:
+            return LedgerSeen(self.finished[key], same)
+        return LedgerSeen(None, same) if key in self.running else None
 
-    def ledger_begin(self, device_id: str, request_id: str, endpoint: str) -> bool:
+    def ledger_begin(
+        self, device_id: str, request_id: str, endpoint: str, request: str = ""
+    ) -> bool:
         self.calls.append(("begin", request_id, endpoint))
         if (device_id, request_id) in self.running:
             return False
         self.running.add((device_id, request_id))
+        self.requests[(device_id, request_id)] = request
         return True
 
     def ledger_finish(
@@ -394,6 +402,99 @@ def test_a_retry_of_a_lane_request_still_running_is_409_in_progress_with_writes_
     replayed = client.post(url, json={"id": "ny_1", "request_id": "slow-1"})
     assert (replayed.status_code, replayed.json()) == (200, {"answered": True})
     assert ran == [] and runtime.allow_write is False
+
+
+def test_a_request_id_answers_only_for_the_request_it_was_first_sent_with(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """The ledger keyed on the id alone: docs/remote.md's ``esc-1``, reused for a stop within
+    15 minutes, was answered 200 with the keys' stored result and the stop never ran, and
+    an extend under it never moved the deadline (sweep of #243)."""
+    ran: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(name: str) -> Callable[[dict[str, Any]], tuple[dict[str, object], str]]:
+        def handle(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+            ran.append((name, body))
+            return {"endpoint": name, "echo": body}, name
+
+        return handle
+
+    writes = Writes({"send-keys": handler("send-keys"), "agent/stop": handler("agent/stop")})
+    app = build_app(runtime, sources=_sources(), writes=writes, dist_dir=tmp_path)
+    runtime.set_allow_write(True)
+    runtime.set_auto_off(datetime.now(UTC) + timedelta(minutes=10))
+    deadline = runtime.auto_off_deadline()
+    client = _unlocked(app, runtime)
+    escape = {"agent": "coder-auth", "keys": ["Escape"], "request_id": "esc-1"}
+    first = client.post(f"{base(runtime)}/api/send-keys", json=escape)
+    assert first.status_code == 200
+    reused = REQUEST_ID_REUSED.format(request_id="esc-1")
+    for path, body in (
+        ("agent/stop", {"agent": "coder-2", "agent_id": "agt_x", "confirm": "coder-2"}),
+        ("send-keys", {"agent": "coder-9", "text": "hello", "enter": True}),
+        ("remote/extend", {}),
+    ):
+        response = client.post(f"{base(runtime)}/api/{path}", json={**body, "request_id": "esc-1"})
+        assert (response.status_code, response.json()) == (
+            409,
+            {"error": "request_id_reused", "message": reused},
+        ), path
+    assert runtime.auto_off_deadline() == deadline, "the extend never ran"
+    again = client.post(f"{base(runtime)}/api/send-keys", json=escape)
+    assert (again.status_code, again.json()) == (200, first.json()), "a retry is still a retry"
+    assert ran == [("send-keys", {"agent": "coder-auth", "keys": ["Escape"]})]
+    recent = client.get(f"{base(runtime)}/api/actions/recent").json()["actions"]
+    assert [(entry["request_id"], entry["endpoint"]) for entry in recent] == [
+        ("esc-1", "send-keys")
+    ]
+
+
+def test_an_id_still_running_is_another_requests_too_and_writes_off_is_still_the_gate(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    started, release = threading.Event(), threading.Event()
+
+    def note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        started.set()
+        release.wait(timeout=10)
+        return {"text": body["text"]}, "note"
+
+    app = build_app(runtime, sources=_sources(), writes=Writes({"note": note}), dist_dir=tmp_path)
+    runtime.set_allow_write(True)
+    url = f"{base(runtime)}/api/note"
+    with _unlocked(app, runtime) as client:
+        first: list[Any] = []
+        worker = threading.Thread(
+            target=lambda: first.append(client.post(url, json={"text": "a", "request_id": "n1"}))
+        )
+        worker.start()
+        try:
+            assert started.wait(timeout=10)
+            other = client.post(url, json={"text": "b", "request_id": "n1"})
+            assert (other.status_code, other.json()["error"]) == (409, "request_id_reused")
+            same = client.post(url, json={"text": "a", "request_id": "n1"})
+            assert (same.status_code, same.json()["error"]) == (409, "in_progress")
+        finally:
+            release.set()
+            worker.join(timeout=10)
+        assert first[0].json() == {"text": "a"}
+        runtime.set_allow_write(False)
+        off = client.post(url, json={"text": "b", "request_id": "n1"})
+        assert (off.status_code, off.json()["error"]) == (403, "read_only"), "another request"
+        replayed = client.post(url, json={"text": "a", "request_id": "n1"})
+        assert (replayed.status_code, replayed.json()) == (200, {"text": "a"})
+
+
+def test_the_ledger_tells_a_retry_from_another_request_under_its_id() -> None:
+    ledger = ActionLedger()
+    assert ledger.ledger_seen("dev_a", "r1", "keys") is None
+    assert ledger.ledger_begin("dev_a", "r1", "send-keys", "keys")
+    assert ledger.ledger_seen("dev_a", "r1", "keys") == LedgerSeen(None, True)
+    assert ledger.ledger_seen("dev_a", "r1", "stop") == LedgerSeen(None, False)
+    ledger.ledger_finish("dev_a", "r1", 200, {"sent": True})
+    assert ledger.ledger_seen("dev_a", "r1", "keys") == LedgerSeen((200, {"sent": True}), True)
+    assert ledger.ledger_seen("dev_a", "r1", "stop") == LedgerSeen((200, {"sent": True}), False)
+    assert ledger.ledger_seen("dev_b", "r1", "stop") is None, "another device's ids are its own"
 
 
 def test_a_refusal_is_stored_too_so_a_retry_gets_the_same_refusal(

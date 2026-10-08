@@ -127,6 +127,8 @@ class LedgerSeen(NamedTuple):
 
     answer: tuple[int, dict[str, object]] | None
     """How the request ended, ``(status, body)``; ``None`` while it still runs."""
+    same: bool = True
+    """Whether it was the request asking now: the id names one request, never another."""
 
 
 _Record = TypeVar("_Record")
@@ -172,10 +174,11 @@ class ActionLedger:
     def __init__(self, *, clock: Callable[[], datetime] = _ledger_now) -> None:
         self._clock = clock
         self._lock = threading.Lock()
-        self._finished: dict[str, dict[str, tuple[LedgerEntry, datetime]]] = {}
-        """device id → request id → (its entry, when it ended); oldest first."""
-        self._running: dict[str, dict[str, tuple[str, datetime]]] = {}
-        """device id → request id → (its endpoint, when it began)."""
+        self._finished: dict[str, dict[str, tuple[tuple[LedgerEntry, str], datetime]]] = {}
+        """device id → request id → ((its entry, its request), when it ended); oldest first.
+        A request is what :meth:`ledger_begin` was told the id stands for."""
+        self._running: dict[str, dict[str, tuple[tuple[str, str], datetime]]] = {}
+        """device id → request id → ((its endpoint, its request), when it began)."""
 
     def _ledger_forget_expired(self) -> datetime:
         now = self._clock()
@@ -190,32 +193,42 @@ class ActionLedger:
         with self._lock:
             self._ledger_forget_expired()
             held = self._finished.get(device_id, {}).get(request_id)
-        return None if held is None else (held[0]["status"], held[0]["body"])
+        return None if held is None else (held[0][0]["status"], held[0][0]["body"])
 
-    def ledger_seen(self, device_id: str, request_id: str) -> LedgerSeen | None:
-        """How this device's request with this id ended, or that it still runs; ``None`` when
-        the ledger has no such request: never sent here, or forgotten.
+    def ledger_seen(self, device_id: str, request_id: str, request: str = "") -> LedgerSeen | None:
+        """How this device's request with this id ended, or that it still runs, and whether
+        it was ``request``; ``None`` when the ledger has no such id: never sent here, or
+        forgotten.
 
         What the server asks before anything else of a write that carries an id, its
         write gate included: a retry is answered from here whatever the switch says now.
+        But only a retry: the id was keyed on alone, so a script that reused one, say
+        docs/remote.md's ``esc-1``, for a stop within the TTL was answered 200 with the
+        keys' stored result, and the stop never ran (sweep of #243). ``request`` is what
+        the id stood for when it began (the server's digest of the endpoint and body).
         """
         with self._lock:
             self._ledger_forget_expired()
             held = self._finished.get(device_id, {}).get(request_id)
             if held is not None:
-                return LedgerSeen((held[0]["status"], held[0]["body"]))
-            if request_id in self._running.get(device_id, {}):
-                return LedgerSeen(None)
+                (entry, began_as), _ended = held
+                return LedgerSeen((entry["status"], entry["body"]), began_as == request)
+            running = self._running.get(device_id, {}).get(request_id)
+            if running is not None:
+                (_endpoint, began_as), _began = running
+                return LedgerSeen(None, began_as == request)
         return None
 
-    def ledger_begin(self, device_id: str, request_id: str, endpoint: str) -> bool:
-        """Mark a request as running; ``False`` while one with that id still is."""
+    def ledger_begin(
+        self, device_id: str, request_id: str, endpoint: str, request: str = ""
+    ) -> bool:
+        """Mark a request as running, as ``request``; ``False`` while one with that id still is."""
         with self._lock:
             now = self._ledger_forget_expired()
             running = self._running.setdefault(device_id, {})
             if request_id in running:
                 return False
-            running[request_id] = (endpoint, now)
+            running[request_id] = ((endpoint, request), now)
             return True
 
     def ledger_finish(
@@ -228,16 +241,17 @@ class ActionLedger:
             began = running.pop(request_id, None)
             if not running:
                 self._running.pop(device_id, None)
+            endpoint, request = ("", "") if began is None else began[0]
             entry: LedgerEntry = {
                 "request_id": request_id,
-                "endpoint": "" if began is None else began[0],
+                "endpoint": endpoint,
                 "status": status,
                 "body": body,
                 "at": now.isoformat(timespec="seconds"),
             }
             finished = self._finished.setdefault(device_id, {})
             finished.pop(request_id, None)  # a repeat ends up newest, not where it first was
-            finished[request_id] = (entry, now)
+            finished[request_id] = ((entry, request), now)
             while len(finished) > ACTION_LEDGER_SIZE:
                 del finished[next(iter(finished))]
 
@@ -246,7 +260,7 @@ class ActionLedger:
         with self._lock:
             self._ledger_forget_expired()
             held = self._finished.get(device_id, {})
-            return [entry.copy() for entry, _ended in reversed(held.values())]
+            return [entry.copy() for (entry, _request), _ended in reversed(held.values())]
 
 
 def new_action_ledger() -> ActionLedger:

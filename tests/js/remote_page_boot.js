@@ -5,7 +5,8 @@
  * loads app.js afresh in its own vm context, whose globals are a browser just
  * big enough for the page. Elements keep their children, classes and
  * listeners; location's hash fires hashchange; fetch and WebSocket are answered
- * by the scenario; timers never fire on their own, so nothing waits on a clock.
+ * by the scenario; timers never fire on their own, so nothing waits on a clock,
+ * but they are kept, and a scenario can fire one by its function's name.
  * Like the other harness it asserts nothing: it prints ONE JSON report, and
  * tests/test_remote_page.py asserts on it.
  *
@@ -288,8 +289,12 @@ function bootPage(hash, answer, globals) {
 
   const requests = [];
   const sockets = [];
-  let timers = 0;
-  const hold = () => ++timers; // a timer is an id and nothing more: none ever fires
+  const timers = new Map();
+  let lastTimer = 0;
+  const hold = (fn) => { // kept, and never fired but by a scenario
+    timers.set(++lastTimer, fn);
+    return lastTimer;
+  };
   const win = { listeners: {} };
   let current = hash;
   /* The tab's history from the page's own load on: setting the hash pushes an entry, as a
@@ -344,8 +349,8 @@ function bootPage(hash, answer, globals) {
     getComputedStyle: (node) => (node.tagName === "PRE" ? { paddingLeft: PRE_PADDING, paddingRight: PRE_PADDING } : {}),
     setTimeout: hold,
     setInterval: hold,
-    clearTimeout() {},
-    clearInterval() {},
+    clearTimeout: (id) => timers.delete(id),
+    clearInterval: (id) => timers.delete(id),
     addEventListener(type, fn) {
       (this.listeners[type] = this.listeners[type] || []).push(fn);
     },
@@ -367,6 +372,15 @@ function bootPage(hash, answer, globals) {
     live: () => sockets[sockets.length - 1],
     sent: (where) => requests.filter((one) => one.method === "POST" && one.path === where).map((one) => one.body),
     requests,
+    /* The names of the functions timers still hold, and one fired (and gone) by its name. */
+    timers: () => Array.from(timers.values(), (fn) => fn.name).filter(Boolean).sort(),
+    fireTimer(name) {
+      for (const [id, fn] of Array.from(timers)) { // what it fires may set another: not this time
+        if (fn.name !== name) continue;
+        timers.delete(id);
+        fn();
+      }
+    },
     /* The browser's Back: false once there is no entry of this page's before this one. */
     back() {
       if (at === 0) return false;
@@ -1538,6 +1552,59 @@ async function writesReachTheirRoutes() {
   return { board: writes(board), reply: writes(feed), agent: writes(agent) };
 }
 
+/* Waking and reconnecting (SPEC §6.4): a 4409 while the tab is hidden, then pageshow still
+ * hidden, then the tab shown; each of visibilitychange, pageshow and online on a shown tab;
+ * and what a new socket asks for after a wake (on the Board tab) and after a dropped
+ * connection (on an agent's Live tab). */
+async function wakes() {
+  const reads = (page, from) => page.requests.slice(from).filter((one) => one.method === "GET").map((one) => one.path).sort();
+  const page = bootPage("#/", signedIn());
+  await settle();
+  page.acceptSockets();
+  await settle();
+  page.run("document.visibilityState = 'hidden'");
+  page.live().fire("close", { code: 4409 });
+  await settle();
+  const banner = page.run("UI.banner.hidden") ? "" : page.run("UI.banner").textContent;
+  const replaced = { sockets: page.sockets.length, state: page.run("S.sockState"), banner, timers: page.timers() };
+  fire(page, "window", "pageshow");
+  await settle();
+  const hiddenShow = page.sockets.length;
+  const from = page.requests.length;
+  page.run("document.visibilityState = 'visible'");
+  fire(page, "document", "visibilitychange");
+  await settle();
+  const shown = { sockets: page.sockets.length, reads: reads(page, from) };
+  const each = {};
+  for (const [target, type] of [["document", "visibilitychange"], ["window", "pageshow"], ["window", "online"]]) {
+    const one = bootPage("#/", signedIn());
+    await settle();
+    one.acceptSockets();
+    await settle();
+    const at = one.requests.length;
+    fire(one, target, type);
+    await settle();
+    each[type] = { oldClosed: one.sockets[0].readyState === 3, sockets: one.sockets.length, reads: reads(one, at) };
+  }
+  const asks = {};
+  for (const [hash, how] of [["#/p/" + PROJECT + "/board", "wake"], ["#/p/" + PROJECT + "/a/coder-1/live", "drop"]]) {
+    const one = bootPage(hash, signedIn());
+    await settle();
+    one.acceptSockets();
+    await settle();
+    if (how === "wake") fire(one, "document", "visibilitychange");
+    else {
+      one.live().fire("close", { code: 1006 });
+      await settle();
+      one.fireTimer("connect");
+    }
+    one.acceptSockets();
+    await settle();
+    asks[how] = { sockets: one.sockets.length, sent: one.live().sent.map((message) => Object.keys(message).filter((key) => key !== "project").map((key) => key + " " + message[key]).join()) };
+  }
+  return { replaced, hiddenShow, shown, each, asks };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -1582,6 +1649,7 @@ async function main() {
     stripCap: await stripCap(),
     spoken: await spoken(),
     writesReachTheirRoutes: await writesReachTheirRoutes(),
+    wakes: await wakes(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

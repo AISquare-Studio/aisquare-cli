@@ -1534,6 +1534,31 @@ def test_each_write_reaches_the_route_that_answers_it(boot_report: dict[str, Any
     assert sent["agent"] == ["POST api/agent/restart", "POST api/agent/switch"]
 
 
+def test_the_page_reconnects_and_reads_again_when_the_phone_wakes(
+    boot_report: dict[str, Any],
+) -> None:
+    """SPEC §6.4, and the docs' "Waking the phone reconnects at once", had no test: deleting
+    the 4409 branch (two tabs then take the socket from each other for ever), any of the
+    three wake listeners, the reads a wake makes, or a message by which a new socket asks
+    for what the screen shows, left every test green."""
+    wakes = boot_report["wakes"]
+    assert wakes["replaced"] == {
+        "sockets": 1,
+        "state": "replaced",
+        "banner": "Another tab of this phone took over the live view.Reconnect here",
+        "timers": [],
+    }
+    assert wakes["hiddenShow"] == 1, "pageshow on a hidden tab takes no socket back"
+    reread = ["api/actions/recent", "api/needs", "api/remote"]
+    assert wakes["shown"] == {"sockets": 2, "reads": reread}
+    for event in ("visibilitychange", "pageshow", "online"):
+        assert wakes["each"][event] == {"oldClosed": True, "sockets": 2, "reads": reread}, event
+    board = ["subscribe_fleet prj_x", "subscribe_board prj_x"]
+    assert wakes["asks"]["wake"] == {"sockets": 2, "sent": board}
+    pane = ["subscribe_fleet prj_x", "subscribe coder-1"]
+    assert wakes["asks"]["drop"] == {"sockets": 2, "sent": pane}
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

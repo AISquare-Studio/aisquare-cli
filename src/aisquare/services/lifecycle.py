@@ -308,6 +308,11 @@ class UpgradePlan:
         return self.reason is None
 
     @property
+    def backwards(self) -> bool:
+        """Whether this run moves to a release older than the one running (``--version``)."""
+        return self.target is not None and install_route.is_newer(self.current, self.target) is True
+
+    @property
     def fleet_warning(self) -> str | None:
         """What upgrading now costs the live fleet agents, or ``None`` when none runs.
 
@@ -423,6 +428,13 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
     fleet_error: str | None = None
     if reason is None:
         refresh, left = refresh_sites(route.facts)
+        if target is not None and install_route.is_newer(__version__, target):
+            # upgrade() leaves the hooks alone on a move back, to a release that may
+            # predate `agents refresh-hooks`, so the plan must not promise a re-connect:
+            # the plan, its --json, the question and the report agree (review of #257).
+            why = f"{target} is older than {__version__}: a move back leaves the hooks as they are"
+            left = (*left, *(HookSite(site.config_dir, site.programs, why) for site in refresh))
+            refresh = ()
         live, _unlistened, fleet_error = running_fleet()
     return UpgradePlan(
         route=route,

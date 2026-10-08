@@ -281,15 +281,23 @@ def upgrade(
         during = (
             f" while {running} fleet agent{'s run' if running != 1 else ' runs'}" if running else ""
         )
-        if not typer.confirm(
-            f"Upgrade aisquare {plan.current} → {plan.destination}{during}?", default=False
-        ):
+        move = (
+            f"Move aisquare {plan.current} back to {plan.destination}"
+            if plan.backwards
+            else f"Upgrade aisquare {plan.current} → {plan.destination}"
+        )
+        if not typer.confirm(f"{move}{during}?", default=False):
             _say("nothing changed")
             _reopen(reopen)
             return
     elif not json_output:
         _fleet_lines(plan)  # --yes skips the plan, not what it costs the fleet
-        _say(f"upgrading aisquare {plan.current} → {plan.destination}: {plan.command}")
+        move = (
+            f"moving aisquare {plan.current} back to {plan.destination}"
+            if plan.backwards
+            else f"upgrading aisquare {plan.current} → {plan.destination}"
+        )
+        _say(f"{move}: {plan.command}")
     report = lifecycle_service.upgrade(plan, to_stderr=json_output)
     if not report.installed:
         fail(

@@ -1279,6 +1279,33 @@ def test_a_uvx_run_is_told_nothing_is_installed(
     assert "nothing is installed to remove" in package["reason"], package
 
 
+def test_a_move_back_plans_no_reconnect_and_asks_to_move_back(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """upgrade() leaves the hooks alone on a move back, so the plan's "then: re-connects"
+    and its --json promised a re-connect the run never made (review of #257)."""
+    site = _hooked(tmp_path / "claude", tool.script)
+    _record(site)
+    monkeypatch.setattr(install_cli, "_stdin_is_a_terminal", lambda: True)
+    asked: list[str] = []
+
+    def confirm(text: str, **_: object) -> bool:
+        asked.append(text)
+        return False
+
+    monkeypatch.setattr("aisquare.cli.install.typer.confirm", confirm)
+    back = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.7.0"]).stdout)
+    forward = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.9.1"]).stdout)
+    runner.invoke(app, ["upgrade", "--version", "0.7.0"])
+    runner.invoke(app, ["upgrade", "--version", "0.9.1"])
+
+    assert back["refresh_hooks"] == [], back
+    assert [entry["config_dir"] for entry in back["hooks_left"]] == [str(site)], back
+    assert back["hooks_left"][0]["reason"].startswith("0.7.0 is older than 0.9.0"), back
+    assert forward["refresh_hooks"] == [str(site)], "control: a move forward re-connects"
+    assert asked == ["Move aisquare 0.9.0 back to 0.7.0?", "Upgrade aisquare 0.9.0 → 0.9.1?"]
+
+
 def _live_fleet_agent(root: Path, label: str = "coder-1") -> None:
     """A fleet row the board lists as live, as `fleet spawn` records one."""
     root.mkdir(parents=True, exist_ok=True)

@@ -35,18 +35,21 @@ esac
 
 # The hook `agents connect` writes for this event, as it reads in settings.json's
 # JSON text, matched the way core.agents._is_aisquare_hook_command matches it: the
-# command's first word is a program named aisquare or asq (a path, shell-quoted or
-# not, `.exe` on Windows), or it is `python [-P] -m aisquare`; then `hook <event>`
-# ends it, with any options before `hook`. A user's own `webhook stop`,
-# `~/bin/my-hook stop` or `echo aisquare hook stop` does not match.
+# command's first word is a program named aisquare or asq (a path or the bare name,
+# plain or in single or double quotes, `.exe` on Windows), or it is `python [-P] -m
+# aisquare`; then `hook <event>` ends it, with any options before `hook`. A user's
+# own `webhook stop`, `~/bin/my-hook stop` or `echo aisquare hook stop` does not
+# match.
 _a="'"
+_dq='\"'                   # a double quote, as JSON escapes it
 _ws='( |\\t)'              # a space, or a tab as JSON escapes it
-_p1="${_a}[^${_a}]*/"      # '/a path/with spaces/
+_p1="${_a}([^${_a}]*/)?"   # '/a path/with spaces/ (or a bare name, quoted)
 _p2="[^ \"${_a}\\\\]*/"    # /a/plain/path/
 _p3="[^ \"${_a}]*\\\\\\\\" # C:\\a\\windows\\path\\ (JSON escapes \)
 _p4="\\\\\"[^\"]*\\\\\\\\" # \"C:\\a quoted\\windows\\path\\
-_p5='[^"]* -m '            # python -P -m
-_program="($_p1|$_p2|$_p3|$_p4|$_p5)?(aisquare|asq)(\\.[eE][xX][eE])?(\\\\\"|$_a)?"
+_p5='([^"]|\\")* -m '      # python -P -m, its path quoted or not
+_p6='\\"([^"]*/)?'         # \"/a path/with spaces/ (or a bare name, quoted)
+_program="($_p1|$_p2|$_p3|$_p4|$_p5|$_p6)?(aisquare|asq)(\\.[eE][xX][eE])?(\\\\\"|$_a)?"
 _ours="\"command\" *: *\"$_program($_ws+-[^\"]*)?$_ws+hook$_ws+$event$_ws*\""
 
 # Whether the program at path $1 can start: an executable file and, when it is a
@@ -74,15 +77,19 @@ _starts() {
 # Whether the program one matching hook ($1, the text grep matched) names can
 # start. A hook naming an aisquare that is gone -- the CLI uninstalled after
 # `agents connect` -- fails on every event, and standing down beside it would
-# leave the session running none. A program sh cannot read out of the JSON text
-# (an escape: a Windows or non-ASCII path) is trusted, as every match was before
-# this check.
+# leave the session running none. The program is read from between its quotes,
+# single or double, else up to the first space. One sh cannot read out of the
+# JSON text (an escape: a Windows or non-ASCII path) is trusted, as every match
+# was before this check.
 _runnable() {
     _cmd=${1#*\"command\"}
     _cmd=${_cmd#*:}
     _cmd=${_cmd#*\"}
     case $_cmd in
-        *\\*) return 0 ;;
+        "$_dq"*)
+            _prog=${_cmd#"$_dq"}
+            _prog=${_prog%%"$_dq"*}
+            ;;
         "$_a"*)
             _prog=${_cmd#"$_a"}
             _prog=${_prog%%"$_a"*}
@@ -93,6 +100,7 @@ _runnable() {
             ;;
     esac
     case $_prog in
+        *\\*) return 0 ;;
         \~/*) _prog=$HOME/${_prog#??} ;;
     esac
     case $_prog in

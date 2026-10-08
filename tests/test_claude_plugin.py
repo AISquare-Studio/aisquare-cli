@@ -390,10 +390,17 @@ def _programs(machine: Machine) -> Path:
 #: Every shape ``agents connect`` has written a hook in, and the hand-edited ones the
 #: CLI's own matcher accepts, as (command, is it a POSIX shape ``core.agents``
 #: recognises here). ``{bin}`` is :func:`_programs`. The JSON escaping of each is real:
-#: the test writes them with ``json.dumps``, which turns a tab into ``\t``.
+#: the test writes them with ``json.dumps``, which turns a tab into ``\t`` and a double
+#: quote into ``\"``.
 _OURS = [
     ("{bin}/aisquare hook stop", True),
     ("'{bin}/My Tools/aisquare' hook stop", True),
+    # Double quotes, and a quoted bare name: hand edits and templates (review of #257).
+    ('"{bin}/My Tools/aisquare" hook stop', True),
+    ('"{bin}/aisquare" hook stop', True),
+    ('"{bin}/python3" -P -m aisquare hook stop', True),
+    ("'aisquare' hook stop", True),
+    ('"aisquare" hook stop', True),
     ("{bin}/python3 -P -m aisquare hook stop", True),
     ("{bin}/python3 -m aisquare hook stop", True),
     ("aisquare hook stop", True),
@@ -433,7 +440,9 @@ def test_it_recognises_every_shape_of_our_hook(
         "~/bin/my-hook stop",
         "/opt/aisquare-tools/notify hook stop",
         "/x/notaisquare hook stop",
+        '"/x/notaisquare" hook stop',
         "echo aisquare hook stop",
+        'echo "aisquare" hook stop',
         "{bin}/aisquare hook stop-failure",
         "{bin}/aisquare hook session-end",
     ],
@@ -459,11 +468,20 @@ def test_it_runs_beside_hooks_that_are_not_ours_for_this_event(
     [
         ("{gone}/aisquare hook stop", False),
         ("'{gone}/My Tools/aisquare' hook stop", False),
+        # Read from between its \" quotes and graded, not trusted for the backslash.
+        ('"{gone}/My Tools/aisquare" hook stop', False),
+        ('"{gone}/python3" -m aisquare hook stop', False),
         # A bare name the hook's shell would not find: the CLI is on no PATH, only in
         # ~/.local/bin, where the launcher still finds it.
         ("aisquare hook stop", True),
     ],
-    ids=["gone", "gone-quoted", "bare-not-on-path"],
+    ids=[
+        "gone",
+        "gone-quoted",
+        "gone-double-quoted",
+        "gone-double-quoted-python",
+        "bare-not-on-path",
+    ],
 )
 def test_it_runs_in_place_of_a_hook_whose_program_is_gone(
     machine: Machine, command: str, runner_in_local_bin: bool

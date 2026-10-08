@@ -961,11 +961,32 @@ def installer_env(route: InstallRoute) -> dict[str, str]:
     return env
 
 
+#: An argument cmd.exe and PowerShell both pass on as it is, unquoted. Anything else — a
+#: space, cmd's ``< > | & ^``, PowerShell's ``, ; ( ) { }`` or a leading ``@`` — is
+#: double-quoted, which both read literally. ``%`` (cmd) and ``$`` (PowerShell) are read
+#: inside double quotes too, so no quoting both shells share protects those.
+_WINDOWS_BARE = re.compile(r"(?!@)[\w@%+=:./\\\[\]-]+", re.ASCII)
+
+
 def command_line(argv: Sequence[str]) -> str:
-    """``argv`` as one line a person can paste into their shell."""
+    """``argv`` as one line a person can paste into their shell.
+
+    On Windows that shell is cmd.exe or PowerShell. ``subprocess.list2cmdline`` quotes
+    only for the C runtime, so ``--with tiktoken>=0.7`` came out bare, and cmd read
+    ``>=0.7`` as a redirection: the constraint was dropped (sweep of #257).
+    """
     if sys.platform == "win32":
-        return subprocess.list2cmdline(list(argv))
+        return " ".join(
+            arg if _WINDOWS_BARE.fullmatch(arg) else _windows_quoted(arg) for arg in argv
+        )
     return shlex.join(argv)
+
+
+def _windows_quoted(arg: str) -> str:
+    """``arg`` in double quotes, escaped by the C runtime's rules (``list2cmdline``'s): its
+    own quotes, and the backslashes before them or before the closing quote, doubled."""
+    escaped = re.sub(r'(\\*)"', r'\1\1\\"', arg)
+    return '"' + re.sub(r"(\\+)\Z", r"\1\1", escaped) + '"'
 
 
 # --- the seams --------------------------------------------------------------------------

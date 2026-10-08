@@ -726,6 +726,48 @@ def test_windows_is_never_run_and_still_gets_the_command(
     assert install_route.not_automated(linux) is None, "the same receipt runs elsewhere"
 
 
+def test_a_command_printed_on_windows_pastes_into_cmd_and_powershell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows never runs the uv route, so the printed line is the only way to upgrade. It
+    was quoted for the C runtime alone: `--with tiktoken>=0.7` came out bare, and cmd read
+    `>=0.7` as a redirection, dropping the constraint (sweep of #257). Both shells read a
+    double-quoted argument literally; one with nothing to protect stays bare."""
+    receipt = _receipt(
+        '{ name = "aisquare-cli", extras = ["mcp", "serve"] }',
+        '{ name = "tiktoken", specifier = ">=0.7" }',
+        '{ name = "rich", specifier = "<15" }',
+        tail='\n[tool.options]\nindex-url = "https://x.example/simple?project=a&token=b"\n',
+    )
+    argv = install_route.upgrade_argv(_uv_route(tmp_path / "w", receipt, platform="win32"))
+    plain = install_route.upgrade_argv(
+        _uv_route(tmp_path / "p", _receipt(_OURS_PINNED, _TIKTOKEN), platform="win32")
+    )
+    with monkeypatch.context() as windows:
+        windows.setattr(sys, "platform", "win32")
+        line = install_route.command_line(argv)
+        bare = install_route.command_line(plain)
+    with monkeypatch.context() as posix:
+        posix.setattr(sys, "platform", "linux")
+        posix_line = install_route.command_line(argv)
+
+    assert line == (
+        'uv tool install --force --python 3.14 --with "tiktoken>=0.7" --with "rich<15" '
+        '--index-url "https://x.example/simple?project=a&token=b" '
+        '"aisquare-cli[mcp,serve]@latest"'
+    ), line
+    outside_quotes = re.sub(r'"[^"]*"', "", line)
+    assert not re.search(r"[<>|&^,;]", outside_quotes), outside_quotes
+    assert (
+        bare == "uv tool install --force --python 3.14 --with tiktoken aisquare-cli[serve]@latest"
+    )
+    assert posix_line == (
+        "uv tool install --force --python 3.14 --with 'tiktoken>=0.7' --with 'rich<15' "
+        "--index-url 'https://x.example/simple?project=a&token=b' "
+        "'aisquare-cli[mcp,serve]@latest'"
+    ), "control: POSIX keeps shlex's quoting"
+
+
 def test_no_uv_on_path_is_reported_not_attempted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

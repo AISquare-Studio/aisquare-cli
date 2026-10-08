@@ -581,14 +581,33 @@ def _homebrew_formula(prefix: Path) -> str | None:
     return parts[index + 1] if index + 1 < len(parts) else None
 
 
+#: A git ref that names a commit: 7 to 40 hex characters.
+_COMMIT = re.compile(r"[0-9a-fA-F]{7,40}")
+
+
+def _moving_ref(ref: object) -> str | None:
+    """``ref`` when following it is the upgrade (a branch), else ``None``.
+
+    uv records PEP 508's ``@<ref>`` as ``rev=``, and pip's ``requested_revision``
+    is the same ``@<ref>``: neither says whether it names a branch or a tag. A
+    commit (7 to 40 hex characters) or a release tag (one :func:`version_key`
+    reads: ``v0.8.0``) pins what is installed, so reinstalling it moves nothing,
+    and it goes. Any other ref is a branch, whose head is the upgrade: dropping
+    it moved a ``rc/first-run`` install to the default branch (review of #257).
+    """
+    if not isinstance(ref, str) or not ref or _COMMIT.fullmatch(ref):
+        return None
+    return None if version_key(ref) is not None else ref
+
+
 def _direct_url(text: str | None) -> tuple[str, bool] | None:
     """``(source, editable)`` from ``direct_url.json``, or ``None`` for an index install.
 
     The source is what pip takes back: a path for a ``file://`` URL, and for a
     VCS install the PEP 508 reference rebuilt from ``vcs_info`` — PEP 610
     records ``https://…/r.git`` without its ``git+``, and pip reads a bare URL
-    as an archive to download. The requested revision is kept (a branch's head
-    is its upgrade), and so is a subdirectory.
+    as an archive to download. The requested revision is kept when it is a
+    branch (:func:`_moving_ref`), and so is a subdirectory.
     """
     if not text:
         return None
@@ -603,9 +622,9 @@ def _direct_url(text: str | None) -> tuple[str, bool] | None:
     editable = isinstance(dir_info, dict) and dir_info.get("editable") is True
     vcs_info = parsed.get("vcs_info")
     if isinstance(vcs_info, dict) and isinstance(vcs_info.get("vcs"), str):
-        revision = vcs_info.get("requested_revision")
+        revision = _moving_ref(vcs_info.get("requested_revision"))
         reference = f"{vcs_info['vcs']}+{url}"
-        if isinstance(revision, str) and revision:
+        if revision:
             reference += f"@{revision}"
         subdirectory = parsed.get("subdirectory")
         if isinstance(subdirectory, str) and subdirectory:
@@ -700,16 +719,19 @@ def _git_reference(recorded: str, subdirectory: str | None) -> str:
     """uv's recorded git source as a PEP 508 ``git+`` URL that moves forward.
 
     uv writes ``https://…/r?branch=dev#<commit>`` or ``?rev=…`` / ``?tag=…``,
-    with ``subdirectory=`` in the same query. A branch is kept — its head is the
-    upgrade. A ``rev``, a ``tag`` and the ``#<commit>`` pin the commit already
-    installed, so they go. The subdirectory moves to PEP 508's fragment.
+    with ``subdirectory=`` in the same query, URL-encoded (``rev=rc%2Ffirst-run``).
+    A branch is kept — its head is the upgrade — and so is a ``rev`` that names one
+    (:func:`_moving_ref`): uv records a ``@<ref>`` as ``rev`` whether it is a branch
+    or a tag (measured, uv 0.12.19). A ``tag``, a ``rev`` that is a commit or a
+    release tag, and the ``#<commit>`` pin what is installed, so they go. The
+    subdirectory moves to PEP 508's fragment.
     """
     parts = urlsplit(recorded)
     query = dict(parse_qsl(parts.query))
     base = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
     if not base.startswith("git+"):
         base = "git+" + base
-    branch = query.get("branch")
+    branch = query.get("branch") or _moving_ref(query.get("rev"))
     if branch:
         base += f"@{branch}"
     inner = query.get("subdirectory") or subdirectory

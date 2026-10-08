@@ -254,8 +254,18 @@ def test_the_same_url_without_editable_is_a_local_source(tmp_path: Path) -> None
             "aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli.git"
             "#subdirectory=cli",
         ),
+        (
+            {"vcs": "git", "commit_id": "0123abcd", "requested_revision": "v0.8.0"},
+            None,
+            "aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli.git",
+        ),
+        (
+            {"vcs": "git", "commit_id": "0123abcd", "requested_revision": "0123abcd"},
+            None,
+            "aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli.git",
+        ),
     ],
-    ids=["branch", "subdirectory"],
+    ids=["branch", "subdirectory", "release-tag", "commit"],
 )
 def test_a_vcs_install_is_reinstalled_from_a_reference_pip_can_read(
     tmp_path: Path, vcs_info: dict[str, str], subdirectory: str | None, source: str
@@ -586,18 +596,44 @@ def test_an_unreadable_receipt_is_still_a_uv_tool_but_is_not_run(
             ["aisquare-cli @ git+https://g.example/r#subdirectory=cli"],
         ),
         (
+            '{ name = "aisquare-cli", git = "https://github.com/o/r?rev=rc%2Ffirst-run" }',
+            install_route.LOCAL_SOURCE,
+            ["aisquare-cli @ git+https://github.com/o/r@rc/first-run"],
+        ),
+        (
+            '{ name = "aisquare-cli", git = "https://github.com/o/r?rev=dev" }',
+            install_route.LOCAL_SOURCE,
+            ["aisquare-cli @ git+https://github.com/o/r@dev"],
+        ),
+        (
+            '{ name = "aisquare-cli", git = "https://github.com/o/r?rev=0123abcd9876" }',
+            install_route.LOCAL_SOURCE,
+            ["aisquare-cli @ git+https://github.com/o/r"],
+        ),
+        (
             '{ name = "aisquare-cli", url = "https://x.example/a.tar.gz", subdirectory = "cli" }',
             install_route.LOCAL_SOURCE,
             ["aisquare-cli @ https://x.example/a.tar.gz#subdirectory=cli"],
         ),
     ],
-    ids=["editable", "directory", "git-rev", "git-branch", "git-subdirectory", "url-subdirectory"],
+    ids=[
+        "editable",
+        "directory",
+        "git-rev-release-tag",
+        "git-branch",
+        "git-subdirectory",
+        "git-rev-branch-encoded",
+        "git-rev-branch",
+        "git-rev-commit",
+        "url-subdirectory",
+    ],
 )
 def test_a_receipt_from_a_source_is_reported_with_its_reinstall(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requirement: str, kind: str, tail: list[str]
 ) -> None:
-    """A branch is kept (its head is the upgrade); a rev, a tag and a commit pin are
-    dropped; a subdirectory survives (review of #251, finding 6)."""
+    """A branch is kept (its head is the upgrade), whether uv recorded it as `branch=` or,
+    for a `@<ref>`, as `rev=`, URL-encoded (review of #257); a release tag, a commit and
+    the commit pin are dropped; a subdirectory survives (review of #251, finding 6)."""
     monkeypatch.setattr(install_route, "find_uv", lambda: "/usr/bin/uv")
     route = _uv_route(tmp_path, _receipt(requirement))
 

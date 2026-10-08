@@ -90,6 +90,17 @@ def _prefix(root: Path, receipt: str | None = None, name: str = "aisquare-cli") 
     return prefix
 
 
+#: What uv writes as ``CACHEDIR.TAG`` into every cache it makes (``~/.cache/uv``, measured).
+UV_CACHEDIR_TAG = "Signature: 8a477f597d28d172789f06886806bc55"
+
+
+def _uv_cache(root: Path) -> Path:
+    """A stand-in for uv's cache at ``root``, tagged as uv tags its own."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "CACHEDIR.TAG").write_text(UV_CACHEDIR_TAG, encoding="utf-8")
+    return root
+
+
 def _facts(prefix: Path, **overrides: Any) -> Facts:
     values: dict[str, Any] = {
         "prefix": prefix,
@@ -1990,6 +2001,58 @@ def test_check_tells_a_newer_build_from_the_latest_and_advises_only_an_upgrade(
     assert result.exit_code == 0, result.output
     assert verdict in lines and advice in lines, lines
     assert ("upgrade with: aisquare upgrade" in lines) is (latest == "0.8.1"), lines
+
+
+@pytest.mark.parametrize(
+    "route", ["pipx", "venv", "Homebrew", "uvx", "native Windows uv tool", "editable"]
+)
+def test_check_on_a_route_upgrade_does_not_run_advises_only_an_update(
+    runner: CliRunner, machine: Machine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """Only the uv tool route had learnt to say "nothing to upgrade". On a route `aisquare
+    upgrade` does not run itself, --check said "(you have it)" and then "upgrade with: pipx
+    upgrade aisquare-cli" (review of #257). A checkout keeps its command: PyPI's number
+    says nothing about its source."""
+    extra: dict[str, Any] = {}
+    prefix = tmp_path / "pip-e"
+    if route == "pipx":
+        prefix = tmp_path / "pipx" / "venvs" / "aisquare-cli"
+        prefix.mkdir(parents=True)
+        (prefix / install_route.PIPX_METADATA_NAME).write_text("{}", encoding="utf-8")
+    elif route == "venv":
+        prefix = tmp_path / "venv"
+    elif route == "Homebrew":
+        prefix = tmp_path / "opt" / "Cellar" / "aisquare" / "0.8.0" / "libexec"
+    elif route == "uvx":
+        prefix = _uv_cache(tmp_path / "cache" / "uv") / "archive-v0" / "AbC123"
+    elif route == "native Windows uv tool":
+        prefix = _prefix(tmp_path / "win", _receipt(_OURS_PINNED, _TIKTOKEN))
+        extra["platform"] = "win32"
+    else:
+        checkout = (tmp_path / "checkout").as_uri()
+        extra["direct_url"] = json.dumps({"url": checkout, "dir_info": {"editable": True}})
+    (prefix / "bin").mkdir(parents=True, exist_ok=True)
+    found = _facts(prefix, **extra)
+    monkeypatch.setattr(install_route, "facts", lambda: found)
+    monkeypatch.setattr(install_route, "find_uv", lambda: "/usr/bin/uv")
+    monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
+
+    def advice(latest: str) -> list[str]:
+        machine.latest = LatestRelease(latest)
+        result = runner.invoke(app, ["upgrade", "--check"])
+        assert result.exit_code == 0, result.output
+        lines = result.stdout.splitlines()
+        return [line for line in lines if line.startswith(("upgrade with: ", "nothing to"))]
+
+    plan = _one_object(runner.invoke(app, ["--json", "upgrade", "--check"]).stdout)
+    same, newer = advice("0.8.0"), advice("0.8.1")
+
+    assert plan["runnable"] is False, plan
+    if route == "editable":
+        assert same and same[0].startswith("upgrade with: "), same
+    else:
+        assert same == ["nothing to upgrade"], same
+    assert newer and newer[0].startswith("upgrade with: "), f"control: {newer}"
 
 
 def test_a_failing_sites_remedy_survives_a_space_in_its_path(

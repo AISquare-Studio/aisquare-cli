@@ -102,6 +102,15 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
         pin = f" --version {plan.target}" if plan.target else ""
         _say(f"upgrade with: aisquare upgrade{pin}")
     else:
+        if plan.up_to_date and plan.route.kind not in (
+            install_route.EDITABLE,
+            install_route.LOCAL_SOURCE,
+        ):
+            # Nothing newer for that route to fetch either: "upgrade with: pipx upgrade
+            # aisquare-cli" under "(you have it)" contradicted it (review of #257). A
+            # checkout keeps its command: PyPI's number says nothing about its source.
+            _say("nothing to upgrade")
+            return
         _say(f"upgrade with: {plan.command}")
         _say(f"(`aisquare upgrade` does not run it: {plan.reason})")
 

@@ -95,7 +95,8 @@ from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSessi
 
 if TYPE_CHECKING:
     import socket
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import Executor, Future, ThreadPoolExecutor
+    from types import TracebackType
 
     import uvicorn
     from starlette.requests import HTTPConnection, Request
@@ -2390,13 +2391,22 @@ class _RateLimiter:
         return None
 
 
-@dataclass(eq=False)
-class _CacheTurn:
-    """Whose turn it is to compute one kind (:class:`_Cache`): the lock its callers take
-    turns on, and how many of them hold it or wait for it."""
+@dataclass(frozen=True, eq=False)
+class _Failed:
+    """A snapshot that raised (:class:`_Cache`): the exception and the traceback it was
+    raised with. It is the tick's answer as a value is, and each caller it is raised to
+    gets that traceback back, so the traceback does not grow by every caller's frames."""
 
-    lock: threading.Lock = field(default_factory=threading.Lock)
-    callers: int = 0
+    error: BaseException
+    traceback: TracebackType | None
+
+
+def _cache_answer(outcome: object) -> object:
+    """What a caller of :class:`_Cache` takes from an outcome: the snapshot, or its failure,
+    raised."""
+    if isinstance(outcome, _Failed):
+        raise outcome.error.with_traceback(outcome.traceback)
+    return outcome
 
 
 class _Cache:
@@ -2418,6 +2428,18 @@ class _Cache:
     fleet, a tmux call each, and a tmux that stops answering costs 30 s a call,
     while every socket's board and fleet frames, and every cached read, waited
     behind it.
+
+    What a compute comes to is the tick's answer, a failure as much as a value,
+    and every caller of the tick takes that. Only a value was kept, so the
+    callers waiting on a kind that raised computed it again one after another:
+    a store locked past its 5 s ``busy_timeout`` held the Nth socket's ``board``
+    frame N x 5 s, its ``fleet`` frame as long again, and its heartbeat behind
+    both.
+
+    A caller waits on the event loop, and only the one computing takes a
+    thread. Each caller waited in a thread of the loop's default pool, which
+    also runs every unlock, write and transcript read, so a few sockets waiting
+    on one slow kind held all of it.
     """
 
     def __init__(self, ttl: float, *, clock: Callable[[], float] = time.monotonic) -> None:
@@ -2426,47 +2448,103 @@ class _Cache:
         self._lock = threading.Lock()
         """Guards the two tables, and is never held while a snapshot is computed."""
         self._values: dict[str, tuple[float, object]] = {}
-        self._turns: dict[str, _CacheTurn] = {}
-        """The kinds being computed or waited for now. A kind's turn goes with its last
-        caller, so this holds the kinds in flight and no more, whatever kinds are asked for."""
+        """Each kind's outcome within the tick: its snapshot, or :class:`_Failed`."""
+        self._flights: dict[str, Future[object]] = {}
+        """The kinds being computed now, each to the future its callers wait on. A flight
+        goes when its compute ends, so this holds the kinds in flight and no more,
+        whatever kinds are asked for."""
 
     def _cache_fresh(self, kind: str) -> tuple[float, object] | None:
-        """``kind``'s snapshot while it is younger than the ttl; call it holding ``_lock``."""
+        """``kind``'s outcome while it is younger than the ttl; call it holding ``_lock``."""
         hit = self._values.get(kind)
         return hit if hit is not None and self._clock() - hit[0] < self._ttl else None
 
-    def _cache_store(self, kind: str, value: object) -> None:
-        """Keep ``value`` as ``kind``'s snapshot, once what expired is dropped; hold ``_lock``."""
+    def _cache_store(self, kind: str, outcome: object) -> None:
+        """Keep ``outcome`` as ``kind``'s, once what expired is dropped; hold ``_lock``."""
         now = self._clock()
-        for stale in [k for k, (at, _value) in self._values.items() if now - at >= self._ttl]:
+        for stale in [k for k, (at, _kept) in self._values.items() if now - at >= self._ttl]:
             del self._values[stale]
         self._values.pop(kind, None)  # stored anew, so the dict stays oldest first
-        self._values[kind] = (now, value)
+        self._values[kind] = (now, outcome)
         while len(self._values) > CACHE_KINDS_MAX:
             del self._values[next(iter(self._values))]
 
-    def cached_snapshot(self, kind: str, compute: Snapshot) -> object:
+    def _cache_claim(self, kind: str) -> tuple[Future[object], bool]:
+        """``kind``'s outcome as a future, and whether this caller is the one to compute it:
+        settled already for what the tick kept, the flight another caller computes, or a
+        new flight (``True``), which :meth:`_cache_compute` settles."""
+        from concurrent.futures import Future
+
         with self._lock:
             hit = self._cache_fresh(kind)
-            if hit is not None:
-                return hit[1]
-            turn = self._turns.setdefault(kind, _CacheTurn())
-            turn.callers += 1
+            if hit is None:
+                flight = self._flights.get(kind)
+                if flight is not None:
+                    return flight, False
+                flight = self._flights[kind] = Future()
+                # Running, so a waiter that is cancelled (its socket closed) ends its own
+                # wait and never the flight the other callers wait on.
+                flight.set_running_or_notify_cancel()
+                return flight, True
+        kept: Future[object] = Future()
+        kept.set_result(hit[1])
+        return kept, False
+
+    def _cache_compute(self, kind: str, flight: Future[object], compute: Snapshot) -> None:
+        """Compute ``kind`` in a worker thread and settle its flight with what came of it. An
+        exception is kept for the tick as a value is; anything rarer (``SystemExit``) only
+        reaches the callers waiting now."""
         try:
-            with turn.lock:
-                with self._lock:
-                    hit = self._cache_fresh(kind)  # the caller this one waited for made it
-                if hit is not None:
-                    return hit[1]
-                value = compute()
-                with self._lock:
-                    self._cache_store(kind, value)
-                return value
-        finally:
-            with self._lock:
-                turn.callers -= 1
-                if not turn.callers:
-                    del self._turns[kind]
+            outcome: object = compute()
+        except BaseException as exc:
+            failed = _Failed(exc, exc.__traceback__)
+            self._cache_settle(kind, flight, failed, keep=isinstance(exc, Exception))
+        else:
+            self._cache_settle(kind, flight, outcome, keep=True)
+
+    def _cache_settle(
+        self, kind: str, flight: Future[object], outcome: object, *, keep: bool
+    ) -> None:
+        """End ``kind``'s flight with ``outcome``, kept as the tick's when ``keep``; a flight
+        ends once, and a later ending changes nothing."""
+        with self._lock:
+            if self._flights.get(kind) is not flight:
+                return
+            del self._flights[kind]
+            if keep:
+                self._cache_store(kind, outcome)
+        flight.set_result(outcome)
+
+    def _cache_job_done(self, kind: str, flight: Future[object]) -> None:
+        """A compute's job ended: if it never ran (its pool shut down first), its flight ends
+        here, since its callers must not wait for it forever."""
+        if not flight.done():
+            never = RuntimeError("the snapshot was not taken: its thread pool shut down")
+            self._cache_settle(kind, flight, _Failed(never, None), keep=False)
+
+    async def cached_snapshot(
+        self, kind: str, compute: Snapshot, pool: Executor | None = None
+    ) -> object:
+        """``kind``'s snapshot this tick: what the tick kept, what the compute in flight comes
+        to, or this caller's own compute, run in a thread of ``pool`` (``None``: the loop's
+        default pool). A failure is raised to every caller it is the answer for."""
+        import asyncio
+        import contextvars
+
+        flight, mine = self._cache_claim(kind)
+        if mine:
+            run = functools.partial(
+                contextvars.copy_context().run, self._cache_compute, kind, flight, compute
+            )
+            try:
+                job = asyncio.get_running_loop().run_in_executor(pool, run)
+            except BaseException as exc:  # a pool shut down: the callers waiting hear why
+                self._cache_settle(kind, flight, _Failed(exc, exc.__traceback__), keep=False)
+                raise
+            job.add_done_callback(lambda _job: self._cache_job_done(kind, flight))
+        if not flight.done():
+            await asyncio.wrap_future(flight)
+        return _cache_answer(flight.result())
 
 
 def _client_of(scope: Any) -> str:
@@ -3204,7 +3282,7 @@ def build_remote_app(
         return f"/r/{request.path_params['token']}"
 
     async def snapshot(kind: str, compute: Snapshot) -> object:
-        return await asyncio.to_thread(cache.cached_snapshot, kind, compute)
+        return await cache.cached_snapshot(kind, compute)
 
     def remote_pane_frame(label: str, project: str) -> dict[str, object]:
         """A pane subscription's live frame: the capture, or what stopped it (``error``).
@@ -3669,11 +3747,10 @@ def build_remote_app(
                     # One capture per pane per tick however many sockets watch it, as for
                     # board and fleet, and on the pane pool (§2.10). The key is the pair as
                     # JSON: a ':' in a ref or a label must not make two pairs one kind.
-                    payload = await loop.run_in_executor(
-                        kit.kit_pane_pool(),
-                        cache.cached_snapshot,
+                    payload = await cache.cached_snapshot(
                         "pane:" + json.dumps([project, label]),
                         functools.partial(remote_pane_frame, label, project),
+                        kit.kit_pane_pool(),
                     )
                 except Exception as exc:  # the pool, shut down under a socket still ticking
                     payload = {"rows": [], "width": 0, "height": 0, "error": str(exc)}

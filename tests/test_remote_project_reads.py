@@ -10,6 +10,7 @@ the other project's snapshot within the same tick.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import threading
@@ -153,9 +154,13 @@ def test_the_cache_keeps_only_what_was_read_within_the_last_tick() -> None:
     spelling was read again: 300 spellings of one project held 300 memory payloads."""
     ticks = Ticks()
     cache = remote_server._Cache(ttl=0.9, clock=ticks)
-    for n in range(300):
-        assert cache.cached_snapshot(f"memory:prj_7b68{'*' * n}", lambda: "x" * 1_000)
-        ticks.now += 1.0
+
+    async def read() -> None:
+        for n in range(300):
+            assert await cache.cached_snapshot(f"memory:prj_7b68{'*' * n}", lambda: "x" * 1_000)
+            ticks.now += 1.0
+
+    asyncio.run(read())
     assert list(cache._values) == [f"memory:prj_7b68{'*' * 299}"]
 
 
@@ -163,8 +168,12 @@ def test_however_many_kinds_one_tick_reads_the_cache_keeps_the_newest_few() -> N
     ticks = Ticks()
     cache = remote_server._Cache(ttl=0.9, clock=ticks)
     spellings = [f"memory:prj_7b68{'*' * n}" for n in range(300)]
-    for spelling in spellings:
-        cache.cached_snapshot(spelling, lambda: "x" * 1_000)
+
+    async def read() -> None:
+        for spelling in spellings:
+            await cache.cached_snapshot(spelling, lambda: "x" * 1_000)
+
+    asyncio.run(read())
     assert list(cache._values) == spellings[-remote_server.CACHE_KINDS_MAX :]
     computed: list[str] = []
 
@@ -172,7 +181,7 @@ def test_however_many_kinds_one_tick_reads_the_cache_keeps_the_newest_few() -> N
         computed.append("again")
         return "y"
 
-    assert cache.cached_snapshot(spellings[-1], again) == "x" * 1_000
+    assert asyncio.run(cache.cached_snapshot(spellings[-1], again)) == "x" * 1_000
     assert computed == [], "within the tick, what was read is still answered from the cache"
 
 

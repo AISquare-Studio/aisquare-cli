@@ -402,7 +402,7 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
         for entry in plan.mcp:
             where = f"{entry.file}" + (f", project {entry.project}" if entry.project else "")
             _say(f"    {entry.name} in {where}")
-    for plugin in plan.plugins:
+    for plugin in plan.lasting_plugins:
         # Claude Code's to remove, and it keeps running aisquare: said, never silent.
         _say(f"  the aisquare plugin in {plugin.config_dir}, which keeps running aisquare")
         _say("  there (through uvx once the package is gone) — remove it with:")
@@ -504,8 +504,8 @@ def _uninstall_question(plan: lifecycle_service.UninstallPlan) -> str | None:
             f" (the package stays: {blocked} other director{'ies' if blocked != 1 else 'y'} "
             "could not be checked)"
         )
-    if plan.plugins:
-        count = len(plan.plugins)
+    if plan.lasting_plugins:
+        count = len(plan.lasting_plugins)
         text += (
             f" (the aisquare plugin stays enabled in {count} "
             f"director{'ies' if count != 1 else 'y'} and keeps running aisquare)"

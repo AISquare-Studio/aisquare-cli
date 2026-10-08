@@ -909,6 +909,35 @@ def test_an_enabled_plugin_is_named_with_its_removal_and_a_purge_waits_for_it(
     assert disabled["plugins"] == [], "control: a disabled plugin runs nothing"
 
 
+def test_a_plugin_inside_the_home_a_purge_deletes_does_not_hold_the_purge_up(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fleet slot gets the plugin from `/plugin install` typed in its pane. Its config dir
+    is inside the home, so the purge deletes it and nothing can run it afterwards: the purge
+    was refused for it all the same (review of #257)."""
+    monkeypatch.setattr(agent_core, "plugin_route_supported", lambda: True)  # the route's rule
+    _initialised(runner, tmp_path)
+    slot = _plugin_installed(paths.claude_accounts_dir() / "2")
+
+    plan = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
+    kept = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+    result = runner.invoke(app, ["uninstall", "--yes", "--purge"])
+
+    assert [plugin["config_dir"] for plugin in plan["plugins"]] == [str(slot)]
+    assert plan["refusal"] is None, plan["refusal"]
+    assert kept["plugins"] == plan["plugins"], "control: without --purge the slot stays, listed"
+    assert result.exit_code == 0, result.output
+    assert not paths.aisquare_home().exists() and world.events[-1][0] == "package"
+    assert "the aisquare plugin is still enabled" not in result.stdout, result.stdout
+
+
 # --- the non-grading directory list ----------------------------------------------------
 
 

@@ -792,6 +792,20 @@ class UninstallPlan:
         return install_route.command_line(self.package_argv)
 
     @property
+    def lasting_plugins(self) -> tuple[agent_core.ClaudePlugin, ...]:
+        """The plugins still enabled after this run: under --purge, not those whose config
+        dir is inside the home it deletes (the fleet's account slots, retired ones too),
+        which go with it and can run nothing afterwards (review of #257)."""
+        if not self.purge:
+            return self.plugins
+        home = agent_core.dir_identity(self.home)
+        return tuple(
+            plugin
+            for plugin in self.plugins
+            if home not in agent_core.dir_identity(plugin.config_dir).parents
+        )
+
+    @property
     def refusal(self) -> UninstallRefused | None:
         """The reason nothing may start, or ``None``."""
         if self.live_agents:
@@ -807,15 +821,16 @@ class UninstallPlan:
                 f"--purge will not delete {self.home}: {self.purge_refusal}",
                 error="purge_refused",
             )
-        if self.purge and self.home_exists and self.plugins:
+        lasting = self.lasting_plugins
+        if self.purge and self.home_exists and lasting:
             # A purge the next session undoes is not one: refused like the fleet, with
             # the command that clears the way. A plain uninstall only says so.
-            where = ", ".join(str(plugin.config_dir) for plugin in self.plugins)
+            where = ", ".join(str(plugin.config_dir) for plugin in lasting)
             return UninstallRefused(
                 f"--purge would not last: the aisquare plugin is enabled in {where}, so "
                 f"Claude Code's next session there runs aisquare and makes {self.home} again. "
                 f"Remove the plugin first: "
-                f"{'; '.join(plugin_removal(plugin) for plugin in self.plugins)}",
+                f"{'; '.join(plugin_removal(plugin) for plugin in lasting)}",
                 error="plugin_enabled",
             )
         return None
@@ -1240,7 +1255,7 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
         record_error=record_error,
         purged=purged,
         purge_error=purge_error,
-        notes=tuple(_uninstall_notes(plan, removals)),
+        notes=tuple(_uninstall_notes(plan, removals, purged=purged)),
     )
 
 
@@ -1284,7 +1299,9 @@ def _purge(home: Path) -> tuple[bool, str | None]:
     return True, None
 
 
-def _uninstall_notes(plan: UninstallPlan, removals: Iterable[HookRemoval]) -> list[str]:
+def _uninstall_notes(
+    plan: UninstallPlan, removals: Iterable[HookRemoval], *, purged: bool = False
+) -> list[str]:
     notes: list[str] = []
     if any(removal.ok for removal in removals):
         notes.append("open Claude Code sessions keep the hooks they started with — restart them")
@@ -1294,7 +1311,7 @@ def _uninstall_notes(plan: UninstallPlan, removals: Iterable[HookRemoval]) -> li
             f"MCP servers that run aisquare are still registered ({names}); Claude Code owns "
             "that file — remove each with: claude mcp remove <name>"
         )
-    for plugin in plan.plugins:
+    for plugin in plan.lasting_plugins if purged else plan.plugins:
         notes.append(plugin_note(plugin))
     notes.append(
         "a running `aisquare serve` keeps running until you stop it; uv, tmux, Node, gh "

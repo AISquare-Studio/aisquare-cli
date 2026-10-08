@@ -416,6 +416,24 @@ def test_hooks_switched_off_are_named_instead_of_offering_connect(tmp_path: Path
     assert hosted(Machine(claude=[UNHOOKED]), go)[1]
 
 
+def test_a_settings_file_connect_refuses_is_named_instead_of_offering_connect(
+    tmp_path: Path,
+) -> None:
+    """Connect could only fail on a settings.json `agents connect` refuses (not a JSON
+    object, or read-only): step 2 says why, as it does for hooks switched off (review of
+    #257)."""
+    why = f"can't write {tmp_path / '.claude' / 'settings.json'}: this user may not write it"
+    refused = dataclasses.replace(UNHOOKED, refused=why)
+
+    async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> tuple[str, bool]:
+        return card(page, "claude-status"), visible(page, "claude-connect")
+
+    text, connect = hosted(Machine(claude=[refused]), go)
+    assert why in text and "Connect cannot change that" in text, text
+    assert not connect
+    assert hosted(Machine(claude=[UNHOOKED]), go)[1], "control: missing hooks get Connect"
+
+
 def test_sign_in_opens_the_accounts_page() -> None:
     signed_out = dataclasses.replace(READY, signed_in=False)
 

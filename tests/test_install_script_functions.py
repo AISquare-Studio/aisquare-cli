@@ -21,6 +21,7 @@ work under whatever `/bin/sh` the developer has, and CI runs the same file with
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -1678,6 +1679,34 @@ def test_the_short_circuit_reason_names_only_the_checks_that_are_amber(
         "the reason named gbrain while `brain` was green:\n" + result.stdout
     )
     assert "no project registered" in result.stdout, result.stdout
+
+
+def test_a_settings_json_connect_refuses_is_not_called_a_sign_in_to_finish(
+    tmp_path: Path,
+) -> None:
+    """The summary mapped every amber claude-code row to "run `claude` once", including a
+    settings.json `agents connect` refuses (not valid JSON, or read-only), where signing in
+    changes nothing (review of #257). That row has no fix here, so it is listed as
+    unexpected and the doctor names the file."""
+
+    def advice(detail: str) -> subprocess.CompletedProcess[str]:
+        row = {"name": "claude-code", "status": "warn", "detail": detail, "fix": ""}
+        # Assigned after the source, which starts DOCTOR_RAW empty.
+        return sh(
+            "DOCTOR_RAW=$PAYLOAD; _actionable_fix claude-code; echo",
+            env={"PAYLOAD": json.dumps([row])},
+            path=base_path(tmp_path),
+        )
+
+    refused = advice(
+        "Claude Code 2.1.294 hooks cannot be written in /h/.claude: can't read "
+        "/h/.claude/settings.json: it is not valid JSON"
+    )
+    missing = advice("Claude Code hooks are missing or outdated in: /h/.claude")
+
+    assert refused.returncode == 0 and missing.returncode == 0, refused.stderr + missing.stderr
+    assert refused.stdout.strip() == "", f"a refusal was given a fix: {refused.stdout!r}"
+    assert "authenticate" in missing.stdout, "control: a missing hook still gets the sign-in hint"
 
 
 def test_the_gh_advice_matches_whether_gh_exists(tmp_path: Path) -> None:

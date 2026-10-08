@@ -224,6 +224,10 @@ def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
         text.append(
             "Connect cannot change that. Remove it; this page notices within a few seconds."
         )
+    elif claude.refused is not None:
+        text.append("\n✗ ", style="red")
+        text.append(f"aisquare's hooks cannot be written: {claude.refused} — ")
+        text.append("Connect cannot change that. Fix it; this page notices within a few seconds.")
     else:
         text.append("\n✗ ", style="red")
         text.append("not connected — Connect installs aisquare's hooks, which bring the manager ")
@@ -979,7 +983,11 @@ class WelcomeView(VerticalScroll):
         found = claude is not None and claude.found
         connect = self.query_one("#claude-connect", Button)
         connect.display = (
-            found and claude is not None and not claude.connected and claude.hooks_off is None
+            found
+            and claude is not None
+            and not claude.connected
+            and claude.hooks_off is None
+            and claude.refused is None
         )
         self.query_one("#claude-sign-in", Button).display = (
             found and claude is not None and claude.signed_in is False

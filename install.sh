@@ -1762,6 +1762,11 @@ run_doctor() {
 # 17  summary (§3.8) — three kinds of amber, never collapsed into one
 # ---------------------------------------------------------------------------
 
+# The JSON object of one doctor check ($1) in DOCTOR_RAW, on one line; empty without one.
+_doctor_row() {
+    printf '%s' "${DOCTOR_RAW:-}" | tr '{' '\n' | grep "\"name\": *\"$1\"" || true
+}
+
 # Actionable by the user: a real credential step this script deliberately does
 # not take (§3.6). Each gets the one command that fixes it.
 # shellcheck disable=SC2016  # the backticks are markdown for the reader, not
@@ -1782,7 +1787,15 @@ _actionable_fix() {
                 printf 'install it: %s' "$(pkg_hint gh)"
             fi
             ;;
-        claude-code) printf 'run `claude` once to authenticate it' ;;
+        claude-code)
+            # A settings.json `agents connect` refuses (not valid JSON, or read-only)
+            # is no sign-in to finish: no fix here, so the row is listed as unexpected
+            # and the doctor names the file and why.
+            case "$(_doctor_row claude-code)" in
+                *"hooks cannot be written in"*) printf '' ;;
+                *) printf 'run `claude` once to authenticate it' ;;
+            esac
+            ;;
         snapshot) printf 'aisquare project onboard' ;;
         *) printf '' ;;
     esac

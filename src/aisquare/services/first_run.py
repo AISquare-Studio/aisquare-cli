@@ -113,6 +113,10 @@ class ClaudeState:
     hooks_off: Path | None = None
     """The settings file that switches every hook off (``"disableAllHooks": true``),
     when one does: Connect cannot change it, so step 2 says so instead of offering it."""
+    refused: str | None = None
+    """Why `agents connect` would refuse the settings file (not a JSON object, or one
+    this user may not write), when it would: Connect could only fail, so step 2 says
+    why instead of offering it (review of #257)."""
     signed_in: bool | None = None
     """``None`` when this probe did not look (the periodic one skips it)."""
     problem: str | None = None
@@ -146,6 +150,10 @@ def _hooks_off_default() -> Path | None:
     return where / "settings.json" if where is not None else None
 
 
+def _refusal_default() -> str | None:
+    return agents_service.connect_refusal("claude-code")
+
+
 def _signed_in_default() -> bool:
     return accounts_core.signed_in(accounts_core.default_account())
 
@@ -157,6 +165,7 @@ def probe_claude(
     connected: Callable[[], bool] | None = None,
     signed_in: Callable[[], bool] | None = None,
     hooks_off: Callable[[], Path | None] | None = None,
+    refusal: Callable[[], str | None] | None = None,
 ) -> ClaudeState:
     """Claude Code as the fleet will meet it. Starts no process; never raises.
 
@@ -168,7 +177,8 @@ def probe_claude(
     login, which lives in a file that can be tens of megabytes, so the periodic
     re-check leaves it out. Not connected, it asks ``core.agents.hooks_disabled``
     first, as the shared check's contract says: ``"disableAllHooks": true`` reads as
-    not connected, and no Connect can change it.
+    not connected, and no Connect can change it. Nor can it write a settings file
+    ``agents connect`` refuses (``refusal``).
     """
     problems: list[str] = []
     try:
@@ -195,6 +205,12 @@ def probe_claude(
             switched_off = (hooks_off or _hooks_off_default)()
         except Exception as exc:
             problems.append(f"could not read the hook settings: {_why(exc)}")
+    refused: str | None = None
+    if not is_connected and switched_off is None:
+        try:
+            refused = (refusal or _refusal_default)()
+        except Exception as exc:
+            problems.append(f"could not read the hook settings: {_why(exc)}")
     signed: bool | None = None
     if sign_in and binary is not None:
         try:
@@ -208,6 +224,7 @@ def probe_claude(
         version=version,
         connected=is_connected,
         hooks_off=switched_off,
+        refused=refused,
         signed_in=signed,
         problem="; ".join(problems) or None,
     )

@@ -144,6 +144,24 @@ def _check_settings(path: Path) -> None:
         raise AgentFileUnreadableError(f"can't write {path}: {unwritable}")
 
 
+def connect_refusal(name: str, config_dir: Path | None = None) -> str | None:
+    """Why `agents connect` would refuse ``config_dir``'s settings file, in its own words,
+    or ``None`` when it would write the hooks. Reads only.
+
+    The doctor asks it before offering Connect: a settings.json that is not a JSON
+    object, or that this user may not write, can only fail the click (review of
+    #257).
+    """
+    spec = agent_core.spec(name, config_dir)
+    if spec is None or spec.settings_path is None:
+        return None
+    try:
+        _check_settings(spec.settings_path)
+    except AgentFileUnreadableError as exc:
+        return str(exc)
+    return None
+
+
 def settings_unwritable(path: Path) -> str | None:
     """Why the hooks cannot be written into ``path``, or ``None`` when they can.
 

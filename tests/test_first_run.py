@@ -249,6 +249,37 @@ def test_hooks_switched_off_are_named_and_connect_is_not_their_answer(tmp_path: 
     assert connected.connected and connected.hooks_off is None
 
 
+def test_a_settings_file_connect_refuses_is_named_and_connect_is_not_its_answer(
+    tmp_path: Path,
+) -> None:
+    """A settings.json `agents connect` refuses read as merely unhooked, so Welcome offered
+    a Connect that could only fail (review of #257): the probe names connect's reason."""
+    where = agent_core.ambient_hook_dir("claude-code")
+    assert where is not None
+    where.mkdir(parents=True)
+    settings = where / "settings.json"
+    binary = str(tmp_path / "claude")
+
+    def probe() -> first_run.ClaudeState:
+        return first_run.probe_claude(which=lambda name: binary, signed_in=lambda: True)
+
+    def never() -> str | None:
+        raise AssertionError("asked about the settings file for a connected Claude Code")
+
+    settings.write_text('{"model": "opus",}', encoding="utf-8")
+    refused = probe()
+    settings.write_text("{}", encoding="utf-8")
+    writable = probe()
+    connected = first_run.probe_claude(
+        which=lambda name: binary, connected=lambda: True, signed_in=lambda: True, refusal=never
+    )
+
+    assert refused.connected is False and refused.refused is not None, refused
+    assert str(settings) in refused.refused and "not valid JSON" in refused.refused
+    assert (writable.connected, writable.refused) == (False, None), "control: merely missing"
+    assert connected.connected and connected.refused is None
+
+
 def test_connect_is_the_doctors_own_fix() -> None:
     ran: list[tuple[list[str], Path | None]] = []
 

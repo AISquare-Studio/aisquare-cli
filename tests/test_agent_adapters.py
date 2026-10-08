@@ -211,11 +211,17 @@ def _row_named(stdout: str, name: str) -> dict[str, object]:
 def test_a_damaged_settings_json_reads_as_no_hooks_not_a_traceback(
     runner: CliRunner, claude_home: Path, shape: str
 ) -> None:
+    """One `agents connect` refuses (it cannot read it) is named, with no Connect: the
+    click could only fail (review of #257). One it can rewrite reads as no hooks."""
     settings_path = claude_home / "settings.json"
     _DAMAGED_SETTINGS[shape](settings_path)
     try:
         connected = agents_service.claude_code_connected()
         damaged = runner.invoke(app, ["--json", "doctor"])
+        refused = shape in _UNREADABLE_SHAPES
+        # The click the row would offer, only where it must fail: one that works records
+        # the directory, and the control below compares a never-connected home.
+        clicked = runner.invoke(app, ["agents", "connect", "claude-code"]) if refused else None
     finally:
         _cleared(settings_path)
     settings_path.write_text("{}", encoding="utf-8")
@@ -226,10 +232,17 @@ def test_a_damaged_settings_json_reads_as_no_hooks_not_a_traceback(
         damaged.exception
     )
     row = _row_named(damaged.stdout, "claude-code")
-    assert row["status"] == "warn" and "agents connect claude-code" in str(row["fix"]), row
-    assert row == _row_named(plain.stdout, "claude-code"), (
-        "control: it reads as a file with no hooks"
-    )
+    assert row["status"] == "warn", row
+    if refused:
+        assert clicked is not None and clicked.exit_code != 0, "connect refuses it"
+        assert f"hooks cannot be written in {claude_home}" in str(row["detail"]), row
+        assert str(settings_path) in str(row["detail"]), row
+        assert "agents connect" not in str(row["fix"]), row
+    else:
+        assert "agents connect claude-code" in str(row["fix"]), row
+        assert row == _row_named(plain.stdout, "claude-code"), (
+            "control: it reads as a file with no hooks"
+        )
 
 
 def test_an_undecodable_sibling_settings_json_costs_doctor_nothing(
@@ -715,6 +728,37 @@ def test_every_reader_follows_the_shared_check(
     row, site, slot = after
     assert row.status is CheckStatus.ok and fix_commands([row]) == [], row
     assert (site, slot) == (True, True)
+
+
+@pytest.mark.parametrize("shape", ["not JSON", "read-only"])
+def test_a_settings_json_connect_refuses_is_named_and_never_offered_connect(
+    claude_home: Path, shape: str
+) -> None:
+    """It read as "hooks are missing or outdated (older installs …)", with a Connect that
+    could only fail: connect refuses a settings.json that is not a JSON object, or one this
+    user may not write, and the read-only one (home-manager's link into the Nix store)
+    never cleared (review of #257). Named with connect's reason, and no button."""
+    settings_path = claude_home / "settings.json"
+    if shape == "not JSON":
+        settings_path.write_text('{"model": "opus",}\n', encoding="utf-8")
+    else:
+        settings_path.write_text('{"model": "opus"}\n', encoding="utf-8")
+        settings_path.chmod(0o444)
+        if os.access(settings_path, os.W_OK):
+            settings_path.chmod(0o644)
+            pytest.skip("this user can write a read-only file (root)")
+    try:
+        row = diagnostics._check_claude_code()
+    finally:
+        settings_path.chmod(0o644)
+    settings_path.write_text("{}\n", encoding="utf-8")
+    fixable = diagnostics._check_claude_code()
+
+    assert row.status is CheckStatus.warn, row
+    assert f"hooks cannot be written in {claude_home}" in row.detail, row
+    assert str(settings_path) in row.detail and "older installs" not in row.detail, row
+    assert fix_commands([row]) == [], "no Connect: the click could only fail"
+    assert fix_commands([fixable]) != [], "control: a settings.json it can write gets Connect"
 
 
 def test_hooks_switched_off_are_not_connected_and_never_offered_connect(

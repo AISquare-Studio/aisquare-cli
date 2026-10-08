@@ -947,6 +947,17 @@ def _check_claude_code() -> DoctorCheck:
         for site in graded
         if site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT) and site not in dead
     ]
+    # A settings.json `agents connect` refuses (not a JSON object, or one this user may
+    # not write) reads here as one with no hooks, and its Connect could only fail: a
+    # read-only one, home-manager's link into the Nix store, never cleared. Named with
+    # connect's own reason, as a switched-off one is, and given no button (review of #257).
+    refused = {
+        site.config_dir: why
+        for site in (*unhooked, *wrong_binary)
+        if (why := agents_service.connect_refusal("claude-code", site.config_dir)) is not None
+    }
+    unhooked = [site for site in unhooked if site.config_dir not in refused]
+    wrong_binary = [site for site in wrong_binary if site.config_dir not in refused]
     # Where the plugin is the route that runs, what it runs is graded like a hook.
     plugin_runs = [site for site in graded if site.plugin is not None and site not in doubled]
     plugin_runs += dead
@@ -959,6 +970,7 @@ def _check_claude_code() -> DoctorCheck:
     healthy = (
         not unhooked
         and not wrong_binary
+        and not refused
         and not doubled
         and runner_problem is None
         and unmade is None
@@ -1021,6 +1033,12 @@ def _check_claude_code() -> DoctorCheck:
             "runs none of them, so no context is injected and no prompt is captured"
         )
         fixes.append(f'Turn hooks back on: remove "disableAllHooks" from {listed}')
+    for directory, why in refused.items():
+        problems.append(f"hooks cannot be written in {directory}: {why}")
+        fixes.append(
+            f"make {directory / 'settings.json'} a JSON object this user can write, then "
+            "connect again"
+        )
     if unhooked:
         listed = ", ".join(_site_label(site) for site in unhooked)
         problems.append(f"{_STALE_HOOKS} in: {listed}")

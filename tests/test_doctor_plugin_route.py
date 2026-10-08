@@ -341,15 +341,22 @@ def test_a_stale_aisquare_the_plugin_runs_is_graded(
 @posix_route
 @pytest.mark.parametrize(("uvx", "status"), [(True, CheckStatus.ok), (False, CheckStatus.warn)])
 def test_with_no_cli_the_plugin_runs_the_pin_through_uvx_or_nothing(
-    claude: Path, monkeypatch: pytest.MonkeyPatch, uvx: bool, status: CheckStatus
+    claude: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, uvx: bool, status: CheckStatus
 ) -> None:
+    # A real stand-in, not a path that happens to exist: since the doctor's search asks
+    # whether the program can start, as the launcher does, a made-up /usr/bin/uvx passed
+    # only on a machine whose uv put one there, and failed on CI's runners.
     real_which = shutil.which
+    stand_in = tmp_path / "uv-bin" / "uvx"
+    stand_in.parent.mkdir()
+    stand_in.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    stand_in.chmod(0o755)
     monkeypatch.setattr(agent_core, "plugin_runner", lambda: None)
     monkeypatch.setattr(
         shutil,
         "which",
         lambda name, *args, **kwargs: (
-            ("/usr/bin/uvx" if uvx else None) if name == "uvx" else real_which(name)
+            (str(stand_in) if uvx else None) if name == "uvx" else real_which(name)
         ),
     )
     _install_plugin(claude)

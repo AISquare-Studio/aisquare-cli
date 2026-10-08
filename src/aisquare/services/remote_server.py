@@ -169,6 +169,9 @@ lets the woken phone back in."""
 PANE_CAPTURE_WORKERS = 4
 """Threads in the pool every pane capture of the stream runs on
 (:meth:`RemoteKit.kit_pane_pool`)."""
+WRITE_WORKERS = 8
+"""Threads in the pool every write handler runs on (:meth:`RemoteKit.kit_write_pool`): keys
+waiting out an action's lock, and the actions themselves, which take seconds."""
 HEARTBEAT_SECONDS = 10.0
 """How often a socket gets a ``heartbeat`` frame, changed or not, so the page can tell a quiet
 fleet from a dead link (the default of ``build_app(heartbeat=)``)."""
@@ -287,11 +290,11 @@ EXIT_KEY_REPEAT_SECONDS = 3.0
 """A second Ctrl-C (or Ctrl-D) to one agent this soon exits Claude Code: refused unless meant."""
 EXIT_KEYS = frozenset({"C-c", "C-d"})
 SEND_KEYS_LOCK_WAIT_SECONDS = 2.0
-"""How long a send-keys waits for its agent's action lock (:func:`remote_agent_lock`). Keys
-tapped in a burst, or sent again together after a reconnect, wait out the milliseconds each
-other's tmux calls take; an action holds the lock for seconds (an interrupt's wait for the
-prompt, a stop's grace, a restart), and keys that would land in the middle of it are 409
-``busy`` instead."""
+"""How long a send-keys waits for its agent's action lock (:func:`remote_agent_lock`), counted
+from when the request reached the server. Keys tapped in a burst, or sent again together
+after a reconnect, wait out the milliseconds each other's tmux calls take; an action holds
+the lock for seconds (an interrupt's wait for the prompt, a stop's grace, a restart), and keys
+that would land in the middle of it are 409 ``busy`` instead."""
 NOTE_TEXT_MAX = 8_000
 NOTE_KINDS = frozenset({"note", "decision", "question", "result"})
 """The kinds a phone may post. The others (``attention``, ``limited``, ``agent_exited``,
@@ -759,6 +762,12 @@ def _lock_state_file(path: Path) -> int | None:
                 return None
             time.sleep(0.01)
 
+
+_WRITE_ARRIVED: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "asq_remote_write_arrived", default=None
+)
+"""When the write a handler runs for reached the server (``time.monotonic``): a wait it makes
+counts from then, not from when a thread of the write pool was free to run it."""
 
 _STATE_CHECKED: contextvars.ContextVar[Runtime | None] = contextvars.ContextVar(
     "asq_remote_state_checked", default=None
@@ -1814,10 +1823,20 @@ def _remote_keys_turn(target: ProjectInfo, label: str) -> Iterator[FleetAgent]:
     up to :data:`SEND_KEYS_LOCK_WAIT_SECONDS`, and are 409 ``busy`` after that, as a
     second action is. A label no row holds makes no lock: the registry is process-wide
     and never shrinks, and a label is whatever a body says.
+
+    The wait counts from when the request reached the server (:data:`_WRITE_ARRIVED`).
+    Counted from when a thread was free to run it, keys tapped in a burst during an
+    action waited their 2 s each in turn, a pool's worth at a time, and the last ones
+    took the lock when the action let it go, seconds after their taps: typed into the
+    replacement a restart had started (sweep of #243).
     """
     _remote_live_row(target, label)
     lock = remote_agent_lock(target.id, label)
-    if not lock.acquire(timeout=SEND_KEYS_LOCK_WAIT_SECONDS):
+    arrived = _WRITE_ARRIVED.get()
+    wait = SEND_KEYS_LOCK_WAIT_SECONDS
+    if arrived is not None:
+        wait -= time.monotonic() - arrived
+    if not lock.acquire(timeout=max(0.0, wait)):
         raise RequestError(
             409, "busy", f"another action on {label} is still running — nothing was sent"
         )
@@ -3091,6 +3110,8 @@ class RemoteKit:
     """The request ledger every write-gated request passes (SPEC §1.5)."""
     pane_pool: ThreadPoolExecutor | None = None
     """Made on the first pane capture (:meth:`kit_pane_pool`); the lifespan shuts it down."""
+    write_pool: ThreadPoolExecutor | None = None
+    """Made on the first write (:meth:`kit_write_pool`); the lifespan shuts it down."""
     sockets: dict[str, list[Callable[[int], None]]] = field(default_factory=dict)
     """Each device's live sockets, oldest first, as closers that take a close code."""
     lane_state: dict[str, Any] = field(default_factory=dict)
@@ -3192,6 +3213,35 @@ class RemoteKit:
                     max_workers=PANE_CAPTURE_WORKERS, thread_name_prefix="asq-remote-pane"
                 )
             return self.pane_pool
+
+    def kit_write_pool(self) -> ThreadPoolExecutor:
+        """The pool every write handler runs on, made on first use.
+
+        Never the default thread pool either, which runs every read and every socket's
+        board and fleet snapshot: a send-keys waits there for its agent's lock while an
+        action holds it, and a burst of taps during a restart held all of that pool's
+        threads, so the stream and every read stalled for seconds (sweep of #243).
+        """
+        with self._lock:
+            if self.write_pool is None:
+                from concurrent.futures import ThreadPoolExecutor
+
+                self.write_pool = ThreadPoolExecutor(
+                    max_workers=WRITE_WORKERS, thread_name_prefix="asq-remote-write"
+                )
+            return self.write_pool
+
+    async def kit_run_write(
+        self, handler: WriteHandler, body: dict[str, Any], arrived: float
+    ) -> tuple[dict[str, object], str]:
+        """``handler(body)`` on the write pool, told when its request reached the server
+        (``arrived``, ``time.monotonic``), and in this request's context otherwise."""
+        import asyncio
+
+        context = contextvars.copy_context()
+        context.run(_WRITE_ARRIVED.set, arrived)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self.kit_write_pool(), context.run, handler, body)
 
     def kit_socket_opened(self, device_id: str, closer: Callable[[int], None]) -> None:
         """Count a device's new socket; past :data:`WS_SOCKETS_PER_DEVICE`, close its oldest."""
@@ -3357,8 +3407,8 @@ async def remote_lifespan(kit: RemoteKit) -> AsyncIterator[None]:
     """The lanes' background work starts with the server and stops with it.
 
     The needs watcher first, then the push sender, which listens to it; at
-    shutdown their stoppers run in reverse, and then the pane pool is shut
-    down. A lane that fails to start costs its own feature and never the
+    shutdown their stoppers run in reverse, and then the pane and write pools
+    are shut down. A lane that fails to start costs its own feature and never the
     server: it is logged, and the rest carries on.
     """
     import asyncio
@@ -3383,9 +3433,10 @@ async def remote_lifespan(kit: RemoteKit) -> AsyncIterator[None]:
                 await asyncio.to_thread(stopper)
             except Exception:
                 log.warning("remote: a lane did not stop cleanly", exc_info=True)
-        pool, kit.pane_pool = kit.pane_pool, None
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
+        for pool in (kit.pane_pool, kit.write_pool):
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
+        kit.pane_pool = kit.write_pool = None
 
 
 def build_remote_app(
@@ -3680,10 +3731,12 @@ def build_remote_app(
 
         In order: the name, then what every write-gated lane route goes through too
         (:meth:`RemoteKit.kit_gated`): the body and its optional ``request_id``, a
-        retry answered from the ledger, the write gate, and the handler in a worker
-        thread, its ending stored, refusals as well, so a retry gets the same
-        refusal. Last, the audit line for a write that went through.
+        retry answered from the ledger, the write gate, and the handler on the write
+        pool (:meth:`RemoteKit.kit_run_write`), its ending stored, refusals as well, so
+        a retry gets the same refusal. Last, the audit line for a write that went
+        through.
         """
+        arrived = time.monotonic()
         device = kit.kit_device(request)
         name = request.path_params["name"]
         handler = handlers.get(name) if name in write_endpoint_names() else None
@@ -3694,7 +3747,7 @@ def build_remote_app(
         async def dispatched(body: dict[str, Any]) -> Response:
             nonlocal summary
             try:
-                result, summary = await asyncio.to_thread(handler, body)
+                result, summary = await kit.kit_run_write(handler, body, arrived)
                 status, payload = 200, result
             except RequestError as exc:
                 status, payload = exc.status, exc.request_error_body()

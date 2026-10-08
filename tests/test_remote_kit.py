@@ -14,6 +14,7 @@ import itertools
 import json
 import logging
 import threading
+import time
 import tracemalloc
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -646,6 +647,28 @@ def test_the_dispatcher_goes_through_the_ledger_and_audits_once(
     assert ("begin", "n1", "note") in app.kit.ledger.calls
     bad = client.post(url, json={"text": "hi", "request_id": "../x"})
     assert bad.status_code == 400 and len(ran) == 2
+
+
+def test_every_write_runs_on_the_write_pool_knowing_when_it_arrived(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """Off the loop's default pool, which runs the reads and the stream's snapshots: a write
+    may wait seconds there, on an agent's lock or an action (sweep of #243)."""
+    ran: list[tuple[str, float | None]] = []
+
+    def note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        ran.append((threading.current_thread().name, remote_server._WRITE_ARRIVED.get()))
+        return {}, "note"
+
+    app = build_app(runtime, sources=_sources(), writes=Writes({"note": note}), dist_dir=tmp_path)
+    runtime.set_allow_write(True)
+    client = _unlocked(app, runtime)
+    before = time.monotonic()
+    assert client.post(f"{base(runtime)}/api/note", json={"text": "x"}).status_code == 200
+    ((thread, arrived),) = ran
+    assert thread.startswith("asq-remote-write"), thread
+    assert arrived is not None and before <= arrived <= time.monotonic()
+    assert remote_server._WRITE_ARRIVED.get() is None, "set for the write alone"
 
 
 def test_a_write_cancelled_while_it_runs_never_leaves_its_request_id_running(

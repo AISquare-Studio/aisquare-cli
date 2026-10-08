@@ -234,48 +234,11 @@ def new_action_ledger() -> ActionLedger:
 # --- the body ------------------------------------------------------------------------------
 
 
-def action_required(body: dict[str, Any], key: str) -> str:
-    """A string the action cannot go without; 400 ``invalid`` when it is missing or blank."""
-    value = body.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise RequestError(400, "invalid", f"{key!r} is required")
-    return value.strip()
-
-
-def action_ref(
-    body: dict[str, Any], key: str, *, limit: int | None = None, guard: bool = False
-) -> str | None:
-    """An optional string: absent and null mean none; over ``limit`` is a 413.
-
-    Blank means none as well, except for a ``guard``: an id that keeps the
-    action off the wrong agent (``agent_id``, ``needs_id``). A page that sends
-    one blank, say from a card that had none, gets a 400. Read as none, the blank
-    would turn the guard off and the action would still go through.
-    """
-    value = body.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise RequestError(400, "invalid", f"{key!r} must be a string")
-    if limit is not None and len(value) > limit:
-        raise RequestError(413, "too_large", f"{key!r} is over {limit} characters")
-    if guard and not value.strip():
-        raise RequestError(400, "invalid", f"{key!r} is blank: send the id, or leave it out")
-    return value.strip() or None
-
-
-def action_flag(body: dict[str, Any], key: str) -> bool:
-    """An optional ``true`` or ``false``, and nothing else.
-
-    ``"false"`` is a non-empty string, and read as true it would make ``force``
-    kill an agent without its ``/exit``.
-    """
-    value = body.get(key)
-    if value is None:
-        return False
-    if not isinstance(value, bool):
-        raise RequestError(400, "invalid", f"{key!r} must be true or false")
-    return value
+# An action reads its body as every write does, with the server's one set of readers: a
+# copy of them here refused what the server's own read as absent (review of #243, round 3).
+action_required = remote_server._required
+action_ref = remote_server._optional_ref
+action_flag = remote_server._remote_flag
 
 
 def action_pinned(body: dict[str, Any]) -> tuple[str, str]:

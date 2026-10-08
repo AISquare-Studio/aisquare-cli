@@ -2072,7 +2072,14 @@ def _live_explainability(label: str, project: str | None = None) -> dict[str, ob
     )
 
 
-def _required(body: dict[str, Any], key: str) -> str:
+def _required(body: Mapping[str, Any], key: str) -> str:
+    """A string the write cannot go without; 400 ``invalid`` when it is missing or blank.
+
+    This and the readers below are the ONE way a write reads its body's fields, the
+    agent actions' and the quick answers' included (``remote_actions.action_required``
+    is this function): two copies drifted, one refusing a value of the wrong type and
+    the other reading it as absent.
+    """
     value = body.get(key)
     if not isinstance(value, str) or not value.strip():
         raise RequestError(400, "invalid", f"{key!r} is required")
@@ -2104,17 +2111,34 @@ def _audit_keys(keys: list[str] | None) -> str:
     return "[" + ",".join(scrubbed) + "]"
 
 
-def _optional_ref(body: dict[str, Any], key: str) -> str | None:
-    """An optional NAME or reference — blank and whitespace-only both mean absent.
+def _optional_ref(
+    body: Mapping[str, Any], key: str, *, limit: int | None = None, guard: bool = False
+) -> str | None:
+    """An optional NAME or reference — absent, null, blank and whitespace-only mean none.
+
+    Any other value that is not a string is a 400 ``invalid``, never none: read as
+    none, ``"project": 2048`` sent a write to the CURRENT project, keys typed into
+    its agent included. Over ``limit`` is a 413. A ``guard`` (an id that keeps an
+    action off the wrong agent: ``agent_id``, ``needs_id``) may not be blank either:
+    read as none, the blank one a page sent from a card that had none would turn
+    the guard off, and the action would still go through.
 
     Correct for a project ref, a note's task or a role. WRONG for literal text a
     human typed: see :func:`_literal`.
     """
     value = body.get(key)
-    return value if isinstance(value, str) and value.strip() else None
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RequestError(400, "invalid", f"{key!r} must be a string")
+    if limit is not None and len(value) > limit:
+        raise RequestError(413, "too_large", f"{key!r} is over {limit} characters")
+    if guard and not value.strip():
+        raise RequestError(400, "invalid", f"{key!r} is blank: send the id, or leave it out")
+    return value.strip() or None
 
 
-def _literal(body: dict[str, Any], key: str) -> str | None:
+def _literal(body: Mapping[str, Any], key: str) -> str | None:
     """Text to deliver verbatim — whitespace is CONTENT here, not emptiness.
 
     ``_optional_ref`` answers "did they name something", and a name that is all
@@ -2123,11 +2147,35 @@ def _literal(body: dict[str, Any], key: str) -> str | None:
     ``" "`` became ``None``, so a write carrying only a space delivered nothing
     while the endpoint answered 200 ``sent: true``, and the audit line recorded
     ``text=0ch`` — the trail honestly reporting that no text was sent, the loss
-    having happened before it. Absent or non-string is still absent; ``""`` is
-    still nothing to send.
+    having happened before it. Absent or null is still absent; ``""`` is still
+    nothing to send. A value that is not a string is a 400 ``invalid``: read as
+    absent, ``"text": 3`` with ``"enter": true`` sent the Enter alone, which takes a
+    dialog's highlighted option, and answered 200 ``sent: true``.
     """
     value = body.get(key)
-    return value if isinstance(value, str) else None
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RequestError(400, "invalid", f"{key!r} must be a string")
+    return value
+
+
+def _remote_flag(body: Mapping[str, Any], key: str) -> bool:
+    """An optional ``true`` or ``false``, and nothing else: absent or null is false, any
+    other value a 400 ``invalid``.
+
+    ``bool()`` of a JSON string is true for ``"false"``, ``"0"`` and ``"no"``: ``"enter":
+    "false"`` pressed Enter after the keys it came with, which takes a dialog's
+    highlighted option, and ``"force": "false"`` would kill an agent without its
+    ``/exit``. ``send-keys``, the quick answers and the agent actions all read their
+    flags here (``remote_actions.action_flag`` is this function).
+    """
+    value = body.get(key)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise RequestError(400, "invalid", f"{key!r} must be true or false")
+    return value
 
 
 DOUBLE_PRESS = (
@@ -2267,7 +2315,8 @@ def live_writes() -> Writes:
     def write_send_keys(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         """Type into one agent's pane: ``text`` (as hex, nothing parses it), or pad ``keys``.
 
-        Everything is checked before anything is sent: the keys against the
+        Everything is checked before anything is sent: each field's type (a
+        ``"enter": "false"`` is a 400, not an Enter), the keys against the
         allowlist, the caps, no control character in the text, one input per body
         (``text`` went first, so "Esc, then type" arrived as "type, then Esc"), the
         pane, and the double Ctrl-C. The pane must be running the agent, and be the
@@ -2282,7 +2331,9 @@ def live_writes() -> Writes:
         label = _required(body, "agent")
         text = _literal(body, "text")
         keys = [] if body.get("keys") is None else check_remote_key_names(body["keys"])
-        enter = bool(body.get("enter", False))
+        enter = _remote_flag(body, "enter")
+        confirmed = _remote_flag(body, "confirm_exit")
+        project = _optional_ref(body, "project")
         if text and len(text) > SEND_KEYS_TEXT_MAX:
             raise RequestError(
                 413,
@@ -2297,7 +2348,7 @@ def live_writes() -> Writes:
             )
         if not text and not keys and not enter:
             raise RequestError(400, "invalid", "give 'text', 'keys' or 'enter'")
-        target = _resolve_project(_optional_ref(body, "project"))
+        target = _resolve_project(project)
         summary = (
             f"{label}@{target.id} text={len(text or '')}ch keys={_audit_keys(keys)} enter={enter}"
         )
@@ -2311,7 +2362,6 @@ def live_writes() -> Writes:
                 gone = PANE_OUTLIVED.format(label=label)
                 raise RequestError(409, "not_agent", f"{gone} — nothing was sent")
             exits = sum(key in EXIT_KEYS for key in keys)
-            confirmed = body.get("confirm_exit") is True
             if exits and not exit_keys.exit_keys_allowed(
                 (target.id, label), exits, confirmed=confirmed
             ):
@@ -3700,7 +3750,9 @@ def build_remote_app(
                 if not isinstance(message, dict):
                     continue
                 ref = message.get("project")
-                project = ref if isinstance(ref, str) else ""
+                if ref is not None and not isinstance(ref, str):
+                    continue  # a project that is no name names none, never the CURRENT one
+                project = ref or ""
                 label = message.get("subscribe")
                 if isinstance(label, str) and label:
                     if (project, label) in panes_wanted or len(

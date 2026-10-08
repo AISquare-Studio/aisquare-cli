@@ -1798,6 +1798,7 @@ def _needs_answer_body(body: Mapping[str, object]) -> tuple[str, list[str], str,
     from aisquare.services.remote_server import (
         SEND_KEYS_TEXT_MAX,
         RequestError,
+        _remote_flag,
         check_remote_key_names,
         check_remote_text,
     )
@@ -1824,7 +1825,7 @@ def _needs_answer_body(body: Mapping[str, object]) -> tuple[str, list[str], str,
     if len(text) > SEND_KEYS_TEXT_MAX:
         raise RequestError(413, "too_large", f"'text' is at most {SEND_KEYS_TEXT_MAX} characters")
     check_remote_text(text)
-    return item_id, keys, text, bool(body.get("enter", False))
+    return item_id, keys, text, _remote_flag(body, "enter")
 
 
 def _needs_send(agent: FleetAgent, keys: Sequence[str], text: str, enter: bool) -> None:

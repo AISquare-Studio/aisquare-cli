@@ -206,6 +206,29 @@ class StubbornNgrok:
         return self.returncode
 
 
+def test_an_ngrok_that_cannot_be_spawned_is_a_sentence_and_remote_stays_local() -> None:
+    """A binary on the PATH that will not run (no execute bit, the wrong architecture):
+    ``start_tunnel`` says so, and Remote is on locally with that on its status line, never
+    an ``OSError`` out of the switch's handler."""
+
+    def refused(command: list[str], **kwargs: object) -> subprocess.Popen[str]:
+        raise PermissionError(13, "Permission denied", command[0])
+
+    tunnels: list[NgrokTunnel] = []
+
+    def factory(port: int) -> NgrokTunnel:
+        tunnels.append(NgrokTunnel(port, which=lambda _name: "/usr/bin/ngrok", popen=refused))
+        return tunnels[-1]
+
+    server = fake_server()
+    controller = RemoteController(server=server, tunnel_factory=factory)
+    controller.turn_on()
+    sentence = "could not start ngrok: [Errno 13] Permission denied: 'ngrok'"
+    assert controller.running and controller.message == sentence
+    assert controller.link_url() == f"http://127.0.0.1:8750/r/{server.token}/"
+    assert tunnels[0].error == sentence and not tunnels[0].running
+
+
 def test_an_ngrok_that_ignores_the_terminate_is_killed() -> None:
     """Stopping waits 5 s for ngrok to end, then kills it: an ngrok left running would hold
     the static domain, and the next Remote's tunnel could not have it (ERR_NGROK_334)."""

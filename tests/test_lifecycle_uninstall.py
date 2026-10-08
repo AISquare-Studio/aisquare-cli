@@ -1835,3 +1835,84 @@ def test_the_json_plan_deletes_the_home_exactly_when_the_text_plan_does(
     assert machine["exists"] is home, machine
     assert machine["action"] == ("delete" if home else "keep"), machine
     assert ("DELETE" in human) is home, human
+
+
+_REPO = Path(__file__).resolve().parents[1]
+
+#: When `aisquare uninstall` removes the package itself, as CHANGELOG.md and docs/install.md
+#: say it, and as install_route.not_removable decides it.
+_REMOVAL_RULE = (
+    "removes the package of a uv tool install, whatever it was installed from; any other "
+    "install, and any install on native Windows, is shown the command that removes it"
+)
+
+
+def _route_at(
+    prefix: Path, *, receipt: str | None = None, platform: str = "linux", **facts: Any
+) -> install_route.InstallRoute:
+    """The route of an install at ``prefix``; ``receipt`` is a uv tool's one requirement."""
+    (prefix / "bin").mkdir(parents=True)
+    if receipt is not None:
+        text = f"[tool]\nrequirements = [{receipt}]\n"
+        (prefix / install_route.RECEIPT_NAME).write_text(text, encoding="utf-8")
+    values: dict[str, Any] = {
+        "base_prefix": prefix.parent / "base-python",
+        "executable": prefix / "bin" / "python",
+        "python_version": "3.13",
+    }
+    values.update(facts)
+    return install_route.classify(Facts(prefix=prefix, platform=platform, **values))
+
+
+@pytest.mark.parametrize("doc", ["CHANGELOG.md", "docs/install.md"])
+def test_the_docs_say_when_uninstall_removes_the_package_as_the_code_decides(
+    doc: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 0.8.0 CHANGELOG said uninstall removes the package, with no condition, and
+    docs/install.md said only the one-liner's uv tool install is: the code removes every uv
+    tool install, from a checkout or a git URL too, and shows any other install its command
+    (sweep of #257). The rule is asked of install_route itself, so neither can drift."""
+    monkeypatch.setattr(install_route, "find_uv", lambda: "/usr/bin/uv")
+    uv_tools = {
+        "PyPI": '{ name = "aisquare-cli" }',
+        "a checkout": '{ name = "aisquare-cli", editable = "/src/aisquare-cli" }',
+        "a directory": '{ name = "aisquare-cli", directory = "/src/aisquare-cli" }',
+        "a git URL": '{ name = "aisquare-cli", git = "https://github.com/o/r?rev=main" }',
+    }
+    removed = {
+        source: install_route.not_removable(
+            _route_at(tmp_path / f"uv-{index}" / "tools" / "aisquare-cli", receipt=requirement)
+        )
+        for index, (source, requirement) in enumerate(uv_tools.items())
+    }
+    pipx = tmp_path / "pipx" / "venvs" / "aisquare-cli"
+    pipx.mkdir(parents=True)
+    (pipx / install_route.PIPX_METADATA_NAME).write_text("{}", encoding="utf-8")
+    checkout = (tmp_path / "checkout").as_uri()
+    editable = json.dumps({"url": checkout, "dir_info": {"editable": True}})
+    others = {
+        "native Windows": _route_at(
+            tmp_path / "win" / "tools" / "aisquare-cli",
+            receipt=uv_tools["PyPI"],
+            platform="win32",
+        ),
+        "pipx": _route_at(pipx),
+        "pip in a venv": _route_at(tmp_path / "venv"),
+        "pip -e": _route_at(tmp_path / "pip-e", direct_url=editable),
+        "Homebrew": _route_at(tmp_path / "opt" / "Cellar" / "aisquare" / "0.8.0" / "libexec"),
+        "uvx": _route_at(tmp_path / "cache" / "environments-v2" / "aisquare-0123"),
+    }
+    text = " ".join((_REPO / doc).read_text(encoding="utf-8").split())
+
+    assert removed == dict.fromkeys(uv_tools), "every uv tool install is removed"
+    assert {name: route.kind for name, route in others.items()} == {
+        "native Windows": install_route.UV_TOOL,
+        "pipx": install_route.PIPX,
+        "pip in a venv": install_route.VENV,
+        "pip -e": install_route.EDITABLE,
+        "Homebrew": install_route.HOMEBREW,
+        "uvx": install_route.UVX,
+    }, "the fixtures must be the routes they are named for"
+    shown = {name: install_route.not_removable(route) for name, route in others.items()}
+    assert all(reason is not None for reason in shown.values()), shown
+    assert _REMOVAL_RULE in text, f"{doc} must say when uninstall removes the package"

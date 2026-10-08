@@ -89,9 +89,10 @@ other install is shown the exact command that updates it. Releases before 0.8.0
 have no `upgrade` yet: re-run the one-liner instead.
 
 Remove it with `aisquare uninstall`. It takes aisquare's hooks out of Claude
-Code, then removes the package of the uv tool install the one-liner makes (any
-other install is shown its command), and keeps `~/.aisquare` (your memory and
-boards) unless you add `--purge`. It shows what it will do and asks first.
+Code, then removes the package of a uv tool install, whatever it was installed
+from; any other install, and any install on native Windows, is shown the
+command that removes it. It keeps `~/.aisquare` (your memory and boards) unless
+you add `--purge`, and it shows what it will do and asks first.
 
 ## Start the GUI
 

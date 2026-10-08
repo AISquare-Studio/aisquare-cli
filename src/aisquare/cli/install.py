@@ -596,9 +596,10 @@ def uninstall(
     slots), leaving every other hook as it was. Refuses while fleet agents are
     running. ~/.aisquare is kept unless --purge, which waits until an enabled
     aisquare plugin is removed (the plan names the command). The package goes
-    last: a uv tool install is removed with `uv tool uninstall`; any other
-    install is told its command. Asks first at a terminal; off a terminal it is
-    a dry run unless --yes.
+    last: a uv tool install, whatever it was installed from, is removed with
+    `uv tool uninstall`; any other install, and any install on native Windows,
+    is told its command. Asks first at a terminal; off a terminal it is a dry
+    run unless --yes.
     """
     json_output = get_state().json_output
     plan = lifecycle_service.uninstall_plan(purge=purge)

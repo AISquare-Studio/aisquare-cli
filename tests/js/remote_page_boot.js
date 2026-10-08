@@ -1431,7 +1431,7 @@ async function buttonsInFlight() {
   await settle();
   return {
     extend: { sent: strip.sent("api/remote/extend").length, waited: extendWaited, after: extend.disabled },
-    revoke: { sent: devices.requests.filter((one) => one.method === "DELETE").length, waited: revokeWaited },
+    revoke: { sent: devices.requests.filter((one) => one.method === "DELETE").map((one) => one.path), waited: revokeWaited },
   };
 }
 
@@ -1501,6 +1501,43 @@ async function spoken() {
   return { dots, tabs, nav, opened, replaced, escaped, toggles: [shut, toggles()] };
 }
 
+/* The writes no other scenario sends, as the machine received them: Post on the Board tab,
+ * Reply on a board question, and Restart and Switch from an agent's Actions menu. */
+async function writesReachTheirRoutes() {
+  const writes = (page) => page.requests.filter((one) => one.method !== "GET").map((one) => one.method + " " + one.path);
+  const ok = () => ({ status: 200, json: { ok: true } });
+  const board = bootPage("#/p/" + PROJECT + "/board", signedIn({ "POST api/note": ok }));
+  await settle();
+  board.acceptSockets();
+  await settle();
+  find(board.main(), (node) => node.tagName === "TEXTAREA").value = "shipping now";
+  click(buttonNamed(board.main(), "Post"));
+  await settle();
+  const question = Object.assign({}, ITEM, {
+    kind: "board_question", detail: { text: "Which store?", author: "lead-1" }, answers: [], actions: ["reply", "dismiss"],
+  });
+  const feed = bootPage("#/", signedIn({
+    "GET api/needs": () => ({ status: 200, json: { items: [question] } }), "POST api/note": ok, "POST api/needs/dismiss": ok,
+  }));
+  await settle();
+  feed.acceptSockets();
+  await settle();
+  click(buttonNamed(feed.main(), "Reply…"));
+  find(feed.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "Postgres";
+  click(buttonNamed(feed.run("UI.sheet"), "Post"));
+  await settle();
+  const agent = await agentView({ "POST api/agent/restart": ok, "POST api/agent/switch": ok });
+  agent.live().frame("fleet", FLEET);
+  await settle();
+  for (const [item, go] of [["Restart…", "Restart"], ["Switch account…", "Switch account"]]) {
+    click(buttonNamed(agent.main(), "Actions…"));
+    click(buttonNamed(agent.run("UI.sheet"), item));
+    click(buttonNamed(agent.run("UI.sheet"), go));
+    await settle();
+  }
+  return { board: writes(board), reply: writes(feed), agent: writes(agent) };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -1544,6 +1581,7 @@ async function main() {
     buttonsInFlight: await buttonsInFlight(),
     stripCap: await stripCap(),
     spoken: await spoken(),
+    writesReachTheirRoutes: await writesReachTheirRoutes(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

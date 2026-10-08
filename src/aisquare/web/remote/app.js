@@ -35,6 +35,13 @@ const API = Object.freeze({
 });
 const WRITES = Object.freeze(["send-keys", "note", "agent/tell", "agent/stop", "agent/restart", "agent/switch"]);
 
+/* A dispatcher write's path, only ever a name WRITES lists: the CI test holds that list to
+ * the server's, where paths typed at each call site were held to nothing. */
+function writePath(name) {
+  if (WRITES.indexOf(name) < 0) throw new Error("not a write: " + name);
+  return "api/" + name;
+}
+
 /* The only messages the page sends on the socket (SPEC §1.6), through wsSend. */
 const SOCKET_MESSAGES = Object.freeze(["subscribe", "unsubscribe", "subscribe_fleet", "subscribe_board"]);
 
@@ -1855,7 +1862,7 @@ function tellSheet(ctx, mode) {
       if (ctx.agentId) body.agent_id = ctx.agentId;
       sheet.busy(true);
       sheet.status.textContent = current === "interrupt" ? "Interrupting " + label + "…" : "Sending…";
-      const res = await apiWrite("api/agent/tell", body, "Tell " + label, () => {
+      const res = await apiWrite(writePath("agent/tell"), body, "Tell " + label, () => {
         sheet.status.textContent = "The phone lost the connection; this goes out again if it is back within 15 seconds.";
       });
       sheet.busy(false);
@@ -1909,7 +1916,7 @@ function replySheet(ctx) {
       const body = { text: text.value, kind: "note", project: ctx.pid };
       if (isText(author)) body.to = author;
       sheet.busy(true);
-      const res = await apiWrite("api/note", body, "Reply");
+      const res = await apiWrite(writePath("note"), body, "Reply");
       sheet.busy(false);
       if (res.ok) {
         sheet.close();
@@ -1992,7 +1999,7 @@ function actionSheet(kind, ctx) {
       if (to && to.value.trim()) body.to = to.value.trim();
       sheet.busy(true);
       sheet.status.textContent = meta.busy + " " + label + "…";
-      const res = await apiWrite("api/agent/" + kind, body, meta.title + " " + label, () => {
+      const res = await apiWrite(writePath("agent/" + kind), body, meta.title + " " + label, () => {
         sheet.status.textContent = "The phone lost the connection. If the machine got this it carries on, and the result shows here once the phone is back.";
       });
       sheet.busy(false);
@@ -2245,7 +2252,7 @@ function noteComposer(pid) {
     if (to.value.trim()) body.to = to.value.trim();
     post.classList.add("busy");
     gateButtons();
-    const res = await apiWrite("api/note", body, "Note");
+    const res = await apiWrite(writePath("note"), body, "Note");
     post.classList.remove("busy");
     gateButtons();
     if (res.ok) {
@@ -2521,7 +2528,7 @@ function inputBar(pid, label, cleanups) {
   }
   let lastEsc = 0;
   const post = async (body, what) => {
-    const res = await keysInTurn(pid, label, (at) => apiWrite("api/send-keys", Object.assign({ agent: label, project: pid }, body), what, null, at));
+    const res = await keysInTurn(pid, label, (at) => apiWrite(writePath("send-keys"), Object.assign({ agent: label, project: pid }, body), what, null, at));
     if (res.ok) return true;
     if (res.status === 409 && res.error === "double_press") {
       // Asked on this agent's own screen, over no other sheet: the answer can come after

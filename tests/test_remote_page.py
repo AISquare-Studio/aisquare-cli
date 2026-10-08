@@ -561,6 +561,45 @@ def test_every_write_the_page_sends_is_one_the_dispatcher_answers() -> None:
     assert set(_writes_table()) <= set(write_endpoint_names())
 
 
+def _requested_paths(source: str) -> list[str]:
+    """What every ``apiWrite`` and ``apiCall`` in the page is given as its path."""
+    writes = re.findall(r"(?<!function )apiWrite\(([^,]+),", source)
+    return writes + re.findall(r'apiCall\("[A-Z]+", ([^,)]+)', source)
+
+
+def test_every_path_the_page_requests_comes_from_its_tables() -> None:
+    """``WRITES`` was held to the dispatcher's list, but the page sent its writes to paths
+    typed at each call site, which nothing held to anything: a typo in Post or Reply would
+    ship green, and answer 404 on the phone. A write's path is now ``writePath`` of a name
+    ``WRITES`` lists, a read's an ``API`` entry, and no ``api/`` path is typed elsewhere."""
+    source = _text("app.js")
+    assert re.findall(r'"api/[^"]+"', source[source.index("function writePath(") :]) == []
+    # path and pending.path: apiWrite's own, passed on; a ternary chooses between two entries.
+    allowed = (
+        r"API\.\w+|apiPath\(API\.\w+|writePath\(.+\)|(?:pending\.)?path|\w+ \? API\.\w+ : API\.\w+"
+    )
+    paths = _requested_paths(source)
+    assert len(paths) > 20 and [p for p in paths if not re.fullmatch(allowed, p.strip())] == []
+    named = re.findall(r'writePath\("([^"]+)"\)', source)
+    assert named and set(named) <= set(_writes_table())
+    (prefix,) = re.findall(r'writePath\("([^"]+)" \+ kind\)', source)
+    actions = re.search(r"const AGENT_ACTIONS = \{(.*?)\n\};", source, re.S)
+    assert actions is not None
+    kinds = re.findall(r"^  (\w+): \{", actions.group(1), re.M)
+    assert kinds == ["stop", "restart", "switch"]
+    assert {prefix + kind for kind in kinds} <= set(_writes_table())
+
+
+def test_the_path_check_can_fail() -> None:
+    """The control: a typed path, and a write given a path from neither table."""
+    typed = 'function writePath(n) {}\napiWrite("api/notes", body, "Note");'
+    assert re.findall(r'"api/[^"]+"', typed[typed.index("function writePath(") :])
+    assert _requested_paths('apiWrite(somewhere, body); apiCall("GET", elsewhere);') == [
+        "somewhere",
+        "elsewhere",
+    ]
+
+
 def test_the_page_sends_only_the_socket_messages_the_server_reads() -> None:
     source = _text("app.js")
     sent = set(re.findall(r'wsSend\(\s*"([a-z_]+)"', source))
@@ -1448,7 +1487,7 @@ def test_extend_and_revoke_wait_for_their_answer_before_another_tap_goes(
     the second answer, "no such device", read as if the first had failed."""
     taps = boot_report["buttonsInFlight"]
     assert taps["extend"] == {"sent": 1, "waited": True, "after": False}
-    assert taps["revoke"] == {"sent": 1, "waited": True}
+    assert taps["revoke"] == {"sent": ["api/devices/dev_4e5f6a7b"], "waited": True}
 
 
 def test_the_feed_keeps_to_six_pane_strips_as_prompts_come_in_above_the_rest(
@@ -1484,6 +1523,15 @@ def test_a_screen_reader_is_told_which_tab_is_open_and_that_a_sheet_is_a_modal_d
     assert said["replaced"] == {"named": "Stop coder-1", "behind": [True] * 4, "focusIn": True}
     assert said["escaped"] == {"open": False, "behind": [False] * 4, "focusBack": True}
     assert said["toggles"] == [["false", "false"], ["true", "true"]]
+
+
+def test_each_write_reaches_the_route_that_answers_it(boot_report: dict[str, Any]) -> None:
+    """No scenario sent the board's Post, a Reply, a Restart or a Switch: their paths could
+    change, or be typed wrong, with every test green. Each, as the machine received it."""
+    sent = boot_report["writesReachTheirRoutes"]
+    assert sent["board"] == ["POST api/note"]
+    assert sent["reply"] == ["POST api/note", "POST api/needs/dismiss"]
+    assert sent["agent"] == ["POST api/agent/restart", "POST api/agent/switch"]
 
 
 # --- 11. the wheel --------------------------------------------------------------------------

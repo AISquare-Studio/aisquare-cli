@@ -567,7 +567,9 @@ def needs_from_agent(
 
     Rules 7 and 8 read the notification from the session's newest ``attention`` event
     only while it still names the dialog on screen (:func:`_needs_notice`); after it a
-    dialog is the plain form, its words not on the board.
+    dialog is the plain form, its words not on the board. So the usage-limit dialog is a
+    ``limited`` card only as the first notice of its turn; later in a turn it is the
+    plain dialog's, without Switch (the agent's own menu has it) and pushed at once.
 
     Attention is the derived ``attention``, or a session still marked so after the row
     went stale (past ``_STALE_AFTER`` it derives ``waiting``, the dialog maybe still up).

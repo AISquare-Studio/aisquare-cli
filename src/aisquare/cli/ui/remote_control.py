@@ -187,6 +187,8 @@ class RemoteController:
         and must not land on a Remote turned off, or on a tunnel replaced, meanwhile."""
         self._stopper: threading.Thread | None = None
         """The thread that stops the server and ngrok after :meth:`turn_off`, the latest one."""
+        self._stopping_tunnel: NgrokTunnel | None = None
+        """The ngrok that thread stops once the server has, for :meth:`stop_tunnel_now`."""
         self.save_switch: SwitchSaver = update_state
         """How a switch that changed reaches ``state.json``: that one key, at once, on the
         caller's thread. The fleet UI hands it to a saver of its own instead, which writes on
@@ -393,7 +395,7 @@ class RemoteController:
             # TUI whatever quit did not wait for.
             daemon=False,
         )
-        self._stopper = stopper
+        self._stopper, self._stopping_tunnel = stopper, tunnel
         stopper.start()
         if wait:
             stopper.join()
@@ -456,6 +458,18 @@ class RemoteController:
             return True
         stopper.join(timeout)
         return not stopper.is_alive()
+
+    def stop_tunnel_now(self) -> None:
+        """Stop the ngrok of a Remote still turning off, on the calling thread, server or not.
+
+        For a process about to end at once (a Ctrl-C while ``run_ui`` waits here): the
+        thread :meth:`turn_off` left stopping stops ngrok only once the server has stopped,
+        and it ends with the process, so the ngrok it had not reached yet ran on, its
+        tunnel still up. One that thread stopped already is stopped again for nothing.
+        """
+        tunnel = self._stopping_tunnel
+        if tunnel is not None:
+            tunnel.stop_tunnel()
 
     def restore(self, *, wait: bool = True) -> None:
         """At TUI start: a Remote that was on when the TUI last exited comes back on.

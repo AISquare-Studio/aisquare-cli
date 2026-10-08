@@ -251,6 +251,68 @@ def test_run_ui_waits_for_the_writes_once_the_fleet_ui_is_gone(
     assert order == ["the UI is gone", "writes"]
 
 
+def test_a_ctrl_c_while_quit_waits_for_remote_to_stop_quits_at_once_and_stops_ngrok_first(
+    said: list[str],
+    quit_now: list[int],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Quit waits for Remote's server and ngrok to stop before it waits for the writes, and a
+    phone's write still running is what holds that stop up: uvicorn waits for its request. A
+    Ctrl-C there raised out of run_ui, Click said "Aborted!", and Python's exit then waited
+    for the write all the same, silently. It quits at once, as it does once the stop is done:
+    what the quit could not save is said first, and the ngrok the stopping thread had not
+    reached yet is stopped before that thread ends with the process."""
+    from aisquare.cli.ui.remote_control import RemoteController
+    from tests.test_remote_control import FakeTunnel, SlowServer, fake_tunnel_factory
+
+    server = SlowServer(patience=10.0)
+    remote = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    remote.turn_on()
+    tunnel = remote.tunnel
+    assert isinstance(tunnel, FakeTunnel)
+    waited = remote.wait_until_off
+
+    def ctrl_c_in_the_wait(timeout: float | None = None) -> bool:
+        if timeout is None:  # the wait with no end, where the Ctrl-C lands
+            raise KeyboardInterrupt
+        return waited(timeout)
+
+    monkeypatch.setattr(remote, "wait_until_off", ctrl_c_in_the_wait)
+
+    class Quit:
+        """A fleet UI whose Remote is still stopping as it quits, a phone's write running."""
+
+        def __init__(self, **options: object) -> None:
+            self.unsaved = ["the theme was not saved: state.json.lock is held by another process"]
+            self.remote = remote
+
+        def run(self) -> None:
+            self.remote.shutdown_for_exit(wait=False)  # what on_unmount does
+
+    monkeypatch.setattr(app_module, "FleetApp", Quit)
+    try:
+        with remote_server._remote_write_running("agent/restart for coder-1"):
+            try:
+                app_module.run_ui()
+            except KeyboardInterrupt:
+                pytest.fail("the Ctrl-C raised out of run_ui: Aborted!, then a silent wait")
+            except SystemExit:
+                pass
+        assert quit_now == [130]
+        assert server.stopping.is_set() and not server.release.is_set(), "still stopping"
+        assert tunnel.stopped, "ngrok is stopped before the process ends with its stopper"
+        assert said[-1] == (
+            "Remote quit with agent/restart for coder-1 unfinished: "
+            "`aisquare fleet ls` shows where the agent is"
+        )
+        err = capsys.readouterr().err
+        assert "⚠ the theme was not saved: state.json.lock is held by another process" in err
+    finally:
+        server.release.set()
+        assert waited(5)
+
+
 # --- serve's Ctrl-C ----------------------------------------------------------------------------
 
 

@@ -1177,7 +1177,12 @@ def run_ui(**options: Any) -> None:
 
     A Remote that was on stops on a thread of its own at quit (``on_unmount``), so the
     screen did not freeze while uvicorn and ngrok wound down; the process waits for
-    them here, with the terminal back, and never ends before its ngrok.
+    them here, with the terminal back, and never ends before its ngrok. A Ctrl-C in
+    that wait quits at once as well, its ngrok stopped first: a phone's write still
+    running is what holds a stop up (uvicorn waits for the request), and raised out of
+    here the Ctrl-C was Click's "Aborted!", after which Python's exit waited for the
+    write all the same, silently. What the quit could not save is said before either
+    wait, so a quit at once keeps it.
     """
     from aisquare.services import remote_server
 
@@ -1185,8 +1190,14 @@ def run_ui(**options: Any) -> None:
     app.run()
     for line in app.unsaved:
         stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
-    if not app.remote.wait_until_off(REMOTE_QUIT_QUIET_SECONDS):
-        stderr_console().print("stopping Remote (its server and ngrok)…", markup=False)
-        app.remote.wait_until_off()
+    try:
+        if not app.remote.wait_until_off(REMOTE_QUIT_QUIET_SECONDS):
+            stderr_console().print("stopping Remote (its server and ngrok)…", markup=False)
+            app.remote.wait_until_off()
+    except KeyboardInterrupt:
+        try:  # the thread that would stop ngrok ends with the process
+            app.remote.stop_tunnel_now()
+        finally:
+            remote_server._remote_quit_now()
     # A phone's write still running would hold the exit as long as it runs: said, not silent.
     remote_server.remote_wait_for_writes()

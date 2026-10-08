@@ -91,7 +91,9 @@ auto-off. A Ctrl-C while a phone's write is still running (a restart or switch
 can take 40 seconds) says which, and waits for it: cut short, it can leave the
 agent down. A second Ctrl-C quits at once and leaves it unfinished, giving a
 notification still on its way, such as auto-off's farewell, two seconds at most.
-Quitting the fleet UI waits, and says so, the same way. Its options:
+Quitting the fleet UI waits, and says so, the same way: first for Remote's server
+and ngrok to stop, then for the write, and a Ctrl-C in either wait quits at once
+(ngrok stopped first). Its options:
 
 | option | default | what it does |
 | --- | --- | --- |

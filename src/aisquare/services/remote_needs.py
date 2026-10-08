@@ -274,6 +274,11 @@ def _needs_lists_every(project_id: str) -> bool:
     return True
 
 
+def _needs_answers_every(socket: str) -> bool:
+    """A source's ``tmux_answers`` when it says nothing: every server answered."""
+    return True
+
+
 @dataclass(frozen=True)
 class NeedsSources:
     """Everything the scan reads, as callables: the live store and tmux, or a test's fakes.
@@ -300,6 +305,9 @@ class NeedsSources:
     """Whether the project has a row that has not ended. The scan lists only a project that
     has: ``fleet.list_agents`` reads every row and session the project ever had, and with
     no live row there is no pane to ask tmux about and no death to record."""
+    tmux_answers: Callable[[str], bool] = _needs_answers_every
+    """Whether a tmux server listens on the given socket (``TmuxServer.answers``): asked
+    only where the listing's states cannot tell (:func:`_needs_unheard`)."""
 
 
 # --- names on a lock screen, and text on a card -------------------------------------------
@@ -1051,6 +1059,7 @@ def _needs_scan_project(
     first_seen: MutableMapping[str, datetime],
     seen: set[str],
     accounts: AccountsSettings | None,
+    answers: Callable[[str], bool] | None = None,
 ) -> _NeedsProject:
     """Every item of one project. ``statuses`` is its ``list_agents``; ``None``, it failed.
 
@@ -1058,10 +1067,13 @@ def _needs_scan_project(
     manager gone and tmux down all depend on rows the listing could not read.
     ``first_seen`` dates the items whose facts carry no date (a pane gone, tmux
     not answering) from the first scan that saw them; ``seen`` collects what
-    this scan saw, so the caller can forget the rest.
+    this scan saw, so the caller can forget the rest. ``answers`` says whether a
+    tmux server answers (:func:`_needs_unheard`), once per socket for a whole scan.
     """
     from aisquare.services.fleet import RECENTLY_ENDED
 
+    if statuses is not None:
+        statuses = _needs_unheard(statuses, answers or _needs_hearing(sources))
     ended = _needs_read(
         lambda: sources.ended_agents(project.id, now - RECENTLY_ENDED), "rows", project
     )
@@ -1115,6 +1127,60 @@ def _needs_scan_project(
     return _NeedsProject(items=items, statuses=listed, ended=ended, tails=tails)
 
 
+def _needs_hearing(sources: NeedsSources) -> Callable[[str], bool]:
+    """``sources.tmux_answers``, asked once per socket: one per scan, across its projects.
+
+    A question that fails to be put is no sign the server is gone: it answers yes.
+    """
+    heard: dict[str, bool] = {}
+
+    def needs_heard(socket: str) -> bool:
+        if socket not in heard:
+            try:
+                heard[socket] = sources.tmux_answers(socket)
+            except Exception:
+                log.debug("remote: needs could not ask tmux on %s", socket, exc_info=True)
+                heard[socket] = True
+        return heard[socket]
+
+    return needs_heard
+
+
+def _needs_unheard(
+    statuses: list[FleetAgentStatus], answers: Callable[[str], bool]
+) -> list[FleetAgentStatus]:
+    """The listing, with each live row on a tmux server that does not answer read ``unknown``.
+
+    ``fleet._derive`` takes a fresh board row over tmux (§5.1). With the server
+    gone, a row reads working, waiting or attention for the board's stale window
+    (30 minutes), and ``limited`` until its reset: ``fleet_down``, every live row
+    ``unknown``, came that late, under cards for agents tmux had taken with it. A
+    row reads ``unknown`` only when the listing could not ask its server, since a
+    row it could ask reads its pane (``lost`` once it is gone, ``exited`` once it
+    is dead), so one such row says its server did not answer and one of those says
+    it did. A server whose live rows all read from the board is asked.
+    """
+    live = [status for status in statuses if status.agent.ended_at is None]
+    silent: set[str] = set()
+    for socket in sorted({status.agent.tmux_socket for status in live}):
+        states = {status.state for status in live if status.agent.tmux_socket == socket}
+        if "unknown" in states or (not states & {"lost", "exited"} and not answers(socket)):
+            silent.add(socket)
+    return [
+        status.model_copy(
+            update={
+                "state": "unknown",
+                "detail": "tmux unavailable" + ("" if status.agent.session_id else "; no hooks"),
+            }
+        )
+        if status.agent.ended_at is None
+        and status.agent.tmux_socket in silent
+        and status.state != "unknown"
+        else status
+        for status in statuses
+    ]
+
+
 def _needs_board_authors(events: Sequence[TeamEvent], now: datetime) -> set[str]:
     """The sessions whose board questions and results may still need the human: the ones
     :func:`needs_from_board` names an item's author from."""
@@ -1144,13 +1210,33 @@ def _needs_dated(
     item: NeedsItem, first_seen: MutableMapping[str, datetime], seen: set[str]
 ) -> NeedsItem:
     """``item`` dated from the first scan that saw it, its push delay moved with it."""
-    seen.add(item.id)
-    since = first_seen.setdefault(item.id, item.since)
+    key = _needs_memory_key(item.project_id, item.id)
+    seen.add(key)
+    since = first_seen.setdefault(key, item.since)
     if since == item.since:
         return item
     shift = item.since - since
     pushed = None if item.push_after is None else item.push_after - shift
     return replace(item, since=since, push_after=pushed)
+
+
+def _needs_memory_key(project_id: str, what: str) -> str:
+    """The watcher's key for when it first saw ``what`` of a project, the project's first."""
+    return f"{project_id}|{what}"
+
+
+def _needs_still_remembered(
+    first_seen: MutableMapping[str, datetime], seen: set[str], project: ProjectInfo
+) -> None:
+    """Keep every date ``first_seen`` holds for ``project`` through a scan that could not look.
+
+    A listing that failed, or a project whose scan did, says nothing of whether a
+    pane is still gone or tmux still silent. Forgotten, the next scan that saw it
+    again dated it anew: ``fleet_down``, whose id is its first sighting, became a
+    new item, pushed again past the dismissal of the one before.
+    """
+    prefix = _needs_memory_key(project.id, "")
+    seen.update(key for key in first_seen if key.startswith(prefix))
 
 
 def _needs_crashed(
@@ -1274,13 +1360,15 @@ def _needs_fleet_down(
 ) -> list[NeedsItem]:
     """Every live row of the project derives ``unknown``: its tmux is not answering.
 
-    The subject is the first scan that saw it, so it is one item until the
-    condition clears and a new one if it comes back.
+    ``statuses`` has been through :func:`_needs_unheard`, so a fresh board row on a
+    server that is gone reads ``unknown`` too. The subject is the first scan that
+    saw it, so it is one item until the condition clears and a new one if it comes
+    back.
     """
     live = [status for status in statuses if status.agent.ended_at is None]
     if not live or any(status.state != "unknown" for status in live):
         return []
-    key = f"fleet_down:{project.id}"
+    key = _needs_memory_key(project.id, "fleet_down")
     seen.add(key)
     first = first_seen.setdefault(key, now)
     return [
@@ -1313,11 +1401,13 @@ def scan_needs_you(
     A project whose listing fails still yields its board items, and one that
     fails outright costs only its own items. ``first_seen`` is the watcher's
     memory of when it first saw the items whose facts carry no date; without
-    it, each scan is the first.
+    it, each scan is the first. What it holds for a project that could not be
+    looked at this time is kept for the next look.
     """
     memory: MutableMapping[str, datetime] = {} if first_seen is None else first_seen
     seen: set[str] = set()
     accounts = _needs_accounts(sources)
+    answers = _needs_hearing(sources)
     items: list[NeedsItem] = []
     for project in sources.list_projects():
         statuses: list[FleetAgentStatus] | None
@@ -1326,12 +1416,22 @@ def scan_needs_you(
         except Exception:
             log.debug("remote: needs could not list the agents of %s", project.id, exc_info=True)
             statuses = None
+        if statuses is None:
+            _needs_still_remembered(memory, seen, project)
         try:
             scanned = _needs_scan_project(
-                sources, project, statuses, now=now, first_seen=memory, seen=seen, accounts=accounts
+                sources,
+                project,
+                statuses,
+                now=now,
+                first_seen=memory,
+                seen=seen,
+                accounts=accounts,
+                answers=answers,
             )
         except Exception:
             log.warning("remote: the needs scan of %s failed", project.id, exc_info=True)
+            _needs_still_remembered(memory, seen, project)
             continue
         items.extend(scanned.items)
     for key in [key for key in memory if key not in seen]:
@@ -1580,6 +1680,9 @@ def live_needs_sources() -> NeedsSources:
     def needs_live_agents(project: ProjectInfo) -> list[FleetAgentStatus]:
         return fleet_service.list_agents(project, live_only=True)
 
+    def needs_tmux_answers(socket: str) -> bool:
+        return fleet_service.server_for(socket).answers()
+
     return NeedsSources(
         list_projects=project_service.list_projects,
         list_agents=needs_live_agents,
@@ -1590,6 +1693,7 @@ def live_needs_sources() -> NeedsSources:
         transcript_tail=_needs_cached_tail,
         accounts=claude_accounts_service.accounts_settings,
         has_live_agents=needs_rows_live,
+        tmux_answers=needs_tmux_answers,
     )
 
 

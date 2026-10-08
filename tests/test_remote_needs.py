@@ -469,6 +469,10 @@ class Fleet:
     tails: dict[str, TranscriptTail] = field(default_factory=dict)
     listing_fails: bool = False
     listed: int = 0
+    silent: set[str] = field(default_factory=set)
+    """Sockets whose tmux server does not answer."""
+    probed: list[str] = field(default_factory=list)
+    """Every socket the scan asked tmux about, once per question."""
 
 
 def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> NeedsSources:
@@ -477,6 +481,10 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
         if fleet.listing_fails:
             raise fleet_service.FleetUnavailable("tmux is not installed")
         return list(fleet.agents)
+
+    def tmux_answers(socket: str) -> bool:
+        fleet.probed.append(socket)
+        return socket not in fleet.silent
 
     return NeedsSources(
         list_projects=lambda: [PROJECT],
@@ -494,6 +502,7 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
         transcript_tail=lambda path: fleet.tails.get(path),
         accounts=lambda: accounts or AccountsSettings(),
         has_live_agents=lambda pid: any(status.agent.ended_at is None for status in fleet.agents),
+        tmux_answers=tmux_answers,
     )
 
 
@@ -671,7 +680,7 @@ def test_tmux_not_answering_is_one_fleet_down_item_until_it_clears() -> None:
     again = _one(_scan(fleet, now=NOW + timedelta(seconds=3), first_seen=memory))
     assert again.id == first.id and again.since == NOW
     assert again.push_after == NOW + timedelta(seconds=60)
-    fleet.agents[0] = _status(one, "waiting", _session(one, state="waiting"))
+    fleet.agents = [_status(row, "waiting", _session(row, state="waiting")) for row in (one, two)]
     assert _scan(fleet, now=NOW + timedelta(seconds=6), first_seen=memory) == []
     assert memory == {}, "a cleared condition is forgotten"
     fleet.agents[0] = _status(one, "unknown")
@@ -680,9 +689,69 @@ def test_tmux_not_answering_is_one_fleet_down_item_until_it_clears() -> None:
 
 
 def test_one_row_tmux_answers_for_is_not_fleet_down() -> None:
-    one, two = _row("coder-1"), _row("coder-2")
-    fleet = Fleet(agents=[_status(one, "unknown"), _status(two, "waiting", _session(two))])
-    assert _scan(fleet) == []
+    """Rows on two servers: the one that answered keeps its agent's own items."""
+    one, two = _row("coder-1"), _row("coder-2").model_copy(update={"tmux_socket": "other"})
+    attention = _session(two, state="attention")
+    fleet = Fleet(agents=[_status(one, "unknown"), _status(two, "attention", attention)])
+    assert [(item.kind, item.agent) for item in _scan(fleet)] == [("permission", "coder-2")]
+    assert fleet.probed == ["other"], "the unknown row said its own server did not answer"
+
+
+def _on_a_dead_tmux() -> Fleet:
+    """Three rows the real ``fleet._derive`` reads from the board with tmux not asked at all
+    (``observed=False``): two sessions seen seconds ago, and one parked on a limit."""
+    rows = [_row("coder-1"), _row("coder-2"), _row("coder-3")]
+    sessions = [
+        _session(rows[0], state="attention", seen=NOW - timedelta(seconds=30)),
+        _session(rows[1], state="working", seen=NOW - timedelta(seconds=30)),
+        _session(rows[2], state="limited", resets=NOW + timedelta(hours=3)),
+    ]
+    return Fleet(
+        agents=[
+            fleet_service._status(row, session, None, None, NOW)
+            for row, session in zip(rows, sessions, strict=True)
+        ]
+    )
+
+
+def test_a_tmux_that_is_gone_is_fleet_down_at_once_not_when_its_rows_go_stale() -> None:
+    """``fleet._derive`` takes a fresh board row over a silent tmux, for 30 minutes, and a
+    parked one until its reset: every live row read ``unknown`` only then, so tmux down was
+    reported half an hour late (hours, with a row on a limit), under cards for agents tmux
+    took with it. The server is asked once the rows cannot tell."""
+    fleet = _on_a_dead_tmux()
+    assert [status.state for status in fleet.agents] == ["attention", "working", "limited"]
+    fleet.silent.add("asq")
+    (down,) = _scan(fleet)
+    assert (down.kind, down.since, down.push_after) == (
+        "fleet_down",
+        NOW,
+        NOW + timedelta(minutes=1),
+    )
+    assert fleet.probed == ["asq"]
+    fleet.silent.clear()
+    assert [item.kind for item in _scan(fleet)] == ["permission", "limited"], "it answers again"
+
+
+def test_a_scan_asks_each_tmux_server_once_whatever_the_projects() -> None:
+    fleet = _on_a_dead_tmux()
+    other = ProjectInfo(id="prj_beta", root=Path("/work/beta"))
+    sources = replace(_sources(fleet), list_projects=lambda: [PROJECT, other])
+    scan_needs_you(sources, now=NOW, dismissed=())
+    assert fleet.probed == ["asq"]
+
+
+def test_a_listing_that_fails_does_not_forget_when_tmux_went_down() -> None:
+    """``fleet_down``'s id is its first sighting. A scan whose listing failed dropped that
+    date, and the next one minted a new item: pushed again, the dismissal of the first lost."""
+    fleet = Fleet(agents=[_status(_row("coder-1"), "unknown")])
+    memory: dict[str, datetime] = {}
+    first = _one(_scan(fleet, first_seen=memory))
+    fleet.listing_fails = True
+    assert _scan(fleet, now=NOW + timedelta(seconds=3), first_seen=memory) == []
+    fleet.listing_fails = False
+    again = _one(_scan(fleet, now=NOW + timedelta(seconds=6), first_seen=memory))
+    assert (again.id, again.since) == (first.id, NOW)
 
 
 def test_a_lost_pane_is_dated_from_the_first_scan_that_saw_it() -> None:
@@ -1218,6 +1287,9 @@ class FakeTmux:
 
     def started_at(self) -> datetime | None:
         return self.started
+
+    def answers(self) -> bool:
+        return True
 
     def run(self, *args: str, stdin: bytes | None = None) -> str:
         if args[:2] == ("list-panes", "-a"):

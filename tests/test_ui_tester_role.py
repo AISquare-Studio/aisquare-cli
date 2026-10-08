@@ -790,7 +790,7 @@ def test_doctor_scans_the_hook_sites_exactly_once(
     """
     calls: list[str] = []
 
-    def counting(name: str) -> list[Any]:
+    def counting(name: str, *, cwd: Path | None = None) -> list[Any]:
         calls.append(name)
         return []
 

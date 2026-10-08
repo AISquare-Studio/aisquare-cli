@@ -93,8 +93,8 @@ def _probe_tmux() -> TmuxState:
     return first_run.probe_tmux()
 
 
-def _probe_claude(sign_in: bool) -> ClaudeState:
-    return first_run.probe_claude(sign_in=sign_in)
+def _probe_claude(sign_in: bool, root: Path | None) -> ClaudeState:
+    return first_run.probe_claude(sign_in=sign_in, cwd=root)
 
 
 def _probe_gh() -> bool:
@@ -146,8 +146,10 @@ class Seams:
     """What the page asks of the machine and does to it — the services, unless a test says not."""
 
     tmux: Callable[[], TmuxState] = _probe_tmux
-    claude: Callable[[bool], ClaudeState] = _probe_claude
-    """Called with ``sign_in``: whether to read the login too (the periodic look does not)."""
+    claude: Callable[[bool, Path | None], ClaudeState] = _probe_claude
+    """Called with ``sign_in`` (whether to read the login too; the periodic look does not)
+    and the folder step 3 starts in: the chosen project's root, ``None`` before one is
+    chosen, which asks about the folder asq started in."""
     gh: Callable[[], bool] = _probe_gh
     candidates: Callable[[list[ProjectInfo] | None], Candidates] = _find_candidates
     """Called with the shell frame's projects, or ``None`` when the page has no shell."""
@@ -347,6 +349,9 @@ class WelcomeView(VerticalScroll):
         """How often the page looks again while it is shown; ``None`` = the app's refresh."""
         self.tmux: TmuxState | None = None
         self.claude: ClaudeState | None = None
+        self._claude_root: Path | None = None
+        """The folder :attr:`claude` was asked about: a chosen project's root, or ``None``
+        for the folder asq started in."""
         self.gh = True
         self.candidates: Candidates | None = None
         self.verdict: PathVerdict = _EMPTY_VERDICT
@@ -475,23 +480,31 @@ class WelcomeView(VerticalScroll):
             self._full_owed = self._full_owed or full
             return
         seams = self.seams
-        claude_due = full or self.claude is None or not self.claude.ready
+        root = self.project.root if self.project is not None else None
+        claude_due = (
+            full or self.claude is None or not self.claude.ready or root != self._claude_root
+        )
         tmux_due = full or self.tmux is None or not self.tmux.ok
         gh_due = full or not self.gh
 
-        def probe() -> tuple[TmuxState | None, ClaudeState | None, bool | None]:
+        def probe() -> tuple[TmuxState | None, ClaudeState | None, bool | None, Path | None]:
             return (
                 seams.tmux() if tmux_due else None,
-                seams.claude(full) if claude_due else None,
+                seams.claude(full, root) if claude_due else None,
                 seams.gh() if gh_due else None,
+                root,
             )
 
         self._run("look", probe)
 
     def _not_ready(self) -> bool:
-        claude, tmux = self.claude, self.tmux
+        claude, tmux, project = self.claude, self.tmux, self.project
         return (
-            claude is None or not claude.ready or (tmux is not None and not tmux.ok) or not self.gh
+            claude is None
+            or not claude.ready
+            or (project is not None and project.root != self._claude_root)
+            or (tmux is not None and not tmux.ok)
+            or not self.gh
         )
 
     def _tick(self) -> None:
@@ -540,7 +553,7 @@ class WelcomeView(VerticalScroll):
     def _looked(self, result: Any) -> None:
         # Not a tuple: a probe crashed (they never raise), and the card keeps what it had.
         if isinstance(result, tuple):
-            tmux, claude, gh = result
+            tmux, claude, gh, root = result
             if isinstance(tmux, TmuxState):
                 self.tmux = tmux
             if isinstance(claude, ClaudeState):
@@ -548,6 +561,7 @@ class WelcomeView(VerticalScroll):
                     # The periodic look leaves the login out: keep the last answer.
                     claude = dataclasses.replace(claude, signed_in=self.claude.signed_in)
                 self.claude = claude
+                self._claude_root = root
                 if claude.connected:
                     self.connect_error = None  # connected since, by this page or another way
             if isinstance(gh, bool):
@@ -555,6 +569,18 @@ class WelcomeView(VerticalScroll):
         if self._full_owed:
             self._full_owed = False
             self.look(full=True)
+        elif isinstance(result, tuple):
+            self._follow_project()
+
+    def _follow_project(self) -> None:
+        """Ask step 2 again when its answer was for another folder than the chosen project's.
+
+        The fleet starts in the chosen project's root, and a project- or local-scope
+        plugin makes "connected?" a question about that folder, not the one asq started
+        in (review of #257). A look in flight is caught up when it lands.
+        """
+        if self.project is not None and self.project.root != self._claude_root:
+            self.look(full=False)
 
     def find_candidates(self) -> None:
         """List step 1's folders off the UI thread, once the shell has read its first frame.
@@ -596,6 +622,7 @@ class WelcomeView(VerticalScroll):
             # page and when the frame changes, and picking the old folder then undid
             # *Choose another*, or aimed step 3 at it mid-onboarding (review of #257).
             self.project = first.project
+            self._follow_project()
         self._show_candidates()
 
     # ------------------------------------------------------------------ step 1
@@ -732,6 +759,7 @@ class WelcomeView(VerticalScroll):
             self.fleet_error = None
         self.project = project
         self.project_note = None
+        self._follow_project()
         self.paint()
 
     # ------------------------------------------------------------------ buttons
@@ -875,6 +903,9 @@ class WelcomeView(VerticalScroll):
             and "onboard" not in self.busy
             and claude is not None
             and claude.ready
+            # Answered for the folder the fleet starts in, not the one asq started in
+            # (review of #257): until the look for it lands, step 3 waits.
+            and self._claude_root == self.project.root
             and (tmux is None or tmux.ok)
         )
 

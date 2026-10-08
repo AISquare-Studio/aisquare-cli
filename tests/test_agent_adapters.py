@@ -718,7 +718,7 @@ def test_every_reader_follows_the_shared_check(
         return diagnostics._check_claude_code(), site, slot.hooks_installed
 
     before = readers()
-    monkeypatch.setattr(agent_core, "claude_code_connected", lambda config_dir=None: True)
+    monkeypatch.setattr(agent_core, "claude_code_connected", lambda config_dir=None, cwd=None: True)
     after = readers()
 
     row, site, slot = before

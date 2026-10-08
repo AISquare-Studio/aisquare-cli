@@ -138,8 +138,8 @@ class ClaudeState:
         return self.found and self.connected
 
 
-def _connected_default() -> bool:
-    return agents_service.claude_code_connected()
+def _connected_default(cwd: Path | None = None) -> bool:
+    return agents_service.claude_code_connected(cwd=cwd)
 
 
 def _hooks_off_default() -> Path | None:
@@ -166,6 +166,7 @@ def probe_claude(
     signed_in: Callable[[], bool] | None = None,
     hooks_off: Callable[[], Path | None] | None = None,
     refusal: Callable[[], str | None] | None = None,
+    cwd: Path | None = None,
 ) -> ClaudeState:
     """Claude Code as the fleet will meet it. Starts no process; never raises.
 
@@ -178,7 +179,8 @@ def probe_claude(
     re-check leaves it out. Not connected, it asks ``core.agents.hooks_disabled``
     first, as the shared check's contract says: ``"disableAllHooks": true`` reads as
     not connected, and no Connect can change it. Nor can it write a settings file
-    ``agents connect`` refuses (``refusal``).
+    ``agents connect`` refuses (``refusal``). ``cwd`` is the folder the fleet starts
+    in, which decides a project- or local-scope plugin; asq's own unless given.
     """
     problems: list[str] = []
     try:
@@ -195,7 +197,9 @@ def probe_claude(
     if binary is not None and harness.is_default_agent(resolution.binary):
         version = diagnostics.claude_code_version(binary)
     try:
-        is_connected = (connected or _connected_default)()
+        # Asked about the folder the fleet starts in (``cwd``), where a project- or
+        # local-scope plugin may be the route (review of #257).
+        is_connected = connected() if connected is not None else _connected_default(cwd)
     except Exception as exc:
         problems.append(f"could not read the hooks: {_why(exc)}")
         is_connected = False

@@ -461,8 +461,12 @@ def hooks_off(name: str, config_dir: Path | None = None) -> Path | None:
     return spec.settings_path
 
 
-def claude_code_connected(config_dir: Path | None = None) -> bool:
+def claude_code_connected(config_dir: Path | None = None, *, cwd: Path | None = None) -> bool:
     """Whether Claude Code in ``config_dir`` runs aisquare: the one "connected?" answer.
+
+    ``cwd`` is the folder a session would start in, for a project- or local-scope
+    plugin (:func:`claude_repo_plugin_here`); this process's working directory
+    unless given.
 
     ``services.agents.claude_code_connected`` is its public face and says who asks
     and why. It is implemented here so this module's own per-directory readers ask
@@ -473,8 +477,8 @@ def claude_code_connected(config_dir: Path | None = None) -> bool:
     every lifecycle hook ``agents connect`` installs is in that file, or the
     aisquare Claude Code plugin is installed and enabled there
     (:func:`claude_plugin`), or installed at project or local scope for the
-    repository a session started in this process's working directory loads it
-    from (:func:`claude_repo_plugin_here`). The switch comes first because it
+    repository a session started in ``cwd`` loads it from
+    (:func:`claude_repo_plugin_here`). The switch comes first because it
     silences every route, the plugin's included. Never raises: everything it
     reads goes through :func:`read_json`.
     """
@@ -484,7 +488,9 @@ def claude_code_connected(config_dir: Path | None = None) -> bool:
         return True
     if not plugin_route_supported():
         return False
-    return claude_plugin(config_dir) is not None or claude_repo_plugin_here(config_dir) is not None
+    if claude_plugin(config_dir) is not None:
+        return True
+    return claude_repo_plugin_here(config_dir, cwd) is not None
 
 
 def claude_repo_plugin_here(
@@ -1266,11 +1272,12 @@ def hook_site_health(
     *,
     recorded: bool,
     cache: dict[HookBinary, tuple[str, str | None]] | None = None,
+    cwd: Path | None = None,
 ) -> HookSiteHealth:
     """Grade one config directory: are the hooks all there, and what do they run?
 
     Its ``plugin`` is the user-scope install; else, only where the directory runs no
-    hooks of ours, a project- or local-scope one a session started here loads
+    hooks of ours, a project- or local-scope one a session started in ``cwd`` loads
     (:func:`claude_repo_plugin_here`). That one covers sessions in its repository
     alone. Beside the directory's own hooks it doubles nothing (the launcher stands
     down there), and graded as the directory's plugin it read as "two ways" and the
@@ -1282,7 +1289,7 @@ def hook_site_health(
     if name == "claude-code" and plugin_route_supported():
         plugin = claude_plugin(config_dir)
         if plugin is None and not commands:
-            plugin = claude_repo_plugin_here(config_dir)
+            plugin = claude_repo_plugin_here(config_dir, cwd)
     binaries: list[HookBinary] = []
     for command in commands:
         binary = hook_binary(command)
@@ -1408,8 +1415,9 @@ def claude_config_dirs() -> list[Path]:
     return unique
 
 
-def hook_sites(name: str) -> list[HookSiteHealth]:
-    """Every config directory doctor should grade, each with its verdict.
+def hook_sites(name: str, *, cwd: Path | None = None) -> list[HookSiteHealth]:
+    """Every config directory doctor should grade, each with its verdict. ``cwd`` is
+    where the sessions in question start (:func:`hook_site_health`).
 
     Recorded sites first (the registry's order), then the ambient directory a
     session from THIS shell would use, then anything found on disk with our
@@ -1420,7 +1428,7 @@ def hook_sites(name: str) -> list[HookSiteHealth]:
     """
     cache: dict[HookBinary, tuple[str, str | None]] = {}
     return [
-        hook_site_health(name, path, recorded=recorded, cache=cache)
+        hook_site_health(name, path, recorded=recorded, cache=cache, cwd=cwd)
         for path, recorded in _hook_dir_candidates(name)
     ]
 

@@ -37,7 +37,7 @@ from aisquare.core import agents as agent_core
 from aisquare.core import paths
 from aisquare.models import CheckStatus, DoctorCheck
 from aisquare.services import agents as agents_service
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, first_run
 from aisquare.services.onboarding import fix_commands
 from tests.fsperms import can_deny_reads, can_symlink
 
@@ -189,6 +189,52 @@ def test_a_repo_scope_plugin_connects_the_sessions_that_load_it(
     assert below[:2] == (loads_below, loads_below), below
     assert _buttons(below[2]) == ([] if loads_below else [_CONNECT]), below[2]
     assert elsewhere[:2] == (False, False) and _buttons(elsewhere[2]) == [_CONNECT], "control"
+
+
+@posix_route
+def test_the_first_run_probe_answers_for_the_folder_the_fleet_starts_in(
+    claude: Path, tmp_path: Path, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Welcome's step 2 asked about the folder asq started in, not the project step 1 chose,
+    where the fleet starts: a project-scope plugin in the chosen repository read as not
+    connected, and one where asq started read as connecting a fleet elsewhere (review of
+    #257). Asked about the chosen folder, both ways; unchosen, asq's own folder."""
+    repo = _repo_plugin(claude, tmp_path / "repo", "project")
+    stand_in = str(tmp_path / "bin" / "claude")
+
+    def connected(started: Path, chosen: Path | None) -> bool:
+        monkeypatch.chdir(started)
+        return first_run.probe_claude(
+            sign_in=False, which=lambda name: stand_in, cwd=chosen
+        ).connected
+
+    assert connected(work_dir, repo) is True, "the chosen repository's plugin runs its fleet"
+    assert connected(repo, work_dir) is False, "the plugin where asq started does not"
+    assert (connected(repo, None), connected(work_dir, None)) == (True, False), "control"
+
+
+@posix_route
+def test_the_doctor_asks_about_the_project_it_reports_on(
+    claude: Path, tmp_path: Path, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fleet UI's doctor reports on the selected project (`doctor(cwd=root)`), where its
+    sessions start, but its claude-code row asked about the folder asq started in, so it
+    could contradict Welcome's step 2 beside it (review of #257). Both ways; unscoped,
+    asq's own folder."""
+    repo = _repo_plugin(claude, tmp_path / "repo", "project")
+
+    def row(started: Path, project: Path | None) -> DoctorCheck:
+        monkeypatch.chdir(started)
+        return next(
+            check for check in diagnostics.doctor(cwd=project) if check.name == "claude-code"
+        )
+
+    there, elsewhere, unscoped = row(work_dir, repo), row(repo, work_dir), row(work_dir, None)
+    assert there.status is CheckStatus.ok and _buttons(there) == [], there
+    assert f"through the aisquare plugin 0.8.0 at project scope in {repo}" in there.detail
+    assert "hooks installed" not in there.detail, there
+    assert _buttons(elsewhere) == [_CONNECT], elsewhere
+    assert _buttons(unscoped) == [_CONNECT], "control: unscoped, the folder asq started in"
 
 
 @posix_route

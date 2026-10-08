@@ -122,7 +122,9 @@ def doctor(
     what the CLI means. The fleet UI hosts many projects in one process and
     must not ``os.chdir`` (docs/plans/fleet-tui.md §5.6), so it passes the
     selected project's root here and gets that project's report in-process.
-    The machine-wide checks ignore it — they are about this machine.
+    The machine-wide checks ignore it — they are about this machine — but for
+    claude-code it is the folder whose project- or local-scope plugin a session
+    there loads, as Welcome asks about the project it starts the fleet in.
 
     ``project_id`` is the project whose explainability key the explainability
     section resolves, as its launches do (``doctor --project``); ``None`` is
@@ -138,7 +140,7 @@ def doctor(
         _check_database(),
         _check_repomix(),
         _check_tiktoken(),
-        _check_claude_code(),
+        _check_claude_code(cwd),
         *_planned_agent_checks(),
         *_claude_accounts_checks(),
         _check_tmux(),
@@ -873,8 +875,12 @@ def _unmade_ambient_dir(sites: list[agent_core.HookSiteHealth]) -> Path | None:
     return ambient
 
 
-def _check_claude_code() -> DoctorCheck:
+def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     """Claude Code: are our hooks in every config dir, and do they run THIS install?
+
+    ``cwd`` is where the sessions in question start (``doctor``'s project; the
+    process's working directory unless given): it decides a project- or local-scope
+    plugin (review of #257).
 
     Graded per directory over recorded sites UNION the ambient dir UNION every
     ``~/.claude*`` on disk that carries our hooks or enables our plugin
@@ -904,7 +910,7 @@ def _check_claude_code() -> DoctorCheck:
     Read-only, like every check here: doctor never rewrites ``settings.json``.
     """
     info = agent_core.detect("claude-code")
-    sites = agent_core.hook_sites("claude-code")
+    sites = agent_core.hook_sites("claude-code", cwd=cwd)
     if info is None or (not info.detected and not sites):
         return _ok("claude-code", "Claude Code not detected on this machine")
     version = claude_code_version()
@@ -931,7 +937,9 @@ def _check_claude_code() -> DoctorCheck:
 
     # The shared answer, which counts the plugin route as connected.
     unhooked = [
-        site for site in graded if not agents_service.claude_code_connected(site.config_dir)
+        site
+        for site in graded
+        if not agents_service.claude_code_connected(site.config_dir, cwd=cwd)
     ]
     doubled = [
         site
@@ -1014,7 +1022,7 @@ def _check_claude_code() -> DoctorCheck:
             routes.extend(
                 f"{_plugin_label(beside)} stands down beside them"
                 for site in hooked
-                if (beside := agent_core.claude_repo_plugin_here(site.config_dir)) is not None
+                if (beside := agent_core.claude_repo_plugin_here(site.config_dir, cwd)) is not None
             )
         if len(plugins) == 1 and not hooked:
             routes.append(f"through {_plugin_label(plugins[0][1])}, which runs {runs}")

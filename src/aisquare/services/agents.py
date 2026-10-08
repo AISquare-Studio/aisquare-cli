@@ -31,8 +31,12 @@ def status(name: str | None = None) -> list[AgentInfo]:
     return [info]
 
 
-def claude_code_connected(config_dir: Path | None = None) -> bool:
+def claude_code_connected(config_dir: Path | None = None, *, cwd: Path | None = None) -> bool:
     """Whether Claude Code in ``config_dir`` runs aisquare: the one "connected?" answer.
+
+    ``cwd`` is the folder the sessions in question start in: it decides a project- or
+    local-scope plugin. Welcome passes the project step 1 chose, where its fleet starts;
+    unless given, this process's working directory (review of #257).
 
     Asked wherever Claude Code is reported connected or offered Connect: the
     doctor's ``claude-code`` row (whose ``agents connect`` fix is a button in asq),
@@ -67,7 +71,7 @@ def claude_code_connected(config_dir: Path | None = None) -> bool:
     ``settings.json`` that cannot be read answers False: nothing shows our hooks
     are there.
     """
-    return agent_core.claude_code_connected(config_dir)
+    return agent_core.claude_code_connected(config_dir, cwd=cwd)
 
 
 def claude_plugin(config_dir: Path | None = None) -> agent_core.ClaudePlugin | None:

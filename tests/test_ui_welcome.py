@@ -103,6 +103,10 @@ class Machine:
 
     claude: list[ClaudeState] = field(default_factory=lambda: [MISSING])
     """Answers in turn; the last one repeats."""
+    claude_at: dict[Path, ClaudeState] = field(default_factory=dict)
+    """The answer for a look asked about a chosen project's root, where one is scripted."""
+    roots: list[Path | None] = field(default_factory=list)
+    """The folder each look asked about: a chosen project's root, or ``None``."""
     tmux: TmuxState = field(default_factory=lambda: TmuxState(found=True, version=(3, 4)))
     gh: bool = True
     found: Candidates | Exception | Callable[[list[ProjectInfo] | None], Candidates] = field(
@@ -128,11 +132,15 @@ class Machine:
     """What the fleet's listing says of an agent, by label, when not ``waiting``."""
 
     def seams(self, platform: str = "linux") -> Seams:
-        def claude(sign_in: bool) -> ClaudeState:
+        def claude(sign_in: bool, root: Path | None) -> ClaudeState:
             self.looks.append(sign_in)
+            self.roots.append(root)
             if self.hold_first_look is not None and len(self.looks) == 1:
                 self.hold_first_look.wait(10)
-            answer = self.claude[0] if len(self.claude) == 1 else self.claude.pop(0)
+            if root is not None and root in self.claude_at:
+                answer = self.claude_at[root]
+            else:
+                answer = self.claude[0] if len(self.claude) == 1 else self.claude.pop(0)
             return answer if sign_in else dataclasses.replace(answer, signed_in=None)
 
         def candidates(listed: list[ProjectInfo] | None) -> Candidates:
@@ -727,6 +735,30 @@ def _ready_machine(tmp_path: Path, **overrides: Any) -> tuple[Machine, ProjectIn
     for key, value in overrides.items():
         setattr(machine, key, value)
     return machine, project
+
+
+@pytest.mark.parametrize("connected_in", ["the folder asq started in", "the chosen project"])
+def test_step_two_answers_for_the_folder_step_one_chose(tmp_path: Path, connected_in: str) -> None:
+    """Step 2 asked about the folder asq started in, while step 3 starts the fleet in the
+    project step 1 chose: with a project-scope plugin in one and not the other, it said
+    connected for a fleet that would run no aisquare, or Connect for one that would
+    (review of #257). Step 2 answers for the chosen root, and step 3 waits for it."""
+    machine, project = _ready_machine(tmp_path)
+    here_only = connected_in == "the folder asq started in"
+    machine.claude = [READY if here_only else UNHOOKED]
+    machine.claude_at = {project.root: UNHOOKED if here_only else READY}
+
+    async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> tuple[str, bool, bool]:
+        return (
+            card(page, "claude-status"),
+            visible(page, "claude-connect"),
+            visible(page, "fleet-manager"),
+        )
+
+    text, connect_offered, manager_offered = hosted(machine, go)
+    assert machine.roots[-1] == project.root, f"asked about {machine.roots}"
+    assert connect_offered is here_only, text
+    assert manager_offered is not here_only, text
 
 
 def test_the_manager_then_the_coders_and_the_fleet_is_up(tmp_path: Path) -> None:

@@ -188,7 +188,7 @@ def test_the_agent_override_is_what_the_probe_looks_for(
 def test_connected_is_the_shared_check(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     answers = iter([True, False])
     monkeypatch.setattr(
-        agents_service, "claude_code_connected", lambda config_dir=None: next(answers)
+        agents_service, "claude_code_connected", lambda config_dir=None, cwd=None: next(answers)
     )
     binary = str(tmp_path / "claude")
     first = first_run.probe_claude(which=lambda name: binary, signed_in=lambda: True)

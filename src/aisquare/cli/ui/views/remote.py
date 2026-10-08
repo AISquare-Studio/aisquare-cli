@@ -17,6 +17,7 @@ the theme's (:data:`QR_COLOURS`).
 from __future__ import annotations
 
 import io
+from datetime import tzinfo
 from typing import Any, ClassVar
 
 from rich.text import Text
@@ -31,8 +32,11 @@ from aisquare.cli.ui.remote_control import (
     READ_ONLY_REASON,
     RemoteController,
 )
+from aisquare.services.remote_server import _remote_instant
 
 QR_UNAVAILABLE = "QR unavailable — pip install segno"
+LOCAL_ZONE: tzinfo | None = None
+"""The zone the panel says its times in: ``None`` is this machine's own (a seam for tests)."""
 QR_COLOURS = "#ffffff on #000000"
 """The QR's own colours: light glyphs on a dark ground, whatever the theme.
 
@@ -214,7 +218,7 @@ class RemotePanel(ModalScreen[None]):
             text.append("  · local only — no tunnel yet", style="dim")
         deadline = controller.adopt_server_deadline()  # a phone's extension shows here too
         if deadline is not None:
-            text.append(f"  · auto-off at {deadline.astimezone():%H:%M}", style="dim")
+            text.append(f"  · auto-off at {deadline.astimezone(LOCAL_ZONE):%H:%M}", style="dim")
         elif controller.state.auto_off_minutes is None:
             # Never: say so, rather than leave the slot the timer usually fills empty —
             # "on" with nothing after it reads like the timer simply has not armed yet.
@@ -337,10 +341,27 @@ def _device_cells(device: dict[str, Any]) -> tuple[str, ...]:
     return (
         str(device["id"]),
         _short_cell(device.get("ua"), 40) or "unknown device",
-        _short_cell(device.get("last_seen"), 19) or "—",
-        _short_cell(device.get("expires_at"), 19) or "—",
+        _device_time(device.get("last_seen")),
+        _device_time(device.get("expires_at")),
         "signed in" if device.get("signed_in") else "signed out",
     )
+
+
+def _device_time(value: Any) -> str:
+    """A device's time as the auto-off line says its own: in this machine's zone, with the
+    date (``Oct 14 20:58``), since a sign-in ends a week on, on the same weekday.
+
+    The server's UTC stamps were cut to 19 characters, the offset and the seconds' last
+    digit gone: in Los Angeles at 20:58 a phone seen that second read ``2026-10-08T03:58:0…``,
+    tomorrow, two rows under "auto-off at 21:58" (sweep of #243). Read as the server reads
+    them (:func:`~aisquare.services.remote_server._remote_instant`: a stamp without its offset
+    is UTC); one that is no time at all shows as it came.
+    """
+    at = _remote_instant(value)
+    if at is None:
+        return _short_cell(value, 19) or "—"
+    here = at.astimezone(LOCAL_ZONE)
+    return f"{here:%b} {here.day} {here:%H:%M}"
 
 
 def _short_cell(value: Any, width: int) -> str:

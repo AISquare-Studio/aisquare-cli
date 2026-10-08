@@ -18,7 +18,7 @@ import socket
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -48,6 +48,8 @@ from tests.test_remote_control import FakeTunnel, SlowServer, fake_tunnel_factor
 T = TypeVar("T")
 SIZE = (140, 40)
 PUBLIC = "https://abcd-12.ngrok-free.app"
+PACIFIC = timezone(timedelta(hours=-7), "PDT")
+"""A machine whose own zone is not UTC: the R panel's times are said in it."""
 REAL_PUBLIC = "https://substantial-kestrel-92417.ngrok-free.dev"
 """A host the length ngrok really hands out: with ``/r/<32-char token>/`` the link is ~84
 characters, which is what pushed Copy off the row (the short PUBLIC above never did)."""
@@ -665,6 +667,7 @@ def test_the_devices_table_follows_last_seen_and_sign_in_while_the_devices_stay_
     old "last seen", and one signed out after a day idle still read "signed in", the very
     columns a revoke is decided from (r2 review of #243). The cells change in place, and
     the cursor stays on the row the user put it on."""
+    monkeypatch.setattr(remote_view, "LOCAL_ZONE", PACIFIC)
 
     async def go(pilot: Pilot[None]) -> None:
         modal = await open_panel(pilot)
@@ -692,7 +695,8 @@ def test_the_devices_table_follows_last_seen_and_sign_in_while_the_devices_stay_
         modal.repaint()
         await pilot.pause()
         back = rows()
-        seen = remote_view._short_cell(clock[0].isoformat(timespec="seconds"), 19)
+        here = clock[0].astimezone(PACIFIC)
+        seen = f"{here:%b} {here.day} {here:%H:%M}"  # the machine's zone, the date kept
         assert back[0][2] == seen != first[0][2]
         assert back[1] == first[1]
 
@@ -705,6 +709,36 @@ def test_the_devices_table_follows_last_seen_and_sign_in_while_the_devices_stay_
         assert table.cursor_row == 1, "the cursor stays on the row the user put it on"
 
     drive(go, tunnel=missing_ngrok)
+
+
+def test_a_devices_times_are_said_in_this_machines_zone_with_their_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cells showed the server's UTC stamps cut to 19 characters, the offset and the
+    seconds' last digit gone: in Los Angeles at 20:58 a phone seen that second read
+    ``2026-10-08T03:58:0…``, tomorrow, two rows under "auto-off at 21:58", and its sign-in,
+    ending Oct 14 at 20:58, read Oct 15 (sweep of #243). They read as that line does, and
+    keep the date: a sign-in ends a week on, on the same weekday."""
+    monkeypatch.setattr(remote_view, "LOCAL_ZONE", PACIFIC)
+    row = {
+        "id": "dev_448c5fba",
+        "ua": "iPhone Safari",
+        "last_seen": "2026-10-08T03:58:01+00:00",
+        "expires_at": "2026-10-15T03:58:01+00:00",
+        "signed_in": True,
+    }
+    assert remote_view._device_cells(row) == (
+        "dev_448c5fba",
+        "iPhone Safari",
+        "Oct 7 20:58",
+        "Oct 14 20:58",
+        "signed in",
+    )
+    hand_edited = {"id": "dev_1", "last_seen": "2026-10-08T03:58:01", "expires_at": "soon"}
+    assert remote_view._device_cells(hand_edited)[2:4] == ("Oct 7 20:58", "soon"), (
+        "a stamp without its offset is UTC, as the server reads it; no time shows as it came"
+    )
+    assert remote_view._device_cells({"id": "dev_2"})[2:4] == ("—", "—")
 
 
 def test_a_repaint_reads_the_status_once_and_draws_the_qr_only_for_a_new_link(

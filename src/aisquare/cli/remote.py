@@ -12,6 +12,8 @@ windows leg). ``tests/test_remote_stays_off_the_hook_path.py`` keeps it off.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -84,14 +86,42 @@ def _remote_runtime() -> Runtime:
 
     Every command that reads or writes the file starts here, so an unreadable or
     corrupt one is the same answer everywhere, its reason in ``--json``'s
-    ``detail`` too (``fail`` keeps the message for the human surface alone).
+    ``detail`` too (``fail`` keeps the message for the human surface alone). A
+    missing one is made here, which a home that refuses it fails as any write does
+    (:func:`_writing_remote_json`).
     """
     from aisquare.services import remote_server
 
+    with _writing_remote_json():
+        try:
+            return remote_server.runtime()
+        except remote_server.RemoteError as exc:
+            fail(str(exc), error="remote_state_unreadable", detail=str(exc))
+
+
+@contextmanager
+def _writing_remote_json() -> Iterator[None]:
+    """A ``remote.json`` that will not be replaced is a clean failure, not a traceback.
+
+    A file that cannot be READ already was (:func:`_remote_runtime`); a write that
+    failed raised its ``OSError`` through ``allow-write``, ``regenerate-password`` and
+    ``revoke``, and through ``status`` and ``serve`` making the file the first time:
+    a hundred lines of traceback, and nothing on stdout under ``--json`` (sweep of
+    #243). Any ``OSError``, as ``serve`` already took them: a read-only or full home,
+    a quota, a Windows rename still refused after its retry. The rename is a write's
+    last step, so a write that failed changed nothing.
+    """
+    from aisquare.core.paths import remote_state_path
+
     try:
-        return remote_server.runtime()
-    except remote_server.RemoteError as exc:
-        fail(str(exc), error="remote_state_unreadable", detail=str(exc))
+        yield
+    except OSError as exc:
+        fail(
+            f"{remote_state_path()} could not be written ({exc}) — nothing was changed; "
+            "make its directory writable, or free some space, and try again",
+            error="remote_state_unwritable",
+            detail=str(exc),
+        )
 
 
 def _describe_remote(info: RemoteInfo, *, allow_write: bool) -> dict[str, object]:
@@ -219,6 +249,7 @@ def install_page(
     A page installed here overrides the one bundled with aisquare-cli, for the
     Remote modal (``R``) and ``asq remote serve`` alike.
     """
+    from aisquare.core.paths import remote_dist_dir
     from aisquare.services import remote_server
 
     source = dist.resolve()
@@ -228,7 +259,17 @@ def install_page(
             error="invalid_dist",
             ref=str(source),
         )
-    destination = remote_server.install_page(source)
+    try:
+        destination = remote_server.install_page(source)
+    except OSError as exc:  # as remote.json's writes: a clean failure, never a traceback
+        target = remote_dist_dir()
+        fail(
+            f"the page could not be installed into {target} ({exc}) — the page served "
+            "before is unchanged; make its directory writable, or free some space, and try "
+            "again",
+            error="remote_page_unwritable",
+            detail=str(exc),
+        )
     if get_state().json_output:
         typer.echo(json.dumps({"installed": str(destination)}))
     else:
@@ -288,7 +329,8 @@ def allow_write(
     """Turn the write endpoints on or off for the running/next server."""
     if switch not in ("on", "off"):
         fail(f"say 'on' or 'off', not {switch!r}", error="invalid_switch", ref=switch)
-    _remote_runtime().set_allow_write(switch == "on")
+    with _writing_remote_json():
+        _remote_runtime().set_allow_write(switch == "on")
     if get_state().json_output:
         typer.echo(json.dumps({"allow_write": switch == "on"}))
     else:
@@ -310,7 +352,8 @@ def regenerate_password(
     from aisquare.services import remote_server
 
     state = _remote_runtime()
-    password = remote_server.regenerate_password(new_link=new_link)
+    with _writing_remote_json():
+        password = remote_server.regenerate_password(new_link=new_link)
     payload: dict[str, object] = {"password": password}
     if new_link:
         info = state.connection_info(port)
@@ -346,13 +389,18 @@ def revoke_command(
         fail("give one device id, or --all", error="invalid_arguments")
     state = _remote_runtime()
     if device_id is None:  # --all: exactly one of the two was given
-        count = state.revoke_every_device("revoked", close_code=remote_server.WS_CLOSE_UNAUTHORIZED)
+        with _writing_remote_json():
+            count = state.revoke_every_device(
+                "revoked", close_code=remote_server.WS_CLOSE_UNAUTHORIZED
+            )
         if get_state().json_output:
             typer.echo(json.dumps({"revoked_all": count}))
         else:
             stdout_console().print(f"✓ revoked {count} device(s)", markup=False)
         return
-    if not remote_server.revoke_remote_device(device_id):
+    with _writing_remote_json():
+        revoked = remote_server.revoke_remote_device(device_id)
+    if not revoked:
         fail(f"no device {device_id}", error="not_found", ref=device_id)
     if get_state().json_output:
         typer.echo(json.dumps({"revoked": device_id}))

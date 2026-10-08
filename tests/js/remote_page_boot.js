@@ -1970,6 +1970,54 @@ async function afterLeaving() {
   return { note: board.toast(), scrolled: transcript.run("UI.main.scrollTop"), back: { landed, left: landed.length < 6 } };
 }
 
+/* What the page says for each refusal and failure (SPEC §6.4), as failText words it; a 413
+ * names the most the box takes. */
+async function refusalSentences() {
+  const page = bootPage("#/", signedIn());
+  await settle();
+  const said = (res, max) => {
+    const full = Object.assign({ ok: false, status: 0, data: null, error: "", message: "", retryAfter: 0, network: false, notJson: false }, res);
+    return page.run("failText(" + JSON.stringify(full) + ", " + JSON.stringify(max || null) + ")");
+  };
+  return {
+    badOrigin: said({ status: 403, error: "bad_origin", message: "this origin may not write" }),
+    readOnly: said({ status: 403, error: "read_only", message: "writes are off" }),
+    gone: said({ status: 404, error: "no_such_agent", message: "no live agent 'coder-1'" }),
+    busy: said({ status: 409, error: "busy", message: "another action on coder-1 is still running" }),
+    inProgress: said({ status: 409, error: "in_progress" }),
+    other: said({ status: 409, error: "not_agent", message: "coder-1's pane is not running the agent — nothing was sent" }),
+    tooLong: said({ status: 413, error: "too_large", message: "the body is too large" }, 8000),
+    tooMany: said({ status: 429, error: "rate_limited", retryAfter: 30 }),
+    unavailable: said({ status: 503, error: "fleet_unavailable", message: "tmux did not answer" }),
+    notJson: said({ status: 200, notJson: true }),
+  };
+}
+
+/* The socket closed 4404 (the link changed) and 4410 (Remote went off) once open; a handshake
+ * that failed before open, the machine then answering its probe 404, and answering it; and a
+ * socket that dropped once open, the control: no probe. What the page shows, the probes it
+ * made, and the timers it holds by name. */
+async function socketCloses() {
+  const remote = { status: 200, json: { allow_write: true, auto_off_at: null, version: "test" } };
+  const closed = async (code, opened, probe) => {
+    let reads = 0;
+    const page = bootPage("#/", signedIn({ "GET api/remote": () => (++reads > 1 && probe ? probe : remote) }));
+    await settle();
+    if (opened) page.acceptSockets();
+    page.live().fire("close", { code });
+    await settle();
+    const heading = find(page.main(), (node) => node.tagName === "H2");
+    return { shown: heading ? heading.textContent : null, probes: reads - 1, timers: page.timers() };
+  };
+  return {
+    link: await closed(4404, true),
+    off: await closed(4410, true),
+    probedGone: await closed(1006, false, { status: 404, json: { error: "not_found", message: "no such link" } }),
+    probedHere: await closed(1006, false, remote),
+    dropped: await closed(1006, true),
+  };
+}
+
 /* Cards the machine answers 409 stale (SPEC §6.3, §6.4): a quick answer, the feed's read that
  * follows still listing the card (the machine has not scanned since), then the note's 6 s up
  * and a frame that lists the card still; a Tell from an asked card, nothing waiting on coder-1
@@ -2065,6 +2113,9 @@ async function main() {
     wakes: await wakes(),
     dismissals: await dismissals(),
     afterLeaving: await afterLeaving(),
+    refusalSentences: await refusalSentences(),
+    socketCloses: await socketCloses(),
+    unlockWait: await unlockAnswered(429, { error: "rate_limited", message: "too many tries" }),
     staleCards: await staleCards(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");

@@ -1681,6 +1681,57 @@ def test_a_card_refused_stale_says_so_in_its_place_and_the_feed_is_read_again(
     assert stale["stop"] == {"shown": nothing, "sheet": None}
 
 
+def test_each_refusal_is_said_in_the_sentence_the_spec_gives_it(
+    boot_report: dict[str, Any],
+) -> None:
+    """SPEC §6.4 gives each refusal its sentence, and failText says them, but few were ever
+    asked for: a bad origin, a busy agent, a body too long or too many tries could each lose
+    its sentence, or fall through to the machine's own words for curl, with every test
+    green."""
+    assert boot_report["refusalSentences"] == {
+        "badOrigin": "Open this page from the link the machine shows.",
+        "readOnly": "Read-only: writes are off",
+        "gone": "That agent is gone.",
+        "busy": "Still running — another action on coder-1 is still running",
+        "inProgress": "Still running — the result shows here when it finishes.",
+        "other": "coder-1's pane is not running the agent — nothing was sent",
+        "tooLong": "Too long (max 8000 characters).",
+        "tooMany": "Too many tries — wait 30 s.",
+        "unavailable": "The machine could not answer — try again in a moment.",
+        "notJson": "Remote is off on the machine, or the link changed.",
+    }
+
+
+def test_each_close_code_and_a_failed_handshake_lead_where_the_spec_says(
+    boot_report: dict[str, Any],
+) -> None:
+    """SPEC §6.4: 4404 says the link is no longer valid and 4410 that Remote is off, and a
+    handshake that failed before open asks ``api/remote`` why: a 404 is the off-or-moved
+    screen, an answer a reconnect. A socket that dropped once open reconnects without
+    asking. None of it had a test: each branch could go with every test green, and a page
+    on a link that changed would reconnect for ever."""
+    closes = boot_report["socketCloses"]
+    assert closes["link"] == {"shown": "This link is no longer valid", "probes": 0, "timers": []}
+    assert closes["off"] == {"shown": "Remote is off on the machine", "probes": 0, "timers": []}
+    assert closes["probedGone"] == {
+        "shown": "Remote is off on the machine, or the link changed",
+        "probes": 1,
+        "timers": [],
+    }
+    assert closes["probedHere"] == {"shown": None, "probes": 1, "timers": ["connect"]}
+    assert closes["dropped"] == {"shown": None, "probes": 0, "timers": ["connect"]}
+
+
+def test_an_unlock_refused_for_too_many_tries_counts_down_to_the_next(
+    boot_report: dict[str, Any],
+) -> None:
+    """SPEC §6.4: a 429 waits ``Retry-After``, with a countdown on the unlock form (60 s when
+    the machine gives none). It had no test: the form could say "wait a few s", and let the
+    next try go at once, with every test green."""
+    wait = boot_report["unlockWait"]
+    assert wait["form"] and wait["said"] == "too many tries — try again in 60 s"
+
+
 def test_an_answer_after_its_screen_was_left_neither_lands_on_the_next_nor_goes_unsaid(
     boot_report: dict[str, Any],
 ) -> None:

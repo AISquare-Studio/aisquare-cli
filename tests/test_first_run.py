@@ -256,31 +256,6 @@ def test_connect_is_the_doctors_own_fix() -> None:
     assert first_run.connect_fix().argv in known
 
 
-def test_connect_makes_the_config_dir_a_fresh_install_has_not_made(tmp_path: Path) -> None:
-    """npm and Homebrew do not create ``~/.claude`` until ``claude`` first runs, and
-    ``agents connect`` reads a missing directory as "not installed"."""
-    ran: list[list[str]] = []
-
-    def run(args: Sequence[str], *, cwd: Path | None = None) -> CliResult:
-        ran.append(list(args))
-        return CliResult(argv=list(args), returncode=0, stdout="{}", stderr="")
-
-    fresh = tmp_path / "fresh-config"
-    assert first_run.connect(run=run, config_dir=fresh).ok and fresh.is_dir()
-    # By default, the directory a session from this shell reads (conftest points it
-    # under the test's home).
-    ambient = agent_core.ambient_hook_dir("claude-code")
-    assert ambient is not None and not ambient.exists()
-    assert first_run.connect(run=run).ok and ambient.is_dir()
-    assert ran == [["--json", *first_run.CONNECT_ARGV]] * 2
-    # A directory that cannot be made is said, and nothing is run.
-    blocker = tmp_path / "a-file"
-    blocker.write_text("not a directory", encoding="utf-8")
-    refused = first_run.connect(run=run, config_dir=blocker / "claude")
-    assert not refused.ok and "could not create" in (refused.reason or "")
-    assert len(ran) == 2
-
-
 # --------------------------------------------------------------------------- tmux and gh
 
 

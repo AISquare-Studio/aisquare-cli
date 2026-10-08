@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from aisquare.core import agents as agent_core
+from aisquare.core import harness
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
 from aisquare.models import AgentConnection, AgentInfo
@@ -67,7 +69,14 @@ def claude_code_connected(config_dir: Path | None = None) -> bool:
 
 
 def claude_plugin(config_dir: Path | None = None) -> agent_core.ClaudePlugin | None:
-    """The aisquare Claude Code plugin in ``config_dir``, when it is installed and enabled."""
+    """The aisquare Claude Code plugin in ``config_dir``, when it is installed and enabled.
+
+    ``None`` where the plugin route does not run (native Windows), as doctor and
+    uninstall read it: there `connect` and `disconnect` must not say the plugin runs
+    aisquare, nor offer an ``env -u`` command cmd and PowerShell cannot run.
+    """
+    if not agent_core.plugin_route_supported():
+        return None
     return agent_core.claude_plugin(config_dir)
 
 
@@ -127,6 +136,33 @@ def _check_settings(path: Path) -> None:
         raise AgentFileUnreadableError(str(exc)) from exc
 
 
+def _claude_on_path() -> str | None:
+    """Where ``claude`` is on PATH, if it is (an indirection so tests can decide)."""
+    return shutil.which(harness.DEFAULT_AGENT_BINARY)
+
+
+def _make_first_run_dir(name: str, config_dir: Path | None) -> None:
+    """Make the config dir an installed Claude Code that has never started has not made.
+
+    npm and Homebrew create ``~/.claude`` only when ``claude`` first runs, and a
+    missing directory reads as "not installed" (detected means the directory
+    exists), so `agents connect`, `init --agent claude-code` and Welcome's Connect
+    refused a Claude Code that is on PATH. Welcome alone used to make it (review of
+    #257). With ``claude`` on PATH, the directory a session from this shell reads is
+    made, as that first start would make it. A ``--config-dir`` is never made: a
+    typo must not get hooks.
+    """
+    if name != "claude-code" or config_dir is not None or _claude_on_path() is None:
+        return
+    where = agent_core.ambient_hook_dir(name)
+    if where is None or where.exists():
+        return
+    try:
+        where.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise AgentFileUnreadableError(f"can't create {where}: {exc.strerror or exc}") from exc
+
+
 def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
     """Install aisquare's hooks into the agent and ingest its existing context.
 
@@ -146,6 +182,7 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
         # agents.json, no ~/.aisquare created for a connection that installs nothing.
         planned = f"; support is planned for {spec.planned}" if spec.planned else ""
         raise UnsupportedAgentError(f"aisquare can't connect {spec.label} yet{planned}")
+    _make_first_run_dir(name, config_dir)
     info = agent_core.detect(name, config_dir)
     if info is None or not info.detected:
         raise AgentNotInstalledError(f"{name} is not installed on this machine")

@@ -636,22 +636,31 @@ def claude_plugin(config_dir: Path | None = None) -> ClaudePlugin | None:
     return ClaudePlugin(config_dir=directory, version=version)
 
 
-def plugin_runner() -> Path | None:
-    """The aisquare the plugin's launcher would run, as THIS process's PATH resolves it.
+def launcher_finds(name: str) -> Path | None:
+    """The program ``name`` where the plugin's launcher looks for it, as THIS process sees.
 
-    The launcher's order (``plugins/claude-code/scripts/aisquare-hook``): ``aisquare``
-    on PATH, then ``~/.local/bin`` and ``~/.cargo/bin``. ``None`` means it falls back
-    to the pinned release through uvx, or to nothing. A Claude Code started from a
-    desktop app may see another PATH; this is the best a doctor run can see.
+    The launcher's ``_find`` (``plugins/claude-code/scripts/aisquare-hook``): on PATH,
+    then ``~/.local/bin`` and ``~/.cargo/bin``, for ``aisquare`` and for ``uvx`` alike.
+    One search here for both, so the doctor's answer cannot drift from the launcher's
+    (review of #257). A Claude Code started from a desktop app may see another PATH;
+    this is the best a doctor run can see.
     """
-    found = shutil.which("aisquare")
+    found = shutil.which(name)
     if found:
         return Path(found)
     for candidate in (_home() / ".local" / "bin", _home() / ".cargo" / "bin"):
-        program = candidate / "aisquare"
+        program = candidate / name
         if program.is_file() and os.access(program, os.X_OK):
             return program
     return None
+
+
+def plugin_runner() -> Path | None:
+    """The aisquare the plugin's launcher would run (:func:`launcher_finds`).
+
+    ``None`` means it falls back to the pinned release through uvx, or to nothing.
+    """
+    return launcher_finds("aisquare")
 
 
 def claude_plugin_command(verb: str, config_dir: Path) -> str:

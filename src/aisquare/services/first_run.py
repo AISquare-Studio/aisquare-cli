@@ -224,26 +224,13 @@ def connect_fix() -> FixCommand:
     )
 
 
-def connect(*, run: Runner = selfcli.run, config_dir: Path | None = None) -> FixResult:
+def connect(*, run: Runner = selfcli.run) -> FixResult:
     """``aisquare --json agents connect claude-code``, exactly as the doctor's button runs it.
 
-    ``agents connect`` takes a missing config dir for "Claude Code is not installed"
-    (``core.agents``: detected means the directory exists). The native installer
-    creates ``~/.claude``, but the npm and Homebrew routes step 2 offers do not
-    until ``claude`` first runs, and neither does a ``CLAUDE_CONFIG_DIR`` naming a
-    new directory: the binary is on PATH and Connect still answered
-    ``not_installed``. Connect is a deliberate click, so the directory a session
-    from this shell reads (``config_dir`` for a test) is made first, as Claude
-    Code's own first start would make it; that start then reads the hooks from it.
+    An npm or Homebrew Claude Code that has never started has no ``~/.claude`` yet;
+    ``agents connect`` makes it when ``claude`` is on PATH, for every caller
+    (``services.agents``), so this is the doctor's fix and nothing else.
     """
-    where = config_dir if config_dir is not None else agent_core.ambient_hook_dir("claude-code")
-    if where is not None and not where.exists():
-        try:
-            where.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            return FixResult(
-                fix=connect_fix(), returncode=None, reason=f"could not create {where}: {_why(exc)}"
-            )
     return onboarding.apply_fix(connect_fix(), None, run=run)
 
 

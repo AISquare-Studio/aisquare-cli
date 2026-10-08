@@ -287,8 +287,11 @@ def test_connect_refuses_an_agent_it_has_no_hooks_for(
     assert registry["connected"] == ["claude-code"], registry
 
 
-def test_an_absent_unsupported_agent_gets_the_same_answer(runner: CliRunner) -> None:
+def test_an_absent_unsupported_agent_gets_the_same_answer(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Saying "not installed" would send someone to install Codex, still unable to connect it."""
+    monkeypatch.setattr(agents_service, "_claude_on_path", lambda: None)  # absent: not on PATH
     refused = runner.invoke(app, ["agents", "connect", "codex"])
     absent = runner.invoke(app, ["agents", "connect", "claude-code"])
 
@@ -339,9 +342,12 @@ def test_the_refusal_never_reaches_a_damaged_store(
         assert reached.get("name") == "claude-code" and "error" not in reached, reached
 
 
-def test_connect_names_a_context_file_it_cannot_read(runner: CliRunner, claude_home: Path) -> None:
+def test_connect_names_a_context_file_it_cannot_read(
+    runner: CliRunner, claude_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A CLAUDE.md saved as Latin-1 was reported as ``not_installed``: an installed Claude
     Code, and asq's Connect button saying it was not, with no file named."""
+    monkeypatch.setattr(agents_service, "_claude_on_path", lambda: None)  # for "absent"
     claude_md = claude_home / "CLAUDE.md"
     claude_md.write_bytes("# Prefs\ncaf\xe9\n".encode("latin-1"))
 
@@ -360,6 +366,35 @@ def test_connect_names_a_context_file_it_cannot_read(runner: CliRunner, claude_h
     assert human.exit_code == 1 and human.output.strip() == f"✗ {reason}"
     assert not ingested, "refused before anything was ingested or the home built"
     assert json.loads(absent.stdout)["error"] == "not_installed", "control: absent still says so"
+
+
+def test_a_claude_code_on_path_that_never_started_is_connected_not_refused(
+    runner: CliRunner, isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """npm and Homebrew make ``~/.claude`` only when ``claude`` first runs, and a missing
+    directory read as not installed, so `agents connect` and Quickstart 1's `init --agent
+    claude-code` refused; only Welcome's own Connect made it (review of #257)."""
+    claude = isolated_agent_home / ".claude"
+    typo = isolated_agent_home / ".claud"
+    monkeypatch.setattr(agents_service, "_claude_on_path", lambda: None)
+    absent = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+    made_without = claude.exists()
+    monkeypatch.setattr(agents_service, "_claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    named = runner.invoke(
+        app, ["--json", "agents", "connect", "claude-code", "--config-dir", str(typo)]
+    )
+    connected = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+    hooked = agent_core.hooks_installed("claude-code", claude)
+    shutil.rmtree(claude, ignore_errors=True)
+    init = runner.invoke(app, ["--json", "init", "--yes", "--no-onboard", "--agent", "claude-code"])
+
+    assert json.loads(absent.stdout)["error"] == "not_installed" and not made_without, "control"
+    assert json.loads(named.stdout)["error"] == "not_installed" and not typo.exists(), (
+        "a --config-dir is never made: a typo must not get hooks"
+    )
+    assert connected.exit_code == 0 and hooked, connected.output
+    notes = " ".join(json.loads(init.stdout)["notes"])
+    assert "Connected claude-code: hooks installed" in notes, notes
 
 
 @pytest.mark.parametrize("shape", _shapes(_UNREADABLE_SHAPES))
@@ -608,6 +643,29 @@ def test_hooks_switched_off_are_not_connected_and_never_offered_connect(
     assert fix_commands([row]) == [] and fix_commands([no_hooks_either]) == [], "no button"
     connected, row = back_on
     assert connected is True and row.status is CheckStatus.ok, f"control: {row}"
+
+
+def test_a_switched_off_directory_is_one_clause_and_the_others_keep_their_connect(
+    runner: CliRunner, claude_home: Path
+) -> None:
+    """The switch is per config dir. One left on in a second profile replaced the whole
+    row, so the directory sessions read showed no "missing" and no Connect while it had no
+    hooks at all (review of #257)."""
+    work = claude_home.parent / ".claude-work"
+    work.mkdir()
+    _connect(runner, work)
+    settings_path = work / "settings.json"
+    hooked = json.loads(settings_path.read_text(encoding="utf-8"))
+    settings_path.write_text(json.dumps({**hooked, "disableAllHooks": True}), encoding="utf-8")
+
+    row = diagnostics._check_claude_code()
+    buttons = [" ".join(fix.argv) for fix in fix_commands([row])]
+
+    assert row.status is CheckStatus.warn, row
+    assert f'switched off ("disableAllHooks": true) in: {settings_path}' in row.detail, row
+    assert f"{diagnostics._STALE_HOOKS} in: {claude_home}" in row.detail, row
+    assert f'remove "disableAllHooks" from {settings_path}' in row.fix, row
+    assert buttons == [f"agents connect claude-code --config-dir {claude_home}"], buttons
 
 
 def test_only_a_literal_true_switches_hooks_off(claude_home: Path) -> None:

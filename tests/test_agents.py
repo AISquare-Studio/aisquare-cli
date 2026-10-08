@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agents
+from aisquare.services import agents as agents_service
 
 
 @pytest.fixture(autouse=True)
@@ -73,9 +74,11 @@ def test_connect_unknown_agent_fails(runner: CliRunner, fake_home: Path) -> None
     assert "unknown agent" in result.output
 
 
-def test_connect_not_installed_fails(runner: CliRunner) -> None:
-    # The suite's agent home has no ~/.claude. (Cursor, the old example here, is now
-    # refused as not connectable before presence is asked: test_agent_adapters.py.)
+def test_connect_not_installed_fails(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The suite's agent home has no ~/.claude, and here no `claude` is on PATH either
+    # (with one, connect makes the directory: test_agent_adapters.py). Cursor, the old
+    # example here, is refused as not connectable before presence is asked.
+    monkeypatch.setattr(agents_service, "_claude_on_path", lambda: None)
     result = runner.invoke(app, ["agents", "connect", "claude-code"])
     assert result.exit_code == 1
     assert "not installed" in result.output

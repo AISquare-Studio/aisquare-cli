@@ -81,6 +81,10 @@ and an aisquare that upgrades and uninstalls itself.**
   two coders, with a stand-in agent (#256).
 
 ### Fixed
+- `aisquare agents connect claude-code` and `aisquare init --agent claude-code`
+  connect a Claude Code from npm or Homebrew that has never started: they make
+  its `~/.claude`, as Welcome's Connect did, instead of saying it is not
+  installed.
 - `aisquare agents connect`, and the Connect in Welcome and the Doctor, refuse
   a `settings.json` that is not valid JSON and name it, instead of rewriting it
   with aisquare's hooks and nothing else.

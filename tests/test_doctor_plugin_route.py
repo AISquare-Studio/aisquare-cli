@@ -360,6 +360,36 @@ def test_with_no_cli_the_plugin_runs_the_pin_through_uvx_or_nothing(
         assert "finds neither aisquare nor uvx on PATH" in check.detail
 
 
+@posix_route
+@pytest.mark.parametrize("where", [".local/bin", ".cargo/bin"])
+def test_the_doctor_finds_uvx_where_the_launcher_does(
+    claude: Path,
+    isolated_agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+) -> None:
+    """The launcher looks for uvx on PATH, then in ~/.local/bin (uv's installer) and
+    ~/.cargo/bin; the doctor looked on PATH only, and told a working setup to install uv
+    (review of #257)."""
+    real_which = shutil.which
+    monkeypatch.setattr(agent_core, "plugin_runner", lambda: None)
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name, *args, **kwargs: None if name == "uvx" else real_which(name),
+    )
+    _install_plugin(claude)
+    uvx = isolated_agent_home / where / "uvx"
+    uvx.parent.mkdir(parents=True)
+    uvx.write_text("#!/bin/sh\n", encoding="utf-8")
+    uvx.chmod(0o755)
+
+    check = diagnostics._check_claude_code()
+
+    assert check.status is CheckStatus.ok, check
+    assert "which runs aisquare-cli==0.9.0 through uvx" in check.detail
+
+
 def test_the_plugin_commands_name_the_config_dir_they_act_on(
     isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -412,3 +442,22 @@ def test_native_windows_reads_only_the_settings_json_route(
     assert agents_service.claude_code_connected() is False
     assert check.status is CheckStatus.warn
     assert _buttons(check) == [_CONNECT]
+
+
+def test_on_native_windows_connect_and_disconnect_say_nothing_about_the_plugin(
+    runner: CliRunner, claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """They read the plugin past the platform rule doctor and uninstall keep: on win32
+    they said it "keeps running aisquare", which doctor there says it does not, and
+    offered an `env -u` command cmd and PowerShell cannot run (review of #257)."""
+    _install_plugin(claude)
+    monkeypatch.setattr(agent_core, "plugin_route_supported", lambda: False)
+    disconnected = runner.invoke(app, ["agents", "disconnect", "claude-code"])
+    connected = runner.invoke(app, ["agents", "connect", "claude-code"])
+    monkeypatch.setattr(agent_core, "plugin_route_supported", lambda: True)
+    posix = runner.invoke(app, ["agents", "connect", "claude-code"])
+
+    assert disconnected.exit_code == 0 and connected.exit_code == 0, connected.output
+    assert "no aisquare hooks found" in disconnected.stderr, disconnected.stderr
+    assert "plugin" not in disconnected.stderr + connected.stderr
+    assert "the aisquare plugin is enabled" in posix.stderr, "control: where the route runs"

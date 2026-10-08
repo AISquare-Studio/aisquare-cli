@@ -824,12 +824,13 @@ def _plugin_runner(pin: str | None) -> tuple[str, str | None, str | None]:
     """
     program = agent_core.plugin_runner()
     if program is None:
-        if shutil.which("uvx") is not None:
+        if agent_core.launcher_finds("uvx") is not None:
             release = f"{DISTRIBUTION}=={pin}" if pin else f"the pinned {DISTRIBUTION}"
             return f"{release} through uvx", None, None
         return (
             "",
-            "finds neither aisquare nor uvx on PATH, so its hooks run nothing",
+            "finds neither aisquare nor uvx on PATH, in ~/.local/bin or in ~/.cargo/bin, "
+            "so its hooks run nothing",
             f"Install uv (https://docs.astral.sh/uv/), or the CLI: uv tool install {DISTRIBUTION}",
         )
     state, version = agent_core.classify_hook_binary(agent_core.HookBinary(program))
@@ -879,29 +880,24 @@ def _check_claude_code() -> DoctorCheck:
     # Hooks switched off ("disableAllHooks": true) run none of ours however complete
     # they are, and `agents connect` cannot change that. The shared check answers
     # False there, so such a directory must not reach `unhooked` below and be
-    # offered a Connect button that could never clear it. It is reported alone:
-    # until hooks run at all, the other clauses describe hooks that do not fire.
+    # offered a Connect button that could never clear it. The switch is per
+    # directory, so it is one clause of the row and every other directory is graded
+    # as usual: reported alone, one switched-off profile hid that the directory
+    # sessions use was not connected, and its Connect (review of #257).
     switched_off = [
-        site.config_dir / "settings.json"
-        for site in sites
-        if agent_core.hooks_disabled("claude-code", site.config_dir)
+        site for site in sites if agent_core.hooks_disabled("claude-code", site.config_dir)
     ]
-    if switched_off:
-        listed = ", ".join(str(path) for path in switched_off)
-        return _warn(
-            "claude-code",
-            f'{product} hooks are switched off ("disableAllHooks": true) in: {listed} — '
-            "Claude Code runs none of them, so no context is injected and no prompt is captured",
-            f'Turn hooks back on: remove "disableAllHooks" from {listed}',
-        )
     if not sites:
         return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
+    graded = [site for site in sites if site not in switched_off]
 
     # The shared answer, which counts the plugin route as connected.
-    unhooked = [site for site in sites if not agents_service.claude_code_connected(site.config_dir)]
+    unhooked = [
+        site for site in graded if not agents_service.claude_code_connected(site.config_dir)
+    ]
     doubled = [
         site
-        for site in sites
+        for site in graded
         if site.plugin is not None and agent_core.hook_commands("claude-code", site.config_dir)
     ]
     # Doubled directories are graded too. The plugin's copies stand down only beside
@@ -910,11 +906,11 @@ def _check_claude_code() -> DoctorCheck:
     dead = [site for site in doubled if site.binary_state == agent_core.HOOK_BINARY_MISSING]
     wrong_binary = [
         site
-        for site in sites
+        for site in graded
         if site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT) and site not in dead
     ]
     # Where the plugin is the route that runs, what it runs is graded like a hook.
-    plugin_runs = [site for site in sites if site.plugin is not None and site not in doubled]
+    plugin_runs = [site for site in graded if site.plugin is not None and site not in doubled]
     plugin_runs += dead
     pins = [site.plugin.version for site in plugin_runs if site.plugin is not None]
     runs, runner_problem, runner_fix = (
@@ -922,7 +918,8 @@ def _check_claude_code() -> DoctorCheck:
         if plugin_runs
         else ("", None, None)
     )
-    if not unhooked and not wrong_binary and not doubled and runner_problem is None:
+    healthy = not unhooked and not wrong_binary and not doubled and runner_problem is None
+    if healthy and not switched_off:
         # Installed, firing, and running THIS install — but a context hook may
         # still carry a shorter timeout than the CI hook can wait for (a
         # settings.json from 0.6.0, or one hand-edited). Its own sentence: the
@@ -963,6 +960,14 @@ def _check_claude_code() -> DoctorCheck:
         return _ok("claude-code", f"{product} connected{where} ({'; '.join(routes)})")
 
     problems: list[str] = []
+    fixes: list[str] = []
+    if switched_off:
+        listed = ", ".join(str(site.config_dir / "settings.json") for site in switched_off)
+        problems.append(
+            f'hooks are switched off ("disableAllHooks": true) in: {listed} — Claude Code '
+            "runs none of them, so no context is injected and no prompt is captured"
+        )
+        fixes.append(f'Turn hooks back on: remove "disableAllHooks" from {listed}')
     if unhooked:
         listed = ", ".join(_site_label(site) for site in unhooked)
         problems.append(f"{_STALE_HOOKS} in: {listed}")
@@ -993,7 +998,7 @@ def _check_claude_code() -> DoctorCheck:
             continue
         if site in unhooked or site in wrong_binary:
             broken.append(site.config_dir)
-    fixes = [f"aisquare agents connect claude-code --config-dir {p}" for p in broken]
+    fixes.extend(f"aisquare agents connect claude-code --config-dir {p}" for p in broken)
     fixes.extend(
         "remove them, and the plugin runs alone: "
         f"aisquare agents disconnect claude-code --config-dir {site.config_dir}"

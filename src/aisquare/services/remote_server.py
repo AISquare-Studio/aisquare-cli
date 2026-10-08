@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import functools
 import hashlib
 import hmac
 import json
@@ -2364,7 +2365,8 @@ class _CacheTurn:
 
 
 class _Cache:
-    """One snapshot per kind per tick, however many sockets are open.
+    """One snapshot per kind per tick, however many sockets are open: each cached read,
+    and each pane the stream's sockets watch (one capture, not one per socket).
 
     It holds only what was asked for within the last tick. A kind carries the
     ``?project=`` ref as it was written, and every spelling that resolves is a
@@ -3124,6 +3126,18 @@ def build_remote_app(
     async def snapshot(kind: str, compute: Snapshot) -> object:
         return await asyncio.to_thread(cache.cached_snapshot, kind, compute)
 
+    def remote_pane_frame(label: str, project: str) -> dict[str, object]:
+        """A pane subscription's live frame: the capture, or what stopped it (``error``).
+
+        §4-L: history is a FETCH, live stays a stream, so 0 keeps this frame the
+        live shape, with no history keys. A failure is a frame too, so the sockets
+        watching a pane that is gone share its answer as they share a capture.
+        """
+        try:
+            return reads.panes(label, project or None, 0)
+        except Exception as exc:
+            return {"rows": [], "width": 0, "height": 0, "error": str(exc)}
+
     def guarded(
         kind: str, compute: ProjectSource, *, scoped: bool = True
     ) -> Callable[[Request], Any]:
@@ -3554,12 +3568,16 @@ def build_remote_app(
             for wanted in list(panes_wanted):
                 project, label = wanted
                 try:
-                    # §4-L: history is a FETCH, live stays a stream — 0 keeps
-                    # this frame the live shape, with no history keys.
+                    # One capture per pane per tick however many sockets watch it, as for
+                    # board and fleet, and on the pane pool (§2.10). The key is the pair as
+                    # JSON: a ':' in a ref or a label must not make two pairs one kind.
                     payload = await loop.run_in_executor(
-                        kit.kit_pane_pool(), reads.panes, label, project or None, 0
+                        kit.kit_pane_pool(),
+                        cache.cached_snapshot,
+                        "pane:" + json.dumps([project, label]),
+                        functools.partial(remote_pane_frame, label, project),
                     )
-                except Exception as exc:
+                except Exception as exc:  # the pool, shut down under a socket still ticking
                     payload = {"rows": [], "width": 0, "height": 0, "error": str(exc)}
                 encoded = json.dumps(payload, sort_keys=True)
                 # Not wanted any more: unsubscribed while the capture ran, so no frame,

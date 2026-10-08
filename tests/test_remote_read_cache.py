@@ -3,22 +3,26 @@
 Every cached read goes through it, and every socket's board and fleet frames. The
 snapshots were computed under the one lock that guards its table, so the slowest
 held up all the others: ``projects`` lists every project's fleet, a tmux call
-each, and a tmux that stops answering costs 30 s a call (review of #243, round 2).
+each, and a tmux that stops answering costs 30 s a call. And the stream's pane
+frames go through it too: every socket captured the panes it watched itself
+(review of #243, round 2).
 """
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from aisquare.services import remote_server
-from aisquare.services.remote_server import Snapshot, Sources, build_app
-from tests.remote_kit_helpers import base, make_client, make_runtime, unlock
+from aisquare.services.remote_server import PaneSource, Snapshot, Sources, build_app
+from tests.remote_kit_helpers import base, frame_within, make_client, make_runtime, unlock
 
 
 def _wait_for(done: Callable[[], bool], seconds: float = 5.0) -> None:
@@ -98,14 +102,17 @@ def test_the_turns_hold_only_the_kinds_in_flight_whatever_kinds_are_asked_for() 
 # --- what a phone saw -----------------------------------------------------------------------------
 
 
-def _sources(projects: Snapshot) -> Sources:
+def _sources(
+    projects: Snapshot = lambda: [],
+    panes: PaneSource = lambda agent, project, history: {"rows": [], "width": 0, "height": 0},
+) -> Sources:
     return Sources(
         projects=projects,
         fleet=lambda project: {"agents": []},
         board=lambda project: {},
         tasks=lambda project: [],
         memory=lambda project: [],
-        panes=lambda agent, project, history: {"rows": [], "width": 0, "height": 0},
+        panes=panes,
         explainability=lambda agent, project: {"available": False},
     )
 
@@ -134,3 +141,86 @@ def test_the_fleet_answers_while_the_projects_screen_is_still_being_read(
         finally:
             release.set()
         assert listed.result(timeout=5).json() == []
+
+
+# --- the stream's pane frames ---------------------------------------------------------------------
+
+
+def _until(ws: Any, kind: str) -> dict[str, Any]:
+    for _ in range(40):
+        frame = frame_within(ws)
+        if frame["type"] == kind:
+            return frame
+    raise AssertionError(f"no {kind} frame in 40")
+
+
+@pytest.mark.parametrize("gone", [False, True], ids=["a capture", "an agent that is gone"])
+def test_sockets_watching_one_pane_share_its_capture(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gone: bool
+) -> None:
+    """Board and fleet went through the cache, and every socket captured its panes itself:
+    two phones on the same cards, or a second tab, captured each pane twice a tick, a tmux
+    process and a store open each, on a pool of four threads. A failure is a frame too, and
+    shared as a capture is."""
+    captured: list[tuple[str, str | None, int]] = []
+    asked: list[str] = []
+    release = threading.Event()
+
+    class Recorded(remote_server._Cache):
+        def cached_snapshot(self, kind: str, compute: Snapshot) -> object:
+            asked.append(kind)
+            return super().cached_snapshot(kind, compute)
+
+    def panes(agent: str, project: str | None, history: int) -> dict[str, object]:
+        captured.append((agent, project, history))
+        release.wait(timeout=10)
+        if gone:
+            raise remote_server.NoSuchAgent(f"no live agent {agent!r}")
+        return {"rows": [f"capture {len(captured)}"], "width": 80, "height": 1}
+
+    monkeypatch.setattr(remote_server, "_Cache", Recorded)
+    runtime = make_runtime()
+    app = build_app(runtime, sources=_sources(panes=panes), dist_dir=tmp_path, tick=0.5)
+    client = make_client(app)
+    assert unlock(client, runtime).status_code == 200
+    url = f"{base(runtime)}/ws"
+    with client.websocket_connect(url) as first, client.websocket_connect(url) as second:
+        try:
+            for ws in (first, second):
+                _until(ws, "remote")
+                ws.send_text(json.dumps({"subscribe": "coder-1"}))
+            # Both sockets have asked for the pane: of the cache, or of tmux itself.
+            _wait_for(lambda: sum(k.startswith("pane:") for k in asked) >= 2 or len(captured) >= 2)
+            while_held = list(captured)
+        finally:
+            release.set()
+        frames = [_until(ws, "pane") for ws in (first, second)]
+    assert while_held == [("coder-1", None, 0)], "one capture, which the other socket waited for"
+    shared: dict[str, object] = (
+        {"rows": [], "width": 0, "height": 0, "error": "no live agent 'coder-1'"}
+        if gone
+        else {"rows": ["capture 1"], "width": 80, "height": 1}
+    )
+    assert [frame["payload"] for frame in frames] == [shared, shared]
+
+
+def test_a_shared_capture_is_still_one_projects_pane(isolated_home: Path, tmp_path: Path) -> None:
+    """The same label in two projects is two agents, and a ':' in a ref or a label must
+    not make two subscriptions one cached capture."""
+
+    def panes(agent: str, project: str | None, history: int) -> dict[str, object]:
+        return {"rows": [f"{project}/{agent}"], "width": 80, "height": 1}
+
+    runtime = make_runtime()
+    app = build_app(runtime, sources=_sources(panes=panes), dist_dir=tmp_path, tick=0.05)
+    client = make_client(app)
+    assert unlock(client, runtime).status_code == 200
+    wanted = [("prj_a", "coder-1"), ("prj_b", "coder-1"), ("a:b", "c"), ("a", "b:c")]
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        for project, label in wanted:
+            ws.send_text(json.dumps({"subscribe": label, "project": project}))
+        seen: dict[tuple[str, str], list[str]] = {}
+        while len(seen) < len(wanted):
+            frame = _until(ws, "pane")
+            seen[(frame["project"], frame["agent"])] = frame["payload"]["rows"]
+    assert seen == {(project, label): [f"{project}/{label}"] for project, label in wanted}

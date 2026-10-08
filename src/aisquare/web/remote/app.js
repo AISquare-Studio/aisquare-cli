@@ -2571,14 +2571,19 @@ VIEWS.devices = (route, main) => {
       const id = device.id;
       if (own) line.appendChild(button(null, "Sign out", () => signOut(id)));
       else {
-        line.appendChild(button("w", "Revoke", async () => {
+        const revoke = button("w", "Revoke", async () => {
+          revoke.classList.add("busy"); // a second tap, answered "no such device", read as a failure
+          gateButtons();
           const out = await apiCall("DELETE", apiPath(API.device, { id }));
+          revoke.classList.remove("busy");
+          gateButtons();
           if (out.ok) load();
           else {
             toast(failText(out));
             afterFailure(out);
           }
-        }));
+        });
+        line.appendChild(revoke);
         line.appendChild(el("p", "ro-note", "Revoking another device is a write: " + READ_ONLY + "."));
       }
       list.appendChild(line);
@@ -2797,8 +2802,14 @@ VIEWS.settings = (route, main) => {
 
 // --- auto-off ---
 
+/* Busy while it runs, as every write button is: a second tap went out under a second
+ * request_id, and Remote stayed on another hour the human never asked for. */
 async function extendAutoOff() {
+  UI.extend.classList.add("busy");
+  gateButtons();
   const res = await apiWrite(API.remoteExtend, {}, "Extend");
+  UI.extend.classList.remove("busy");
+  gateButtons();
   if (res.ok && res.data && typeof res.data.auto_off_at === "string") {
     S.remote = Object.assign({}, S.remote, { auto_off_at: res.data.auto_off_at });
     drawStatus();

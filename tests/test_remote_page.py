@@ -1414,6 +1414,18 @@ def test_the_transcript_draws_one_read_at_a_time_and_the_newest_wins(
     assert loads["spliced"] == {"asked": [None, "100", None], "shown": ["t5", "t6"], "older": True}
 
 
+def test_extend_and_revoke_wait_for_their_answer_before_another_tap_goes(
+    boot_report: dict[str, Any],
+) -> None:
+    """Extend 1 h stayed live while its request ran, as no other write button does, and a
+    second tap went out under a second request_id: Remote stayed on the internet an hour
+    longer than asked, and the phone has no way to take it back. Revoke did the same, and
+    the second answer, "no such device", read as if the first had failed."""
+    taps = boot_report["buttonsInFlight"]
+    assert taps["extend"] == {"sent": 1, "waited": True, "after": False}
+    assert taps["revoke"] == {"sent": 1, "waited": True}
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

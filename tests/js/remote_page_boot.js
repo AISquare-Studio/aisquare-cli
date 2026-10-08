@@ -1383,6 +1383,50 @@ function transcriptPage(lines, cursor, more) {
   return { status: 200, json: { lines, cursor, more, stamps: {} } };
 }
 
+const TWO_DEVICES = [
+  { id: "dev_0a1b2c3d", current: true, signed_in: true, ua: "this phone", last_seen: null },
+  { id: "dev_4e5f6a7b", current: false, signed_in: true, ua: "another", last_seen: null },
+];
+
+/* Extend 1 h and Revoke, each tapped twice before the machine answered the first: the
+ * requests that went out, and whether the button waited meanwhile. */
+async function buttonsInFlight() {
+  const extended = deferred();
+  const strip = bootPage("#/", signedIn({
+    "GET api/remote": () => ({ status: 200, json: { allow_write: true, auto_off_at: "2026-10-07T11:00:00+00:00", version: "test" } }),
+    "POST api/remote/extend": () => extended.promise,
+  }));
+  await settle();
+  strip.acceptSockets();
+  await settle();
+  const extend = buttonNamed(strip.run("UI.top"), "Extend 1 h");
+  click(extend);
+  await settle();
+  const extendWaited = extend.disabled;
+  click(extend);
+  extended.settle({ status: 200, json: { auto_off_at: "2026-10-07T12:00:00+00:00" } });
+  await settle();
+  const revoked = deferred();
+  const devices = bootPage("#/devices", signedIn({
+    "GET api/devices": () => ({ status: 200, json: TWO_DEVICES }),
+    "DELETE api/devices/dev_4e5f6a7b": () => revoked.promise,
+  }));
+  await settle();
+  devices.acceptSockets();
+  await settle();
+  const revoke = buttonNamed(devices.main(), "Revoke");
+  click(revoke);
+  await settle();
+  const revokeWaited = revoke.disabled;
+  click(revoke);
+  revoked.settle({ status: 200, json: { ok: true, id: "dev_4e5f6a7b", signed_out: false } });
+  await settle();
+  return {
+    extend: { sent: strip.sent("api/remote/extend").length, waited: extendWaited, after: extend.disabled },
+    revoke: { sent: devices.requests.filter((one) => one.method === "DELETE").length, waited: revokeWaited },
+  };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -1423,6 +1467,7 @@ async function main() {
     staleAcrossAWake: await staleAcrossAWake(),
     transcriptColumns: await transcriptColumns(),
     transcriptLoads: await transcriptLoads(),
+    buttonsInFlight: await buttonsInFlight(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

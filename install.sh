@@ -1681,6 +1681,37 @@ is_expected_amber() {
     return 1
 }
 
+# `aisquare --json doctor` as this script judges it: every check as this folder
+# answers it, except claude-code, which is asked from `/`. One check per line, the
+# `tr '{' '\n'` form every reader below splits a payload into anyway.
+#
+# The doctor answers claude-code for the folder it runs in, and inside a
+# repository whose project- or local-scope aisquare plugin is the only route that
+# row is green: sessions started there run the plugin. What this script wires is
+# Claude Code's own config, which every other repository runs on, so it asks
+# where no repository's plugin loads. Asked here, a run from such a repository
+# printed "claude-code hooks installed", wired nothing and exited 0, and a run
+# whose hooks could not be written listed nothing (review of #257). The other
+# rows stay this folder's: snapshot, brain and harness are about its project.
+#
+# Empty when `/` gives no claude-code row though this folder did, which every
+# caller reads as "cannot verify", never as health.
+doctor_json() {
+    _dj_here=$(aisquare --json doctor 2>/dev/null | tr '{' '\n' || true)
+    _dj_row=$(printf '%s\n' "$_dj_here" | grep '"name": *"claude-code"' || true)
+    if [ -z "$_dj_row" ]; then
+        printf '%s' "$_dj_here"
+        return 0
+    fi
+    _dj_row=$(
+        cd / || exit 0
+        aisquare --json doctor 2>/dev/null | tr '{' '\n' | grep '"name": *"claude-code"' || true
+    )
+    [ -n "$_dj_row" ] || return 0
+    printf '%s\n' "$_dj_here" | grep -v '"name": *"claude-code"' || true
+    printf '%s' "$_dj_row"
+}
+
 # The names of every check that is not ok, SORTED and space-separated.
 #
 # Sorted so a comparison is about the SET rather than the order checks happen to
@@ -1701,7 +1732,7 @@ is_expected_amber() {
 # unexpected check, which is exactly what §3.8 exists to prevent. Every
 # container cell in the matrix passed it, because none of them is a Mac.
 doctor_amber() {
-    _raw=$(aisquare --json doctor 2>/dev/null || true)
+    _raw=$(doctor_json)
     [ -n "$_raw" ] || return 1
     # THE PAYLOAD IS CROSS-CHECKED HERE, not only in run_doctor. A `{` inside a
     # check's detail splits an object across two lines and loses it, so a count
@@ -1735,7 +1766,7 @@ run_doctor() {
         return 0
     fi
 
-    DOCTOR_RAW=$(aisquare --json doctor 2>/dev/null || true)
+    DOCTOR_RAW=$(doctor_json)
     if [ -z "$DOCTOR_RAW" ]; then
         warn "\`aisquare --json doctor\` produced no output — cannot verify this install."
         UNEXPECTED=$((UNEXPECTED + 1))

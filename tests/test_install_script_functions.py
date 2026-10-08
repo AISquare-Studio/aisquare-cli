@@ -1915,6 +1915,178 @@ def test_the_snapshot_advice_is_only_for_a_project_with_no_snapshot(
     assert result.returncode == exit_code
 
 
+# A repository's own plugin answers for that repository only, and the installer wires
+# Claude Code's own config. These run the real CLI as the script does, so the doctor
+# sees the folder it is started in (review of #257).
+
+
+def _the_cli(tmp_path: Path) -> Path:
+    """A directory for PATH whose `aisquare` is this tree's CLI, in a process of its own."""
+    directory = tmp_path / "cli"
+    directory.mkdir()
+    script = directory / "aisquare"
+    script.write_text(f'#!/bin/sh\nexec "{sys.executable}" -P -m aisquare "$@"\n', "utf-8")
+    script.chmod(0o755)
+    return directory
+
+
+def _repo_scope_plugin(config_dir: Path, repo: Path, scope: str) -> None:
+    """What `claude plugin install aisquare@aisquare-cli --scope <scope>`, run in `repo`,
+    leaves (Claude Code 2.1.294): the key in the repository's settings, none in the
+    config dir's, and a record in the config dir naming the scope and the repository."""
+    (repo / ".git").mkdir(parents=True)
+    (repo / "src").mkdir()
+    (repo / ".claude").mkdir()
+    name = "settings.json" if scope == "project" else "settings.local.json"
+    plugin = agent_core.CLAUDE_PLUGIN_ID
+    (repo / ".claude" / name).write_text(json.dumps({"enabledPlugins": {plugin: True}}), "utf-8")
+    record = {"scope": scope, "projectPath": str(repo), "version": "0.8.0"}
+    (config_dir / "plugins").mkdir(parents=True)
+    (config_dir / "plugins" / "installed_plugins.json").write_text(
+        json.dumps({"version": 2, "plugins": {plugin: [record]}}), encoding="utf-8"
+    )
+
+
+def _claude_code_row_from(where: Path, cli: Path, path: str, home: Path) -> dict[str, Any]:
+    """The claude-code row of the real `aisquare --json doctor`, run in `where` with `path`."""
+    doctor = subprocess.run(
+        [str(cli / "aisquare"), "--json", "doctor"],
+        cwd=where,
+        env={**os.environ, "HOME": str(home), "PATH": path},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    row: dict[str, Any] = next(c for c in json.loads(doctor.stdout) if c["name"] == "claude-code")
+    return row
+
+
+@pytest.mark.parametrize(("scope", "inside"), [("project", "."), ("local", "src")])
+def test_a_repositorys_plugin_does_not_answer_for_claude_codes_own_hooks(
+    tmp_path: Path, isolated_agent_home: Path, scope: str, inside: str
+) -> None:
+    """Run from inside a repository whose project- or local-scope plugin is the only
+    route, the doctor's claude-code row is green there, and the installer read it as
+    "claude-code hooks installed": it short-circuited, wired nothing in ~/.claude, and
+    every other repository ran without aisquare (review of #257). The installer's
+    reading of the row is now Claude Code's own config's, asked from `/`."""
+    claude = isolated_agent_home / ".claude"
+    claude.mkdir(parents=True)
+    (claude / "settings.json").write_text("{}", encoding="utf-8")
+    repo = tmp_path / "team-repo"
+    _repo_scope_plugin(claude, repo, scope)
+    cli = _the_cli(tmp_path)
+    path = f"{cli}:{base_path(tmp_path)}"
+
+    here = _claude_code_row_from(repo / inside, cli, path, isolated_agent_home)
+    amber = sh(
+        "doctor_amber; echo",
+        cwd=repo / inside,
+        env={"HOME": str(isolated_agent_home)},
+        path=path,
+    )
+
+    assert here["status"] == "ok" and f"at {scope} scope in {repo}" in here["detail"], here
+    assert "claude-code" in amber.stdout.split(), amber.stdout + amber.stderr
+
+
+def test_a_run_from_that_repository_lists_hooks_it_could_not_write(
+    tmp_path: Path, isolated_agent_home: Path
+) -> None:
+    """The closing doctor ran in the same folder. With a settings.json `agents connect`
+    refuses, `init` only notes it and the plugin read as connected there, so the run
+    listed nothing and exited 0 with no hooks wired. It is unexpected now, as anywhere
+    else, and the rows the summary reads are the ones its verdict came from."""
+    paths.ensure_home()
+    with store_session():
+        pass
+    claude = isolated_agent_home / ".claude"
+    claude.mkdir(parents=True)
+    (claude / "settings.json").write_text('{"broken": \n', encoding="utf-8")
+    repo = tmp_path / "team-repo"
+    _repo_scope_plugin(claude, repo, "project")
+    cli = _the_cli(tmp_path)
+    path = f"{cli}:{base_path(tmp_path)}"
+
+    here = _claude_code_row_from(repo, cli, path, isolated_agent_home)
+    result = sh(
+        "DRY_RUN=0; WANT_SYSTEM_DEPS=0; PROJECT_DIR=$PWD; run_doctor >/dev/null; "
+        'printf "detail: %s\\n" "$(_doctor_detail claude-code)"; '
+        'summary; echo "UNEXPECTED=$UNEXPECTED"; handoff',
+        cwd=repo,
+        env={"HOME": str(isolated_agent_home)},
+        path=path,
+        no_terminal=True,
+    )
+
+    assert here["status"] == "ok", here
+    assert "hooks cannot be written in" in result.stdout.split("detail: ", 1)[1], result.stdout
+    assert "Not expected, and worth a look:\n  claude-code\n" in result.stdout, result.stdout
+    assert "UNEXPECTED=1" in result.stdout
+    assert result.returncode == 2
+
+
+@pytest.mark.parametrize(("from_root", "fires"), [("warn", False), ("ok", True)])
+def test_the_short_circuit_takes_claude_code_from_outside_any_repository(
+    tmp_path: Path, from_root: str, fires: bool
+) -> None:
+    """`short_circuit` printed "claude-code hooks installed" and did nothing whenever the
+    folder it ran in answered green. It goes by `/`'s answer now; the control is a
+    machine whose hooks are there, which still has nothing to do."""
+
+    def doctor(claude_code: str) -> str:
+        return json.dumps(
+            [
+                {"name": "brain", "status": "warn", "detail": "gbrain not found", "fix": "x"},
+                {"name": "claude-code", "status": claude_code, "detail": "d", "fix": None},
+            ]
+        )
+
+    versions = tmp_path / "v"
+    versions.mkdir()
+    for name, out in (
+        ("uv", "uv 0.12.3"),
+        ("tmux", "tmux 3.7c"),
+        ("gh", "gh version 2.97.0 (x)"),
+        ("git", "git version 2.55.0"),
+        ("node", "v26.7.0"),
+        ("claude", "2.1.294 (Claude Code)"),
+        ("curl", ""),
+    ):
+        script = versions / name
+        script.write_text(f'#!/bin/sh\nprintf "%s\\n" "{out}"\nexit 0\n', encoding="utf-8")
+        script.chmod(0o755)
+    cli = stub_dir(
+        tmp_path,
+        "cli",
+        "aisquare",
+        body=(
+            'case "$1" in\n'
+            '  --version) echo "aisquare 0.6.0"; exit 0 ;;\n'
+            '  --json) if [ "$(pwd)" = / ]; then printf %s "$FROM_ROOT"; '
+            'else printf %s "$HERE"; fi; exit 0 ;;\n'
+            "esac\nexit 0"
+        ),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = sh(
+        "WANT_PROJECT=0; OFFLINE=1; survey >/dev/null 2>&1; resolve >/dev/null 2>&1; "
+        "if short_circuit; then echo FIRED; else echo REFUSED; fi",
+        cwd=repo,
+        env={
+            "AISQUARE_INSTALL_VERSION": "",
+            "HERE": doctor("ok"),
+            "FROM_ROOT": doctor(from_root),
+        },
+        path=f"{versions}:{cli}:{base_path(tmp_path)}",
+    )
+
+    assert ("FIRED" in result.stdout) is fires, result.stdout + result.stderr
+    assert ("claude-code hooks installed" in result.stdout) is fires, result.stdout
+
+
 def test_the_gh_advice_matches_whether_gh_exists(tmp_path: Path) -> None:
     """ "Log in" is wrong advice for a binary that is not installed.
 

@@ -465,10 +465,13 @@ curl -b jar -H "Origin: http://127.0.0.1:8750" -H "content-type: application/jso
   -d '{"agent": "coder-auth", "keys": ["Escape"], "request_id": "esc-1"}' "$BASE/api/send-keys"
 ```
 
-A write's `request_id` is optional. Sent again with the same request, it is
-answered with what the first one did instead of running twice; give every other
-write an id of its own, since for 15 minutes an id sent with another endpoint or
-body is refused with `request_id_reused`.
+A write's `request_id` is optional. Sent again with the same request within 15
+minutes, it is answered with what the first one did instead of running twice;
+give every other write an id of its own, since for those 15 minutes an id sent
+with another endpoint or body is refused with `request_id_reused`. The server
+keeps the answers of a device's 50 newest writes and the ids of its 1000 newest:
+a retry of an older one is refused with `already_answered`, which says how it
+ended, and does not run again.
 
 The code is `src/aisquare/services/remote_server.py` (the server and its gates)
 and `src/aisquare/services/remote_page.py` (the bundled page, whose files are in

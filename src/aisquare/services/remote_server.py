@@ -3216,6 +3216,12 @@ REQUEST_ID_REUSED = (
     "its own, and send one again only with the request it was first sent with"
 )
 """409 ``request_id_reused``: an id the ledger holds, with another endpoint or body."""
+ALREADY_ANSWERED = (
+    "request_id {request_id} was answered {status} already, and that answer is no longer "
+    "kept — it is not run again; send it with a new request_id to run it again"
+)
+"""409 ``already_answered``: a retry of a request that ran, whose answer went to make room for
+the device's newer ones (``remote_actions.ACTION_LEDGER_SIZE``)."""
 
 
 def _new_action_ledger() -> ActionLedger:
@@ -3455,7 +3461,9 @@ class RemoteKit:
         body the ledger cannot answer is a 403 whatever else is wrong with it. Past the
         gate, an id the ledger holds for another request is 409 ``request_id_reused``,
         not that request's answer: replayed, a stop sent with a send-keys' id was
-        answered 200 and never ran (sweep of #243).
+        answered 200 and never ran (sweep of #243). A retry of a request whose answer
+        the ledger no longer keeps, though it still knows the id, is 409
+        ``already_answered``, saying how it ended, and never runs again.
         """
         from starlette.responses import JSONResponse
 
@@ -3470,6 +3478,9 @@ class RemoteKit:
             return JSONResponse(exc.request_error_body(), status_code=exc.status)
         seen = None if request_id is None else self.ledger.ledger_seen(device.id, request_id, asked)
         if seen is not None and seen.same:
+            if seen.spent is not None:
+                answered = ALREADY_ANSWERED.format(request_id=request_id, status=seen.spent)
+                return self.kit_refuse(409, "already_answered", answered)
             if seen.answer is None:
                 return self.kit_refuse(409, "in_progress", IN_PROGRESS)
             status, payload = seen.answer

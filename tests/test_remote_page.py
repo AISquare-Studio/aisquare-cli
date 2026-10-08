@@ -1321,7 +1321,9 @@ def test_back_leaves_the_page_once_a_redirect_took_the_place_of_the_screen_it_le
     """Each redirect pushed an entry: Back from the feed went to ``#/unlock``, which sent the
     unlocked page on to the feed again, so Back never left the tab or the installed app. A
     gone agent's tab did the same: its 404 sent the page to the fleet, and Back to the tab
-    asked again. Signed out, Back went to the screen the lock had left, and back to the lock."""
+    asked again. Signed out, Back went to the screen the lock had left, and back to the lock.
+    And a tab left at ``#/unlock`` and opened again once signed in (another tab unlocked, or
+    a reload) is sent to the feed in that entry's place, or Back went to it and bounced."""
     report = boot_report["backLeaves"]
     assert report["afterUnlock"] == {"at": "#/", "landed": [], "left": True}
     assert report["afterGone"] == {
@@ -1330,6 +1332,7 @@ def test_back_leaves_the_page_once_a_redirect_took_the_place_of_the_screen_it_le
         "left": True,
     }
     assert report["afterSignedOut"] == {"at": "#/unlock", "landed": ["#/unlock"], "left": True}
+    assert report["unlockedAtUnlock"] == {"at": "#/", "landed": [], "left": True}
 
 
 def test_an_answer_that_comes_after_the_human_moved_on_acts_on_its_own_sheet_only(

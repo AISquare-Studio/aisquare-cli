@@ -1027,8 +1027,9 @@ async function readsAfterFrames() {
 }
 
 /* The browser's Back, pressed until it leaves the page (six times at most), and where each
- * press landed: after an unlock, after a gone agent's tab sent the page to its fleet, and
- * after the phone was signed out on a project's screen. */
+ * press landed: after an unlock, after a gone agent's tab sent the page to its fleet, after
+ * the phone was signed out on a project's screen, and after a tab left at #/unlock was opened
+ * again once signed in (another tab unlocked, or a reload). */
 async function backLeaves() {
   const backs = async (page) => {
     const landed = [];
@@ -1069,7 +1070,10 @@ async function backLeaves() {
   await settle();
   out.live().fire("close", { code: 4401 });
   await settle();
-  return { afterUnlock, afterGone, afterSignedOut: await backs(out) };
+  const afterSignedOut = await backs(out);
+  const reopened = bootPage("#/unlock", signedIn());
+  await settle();
+  return { afterUnlock, afterGone, afterSignedOut, unlockedAtUnlock: await backs(reopened) };
 }
 
 /* The title of the sheet on screen, or null. */

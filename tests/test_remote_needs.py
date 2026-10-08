@@ -1558,6 +1558,10 @@ def test_a_closing_question_waits_for_the_manager_to_answer_it_first(
         '> "Is this the right file?"',
         "Shall I open the PR?\n\n- it adds the cache\n- it adds the tests",
         "All green.\n\nOne thing:\n\nship it now or wait for review?",
+        "```swift\nvar email: String?\n```\n\nShould I make `Account.email` optional too?",
+        "Should I run `make check`?",
+        "Is `String?` the right type for `email`?",
+        "Which of these should the cache use?\n```\nRedis\n\nSQLite\n```",
     ],
 )
 def test_text_that_asks(text: str) -> None:
@@ -1576,6 +1580,43 @@ def test_text_that_asks(text: str) -> None:
 )
 def test_text_that_does_not(text: str) -> None:
     assert not looks_like_a_question(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Added the field.\n\n```swift\nstruct User {\n    var email: String?\n}\n```\n\n"
+        "All 42 tests pass; committed as a1b2c3d.",
+        "The repository is now:\n\n```kotlin\ninterface Users {\n    fun find(id: Long): User?\n}"
+        "\n```",
+        "Done:\n\n```ruby\ndef publishable?\n  !draft? && approved?\nend\n```",
+        "Fixed:\n\n```rust\nOk(toml::from_str(&fs::read_to_string(path)?)?)\n```",
+        "The query binds the address:\n\n```sql\nSELECT * FROM users WHERE email = ?\n```",
+        "Done.\n\n~~~python\nwho = user.name if user else None  # was it set?\n~~~",
+        "Here it is:\n\n```sh\nmake check\nstatus=$?",
+        "- the tag parser now uses `<(.*?)>`",
+        "- `User.email` is now `String?`",
+    ],
+)
+def test_code_that_ends_in_a_question_mark_asks_nothing(text: str) -> None:
+    """A closing summary that showed code ending in ``?`` was an ``asked`` card, "coder-1
+    ended its turn with a question", pushed again every turn it did so: a Swift optional, a
+    Kotlin return type, a Ruby predicate, Rust's ``?``, a SQL placeholder, a comment in a
+    block, a lazy regex in an inline span. Only prose asks: no line inside a fenced block
+    (one never closed runs to the end), and no ``?`` inside an inline span."""
+    assert not looks_like_a_question(text)
+    row = _row()
+    tail = _tail(newest="assistant_text", text=text)
+    assert _classify(_status(row, "waiting", _session(row, state="waiting")), tail) == []
+
+
+def test_the_question_a_card_shows_is_the_last_one_in_prose() -> None:
+    text = "Should I run `make check` before the push?\n\n```sh\nmake check\nstatus=$?\n```"
+    row = _row()
+    tail = _tail(newest="assistant_text", text=text)
+    item = _one(_classify(_status(row, "waiting", _session(row, state="waiting")), tail))
+    assert item.kind == "asked"
+    assert item.excerpt.startswith("Should I run `make check` before the push?"), item.excerpt
 
 
 # --- dismissals ---------------------------------------------------------------------------

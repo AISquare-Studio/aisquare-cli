@@ -446,17 +446,25 @@ def _needs_fit(detail: dict[str, Any], limit: int) -> dict[str, Any]:
 def looks_like_a_question(text: str) -> bool:
     """Whether an assistant's last words ask the human something.
 
-    Each line is read without its markdown (``*_`>#``) and trailing quotes,
-    brackets and spaces. The text asks when a line ending in ``?`` lies in its
-    last paragraph (after its last blank line), or among its last 12 non-empty
-    lines and within its last 600 characters. So "Which approach? 1. … 2. …"
-    asks, and so does a coder's closing "Want me to commit this?" — which the
-    push policy, not this test, keeps from crying wolf.
+    Only prose is read (:func:`_needs_prose`): code ends in ``?`` all the time
+    (Swift's ``String?``, SQL's ``WHERE id = ?``, Ruby's ``admin?``, a lazy
+    ``(.*?)``), and a closing summary that showed some was an ``asked`` card,
+    pushed again every turn. Each line is read without its markdown (``*_`>#``)
+    and trailing quotes, brackets and spaces. The text asks when a line ending in
+    ``?`` lies in its last paragraph (after its last blank line outside a code
+    block), or among its last 12 non-empty lines and within its last 600
+    characters. So "Which approach? 1. … 2. …" asks, and so does a coder's
+    closing "Want me to commit this?" — which the push policy, not this test,
+    keeps from crying wolf.
     """
     body = text.strip()
     lines = body.splitlines()
-    blank = max((index for index, line in enumerate(lines) if not line.strip()), default=-1)
-    if any(_needs_line_asks(line) for line in lines[blank + 1 :]):
+    prose = _needs_prose(lines)
+    blank = max(
+        (index for index, line in enumerate(prose) if line is not None and not line.strip()),
+        default=-1,
+    )
+    if any(line is not None and _needs_line_asks(line) for line in prose[blank + 1 :]):
         return True
     ends: list[int] = []
     position = 0
@@ -466,13 +474,13 @@ def looks_like_a_question(text: str) -> bool:
         position += 1
     window = len(body) - 600
     counted = 0
-    for line, end in zip(reversed(lines), reversed(ends), strict=True):
+    for line, read, end in zip(reversed(lines), reversed(prose), reversed(ends), strict=True):
         if not line.strip():
             continue
         counted += 1
         if counted > 12 or end < window:
             return False
-        if _needs_line_asks(line):
+        if read is not None and _needs_line_asks(read):
             return True
     return False
 
@@ -480,16 +488,55 @@ def looks_like_a_question(text: str) -> bool:
 _NEEDS_TRAILING = " \t*_`>#\"'\u201d\u2019\u00bb)]}"
 """What a line may end with after its question mark: markdown, closing quotes and brackets."""
 
+_NEEDS_FENCE = re.compile(r"[ \t>]*(`{3,}|~{3,})")
+"""A line that opens or closes a fenced code block: three backticks or tildes or more, after
+an indent or a blockquote's marks."""
+
+_NEEDS_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`).+?(?<!`)\1(?!`)")
+"""An inline code span: a run of backticks, to the next run of as many."""
+
+
+def _needs_prose(lines: Sequence[str]) -> list[str | None]:
+    """Each line as the question test reads it: ``None`` inside a fenced code block, its
+    fences included, and otherwise the line without its inline code spans.
+
+    A fence closes on a line of the same character, at least as long, with nothing
+    after it; one that never closes runs to the end, as markdown reads it. Without
+    its spans, "Should I run `make check`?" still asks, and "now `String?`" does not.
+    """
+    prose: list[str | None] = []
+    fence: str | None = None
+    for line in lines:
+        marks = _NEEDS_FENCE.match(line)
+        rest = "" if marks is None else line[marks.end() :]
+        if fence is not None:
+            prose.append(None)
+            if (
+                marks is not None
+                and marks.group(1)[0] == fence[0]
+                and len(marks.group(1)) >= len(fence)
+                and not rest.strip()
+            ):
+                fence = None
+        elif marks is not None and not (marks.group(1)[0] == "`" and "`" in rest):
+            fence = marks.group(1)
+            prose.append(None)
+        else:
+            prose.append(_NEEDS_CODE_SPAN.sub("", line))
+    return prose
+
 
 def _needs_line_asks(line: str) -> bool:
     return line.rstrip(_NEEDS_TRAILING).endswith("?")
 
 
 def _needs_asked_tail(text: str) -> str:
-    """The question an assistant ended on: its last line ending in ``?``, to the end."""
+    """The question an assistant ended on: its last prose line ending in ``?``, to the end."""
     lines = text.strip().splitlines()
+    prose = _needs_prose(lines)
     for index in range(len(lines) - 1, -1, -1):
-        if _needs_line_asks(lines[index]):
+        read = prose[index]
+        if read is not None and _needs_line_asks(read):
             return "\n".join(lines[index:])
     return text
 

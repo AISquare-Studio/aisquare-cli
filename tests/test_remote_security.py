@@ -1489,7 +1489,7 @@ def test_a_note_holding_a_control_character_is_refused_before_anything_is_writte
         {
             "error": "invalid",
             "message": f"'{field}' holds the control character {char} — a note may hold tabs "
-            "and line breaks, and no other control character",
+            "and line breaks, and no other ASCII control character",
         },
     )
     assert team.notes == [] and team.finished == [] and _audit_lines() == before

@@ -1653,9 +1653,9 @@ def check_remote_key_names(keys: object) -> list[str]:
 
 
 def check_remote_text(text: str, *, pasted: bool = False) -> None:
-    """Refuse typed ``text`` holding a control character other than tab and newline: 400
-    ``invalid``, naming the pad's key for it. A ``pasted`` text (a tell) may also hold a
-    carriage return.
+    """Refuse typed ``text`` holding an ASCII control character (C0, or DEL) other than tab
+    and newline: 400 ``invalid``, naming the pad's key for it. A ``pasted`` text (a tell)
+    may also hold a carriage return.
 
     Text reaches the pane as hex, byte for byte, so a control character in it IS a
     keystroke: ``"\\x03"`` was a Ctrl-C past the double-press guard, ``"\\x1a"`` the
@@ -1680,8 +1680,8 @@ def check_remote_text(text: str, *, pasted: bool = False) -> None:
 
 def check_note_text(text: str, field: str) -> None:
     """A note's ``field`` as a phone may post it: at most :data:`NOTE_TEXT_MAX` characters
-    (413), and no control character but tab, newline and carriage return (400 ``invalid``),
-    which is a tell's rule.
+    (413), and no ASCII control character but tab, newline and carriage return (400
+    ``invalid``), which is a tell's rule.
 
     A note posted ``as`` an agent's session is one of that session's newest board
     entries, and the first prompt of a fresh replacement repeats them
@@ -1702,7 +1702,7 @@ def check_note_text(text: str, field: str) -> None:
             400,
             "invalid",
             f"{field!r} holds the control character U+{ord(found.group()):04X} — a note may "
-            "hold tabs and line breaks, and no other control character",
+            "hold tabs and line breaks, and no other ASCII control character",
         )
 
 

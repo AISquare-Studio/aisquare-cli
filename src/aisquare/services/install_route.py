@@ -83,7 +83,8 @@ ROUTES = (UV_TOOL, EDITABLE, LOCAL_SOURCE, UVX, PIPX, HOMEBREW, VENV, SYSTEM)
 
 #: The directories of uv's cache that hold the environments ``uvx`` runs:
 #: ``archive-v0/<id>/`` is the environment, and ``environments-v2/<hash>/<hash>``
-#: links to one (measured, uv 0.12.19).
+#: links to one (measured, uv 0.12.19). They count only inside uv's cache
+#: (:func:`_uv_cache_environment`).
 _UV_CACHE_ENVIRONMENTS = re.compile(r"(?:archive|environments)-v\d+")
 
 PYPI_JSON_URL = f"https://pypi.org/pypi/{DISTRIBUTION}/json"
@@ -694,8 +695,55 @@ def classify(found: Facts) -> InstallRoute:
 
 
 def _uv_cache_environment(prefix: Path) -> bool:
-    """Whether ``prefix`` is an environment in uv's cache, the kind ``uvx`` runs."""
-    return any(_UV_CACHE_ENVIRONMENTS.fullmatch(parent.name) for parent in prefix.parents[:2])
+    """Whether ``prefix`` is an environment in uv's cache, the kind ``uvx`` runs.
+
+    Its parent or grandparent is one of the cache's environment directories, and the
+    directory above that is uv's cache. That is the one ``UV_CACHE_DIR`` or the
+    platform default names (:func:`_uv_cache_roots`), or one holding the
+    ``CACHEDIR.TAG`` uv writes into every cache it makes: a ``--cache-dir`` or a uv.toml
+    ``cache-dir`` moves the cache where only uv could name it. Not ``uv cache dir``,
+    which would start a process on every session start and cannot see that
+    ``--cache-dir``. By the names alone, a venv in ``~/Code/archive-v1/.venv`` read as
+    a uvx run (review of #257). Never raises.
+    """
+    roots: list[str] | None = None
+    for parent in prefix.parents[:2]:
+        if _UV_CACHE_ENVIRONMENTS.fullmatch(parent.name) is None:
+            continue
+        cache = parent.parent
+        if os.path.isfile(cache / "CACHEDIR.TAG"):
+            return True
+        if roots is None:
+            roots = _uv_cache_roots()
+        if _cache_key(str(cache)) in roots:
+            return True
+    return False
+
+
+def _uv_cache_roots() -> list[str]:
+    """Where uv keeps its cache unless its command line or a uv.toml moves it, as
+    :func:`_cache_key` compares them: ``UV_CACHE_DIR``, and the platform default
+    (``$XDG_CACHE_HOME/uv`` or ``~/.cache/uv``; ``%LOCALAPPDATA%\\uv\\cache`` on Windows)."""
+    named = [os.environ.get("UV_CACHE_DIR") or ""]
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA")
+        named.append(os.path.join(local, "uv", "cache") if local else "")
+    else:
+        xdg = os.environ.get("XDG_CACHE_HOME")
+        named.append(
+            os.path.join(xdg, "uv")
+            if xdg
+            else os.path.join(os.path.expanduser("~"), ".cache", "uv")
+        )
+    return [key for root in named if root and (key := _cache_key(root))]
+
+
+def _cache_key(path: str) -> str:
+    """``path`` as two names for one directory compare equal; empty where it cannot be read."""
+    try:
+        return os.path.normcase(os.path.realpath(os.path.expanduser(path)))
+    except (OSError, ValueError):
+        return ""
 
 
 def detect() -> InstallRoute:

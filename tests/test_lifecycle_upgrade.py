@@ -1423,7 +1423,7 @@ def test_a_uvx_run_is_told_nothing_is_installed(
 ) -> None:
     """uvx runs aisquare from an entry in uv's cache. Read as a user's venv, upgrade and
     uninstall advised `uv pip` into the cache entry (review of #257)."""
-    prefix = tmp_path / "cache" / "uv" / entry
+    prefix = _uv_cache(tmp_path / "cache" / "uv") / entry
     (prefix / "bin").mkdir(parents=True)
     found = _facts(prefix, installer="uv")
     monkeypatch.setattr(install_route, "facts", lambda: found)
@@ -1439,6 +1439,40 @@ def test_a_uvx_run_is_told_nothing_is_installed(
     assert "nothing is installed to upgrade" in check["reason"], check
     assert package["command"] == "uv cache clean aisquare-cli" and not package["runs"], package
     assert "nothing is installed to remove" in package["reason"], package
+
+
+@pytest.mark.parametrize(
+    "where", ["UV_CACHE_DIR", "the platform default", "a tagged cache", "an archived checkout"]
+)
+def test_only_uvs_own_cache_makes_a_uvx_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """By the directory names alone, a venv in `~/Code/archive-v1/.venv` read as a uvx run:
+    uninstall said nothing is installed, upgrade pointed at a second install, and session
+    start named `uvx --from …` (review of #257). Only uv's own cache counts: the one
+    UV_CACHE_DIR or the platform default names, or one carrying uv's CACHEDIR.TAG."""
+    home = tmp_path / "home"
+    for name in ("UV_CACHE_DIR", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData" / "Local"))
+    prefix = home / "Code" / "archive-v1" / ".venv"
+    if where == "UV_CACHE_DIR":
+        monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "elsewhere"))
+        prefix = tmp_path / "elsewhere" / "archive-v0" / "AbC123"
+    elif where == "the platform default":
+        default = home / ("AppData/Local/uv/cache" if sys.platform == "win32" else ".cache/uv")
+        prefix = default / "archive-v0" / "AbC123"
+    elif where == "a tagged cache":
+        prefix = _uv_cache(tmp_path / "moved-by-cache-dir") / "environments-v2" / "c57" / "561"
+    (prefix / "bin").mkdir(parents=True)
+    monkeypatch.setattr(sys, "prefix", str(prefix))
+
+    route = install_route.classify(_facts(prefix, installer="pip"))
+
+    in_uvs_cache = where != "an archived checkout"
+    assert route.kind == (install_route.UVX if in_uvs_cache else install_route.VENV), route
+    assert install_route.runs_from_uv_cache() is in_uvs_cache
 
 
 def test_a_move_back_plans_no_reconnect_and_asks_to_move_back(

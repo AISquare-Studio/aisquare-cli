@@ -126,6 +126,16 @@ def _aisquare_on_path(found: str | None, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(shutil, "which", which)
 
 
+def _uv_cache(root: Path) -> Path:
+    """A stand-in for uv's cache at ``root``, tagged as uv tags its own (``CACHEDIR.TAG``):
+    only an environment inside uv's cache is a uvx run (review of #257)."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "CACHEDIR.TAG").write_text(
+        "Signature: 8a477f597d28d172789f06886806bc55", encoding="utf-8"
+    )
+    return root
+
+
 def _session_start_after_a_prompt(runner: CliRunner, work_dir: Path) -> str:
     payload = json.dumps({"prompt": "add a test for X", "cwd": str(work_dir)})
     assert runner.invoke(app, ["hook", "user-prompt-submit"], input=payload).exit_code == 0
@@ -146,7 +156,7 @@ def test_session_start_names_a_log_command_the_uvx_route_can_run(
     aisquare is installed. "run `aisquare log`" was command not found for the agent,
     and it was often all that session start said there.
     """
-    cached = tmp_path / ".cache" / "uv" / "archive-v0" / "NPat_ypOvcy3YMzz"
+    cached = _uv_cache(tmp_path / ".cache" / "uv") / "archive-v0" / "NPat_ypOvcy3YMzz"
     monkeypatch.setattr(sys, "prefix", str(cached))
     _aisquare_on_path(str(cached / "bin" / "aisquare"), monkeypatch)
 
@@ -189,7 +199,8 @@ def test_the_plugin_page_names_the_log_command_the_uvx_route_prints(
     (review of #257). It now says what that route gives, with the command it prints."""
     from aisquare.services import hooks as hooks_service
 
-    monkeypatch.setattr(sys, "prefix", str(tmp_path / ".cache" / "uv" / "archive-v0" / "x"))
+    cache = _uv_cache(tmp_path / ".cache" / "uv")
+    monkeypatch.setattr(sys, "prefix", str(cache / "archive-v0" / "x"))
     printed = hooks_service._log_command()
     page = Path(__file__).resolve().parents[1] / "docs" / "claude-code-plugin.md"
     text = " ".join(page.read_text(encoding="utf-8").split())

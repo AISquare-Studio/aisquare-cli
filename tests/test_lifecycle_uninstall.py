@@ -1847,6 +1847,15 @@ _REMOVAL_RULE = (
 )
 
 
+def _uv_cache(root: Path) -> Path:
+    """A stand-in for uv's cache at ``root``, tagged as uv tags its own (``CACHEDIR.TAG``)."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "CACHEDIR.TAG").write_text(
+        "Signature: 8a477f597d28d172789f06886806bc55", encoding="utf-8"
+    )
+    return root
+
+
 def _route_at(
     prefix: Path, *, receipt: str | None = None, platform: str = "linux", **facts: Any
 ) -> install_route.InstallRoute:
@@ -1900,7 +1909,7 @@ def test_the_docs_say_when_uninstall_removes_the_package_as_the_code_decides(
         "pip in a venv": _route_at(tmp_path / "venv"),
         "pip -e": _route_at(tmp_path / "pip-e", direct_url=editable),
         "Homebrew": _route_at(tmp_path / "opt" / "Cellar" / "aisquare" / "0.8.0" / "libexec"),
-        "uvx": _route_at(tmp_path / "cache" / "environments-v2" / "aisquare-0123"),
+        "uvx": _route_at(_uv_cache(tmp_path / "cache") / "environments-v2" / "aisquare-0123"),
     }
     text = " ".join((_REPO / doc).read_text(encoding="utf-8").split())
 

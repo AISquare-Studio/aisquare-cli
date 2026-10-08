@@ -19,7 +19,7 @@ claude plugin install aisquare@aisquare-cli
 The hooks are SessionStart, UserPromptSubmit, SessionEnd, Stop, Notification and StopFailure. Each one runs `aisquare hook <event>`, the same entry point the `settings.json` hooks use:
 
 - the aisquare CLI on your `PATH`, or in `~/.local/bin` where `uv tool install` puts it;
-- otherwise the aisquare release the plugin pins, through `uvx`. A machine with only [uv](https://docs.astral.sh/uv/) gets memory with nothing else installed. The first session start downloads it, which takes a few seconds; after that it starts in well under a second;
+- otherwise the aisquare release the plugin pins, through `uvx`. On a machine with only [uv](https://docs.astral.sh/uv/), the hooks run with nothing else installed: they capture your prompts and hand each new session what is saved. There is no `aisquare` command there, so session start tells the agent to read the prompts with `uvx --from aisquare-cli==<version> aisquare log`, and saving something needs the CLI ([below](#saving-memory-on-purpose)). The first session start downloads the release, which takes a few seconds; after that it starts in well under a second;
 - with neither, the session starts as usual and says once that aisquare is not available.
 
 A hook that fails never blocks a prompt or a session.

@@ -20,6 +20,7 @@ default agent does.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -30,9 +31,10 @@ from aisquare.core import snapshot as snapshot_core
 from aisquare.core import spawn as spawn_core
 from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
+from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import active_project
 from aisquare.models import ProjectInfo
-from aisquare.services import auto_mode, ci_augment
+from aisquare.services import auto_mode, ci_augment, install_route
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import metrics as metrics_service
@@ -477,9 +479,28 @@ def _directive(project_id: str, *, has_prompts: bool) -> str:
         ]
     if has_prompts:
         lines.append(
-            "Past user prompts here are captured — run `aisquare log` to see how the user "
-            "tends to ask, and honour that intent."
+            f"Past user prompts here are captured — run `{_log_command()}` to see how the "
+            "user tends to ask, and honour that intent."
         )
     if not lines:
         return ""
     return "<aisquare-context>\n" + "\n".join(lines) + "\n</aisquare-context>"
+
+
+def _log_command() -> str:
+    """``aisquare log`` as the agent's own shell can run it.
+
+    The plugin's launcher runs the hooks through ``uvx`` only where no aisquare is
+    installed, so there "run `aisquare log`" was command not found, and on that
+    route it was often the only thing session start said (review of #257). uvx
+    puts its environment's ``bin`` on the HOOK's PATH, not the agent's, so the
+    route is asked before PATH is. Elsewhere: the bare name when PATH has one, else
+    this interpreter (hooks that name a virtualenv that is not on PATH).
+    """
+    if install_route.runs_from_uv_cache():
+        argv = ["uvx", "--from", f"{DISTRIBUTION}=={__version__}", "aisquare", "log"]
+    elif shutil.which("aisquare") is not None:
+        return "aisquare log"
+    else:
+        argv = selfcli.argv_for(["log"])
+    return install_route.command_line(argv)

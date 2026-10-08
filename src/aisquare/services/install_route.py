@@ -703,6 +703,16 @@ def detect() -> InstallRoute:
     return classify(facts())
 
 
+def runs_from_uv_cache() -> bool:
+    """Whether THIS process runs from an environment in uv's cache, the way ``uvx`` runs it.
+
+    The plugin's launcher takes that route only where no aisquare is installed, so
+    nothing on the agent's PATH answers to ``aisquare`` there. One path check, for
+    the session-start hook that asks; :func:`detect` also reads the package metadata.
+    """
+    return _uv_cache_environment(Path(sys.prefix))
+
+
 # --- what upgrades it -------------------------------------------------------------------
 
 

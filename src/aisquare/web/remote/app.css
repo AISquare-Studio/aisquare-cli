@@ -187,7 +187,12 @@ pre.pane, pre.transcript {
   background: var(--pane); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; min-height: 40vh;
 }
 pre.transcript { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 0; }
-pre.pane.fit { overflow-x: hidden; font-size: calc((100vw - 48px) / (var(--cols, 80) * 0.6)); }
+/* Fit width: the screen less what pads the pane across it, the side insets of a phone in
+ * landscape included (59 px a side on an iPhone: ten columns of eighty went unseen). */
+pre.pane.fit {
+  overflow-x: hidden;
+  font-size: calc((100vw - 48px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)) / (var(--cols, 80) * 0.6));
+}
 .ln { display: block; min-height: 1.25em; }
 .measure { position: absolute; visibility: hidden; white-space: pre; font: 12px/1.25 var(--mono); }
 .inputbar {

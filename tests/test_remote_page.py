@@ -721,6 +721,25 @@ def test_the_status_strip_and_the_bottom_nav_keep_to_one_line_on_a_phone() -> No
     assert _css_px(css, ".bottom .tab", "padding") == [8, 2]
 
 
+def test_fit_width_sizes_the_pane_inside_the_screens_side_insets() -> None:
+    """Fit width scaled the font to the screen's width less 48 px, but in landscape a phone's
+    sides give up their safe-area insets too, 59 px a side on an iPhone 15 Pro: the pane ran
+    104 px past its box, and overflow hid its rightmost columns, ten of eighty, with nothing to
+    say so. Everything that pads the pane across the screen comes off the width it fits to."""
+    css = _text("app.css")
+    fit = _css_value(css, "pre.pane.fit", "font-size")
+    main = _css_value(css, ".main", "padding")
+    for side in ("left", "right"):
+        assert f"env(safe-area-inset-{side})" in main, "the control: the insets pad the screen"
+        assert re.search(rf"-\s*env\(safe-area-inset-{side}", fit), side
+    fixed = re.search(r"100vw - (\d+)px", fit)
+    assert fixed is not None
+    (pad,) = _css_px(css, "pre.pane, pre.transcript", "padding")
+    border = _css_px(css, "pre.pane, pre.transcript", "border")[0]
+    sides = _css_px(css, ".main", "padding")[1::2]
+    assert int(fixed.group(1)) >= sum(sides) + 2 * (pad + border)
+
+
 # --- 10. the service worker -----------------------------------------------------------------
 
 NGROK_SUFFIXES = (".ngrok-free.app", ".ngrok.app", ".ngrok.io", ".ngrok-free.dev", ".ngrok.dev")

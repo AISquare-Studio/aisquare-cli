@@ -546,6 +546,8 @@ class Fleet:
     """When every pane last printed, as tmux tells it; ``None``: it would not say."""
     windows: int = 0
     """How many times the scan read the window of the newest events."""
+    board_fails: bool = False
+    """The read of the board's day raises, as a store held past its busy timeout does."""
 
 
 def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> NeedsSources:
@@ -561,6 +563,8 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
 
     def board_since(pid: str, since: datetime) -> list[TeamEvent]:
         """The store's ``team_events_since`` over the kinds the live source asks for."""
+        if fleet.board_fails:
+            raise RuntimeError("database is locked")
         return [
             event
             for event in fleet.events
@@ -1034,6 +1038,27 @@ def test_an_event_older_than_its_row_names_nothing_in_the_window_or_out_of_it() 
     _board_traffic(fleet)
     (after,) = _scan(fleet)
     assert after.id == before.id
+
+
+def test_a_manager_whose_last_word_cannot_be_read_is_not_called_down() -> None:
+    """A read of the board that failed is no board at all, and a manager with no last word
+    read as one stopped mid-work: a card, pushed if the store stayed locked, for a manager
+    that reported and was stopped. A failure costs what it would have shown instead."""
+    manager = _row("manager", role="manager", ended=NOW - timedelta(minutes=5))
+    managing = _session(manager, ended=NOW - timedelta(minutes=5))
+    coder = _row()
+    fleet = Fleet(
+        ended=[manager],
+        agents=[_status(coder, "working", _session(coder))],
+        sessions=[managing],
+        events=[_event(5, "result", "Shipped.", session=managing)],
+    )
+    assert [item.kind for item in _scan(fleet)] == ["board_result"]
+    fleet.board_fails = True
+    assert _scan(fleet) == []
+    crashed = _row("manager", role="manager", ended=NOW - timedelta(minutes=5), exit_status=3)
+    fleet.ended = [crashed]
+    assert [item.kind for item in _scan(fleet)] == ["manager_down"], "a crash needs no board"
 
 
 def test_a_managers_last_word_is_read_however_long_ago_it_was() -> None:

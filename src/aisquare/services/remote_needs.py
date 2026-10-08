@@ -1207,11 +1207,19 @@ _T = TypeVar("_T")
 
 def _needs_read(read: Callable[[], list[_T]], what: str, project: ProjectInfo) -> list[_T]:
     """One source read for one project; a failure costs what it would have shown."""
+    return _needs_read_or_none(read, what, project) or []
+
+
+def _needs_read_or_none(
+    read: Callable[[], list[_T]], what: str, project: ProjectInfo
+) -> list[_T] | None:
+    """:func:`_needs_read`, ``None`` when the read failed: for facts whose absence says
+    something, as a manager's last word that is not its result does."""
     try:
         return read()
     except Exception:
         log.debug("remote: needs could not read %s of %s", what, project.id, exc_info=True)
-        return []
+        return None
 
 
 def _needs_scan_project(
@@ -1241,9 +1249,9 @@ def _needs_scan_project(
     ended = _needs_read(
         lambda: sources.ended_agents(project.id, now - RECENTLY_ENDED), "rows", project
     )
-    board = _needs_read(
-        lambda: sources.board_since(project.id, now - QUESTION_HORIZON), "board", project
-    )
+    day = now - max(QUESTION_HORIZON, RECENTLY_ENDED)
+    board_read = _needs_read_or_none(lambda: sources.board_since(project.id, day), "board", project)
+    board = board_read or []
     window = _needs_window(sources, project)
     authors = _needs_board_authors(board, now)
     sessions = _needs_read(
@@ -1293,7 +1301,7 @@ def _needs_scan_project(
                 sources=sources,
             )
         )
-        items.extend(_needs_manager_down(statuses, rows, board, project=project, now=now))
+        items.extend(_needs_manager_down(statuses, rows, board_read, project=project, now=now))
         items.extend(
             _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
         )
@@ -1614,7 +1622,7 @@ def _needs_last_word(row: FleetAgent, board: Sequence[TeamEvent]) -> TeamEvent |
 def _needs_manager_down(
     statuses: Sequence[FleetAgentStatus],
     rows: Sequence[FleetAgent],
-    board: Sequence[TeamEvent],
+    board: Sequence[TeamEvent] | None,
     *,
     project: ProjectInfo,
     now: datetime,
@@ -1631,7 +1639,9 @@ def _needs_manager_down(
     exit a switch or a restart made, though, and then could not start the
     replacement for: the hand-over's own ``/exit`` is status 0, and the exit it
     announces says so (``fleet.HANDOVER_FAILED``). That one is reported as a
-    stop is.
+    stop is. ``board`` is ``None`` when the day could not be read: a stop is then
+    not reported at all, rather than for a last word nobody read; a crash needs no
+    board.
     """
     managers = [row for row in rows if _needs_is_manager(row.role)]
     if not managers or any(row.ended_at is None for row in managers):
@@ -1649,7 +1659,7 @@ def _needs_manager_down(
             and status.agent.ended_at is None
             and status.state in ("working", "attention", "limited")
         ]
-        if not busy:
+        if not busy or board is None:
             return []
         if manager.exit_status == 0 and not _needs_handover_failed(_needs_exit_of(manager, board)):
             return []

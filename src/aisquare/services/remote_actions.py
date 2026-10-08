@@ -294,8 +294,9 @@ def action_pinned(body: dict[str, Any]) -> tuple[str, str]:
 def action_tell_text(body: dict[str, Any]) -> str:
     """The tell's ``text``, kept literally: whitespace is content. Empty is a 400, longer
     than :data:`TELL_TEXT_MAX` a 413, and an ASCII control character other than tab,
-    newline and carriage return a 400 (``remote_server.check_remote_text``). Typed text refuses the
-    carriage return too, which is the Enter key there; inside the paste it is a line break.
+    newline and carriage return a 400 (``remote_server.check_remote_text``). Typed text
+    refuses the carriage return too, which is the Enter key there; inside the paste it is
+    a line break.
 
     A tell goes into the pane as one bracketed paste, and tmux before 3.7 pastes the
     buffer's bytes as they are: an ``ESC [201~`` in the text ended the paste early, and

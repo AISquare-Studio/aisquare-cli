@@ -481,6 +481,40 @@ def test_it_runs_in_place_of_a_hook_whose_program_is_gone(
 
 
 @posix_only
+@pytest.mark.parametrize("indent", [2, None], ids=["indented", "minified"])
+@pytest.mark.parametrize(
+    ("hooks", "runs"),
+    [
+        # A user's hook that cannot start, then a live one of ours: settings.json runs
+        # aisquare, so the launcher must not run it a second time.
+        (("{gone}/notify-send done", "{bin}/aisquare hook stop"), False),
+        # A user's hook that can start, then ours naming an uninstalled CLI: no aisquare
+        # runs from settings.json, so the launcher must.
+        (("{bin}/python3 notify.py", "{gone}/aisquare hook stop"), True),
+        # Ours twice, the first gone: the second still runs aisquare.
+        (("{gone}/aisquare hook stop", "{bin}/aisquare hook stop"), False),
+    ],
+    ids=["dead-hook-then-ours", "live-hook-then-gone-ours", "gone-ours-then-live-ours"],
+)
+def test_it_grades_the_program_in_our_hook_not_the_first_on_its_line(
+    machine: Machine, hooks: tuple[str, str], runs: bool, indent: int | None
+) -> None:
+    """A minified settings.json (``jq -c``, Nix, Ansible) has every hook on one line, and
+    the program graded was the first ``"command"`` on it: the event fired twice beside a
+    live hook of ours, or never beside a dead one (review of #257)."""
+    machine.fake("aisquare")
+    where = {"bin": _programs(machine), "gone": machine.home / "uninstalled"}
+    machine.settings(
+        machine.home / ".claude", *(("Stop", hook.format(**where)) for hook in hooks), indent=indent
+    )
+
+    result = machine.run("stop")
+
+    assert result.returncode == 0
+    assert machine.ran("aisquare") == (["hook", "stop"] if runs else None)
+
+
+@posix_only
 def test_it_reads_the_settings_json_the_session_reads(machine: Machine) -> None:
     """CLAUDE_CONFIG_DIR, else ~/.claude -- and the config dir the plugin is installed in."""
     alt = machine.home / ".claude-c2"

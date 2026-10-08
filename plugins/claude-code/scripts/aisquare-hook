@@ -49,11 +49,12 @@ _p5='[^"]* -m '            # python -P -m
 _program="($_p1|$_p2|$_p3|$_p4|$_p5)?(aisquare|asq)(\\.[eE][xX][eE])?(\\\\\"|$_a)?"
 _ours="\"command\" *: *\"$_program($_ws+-[^\"]*)?$_ws+hook$_ws+$event$_ws*\""
 
-# Whether the program a matching hook ($1, its JSON line) names can start. A hook
-# naming an aisquare that is gone -- the CLI uninstalled after `agents connect` --
-# fails on every event, and standing down beside it would leave the session
-# running none. A program sh cannot read out of the JSON text (an escape: a
-# Windows or non-ASCII path) is trusted, as every match was before this check.
+# Whether the program one matching hook ($1, the text grep matched) names can
+# start. A hook naming an aisquare that is gone -- the CLI uninstalled after
+# `agents connect` -- fails on every event, and standing down beside it would
+# leave the session running none. A program sh cannot read out of the JSON text
+# (an escape: a Windows or non-ASCII path) is trusted, as every match was before
+# this check.
 _runnable() {
     _cmd=${1#*\"command\"}
     _cmd=${_cmd#*:}
@@ -89,11 +90,22 @@ case ${CLAUDE_PLUGIN_ROOT:-} in
 esac
 for _dir in "$_installed_in" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; do
     [ -n "$_dir" ] || continue
-    # A missing or unreadable settings.json is grep's error, which is no match.
-    _line=$(grep -E "$_ours" "$_dir/settings.json" 2>/dev/null) || continue
-    if _runnable "${_line%%"$_nl"*}"; then
-        exit 0
-    fi
+    # Each match alone (-o), one per line, never the line it is on: in a minified
+    # settings.json every hook shares one line, and the program graded must be the
+    # one in OUR hook, not the first "command" on that line. Any of ours that can
+    # start means settings.json runs aisquare for this event. A missing or
+    # unreadable settings.json is grep's error, which is no match.
+    _matches=$(grep -o -E "$_ours" "$_dir/settings.json" 2>/dev/null) || continue
+    while [ -n "$_matches" ]; do
+        _match=${_matches%%"$_nl"*}
+        case $_matches in
+            *"$_nl"*) _matches=${_matches#*"$_nl"} ;;
+            *) _matches= ;;
+        esac
+        if _runnable "$_match"; then
+            exit 0
+        fi
+    done
 done
 
 # The first executable named $1: on PATH, then where uv installs tools.

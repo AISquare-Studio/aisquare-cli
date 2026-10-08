@@ -203,12 +203,12 @@ aisquare --json remote needs
 | plan | an agent asks you to approve its plan |
 | board_question | the manager (or a coder with no manager left) asks on the board |
 | manager_down | the manager stopped while agents still work, or crashed |
-| crashed | an agent exited with an error, its task unfinished |
+| crashed | an agent exited with an error in the last hour, its task unfinished, while no manager runs to handle it (one parked on its usage limit does not count) |
 | limited | an agent hit its usage limit |
 | lost | an agent's pane is gone |
 | fleet_down | tmux is not answering for a project |
 | asked | an agent ended its turn with a question in plain text |
-| board_result | the manager reports a result |
+| board_result | the manager (or a coder with no manager left) reports a result |
 | interrupted | you pressed Esc on an agent, and it waits for you |
 
 A card holds what you must read before answering, in full: the exact command a

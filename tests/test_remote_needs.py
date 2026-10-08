@@ -608,6 +608,59 @@ def test_a_new_manager_ends_manager_down() -> None:
     assert _scan(fleet) == []
 
 
+def _crew_and_manager(manager: FleetAgentStatus) -> Fleet:
+    """coder-1 asks the manager on the board, coder-2 crashed with its task open."""
+    asker = _row("coder-1")
+    asking = _session(asker)
+    crashed = _row("coder-2", ended=NOW - timedelta(minutes=10), exit_status=1, task_id="tsk_1")
+    return Fleet(
+        agents=[manager, _status(asker, "working", asking)],
+        ended=[crashed],
+        sessions=[asking] + ([manager.session] if manager.session is not None else []),
+        events=[_event(5, "question", "Which branch?", session=asking, to="manager")],
+        tasks={"tsk_1": "doing"},
+    )
+
+
+def test_a_manager_parked_on_its_usage_limit_is_no_manager_to_leave_work_to() -> None:
+    """Parked, a manager fires no hook and takes no nudge until its reset, hours away maybe.
+    Counted live, it hid a coder's crash and a coder's question to it for the whole limit,
+    while nobody acted on either; and its own limit's push waited 90 s, for itself."""
+    manager = _row("manager", role="manager")
+    parked = _session(manager, state="limited", resets=NOW + timedelta(hours=4))
+    fleet = _crew_and_manager(_status(manager, "limited", parked, "limit resets in 4h"))
+    items = _scan(fleet)
+    assert [(item.kind, item.agent) for item in items] == [
+        ("board_question", "coder-1"),
+        ("crashed", "coder-2"),
+        ("limited", "manager"),
+    ]
+    assert items[-1].push_after == items[-1].since, "nobody else is on the manager's own limit"
+    working = _crew_and_manager(_status(manager, "working", _session(manager)))
+    assert _scan(working) == [], "a manager at work has both"
+
+
+def test_a_manager_tmux_cannot_reach_is_no_manager_to_leave_work_to() -> None:
+    manager = _row("manager", role="manager").model_copy(update={"tmux_socket": "elsewhere"})
+    fleet = _crew_and_manager(_status(manager, "unknown"))
+    assert [item.kind for item in _scan(fleet)] == ["board_question", "crashed"]
+
+
+def test_a_manager_session_parked_on_its_limit_is_not_live_without_its_row_either() -> None:
+    """The session counts for a manager started outside the fleet, which has no row; a
+    session whose row the scan read is that row's to decide, whatever the session says."""
+    question = _event(10, "question", "Which branch?", session=CODING, to="manager")
+    parked = _session(MANAGER, state="limited", seen=NOW - timedelta(minutes=2))
+    assert len(_board([question], sessions=(parked, CODING), manager_live=None)) == 1
+    outside = _row("manager", role="manager", row_id="outside")
+    waiting = _session(outside, state="limited", seen=NOW - timedelta(minutes=2))
+    rows = (CODER,)
+    assert len(_board([question], sessions=(waiting, CODING), rows=rows, manager_live=None)) == 1
+    fleet = _crew_and_manager(_status(_row("manager", role="manager"), "lost"))
+    fleet.sessions.append(_session(_row("manager", role="manager")))
+    assert "crashed" in [item.kind for item in _scan(fleet)], "its row says it is gone"
+
+
 def test_tmux_not_answering_is_one_fleet_down_item_until_it_clears() -> None:
     one, two = _row("coder-1"), _row("coder-2")
     fleet = Fleet(agents=[_status(one, "unknown"), _status(two, "unknown")])

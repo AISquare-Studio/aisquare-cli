@@ -920,7 +920,7 @@ def needs_from_board(
     later question, result or decision: they have moved on. An unaddressed
     human note clears nothing; it is news, not an answer. ``agents`` names each
     author by its fleet label; ``manager_live`` defaults to what the sessions and
-    rows say.
+    rows say, a row whose session is parked on its usage limit not counting.
     """
     by_session = {session.id: session for session in sessions}
     rows: dict[str, FleetAgent] = {}
@@ -928,9 +928,10 @@ def needs_from_board(
         if agent.session_id:
             rows[agent.session_id] = agent  # the newest row of a session names it
     if manager_live is None:
-        gone = {row.session_id for row in agents if row.ended_at is not None and row.session_id}
-        live_rows = [row for row in agents if row.ended_at is None]
-        manager_live = _needs_manager_live(live_rows, gone, sessions, now)
+        parked = {session.id for session in sessions if session.state == "limited"}
+        live_rows = [row for row in agents if row.ended_at is None and row.session_id not in parked]
+        rowed = {row.session_id for row in agents if row.session_id}
+        manager_live = _needs_manager_live(live_rows, rowed, sessions, now)
     addressed: set[str] = set()  # whom the human's later writes were addressed to
     moved_on: set[str] = set()  # sessions that asked, reported or decided again later
     items: list[NeedsItem] = []
@@ -981,30 +982,41 @@ def _needs_board_item(
 
 def _needs_manager_live(
     live_rows: Sequence[FleetAgent],
-    gone: Collection[str],
+    rowed: Collection[str],
     sessions: Sequence[TeamSession],
     now: datetime,
 ) -> bool:
     """Whether the project has a manager to act on what needs doing.
 
-    A live manager row says so outright. Otherwise a manager session counts
-    (one started outside the fleet, say) while it has not ended and was seen
-    within the board's stale window — unless its fleet row is ``gone``: a crash
-    fires no ``SessionEnd``, and its session would otherwise read live for half
-    an hour after the manager died.
+    A manager among ``live_rows`` says so outright: the caller passes only the
+    rows that can act, never one parked on its usage limit (it fires no hook and
+    takes no nudge until the reset, which can be hours away) or one whose tmux
+    would not answer. Otherwise a manager session with no fleet row (one started
+    outside the fleet, say) counts while it has not ended, is not parked on a
+    limit and was seen within the board's stale window. A session that has a row
+    (``rowed``) is its row's to decide: a crash fires no ``SessionEnd``, so a
+    dead manager's session read live for half an hour after it died, and a
+    parked one's for as long as it waited.
     """
     if any(_needs_is_manager(row.role) for row in live_rows):
         return True
     return any(
         _needs_is_manager(session.role)
         and session.ended_at is None
+        and session.state != "limited"
         and now - session.last_seen_at <= _MANAGER_FRESH
-        and session.id not in gone
+        and session.id not in rowed
         for session in sessions
     )
 
 
 # --- one project --------------------------------------------------------------------------
+
+
+_NEEDS_NOT_ACTING = frozenset({"exited", "lost", "limited", "unknown"})
+"""Derived states of a live row that takes no nudge: dead, gone, parked on its usage limit
+until a reset that can be hours away, or on a tmux server that would not answer. A manager
+in one of them is no manager to leave a crash or a coder's question to."""
 
 
 @dataclass(frozen=True)
@@ -1064,19 +1076,13 @@ def _needs_scan_project(
     )
     listed = statuses or []
     rows = list({row.id: row for row in [*ended, *(status.agent for status in listed)]}.values())
-    gone = {row.session_id for row in ended if row.session_id}
-    gone |= {
-        status.agent.session_id
-        for status in listed
-        if status.agent.session_id
-        and (status.agent.ended_at is not None or status.state in ("exited", "lost"))
-    }
-    live_rows = [
+    rowed = {row.session_id for row in rows if row.session_id}
+    acting = [
         status.agent
         for status in listed
-        if status.agent.ended_at is None and status.state not in ("exited", "lost")
+        if status.agent.ended_at is None and status.state not in _NEEDS_NOT_ACTING
     ]
-    manager_live = _needs_manager_live(live_rows, gone, sessions, now)
+    manager_live = _needs_manager_live(acting, rowed, sessions, now)
     items: list[NeedsItem] = []
     tails: dict[str, TranscriptTail | None] = {}
     if statuses is not None:

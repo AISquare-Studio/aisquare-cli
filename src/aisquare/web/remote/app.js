@@ -2366,11 +2366,19 @@ VIEWS.agent = (route, main) => {
     const refresh = button("ghost", "Refresh", () => load(null));
     body.append(older, lines, refresh);
     let cursor = null;
+    let loads = 0;
     older.hidden = true;
+    // The newest read is the one drawn: Load older waits while one is out (a second tap put
+    // the same page in twice), a Refresh drops an older read still out (spliced onto the
+    // newest page, it left a gap Load older never filled), and so does leaving the tab.
     const load = async (before) => {
+      const seq = ++loads;
+      older.disabled = true;
       const query = { project: pid, width: measureColumns(lines) };
       if (before) query.before = before;
       const res = await apiCall("GET", apiPath(API.transcript, { agent: label }), { query });
+      if (seq !== loads || !lines.isConnected) return undefined;
+      older.disabled = false;
       if (!res.ok || !res.data || typeof res.data !== "object") {
         toast(failText(res));
         return afterFailure(res, route);

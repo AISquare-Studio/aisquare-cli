@@ -1398,6 +1398,22 @@ def test_the_transcript_asks_for_lines_as_wide_as_fit_inside_its_padding(
     assert report["asked"] == {"334": 44, "364": 48, "386": 51}
 
 
+def test_the_transcript_draws_one_read_at_a_time_and_the_newest_wins(
+    boot_report: dict[str, Any],
+) -> None:
+    """Load older had nothing to wait on: a double tap asked for the same page twice and put
+    it in twice. A Refresh answered while Load older was out drew the newest page, then the
+    late older page went on top of it with the turns between them gone, and its "no more"
+    hid Load older, so the gap could never be filled."""
+    loads = boot_report["transcriptLoads"]
+    assert loads["twice"] == {
+        "asked": [None, "100"],
+        "shown": ["t1", "t2", "t3", "t4"],
+        "older": False,
+    }
+    assert loads["spliced"] == {"asked": [None, "100", None], "shown": ["t5", "t6"], "older": True}
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

@@ -1342,6 +1342,47 @@ async function transcriptColumns() {
   return { asked, padding: parseFloat(PRE_PADDING), charPx: CHAR_PX };
 }
 
+/* The Transcript's reads, each answered when the scenario says: Load older tapped twice
+ * while its read is out; and Load older, then Refresh, answered newest first. The reads
+ * asked for (their before cursors), the lines drawn, and whether Load older shows. */
+async function transcriptLoads() {
+  const opened = async () => {
+    const reads = [];
+    const page = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
+      "GET api/transcript/coder-1": () => (reads[reads.length] = deferred()).promise,
+    }));
+    await settle();
+    reads[0].settle(transcriptPage(["t3", "t4"], "100", true));
+    await settle();
+    const tap = (name) => click(buttonNamed(page.main(), name));
+    const result = () => ({
+      asked: page.requests.filter((one) => one.path === "api/transcript/coder-1").map((one) => new URLSearchParams(one.query).get("before")),
+      shown: page.main().querySelectorAll("pre.transcript")[0].childNodes.map((line) => line.textContent),
+      older: !buttonNamed(page.main(), "Load older").hidden,
+    });
+    return { reads, tap, result };
+  };
+  const twice = await opened();
+  twice.tap("Load older");
+  twice.tap("Load older");
+  await settle();
+  for (const read of twice.reads.slice(1)) read.settle(transcriptPage(["t1", "t2"], null, false));
+  await settle();
+  const spliced = await opened();
+  spliced.tap("Load older");
+  spliced.tap("Refresh");
+  await settle();
+  spliced.reads[2].settle(transcriptPage(["t5", "t6"], "300", true));
+  await settle();
+  spliced.reads[1].settle(transcriptPage(["t1", "t2"], null, false));
+  await settle();
+  return { twice: twice.result(), spliced: spliced.result() };
+}
+
+function transcriptPage(lines, cursor, more) {
+  return { status: 200, json: { lines, cursor, more, stamps: {} } };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -1381,6 +1422,7 @@ async function main() {
     padConfirms: await padConfirms(),
     staleAcrossAWake: await staleAcrossAWake(),
     transcriptColumns: await transcriptColumns(),
+    transcriptLoads: await transcriptLoads(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

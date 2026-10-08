@@ -77,6 +77,9 @@ class RemotePanel(ModalScreen[None]):
         self._device_columns: list[ColumnKey] = []
         self._qr_url: str | None = ""
         """The link the QR was last drawn for; ``""`` before the first paint."""
+        self._painted: dict[str, bool] = {}
+        """What each switch was last painted to show, by id. A switch showing anything else
+        was moved by the user since, and its ``Changed`` is still on its way."""
 
     # --- layout ---------------------------------------------------------------------------
 
@@ -133,22 +136,21 @@ class RemotePanel(ModalScreen[None]):
 
     # --- paint from the controller -------------------------------------------------------------
 
-    def repaint(self) -> None:
+    def repaint(self, *, heard: str | None = None) -> None:
         """Paint everything from the controller; the one-second tick runs it too.
 
         On Textual's own thread, so a tick reads ``remote_server_status()`` once, for
         the devices and the failed unlocks both, and draws the link and its QR only when
         the link changed: every tick used to encode the QR anew (about 4 ms of segno)
         and read the status twice, each read three digests of ``remote.json``.
+        ``heard`` is the switch whose ``Changed`` was just handled (:meth:`_paint_switch`).
         """
         controller = self.controller
         running = controller.running
         writes = controller.write_actions_allowed()
         status = controller.remote_status()
-        # The echoes these two writes produce are filtered in on_switch_changed,
-        # by value rather than by a flag — see the note there.
-        self.query_one("#remote-on", Switch).value = running
-        self.query_one("#remote-allow-write", Switch).value = writes
+        self._paint_switch("remote-on", running, heard)
+        self._paint_switch("remote-allow-write", writes, heard)
         self.query_one("#remote-state", Static).update(self._state_text())
         # Text, never a str, which is read as markup: the sentences carry exception text
         # and paths, and "[Errno 13]" there was taken for a tag.
@@ -168,6 +170,24 @@ class RemotePanel(ModalScreen[None]):
         self.query_one("#remote-regen", Button).disabled = not running
         self.query_one("#remote-copy", Button).disabled = url is None
         self._paint_devices(controller.devices(status))
+
+    def _paint_switch(self, switch_id: str, value: bool, heard: str | None) -> None:
+        """Show the controller's ``value`` on a switch, posting no ``Changed`` of its own.
+
+        Each value written back used to come round as a ``Changed`` the handler took for
+        the user's, and with two presses in flight they never ran out: the handler flipped
+        the controller, this flipped the switch back, its echo flipped the controller again,
+        starting uvicorn and ngrok and revoking every phone, for as long as the panel stayed
+        open (sweep of #243). A switch the user moved since the last paint keeps the user's
+        word until :meth:`on_switch_changed` has handled it (``heard``): the one-second tick
+        landing between a press and its ``Changed`` turned it back, and the press was lost.
+        """
+        switch = self.query_one(f"#{switch_id}", Switch)
+        if heard != switch_id and switch.value != self._painted.get(switch_id, switch.value):
+            return
+        with self.prevent(Switch.Changed):
+            switch.value = value
+        self._painted[switch_id] = value
 
     def _state_text(self) -> Text:
         controller = self.controller
@@ -228,33 +248,34 @@ class RemotePanel(ModalScreen[None]):
     # --- the controls ---------------------------------------------------------------------------
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
-        """A switch moved. Act only when it DISAGREES with the controller.
+        """A switch moved. Act on what it shows now, only when that DISAGREES with the
+        controller; a repaint posts no ``Changed`` of its own (:meth:`_paint_switch`).
 
-        The value a repaint writes back comes round as a ``Changed`` message of
-        its own, and Textual delivers those from the queue — so the ``_syncing``
-        flag this used to read was always back to ``False`` by the time the echo
-        arrived. Measured: a ``start_remote_server()`` that refuses (no page
-        installed) set the status line, ``repaint`` snapped the switch back to off, and that echo
-        ran ``turn_off()`` — which cleared the very sentence the user needed.
-        Comparing against the controller needs no flag and cannot go stale: the
-        switch always shows the current state, so a real toggle never matches it.
+        A ``Changed`` whose value the switch no longer shows is a press a later one has
+        taken back, still on its way, and acting on it is what flipped Remote on and off
+        for as long as the panel stayed open: two presses before the first was handled
+        (impatience while Remote stops, key repeat, keys batched over SSH) are the human's
+        net word, which the last of them carries. Comparing against the controller
+        needs no flag and cannot go stale: a real toggle never matches it.
         """
-        if event.switch.id == "remote-on":
-            if event.value == self.controller.running:
-                return
+        switch = event.switch
+        if event.value != switch.value:
+            return
+        if switch.id == "remote-on" and event.value != self.controller.running:
             # Never waiting for a Remote to stop: its server and ngrok take seconds to wind
             # down, on a thread of their own, and the status line says when they are done.
             if event.value:
                 self.controller.turn_on(wait=False)
             else:
                 self.controller.turn_off(wait=False)
-        elif event.switch.id == "remote-allow-write":
-            if event.value == self.controller.write_actions_allowed():
-                return
+        elif (
+            switch.id == "remote-allow-write"
+            and event.value != self.controller.write_actions_allowed()
+        ):
             self.controller.set_allow_write(event.value)
             if event.value:
                 self.notify("Write actions are ON for remote devices", severity="warning")
-        self.repaint()
+        self.repaint(heard=switch.id)
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id != "remote-auto-off" or event.value not in AUTO_OFF_CHOICES:

@@ -20,7 +20,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import pytest
 from textual.pilot import Pilot
@@ -349,6 +349,112 @@ def test_copy_stays_visible_beside_a_real_length_ngrok_link(size: tuple[int, int
         assert app.clipboard == link
 
     drive(go, tunnel=fake_tunnel_factory(url=REAL_PUBLIC), size=size)
+
+
+def counted(controller: RemoteController) -> list[str]:
+    """Every turn on, turn off and write-switch flip the panel asks of ``controller``."""
+    calls: list[str] = []
+    turn_on, turn_off, set_allow_write = (
+        controller.turn_on,
+        controller.turn_off,
+        controller.set_allow_write,
+    )
+
+    def on(**kwargs: Any) -> None:
+        calls.append("on")
+        turn_on(**kwargs)
+
+    def off(**kwargs: Any) -> None:
+        calls.append("off")
+        turn_off(**kwargs)
+
+    def write(enabled: bool) -> None:
+        calls.append(f"write {enabled}")
+        set_allow_write(enabled)
+
+    controller.turn_on = on  # type: ignore[method-assign]
+    controller.turn_off = off  # type: ignore[method-assign]
+    controller.set_allow_write = write  # type: ignore[method-assign]
+    return calls
+
+
+async def settle(pilot: Pilot[None]) -> None:
+    """Let every message in flight be handled, and any it posts in turn."""
+    for _ in range(10):
+        await pilot.pause()
+
+
+def test_presses_in_flight_are_the_humans_net_word_and_never_flip_remote_for_ever() -> None:
+    """Each value a repaint wrote back came round as a ``Changed`` the panel took for a
+    press, so with two presses in flight they never ran out: Remote started and stopped
+    uvicorn and ngrok, and revoked every phone, until the panel was closed; the write switch
+    flipped hundreds of times a second (sweep of #243). Presses landing before the first is
+    handled are one word, the last one's."""
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        calls = counted(app.remote)
+        on = modal.query_one("#remote-on", Switch)
+        on.toggle()
+        on.toggle()
+        on.toggle()  # three presses before the panel heard the first
+        await settle(pilot)
+        assert calls == ["on"] and app.remote.running and on.value is True
+
+        writes = modal.query_one("#remote-allow-write", Switch)
+        writes.toggle()
+        writes.toggle()  # on and off again: nothing to do
+        await settle(pilot)
+        assert calls == ["on"] and writes.value is False
+        assert app.remote.write_actions_allowed() is False
+
+        on.toggle()
+        on.toggle()
+        on.toggle()
+        on.toggle()  # off, on, off, on: still on
+        await settle(pilot)
+        await asyncio.sleep(0.3)
+        modal.repaint()
+        await settle(pilot)
+        assert calls == ["on"] and app.remote.running and on.value is True
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def test_a_tick_between_a_press_and_its_changed_keeps_the_press() -> None:
+    """The one-second repaint landing after a press and before the panel heard of it wrote
+    the controller's state back over the switch: the press was undone, or, with its echo,
+    the switches flipped for ever."""
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        calls = counted(app.remote)
+        on = modal.query_one("#remote-on", Switch)
+        on.toggle()
+        modal.repaint()  # the tick, before the press's Changed is handled
+        assert on.value is True, "the switch keeps the press"
+        await settle(pilot)
+        assert calls == ["on"] and app.remote.running
+
+        handled: list[str | None] = []
+        repaint = modal.repaint
+
+        def recording(*, heard: str | None = None) -> None:
+            handled.append(heard)
+            repaint(heard=heard)
+
+        modal.repaint = recording  # type: ignore[method-assign]
+        RemoteController.turn_off(app.remote)  # as auto-off would: the switch follows
+        modal.repaint()
+        await settle(pilot)
+        assert on.value is False and calls == ["on"]
+        assert handled == [None], "writing the switch posted a Changed the panel handled"
+
+    drive(go, tunnel=missing_ngrok)
 
 
 # --- auto-off: Never ------------------------------------------------------------------------

@@ -134,6 +134,11 @@ def shown(widget: Static) -> str:
     return plain
 
 
+def toasts(app: FleetApp) -> list[str]:
+    """The notifications the app still shows."""
+    return [note.message for note in app._notifications]
+
+
 def panel(pilot: Pilot[None]) -> RemotePanel:
     screen = pilot.app.screen
     assert isinstance(screen, RemotePanel), f"the top screen is a {type(screen).__name__}"
@@ -491,6 +496,9 @@ def test_devices_list_shows_devices_from_remote_json_and_revoke_drops_one() -> N
         left = devices()
         assert len(left) == 1 and left[0]["ua"] == "Firefox"  # the cursor was on the first row
         assert table.row_count == 1  # type: ignore[attr-defined]
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        assert any(text.startswith("Revoked dev_") for text in toasts(app)), "the control"
 
     drive(go, tunnel=missing_ngrok)
 
@@ -716,6 +724,7 @@ def test_a_remote_json_that_will_not_write_is_a_sentence_for_each_control_of_the
         modal.query_one("#remote-revoke", Button).press()
         await pilot.pause()
         assert "could not be revoked in remote.json" in status()
+        assert not any(text.startswith("Revoked") for text in toasts(app)), "the revoke failed"
         modal.query_one("#remote-regen", Button).press()
         await pilot.pause()
         assert status().startswith("the new password could not be saved to remote.json")

@@ -122,7 +122,8 @@ The screens, along the bottom bar:
   explainability verdict). Under Live and Transcript sit the input bar and the
   key pad.
 - **Devices** — every device that unlocked, which one is this one, last seen, when
-  its sign-in ends. Sign out of this one, or revoke another.
+  its sign-in ends. Sign out of this one, or revoke another (a write, so only
+  while writes are on).
 - **Settings** — notifications for this device, the version, sign out.
 
 The strip at the top shows the connection (green: live), **READ-ONLY** while
@@ -158,12 +159,16 @@ The writes, and the routes they use:
 | a quick answer on a card | `POST api/needs/answer` |
 | tell, stop, restart, switch | `POST api/agent/tell`, `…/stop`, `…/restart`, `…/switch` |
 | another hour before auto-off | `POST api/remote/extend` |
-| claim or finish a task, switch, add or remove a project | `POST api/task/claim`, `api/task/done`, `api/project/switch`, `api/project/add`, `api/project/remove` |
 
-Dismissing a card, signing a device out and turning notifications on or off
-change only what you are shown, not the fleet, and need no write switch.
+Revoking another device from **Devices** (`DELETE api/devices/<id>`) is a write
+as well, refused while writes are off. Dismissing a card, signing this device out
+and turning notifications on or off change only what you are shown, not the
+fleet, and need no write switch. Claiming or finishing a task and switching,
+adding or removing a project are write routes of the API (`api/task/claim`,
+`api/task/done`, `api/project/switch`, `add`, `remove`) that the page itself
+does not offer: Tasks is read-only there.
 
-**Retries are safe, and soon or never.** Every write the page sends carries a
+**Retries are safe, and soon or never.** Every write in the table carries a
 `request_id`. If the phone loses the answer (a restart can take 40 seconds, long
 enough for a phone to sleep), the page asks again with the same id once it
 reconnects, and the server answers from what it recorded instead of doing it
@@ -405,7 +410,7 @@ from `POST api/unlock`) except unlock itself; every non-GET request needs an
 | GET | `api/needs` | `{"items", "scanned_at"}` |
 | POST | `api/needs/answer`, `api/needs/dismiss` | a quick answer; hide a card |
 | GET, POST, DELETE | `api/push`, `api/push/subscribe`, `api/push/subscription`, `api/push/test` | notifications for this device |
-| GET, DELETE | `api/devices`, `api/devices/<id>` | the devices; sign out (own id) or revoke |
+| GET, DELETE | `api/devices`, `api/devices/<id>` | the devices; sign out (own id), or revoke another (a write) |
 | GET | `api/actions/recent` | this device's recent writes and how they ended |
 | POST | `api/send-keys`, `api/note`, `api/agent/{tell,stop,restart,switch}`, `api/task/…`, `api/project/…` | the writes |
 | WS | `ws` | the live stream |

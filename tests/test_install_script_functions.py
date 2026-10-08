@@ -1465,6 +1465,67 @@ def test_only_a_missing_node_that_was_asked_for_is_named(
     assert "did not install" not in result.stdout
 
 
+def test_a_missing_node_alone_is_not_sent_to_the_doctor(tmp_path: Path) -> None:
+    """For a Node that did not install, doctor's rows are all ok: "off", no fix (review of #257).
+
+    The summary still ended "the full detail and a fix for each: aisquare doctor". The
+    pointer now follows only checks the doctor explains, and the node line, which
+    carries its own remedy, comes after it.
+    """
+    alone = _summary_then_handoff(tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER=brain", node=False)
+    both = _summary_then_handoff(
+        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain python'", node=False
+    )
+
+    assert "node — Node 22+ did not install" in alone.stdout
+    assert "aisquare doctor" not in alone.stdout, alone.stdout
+    assert alone.returncode == 2
+    pointer = both.stdout.index("the full detail and a fix for each: aisquare doctor")
+    assert both.stdout.index("  python\n") < pointer < both.stdout.index("node — Node 22+")
+    assert both.returncode == 2
+
+
+def test_exit_2_is_documented_for_a_node_that_did_not_install(tmp_path: Path) -> None:
+    """The run exits 2 for a Node it could not install, with no check amber (review of #257)."""
+    usage = sh("usage", path=base_path(tmp_path)).stdout
+    exit_codes = " ".join(usage.split("Exit codes", 1)[1].split("\n\n", 1)[0].split())
+    page = " ".join((REPO / "docs" / "install.md").read_text(encoding="utf-8").split())
+
+    assert "a fatal step failed" in exit_codes, "control: this is the exit-code section"
+    assert "or Node did not install" in exit_codes, exit_codes
+    assert "unexpectedly amber, or Node did not install" in page
+
+
+def test_the_fnm_warning_says_what_a_shell_without_its_node_still_gets(tmp_path: Path) -> None:
+    """fnm's Node is on PATH for this run only (review of #257).
+
+    The warning said doctor "reads codebase snapshots as off" in the shells without it,
+    but this run packs the project it registers, and agents keep getting that pack
+    there. What those shells cannot do is pack or refresh one.
+    """
+    home = tmp_path / "home"
+    fnm_dir = home / ".local" / "share" / "fnm"
+    alias = fnm_dir / "aliases" / "default" / "bin"
+    alias.mkdir(parents=True)
+    for script, body in ((fnm_dir / "fnm", "exit 0"), (alias / "node", "echo v22.11.0")):
+        script.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8", newline="\n")
+        script.chmod(0o755)
+    path = f"{stub_dir(tmp_path, 'bashbin', 'bash')}:{base_path(tmp_path)}"
+
+    result = sh(
+        "fetch_into_shell() { return 0; }; _install_node_via_fnm",
+        env={"HOME": str(home)},
+        path=path,
+    )
+
+    warning = " ".join(result.stderr.split())
+    assert "Node 22.11.0 via fnm" in result.stdout, result.stdout + result.stderr
+    assert "fnm env --use-on-cd" in warning, "control: this is the warning in question"
+    assert "reads codebase snapshots as off" not in warning
+    assert "cannot pack or refresh a codebase snapshot" in warning
+    assert "agents still get any pack this run makes" in warning
+
+
 def test_a_version_pin_moves_a_machine_that_is_ahead_of_it(tmp_path: Path) -> None:
     """`--version V` is documented as a PIN, so anything that is not V must move.
 

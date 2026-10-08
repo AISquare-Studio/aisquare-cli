@@ -1520,9 +1520,13 @@ _install_node_via_fnm() {
         _reread_node
         good "Node ${NODE_VERSION:-$MIN_NODE_MAJOR} via fnm"
         INSTALLED_LIST="$INSTALLED_LIST node(fnm)"
+        # Not "doctor reads snapshots as off": the project this run registers is
+        # packed now, on this PATH, and agents keep getting that pack in a shell
+        # with no node. What such a shell cannot do is pack or refresh one.
         warn "fnm's Node is only on PATH in shells that have run its hook. Add to your profile:
          eval \"\$(fnm env --use-on-cd)\"
-         Until then those shells have no node, and \`aisquare doctor\` reads codebase snapshots as off."
+         Until then those shells have no node, so they cannot pack or refresh a codebase
+         snapshot; agents still get any pack this run makes."
     else
         warn "fnm could not install Node $MIN_NODE_MAJOR — snapshots need it; everything else works."
     fi
@@ -1874,15 +1878,24 @@ summary() {
     if [ -n "$_unexpected" ]; then
         say ""
         say "${C_YELLOW}Not expected, and worth a look:${C_RESET}"
+        # The doctor's checks first, and the pointer to the doctor only under them:
+        # for a Node that did not install, doctor's rows are all ok ("off", no fix),
+        # so pointing there for "the full detail and a fix" sent people nowhere.
+        _from_doctor=""
         for _check in $_unexpected; do
-            case "$_check" in
-                # Its own line: doctor only says snapshots are off, which is
-                # true and names no failure.
-                node) printf '  node — Node %s+ did not install, so codebase snapshots are off (nodejs.org, or fnm)\n' "$MIN_NODE_MAJOR" ;;
-                *) printf '  %s\n' "$_check" ;;
-            esac
+            [ "$_check" = node ] || _from_doctor="$_from_doctor $_check"
         done
-        note "the full detail and a fix for each: aisquare doctor"
+        for _check in $_from_doctor; do
+            printf '  %s\n' "$_check"
+        done
+        if [ -n "$_from_doctor" ]; then
+            note "the full detail and a fix for each: aisquare doctor"
+        fi
+        case " $_unexpected " in
+            # Its own line, with its own remedy: doctor only says snapshots are
+            # off, which is true and names no failure.
+            *" node "*) printf '  node — Node %s+ did not install, so codebase snapshots are off (nodejs.org, or fnm)\n' "$MIN_NODE_MAJOR" ;;
+        esac
     fi
 
     if [ -n "$PATH_HINT" ]; then
@@ -1899,8 +1912,9 @@ summary() {
 handoff() {
     _exit=0
     [ "$UNEXPECTED" -gt 0 ] && _exit=2
-    # Exit 2, not 0: the install completed but an unexpected check is amber. A
-    # script that exits 0 onto a broken machine is worse than one that never ran.
+    # Exit 2, not 0: the install completed but an unexpected check is amber, or
+    # the Node this run was asked for did not install. A script that exits 0
+    # onto a broken machine is worse than one that never ran.
 
     if [ "$DRY_RUN" = 1 ]; then
         exit "$_exit"
@@ -1984,7 +1998,8 @@ Environment
 Exit codes
   0  installed (or nothing to do), with nothing unexpected
   1  a fatal step failed — uv, or aisquare-cli itself
-  2  installed, but a check is amber for a reason this script did not expect
+  2  installed, but a check is amber for a reason this script did not expect,
+     or Node did not install
 
 Not installed, on purpose: gbrain (out of scope), explainability tracing (off
 unless asked for), and any credential — `claude` and `gh auth login` do their

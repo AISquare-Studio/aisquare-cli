@@ -1605,6 +1605,51 @@ async function wakes() {
   return { replaced, hiddenShow, shown, each, asks };
 }
 
+/* Cards dismissed: by hand (answered 200, and 404 for one already gone); after a Tell from
+ * an asked card that the machine typed in, and after one it did not; and after a Reply on a
+ * board question. The dismissals sent, the cards left, and the needs_id each Tell carried. */
+async function dismissals() {
+  const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell", "dismiss"] });
+  const question = Object.assign({}, ITEM, {
+    id: "ny_00000000000000b2", kind: "board_question", detail: { text: "Which store?", author: "lead-1" }, answers: [], actions: ["reply"],
+  });
+  const done = () => ({ status: 200, json: { dismissed: true } });
+  const feed = async (items, routes) => {
+    const page = bootPage("#/", signedIn(Object.assign({ "GET api/needs": () => ({ status: 200, json: { items } }) }, routes)));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    return page;
+  };
+  const result = (page) => ({ sent: page.sent("api/needs/dismiss"), cards: page.main().querySelectorAll("div.card").length });
+  const byHand = async (answer) => {
+    const page = await feed([ITEM], { "POST api/needs/dismiss": answer });
+    click(buttonNamed(page.main(), "Dismiss"));
+    await settle();
+    return result(page);
+  };
+  const tell = async (delivered) => {
+    const page = await feed([asked], {
+      "POST api/agent/tell": (body) => ({ status: 200, json: { label: "coder-1", delivered, mode: body.mode, project: PROJECT } }),
+      "POST api/needs/dismiss": done,
+    });
+    click(buttonNamed(page.main(), "Tell…"));
+    find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "yes, merge";
+    click(buttonNamed(page.run("UI.sheet"), "Tell"));
+    await settle();
+    return Object.assign(result(page), { told: page.sent("api/agent/tell").map((body) => body.needs_id) });
+  };
+  const reply = await feed([question], { "POST api/note": () => ({ status: 200, json: { ok: true } }), "POST api/needs/dismiss": done });
+  click(buttonNamed(reply.main(), "Reply…"));
+  find(reply.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "Postgres";
+  click(buttonNamed(reply.run("UI.sheet"), "Post"));
+  await settle();
+  return {
+    byHand: await byHand(done), gone: await byHand(() => ({ status: 404, json: { error: "not_found", message: "no such item" } })),
+    delivered: await tell(true), notDelivered: await tell(false), reply: result(reply),
+  };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -1650,6 +1695,7 @@ async function main() {
     spoken: await spoken(),
     writesReachTheirRoutes: await writesReachTheirRoutes(),
     wakes: await wakes(),
+    dismissals: await dismissals(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

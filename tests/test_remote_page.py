@@ -1559,6 +1559,22 @@ def test_the_page_reconnects_and_reads_again_when_the_phone_wakes(
     assert wakes["asks"]["drop"] == {"sockets": 2, "sent": pane}
 
 
+def test_a_card_is_dismissed_by_hand_and_after_a_tell_only_once_it_was_typed_in(
+    boot_report: dict[str, Any],
+) -> None:
+    """Nothing tested Dismiss, nor the dismissal after a Tell or a Reply: breaking any of
+    them, or dismissing a card after a Tell the machine only left as a note (SPEC §6.3:
+    "only when the response says delivered: true"), left every test green."""
+    gone = boot_report["dismissals"]
+    card = [{"id": "ny_0123456789abcdef"}]
+    assert gone["byHand"] == {"sent": card, "cards": 0}
+    assert gone["gone"] == {"sent": card, "cards": 0}, "a 404 is a card already gone"
+    told = ["ny_0123456789abcdef"]
+    assert gone["delivered"] == {"sent": card, "cards": 0, "told": told}
+    assert gone["notDelivered"] == {"sent": [], "cards": 1, "told": told}
+    assert gone["reply"] == {"sent": [{"id": "ny_00000000000000b2"}], "cards": 0}
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

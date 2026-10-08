@@ -910,7 +910,16 @@ def test_a_remote_whose_process_ended_holds_the_home_no_more(
     finally:
         holder.kill()
         holder.wait(timeout=30)
-    remote_server.start_remote_server(dist, port=_free_port())
+    # Windows lets a dead process's locks go a moment after it ends, as it gets to them.
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            remote_server.start_remote_server(dist, port=_free_port())
+            break
+        except remote_server.RemoteAlreadyOn:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.05)
     remote_server.stop_remote_server()
 
 

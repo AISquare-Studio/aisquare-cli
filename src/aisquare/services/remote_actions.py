@@ -187,15 +187,6 @@ class ActionLedger:
         _ledger_drop_expired(self._running, now)
         return now
 
-    def ledger_replay(
-        self, device_id: str, request_id: str
-    ) -> tuple[int, dict[str, object]] | None:
-        """The stored ``(status, body)`` of a finished request; ``None``: not finished here."""
-        with self._lock:
-            self._ledger_forget_expired()
-            held = self._finished.get(device_id, {}).get(request_id)
-        return None if held is None else (held[0][0]["status"], held[0][0]["body"])
-
     def ledger_seen(self, device_id: str, request_id: str, request: str = "") -> LedgerSeen | None:
         """How this device's request with this id ended, or that it still runs, and whether
         it was ``request``; ``None`` when the ledger has no such id: never sent here, or
@@ -207,6 +198,10 @@ class ActionLedger:
         docs/remote.md's ``esc-1``, for a stop within the TTL was answered 200 with the
         keys' stored result, and the stop never ran (sweep of #243). ``request`` is what
         the id stood for when it began (the server's digest of the endpoint and body).
+
+        The ledger's one lookup. A second one keyed on the id alone outlived its last
+        caller, kept alive by the tests that checked expiry through it, so expiry on this
+        one went untested (sweep 2 of #243).
         """
         with self._lock:
             self._ledger_forget_expired()

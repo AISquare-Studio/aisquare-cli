@@ -41,6 +41,7 @@ from aisquare.services.remote_actions import (
     TELL_MODES,
     TELL_TEXT_MAX,
     ActionLedger,
+    LedgerSeen,
     action_audit_excerpt,
     action_handlers,
     action_interrupt_wait,
@@ -230,16 +231,16 @@ def _finished(
 
 def test_a_finished_request_is_replayed_and_one_still_running_cannot_begin_twice() -> None:
     ledger = ActionLedger(clock=Clock())
-    assert ledger.ledger_replay("dev_a", "r1") is None, "nothing finished yet"
+    assert ledger.ledger_seen("dev_a", "r1") is None, "nothing sent yet"
     assert ledger.ledger_begin("dev_a", "r1", "agent/restart")
+    assert ledger.ledger_seen("dev_a", "r1") == LedgerSeen(None, True), "running"
     assert not ledger.ledger_begin("dev_a", "r1", "agent/restart"), "still running"
     assert ledger.ledger_begin("dev_b", "r1", "agent/restart"), "another device's id is its own"
     ledger.ledger_finish("dev_a", "r1", 409, {"error": "stale", "current": {"agent_id": "a2"}})
-    assert ledger.ledger_replay("dev_a", "r1") == (
-        409,
-        {"error": "stale", "current": {"agent_id": "a2"}},
+    assert ledger.ledger_seen("dev_a", "r1") == LedgerSeen(
+        (409, {"error": "stale", "current": {"agent_id": "a2"}}), True
     ), "a refusal is replayed as the refusal it was"
-    assert ledger.ledger_replay("dev_b", "r1") is None, "dev_b's run has not finished"
+    assert ledger.ledger_seen("dev_b", "r1") == LedgerSeen(None, True), "dev_b's still runs"
 
 
 def test_the_ledger_shows_a_device_its_own_requests_newest_first() -> None:
@@ -281,10 +282,10 @@ def test_entries_expire_after_the_ttl() -> None:
     ledger = ActionLedger(clock=clock)
     _finished(ledger, "dev_a", "r1")
     clock.now = T0 + ACTION_LEDGER_TTL - timedelta(seconds=1)
-    assert ledger.ledger_replay("dev_a", "r1") == (200, {})
+    assert ledger.ledger_seen("dev_a", "r1") == LedgerSeen((200, {}), True)
     assert len(ledger.ledger_recent("dev_a")) == 1
     clock.now = T0 + ACTION_LEDGER_TTL
-    assert ledger.ledger_replay("dev_a", "r1") is None, "a retry this late runs anew"
+    assert ledger.ledger_seen("dev_a", "r1") is None, "a retry this late runs anew"
     assert ledger.ledger_recent("dev_a") == []
 
 
@@ -318,7 +319,7 @@ def test_the_ledger_keeps_the_newest_fifty_per_device() -> None:
     recent = [entry["request_id"] for entry in ledger.ledger_recent("dev_a")]
     assert len(recent) == ACTION_LEDGER_SIZE
     assert recent[0] == f"r{ACTION_LEDGER_SIZE + 4}" and recent[-1] == "r5"
-    assert ledger.ledger_replay("dev_a", "r4") is None, "the oldest went first"
+    assert ledger.ledger_seen("dev_a", "r4") is None, "the oldest went first"
     assert ledger.ledger_recent("dev_b")[0]["request_id"] == "kept"
 
 

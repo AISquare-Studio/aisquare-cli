@@ -870,6 +870,9 @@ class McpRegistration:
 
     name: str
     file: Path
+    """The ``.claude.json`` that holds it: the file itself, links resolved, so one file
+    reached two ways is one, and a link the purge deletes never stands for a file it
+    leaves (sweep 2 of #257)."""
     project: str | None = None
     """The project a local-scope entry belongs to; ``None`` for user scope."""
 
@@ -967,9 +970,8 @@ class UninstallPlan:
     def lasting_mcp(self) -> tuple[McpRegistration, ...]:
         """The MCP registrations still there after this run: when it purges, not those in a
         ``.claude.json`` inside the home (an account slot's), which the purge deletes, as it
-        does a plugin there (sweep 2 of #257). The run asks this before the purge: a link
-        inside the home may lead to a file the purge leaves, and once the link is gone, its
-        path no longer resolves to that file."""
+        does a plugin there (sweep 2 of #257). ``file`` is the file itself, so the answer is
+        the same after the purge as before it."""
         if not self.purges:
             return self.mcp
         return tuple(entry for entry in self.mcp if not self.in_home(entry.file))
@@ -1176,7 +1178,14 @@ def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ..
     found: list[McpRegistration] = []
     read: set[Path] = set()
     for directory in directories:
-        for path in agent_core.claude_json_paths(directory):
+        for spelled in agent_core.claude_json_paths(directory):
+            # The file itself: a slot linked to ~/.claude, or a ~/.claude* sibling that is a
+            # link, reaches it twice. Read as spelled where pathlib cannot resolve it (a
+            # symlink loop raises RuntimeError on 3.11 and 3.12); read_json fails open.
+            try:
+                path = agent_core.dir_identity(spelled)
+            except (OSError, RuntimeError):
+                path = spelled
             if path in read:
                 continue
             read.add(path)
@@ -1441,7 +1450,6 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
     removals.extend(HookRemoval(site.config_dir, False, site.reason) for site in blocking)
     purged, purge_error = False, None
     hooks_failed = any(not removal.ok for removal in removals)
-    lasting_mcp = plan.lasting_mcp  # read before the purge: see its docstring
     if plan.purges and not hooks_failed:
         purged, purge_error = _purge(plan.home)
     elif plan.purge and plan.home_exists and hooks_failed:
@@ -1469,9 +1477,7 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
         record_error=record_error,
         purged=purged,
         purge_error=purge_error,
-        notes=tuple(
-            _uninstall_notes(plan, removals, mcp=lasting_mcp if purged else plan.mcp, purged=purged)
-        ),
+        notes=tuple(_uninstall_notes(plan, removals, purged=purged)),
     )
 
 
@@ -1516,16 +1522,12 @@ def _purge(home: Path) -> tuple[bool, str | None]:
 
 
 def _uninstall_notes(
-    plan: UninstallPlan,
-    removals: Iterable[HookRemoval],
-    *,
-    mcp: tuple[McpRegistration, ...],
-    purged: bool = False,
+    plan: UninstallPlan, removals: Iterable[HookRemoval], *, purged: bool = False
 ) -> list[str]:
-    """What the run leaves for the user to do. ``mcp`` is the registrations still there."""
     notes: list[str] = []
     if any(removal.ok for removal in removals):
         notes.append("open Claude Code sessions keep the hooks they started with — restart them")
+    mcp = plan.lasting_mcp if purged else plan.mcp
     if mcp:
         names = ", ".join(sorted({entry.name for entry in mcp}))
         notes.append(

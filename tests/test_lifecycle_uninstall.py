@@ -2034,7 +2034,8 @@ def test_an_mcp_server_a_purge_deletes_with_the_home_is_not_kept(
     assert "still registered (user-memory);" in result.stdout, result.stdout
 
 
-def test_an_mcp_server_a_slot_links_to_outside_the_home_outlives_the_purge(
+@pytest.mark.parametrize("link", ["slot-file", "whole-slot"])
+def test_an_mcp_server_reached_through_a_link_in_the_home_is_kept_by_its_own_file(
     tool: Tool,
     world: World,
     default_home: None,
@@ -2042,25 +2043,96 @@ def test_an_mcp_server_a_slot_links_to_outside_the_home_outlives_the_purge(
     user_home: Path,
     isolated_agent_home: Path,
     tmp_path: Path,
+    link: str,
 ) -> None:
-    """The purge unlinks a slot's .claude.json that is a link and leaves the file it leads
-    to, registration and all. The plan keeps it, and the run still names it afterwards,
-    when the link's path no longer leads to that file."""
+    """The purge unlinks a link inside the home and leaves the file it leads to, with its
+    registration: a slot's .claude.json that is a link, or a slot that is one (#198 plans
+    links between the slots and ~/.claude). The plan kept it under the link's path, which
+    the purge deletes, in text and in --json, and listed a slot linked to ~/.claude twice
+    (sweep 2 of #257). It is kept once, by the file the purge leaves, and the run still
+    names it afterwards."""
     if not can_symlink():
         pytest.skip("this machine cannot create symlinks")
     _initialised(runner, tmp_path)
-    target = _mcp_server(tmp_path / "elsewhere" / ".claude.json", "linked-memory")
     slot = paths.claude_accounts_dir() / "2"
-    slot.mkdir(parents=True)
-    (slot / ".claude.json").symlink_to(target)
+    if link == "slot-file":
+        held = _mcp_server(tmp_path / "elsewhere" / ".claude.json", "linked-memory")
+        slot.mkdir(parents=True)
+        (slot / ".claude.json").symlink_to(held)
+    else:
+        claude = isolated_agent_home / ".claude"
+        held = _mcp_server(claude / ".claude.json", "linked-memory")
+        slot.parent.mkdir(parents=True, exist_ok=True)
+        slot.symlink_to(claude, target_is_directory=True)
+    held = held.resolve()
 
+    machine = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
     human = runner.invoke(app, ["uninstall", "--purge", "--dry-run"]).stdout
     result = runner.invoke(app, ["uninstall", "--purge", "--yes"])
 
-    assert "DELETE" in human and "linked-memory in" in human.split("and keep:", 1)[1], human
+    kept = human.split("and keep:", 1)[1].splitlines()
+    named = [line.strip() for line in kept if line.strip().startswith("linked-memory")]
+    assert machine["home"]["action"] == "delete", machine["home"]
+    assert machine["mcp"] == [{"name": "linked-memory", "file": str(held), "project": None}]
+    assert named == [f"linked-memory in {held}"], human
     assert result.exit_code == 0, result.output
-    assert not paths.aisquare_home().exists() and target.is_file()
+    assert not paths.aisquare_home().exists() and held.is_file()
     assert "still registered (linked-memory);" in result.stdout, result.stdout
+
+
+def test_one_claude_json_reached_two_ways_is_listed_once(
+    tool: Tool, world: World, runner: CliRunner, isolated_agent_home: Path
+) -> None:
+    """A ~/.claude* sibling that is a link to ~/.claude reaches the same .claude.json, and
+    the plan listed its MCP server twice, once by each path, in text and in --json (sweep 2
+    of #257). It is one file, listed once, by the file itself."""
+    if not can_symlink():
+        pytest.skip("this machine cannot create symlinks")
+    claude = isolated_agent_home / ".claude"
+    held = _mcp_server(claude / ".claude.json", "memory").resolve()
+    (isolated_agent_home / ".claude-c2").symlink_to(claude, target_is_directory=True)
+
+    machine = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+    human = runner.invoke(app, ["uninstall", "--dry-run"]).stdout
+
+    named = [line.strip() for line in human.splitlines() if line.strip().startswith("memory in")]
+    assert machine["mcp"] == [{"name": "memory", "file": str(held), "project": None}]
+    assert named == [f"memory in {held}"], human
+
+
+def test_a_claude_json_that_is_a_symlink_loop_is_read_as_empty_not_raised(
+    tool: Tool, world: World, runner: CliRunner, isolated_agent_home: Path
+) -> None:
+    """Resolving each .claude.json, to list one file once, raises RuntimeError on a symlink
+    loop on 3.11 and 3.12. Such a file is read as it is spelled, which finds nothing in it,
+    and the other files are still read (control)."""
+    if not can_symlink():
+        pytest.skip("this machine cannot create symlinks")
+    loop = isolated_agent_home / ".claude" / ".claude.json"
+    loop.parent.mkdir(parents=True)
+    loop.symlink_to(loop.name)
+    _mcp_server(isolated_agent_home / ".claude.json", "memory")
+
+    result = runner.invoke(app, ["--json", "uninstall"])
+
+    assert result.exit_code == 0, result.output
+    assert [entry["name"] for entry in _one_object(result.stdout)["mcp"]] == ["memory"]
+
+
+def test_a_config_dir_recorded_as_a_tilde_path_still_has_its_mcp_server_found(
+    tool: Tool, world: World, isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """agents.json may hold ~/.claude as written, and it reaches the MCP scan before the
+    ~/.claude spelled in full. Both are one file, read once: the file itself, so the spelling
+    that cannot be read as written never stands for the one that can."""
+    monkeypatch.setenv("HOME", str(isolated_agent_home))
+    monkeypatch.setenv("USERPROFILE", str(isolated_agent_home))  # what ~ means on Windows
+    held = _mcp_server(isolated_agent_home / ".claude" / ".claude.json", "memory").resolve()
+    _record(Path("~") / ".claude")
+
+    plan = lifecycle.uninstall_plan()
+
+    assert [(entry.name, entry.file) for entry in plan.mcp] == [("memory", held)]
 
 
 _REPO = Path(__file__).resolve().parents[1]

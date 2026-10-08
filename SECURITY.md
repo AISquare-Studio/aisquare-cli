@@ -60,6 +60,11 @@ every session and capture your prompts:
 
 `aisquare agents disconnect claude-code` removes them from one config directory:
 `$CLAUDE_CONFIG_DIR` or `~/.claude`, or the one `--config-dir` names.
+`aisquare uninstall`, and asq's Uninstall, remove them from every Claude Code
+directory they find: the connected ones, `$CLAUDE_CONFIG_DIR`, each `~/.claude*`
+that holds them, and the account slots, removed ones included. With `--purge`,
+`~/.aisquare` and its account slots are deleted too; on macOS their sign-in
+tokens stay in the Keychain.
 
 Fleet agents (`asq`, `aisquare fleet spawn`) start with
 `--permission-mode auto` unless their role or the command says otherwise. In

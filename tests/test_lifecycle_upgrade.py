@@ -417,6 +417,8 @@ def test_security_md_lists_what_upgrade_and_the_plugin_change_and_send() -> None
     assert install_route.PYPI_JSON_URL in sent and "User-Agent" in sent
     assert '--from "$_from" aisquare hook' in launcher, "the launcher still runs uvx --from"
     assert f"uvx --from {DISTRIBUTION}==" in sent
+    assert "`aisquare uninstall`" in changed and "`--purge`" in changed, "uninstall too"
+    assert "Keychain" in changed, "a purge leaves the macOS slots' tokens, and says so"
 
 
 # --- the uv receipt, restated ----------------------------------------------------------

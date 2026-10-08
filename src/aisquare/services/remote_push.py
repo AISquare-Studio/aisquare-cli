@@ -1437,11 +1437,11 @@ def push_routes(kit: RemoteKit) -> list[BaseRoute]:
         paced = push_subscription_paced(device)
         if paced is not None:
             return paced
-        live = push_device_ids(kit)
 
         def push_subscribe_store() -> tuple[PushSubscriptionRecord, bool]:
             record = push_subscription_from_body(body, now=_push_utc_now())
             load_or_create_vapid_keys()  # made on the first GET or subscribe (SPEC §5.2)
+            live = push_device_ids(kit)  # remote.json: file work, so off the event loop too
             return record, push_subscribe_device(device.id, record, live)
 
         try:
@@ -1458,9 +1458,12 @@ def push_routes(kit: RemoteKit) -> list[BaseRoute]:
         paced = push_subscription_paced(device)
         if paced is not None:
             return paced
-        live = push_device_ids(kit)
+
+        def push_unsubscribe_store() -> bool:
+            return push_unsubscribe_device(device.id, push_device_ids(kit))
+
         try:
-            removed = await asyncio.to_thread(push_unsubscribe_device, device.id, live)
+            removed = await asyncio.to_thread(push_unsubscribe_store)
         except OSError as exc:
             raise push_unavailable(f"the subscription could not be removed: {exc}") from exc
         if removed:

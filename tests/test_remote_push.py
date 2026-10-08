@@ -14,6 +14,7 @@ test reads exactly what a phone would.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import http.client
 import json
@@ -1449,6 +1450,32 @@ def test_turning_notifications_on_and_off_in_a_loop_is_paced(
     assert other.post(subscribe, json=theirs.subscription()).status_code == 201
     monkeypatch.setattr(remote_push, "PUSH_SUBSCRIPTION_WINDOW_SECONDS", 0.0)
     assert client.post(subscribe, json=phone.subscription()).status_code == 201
+
+
+def test_the_subscription_routes_ask_for_the_devices_off_the_event_loop(
+    app: Any, runtime: Runtime, roster: set[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``push_device_ids`` is ``Runtime.device_ids``, which reads ``remote.json`` again and
+    hashes it: file work, which these routes keep off the event loop that serves every
+    request and socket. Both asked for it there, before their worker thread."""
+    client, _device = unlocked(app, runtime, roster)
+    on_the_loop: list[bool] = []
+
+    def device_ids(kit: object) -> frozenset[str]:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_the_loop.append(False)
+        else:
+            on_the_loop.append(True)
+        return frozenset(roster)
+
+    monkeypatch.setattr(remote_push, "push_device_ids", device_ids)
+    phone = Browser(f"{FCM}phone")
+    subscribed = client.post(f"{base(runtime)}/api/push/subscribe", json=phone.subscription())
+    assert subscribed.status_code == 201
+    assert client.delete(f"{base(runtime)}/api/push/subscription").status_code == 200
+    assert on_the_loop == [False, False]
 
 
 def test_the_pace_counts_within_its_window_and_forgets_a_device_once_it_is_quiet() -> None:

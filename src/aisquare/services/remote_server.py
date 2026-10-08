@@ -172,7 +172,9 @@ HEARTBEAT_SECONDS = 10.0
 fleet from a dead link (the default of ``build_app(heartbeat=)``)."""
 CACHE_KINDS_MAX = 64
 """Snapshots the read cache keeps at once, however many ``?project=`` spellings are asked for
-within one tick (:class:`_Cache`); a phone reads a handful."""
+within one tick (:class:`_Cache`): a phone reads a handful, and one pane frame for each pane
+its sockets watch, up to :data:`WS_PANE_SUBSCRIPTIONS_MAX` a socket. Past the cap the oldest
+go first, which costs a read or a capture again within the tick, never a wrong answer."""
 
 MAX_BODY_BYTES = 65_536
 """The largest body any request may carry, refused with 413 before a route sees it.

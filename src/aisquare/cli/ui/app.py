@@ -1127,3 +1127,7 @@ def run_ui(**options: Any) -> None:
     app.run()
     for line in app.unsaved:
         stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
+    # A phone's write still running would hold the exit as long as it runs: said, not silent.
+    from aisquare.services import remote_server
+
+    remote_server.remote_wait_for_writes()

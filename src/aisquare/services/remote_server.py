@@ -78,7 +78,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mappin
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from aisquare.core.atomic import Replacement, replacement
 from aisquare.core.locking import lock_exclusive, unlock
@@ -96,7 +96,7 @@ from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSessi
 if TYPE_CHECKING:
     import socket
     from concurrent.futures import Executor, Future, ThreadPoolExecutor
-    from types import TracebackType
+    from types import FrameType, TracebackType
 
     import uvicorn
     from starlette.requests import HTTPConnection, Request
@@ -3281,7 +3281,10 @@ def build_remote_app(
     from aisquare.services import remote_actions, remote_needs, remote_push
 
     reads = sources or live_sources()
-    handlers = (writes or live_writes()).handlers
+    handlers = {
+        name: _remote_write_tracked(name, handler)
+        for name, handler in (writes or live_writes()).handlers.items()
+    }
     dist = (dist_dir or remote_dist_dir()).resolve()
     limiter = _RateLimiter(clock)
     budget = UnlockBudget(runtime)
@@ -4022,6 +4025,159 @@ class _Server:
     def running(self) -> bool:
         return self._thread.is_alive() and self._server.started
 
+    @property
+    def winding_down(self) -> bool:
+        """Told to stop, and still finishing what was asked of it: the requests in flight,
+        then the lanes, then the threads of its default pool."""
+        return self._server.should_exit and self._thread.is_alive()
+
+    def wound_down(self, timeout: float) -> bool:
+        """Wait at most ``timeout`` s for it to finish stopping; whether it has."""
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
+
+
+_winding_down: list[_Server] = []
+"""Servers :func:`stop_remote_server` stopped that were still finishing what was asked of them,
+for :func:`remote_wait_for_writes` to see out."""
+
+REMOTE_WINDING_DOWN_SECONDS = 5.0
+"""How long :func:`remote_wait_for_writes` gives a stopped server once its writes are done: the
+answers go out, then the lanes stop, as :meth:`_Server.stop_serving` allows."""
+
+_WRITE_TARGET = re.compile(r"[\w.@-]{1,64}\Z")
+"""An agent named in a write's body that may be printed to the terminal: a label, never a
+control character a phone sent."""
+_writes_lock = threading.RLock()
+"""Re-entrant: ``serve``'s signal handler reads the writes, and Python runs a handler in the
+main thread between two bytecodes, so a second Ctrl-C's can land while the first's holds it."""
+_writes: dict[object, str] = {}
+"""What phones asked for that a worker thread is doing now, oldest first: the writes quitting
+waits for (:func:`remote_wait_for_writes`, :func:`_remote_serve_server`)."""
+
+
+@contextlib.contextmanager
+def _remote_write_running(what: str) -> Iterator[None]:
+    """Count ``what`` among the writes running (:data:`_writes`) for as long as it runs."""
+    ticket = object()
+    with _writes_lock:
+        _writes[ticket] = what
+    try:
+        yield
+    finally:
+        with _writes_lock:
+            del _writes[ticket]
+
+
+def _remote_write_tracked(name: str, handler: WriteHandler) -> WriteHandler:
+    """``handler``, counted among the writes running while its worker thread runs it.
+
+    In the thread, not around the request: uvicorn's shutdown can end a request whose
+    thread goes on, and that thread is what the process waits for at exit.
+    """
+
+    def tracked_write(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        agent = body.get("agent")
+        named = isinstance(agent, str) and _WRITE_TARGET.fullmatch(agent) is not None
+        with _remote_write_running(f"{name} for {agent}" if named else name):
+            return handler(body)
+
+    return tracked_write
+
+
+def remote_writes_running() -> list[str]:
+    """The writes phones asked for that are still running in this process, oldest first:
+    the endpoint, and the agent it is for (``agent/restart for coder-1``)."""
+    with _writes_lock:
+        return list(_writes.values())
+
+
+def _remote_say(line: str) -> None:
+    """One line on stderr, written once and unbuffered: it may be said from a signal handler,
+    which must not re-enter a write the interrupted code was making. A stderr that is gone
+    loses the line, never the shutdown saying it."""
+    with contextlib.suppress(OSError):
+        os.write(2, f"{line}\n".encode(errors="replace"))
+
+
+def _remote_writes_announced(ctrl_c: str) -> bool:
+    """Say which writes the way out waits for, and that ``ctrl_c`` quits at once instead;
+    whether any is running."""
+    running = remote_writes_running()
+    if running:
+        _remote_say(
+            f"waiting for {', '.join(running)} to finish (a restart or switch can take 40 s) "
+            f"— {ctrl_c} quits now and leaves it unfinished"
+        )
+    return bool(running)
+
+
+def _remote_quit_now() -> NoReturn:
+    """End the process at once, saying which writes it leaves unfinished.
+
+    At once is the point: Python's own exit waits for every worker thread, the ones
+    still running a write included (``concurrent.futures`` joins them all), so an exit
+    any other way waits as long as the write does, and a Ctrl-C at that point only
+    prints a traceback. ``serve``'s ``remote.json`` cleanup is skipped with it: the
+    next Remote sets its own deadline, and the devices' expiry bounds them.
+    """
+    left = remote_writes_running()
+    if left:
+        _remote_say(
+            f"Remote quit with {', '.join(left)} unfinished — "
+            "`aisquare fleet ls` shows where the agent is"
+        )
+    os._exit(130)
+
+
+def remote_wait_for_writes() -> None:
+    """Once the fleet UI is gone: see out the writes phones started that still run, saying
+    so, and quit at once on Ctrl-C (:func:`_remote_quit_now`).
+
+    Quitting stopped the server and returned after 5 s whatever it was doing, and then
+    the process waited, silently, for any write still running: a restart or a switch
+    takes up to 40 s, and cut short between its ``/exit`` and its spawn it leaves the
+    agent down, so the wait is right and only its silence was not. Then the stopped
+    server gets :data:`REMOTE_WINDING_DOWN_SECONDS` to send the answers and stop.
+    """
+    try:
+        if _remote_writes_announced("Ctrl-C"):
+            while remote_writes_running():
+                time.sleep(0.05)
+        with _lock:
+            stopped, _winding_down[:] = list(_winding_down), []
+        deadline = time.monotonic() + REMOTE_WINDING_DOWN_SECONDS
+        for server in stopped:
+            server.wound_down(max(0.0, deadline - time.monotonic()))
+    except KeyboardInterrupt:
+        _remote_quit_now()
+
+
+def _remote_serve_server(config: uvicorn.Config) -> uvicorn.Server:
+    """uvicorn for ``serve``, whose Ctrl-C says what it waits for, and whose second one quits.
+
+    uvicorn's shutdown waits for every request in flight, and a phone's restart or
+    switch takes up to 40 s; its log level hides the line saying so. And a second
+    Ctrl-C did not end the wait: on Python 3.12 and later its ``wait_closed`` waits for
+    the connection all the same, and ``asyncio.run`` then waits for the write's thread.
+    With no write running, the second Ctrl-C is uvicorn's own, and the way out still
+    clears the deadline and saves ``last_seen``. ``timeout_graceful_shutdown`` would not
+    do: it ends the request before its answer goes out, and the thread runs on.
+    """
+    import signal
+
+    import uvicorn
+
+    class RemoteServe(uvicorn.Server):
+        def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+            again = self.should_exit and sig == signal.SIGINT
+            super().handle_exit(sig, frame)
+            if again and remote_writes_running():
+                _remote_quit_now()
+            _remote_writes_announced("Ctrl-C again")
+
+    return RemoteServe(config)
+
 
 _lock = threading.Lock()
 _runtime: Runtime | None = None
@@ -4123,6 +4279,9 @@ def stop_remote_server() -> None:
         flusher.cancel()
     if server is not None:
         server.stop_serving()
+        with _lock:
+            kept = [*_winding_down, server]
+            _winding_down[:] = [stopped for stopped in kept if stopped.winding_down]
     if _runtime is not None:
         try:
             _runtime.flush_last_seen()
@@ -4304,12 +4463,18 @@ class _AutoOffTimer:
 
 def _remote_serve_off(state: Runtime, server: Any) -> None:
     """``serve``'s auto-off firing: the farewell, every device revoked (4410), the deadline
-    cleared, and the server told to stop, even when ``remote.json`` cannot be written."""
+    cleared, and the server told to stop, even when ``remote.json`` cannot be written.
+
+    Its way out waits for a phone's write still running, and says so: told to stop
+    already, the server takes the next Ctrl-C as the second, which quits at once
+    (:func:`_remote_serve_server`).
+    """
     try:
         revoke_every_remote_device("auto-off")
         state.set_auto_off(None)
     finally:
         server.should_exit = True
+        _remote_writes_announced("Ctrl-C")
 
 
 class RemoteBindError(RemoteError):
@@ -4375,14 +4540,12 @@ def run_foreground(
     page_problem = _page_missing(dist_dir)
     if page_problem is not None:
         raise NoRemotePage(page_problem)
-    import uvicorn
-
     origin = None if public_url is None else check_public_origin(public_url)
     state = runtime()
     sock = _bind_remote_socket(port)
     try:
         app = build_remote_app(state, dist_dir=dist_dir)
-        server = uvicorn.Server(_remote_uvicorn_config(app, port))
+        server = _remote_serve_server(_remote_uvicorn_config(app, port))
 
         timer = _AutoOffTimer(state, lambda: _remote_serve_off(state, server))
         minutes = max(0, auto_off_minutes)
@@ -4456,6 +4619,8 @@ __all__ = [
     "remote_gate_token",
     "remote_install_hint",
     "remote_server_status",
+    "remote_wait_for_writes",
+    "remote_writes_running",
     "revoke_remote_device",
     "run_foreground",
     "runtime",

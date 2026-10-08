@@ -29,7 +29,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app as cli
 from aisquare.core.paths import remote_audit_path
 from aisquare.services import remote_actions, remote_needs, remote_push, remote_server
-from aisquare.services.remote_actions import ActionLedger, LedgerEntry
+from aisquare.services.remote_actions import ActionLedger, LedgerEntry, LedgerSeen
 from aisquare.services.remote_needs import NeedsItem, QuickAnswer
 from aisquare.services.remote_server import (
     CRASHED,
@@ -86,11 +86,11 @@ class RecordingLedger(ActionLedger):
         self.running: set[tuple[str, str]] = set()
         self.recent: dict[str, list[LedgerEntry]] = {}
 
-    def ledger_replay(
-        self, device_id: str, request_id: str
-    ) -> tuple[int, dict[str, object]] | None:
-        self.calls.append(("replay", request_id))
-        return self.finished.get((device_id, request_id))
+    def ledger_seen(self, device_id: str, request_id: str) -> LedgerSeen | None:
+        self.calls.append(("seen", request_id))
+        if (device_id, request_id) in self.finished:
+            return LedgerSeen(self.finished[(device_id, request_id)])
+        return LedgerSeen(None) if (device_id, request_id) in self.running else None
 
     def ledger_begin(self, device_id: str, request_id: str, endpoint: str) -> bool:
         self.calls.append(("begin", request_id, endpoint))
@@ -310,10 +310,10 @@ def test_a_retried_request_id_is_answered_from_the_ledger_without_running_again(
     assert first.json() == again.json() == {"answered": "ny_1", "run": 1}
     assert ran == [{"id": "ny_1"}], "request_id is the ledger's, never the endpoint's"
     assert app.kit.ledger.calls == [
-        ("replay", "c0ffee"),
+        ("seen", "c0ffee"),
         ("begin", "c0ffee", "needs/answer"),
         ("finish", "c0ffee", 200, {"answered": "ny_1", "run": 1}),
-        ("replay", "c0ffee"),
+        ("seen", "c0ffee"),
     ]
 
 
@@ -334,6 +334,66 @@ def test_a_request_id_still_running_is_409_in_progress(
     assert response.status_code == 409
     assert response.json() == {"error": "in_progress", "message": IN_PROGRESS}
     assert ran == []
+
+
+def test_a_retry_is_answered_from_the_ledger_after_writes_were_switched_off(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """A retry changes nothing, and the gate answered it 403 ``read_only`` once writes were
+    off: the page said "Read-only", greyed every write and settled the request with it,
+    though what it asked for had run (review of #243, round 3)."""
+    ran: list[dict[str, Any]] = []
+
+    def note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        ran.append(body)
+        return {"event": len(ran)}, "note seq=1"
+
+    app = build_app(runtime, sources=_sources(), writes=Writes({"note": note}), dist_dir=tmp_path)
+    runtime.set_allow_write(True)
+    client = _unlocked(app, runtime)
+    url = f"{base(runtime)}/api/note"
+    first = client.post(url, json={"text": "hi", "request_id": "rq-1"})
+    assert (first.status_code, first.json()) == (200, {"event": 1})
+    runtime.set_allow_write(False)
+    again = client.post(url, json={"text": "hi", "request_id": "rq-1"})
+    assert (again.status_code, again.json()) == (200, {"event": 1})
+    assert ran == [{"text": "hi"}] and _audited("note") == 1
+    new = client.post(url, json={"text": "hi", "request_id": "rq-2"})
+    assert (new.status_code, new.json()["error"]) == (403, "read_only"), "a new id: the gate"
+    for body in (b"not json", b'{"text": "hi", "request_id": "../x"}'):
+        refused = client.post(url, content=body)
+        assert (refused.status_code, refused.json()["error"]) == (403, "read_only"), body
+    assert ran == [{"text": "hi"}]
+    recent = client.get(f"{base(runtime)}/api/actions/recent").json()["actions"]
+    assert [(entry["request_id"], entry["status"]) for entry in recent] == [("rq-1", 200)]
+
+
+def test_a_retry_of_a_lane_request_still_running_is_409_in_progress_with_writes_off(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Answered 403, the page settled the request it still waited on and never showed its
+    result; ``in_progress`` keeps it waiting for the ledger's ``action`` frame."""
+    ran: list[dict[str, Any]] = []
+
+    async def answer(request: Request, device: Device, body: dict[str, Any]) -> Response:
+        ran.append(body)
+        return JSONResponse({"answered": True})
+
+    app = _lane_app(runtime, tmp_path, monkeypatch, answer)
+    client = _unlocked(app, runtime)
+    device_id = _device_id(client, runtime)
+    app.kit.ledger.running.add((device_id, "slow-1"))
+    url = f"{base(runtime)}/api/needs/answer"
+    response = client.post(url, json={"id": "ny_1", "request_id": "slow-1"})
+    assert (response.status_code, response.json()) == (
+        409,
+        {"error": "in_progress", "message": IN_PROGRESS},
+    )
+    app.kit.ledger.running.discard((device_id, "slow-1"))
+    app.kit.ledger.finished[(device_id, "slow-1")] = (200, {"answered": True})
+    replayed = client.post(url, json={"id": "ny_1", "request_id": "slow-1"})
+    assert (replayed.status_code, replayed.json()) == (200, {"answered": True})
+    assert ran == [] and runtime.allow_write is False
 
 
 def test_a_refusal_is_stored_too_so_a_retry_gets_the_same_refusal(

@@ -162,11 +162,12 @@ change only what you are shown, not the fleet, and need no write switch.
 `request_id`. If the phone loses the answer (a restart can take 40 seconds, long
 enough for a phone to sleep), the page asks again with the same id once it
 reconnects, and the server answers from what it recorded instead of doing it
-twice. A request that never reached the machine runs when the retry does, and a
-key pressed long before could answer a prompt that came up since, so the page
-sends it again only within 15 seconds of the tap, and never after the phone had
-to unlock again. Past that it says the write was not sent again, and still shows
-the result if the machine had it after all.
+twice, even if writes were switched off meanwhile. A request that never reached
+the machine runs when the retry does, and a key pressed long before could
+answer a prompt that came up since, so the page sends it again only within 15
+seconds of the tap, and never after the phone had to unlock again. Past that it
+says the write was not sent again, and still shows the result if the machine had
+it after all.
 
 **Every write is audited** in `~/.aisquare/remote-audit.log`, owner-only, one
 line each:

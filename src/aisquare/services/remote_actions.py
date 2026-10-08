@@ -66,7 +66,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, TypeVar
 
 from aisquare.services import remote_needs, remote_server
 from aisquare.services.remote_server import RequestError
@@ -120,6 +120,13 @@ class LedgerEntry(TypedDict):
     status: int
     body: dict[str, object]
     at: str
+
+
+class LedgerSeen(NamedTuple):
+    """What the ledger knows of a request id it has (:meth:`ActionLedger.ledger_seen`)."""
+
+    answer: tuple[int, dict[str, object]] | None
+    """How the request ended, ``(status, body)``; ``None`` while it still runs."""
 
 
 _Record = TypeVar("_Record")
@@ -184,6 +191,22 @@ class ActionLedger:
             self._ledger_forget_expired()
             held = self._finished.get(device_id, {}).get(request_id)
         return None if held is None else (held[0]["status"], held[0]["body"])
+
+    def ledger_seen(self, device_id: str, request_id: str) -> LedgerSeen | None:
+        """How this device's request with this id ended, or that it still runs; ``None`` when
+        the ledger has no such request: never sent here, or forgotten.
+
+        What the server asks before anything else of a write that carries an id, its
+        write gate included: a retry is answered from here whatever the switch says now.
+        """
+        with self._lock:
+            self._ledger_forget_expired()
+            held = self._finished.get(device_id, {}).get(request_id)
+            if held is not None:
+                return LedgerSeen((held[0]["status"], held[0]["body"]))
+            if request_id in self._running.get(device_id, {}):
+                return LedgerSeen(None)
+        return None
 
     def ledger_begin(self, device_id: str, request_id: str, endpoint: str) -> bool:
         """Mark a request as running; ``False`` while one with that id still is."""
@@ -1018,6 +1041,7 @@ __all__ = [
     "TELL_TEXT_MAX",
     "ActionLedger",
     "LedgerEntry",
+    "LedgerSeen",
     "action_handlers",
     "action_restart",
     "action_routes",

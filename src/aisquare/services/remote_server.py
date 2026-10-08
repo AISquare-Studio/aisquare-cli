@@ -3182,6 +3182,45 @@ class RemoteKit:
             if not live:
                 self.sockets.pop(device_id, None)
 
+    async def kit_gated(
+        self,
+        request: Request,
+        device: Device,
+        endpoint: str,
+        respond: Callable[[dict[str, Any]], Awaitable[Response]],
+    ) -> Response:
+        """A write-gated request, the write dispatcher's and a lane route's alike (SPEC
+        §1.5): the body and its ``request_id``, the ledger, the write gate, then
+        ``respond(body)`` once per ``request_id`` (:meth:`kit_ledgered`).
+
+        A ``request_id`` the ledger knows is answered from it before the write gate is
+        asked: the answer the first try got, or 409 ``in_progress`` while that still
+        runs. A retry changes nothing, and asked first, the gate answered one 403
+        ``read_only`` once writes were off: the page said "Read-only", greyed every write
+        and settled the pending request with the 403, though the restart it was for had
+        run (review of #243, round 3). Everything else needs the gate, and while writes
+        are off a body the ledger cannot answer is a 403 whatever else is wrong with it.
+        """
+        from starlette.responses import JSONResponse
+
+        allowed = self.kit_write_allowed()
+        try:
+            body = await self.kit_json_object(request)
+            request_id = _ledger_request_id(body)
+        except RequestError as exc:
+            if not allowed:
+                return self.kit_refuse(403, "read_only", READ_ONLY_REASON)
+            return JSONResponse(exc.request_error_body(), status_code=exc.status)
+        seen = None if request_id is None else self.ledger.ledger_seen(device.id, request_id)
+        if seen is not None:
+            if seen.answer is None:
+                return self.kit_refuse(409, "in_progress", IN_PROGRESS)
+            status, payload = seen.answer
+            return JSONResponse(payload, status_code=status)
+        if not allowed:
+            return self.kit_refuse(403, "read_only", READ_ONLY_REASON)
+        return await self.kit_ledgered(device, request_id, endpoint, lambda: respond(body))
+
     async def kit_ledgered(
         self,
         device: Device,
@@ -3190,25 +3229,18 @@ class RemoteKit:
         respond: Callable[[], Awaitable[Response]],
     ) -> Response:
         """``respond()``, once per ``request_id`` (SPEC §1.5): the ledger flow of every
-        write-gated request, the write dispatcher's and a lane route's alike.
+        write-gated request, once :meth:`kit_gated` found its id new to the ledger.
 
-        Without an id it just runs. A retried id is answered from the ledger
-        instead of running again, and one still running is 409 ``in_progress``.
-        How every request ended is stored, refusals included, so a retry gets the
-        answer the first try got, and it is stored in a ``finally``: a crash or a
-        cancellation is an ending too. The dispatcher kept a copy of this flow that
-        stored after its ``try``, which stops an ``Exception`` and nothing else, so
-        a cancelled write left its id running, and every retry of it was answered
-        ``in_progress`` until the ledger forgot the id.
+        Without an id it just runs. With one it is marked running (one that runs
+        already is 409 ``in_progress``), and how it ended is stored, refusals
+        included, so a retry gets the answer the first try got, and it is stored in
+        a ``finally``: a crash or a cancellation is an ending too. The dispatcher kept
+        a copy of this flow that stored after its ``try``, which stops an
+        ``Exception`` and nothing else, so a cancelled write left its id running, and
+        every retry of it was answered ``in_progress`` until the ledger forgot the id.
         """
-        from starlette.responses import JSONResponse
-
         if request_id is None:
             return await respond()
-        replayed = self.ledger.ledger_replay(device.id, request_id)
-        if replayed is not None:
-            status, payload = replayed
-            return JSONResponse(payload, status_code=status)
         if not self.ledger.ledger_begin(device.id, request_id, endpoint):
             return self.kit_refuse(409, "in_progress", IN_PROGRESS)
         status, payload = 500, _error_body("internal_error", CRASHED)
@@ -3224,11 +3256,11 @@ class RemoteKit:
     ) -> Route:
         """A lane's route: the endpoint gets the device and the parsed body (``{}`` for GET).
 
-        With ``write_gated``, the route answers 403 ``read_only`` until writes are
-        on, takes the optional ``request_id`` out of the body, and runs through the
-        ledger (:meth:`kit_ledgered`): a retried id is answered from it instead of
-        running again, one still running is 409 ``in_progress``, and how every
-        request ended is stored, refusals included, so a retry gets the answer the
+        With ``write_gated``, a POST, PUT or DELETE goes through :meth:`kit_gated`:
+        it takes the optional ``request_id`` out of the body, answers a retried id from
+        the ledger instead of running again (one still running is 409
+        ``in_progress``), answers 403 ``read_only`` while writes are off, and stores
+        how every request ended, refusals included, so a retry gets the answer the
         first try got.
 
         A route that changes something without the gate must be in
@@ -3258,18 +3290,19 @@ class RemoteKit:
 
         async def kit_endpoint(request: Request) -> Response:
             reading = request.method in ("GET", "HEAD")
-            gated = write_gated and not reading  # a read never waits on the write gate
             try:
                 device = self.kit_device(request)
-                if gated and not self.kit_write_allowed():
-                    raise RequestError(403, "read_only", READ_ONLY_REASON)
-                body = {} if reading else await self.kit_json_object(request)
-                request_id = _ledger_request_id(body) if gated else None
             except RequestError as exc:
                 return JSONResponse(exc.request_error_body(), status_code=exc.status)
-            return await self.kit_ledgered(
-                device, request_id, name, lambda: kit_respond(request, device, body)
-            )
+            if write_gated and not reading:  # a read never waits on the write gate
+                return await self.kit_gated(
+                    request, device, name, lambda body: kit_respond(request, device, body)
+                )
+            try:
+                body = {} if reading else await self.kit_json_object(request)
+            except RequestError as exc:
+                return JSONResponse(exc.request_error_body(), status_code=exc.status)
+            return await kit_respond(request, device, body)
 
         return Route(path, kit_endpoint, methods=methods)
 
@@ -3600,28 +3633,20 @@ def build_remote_app(
     async def write_endpoint(request: Request) -> Response:
         """``POST api/{name}``: the plan's writes and the agent actions (SPEC §1.5).
 
-        In order: the name, the write gate, the body and its optional
-        ``request_id``, then the handler in a worker thread, inside the ledger
-        flow every write-gated lane route goes through too
-        (:meth:`RemoteKit.kit_ledgered`: refusals are stored as well, so a retry
-        gets the same refusal), and last the audit line for a write that went
-        through.
+        In order: the name, then what every write-gated lane route goes through too
+        (:meth:`RemoteKit.kit_gated`): the body and its optional ``request_id``, a
+        retry answered from the ledger, the write gate, and the handler in a worker
+        thread, its ending stored, refusals as well, so a retry gets the same
+        refusal. Last, the audit line for a write that went through.
         """
         device = kit.kit_device(request)
         name = request.path_params["name"]
         handler = handlers.get(name) if name in write_endpoint_names() else None
         if handler is None:
             return _json_error(404, "not_found", f"there is nothing to write at api/{name}")
-        if not kit.kit_write_allowed():
-            return kit.kit_refuse(403, "read_only", READ_ONLY_REASON)
-        try:
-            body = await kit.kit_json_object(request)
-            request_id = _ledger_request_id(body)
-        except RequestError as exc:
-            return JSONResponse(exc.request_error_body(), status_code=exc.status)
         summary: str | None = None
 
-        async def dispatched() -> Response:
+        async def dispatched(body: dict[str, Any]) -> Response:
             nonlocal summary
             try:
                 result, summary = await asyncio.to_thread(handler, body)
@@ -3638,7 +3663,7 @@ def build_remote_app(
                 status, payload = 400, _error_body("write_failed", str(exc))
             return JSONResponse(payload, status_code=status)
 
-        response = await kit.kit_ledgered(device, request_id, name, dispatched)
+        response = await kit.kit_gated(request, device, name, dispatched)
         # After the ledger has the ending: an audit log that cannot be written fails
         # the request, and must not make a write that went through read as failed.
         if summary is not None:

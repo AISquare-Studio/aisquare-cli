@@ -546,7 +546,7 @@ def test_step_three_waits_while_step_one_sets_a_folder_up(tmp_path: Path) -> Non
 
     during, manager_offered, settled = hosted(machine, go)
     assert during is None, "the folder asq started in is not picked mid-onboarding"
-    assert not manager_offered, "step 3 waits for the folder being set up"
+    assert not manager_offered, "with nothing chosen, step 3 offers nothing"
     assert settled == other, "control: the onboarding settles step 1 on the new folder"
 
 
@@ -594,6 +594,67 @@ def test_a_typed_folder_is_judged_off_the_ui_thread_and_the_latest_text_wins(
     assert machine.judged == [(str(tmp_path), False), (str(folder), False)], machine.judged
     assert (held, verdict) == ("", str(folder)), "no verdict until its judgement lands"
     assert machine.onboarded == [folder], "Enter used the folder once it was judged"
+
+
+def test_start_manager_waits_while_an_owed_enter_sets_another_folder_up(tmp_path: Path) -> None:
+    """Step 3 waits for the folder step 1 is setting up, even with another folder chosen.
+
+    Enter on a typed folder that is still being judged is owed. The first listing can land
+    meanwhile and choose the listed folder asq started in, as the user has chosen nothing
+    yet; then the owed Enter sets the typed folder up while that one is still chosen.
+    Start manager was offered then, and started the manager in the folder step 1 was
+    leaving. The test above reaches onboarding with nothing chosen, where step 3 offers
+    nothing either way (review of #257).
+    """
+    started = ProjectInfo(id="prj_demo", root=tmp_path / "demo-app", onboarded_at=T0)
+    typed = tmp_path / "typed-app"
+    typed.mkdir()
+    listing = threading.Event()
+    onboarding = threading.Event()
+
+    def listed_late(frame: list[ProjectInfo] | None) -> Candidates:
+        listing.wait(10)
+        return Candidates(items=(here(started.root, started),))
+
+    machine = SlowDisk(claude=[READY], found=listed_late)
+
+    def held(path: Path) -> OnboardOutcome:
+        onboarding.wait(10)
+        project = ProjectInfo(id=project_id_for(path), root=path, onboarded_at=T0)
+        machine.stored[project.id] = project
+        return OnboardOutcome(path=path, project_id=project.id)
+
+    machine.onboard_answer = held
+
+    async def run() -> list[Any]:
+        page = WelcomeView(seams=machine.seams(), recheck_seconds=0, id="welcome")
+        host = Host(page)
+        async with host.run_test(size=SIZE) as pilot:
+            machine.ui = threading.current_thread()
+            box = page.query_one("#welcome-path", Input)
+            box.focus()
+            box.value = str(typed)
+            await pilot.pause()
+            await pilot.press("enter")  # owed: the folder is still being judged
+            # The listing and the onboarding are held on purpose: settle no worker group.
+            listing.set()
+            await settle_until(host, lambda: page.project is not None, group="held")
+            machine.release.set()  # the judgement lands, and the owed Enter runs
+            await settle_until(host, lambda: "onboard" in page.busy, group="held")
+            seen: list[Any] = [page.project, visible(page, "fleet-manager")]
+            page.query_one("#fleet-manager", Button).press()
+            await settle_until(host, lambda: not page._in_flight("manager"), group="held")
+            seen.append(list(machine.starts))
+            onboarding.set()
+            await settle_page(host)
+            seen += [page.project.root if page.project else None, visible(page, "fleet-manager")]
+            return seen
+
+    chosen, offered, starts, settled, offered_after = asyncio.run(run())
+    assert chosen == started, "premise: demo-app is chosen while typed-app is set up"
+    assert not offered, "Start manager waits for the folder being set up"
+    assert starts == [], "nothing starts in the folder step 1 is leaving"
+    assert (settled, offered_after) == (typed, True), "control: then it starts in typed-app"
 
 
 def test_names_reach_the_screen_as_they_are(tmp_path: Path) -> None:

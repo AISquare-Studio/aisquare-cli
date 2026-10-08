@@ -44,6 +44,7 @@ from aisquare.services.remote_server import (
     DEVICE_ID,
     EXIT_KEY_REPEAT_SECONDS,
     KNOWN_DEVICE_FAILURES_MAX,
+    LINK_GONE,
     NOTE_TEXT_MAX,
     REMOTE_KEY_NAME,
     SEND_KEYS_KEYS_MAX,
@@ -914,7 +915,8 @@ def test_past_the_deadline_everything_is_a_404_like_a_wrong_token(
     clock.advance(minutes=5)
     for path in ("/", "/api/board", "/api/remote"):
         response = client.get(f"{base(runtime)}{path}")
-        assert response.status_code == 404 and response.json() == {"error": "not_found"}
+        assert response.status_code == 404
+        assert response.json() == {"error": "not_found", "message": LINK_GONE}
     assert unlock(make_client(app), runtime).status_code == 404
     with (
         pytest.raises(WebSocketDenialResponse) as denied,

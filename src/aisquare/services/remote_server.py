@@ -2485,15 +2485,33 @@ def _cache_control(rel: str) -> str:
     return ASSET_CACHE_CONTROL if _HASHED_ASSET.search(stem) else MUTABLE_CACHE_CONTROL
 
 
-def _error_body(error: str, message: str | None = None) -> dict[str, object]:
-    """``{error, message}``, the one shape of every refusal (SPEC §0.5)."""
-    body: dict[str, object] = {"error": error}
-    if message:
-        body["message"] = message
-    return body
+LINK_GONE = (
+    "Remote is off on the machine, or the link changed — turn it on again, or open the "
+    "link the machine shows now"
+)
+"""404 ``not_found`` at the token gate, in the words of the page's screen for it and of
+docs/remote.md's troubleshooting. A wrong token and a passed auto-off answer alike, and
+with one sentence whatever was sent, so it tells a guess nothing about the token."""
+NOT_UNLOCKED = "no unlocked device for this request — unlock with the passphrase"
+"""401 ``unauthorized``: no cookie, or one whose device is signed out, revoked or expired."""
+WRONG_PASSWORD = "that is not the passphrase"
+"""401 ``wrong_password``."""
+CRASHED = "the machine hit an error answering that"
+"""500 ``internal_error``: what the ledger answers a retry of a request that crashed, in the
+words the page uses for a crash."""
 
 
-def _json_error(status: int, error: str, message: str | None = None) -> Response:
+def _error_body(error: str, message: str) -> dict[str, object]:
+    """``{error, message}``, the one shape of every refusal (SPEC §0.5).
+
+    The message is always there: the docs promise one, and the page shows it, so a
+    refusal without one left the unlock line saying ``not_found``. A message that came
+    out empty, the ``str()`` of an exception that holds no text, is the code in words.
+    """
+    return {"error": error, "message": message or error.replace("_", " ")}
+
+
+def _json_error(status: int, error: str, message: str) -> Response:
     from starlette.responses import JSONResponse
 
     return JSONResponse(_error_body(error, message), status_code=status)
@@ -2641,7 +2659,7 @@ async def _refuse_at_the_gate(
     send: Any,
     status: int,
     error: str,
-    message: str | None,
+    message: str,
     close_code: int,
 ) -> None:
     """JSON over HTTP; on a handshake, a denial response where the server can send one
@@ -2680,7 +2698,7 @@ class _TokenGate:
         runtime = self._runtime
         if not (remote_gate_token(runtime, scope) and remote_gate_auto_off(runtime, scope)):
             await _refuse_at_the_gate(
-                scope, receive, send, 404, "not_found", None, WS_CLOSE_NOT_FOUND
+                scope, receive, send, 404, "not_found", LINK_GONE, WS_CLOSE_NOT_FOUND
             )
             return
         method = scope.get("method")  # a handshake has none, and is always asked
@@ -2699,7 +2717,7 @@ class _TokenGate:
             device = remote_gate_device(runtime, scope)
             if device is None:
                 await _refuse_at_the_gate(
-                    scope, receive, send, 401, "unauthorized", None, WS_CLOSE_UNAUTHORIZED
+                    scope, receive, send, 401, "unauthorized", NOT_UNLOCKED, WS_CLOSE_UNAUTHORIZED
                 )
                 return
             scope[DEVICE_SCOPE] = device
@@ -2778,7 +2796,7 @@ class RemoteKit:
         device = request.scope.get(DEVICE_SCOPE)
         if not isinstance(device, Device):
             # Only a route outside the gate's reach can get here: refuse, never guess.
-            raise RequestError(401, "unauthorized", "no unlocked device for this request")
+            raise RequestError(401, "unauthorized", NOT_UNLOCKED)
         return device
 
     async def kit_json_object(self, request: Request) -> dict[str, Any]:
@@ -2810,7 +2828,7 @@ class RemoteKit:
         self,
         status: int,
         error: str,
-        message: str | None = None,
+        message: str,
         *,
         headers: Mapping[str, str] | None = None,
         **extra: object,
@@ -2937,7 +2955,7 @@ class RemoteKit:
                 return JSONResponse(payload, status_code=status)
             if not self.ledger.ledger_begin(device.id, request_id, name):
                 return self.kit_refuse(409, "in_progress", IN_PROGRESS)
-            status, payload = 500, {"error": "internal_error"}
+            status, payload = 500, _error_body("internal_error", CRASHED)
             try:
                 response = await kit_respond(request, device, body)
                 status, payload = response.status_code, _ledger_body(response)
@@ -3002,6 +3020,7 @@ def build_remote_app(
 
     try:
         from starlette.applications import Starlette
+        from starlette.exceptions import HTTPException
         from starlette.responses import FileResponse, JSONResponse
         from starlette.routing import Mount, Route, WebSocketRoute
         from starlette.status import WS_1011_INTERNAL_ERROR
@@ -3131,7 +3150,7 @@ def build_remote_app(
             wait = max(1, math.ceil((decided - _remote_now()).total_seconds()))
             return kit.kit_refuse(429, "locked_out", LOCKED_OUT, headers={"Retry-After": str(wait)})
         if decided is None:
-            return _json_error(401, "wrong_password")
+            return _json_error(401, "wrong_password", WRONG_PASSWORD)
         secret, device, reactivated = decided
         # A reactivated device keeps its expiry, so its cookie gets what is left of it: a
         # cookie never outlives its device.
@@ -3268,7 +3287,7 @@ def build_remote_app(
         name = request.path_params["name"]
         handler = handlers.get(name) if name in write_endpoint_names() else None
         if handler is None:
-            return _json_error(404, "not_found")
+            return _json_error(404, "not_found", f"there is nothing to write at api/{name}")
         if not kit.kit_write_allowed():
             return kit.kit_refuse(403, "read_only", READ_ONLY_REASON)
         try:
@@ -3304,7 +3323,24 @@ def build_remote_app(
         return JSONResponse(payload, status_code=status)
 
     async def api_missing(request: Request) -> Response:
-        return _json_error(404, "not_found")
+        rest = request.path_params["rest"]
+        return _json_error(404, "not_found", f"there is nothing to read at api/{rest}")
+
+    async def wrong_method(request: Request, exc: Exception) -> Response:
+        """Starlette's 405, for a route asked with a method it does not take, in the one
+        shape: its own answer was ``Method Not Allowed`` as plain text.
+
+        The sentence says what ``Allow`` says, the methods of the route that matched,
+        and names no path: ``DELETE api/nuke`` matches the write catch-all, which takes
+        ``POST``, though a ``POST`` there is a 404.
+        """
+        headers = exc.headers if isinstance(exc, HTTPException) else None
+        named = (headers or {}).get("Allow", "").split(",")
+        allowed = ", ".join(sorted(method.strip() for method in named if method.strip()))
+        said = f"this route does not take {request.method} — it takes {allowed}"
+        response = _json_error(405, "method_not_allowed", said)
+        response.headers["Allow"] = allowed
+        return response
 
     async def static(request: Request) -> Response:
         """The page: ``--dist``, else the installed build, else the one aisquare-cli bundles.
@@ -3569,7 +3605,9 @@ def build_remote_app(
         Route("/{path:path}", static, methods=["GET"]),
     ]
     inner = Starlette(
-        routes=[Mount("/r/{token}", routes=api_routes)], lifespan=lambda app: remote_lifespan(kit)
+        routes=[Mount("/r/{token}", routes=api_routes)],
+        exception_handlers={405: wrong_method},
+        lifespan=lambda app: remote_lifespan(kit),
     )
     return _TokenGate(inner, runtime, kit)
 

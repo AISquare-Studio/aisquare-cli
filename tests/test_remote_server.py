@@ -22,8 +22,11 @@ from aisquare.core.paths import remote_audit_path, remote_state_path
 from aisquare.services import remote_server
 from aisquare.services.remote_server import (
     COOKIE,
+    LINK_GONE,
+    NOT_UNLOCKED,
     READ_ONLY_REASON,
     WRITE_ENDPOINTS,
+    WRONG_PASSWORD,
     NoSuchAgent,
     NoSuchProject,
     RequestError,
@@ -245,13 +248,14 @@ def test_an_empty_state_file_is_made_anew(isolated_home: Path, body: bytes) -> N
 def test_wrong_or_missing_token_is_404_everywhere(client: TestClient, path: str) -> None:
     response = client.get(path)
     assert response.status_code == 404
-    assert response.json() == {"error": "not_found"}
+    assert response.json() == {"error": "not_found", "message": LINK_GONE}
 
 
 def test_wrong_token_on_the_websocket_is_404(client: TestClient) -> None:
     with pytest.raises(WebSocketDenialResponse) as denied, client.websocket_connect("/r/nope/ws"):
         pass
     assert denied.value.status_code == 404
+    assert denied.value.json() == {"error": "not_found", "message": LINK_GONE}
 
 
 def test_the_token_is_compared_whole(client: TestClient, runtime: Runtime) -> None:
@@ -266,7 +270,7 @@ def test_the_token_is_compared_whole(client: TestClient, runtime: Runtime) -> No
 def test_unlock_wrong_password_is_401(client: TestClient, runtime: Runtime) -> None:
     response = unlock(client, runtime, "nope")
     assert response.status_code == 401
-    assert response.json()["error"] == "wrong_password"
+    assert response.json() == {"error": "wrong_password", "message": WRONG_PASSWORD}
     assert COOKIE not in response.cookies
 
 
@@ -316,7 +320,7 @@ def test_api_without_cookie_is_401(client: TestClient, runtime: Runtime) -> None
     for name in ("projects", "fleet", "board", "tasks", "memory", "devices", "remote", "panes/x"):
         response = client.get(f"{base(runtime)}/api/{name}")
         assert response.status_code == 401, name
-        assert response.json() == {"error": "unauthorized"}
+        assert response.json() == {"error": "unauthorized", "message": NOT_UNLOCKED}
 
 
 def test_a_forged_cookie_is_401(client: TestClient, runtime: Runtime) -> None:
@@ -402,6 +406,68 @@ def test_unknown_write_endpoint_is_404(client: TestClient, runtime: Runtime) -> 
     unlock(client, runtime)
     runtime.set_allow_write(True)
     assert client.post(f"{base(runtime)}/api/task/nuke", json={}).status_code == 404
+
+
+def test_every_refusal_is_a_code_and_a_sentence(client: TestClient, runtime: Runtime) -> None:
+    """docs/remote.md promises ``{"error", "message"}`` for every refusal. The gates, a
+    wrong passphrase and an unknown route answered the code alone, so the page's unlock
+    line read ``not_found``, and a route asked with a method it does not take answered
+    Starlette's plain-text 405 (smoke test of #243, round 2)."""
+    b = base(runtime)
+    refused = [
+        (client.get("/r/wrong/api/remote"), 404, "not_found", LINK_GONE),
+        (client.get(f"{b}/api/remote"), 401, "unauthorized", NOT_UNLOCKED),
+        (unlock(client, runtime, "nope"), 401, "wrong_password", WRONG_PASSWORD),
+    ]
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    refused += [
+        (
+            client.post(f"{b}/api/task/nuke", json={}),
+            404,
+            "not_found",
+            "there is nothing to write at api/task/nuke",
+        ),
+        (client.get(f"{b}/api/nuke"), 404, "not_found", "there is nothing to read at api/nuke"),
+        (
+            client.put(f"{b}/api/remote", json={}),
+            405,
+            "method_not_allowed",
+            "this route does not take PUT — it takes GET, HEAD",
+        ),
+        (
+            client.delete(f"{b}/api/nuke"),
+            405,
+            "method_not_allowed",
+            "this route does not take DELETE — it takes POST",
+        ),
+    ]
+    for response, status, error, message in refused:
+        assert (response.status_code, response.json()) == (
+            status,
+            {"error": error, "message": message},
+        )
+    allowed = [response.headers["allow"] for response, status, _, _ in refused if status == 405]
+    assert allowed == ["GET, HEAD", "POST"]
+
+
+def test_a_refusal_whose_reason_came_out_empty_says_its_code_in_words(
+    runtime: Runtime, fake: Fake, dist: Path
+) -> None:
+    """``str()`` of an exception that holds no text is ``""``: the body had no message."""
+
+    def silent(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        raise TimeoutError
+
+    app = build_app(runtime, sources=fake.sources(), writes=Writes({"note": silent}), dist_dir=dist)
+    client = make_client(app)
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    response = client.post(f"{base(runtime)}/api/note", json={"text": "hi"})
+    assert (response.status_code, response.json()) == (
+        400,
+        {"error": "write_failed", "message": "write failed"},
+    )
 
 
 def test_allowed_write_runs_the_handler_and_audits(

@@ -23,6 +23,7 @@ from starlette.testclient import WebSocketDenialResponse
 from aisquare.services import remote_server
 from aisquare.services.remote_server import (
     MAX_BODY_BYTES,
+    NOT_UNLOCKED,
     NOT_WRITE_GATED,
     READ_ONLY_REASON,
     Runtime,
@@ -148,7 +149,7 @@ def test_every_api_route_without_a_cookie_is_401(
     response = make_client(app).request(method, f"{base(runtime)}{path}", content=b"{}")
     assert response.status_code == 401, response.text
     if method != "HEAD":
-        assert response.json() == {"error": "unauthorized"}
+        assert response.json() == {"error": "unauthorized", "message": NOT_UNLOCKED}
     assert ran == []
 
 

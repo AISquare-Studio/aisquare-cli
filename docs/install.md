@@ -41,7 +41,7 @@ sh install.sh --dry-run
 Or install by hand, which stays fully supported:
 
 ```sh
-uv tool install --python 3.13 --with tiktoken aisquare-cli   # or: pipx install aisquare-cli
+UV_PYTHON_DOWNLOADS=automatic uv tool install --python 3.13 --with tiktoken aisquare-cli   # or: pipx install aisquare-cli
 aisquare init --local --yes --agent claude-code
 ```
 

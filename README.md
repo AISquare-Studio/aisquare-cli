@@ -27,7 +27,7 @@ Needs [uv](https://docs.astral.sh/uv/) and
 is optional and adds the codebase snapshot. Run `init` inside your repo:
 
 ```sh
-uv tool install --python 3.13 aisquare-cli
+UV_PYTHON_DOWNLOADS=automatic uv tool install --python 3.13 aisquare-cli
 cd path/to/your/repo
 aisquare init --local --agent claude-code
 aisquare remember --user "prefer pytest over unittest"

@@ -903,6 +903,59 @@ async function transcriptTimes() {
   }
 }
 
+const OLDER_REMOTE = { allow_write: false, auto_off_at: null, version: "test" };
+
+function note(seq, text) {
+  return { kind: "team.note", ts: "2026-10-07T10:00:00+00:00", payload: { seq, text, session_id: null } };
+}
+
+/* Reads the page makes while its socket sends the same kind, answered only after the socket's
+ * frame, and older than it: the feed and the strip on a wake, the Board and Fleet tabs as they
+ * open (one answered with a failure); and a board read no frame came before, the control. */
+async function readsAfterFrames() {
+  const held = {};
+  let holding = false;
+  const hold = (key, now) => () => (holding ? (held[key] = deferred()).promise : now);
+  const page = bootPage("#/", signedIn({
+    "GET api/needs": hold("needs", { status: 200, json: { items: [] } }),
+    "GET api/remote": hold("remote", { status: 200, json: OLDER_REMOTE }),
+  }));
+  await settle();
+  page.acceptSockets();
+  await settle();
+  holding = true;
+  fire(page, "document", "visibilitychange");
+  page.acceptSockets();
+  page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  page.live().frame("needs_you", { items: [ITEM] });
+  await settle();
+  held.needs.settle({ status: 200, json: { items: [] } });
+  held.remote.settle({ status: 200, json: OLDER_REMOTE });
+  await settle();
+  const wake = { cards: page.main().querySelectorAll("div.card").length, writable: page.run("writable()") };
+
+  const opened = async (tab, answer, frame) => {
+    const read = deferred();
+    const one = bootPage("#/p/" + PROJECT + "/" + tab, signedIn({ ["GET api/" + tab]: () => read.promise }));
+    await settle();
+    one.acceptSockets();
+    if (frame) one.live().frame(tab, frame);
+    await settle();
+    read.settle(answer);
+    await settle();
+    return one.main().querySelectorAll(tab === "board" ? "div.event" : "button.row").length;
+  };
+  const board = (events) => ({ project: { id: PROJECT }, sessions: [], events });
+  const two = Object.assign({}, FLEET, { agents: FLEET.agents.concat({ agent: { id: "agt_2", label: "coder-2", role: "coder" }, state: "working" }) });
+  return {
+    wake,
+    board: await opened("board", { status: 200, json: board([note(1, "first")]) }, board([note(1, "first"), note(2, "second")])),
+    fleet: await opened("fleet", { status: 200, json: FLEET }, two),
+    fleetFailed: await opened("fleet", { status: 503, json: { error: "unavailable", message: "tmux" } }, two),
+    boardAlone: await opened("board", { status: 200, json: board([note(1, "first")]) }, null),
+  };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -934,6 +987,7 @@ async function main() {
     padScroll: await padScroll(),
     boardOnItsTab: await boardOnItsTab(),
     transcriptTimes: await transcriptTimes(),
+    readsAfterFrames: await readsAfterFrames(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

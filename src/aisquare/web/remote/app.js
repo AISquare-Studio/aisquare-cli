@@ -593,6 +593,7 @@ const S = {
   opened: false, backoff: 0, retryTimer: 0, lastFrameAt: 0, stale: false, offline: false, away: null,
   off: null, locked: false, booting: false, view: null, route: null, pending: new Map(), orphans: new Map(),
   gone: new Map(), since: new Set(), push: null, padOnOpen: false, lastWake: 0, me: null, names: new Map(), scannedBehind: "",
+  heard: { remote: 0, needs: 0 },
 };
 const UI = {};
 const paneWatchers = new Map();
@@ -1012,9 +1013,13 @@ function onFrame(text) {
   setOffline(false); // a frame is the machine answering, whatever a lost fetch said
   if (S.stale) checkStale();
   const payload = frame.payload;
-  if (frame.type === "remote") setRemote(payload);
-  else if (frame.type === "needs_you") setNeeds(payload && payload.items);
-  else if (frame.type === "action") settleFromLedger(payload && payload.actions);
+  if (frame.type === "remote") {
+    S.heard.remote++;
+    setRemote(payload);
+  } else if (frame.type === "needs_you") {
+    S.heard.needs++;
+    setNeeds(payload && payload.items);
+  } else if (frame.type === "action") settleFromLedger(payload && payload.actions);
   else if (frame.type === "heartbeat") noteScan(frame.ts, payload);
   else if (frame.type === "fleet") {
     S.fleet = payload;
@@ -1105,8 +1110,13 @@ function setNeeds(items) {
   viewCall("needs");
 }
 
+/* A read answered after a frame of its kind came is no newer than the frame, and may be
+ * older (a wake reads and reconnects at once). It is dropped: the socket sends a kind again
+ * only once it changes, so an older answer kept stayed, a card hidden until the next. */
 async function refreshNeeds() {
+  const heard = S.heard.needs;
   const res = await apiCall("GET", API.needs);
+  if (S.heard.needs !== heard) return;
   if (res.ok && res.data && typeof res.data === "object") setNeeds(res.data.items);
   else if (res.status === 404 && !res.notJson && S.needs === null) setNeeds([]);
 }
@@ -1117,8 +1127,9 @@ async function refreshActions() {
 }
 
 async function refreshRemote() {
+  const heard = S.heard.remote;
   const res = await apiCall("GET", API.remote);
-  if (res.ok) setRemote(res.data);
+  if (res.ok && S.heard.remote === heard) setRemote(res.data);
 }
 
 /* Whether the browser says this phone has no network. Only then is the phone the one
@@ -2011,6 +2022,7 @@ VIEWS.project = (route, main) => {
     draw();
     if (projectIdOf(S.fleet) !== pid) {
       apiCall("GET", API.fleet, { query: { project: pid } }).then((res) => {
+        if (projectIdOf(S.fleet) === pid) return; // a frame came first, and is no older
         if (res.ok && S.wantFleet === pid && projectIdOf(res.data) === pid) {
           S.fleet = res.data;
           noteName(res.data);
@@ -2054,7 +2066,7 @@ VIEWS.project = (route, main) => {
     draw();
     if (projectIdOf(S.board) !== pid) {
       apiCall("GET", API.board, { query: { project: pid } }).then((res) => {
-        if (res.ok && S.wantBoard === pid && projectIdOf(res.data) === pid) {
+        if (res.ok && S.wantBoard === pid && projectIdOf(res.data) === pid && projectIdOf(S.board) !== pid) {
           S.board = res.data;
           draw();
         }

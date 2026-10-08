@@ -1234,6 +1234,20 @@ def test_a_transcript_tells_each_turns_time_by_the_phones_own_clock(
     assert (lines[1], lines[4]) == ("  commit it", "  done")
 
 
+def test_a_read_answered_after_a_newer_frame_of_its_kind_is_dropped(
+    boot_report: dict[str, Any],
+) -> None:
+    """A wake reads the feed and reconnects at once, and a read answered after the new
+    socket's frame put back what was there before it: the card the frame brought was gone,
+    and the socket, which sends the feed only when it changes, never sent it again. So it
+    went for the write switch on a wake, and for the Board and Fleet tabs' first reads, a
+    failed one included, which blanked the fleet. A read with no frame before it is drawn."""
+    reads = boot_report["readsAfterFrames"]
+    assert reads["wake"] == {"cards": 1, "writable": True}
+    assert (reads["board"], reads["fleet"], reads["fleetFailed"]) == (2, 2, 2)
+    assert reads["boardAlone"] == 1
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

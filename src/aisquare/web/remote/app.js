@@ -2045,9 +2045,12 @@ VIEWS.projects = (route, main) => {
   const list = el("div", "rows data");
   main.appendChild(list);
   let rows = null;
+  // A refusal of the first read is drawn here, with the rest: put in by the read, the next needs
+  // frame's redraw cleared it to a blank screen, and each 15 s poll that failed added a copy.
+  let failed = null;
   const draw = () => {
     clear(list);
-    if (!rows) return;
+    if (!rows) return list.appendChild(el("p", "empty", failed ? failText(failed) : "Loading…"));
     if (!rows.length) list.appendChild(el("p", "empty", "No projects on this machine yet."));
     for (const row of rows) {
       if (!row || typeof row !== "object" || !REF.test(row.id || "")) continue;
@@ -2064,13 +2067,17 @@ VIEWS.projects = (route, main) => {
       line.appendChild(el("span", "muted", sub.join(" — ")));
       list.appendChild(line);
     }
+    return undefined;
   };
   const load = async () => {
     const res = await apiCall("GET", API.projects);
     if (res.ok && Array.isArray(res.data)) {
       rows = res.data;
       draw();
-    } else if (!rows) list.appendChild(el("p", "empty", failText(res)));
+    } else if (!rows) {
+      failed = res;
+      draw();
+    }
   };
   load();
   const timer = setInterval(load, 15000);
@@ -2112,11 +2119,14 @@ VIEWS.project = (route, main) => {
   main.appendChild(body);
   const view = {};
   if (route.tab === "fleet") {
+    // A refusal of its read is drawn here too: put in by the read, the next frame's redraw (needs,
+    // a heartbeat, a wake) put "Loading…" in its place for as long as the tab was open.
+    let failed = null;
     const draw = () => {
       const fleet = projectIdOf(S.fleet) === pid ? S.fleet : null;
       title.textContent = projectName(pid);
       clear(body);
-      if (!fleet) return body.appendChild(el("p", "empty", "Loading…"));
+      if (!fleet) return body.appendChild(el("p", "empty", failed ? failText(failed) : "Loading…"));
       const agents = agentsOf(fleet);
       if (!agents.length) body.appendChild(el("p", "empty", "No agents running in this project."));
       for (const row of agents) {
@@ -2143,8 +2153,8 @@ VIEWS.project = (route, main) => {
           noteName(res.data);
           draw();
         } else if (!res.ok) {
-          clear(body);
-          body.appendChild(el("p", "empty", failText(res)));
+          failed = res;
+          draw();
         }
       });
     }

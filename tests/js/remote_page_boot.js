@@ -291,8 +291,8 @@ function bootPage(hash, answer, globals) {
   const sockets = [];
   const timers = new Map();
   let lastTimer = 0;
-  const hold = (fn) => { // kept, and never fired but by a scenario
-    timers.set(++lastTimer, fn);
+  const hold = (fn, every) => { // kept, and never fired but by a scenario
+    timers.set(++lastTimer, { fn, every });
     return lastTimer;
   };
   const win = { listeners: {} };
@@ -347,8 +347,8 @@ function bootPage(hash, answer, globals) {
     URL,
     URLSearchParams,
     getComputedStyle: (node) => (node.tagName === "PRE" ? { paddingLeft: PRE_PADDING, paddingRight: PRE_PADDING } : {}),
-    setTimeout: hold,
-    setInterval: hold,
+    setTimeout: (fn) => hold(fn, false),
+    setInterval: (fn) => hold(fn, true),
     clearTimeout: (id) => timers.delete(id),
     clearInterval: (id) => timers.delete(id),
     addEventListener(type, fn) {
@@ -372,13 +372,14 @@ function bootPage(hash, answer, globals) {
     live: () => sockets[sockets.length - 1],
     sent: (where) => requests.filter((one) => one.method === "POST" && one.path === where).map((one) => one.body),
     requests,
-    /* The names of the functions timers still hold, and one fired (and gone) by its name. */
-    timers: () => Array.from(timers.values(), (fn) => fn.name).filter(Boolean).sort(),
+    /* The names of the functions timers still hold, and one fired by its name: a timeout is
+     * gone once fired, an interval stays, as a browser's do. */
+    timers: () => Array.from(timers.values(), (timer) => timer.fn.name).filter(Boolean).sort(),
     fireTimer(name) {
-      for (const [id, fn] of Array.from(timers)) { // what it fires may set another: not this time
-        if (fn.name !== name) continue;
-        timers.delete(id);
-        fn();
+      for (const [id, timer] of Array.from(timers)) { // what it fires may set another: not this time
+        if (timer.fn.name !== name) continue;
+        if (!timer.every) timers.delete(id);
+        timer.fn();
       }
     },
     /* The browser's Back: false once there is no entry of this page's before this one. */
@@ -2161,6 +2162,49 @@ async function cardFlicker() {
   return Object.assign(steps, { cleared: await feed([], true), back: await feed([prompt]), again: await feed([], true) });
 }
 
+/* Reads refused while the screen that made them stays open: a Fleet tab whose project the machine
+ * no longer has (404), then a needs frame, a heartbeat saying the scans fell behind, another
+ * project's fleet frame, and a wake; and the Projects screen answered 503, then two more polls
+ * answered the same, and a needs frame. What the screen shows after each. */
+async function failuresKept() {
+  const fleet = bootPage("#/p/prj_gone/fleet", signedIn({
+    "GET api/fleet": () => ({ status: 404, json: { error: "not_found", message: "no project matches 'prj_gone'" } }),
+  }));
+  await settle();
+  fleet.acceptSockets();
+  await settle();
+  const tab = () => textsOf(fleet.main().querySelectorAll("div.data")[0].childNodes);
+  const steps = [tab()];
+  fleet.live().frame("needs_you", { items: [] });
+  await settle();
+  steps.push(tab());
+  fleet.live().frame("heartbeat", { needs_scanned_at: "2026-10-07T10:00:00+00:00" }, { ts: "2026-10-07T10:01:00+00:00" });
+  fleet.live().frame("fleet", FLEET);
+  await settle();
+  steps.push(tab());
+  fire(fleet, "document", "visibilitychange");
+  fleet.acceptSockets();
+  await settle();
+  steps.push(tab());
+  const projects = bootPage("#/projects", signedIn({
+    "GET api/projects": () => ({ status: 503, json: { error: "unavailable", message: "tmux did not answer" } }),
+  }));
+  await settle();
+  projects.acceptSockets();
+  await settle();
+  const listed = () => textsOf(projects.main().querySelectorAll("div.data")[0].childNodes);
+  const polls = [listed()];
+  for (let n = 0; n < 2; n++) {
+    projects.fireTimer("load");
+    await settle();
+    polls.push(listed());
+  }
+  projects.live().frame("needs_you", { items: [] });
+  await settle();
+  polls.push(listed());
+  return { fleet: steps, projects: polls, reads: projects.requests.filter((one) => one.path === "api/projects").length };
+}
+
 /* The Tasks tab of a board whose tasks were all dropped, and of one with a dropped task among
  * the rest: what it shows under its tabs. */
 async function droppedTasks() {
@@ -2397,6 +2441,7 @@ async function main() {
     statusStrip: await statusStrip(),
     screensListed: await screensListed(),
     cardFlicker: await cardFlicker(),
+    failuresKept: await failuresKept(),
     droppedTasks: await droppedTasks(),
     pushScreens: await pushScreens(),
     writeBodies: await writeBodies(),

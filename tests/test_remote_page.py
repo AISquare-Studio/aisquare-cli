@@ -1876,6 +1876,20 @@ def test_a_card_screen_says_its_card_cleared_every_time_it_clears(
     assert flicker["back"] == ["card"]
 
 
+def test_a_refused_read_stays_said_through_the_redraws_that_follow(
+    boot_report: dict[str, Any],
+) -> None:
+    """The Fleet tab put a refused read's sentence in its body, and the next redraw (any needs
+    frame, a heartbeat, a wake, another project's fleet) said "Loading…" in its place for as
+    long as the tab was open: a project the machine no longer has never said so. The Projects
+    screen added the sentence without clearing, so each 15 s poll that failed added a copy,
+    and a needs frame's redraw then left the screen blank."""
+    kept = boot_report["failuresKept"]
+    assert kept["fleet"] == [["no project matches 'prj_gone'"]] * 4
+    assert kept["projects"] == [["The machine could not answer — try again in a moment."]] * 4
+    assert kept["reads"] == 3, "the polls did run"
+
+
 def test_notifications_say_where_they_stand_wherever_the_page_offers_them(
     boot_report: dict[str, Any],
 ) -> None:

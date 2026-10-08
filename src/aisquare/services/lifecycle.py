@@ -829,11 +829,23 @@ class UninstallPlan:
         return install_route.command_line(self.package_argv)
 
     @property
+    def blocked(self) -> bool:
+        """Whether some directory's hooks cannot be taken out (``unreadable``). The run then
+        keeps the package and the home, which those hooks still call, so the plan, its
+        --json and the question say so too (review of #257)."""
+        return bool(self.unreadable)
+
+    @property
+    def purges(self) -> bool:
+        """Whether this run deletes the home: --purge, a home to delete, and nothing blocked."""
+        return self.purge and self.home_exists and not self.blocked
+
+    @property
     def lasting_plugins(self) -> tuple[agent_core.ClaudePlugin, ...]:
-        """The plugins still enabled after this run: under --purge, not those whose config
+        """The plugins still enabled after this run: when it purges, not those whose config
         dir is inside the home it deletes (the fleet's account slots, retired ones too),
         which go with it and can run nothing afterwards (review of #257)."""
-        if not self.purge:
+        if not self.purges:
             return self.plugins
         home = agent_core.dir_identity(self.home)
         return tuple(
@@ -859,7 +871,7 @@ class UninstallPlan:
                 error="purge_refused",
             )
         lasting = self.lasting_plugins
-        if self.purge and self.home_exists and lasting:
+        if self.purges and lasting:
             # A purge the next session undoes is not one: refused like the fleet, with
             # the command that clears the way. A plain uninstall only says so.
             where = ", ".join(str(plugin.config_dir) for plugin in lasting)

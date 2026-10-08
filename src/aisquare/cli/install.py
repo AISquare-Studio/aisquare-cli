@@ -348,8 +348,8 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
             "route": plan.route.kind,
             "command": plan.package_command,
             "argv": list(plan.package_argv),
-            "runs": plan.package_reason is None,
-            "reason": plan.package_reason,
+            "runs": plan.package_reason is None and not plan.blocked,
+            "reason": plan.package_reason or (_blocked_reason(plan) if plan.blocked else None),
         },
         "home": {
             "path": str(plan.home),
@@ -357,7 +357,7 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
             "entries": len(plan.home_entries),
             "accounts": list(plan.accounts),
             "keychain_tokens_kept": plan.keychain and bool(plan.accounts),
-            "action": "delete" if plan.purge else "keep",
+            "action": "delete" if plan.purge and not plan.blocked else "keep",
         },
         "purge_refusal": plan.purge_refusal,
         "live_agents": list(plan.live_agents),
@@ -365,6 +365,15 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
         "fleet_error": plan.fleet_error,
         "refusal": None if refusal is None else {"error": refusal.error, "message": str(refusal)},
     }
+
+
+def _blocked_reason(plan: lifecycle_service.UninstallPlan) -> str:
+    """Why a blocked run keeps the package (and the home): what ``uninstall`` then does."""
+    count = len(plan.unreadable)
+    return (
+        f"the hooks in {count} director{'ies' if count != 1 else 'y'} cannot be taken out, "
+        "and they still call it"
+    )
 
 
 def _home_line(plan: lifecycle_service.UninstallPlan) -> str:
@@ -385,25 +394,30 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
         for site in plan.hooks:
             runs = f" (they run {', '.join(site.programs)})" if site.programs else ""
             _say(f"    {site.config_dir}{runs}")
-    else:
+    elif not plan.unreadable:
         _say("  find no aisquare hooks in any Claude Code directory")
     for site in plan.unreadable:
         _say(f"  ⚠ cannot take the hooks out of {site.config_dir}: {site.reason}")
-    if plan.purge and plan.home_exists:
+    if plan.purges:
         _say(f"  DELETE {_home_line(plan)}")
         if plan.keychain and plan.accounts:
             # A purge deletes the slots' directories; on macOS Claude Code keeps their
             # sign-in tokens in the Keychain, which nothing here touches (review of #253).
             _say("    their sign-in tokens stay in the macOS Keychain: sign out in each slot")
             _say("    (/logout in Claude Code) first to remove them")
-    if plan.package_reason is None:
+    if plan.blocked:
+        # What the run does: a site it cannot clean fails it, and it keeps both.
+        stays = f"the package and {plan.home}" if plan.purge and plan.home_exists else "the package"
+        _say(f"  then stop: {stays} stay, as {_blocked_reason(plan)}")
+    elif plan.package_reason is None:
         _say(f"  then remove the package: {plan.package_command}")
     else:
         _say(f"  then tell you to remove the package yourself: {plan.package_command}")
         _say(f"    (aisquare does not run it: {plan.package_reason})")
     _say("and keep:")
-    if plan.home_exists and not plan.purge:
-        _say(f"  {_home_line(plan)} (delete it too with --purge)")
+    if plan.home_exists and not plan.purges:
+        later = "" if plan.purge else " (delete it too with --purge)"
+        _say(f"  {_home_line(plan)}{later}")
     if plan.mcp:
         _say("  MCP servers that run aisquare (Claude Code owns .claude.json; remove each with")
         _say("  `claude mcp remove <name>`):")
@@ -501,9 +515,9 @@ def _uninstall_question(plan: lifecycle_service.UninstallPlan) -> str | None:
     if plan.hooks:
         count = len(plan.hooks)
         steps.append(f"remove aisquare's hooks from {count} director{'ies' if count != 1 else 'y'}")
-    if plan.purge and plan.home_exists and not blocked:
+    if plan.purges:
         steps.append(f"DELETE {plan.home}")
-    if plan.package_reason is None and not blocked:
+    if plan.package_reason is None and not plan.blocked:
         steps.append("remove the package")
     if not steps:
         return None

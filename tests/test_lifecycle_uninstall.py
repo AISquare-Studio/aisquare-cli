@@ -1446,6 +1446,37 @@ def test_hooks_in_a_settings_json_this_user_may_not_write_keep_the_package(
     assert agent_core.hook_commands("claude-code", site), "the hooks are untouched"
 
 
+def test_a_blocked_site_keeps_the_package_and_the_home_in_the_plan_as_in_the_run(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+) -> None:
+    """The question left out what a blocked site rules out (#254), but the plan and its
+    --json still promised the package's removal and, under --purge, the home's deletion,
+    which the run kept; it also opened with "find no aisquare hooks" above a directory
+    holding them (review of #257)."""
+    _initialised(runner, tmp_path)
+    broken = isolated_agent_home / ".claude"
+    broken.mkdir(parents=True)
+    (broken / "settings.json").write_text(_hooks_text(tool.script, trailing_comma=True), "utf-8")
+
+    plan = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
+    human = runner.invoke(app, ["uninstall", "--purge", "--dry-run"]).stdout
+    ran = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge", "--yes"]).stdout)
+
+    assert plan["package"]["runs"] is False, plan["package"]
+    assert "cannot be taken out" in str(plan["package"]["reason"]), plan["package"]
+    assert plan["home"]["action"] == "keep", plan["home"]
+    assert "DELETE" not in human and "find no aisquare hooks" not in human, human
+    assert f"then stop: the package and {paths.aisquare_home()} stay" in human, human
+    assert (ran["package"]["runs"], ran["home"]["deleted"]) == (False, False), "as the run does"
+    assert paths.aisquare_home().is_dir() and world.execs == []
+
+
 def test_the_question_never_offers_what_an_unreadable_site_rules_out(
     tool: Tool,
     world: World,

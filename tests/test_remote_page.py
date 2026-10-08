@@ -1575,6 +1575,20 @@ def test_a_card_is_dismissed_by_hand_and_after_a_tell_only_once_it_was_typed_in(
     assert gone["reply"] == {"sent": [{"id": "ny_00000000000000b2"}], "cards": 0}
 
 
+def test_an_answer_after_its_screen_was_left_neither_lands_on_the_next_nor_goes_unsaid(
+    boot_report: dict[str, Any],
+) -> None:
+    """Three more of the kinds fixed above, each without a test of its own: a note posted
+    from the Board tab said "Posted." into a composer no longer on screen once the tab was
+    left, so its result went unseen; a transcript read answered after the Live tab opened
+    scrolled that tab to its foot; and a hash typed by hand that is no route went to the feed
+    with a push, so Back went to it and was sent on again, for ever."""
+    after = boot_report["afterLeaving"]
+    assert after["note"] == "Note: Posted."
+    assert after["scrolled"] == 0
+    assert after["back"] == {"landed": ["#/"], "left": True}
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

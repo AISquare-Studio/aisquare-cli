@@ -1650,6 +1650,41 @@ async function dismissals() {
   };
 }
 
+/* Answers that come after the human left the screen that asked: a note posted on the Board
+ * tab, then the tab left; a transcript read, then the Live tab opened; and Back after a hash
+ * typed in by hand that is no route. The toast, where the page scrolled, and where Back went. */
+async function afterLeaving() {
+  const posted = deferred();
+  const board = bootPage("#/p/" + PROJECT + "/board", signedIn({ "POST api/note": () => posted.promise }));
+  await settle();
+  board.acceptSockets();
+  await settle();
+  find(board.main(), (node) => node.tagName === "TEXTAREA").value = "shipping now";
+  click(buttonNamed(board.main(), "Post"));
+  board.run("pageGo('#/')");
+  await settle();
+  posted.settle({ status: 200, json: { ok: true } });
+  await settle();
+  const read = deferred();
+  const transcript = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({ "GET api/transcript/coder-1": () => read.promise }));
+  await settle();
+  transcript.run("UI.main.scrollHeight = 2400; UI.main.scrollTop = 0;");
+  transcript.run("pageGo('#/p/" + PROJECT + "/a/coder-1/live')");
+  await settle();
+  read.settle(transcriptPage(["t1", "t2"], null, false));
+  await settle();
+  const typed = bootPage("#/", signedIn());
+  await settle();
+  typed.location.hash = "#/no/such/route";
+  await settle();
+  const landed = [];
+  while (typed.back() && landed.length < 6) {
+    await settle();
+    landed.push(typed.location.hash);
+  }
+  return { note: board.toast(), scrolled: transcript.run("UI.main.scrollTop"), back: { landed, left: landed.length < 6 } };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -1696,6 +1731,7 @@ async function main() {
     writesReachTheirRoutes: await writesReachTheirRoutes(),
     wakes: await wakes(),
     dismissals: await dismissals(),
+    afterLeaving: await afterLeaving(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

@@ -1441,11 +1441,22 @@ def test_keys_reach_an_agent_one_at_a_time_in_the_order_they_were_tapped(
     accepts option 1 where No was meant. Lost keys were resent together on a reconnect, and
     a key tapped behind a lost one went first. Now a key goes once the one before it was
     answered, and not at all behind one that did not go through; a card's quick answer is
-    keys too, and a key tapped while it is typed waits for it."""
+    keys too, and a key tapped while it is typed waits for it. A key waiting its turn says
+    so, marked sending until its answer: on a slow link the taps behind it said nothing
+    until their toasts, long after."""
     keys = boot_report["keysInOrder"]
-    assert keys["quick"] == {"atOnce": 1, "order": ["Down", "Down", "Enter"]}
+    assert keys["quick"] == {
+        "atOnce": 1,
+        "order": ["Down", "Down", "Enter"],
+        "sending": [["⏎", "↓"], ["⏎", "↓"], ["⏎"], []],  # ↓ until both its taps are answered
+    }
+    assert keys["refused"]["marked"] == [], "a key that was not sent is not left marked"
+    assert _css_value(_text("app.css"), ".pad .key.sending", "border-color") == "var(--accent)"
     assert keys["refused"]["sent"] == 1 and keys["refused"]["toast"].startswith("Not sent — ")
     assert keys["refused"]["after"] == ["Down", "Enter"], "a key tapped after the refusal goes"
+    waited = keys["waitedTooLong"]  # tapped for a screen 16 s gone by the time it could go
+    assert waited["sent"] == ["Down"] and waited["toast"].startswith("Not sent — ")
+    assert waited["marked"] == []
     assert keys["lost"] == ["Down", "Down", "Enter"]
     assert keys["afterAnswer"] == {"whileAnswering": 0, "after": 1}
 

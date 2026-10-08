@@ -1444,9 +1444,11 @@ async function sheetBeforeFleet() {
 }
 
 /* Pad keys tapped faster than the machine answers, in the order they reached it: ↓ ↓ ⏎
- * with every answer held until the scenario gives it; a ⏎ tapped behind a ↓ the machine
- * refused, then one tapped after; a ↓ the phone lost, a ⏎ tapped behind it, and the
- * reconnect that sends the ↓ again; and a ⏎ tapped while a card's quick answer is typed. */
+ * with every answer held until the scenario gives it, and the keys marked sending once
+ * tapped and after each answer; a ⏎ tapped behind a ↓ the machine refused, then one tapped
+ * after; a ⏎ behind a ↓ answered only 16 s later; a ↓ the phone lost, a ⏎ tapped behind
+ * it, and the reconnect that sends the ↓ again; and a ⏎ tapped while a card's quick
+ * answer is typed. */
 async function keysInOrder() {
   const held = async () => {
     const calls = [];
@@ -1457,15 +1459,18 @@ async function keysInOrder() {
         return answer.promise;
       },
     });
-    return { page, calls, tap: (name) => click(buttonNamed(page.main(), name)) };
+    const marked = () => page.main().querySelectorAll("button.key.sending").map((key) => key.textContent);
+    return { page, calls, marked, tap: (name) => click(buttonNamed(page.main(), name)) };
   };
   const quick = await held();
   for (const name of ["↓", "↓", "⏎"]) quick.tap(name);
   await settle();
   const atOnce = quick.calls.length;
+  const sending = [quick.marked()];
   for (let n = 0; n < quick.calls.length && n < 3; n++) {
     quick.calls[n].answer.settle({ status: 200, json: { sent: true } });
     await settle();
+    sending.push(quick.marked());
   }
   const refused = await held();
   refused.tap("↓");
@@ -1473,9 +1478,17 @@ async function keysInOrder() {
   await settle();
   refused.calls[0].answer.settle({ status: 409, json: { error: "busy", message: "keys are still being typed" } });
   await settle();
-  const behind = { sent: refused.calls.length, toast: refused.page.toast() };
+  const behind = { sent: refused.calls.length, toast: refused.page.toast(), marked: refused.marked() };
   refused.tap("⏎");
   await settle();
+  const slow = await held();
+  slow.tap("↓");
+  slow.tap("⏎");
+  await settle();
+  slow.page.run("Date.now = ((then) => () => then + 16000)(Date.now());"); // past RETRY_WITHIN_MS
+  slow.calls[0].answer.settle({ status: 200, json: { sent: true } });
+  await settle();
+  const waitedTooLong = { sent: slow.calls.map((call) => call.key), toast: slow.page.toast(), marked: slow.marked() };
   const reached = [];
   const lost = await agentView({
     "POST api/send-keys": (body) => {
@@ -1508,8 +1521,9 @@ async function keysInOrder() {
   answered.settle({ status: 200, json: { id: NEEDS_ID, sent: ["1"] } });
   await settle();
   return {
-    quick: { atOnce, order: quick.calls.map((call) => call.key) },
+    quick: { atOnce, order: quick.calls.map((call) => call.key), sending },
     refused: Object.assign(behind, { after: refused.calls.map((call) => call.key) }),
+    waitedTooLong,
     lost: reached,
     afterAnswer: { whileAnswering, after: card.sent("api/send-keys").length },
   };

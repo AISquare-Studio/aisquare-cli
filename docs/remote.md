@@ -271,7 +271,10 @@ eight are two rows of four, More last.
 Ctrl-C and Ctrl-D ask first, and a second one within 3 seconds asks again,
 because Claude Code exits on it. A second Esc within a second and a half asks
 too: two in a row open Claude Code's Rewind selector. The pad and the phone's
-keyboard never share the screen.
+keyboard never share the screen. Keys reach an agent one at a time, in the order
+they were tapped, and a key shows in the accent colour until the machine has
+answered it; one that waits behind a key that did not get through, or for longer
+than 15 seconds, is not sent, and the page says so.
 
 ---
 

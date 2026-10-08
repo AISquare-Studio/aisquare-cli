@@ -210,6 +210,8 @@ pre.pane.fit {
 .pad { display: none; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
 .pad.open { display: flex; }
 .pad .key { flex: 1 0 44px; min-width: max-content; padding: 6px 4px; font-family: var(--mono); }
+/* a key on its way, or waiting its turn behind one: still a key to tap */
+.pad .key.sending { border-color: var(--accent); color: var(--accent); }
 @media (max-width: 359px) {
   .pad > .key { flex-basis: calc(25% - 3px); }
 }

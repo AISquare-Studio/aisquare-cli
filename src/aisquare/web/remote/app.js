@@ -2499,7 +2499,7 @@ function inputBar(pid, label, cleanups) {
   const pad = el("div", "pad");
   const more = el("div", "pad-more");
   const keyButton = (key) => {
-    const control = button("w key pk", key[0], () => sendKey(key[1]));
+    const control = button("w key pk", key[0], () => sendKey(key[1], control));
     if (Object.prototype.hasOwnProperty.call(KEY_SPOKEN, key[1])) control.setAttribute("aria-label", KEY_SPOKEN[key[1]]);
     return control;
   };
@@ -2530,8 +2530,17 @@ function inputBar(pid, label, cleanups) {
     setPad(true);
   }
   let lastEsc = 0;
-  const post = async (body, what) => {
+  // A pad key says "sending" until every tap of it was answered, and stays live: keys go one
+  // at a time (keysInTurn), and a tap behind a slow one showed nothing until its toast.
+  const sending = (tapped, by) => {
+    if (!tapped) return;
+    tapped.sending = (tapped.sending || 0) + by;
+    tapped.classList.toggle("sending", tapped.sending > 0);
+  };
+  const post = async (body, what, tapped) => {
+    sending(tapped, 1);
     const res = await keysInTurn(pid, label, (at) => apiWrite(writePath("send-keys"), Object.assign({ agent: label, project: pid }, body), what, null, at));
+    sending(tapped, -1);
     if (res.ok) return true;
     if (res.status === 409 && res.error === "double_press") {
       // Asked on this agent's own screen, over no other sheet: the answer can come after
@@ -2540,7 +2549,7 @@ function inputBar(pid, label, cleanups) {
       const which = (body.keys || []).indexOf("C-d") >= 0 ? "Ctrl-D" : "Ctrl-C";
       if (onAgent({ pid, label }) && !sheetOpen()) {
         confirmSheet("Send " + which + " to " + label + " again?", "A second " + which + " within 3 s exits Claude Code, and " + label + " with it.",
-          "Send and exit", () => post(Object.assign({}, body, { confirm_exit: true }), what));
+          "Send and exit", () => post(Object.assign({}, body, { confirm_exit: true }), what, tapped));
       } else toast(label + ": the second " + which + " was not sent — it would exit Claude Code.");
       return false;
     }
@@ -2548,12 +2557,12 @@ function inputBar(pid, label, cleanups) {
     afterFailure(res, { pid, label });
     return false;
   };
-  const sendKey = (key) => {
+  const sendKey = (key, tapped) => {
     if (key === "Escape") {
       const now = Date.now();
       if (now - lastEsc < ESC_REPEAT_MS) {
         lastEsc = 0;
-        confirmSheet("Press Esc again?", "Two Esc in a row open Claude Code's Rewind selector.", "Send Esc", () => post({ keys: [key] }, "Esc"));
+        confirmSheet("Press Esc again?", "Two Esc in a row open Claude Code's Rewind selector.", "Send Esc", () => post({ keys: [key] }, "Esc", tapped));
         return;
       }
       lastEsc = now;
@@ -2561,10 +2570,10 @@ function inputBar(pid, label, cleanups) {
     if (key === "C-c" || key === "C-d") {
       const which = key === "C-c" ? "Ctrl-C" : "Ctrl-D";
       confirmSheet("Send " + which + "?", which + " interrupts " + label + "; a second one within 3 s exits Claude Code.", "Send " + which,
-        () => post({ keys: [key] }, which));
+        () => post({ keys: [key] }, which, tapped));
       return;
     }
-    post({ keys: [key] }, "Key " + key);
+    post({ keys: [key] }, "Key " + key, tapped);
   };
   // Send needs words. An empty box with ⏎ on was a bare Enter into the pane, which
   // picks a dialog's highlighted option ("1. Yes"); Enter on its own is the pad's.

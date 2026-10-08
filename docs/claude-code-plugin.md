@@ -1,6 +1,6 @@
 # The Claude Code plugin
 
-The aisquare plugin gives Claude Code the six hooks that `aisquare agents connect claude-code` writes into `settings.json`, without an installer and without touching that file. Inside Claude Code:
+The aisquare plugin gives Claude Code the six hooks that `aisquare agents connect claude-code` writes into `settings.json`, without an installer and without writing hooks into that file. Installing it still writes to `settings.json`, or to the repository's `.claude` settings for a project or local install: Claude Code records there that the plugin is enabled (`enabledPlugins`). Inside Claude Code:
 
 ```text
 /plugin marketplace add AISquare-Studio/aisquare-cli

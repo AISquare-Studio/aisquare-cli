@@ -140,6 +140,23 @@ def test_the_marketplace_lists_this_plugin_under_the_names_doctor_reads() -> Non
     assert "version" not in entry, "plugin.json holds the version: one fewer number to bump"
 
 
+def test_the_plugin_page_says_installing_it_writes_the_key_doctor_reads(tmp_path: Path) -> None:
+    """docs/claude-code-plugin.md said the plugin works "without touching" settings.json,
+    but `/plugin install` records it there as enabled, the key every reader of the route
+    asks, so a settings.json that is read-only or generated still has to take it (sweep
+    of #257)."""
+    key = "enabledPlugins"
+    (tmp_path / "settings.json").write_text(
+        json.dumps({key: {agent_core.CLAUDE_PLUGIN_ID: True}}), encoding="utf-8"
+    )
+    page = REPO / "docs" / "claude-code-plugin.md"
+    text = " ".join(page.read_text(encoding="utf-8").split())
+
+    assert agent_core.enabled_plugins(tmp_path) == [agent_core.CLAUDE_PLUGIN_ID], "the key read"
+    assert "without touching" not in text
+    assert "writes to `settings.json`" in text and f"`{key}`" in text
+
+
 # --------------------------------------------------------------------------- hooks.json
 
 

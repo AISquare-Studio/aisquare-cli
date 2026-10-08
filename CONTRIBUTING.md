@@ -114,8 +114,8 @@ signatures already exist. The flow is:
 2. **Render it** in the matching `src/aisquare/cli/<group>.py` command: parse,
    call the service, print (honouring `--json` via `get_state().json_output`).
    Shared rendering helpers live in `cli/common.py`.
-3. **Move the command off the stub skip-list** in `tests/test_stubs.py`
-   (`IMPLEMENTED`) and add real tests for the new behaviour.
+3. **Add the command to `IMPLEMENTED`** in `tests/test_stubs.py` (the stub
+   test's skip-list) in the same commit, and add real tests for the new behaviour.
 
 See [Architecture](docs/reference.md#architecture) in the reference for the full
 layout and the thin-CLI / service / core split.

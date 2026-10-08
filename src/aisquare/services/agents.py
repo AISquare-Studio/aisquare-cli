@@ -120,7 +120,8 @@ def plugin_beside_note(name: str, config_dir: Path | None = None) -> str | None:
 
 
 def disconnect_notes(name: str, config_dir: Path | None = None, *, removed: bool) -> list[str]:
-    """What `agents disconnect` says beside its ✓, given whether it ``removed`` any hooks.
+    """What `agents disconnect` says beside its ✓, given whether it ``removed`` anything
+    (:func:`disconnect`: hooks, or this home's record of the directory).
 
     Each aisquare plugin that still runs aisquare for ``config_dir``, with the command that
     stops it: the plugin's hooks stand down only while settings.json runs aisquare's, so
@@ -242,15 +243,25 @@ def refused_file(name: str, config_dir: Path | None = None) -> tuple[Path, str] 
     Every check connect makes before it writes (:func:`_read_before_writing`): a
     settings.json that is not a JSON object, or that this user may not write, and a
     context file (``CLAUDE.md``) that is not UTF-8 text this user can read. A Connect
-    offered there can only fail the click, so the doctor names the file instead.
+    offered there can only fail the click, so the doctor names the file instead. So
+    does a named ``config_dir`` that does not exist and that connect would not make
+    (:func:`_check_found`), the directory itself being the file: a profile removed after
+    this home connected it was offered a Connect that could only say "not installed".
+    Whether Claude Code is installed at all is the callers' own question for the
+    directory a session from this shell reads: Welcome offers the install, and the
+    doctor says it is not detected.
     """
     spec = agent_core.spec(name, config_dir)
     if spec is None or not spec.connectable:
         return None
     try:
         _read_before_writing(name, config_dir)
+        if config_dir is not None and _first_run_dir(name, config_dir) is None:
+            _check_found(name, config_dir)
     except AgentFileUnreadableError as exc:
         return (exc.path or spec.settings_path or spec.home), str(exc)
+    except AgentNotInstalledError as exc:
+        return spec.home, str(exc)
     return None
 
 
@@ -293,8 +304,9 @@ def _install_hooks(name: str, config_dir: Path | None, path: Path | None) -> boo
         raise AgentFileUnreadableError(f"can't write {path}: {exc.strerror or exc}", path) from exc
 
 
-def _make_first_run_dir(name: str, config_dir: Path | None) -> None:
-    """Make the config dir an installed Claude Code that has never started has not made.
+def _first_run_dir(name: str, config_dir: Path | None) -> Path | None:
+    """The config dir `agents connect` makes for an installed Claude Code that has never
+    started, else ``None``. Decides only; :func:`_make_first_run_dir` makes it.
 
     npm and Homebrew create ``~/.claude`` only when ``claude`` first runs, and a
     missing directory reads as "not installed" (detected means the directory
@@ -307,23 +319,47 @@ def _make_first_run_dir(name: str, config_dir: Path | None) -> None:
     is never made: a typo must not get hooks.
     """
     if name != "claude-code" or agent_core.claude_on_path() is None:
-        return
+        return None
     where = agent_core.ambient_hook_dir(name)
     if where is None or where.exists():
-        return
+        return None
     if config_dir is not None:
         try:
             elsewhere = agent_core.dir_identity(config_dir) != agent_core.dir_identity(where)
         except RuntimeError:  # pathlib's symlink loop on 3.11 and 3.12: nothing to make
             elsewhere = True
         if elsewhere:
-            return
+            return None
+    return where
+
+
+def _make_first_run_dir(name: str, config_dir: Path | None) -> None:
+    """Make :func:`_first_run_dir`'s directory, where there is one."""
+    where = _first_run_dir(name, config_dir)
+    if where is None:
+        return
     try:
         where.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise AgentFileUnreadableError(
             f"can't create {where}: {exc.strerror or exc}", where
         ) from exc
+
+
+def _check_found(name: str, config_dir: Path | None) -> None:
+    """Refuse a directory `agents connect` cannot find once :func:`_first_run_dir` is made.
+
+    A ``--config-dir`` that does not exist is named as that: a typo, or a profile removed
+    after this home connected it, was called "not installed on this machine" beside a
+    `claude` on PATH (review of #257). Otherwise the agent is not installed.
+    """
+    info = agent_core.detect(name, config_dir)
+    if info is not None and info.detected:
+        return
+    spec = agent_core.spec(name, config_dir)
+    if config_dir is not None and spec is not None:
+        raise AgentNotInstalledError(f"{spec.home} does not exist")
+    raise AgentNotInstalledError(f"{name} is not installed on this machine")
 
 
 def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
@@ -351,9 +387,7 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
         planned = f"; support is planned for {spec.planned}" if spec.planned else ""
         raise UnsupportedAgentError(f"aisquare can't connect {spec.label} yet{planned}")
     _make_first_run_dir(name, config_dir)
-    info = agent_core.detect(name, config_dir)
-    if info is None or not info.detected:
-        raise AgentNotInstalledError(f"{name} is not installed on this machine")
+    _check_found(name, config_dir)
 
     # Every file is read before anything is written: a settings.json that cannot
     # be read stopped connect after the context was ingested and the home built.
@@ -390,15 +424,17 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
 def disconnect(name: str, config_dir: Path | None = None) -> bool:
     """Remove aisquare's hooks and mark the agent disconnected (ingested context kept).
 
-    Returns whether any hooks were actually removed, so the CLI can say
-    "nothing to remove here" instead of a false ✓ when the hooks live in a
-    different config dir. Raises ``KeyError`` for an unknown agent.
+    Returns whether it took anything away: hooks, or this home's record of the
+    directory, which is all a removed profile leaves (the doctor's way to clear one),
+    so the CLI can say "nothing to remove here" instead of a false ✓ when the hooks
+    live in a different config dir. Raises ``KeyError`` for an unknown agent.
     """
     if agent_core.detect(name, config_dir) is None:
         raise KeyError(name)
     removed = agent_core.remove_hooks(name, config_dir)
+    recorded = agent_core.connected_dirs(name)
     agent_core.set_connected(name, False, config_dir)
-    return removed
+    return removed or agent_core.connected_dirs(name) != recorded
 
 
 def _split_sections(text: str) -> list[str]:

@@ -1131,6 +1131,10 @@ def _refused_fix(directory: Path, path: Path, *, also: str | None = None) -> str
     (``agents_service.refused_file``), one it can use. ``also`` is what to change instead
     where a settings.json that is read-only by design (home-manager) is generated."""
     spec = agent_core.spec("claude-code", directory)
+    if spec is not None and path == spec.home:
+        # The directory itself is gone, and connect makes no --config-dir but the one a
+        # session from this shell reads: this home's record of it is all that is left.
+        return f"forget it: aisquare agents disconnect claude-code --config-dir {directory}"
     if spec is None or path != spec.settings_path:
         # A context file connect imports (CLAUDE.md): the hooks need nothing else changed.
         return f"make {path} UTF-8 text this user can read, then connect again"

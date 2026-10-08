@@ -529,6 +529,53 @@ def test_a_config_dir_that_is_a_symlink_loop_is_not_installed_not_a_traceback(
     assert not (isolated_agent_home / ".claude").exists(), "nothing made for another dir"
 
 
+@pytest.mark.parametrize("shape", ["another profile", "no claude on PATH"])
+def test_a_recorded_dir_connect_cannot_make_is_named_gone_with_the_way_to_forget_it(
+    runner: CliRunner, isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    """A recorded config dir that was removed, and that connect will not make (any but the
+    one a session from this shell reads, or ~/.claude with no `claude` on PATH): the row
+    graded it "hooks are missing or outdated", which the installer answers with a sign-in,
+    with a --config-dir Connect that could only say not installed, and `agents status`
+    called it missing (review of #257). Named as gone, with the disconnect that forgets
+    it, everywhere."""
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    claude = isolated_agent_home / ".claude"
+    claude.mkdir(parents=True)
+    _connect(runner)
+    gone = isolated_agent_home / ".claude-c2" if shape == "another profile" else claude
+    if gone != claude:
+        gone.mkdir()
+        _connect(runner, gone)
+    else:
+        monkeypatch.setattr(agent_core, "claude_on_path", lambda: None)
+    kept = isolated_agent_home / ".claude-c3"  # the control: recorded, and still there
+    kept.mkdir()
+    _connect(runner, kept)
+    (kept / "settings.json").write_text("{}", encoding="utf-8")
+    shutil.rmtree(gone)
+
+    row = diagnostics._check_claude_code()
+    buttons = [fix.argv for fix in fix_commands([row])]
+    status = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
+    sites = {site["config_dir"]: site for site in status[0]["sites"]}
+    clicked = runner.invoke(app, ["agents", "connect", "claude-code", "--config-dir", str(gone)])
+    forget = runner.invoke(app, ["agents", "disconnect", "claude-code", "--config-dir", str(gone)])
+    after = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
+
+    reason = f"{gone} does not exist"
+    assert f"hooks cannot be written in {gone}: {reason}" in row.detail, row
+    assert f"{diagnostics._STALE_HOOKS} in: {kept}" in row.detail, "only kept is missing"
+    assert f"forget it: aisquare agents disconnect claude-code --config-dir {gone}" in str(row.fix)
+    connect = ("agents", "connect", "claude-code", "--config-dir")
+    assert (*connect, str(gone)) not in buttons, buttons
+    assert (*connect, str(kept)) in buttons, "control: a recorded dir still there keeps Connect"
+    assert (sites[str(gone)]["refused"], sites[str(kept)]["refused"]) == (reason, None), sites
+    assert clicked.exit_code == 1 and clicked.output.strip() == f"✗ {reason}", clicked.output
+    assert forget.exit_code == 0 and "no aisquare hooks found" not in forget.output, forget.output
+    assert str(gone) not in {site["config_dir"] for site in after[0]["sites"]}, "forgotten"
+
+
 @pytest.mark.parametrize("shape", ["new-profile", "never-started"])
 def test_a_config_dir_claude_code_has_not_made_is_offered_connect_beside_other_sites(
     runner: CliRunner, isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch, shape: str

@@ -1262,6 +1262,19 @@ def _needs_scan_project(
     return _NeedsProject(items=items, statuses=listed, ended=ended, tails=tails)
 
 
+def _needs_tail_of(sources: NeedsSources, status: FleetAgentStatus) -> TranscriptTail | None:
+    """The agent's transcript tail, read only where a rule can use it."""
+    session = status.session
+    path = None if session is None else session.transcript_path
+    if not path or status.state in ("exited", "unknown", "lost"):
+        return None
+    try:
+        return sources.transcript_tail(path)
+    except Exception:
+        log.debug("remote: needs could not read the tail of %s", path, exc_info=True)
+        return None
+
+
 def _needs_own_events(
     sources: NeedsSources,
     project: ProjectInfo,
@@ -1394,19 +1407,6 @@ def _needs_board_authors(events: Sequence[TeamEvent], now: datetime) -> set[str]
         and event.kind in ("question", "result")
         and now - event.created_at <= QUESTION_HORIZON
     }
-
-
-def _needs_tail_of(sources: NeedsSources, status: FleetAgentStatus) -> TranscriptTail | None:
-    """The agent's transcript tail, read only where a rule can use it."""
-    session = status.session
-    path = None if session is None else session.transcript_path
-    if not path or status.state in ("exited", "unknown", "lost"):
-        return None
-    try:
-        return sources.transcript_tail(path)
-    except Exception:
-        log.debug("remote: needs could not read the tail of %s", path, exc_info=True)
-        return None
 
 
 def _needs_dated(

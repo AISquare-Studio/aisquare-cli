@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.9.0] - 2026-10-09
+## [0.8.0] - 2026-10-09
 
 **A first run you can follow, from an empty home to a manager and two coders,
 and an aisquare that upgrades and uninstalls itself.**
@@ -21,14 +21,12 @@ and an aisquare that upgrades and uninstalls itself.**
 - The README is a one-page front page, on GitHub and on PyPI, with a GIF of
   the Welcome walkthrough; its long form moved into `docs/`.
 
-0.8.0 was not released: this release follows 0.7.0.
-
 **Upgrading:**
 - From 0.7.0 or earlier, re-run the one-line installer, or run
   `UV_PYTHON_DOWNLOADS=automatic uv tool install --force --python 3.13 --with tiktoken 'aisquare-cli@latest'`.
   Not `uv tool upgrade`: on a pinned install it silently does nothing. Both
   replace the install and drop its extras; with the command, name yours, as in
-  `'aisquare-cli[serve]@latest'`. From 0.9.0 on, `aisquare upgrade` does it for
+  `'aisquare-cli[serve]@latest'`. From 0.8.0 on, `aisquare upgrade` does it for
   you and keeps them.
 - The store stays at schema v24; nothing migrates.
 - `aisquare agents connect codex` and `… cursor` now exit 1 with "can't connect
@@ -3028,8 +3026,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.0...HEAD
-[0.9.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.7.0...v0.9.0
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc2...v0.5.0

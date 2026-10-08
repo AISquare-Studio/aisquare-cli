@@ -631,7 +631,7 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
     )
     if version is not None and install_route.is_newer(plan.current, version):
         # A move BACK lands on a release that may predate `agents refresh-hooks`
-        # (0.8 and earlier do), and the hooks the newer version wrote still run it.
+        # (0.7 and earlier do), and the hooks the newer version wrote still run it.
         notes.append(
             f"{version} is older than {plan.current}, so the hooks were left as they were; "
             f"`aisquare agents connect {HOOK_AGENT}` rewrites them for {version}"

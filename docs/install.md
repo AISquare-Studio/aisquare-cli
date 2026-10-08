@@ -85,7 +85,7 @@ It reports every dependency and gives the exact command for anything missing.
 
 Update in place with `aisquare upgrade`. It keeps your extras and re-connects
 Claude Code's hooks. It runs for the uv tool install the one-liner makes; any
-other install is shown the exact command that updates it. Releases before 0.9.0
+other install is shown the exact command that updates it. Releases before 0.8.0
 have no `upgrade` yet: re-run the one-liner instead.
 
 Remove it with `aisquare uninstall`. It takes aisquare's hooks out of Claude

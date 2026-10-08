@@ -2,7 +2,7 @@
 
 The README's first line, the PyPI summary (pyproject's ``description``), the
 header of ``aisquare --help`` (the root callback's docstring) and the package
-docstring. They had drifted into two identities before 0.9: PyPI and ``--help``
+docstring. They had drifted into two identities before 0.8: PyPI and ``--help``
 said "portable memory layer", while the README led with the terminal. The owner
 picks the final words, and this guard turns that choice into one edit per place
 that fails when a place is missed.

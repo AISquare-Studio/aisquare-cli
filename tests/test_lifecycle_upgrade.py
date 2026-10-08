@@ -1547,7 +1547,9 @@ def test_a_site_that_fails_to_reconnect_gets_the_whole_reason(
     result = runner.invoke(app, ["--json", "upgrade", "--yes"])
 
     hooks = _one_object(result.stdout)["hooks"]
-    assert hooks == [{"config_dir": str(site), "refreshed": False, "error": reason}], hooks
+    assert hooks == [
+        {"config_dir": str(site), "refreshed": False, "error": reason, "hooks_off": None}
+    ], hooks
 
 
 @pytest.mark.parametrize("entry", ["archive-v0/AbC123", "environments-v2/c5764179/56172ecc"])
@@ -1731,7 +1733,9 @@ def test_under_json_the_report_is_one_object_and_uv_talks_on_stderr(
     report = _one_object(result.stdout)
     assert report["upgraded"] is True
     assert report["previous"] == "0.9.0" and report["version"] == "0.9.1"
-    assert report["hooks"] == [{"config_dir": str(site), "refreshed": True, "error": None}]
+    assert report["hooks"] == [
+        {"config_dir": str(site), "refreshed": True, "error": None, "hooks_off": None}
+    ]
     assert machine.installs[0][2] is True, "the installer's output must go to stderr"
 
 
@@ -1988,6 +1992,40 @@ def test_a_site_that_fails_to_reconnect_is_named_with_its_command_and_exits_1(
         ["aisquare", "agents", "refresh-hooks", "claude-code", "--config-dir", str(site)]
     )
     assert remedy in result.stdout
+
+
+def test_a_site_whose_hooks_are_switched_off_is_rewritten_and_not_called_connected(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path
+) -> None:
+    """With `"disableAllHooks": true` Claude Code runs none of a directory's hooks. The plan
+    said "re-connects" and the report "✓ hooks re-connected" there, where `agents connect`,
+    init and the doctor say they are switched off (sweep of #257). They are still rewritten,
+    so they run once the key goes."""
+    off = _hooked(tmp_path / "claude-off", tool.script)
+    settings = off / "settings.json"
+    hooks = json.loads(settings.read_text(encoding="utf-8"))["hooks"]
+    settings.write_text(json.dumps({"disableAllHooks": True, "hooks": hooks}), encoding="utf-8")
+    on = _hooked(tmp_path / "claude-on", tool.script)
+    _record(off, on)
+
+    plan = runner.invoke(app, ["upgrade", "--dry-run"])
+    planned = _one_object(runner.invoke(app, ["--json", "upgrade", "--dry-run"]).stdout)
+    run = runner.invoke(app, ["upgrade", "--yes"])
+    report = _one_object(runner.invoke(app, ["--json", "upgrade", "--yes"]).stdout)
+
+    said = f'rewrites the Claude Code hooks in {off} (switched off there: "disableAllHooks": true)'
+    assert said in plan.stdout, plan.stdout
+    assert f"re-connects the Claude Code hooks in {off}" not in plan.stdout
+    assert f"re-connects the Claude Code hooks in {on}" in plan.stdout, "control: hooks that run"
+    assert planned["refresh_hooks"] == [str(off), str(on)], planned
+    assert planned["hooks_off"] == [str(settings)], planned
+    assert run.exit_code == 0, run.output
+    told = f'· hooks rewritten in {off}, but switched off: remove "disableAllHooks" from {settings}'
+    assert told in run.stdout, run.stdout
+    assert f"✓ hooks re-connected in {off}" not in run.stdout
+    assert f"✓ hooks re-connected in {on}" in run.stdout, "control: hooks that run"
+    assert [hook["hooks_off"] for hook in report["hooks"]] == [str(settings), None], report
+    assert len(machine.connects()) == 4, "both sites are rewritten, on both runs"
 
 
 @pytest.fixture

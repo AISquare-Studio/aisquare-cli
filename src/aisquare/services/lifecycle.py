@@ -285,6 +285,10 @@ class HookSite:
     config_dir: Path
     programs: tuple[str, ...] = ()
     reason: str | None = None
+    hooks_off: Path | None = None
+    """For a site the upgrade rewrites: its settings file, when that switches every hook off
+    (``"disableAllHooks": true``, :func:`agent_core.hooks_off`). The hooks are rewritten so
+    they run once the key goes; until then Claude Code runs none, so it is not "connected"."""
 
 
 @dataclass(frozen=True)
@@ -381,6 +385,8 @@ class HookRefresh:
     config_dir: Path
     ok: bool
     error: str | None = None
+    hooks_off: Path | None = None
+    """:attr:`HookSite.hooks_off`: rewritten, but switched off there."""
 
 
 @dataclass(frozen=True)
@@ -551,7 +557,11 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
             # (review of #257). The hooks name the tool path the reinstall keeps.
             left.append(HookSite(directory, programs, _CANNOT_REWRITE.format(unwritable)))
         else:
-            refresh.append(HookSite(directory, programs))
+            # Rewritten all the same, as `agents connect` does: they run once the key goes.
+            # Said, because the plan and the report called such a site re-connected, where
+            # connect and init now say it is not (sweep of #257).
+            off = agent_core.hooks_off(HOOK_AGENT, directory)
+            refresh.append(HookSite(directory, programs, hooks_off=off))
     return tuple(refresh), tuple(left)
 
 
@@ -816,7 +826,7 @@ def _refresh(site: HookSite, found: install_route.Facts) -> HookRefresh:
     if answer.returncode != 0:
         said = _reason_line(answer.stderr, answer.stdout) or f"exit {answer.returncode}"
         return HookRefresh(site.config_dir, False, said)
-    return HookRefresh(site.config_dir, True)
+    return HookRefresh(site.config_dir, True, hooks_off=site.hooks_off)
 
 
 # --- uninstall ---------------------------------------------------------------------------

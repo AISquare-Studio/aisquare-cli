@@ -63,6 +63,8 @@ def _plan_json(plan: lifecycle_service.UpgradePlan) -> dict[str, Any]:
         "command": plan.command,
         "argv": list(plan.argv),
         "refresh_hooks": [str(site.config_dir) for site in plan.refresh],
+        # The settings files, among those sites, that switch every hook off.
+        "hooks_off": [str(site.hooks_off) for site in plan.refresh if site.hooks_off is not None],
         "hooks_left": [_site_json(site) for site in plan.left],
         "live_agents": list(plan.live_agents),
         "fleet_error": plan.fleet_error,
@@ -137,7 +139,13 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
     _say(f"  install: {plan.route.describe()}")
     _say(f"  runs:    {plan.command}")
     for site in plan.refresh:
-        _say(f"  then:    re-connects the Claude Code hooks in {site.config_dir}")
+        if site.hooks_off is None:
+            _say(f"  then:    re-connects the Claude Code hooks in {site.config_dir}")
+        else:
+            _say(
+                f"  then:    rewrites the Claude Code hooks in {site.config_dir} (switched off "
+                'there: "disableAllHooks": true)'
+            )
     for site in plan.left:
         _say(f"  leaves:  {site.config_dir} — {site.reason}")
     _fleet_lines(plan)
@@ -164,7 +172,12 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
                 "route": plan.route.kind,
                 "command": plan.command,
                 "hooks": [
-                    {"config_dir": str(hook.config_dir), "refreshed": hook.ok, "error": hook.error}
+                    {
+                        "config_dir": str(hook.config_dir),
+                        "refreshed": hook.ok,
+                        "error": hook.error,
+                        "hooks_off": None if hook.hooks_off is None else str(hook.hooks_off),
+                    }
                     for hook in report.hooks
                 ],
                 "hooks_left": [_site_json(site) for site in plan.left],
@@ -182,7 +195,13 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
     else:
         _say(f"✓ aisquare {report.version} (was {plan.current}) — checked in a new process")
     for hook in report.hooks:
-        if hook.ok:
+        if hook.ok and hook.hooks_off is not None:
+            # Not ✓ "re-connected": `agents connect` and init say the same of such a site.
+            _say(
+                f"· hooks rewritten in {hook.config_dir}, but switched off: remove "
+                f'"disableAllHooks" from {hook.hooks_off} to turn them on'
+            )
+        elif hook.ok:
             _say(f"✓ hooks re-connected in {hook.config_dir}")
         else:
             remedy = install_route.command_line(

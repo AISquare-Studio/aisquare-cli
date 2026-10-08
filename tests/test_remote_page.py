@@ -1885,7 +1885,10 @@ def test_the_wheel_carries_the_bundled_page(tmp_path: Path) -> None:
         directory=str(tmp_path / "sdist"), versions=["standard"]
     )
     with tarfile.open(built) as archive:
-        archive.extractall(tmp_path / "unpacked", filter="data")
+        if hasattr(tarfile, "data_filter"):
+            archive.extractall(tmp_path / "unpacked", filter="data")
+        else:  # 3.11.0 to 3.11.3, which requires-python lets in: the filters came in 3.11.4
+            archive.extractall(tmp_path / "unpacked")  # the sdist this test just built
     (unpacked,) = (tmp_path / "unpacked").iterdir()
     wheels = list(
         wheel.WheelBuilder(str(unpacked)).build(

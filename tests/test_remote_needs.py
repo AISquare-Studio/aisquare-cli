@@ -2860,6 +2860,51 @@ def test_tmux_failing_mid_answer_is_said_and_still_on_the_trail(live: Live) -> N
     assert live.audit()[-1].endswith("enter=False failed"), "part of it may have reached the pane"
 
 
+def test_the_needs_routes_write_their_audit_lines_off_the_event_loop(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An audit line opens ``remote-audit.log`` and appends to it, and the first one makes the
+    file and restricts it to this account, on Windows an ``icacls`` run: file work, which the
+    write dispatcher, extend, revoke and the push routes do in a worker thread. A dismissal,
+    which no write switch gates and so can be a fresh home's first line, and both lines of an
+    answer did it on the event loop, every request and every socket's tick waiting on it
+    (sweep of #243, the instances round 3 left in this file)."""
+    import asyncio
+
+    written: list[tuple[str, bool]] = []
+    audit = live.runtime.audit
+
+    def audit_where_it_runs(device_id: str, endpoint: str, summary: str) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            written.append((endpoint, False))
+        else:
+            written.append((endpoint, True))
+        audit(device_id, endpoint, summary)
+
+    monkeypatch.setattr(live.runtime, "audit", audit_where_it_runs)
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    body = {"id": card["id"], "keys": ["1"]}
+    live.tmux.fail = True
+    assert live.client.post(live.url("needs/answer"), json=body).status_code == 503
+    live.tmux.fail = False
+    assert live.client.post(live.url("needs/answer"), json=body).status_code == 200
+    question = live.card("board_question")
+    dismissed = live.client.post(live.url("needs/dismiss"), json={"id": question["id"]})
+    assert dismissed.status_code == 200
+    assert written == [
+        ("needs/answer", False),
+        ("needs/answer", False),
+        ("needs/dismiss", False),
+    ]
+    assert live.audit()[-3].endswith("enter=False failed")
+    assert live.audit()[-1].endswith(
+        f"needs/dismiss {question['id']} board_question manager@prj_alpha"
+    )
+
+
 def test_a_retried_answer_is_typed_once_with_the_servers_own_ledger(live: Live) -> None:
     live.runtime.set_allow_write(True)
     card = live.card("permission")

@@ -2478,7 +2478,7 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
         await asyncio.to_thread(record_needs_dismissal, item.id)
         watcher.needs_forget(item.id)
         summary = f"{item.id} {item.kind} {item.agent or '-'}@{item.project_id}"
-        kit.kit_audit(device, "needs/dismiss", summary)
+        await asyncio.to_thread(kit.kit_audit, device, "needs/dismiss", summary)
         return JSONResponse({"dismissed": item.id})
 
     async def needs_answer_endpoint(
@@ -2530,9 +2530,9 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
                 await asyncio.to_thread(_needs_send, snap.status.agent, keys, text, enter)
             except Exception as exc:
                 # Part of it may have reached the pane: the trail says it was tried.
-                kit.kit_audit(device, "needs/answer", f"{summary} failed")
+                await asyncio.to_thread(kit.kit_audit, device, "needs/answer", f"{summary} failed")
                 return kit.kit_refuse(503, "fleet_unavailable", f"tmux could not type it: {exc}")
-            kit.kit_audit(device, "needs/answer", summary)
+            await asyncio.to_thread(kit.kit_audit, device, "needs/answer", summary)
         finally:
             lock.release()
         watcher.needs_rescan_soon()

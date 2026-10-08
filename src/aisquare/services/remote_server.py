@@ -4579,15 +4579,17 @@ class _Server:
         then the lanes, then the threads of its default pool."""
         return self._server.should_exit and self._thread.is_alive()
 
-    def wound_down(self, timeout: float) -> bool:
-        """Wait at most ``timeout`` s for it to finish stopping; whether it has."""
+    def wound_down(self, timeout: float | None) -> bool:
+        """Wait at most ``timeout`` s (``None``: as long as it takes) for it to finish
+        stopping; whether it has."""
         self._thread.join(timeout)
         return not self._thread.is_alive()
 
 
 _winding_down: list[_Server] = []
 """Servers :func:`stop_remote_server` stopped that were still finishing what was asked of them,
-for :func:`remote_wait_for_writes` to see out."""
+for :func:`remote_wait_for_writes` to see out, and for the home's claim to outlast
+(:func:`_release_remote_home`)."""
 
 REMOTE_WINDING_DOWN_SECONDS = 5.0
 """How long :func:`remote_wait_for_writes` gives a stopped server once its writes are done: the
@@ -4825,15 +4827,29 @@ def _release_remote_home() -> None:
     """Let :data:`SERVE_LOCK_NAME` go: this process serves Remote no more.
 
     Unless it does again: a server started while an earlier one was still being stopped,
-    on a thread of its own, would serve on unclaimed once that stop came to its end.
+    on a thread of its own, would serve on unclaimed once that stop came to its end. Nor
+    while a server it stopped still finishes a phone's write (:data:`_winding_down`): its
+    needs watcher and push sender run until it is done, and a Remote another process
+    started in those seconds, finding the home let go, pushed every notification beside
+    them. The last of those servers lets it go as it ends
+    (:func:`_release_remote_home_once_wound_down`).
     """
     global _home_claim
     with _lock:
         if (_server is not None and _server.running) or _foreground is not None:
             return
+        if any(stopped.winding_down for stopped in _winding_down):
+            return
         claim, _home_claim = _home_claim, None
     if claim is not None:
         _release_remote_claim(claim[1])
+
+
+def _release_remote_home_once_wound_down(server: _Server) -> None:
+    """Wait for a stopped ``server`` to finish what was asked of it, then let the home go,
+    if nothing else of this process serves from it (:func:`_release_remote_home`)."""
+    server.wound_down(None)
+    _release_remote_home()
 
 
 def _release_remote_claim(fd: int) -> None:
@@ -4935,7 +4951,9 @@ def stop_remote_server() -> None:
     The server stops first and ``remote.json`` is flushed last, best effort, as the
     flusher's every-30-s write is: a file that will not write is logged, never
     raised. The TUI turns Remote off from a Textual timer (auto-off), where an
-    exception ends the whole fleet UI, and stops ngrok only once this returns.
+    exception ends the whole fleet UI, and stops ngrok only once this returns. A
+    server still finishing a phone's write after its 5 s keeps the home claimed until
+    it is done, on a thread of its own (:func:`_release_remote_home`).
     """
     global _server, _flusher
     with _lock:
@@ -4948,6 +4966,14 @@ def stop_remote_server() -> None:
         with _lock:
             kept = [*_winding_down, server]
             _winding_down[:] = [stopped for stopped in kept if stopped.winding_down]
+            parked = server in _winding_down
+        if parked:  # the home stays claimed until it is done (_release_remote_home)
+            threading.Thread(
+                target=_release_remote_home_once_wound_down,
+                args=(server,),
+                name="asq-remote-wound-down",
+                daemon=True,
+            ).start()
     if _runtime is not None:
         try:
             _runtime.flush_last_seen()

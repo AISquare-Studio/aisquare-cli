@@ -957,6 +957,61 @@ def test_a_stop_that_ends_while_a_new_server_starts_leaves_it_the_home(
     assert not _held_elsewhere(isolated_home)
 
 
+def test_a_stopped_server_still_finishing_a_write_keeps_the_home_until_it_is_done(
+    isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stop returns after its 5 s with a phone's restart still running, and the server
+    goes on until the restart is done, its needs watcher and push sender with it. Let go
+    then, the home took a Remote from another shell, which pushed every notification
+    beside them (the merge of round 3's one-Remote-per-home and its quit's wait)."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    monkeypatch.setattr(remote_server, "_winding_down", [])
+    started, release = threading.Event(), threading.Event()
+
+    def restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        started.set()
+        release.wait(timeout=20)
+        return {"restarted": True}, "agent/restart coder-1"
+
+    monkeypatch.setattr(remote_server, "live_writes", lambda: Writes({"agent/restart": restart}))
+    stop_serving = remote_server._Server.stop_serving
+    monkeypatch.setattr(  # its 5 s, cut to a fraction: the write outlasts it either way
+        remote_server._Server, "stop_serving", lambda self, timeout=5.0: stop_serving(self, 0.2)
+    )
+    state = remote_server.runtime()
+    state._state.password = PASSWORD
+    state._save_state()
+    state.set_allow_write(True)
+    port = _free_port()
+    info = remote_server.start_remote_server(dist, port=port)
+    url = info.url_local.rstrip("/")
+    answers: list[int] = []
+    origin = {"origin": f"http://127.0.0.1:{port}"}
+    with httpx.Client(trust_env=False, headers=origin, timeout=30) as phone:
+        assert phone.post(f"{url}/api/unlock", json={"password": PASSWORD}).status_code == 200
+
+        def ask() -> None:
+            answer = phone.post(f"{url}/api/agent/restart", json={"agent": "coder-1"})
+            answers.append(answer.status_code)
+
+        asking = threading.Thread(target=ask)
+        asking.start()
+        try:
+            assert started.wait(timeout=10)
+            remote_server.stop_remote_server()
+            assert remote_server.remote_server_status()["running"] is False
+            assert _held_elsewhere(isolated_home), "a server still at a phone's write"
+        finally:
+            release.set()
+            asking.join(10)
+    assert answers == [200], "the restart's answer still went out"
+    deadline = time.monotonic() + 10
+    while _held_elsewhere(isolated_home):
+        assert time.monotonic() < deadline, "the home was never let go once the write was done"
+        time.sleep(0.05)
+
+
 def test_a_remote_whose_process_ended_holds_the_home_no_more(
     isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

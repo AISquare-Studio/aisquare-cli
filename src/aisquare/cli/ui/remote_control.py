@@ -155,7 +155,9 @@ class RemoteController:
         """What the status line says: waiting for ngrok, the install hint, an error."""
         self.auto_off_at: datetime | None = None
         self._deadline_unsaved = False
-        """``auto_off_at`` is one ``remote.json`` would not take (:meth:`_arm_auto_off`)."""
+        """Set by a write of the deadline that failed, until one goes through or the server is
+        seen to read the file again: till then the running server may hold a deadline
+        ``remote.json`` does not (:meth:`adopt_server_deadline`)."""
         self._waiter: threading.Thread | None = None
 
     # --- on / off -----------------------------------------------------------------------
@@ -287,20 +289,27 @@ class RemoteController:
 
     def set_allow_write(self, enabled: bool) -> None:
         """Flip the one write switch, in ``remote.json``, whether Remote is on or not: the
-        TUI's next Remote and ``asq remote serve`` both start with what it says."""
+        TUI's next Remote and ``asq remote serve`` both start with what it says.
+
+        A switch the file will not take still holds in this TUI until its server reads the
+        file again: a write that fails has already changed the server's state in memory,
+        and nothing rolls it back. So the status line says it was not saved; "could not be
+        changed" sat beside a switch that showed the change, which phones had too.
+        """
         try:
             self._server.set_allow_write(bool(enabled))
         except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
-            self.message = f"write actions could not be changed — {exc}"
+            self.message = f"write actions could not be saved to remote.json — {exc}"
 
     def set_auto_off(self, minutes: int | None) -> None:
         """Pick a timer, or ``None`` for Never. Takes effect at once while Remote is on.
 
-        A deadline ``remote.json`` will not take still holds here, where
-        :meth:`enforce_auto_off` keeps it, and the status line says it was not saved:
-        raised into the Auto-off picker's handler, it ended the fleet UI. The server
-        still ends Remote at the one the file holds, so whichever of the two comes first
-        is when Remote goes off (:meth:`adopt_server_deadline`).
+        A timer ``remote.json`` will not take still takes effect, and the status line says
+        it was not saved: raised into the Auto-off picker's handler, the error ended the
+        fleet UI. The running server has the timer too, since a write that fails has
+        already changed its state in memory and nothing rolls that back, so the panel and
+        the server's gate end Remote at the same time until the server reads the file
+        again (:meth:`adopt_server_deadline`).
         """
         if minutes not in AUTO_OFF_CHOICES:
             raise ValueError(f"auto-off must be one of {AUTO_OFF_CHOICES}, not {minutes}")
@@ -313,7 +322,10 @@ class RemoteController:
 
     def regenerate_password(self) -> str | None:
         """A new passphrase from the server; ``None`` while Remote is off (nothing to unlock),
-        or when ``remote.json`` would not take it, which the status line then says."""
+        or when ``remote.json`` would not take it, which the status line then says. The
+        running server has the new one all the same, and has signed every phone out: the
+        panel shows it until the server reads the file again after another process rewrote
+        it, which brings back the old passphrase, and the devices with it."""
         if self.info is None:
             return None
         try:
@@ -340,7 +352,9 @@ class RemoteController:
 
     def revoke_device(self, device_id: str) -> bool:
         """Revoke one device; ``False`` when ``remote.json`` would not take it, which the
-        status line then says (raised into the Revoke button's handler, it ended the UI)."""
+        status line then says (raised into the Revoke button's handler, it ended the UI).
+        The running server has signed it out all the same, until it reads the file again
+        after another process rewrote it."""
         try:
             self._server.revoke_remote_device(device_id)
         except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
@@ -383,10 +397,13 @@ class RemoteController:
 
         An instant with its offset, from an aware clock: naive local time plus an
         hour ran an hour long across a DST fall-back, and was published without an
-        offset a phone elsewhere read in its own timezone.
+        offset a phone elsewhere read in its own timezone. To the second, as the server
+        keeps it: with the clock's microseconds the server's copy read as an EARLIER
+        deadline than the panel's own, which :meth:`adopt_server_deadline` took for the
+        file's coming back after a write that failed.
         """
         minutes = self.state.auto_off_minutes
-        now = _aware(self._now())
+        now = _aware(self._now()).replace(microsecond=0)
         self.auto_off_at = None if minutes is None else now + timedelta(minutes=minutes)
         # The server shows it as GET /api/remote's auto_off_at (PLAN §4-B); Never is
         # null there, which is the same thing it shows while Remote is off.
@@ -400,11 +417,17 @@ class RemoteController:
         Called by :meth:`enforce_auto_off` and on every paint, so the extension holds
         and the modal shows the new time. The server enforces it either way.
 
-        While the deadline in hand is one ``remote.json`` would not take, the file still
-        holds the one it failed to replace, and the server's gate ends Remote there all
-        the same (SPEC §2.5): the EARLIER of the two is when Remote goes off. Adopting a
-        later one would undo a shorter timer, and a longer one, or Never, kept in hand
-        showed a time the server would not wait for, the panel on while phones were off.
+        A timer ``remote.json`` would not take is the running server's too: a write that
+        fails has already changed the server's state in memory, and nothing rolls it back,
+        so its gate and the panel end Remote at the same time. But the file keeps the
+        deadline the write failed to replace, and the server goes back to it when it reads
+        the file again after another process rewrote it (``asq remote allow-write`` in a
+        shell, say); its gate ends Remote there from then on (SPEC §2.5). So while the
+        deadline in hand is unsaved, an EARLIER deadline of the server's is taken too, and
+        so is any in place of Never: keeping the longer timer, or Never, showed Remote on
+        while every phone was answered as if it were off. A later one is taken as ever,
+        whether a phone extended the unsaved timer or the file held a longer one: the gate
+        waits for it.
         """
         if not self.running or (self.auto_off_at is None and not self._deadline_unsaved):
             return self.auto_off_at
@@ -414,9 +437,9 @@ class RemoteController:
             served = None
         if served is not None:
             served, held = _aware(served), self.auto_off_at
-            if self._deadline_unsaved:
-                if held is None or served < held:  # the file's comes first, and is in hand now
-                    self.auto_off_at, self._deadline_unsaved = served, False
+            if self._deadline_unsaved and (held is None or served < held):
+                # the server read the file again: the deadline in hand is the file's now
+                self.auto_off_at, self._deadline_unsaved = served, False
             elif held is not None and served > held:
                 self.auto_off_at = served
         return self.auto_off_at

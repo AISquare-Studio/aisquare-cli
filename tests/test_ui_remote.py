@@ -692,7 +692,8 @@ def test_a_remote_json_that_will_not_write_is_a_sentence_for_each_control_of_the
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The switch, the Auto-off picker, Regenerate and Revoke raised into Textual's handlers,
-    and the exception ended the fleet UI while Remote kept serving (r2 review of #243)."""
+    and the exception ended the fleet UI while Remote kept serving (r2 review of #243). The
+    write switch said it "could not be changed" while it showed the change phones now got."""
 
     async def go(pilot: Pilot[None]) -> None:
         app = pilot.app
@@ -718,6 +719,11 @@ def test_a_remote_json_that_will_not_write_is_a_sentence_for_each_control_of_the
         modal.query_one("#remote-regen", Button).press()
         await pilot.pause()
         assert status().startswith("the new password could not be saved to remote.json")
+        modal.query_one("#remote-allow-write", Switch).toggle()
+        await pilot.pause()
+        assert status().startswith("write actions could not be saved to remote.json — [Errno 13]")
+        assert modal.query_one("#remote-allow-write", Switch).value is True
+        assert remote_server.remote_allow_write() is True, "the running server took it"
         assert app.screen is modal and app.remote.running
 
         modal.query_one("#remote-on", Switch).toggle()  # off still goes off

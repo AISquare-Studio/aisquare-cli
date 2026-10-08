@@ -23,7 +23,7 @@ import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -1184,6 +1184,40 @@ def test_an_agent_stopped_elsewhere_is_not_brought_back(
     coders_before, start_after, coders_after, status = in_shell(machine, go)
     assert coders_before  # control: a live manager, by the frame, offers the coders
     assert start_after and not coders_after
+    assert "manager — started" not in status
+
+
+def test_a_clock_that_steps_back_does_not_keep_a_stopped_agent_started(
+    captain: str | None,
+    scripted: Callable[[Machine], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Frames and starts were ordered by wall-clock time. After the clock stepped back
+    (DST ending, an NTP correction), every frame read older than the start for up to an
+    hour, and a manager stopped elsewhere stayed "started" (review of #257)."""
+    machine, project = _ready_machine(tmp_path)
+    with store_session() as store:
+        store.onboard_project(ProjectInfo(id=project.id, root=project.root))
+
+    def listing(p: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        return [FleetAgentStatus(agent=a) for a in machine.live if a.project_id == p.id]
+
+    monkeypatch.setattr(fleet_service, "list_agents", listing)
+    scripted(machine)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> tuple[bool, str]:
+        await press(pilot, page, "fleet-manager")
+        machine.live.clear()  # stopped elsewhere
+        app.refresh_data()
+        assert app.snapshot is not None
+        an_hour_back = app.snapshot.taken_at - timedelta(hours=1)
+        app.snapshot = dataclasses.replace(app.snapshot, taken_at=an_hour_back)
+        page.paint()
+        return visible(page, "fleet-manager"), card(page, "fleet-status")
+
+    start_again, status = in_shell(machine, go)
+    assert start_again, "the frame read after the start answers, whatever the clock says"
     assert "manager — started" not in status
 
 

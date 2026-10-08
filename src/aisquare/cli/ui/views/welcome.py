@@ -36,7 +36,6 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -76,6 +75,9 @@ FLEET_WORK = frozenset({"manager", "coders"})
 
 FLEET_UP = "Your fleet is up."
 """The sentence step 3 ends on — stable, so a recording can wait for it."""
+
+_NO_START = object()
+"""``WelcomeView._frame_at_start`` before step 3 has started anything."""
 
 _EMPTY_VERDICT = PathVerdict(
     text="", path=None, exists=False, is_dir=False, root=None, registered=None, is_git=False
@@ -319,8 +321,12 @@ class WelcomeView(VerticalScroll):
         self.connect_error: str | None = None
         self.steps: dict[str, FleetStep] = {}
         """Per label, what the last start said about the chosen project's agents."""
-        self.steps_at: datetime | None = None
-        """When ``steps`` was last written: a frame read after it is the whole answer."""
+        self._frame_at_start: object = _NO_START
+        """The shell's frame when ``steps`` was last written. The shell reads its store and
+        sets a new frame object on the UI thread, so any other frame was read after the
+        start and is the whole answer. Identity, not wall-clock time: a clock that stepped
+        back (DST, NTP) kept every frame "older" than the start for up to an hour, and a
+        coder stopped elsewhere read as running (review of #257)."""
         self.fleet_error: str | None = None
         self.opened: str | None = None
         """The manager whose pane *Open the manager* last opened: the trust question's turn
@@ -752,7 +758,7 @@ class WelcomeView(VerticalScroll):
             return
         for step in result.steps:
             self.steps[step.label] = step
-        self.steps_at = datetime.now()
+        self._frame_at_start = getattr(self.app, "snapshot", None)
         if self.project is not None:
             self.post_message(self.Progress(self.project.id))
 
@@ -785,15 +791,13 @@ class WelcomeView(VerticalScroll):
             else:
                 ended.add(agent.id)
         notices = getattr(snapshot, "notices", None)
-        taken = getattr(snapshot, "taken_at", None)
         answered = (
             isinstance(frame, dict)
             and project.id in frame
             and not (isinstance(notices, dict) and notices.get(project.id))
             and getattr(snapshot, "stale_since", None) is None
-            and isinstance(taken, datetime)
-            and self.steps_at is not None
-            and taken >= self.steps_at
+            and self._frame_at_start is not _NO_START
+            and snapshot is not self._frame_at_start
         )
         if answered:
             return live

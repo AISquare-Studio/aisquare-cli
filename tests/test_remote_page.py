@@ -1534,13 +1534,15 @@ def test_the_transcript_asks_for_lines_as_wide_as_fit_inside_its_padding(
     of padding a side, which clientWidth counts: it asked the machine to wrap a column or two
     wider than fit, and every full line wrapped again on the phone (45 asked where 44 fit on a
     360 px phone, 52 where 51 fit on a 412). A line of the width asked fits now, and a line
-    one column longer would not."""
+    one column longer would not. clientWidth is whole pixels, and may be the box's width
+    rounded up: half a pixel less is what is sure to be there, so a box of exactly 45
+    columns by it is asked for 44."""
     report = boot_report["transcriptColumns"]
     for width, columns in report["asked"].items():
         inside = int(width) - 2 * report["padding"]
-        assert columns * report["charPx"] <= inside, (width, columns)
+        assert columns * report["charPx"] <= inside - 0.5, (width, columns)
         assert (columns + 1) * report["charPx"] > inside - 0.5, (width, columns)
-    assert report["asked"] == {"334": 44, "364": 48, "386": 51}
+    assert report["asked"] == {"334": 44, "340": 44, "364": 48, "386": 51}
 
 
 def test_the_transcript_draws_one_read_at_a_time_and_the_newest_wins(

@@ -1622,10 +1622,11 @@ async function staleAcrossAWake() {
 }
 
 /* The columns the Transcript asks the machine to wrap to, on 360, 390 and 412 px phones,
- * whose transcript box is 334, 364 and 386 px inside its border. */
+ * whose transcript box is 334, 364 and 386 px inside its border; and a 340 px box, exactly 45
+ * columns inside its padding by clientWidth, which is whole pixels and may have rounded up. */
 async function transcriptColumns() {
   const asked = {};
-  for (const width of [334, 364, 386]) {
+  for (const width of [334, 340, 364, 386]) {
     preWidth = width;
     const page = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
       "GET api/transcript/coder-1": () => ({ status: 200, json: { lines: [], cursor: null, more: false, stamps: {} } }),

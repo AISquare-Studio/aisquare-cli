@@ -24,6 +24,7 @@ settings.json, and ``plugins/installed_plugins.json`` (``{"version": 2, "plugins
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 from collections.abc import Sequence
@@ -491,6 +492,34 @@ def _hooks_name(claude: Path, program: str) -> None:
                 subcommand = item["command"].rsplit(" hook ", 1)[1]
                 item["command"] = f"{program} hook {subcommand}"
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+
+@posix_route
+def test_a_read_only_settings_json_still_says_what_its_hooks_run(
+    runner: CliRunner, claude: Path, tmp_path: Path
+) -> None:
+    """Read-only, as home-manager's link into the Nix store is, a settings.json whose hooks
+    name an aisquare that is gone read only as "hooks cannot be written": the row no
+    longer said every event fails (review of #257). Both, and still no Connect."""
+    _connect(runner)
+    gone = tmp_path / "old-venv" / "bin" / "aisquare"
+    _hooks_name(claude, str(gone))
+    settings = claude / "settings.json"
+    settings.chmod(0o444)
+    try:
+        if os.access(settings, os.W_OK):
+            pytest.skip("this user can write a read-only file (root)")
+        row = diagnostics._check_claude_code()
+    finally:
+        settings.chmod(0o644)
+    writable = diagnostics._check_claude_code()
+
+    assert row.status is CheckStatus.warn, row
+    assert f"point at {gone}, which does not exist" in row.detail, row
+    assert f"hooks cannot be written in {claude}" in row.detail, row
+    assert "point its hooks at this install" in (row.fix or ""), row.fix
+    assert _buttons(row) == [], "Connect cannot rewrite them"
+    assert _buttons(writable) == [_CONNECT], "control: writable, Connect rewrites them"
 
 
 @posix_route

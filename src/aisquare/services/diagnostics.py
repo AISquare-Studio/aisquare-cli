@@ -959,13 +959,14 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     # not write) reads here as one with no hooks, and its Connect could only fail: a
     # read-only one, home-manager's link into the Nix store, never cleared. Named with
     # connect's own reason, as a switched-off one is, and given no button (review of #257).
+    # Hooks it holds that run the wrong program still say so: that is the diagnosis, and
+    # read only as "cannot be written" the row hid that every event fails.
     refused = {
         site.config_dir: why
         for site in (*unhooked, *wrong_binary)
         if (why := agents_service.connect_refusal("claude-code", site.config_dir)) is not None
     }
     unhooked = [site for site in unhooked if site.config_dir not in refused]
-    wrong_binary = [site for site in wrong_binary if site.config_dir not in refused]
     # Where the plugin is the route that runs, what it runs is graded like a hook.
     plugin_runs = [site for site in graded if site.plugin is not None and site not in doubled]
     plugin_runs += dead
@@ -1041,12 +1042,6 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
             "runs none of them, so no context is injected and no prompt is captured"
         )
         fixes.append(f'Turn hooks back on: remove "disableAllHooks" from {listed}')
-    for directory, why in refused.items():
-        problems.append(f"hooks cannot be written in {directory}: {why}")
-        fixes.append(
-            f"make {directory / 'settings.json'} a JSON object this user can write, then "
-            "connect again"
-        )
     if unhooked:
         listed = ", ".join(_site_label(site) for site in unhooked)
         problems.append(f"{_STALE_HOOKS} in: {listed}")
@@ -1059,6 +1054,17 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
         clauses = "; ".join(_hook_binary_problems(wrong_binary))
         this = f"{agent_core.current_install()} ({__version__})"
         problems.append(f"{clauses} — this install is {this}")
+    stale = {site.config_dir for site in wrong_binary}
+    for directory, why in refused.items():
+        problems.append(f"hooks cannot be written in {directory}: {why}")
+        fix = (
+            f"make {directory / 'settings.json'} a JSON object this user can write, then "
+            "connect again"
+        )
+        if directory in stale:
+            # Read-only by design (home-manager), the remedy is in what generates it.
+            fix += ", or point its hooks at this install where that file is generated"
+        fixes.append(fix)
     live = [site for site in doubled if site not in dead]
     if dead:
         listed = ", ".join(str(site.config_dir) for site in dead)
@@ -1078,7 +1084,7 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     # A doubled directory gets no Connect button: connecting keeps both routes.
     broken: list[Path] = []
     for site in sites:
-        if site in doubled or site.config_dir in broken:
+        if site in doubled or site.config_dir in broken or site.config_dir in refused:
             continue
         if site in unhooked or site in wrong_binary:
             broken.append(site.config_dir)

@@ -542,7 +542,7 @@ def test_a_settings_json_that_is_not_utf8_costs_its_row_nothing(
 def test_a_hook_program_this_user_cannot_reach_costs_the_doctor_nothing(
     runner: CliRunner, claude: Path, tmp_path: Path
 ) -> None:
-    """Path.exists raised PermissionError on 3.11/3.12 for a hook's program in a directory
+    """Path.exists raised PermissionError on 3.11 to 3.13 for a hook's program in a directory
     this user cannot enter, and `aisquare --json doctor` ended in a traceback with no
     report (review of #257). The program reads as gone, as it is to this user."""
     if sys.platform == "win32" or not can_deny_reads():

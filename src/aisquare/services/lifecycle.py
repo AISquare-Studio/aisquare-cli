@@ -530,9 +530,10 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
         if not binaries:
             continue
         programs = tuple(str(binary.program) for binary in binaries)
-        # os.path.exists, not Path.exists: on 3.11/3.12 the latter raises PermissionError
-        # for a program in a directory this user cannot enter, and upgrade crashed. Such a
-        # program counts as gone, whose hooks fail every session (review of #257).
+        # os.path.exists, not Path.exists: on 3.11 to 3.13 the latter raises PermissionError
+        # (3.14 answers False) for a program in a directory this user cannot enter, and
+        # upgrade crashed. Such a program counts as gone, whose hooks fail every session
+        # (review of #257).
         foreign = next(
             (b for b in binaries if os.path.exists(b.program) and not runs_this_install(b, found)),
             None,
@@ -612,9 +613,9 @@ def settings_unreadable(directory: Path) -> str | None:
     command's business (review of #254).
     """
     settings = directory / "settings.json"
-    # One read, "missing" split out. An exists() first raised PermissionError on
-    # 3.11/3.12 for a directory this user cannot enter, and answered False on 3.13,
-    # passing it as one with no hooks; either broke the promise above (review of #257).
+    # One read, "missing" split out. An exists() first raised PermissionError on 3.11 to
+    # 3.13 for a directory this user cannot enter, and answers False on 3.14, passing it
+    # as one with no hooks; either broke the promise above (review of #257).
     try:
         raw = settings.read_bytes()
     except (FileNotFoundError, NotADirectoryError):

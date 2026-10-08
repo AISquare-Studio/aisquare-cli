@@ -1140,9 +1140,9 @@ def test_an_unreadable_settings_file_is_reported_not_raised(
 def test_a_recorded_config_dir_this_user_cannot_enter_is_reported_not_raised(
     tool: Tool, world: World, runner: CliRunner, isolated_agent_home: Path
 ) -> None:
-    """An exists() before the read raised PermissionError on 3.11/3.12 for a directory this
-    user cannot enter (a backup left at mode 000), so the plan never printed; on 3.13 it
-    read as a directory with no hooks (review of #257)."""
+    """An exists() before the read raised PermissionError on 3.11 to 3.13 for a directory
+    this user cannot enter (a backup left at mode 000), so the plan never printed; on 3.14
+    it reads as a directory with no hooks (review of #257)."""
     if sys.platform == "win32" or not can_deny_reads():
         pytest.skip("needs a directory this user cannot enter")
     old = _hooked(isolated_agent_home / ".claude-old", tool.script)

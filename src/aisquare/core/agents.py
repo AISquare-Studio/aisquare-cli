@@ -782,7 +782,8 @@ def _starts(program: Path) -> bool:
     its Python stays executable and fails every run; ``env`` lines and binaries are
     trusted, as the launcher trusts them."""
     # os.path.isfile, here and below: a #! may name a path this user cannot reach, where
-    # Path.is_file raises on 3.11/3.12; the launcher's `[ -f ]` answers no.
+    # Path.is_file raises PermissionError on 3.11 to 3.13 (measured; 3.14 answers False);
+    # the launcher's `[ -f ]` answers no.
     if not (os.path.isfile(program) and os.access(program, os.X_OK)):
         return False
     try:
@@ -1240,8 +1241,9 @@ def classify_hook_binary(binary: HookBinary) -> tuple[str, str | None]:
     directory is asked its version, and it is asked ONCE per doctor run however
     many directories name it (see ``hook_site_health``'s cache).
     """
-    # os.path.exists: Path.exists raises on 3.11/3.12 for a program in a directory this
-    # user cannot enter, which cost `doctor` its report; such a program is as good as gone.
+    # os.path.exists: Path.exists raises PermissionError on 3.11 to 3.13 (3.14 answers
+    # False) for a program in a directory this user cannot enter, which cost `doctor` its
+    # report; such a program is as good as gone.
     if not os.path.exists(binary.program):
         return HOOK_BINARY_MISSING, None
     if _same_install(binary):

@@ -618,8 +618,8 @@ def test_a_script_whose_interpreter_this_user_cannot_reach_is_passed_over(
     machine: Machine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The doctor's search asked Path.is_file of a #! path in a directory this user cannot
-    enter, which raises on 3.11/3.12; the launcher's `[ -f ]` answers no, and so does the
-    doctor now (review of #257)."""
+    enter, which raises on 3.11 to 3.13; the launcher's `[ -f ]` answers no, and so does
+    the doctor now (review of #257)."""
     if not can_deny_reads():
         pytest.skip("needs a directory this user cannot enter")
     locked = machine.home / "someone-else"

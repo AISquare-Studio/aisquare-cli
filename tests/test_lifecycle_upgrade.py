@@ -1317,7 +1317,7 @@ def test_a_settings_json_this_user_may_not_write_is_left_not_promised(
 def test_a_hook_naming_a_program_this_user_cannot_reach_counts_as_gone(
     runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path
 ) -> None:
-    """Path.exists raised PermissionError on 3.11/3.12 for a hook's program in a directory
+    """Path.exists raised PermissionError on 3.11 to 3.13 for a hook's program in a directory
     this user cannot enter (another user's ~/.local/bin), so upgrade, --check and asq's
     Update ended in a traceback (review of #257). Such a program is gone, and its hooks
     fail every session: re-connecting is the fix."""
@@ -1342,8 +1342,8 @@ def test_a_hook_naming_a_program_this_user_cannot_reach_counts_as_gone(
 def test_a_recorded_config_dir_this_user_cannot_enter_is_left_with_its_reason(
     runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path
 ) -> None:
-    """exists() before the read raised PermissionError on 3.11/3.12, so `upgrade --check`
-    and asq's Update failed outright; on 3.13 the directory passed as one with no hooks
+    """exists() before the read raised PermissionError on 3.11 to 3.13, so `upgrade --check`
+    and asq's Update failed outright; on 3.14 the directory passes as one with no hooks
     (review of #257)."""
     if sys.platform == "win32" or not can_deny_reads():
         pytest.skip("needs a directory this user cannot enter")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from aisquare.services import remote_server
 from aisquare.services.remote_server import (
     READ_ONLY_REASON,
     WS_CLOSE_UNAUTHORIZED,
+    Device,
     Runtime,
     Sources,
     build_app,
@@ -192,6 +194,67 @@ def test_same_size_regenerations_in_a_tight_loop_are_all_seen(isolated_home: Pat
         shell.set_allow_write(not shell.allow_write)
         seen += server.allow_write == shell.allow_write
     assert seen == 50
+
+
+def _while_the_next_check_reads(
+    monkeypatch: pytest.MonkeyPatch, meanwhile: Callable[[Runtime], object]
+) -> None:
+    """Replay the race: the next check reads the file, and ``meanwhile`` runs before that
+    check compares, as another thread of this process can: it takes the lock first."""
+    read = Runtime._signature
+    raced = False
+
+    def overtaken(self: Runtime) -> tuple[bytes, bytes] | None:
+        nonlocal raced
+        signature = read(self)
+        if not raced:
+            raced = True
+            meanwhile(self)
+        return signature
+
+    monkeypatch.setattr(Runtime, "_signature", overtaken)
+
+
+def test_a_device_revoked_while_its_request_read_the_file_is_refused(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check read the file, the revoke here renamed its own write into place, and the
+    check, comparing after it, adopted the file the revoke had replaced: the revoked device
+    was let through (review of #243, round 2)."""
+    unlocked = runtime.unlock_device(PASSWORD, "Phone")
+    assert unlocked is not None
+    secret, device = unlocked
+    reads = runtime.reads
+    _while_the_next_check_reads(monkeypatch, lambda rt: rt.revoke_device(device.id))
+    assert runtime.device_for_cookie(secret) is None
+    assert runtime.reads == reads, "the file the revoke replaced was never adopted"
+
+
+def test_a_device_unlocked_while_a_check_read_the_file_stays_known(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unlocked: list[tuple[str, Device] | None] = []
+    _while_the_next_check_reads(
+        monkeypatch, lambda rt: unlocked.append(rt.unlock_device(PASSWORD, "Phone"))
+    )
+    known = runtime.device_ids()
+    assert unlocked[0] is not None
+    assert known == [unlocked[0][1].id], "the new device was dropped until the next check"
+
+
+def test_a_check_never_adopts_a_file_older_than_one_another_check_adopted(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    later = (datetime.now(UTC) + timedelta(days=1)).isoformat(timespec="seconds")
+    other_process_writes(lambda raw: raw.__setitem__("allow_write", True))
+
+    def newer_adopted(rt: Runtime) -> None:
+        other_process_writes(lambda raw: raw.__setitem__("auto_off_at", later))
+        assert rt.reload_if_changed() is True
+
+    _while_the_next_check_reads(monkeypatch, newer_adopted)
+    assert runtime.reload_if_changed() is False, "it read the older file"
+    assert (runtime._state.allow_write, runtime._state.auto_off_at) == (True, later)
 
 
 def test_a_half_written_file_keeps_the_state_in_hand(runtime: Runtime) -> None:

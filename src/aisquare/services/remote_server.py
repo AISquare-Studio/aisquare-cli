@@ -780,6 +780,10 @@ class Runtime:
         filesystem, so a regenerated passphrase of equal length went unnoticed.
         The file is a few hundred bytes; hashing it costs about what the stat did.
         """
+        self._disk_moves = 0
+        """How many times :attr:`_disk` has moved: every write this process renamed into
+        place, and every file it adopted. A reload that read the file while it moved adopts
+        nothing (:meth:`reload_if_changed`)."""
         self.reads = 0
         """How many times the file was parsed after startup — tests pin the short-circuit."""
         self._said_unrestricted = False
@@ -826,7 +830,9 @@ class Runtime:
         decided (:meth:`_write_state`) is published once ``_lock`` is let go,
         still under the file lock, so its fsyncs and rename hold up no request
         and no socket tick. Until the rename this process's digest of the file
-        stays the old one, so a reload meanwhile finds nothing new to adopt.
+        stays the old one, so a reload meanwhile finds nothing new to adopt; and
+        a reload that read the old file before the rename and compares after it
+        adopts nothing either (:attr:`_disk_moves`).
         """
         with self._writing:
             if self._file_lock_depth:
@@ -881,10 +887,21 @@ class Runtime:
         password also resets the failed-unlock budget); devices the file no longer
         lists are revoked here too (sockets closed with 4401); ``last_seen`` keeps
         the newer of memory and disk.
+
+        The file is read before ``_lock`` is taken, so a write this process renames
+        into place meanwhile can overtake the read. Compared after that write, the
+        file it replaced looked like another process's change: adopting it dropped
+        a device that had just unlocked, let a device just revoked make one more
+        request, and closed the sockets of every device the old file did not list.
+        So a read made while :attr:`_disk` moved, by a write here or by another
+        reload's adoption, is never adopted: what is in hand is that newer state,
+        and anything newer still on disk is read by the next check.
         """
+        with self._lock:
+            moves = self._disk_moves
         signature = self._signature()
         with self._lock:
-            if signature is None or signature[0] == self._disk:
+            if signature is None or signature[0] == self._disk or moves != self._disk_moves:
                 return False
             digest, data = signature
             try:
@@ -895,6 +912,7 @@ class Runtime:
                 return False
             self.reads += 1
             self._disk = digest
+            self._disk_moves += 1
             incoming = _State.from_json(raw)
             known = {device.id: device for device in self._state.devices}
             for device in incoming.devices:
@@ -1003,6 +1021,7 @@ class Runtime:
         pending.publish(body)
         with self._lock:
             self._disk = self._state_digest(body)
+            self._disk_moves += 1
         if not pending.restricted and not self._said_unrestricted:
             self._said_unrestricted = True  # once: the flush rewrites the file every 30 s
             log.warning(_UNRESTRICTED, self._state_path, "the password and the link token")

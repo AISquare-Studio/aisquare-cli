@@ -437,7 +437,11 @@ def test_a_recorded_dir_is_graded_even_when_the_ambient_dir_does_not_exist(
     assert check.status is CheckStatus.warn and str(recorded) in check.detail
 
 
-def test_nothing_on_disk_is_still_not_detected(isolated_agent_home: Path) -> None:
+def test_nothing_on_disk_is_still_not_detected(
+    isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Nothing anywhere: a `claude` on this machine's PATH would count as installed.
+    monkeypatch.setattr(agents, "claude_on_path", lambda: None)
     check = diagnostics._check_claude_code()
 
     assert check.status is CheckStatus.ok

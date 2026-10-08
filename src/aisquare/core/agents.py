@@ -791,7 +791,18 @@ def detected(spec: AgentSpec) -> bool:
     return spec.home.exists() or any(path.exists() for path in spec.context_files)
 
 
-def _to_info(spec: AgentSpec, registry: dict[str, Any]) -> AgentInfo:
+def claude_on_path() -> str | None:
+    """Where ``claude`` is on PATH, if it is (an indirection so tests can decide).
+
+    npm and Homebrew make Claude Code's config dir only when ``claude`` first runs,
+    so before then the binary is how detection, ``agents connect`` and the doctor know
+    it is installed (review of #257). ``claude`` is ``harness.DEFAULT_AGENT_BINARY``,
+    named here so this module stays light to import.
+    """
+    return shutil.which("claude")
+
+
+def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False) -> AgentInfo:
     existing = [path for path in spec.context_files if path.exists()]
     sites = [
         AgentHookSite(
@@ -805,11 +816,28 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any]) -> AgentInfo:
         )
         for directory in connected_dirs(spec.name, registry)
     ]
+    found = detected(spec)
+    connected = spec.name in _connected_set(registry)
+    if spec.name == "claude-code":
+        # The answer doctor and Welcome give, so `agents list`/`status` and `aisquare
+        # status` agree with them (review of #257). A directory whose hooks or plugin
+        # run aisquare is connected, whoever wrote them: told "not connected", a
+        # plugin user ran `agents connect` and got both routes.
+        directory = _hook_dir(spec)
+        if claude_code_connected(directory):
+            connected = True
+            if all(_dir_key(site.config_dir) != _dir_key(directory) for site in sites):
+                sites.append(AgentHookSite(config_dir=directory, hooks_installed=True))
+        # A Claude Code that has never started has no config dir yet; its binary on PATH
+        # says it is installed, for the directory a session from this shell reads (never
+        # a --config-dir, which a typo could name), as `agents connect` treats it.
+        if not found and ambient and claude_on_path() is not None:
+            found = True
     return AgentInfo(
         name=spec.name,
-        detected=detected(spec),
+        detected=found,
         config_paths=existing,
-        connected=spec.name in _connected_set(registry),
+        connected=connected,
         sites=sites,
     )
 
@@ -817,13 +845,13 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any]) -> AgentInfo:
 def detect_all() -> list[AgentInfo]:
     """Detection state for every agent aisquare knows about."""
     registry = _registry()
-    return [_to_info(spec, registry) for spec in _specs()]
+    return [_to_info(spec, registry, ambient=True) for spec in _specs()]
 
 
 def detect(name: str, config_dir: Path | None = None) -> AgentInfo | None:
     """Detection state for one agent, or ``None`` if the name is unknown."""
     spec = _spec(name, config_dir)
-    return _to_info(spec, _registry()) if spec is not None else None
+    return _to_info(spec, _registry(), ambient=config_dir is None) if spec is not None else None
 
 
 def context_files(name: str, config_dir: Path | None = None) -> list[Path]:

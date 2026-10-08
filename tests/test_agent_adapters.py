@@ -292,7 +292,7 @@ def test_an_absent_unsupported_agent_gets_the_same_answer(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Saying "not installed" would send someone to install Codex, still unable to connect it."""
-    monkeypatch.setattr(agents_service, "_claude_on_path", lambda: None)  # absent: not on PATH
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: None)  # absent: not on PATH
     refused = runner.invoke(app, ["agents", "connect", "codex"])
     absent = runner.invoke(app, ["agents", "connect", "claude-code"])
 
@@ -348,7 +348,7 @@ def test_connect_names_a_context_file_it_cannot_read(
 ) -> None:
     """A CLAUDE.md saved as Latin-1 was reported as ``not_installed``: an installed Claude
     Code, and asq's Connect button saying it was not, with no file named."""
-    monkeypatch.setattr(agents_service, "_claude_on_path", lambda: None)  # for "absent"
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: None)  # for "absent"
     claude_md = claude_home / "CLAUDE.md"
     claude_md.write_bytes("# Prefs\ncaf\xe9\n".encode("latin-1"))
 
@@ -369,6 +369,28 @@ def test_connect_names_a_context_file_it_cannot_read(
     assert json.loads(absent.stdout)["error"] == "not_installed", "control: absent still says so"
 
 
+def test_a_claude_code_on_path_that_never_started_is_detected_and_offered_connect(
+    runner: CliRunner, isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`agents connect` makes the missing ~/.claude of a Claude Code on PATH (above), but
+    detection still keyed on the directory: doctor gave a green "not detected" row with no
+    Connect, and `agents status` said detected: false, while Welcome offered Connect
+    (review of #257)."""
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    row = diagnostics._check_claude_code()
+    listed = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
+    named = agent_core.detect("claude-code", isolated_agent_home / ".claude-typo")
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: None)
+    nowhere = diagnostics._check_claude_code()
+
+    assert row.status is CheckStatus.warn, row
+    assert [fix.argv[:3] for fix in fix_commands([row])] == [("agents", "connect", "claude-code")]
+    assert listed[0]["detected"] is True, listed
+    assert named is not None and not named.detected, "a --config-dir needs its directory"
+    assert nowhere.status is CheckStatus.ok, "control: no claude anywhere is not detected"
+    assert not (isolated_agent_home / ".claude").exists(), "asking makes nothing"
+
+
 def test_a_claude_code_on_path_that_never_started_is_connected_not_refused(
     runner: CliRunner, isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -377,10 +399,10 @@ def test_a_claude_code_on_path_that_never_started_is_connected_not_refused(
     claude-code` refused; only Welcome's own Connect made it (review of #257)."""
     claude = isolated_agent_home / ".claude"
     typo = isolated_agent_home / ".claud"
-    monkeypatch.setattr(agents_service, "_claude_on_path", lambda: None)
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: None)
     absent = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
     made_without = claude.exists()
-    monkeypatch.setattr(agents_service, "_claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
     named = runner.invoke(
         app, ["--json", "agents", "connect", "claude-code", "--config-dir", str(typo)]
     )
@@ -788,8 +810,10 @@ def test_the_agent_rows_survive_a_damaged_store(
     runner: CliRunner,
     isolated_agent_home: Path,
     damaged_store: str,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (isolated_agent_home / ".codex").mkdir(parents=True)
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: None)  # no Claude Code anywhere
 
     result = runner.invoke(app, ["--json", "doctor"])
 

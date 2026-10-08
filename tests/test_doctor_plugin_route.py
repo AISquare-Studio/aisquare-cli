@@ -460,6 +460,27 @@ def test_a_hook_program_this_user_cannot_reach_costs_the_doctor_nothing(
     assert f"{program}, which does not exist" in rows["claude-code"]["detail"], rows
 
 
+@posix_route
+def test_a_plugin_only_install_reads_as_connected_everywhere(
+    runner: CliRunner, claude: Path
+) -> None:
+    """For Claude Code, `agents list`/`status` and `aisquare status` read only agents.json,
+    which the plugin route never writes: "connected: none" beside a doctor that said
+    connected, and a user told so ran `agents connect` and got both routes
+    (review of #257)."""
+    before = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
+    _install_plugin(claude)
+    listed = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
+    summary = json.loads(runner.invoke(app, ["--json", "status"]).stdout)
+    row = diagnostics._check_claude_code()
+
+    assert before[0]["connected"] is False, "control: nothing runs aisquare yet"
+    assert listed[0]["connected"] is True, listed
+    assert listed[0]["sites"] == [{"config_dir": str(claude), "hooks_installed": True}], listed
+    assert "claude-code" in summary["agents_connected"], summary
+    assert row.status is CheckStatus.ok, "doctor says the same"
+
+
 def test_native_windows_reads_only_the_settings_json_route(
     claude: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

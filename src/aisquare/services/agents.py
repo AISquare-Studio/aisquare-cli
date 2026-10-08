@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 from aisquare.core import agents as agent_core
-from aisquare.core import harness
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
 from aisquare.models import AgentConnection, AgentInfo
@@ -169,11 +167,6 @@ def _install_hooks(name: str, config_dir: Path | None, path: Path | None) -> boo
         raise AgentFileUnreadableError(f"can't write {path}: {exc.strerror or exc}") from exc
 
 
-def _claude_on_path() -> str | None:
-    """Where ``claude`` is on PATH, if it is (an indirection so tests can decide)."""
-    return shutil.which(harness.DEFAULT_AGENT_BINARY)
-
-
 def _make_first_run_dir(name: str, config_dir: Path | None) -> None:
     """Make the config dir an installed Claude Code that has never started has not made.
 
@@ -185,7 +178,7 @@ def _make_first_run_dir(name: str, config_dir: Path | None) -> None:
     made, as that first start would make it. A ``--config-dir`` is never made: a
     typo must not get hooks.
     """
-    if name != "claude-code" or config_dir is not None or _claude_on_path() is None:
+    if name != "claude-code" or config_dir is not None or agent_core.claude_on_path() is None:
         return
     where = agent_core.ambient_hook_dir(name)
     if where is None or where.exists():

@@ -1508,6 +1508,27 @@ async function keysInOrder() {
   await settle();
   lost.acceptSockets();
   await settle();
+  // A key that waited its turn 10 s and then was lost: its retry window counts from its
+  // tap, not from when it could go, so 16 s after the tap it is not sent again.
+  const turned = [];
+  const slowFirst = deferred();
+  const queued = await agentView({
+    "POST api/send-keys": (body) => {
+      turned.push(body.keys[0]);
+      if (turned.length === 1) return slowFirst.promise;
+      return turned.length === 2 ? "network" : { status: 200, json: { sent: true } };
+    },
+  });
+  click(buttonNamed(queued.main(), "↓"));
+  click(buttonNamed(queued.main(), "⏎"));
+  await settle();
+  queued.run("Date.now = ((then) => () => then + 10000)(Date.now());"); // ↓ answered 10 s on
+  slowFirst.settle({ status: 200, json: { sent: true } });
+  await settle();
+  queued.run("Date.now = ((then) => () => then + 6000)(Date.now());"); // 16 s since ⏎ was tapped
+  queued.acceptSockets();
+  await settle();
+  const lostAfterItsTurn = { sent: turned, toast: queued.toast() };
   const answered = deferred();
   const card = bootPage("#/", signedIn({
     "GET api/needs": () => ({ status: 200, json: { items: [ITEM] } }),
@@ -1532,14 +1553,16 @@ async function keysInOrder() {
     refused: Object.assign(behind, { after: refused.calls.map((call) => call.key) }),
     waitedTooLong,
     lost: reached,
+    lostAfterItsTurn,
     afterAnswer: { whileAnswering, after: card.sent("api/send-keys").length },
   };
 }
 
 /* The pad's guards, which only the page keeps: ^C and ^D each ask first; a second Esc within
- * 1.5 s asks first (two open Claude Code's Rewind), and one 2 s after the last does not; a
- * second ^C the machine refuses double_press goes again, with confirm_exit, only once the
- * human says so. After each step: the sheet on screen and how many keys were sent. */
+ * 1.5 s asks first (two open Claude Code's Rewind), at once or 1.4 s after the last, and one
+ * 2 s after the last does not; a second ^C the machine refuses double_press goes again, with
+ * confirm_exit, only once the human says so. After each step: the sheet on screen and how
+ * many keys were sent. */
 async function padConfirms() {
   let ctrlC = 0;
   const page = await agentView({
@@ -1566,6 +1589,10 @@ async function padConfirms() {
   await act("pad", "Esc");
   await act("pad", "Esc");
   await act("sheet", "Send Esc");
+  await act("pad", "Esc");
+  page.run("Date.now = ((then) => () => then + 1400)(Date.now());");
+  await act("pad", "Esc");
+  await act("sheet", "Close");
   return { steps, keys: sent().map((body) => (body.confirm_exit === true ? body.keys.concat("confirm_exit") : body.keys)) };
 }
 

@@ -1463,6 +1463,9 @@ def test_keys_reach_an_agent_one_at_a_time_in_the_order_they_were_tapped(
     assert waited["sent"] == ["Down"] and waited["toast"].startswith("Not sent — ")
     assert waited["marked"] == []
     assert keys["lost"] == ["Down", "Down", "Enter"]
+    queued = keys["lostAfterItsTurn"]  # tapped 16 s ago, sent 6 s ago, its request lost
+    assert queued["sent"] == ["Down", "Enter"], "its retry counts from the tap, not the send"
+    assert queued["toast"].startswith("Not sent again — the phone was away too long")
     assert keys["afterAnswer"] == {"whileAnswering": 0, "after": 1}
 
 
@@ -1486,8 +1489,11 @@ def test_the_pads_exit_and_rewind_guards_each_ask_before_a_key_goes(
         ["Esc", None, 5],  # two seconds after the last
         ["Esc", "Press Esc again?", 5],
         ["Send Esc", None, 6],
+        ["Esc", None, 7],  # the confirmed one starts no new pair
+        ["Esc", "Press Esc again?", 7],  # 1.4 s after the last: still within 1.5 s
+        ["Close", None, 7],
     ]
-    escapes = [["Escape"]] * 3
+    escapes = [["Escape"]] * 4
     assert pad["keys"] == [["C-c"], ["C-c"], ["C-c", "confirm_exit"], *escapes]
 
 

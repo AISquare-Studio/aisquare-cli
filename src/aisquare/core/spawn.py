@@ -90,7 +90,7 @@ narrowing their environment would be change without a reason:
     ``aisquare upgrade`` replacing its own install. A package manager, not a
     model process.
   * ``services/install_route.py::run_captured`` — the NEW install after an
-    upgrade, asked ``--version`` and ``agents connect``. Our own CLI, like
+    upgrade, asked ``--version`` and ``agents refresh-hooks``. Our own CLI, like
     ``core/selfcli.py::run`` below.
   * ``services/install_route.py::exec_replace`` — ``uv tool uninstall``, the
     last step of ``aisquare uninstall``, which this process becomes.
@@ -275,8 +275,8 @@ SEAMS: dict[str, Seam] = {
     ),
     "aisquare/services/install_route.py::run_captured": Seam(
         EXCLUDED,
-        "the upgraded install asked `--version` and `agents connect`: our own CLI as a "
-        "subprocess, no model process; not stripped, like `core/selfcli.py::run`",
+        "the upgraded install asked `--version` and `agents refresh-hooks`: our own CLI as "
+        "a subprocess, no model process; not stripped, like `core/selfcli.py::run`",
     ),
     "aisquare/services/install_route.py::exec_replace": Seam(
         EXCLUDED,

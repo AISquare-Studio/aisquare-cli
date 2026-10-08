@@ -354,6 +354,19 @@ def test_the_fixture_closes_every_process_seam_this_module_registers() -> None:
     assert registered <= set(installer_seams.SEAMS), sorted(registered - set(installer_seams.SEAMS))
 
 
+def test_the_seam_registry_names_the_command_the_new_install_runs() -> None:
+    """The registry is where someone learns what the seam starts. It said ``agents
+    connect`` after #251's review moved the refresh off it (review of #257)."""
+    runs = " ".join(lifecycle.REFRESH_HOOKS[:2])
+    ruling = spawn.SEAMS["aisquare/services/install_route.py::run_captured"].reason
+    listed = (spawn.__doc__ or "").split("``services/install_route.py::run_captured``")[1]
+    listed = listed.split("  * ")[0]
+
+    assert runs == "agents refresh-hooks"
+    assert f"`{runs}`" in ruling and "agents connect" not in ruling, ruling
+    assert f"``{runs}``" in listed and "agents connect" not in listed, listed
+
+
 # --- the uv receipt, restated ----------------------------------------------------------
 
 

@@ -544,10 +544,10 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   on its new session, and no exit is announced for it either. Should the
   replacement not start, the agent stays stopped, its task goes back to the
   pool, and the board says `agent_exited` after all, as *exited (0): its
-  replacement did not start*. An agent whose
-  role, task (done or dropped) or binary would refuse the replacement is
-  refused before it is stopped, and a task that closes while it is being
-  stopped is left off the replacement.
+  replacement did not start* (*exited (?)* when the stop had to kill it). An
+  agent whose role, task (done or dropped) or binary would refuse the
+  replacement is refused before it is stopped, and a task that closes while
+  it is being stopped is left off the replacement.
   With `on_limit = "switch"` (*on a usage limit* on the Settings tab) the fleet
   does this by itself when the limit lifts more than
   `wait_if_reset_within_minutes` away, in a worker detached from the agent's
@@ -1209,7 +1209,8 @@ running agent is handed over the way `fleet switch` hands one over: its task
 stays claimed for the replacement, and the board says `restarted`, not
 `agent_exited`, so the manager is not woken to staff that task again. Should the
 replacement not start, the task goes back to the pool and the board says
-`agent_exited` after all, as *exited (0): its replacement did not start*. A resumed
+`agent_exited` after all, as *exited (0): its replacement did not start*
+(*exited (?)* when the stop had to kill it). A resumed
 agent is typed one line telling it to carry on, as `fleet switch` types it, so
 it does not sit at the idle prompt `claude --resume` opens at. An agent a
 hand-over is already moving (a `fleet switch`, by hand or on a usage limit, or

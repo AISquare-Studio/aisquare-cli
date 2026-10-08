@@ -540,24 +540,30 @@ def test_it_runs_in_place_of_a_hook_whose_script_cannot_start(machine: Machine) 
 
 
 @posix_only
-def test_an_aisquare_that_cannot_start_is_passed_over_for_uvx(machine: Machine) -> None:
-    """The first aisquare on PATH (uv's ~/.local/bin link) can be a script that cannot
-    start; picked, it failed every event instead of reaching the uvx fallback."""
-    _cannot_start(machine.bin / "aisquare")
+@pytest.mark.parametrize("good_in_local_bin", [False, True], ids=["to-uvx", "to-local-bin"])
+def test_an_aisquare_that_cannot_start_is_passed_over(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, good_in_local_bin: bool
+) -> None:
+    """The first aisquare on PATH can be a script that cannot start; picked, it failed
+    every event instead of reaching ~/.local/bin or the uvx fallback. The doctor's search
+    (``agent_core.launcher_finds``) passes it over the same way, or the row names a
+    program the plugin never runs (review of #257)."""
+    dead = _cannot_start(machine.bin / "aisquare")
+    local = machine.home / ".local" / "bin"
+    good = machine.fake("aisquare", where=local) if good_in_local_bin else None
     machine.fake("uvx")
+    monkeypatch.setenv("PATH", os.pathsep.join([str(machine.bin), str(machine.tools)]))
+    monkeypatch.setattr(agent_core, "_home", lambda: machine.home)
 
     result = machine.run("stop")
+    doctor_sees = agent_core.plugin_runner()
 
     assert result.returncode == 0
-    assert machine.ran("uvx") == [
-        "--python",
-        ">=3.11,<3.14",
-        "--from",
-        f"aisquare-cli=={_release()}",
-        "aisquare",
-        "hook",
-        "stop",
-    ]
+    expected_uvx = ["--python", ">=3.11,<3.14", "--from", f"aisquare-cli=={_release()}"]
+    expected_uvx += ["aisquare", "hook", "stop"]
+    ran = (machine.ran("aisquare"), machine.ran("uvx"))
+    assert ran == ((["hook", "stop"], None) if good else (None, expected_uvx)), ran
+    assert doctor_sees == good and doctor_sees != dead, doctor_sees
 
 
 @posix_only

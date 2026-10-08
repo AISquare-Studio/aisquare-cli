@@ -636,21 +636,43 @@ def claude_plugin(config_dir: Path | None = None) -> ClaudePlugin | None:
     return ClaudePlugin(config_dir=directory, version=version)
 
 
+def _starts(program: Path) -> bool:
+    """The launcher's ``_starts``: an executable file whose absolute ``#!`` interpreter,
+    when it has one, is an executable file too. A console script whose environment lost
+    its Python stays executable and fails every run; ``env`` lines and binaries are
+    trusted, as the launcher trusts them."""
+    if not (program.is_file() and os.access(program, os.X_OK)):
+        return False
+    try:
+        with program.open("rb") as handle:
+            first = handle.readline(4096)
+    except OSError:
+        return True  # unreadable: trusted, as the launcher's failed `read` is
+    if not first.startswith(b"#!"):
+        return True
+    line = first[2:].rstrip(b"\n").lstrip(b" \t")
+    interpreter = Path(re.split(rb"[ \t]", line, maxsplit=1)[0].decode(errors="replace"))
+    if not interpreter.is_absolute():
+        return True
+    return interpreter.is_file() and os.access(interpreter, os.X_OK)
+
+
 def launcher_finds(name: str) -> Path | None:
     """The program ``name`` where the plugin's launcher looks for it, as THIS process sees.
 
     The launcher's ``_find`` (``plugins/claude-code/scripts/aisquare-hook``): on PATH,
-    then ``~/.local/bin`` and ``~/.cargo/bin``, for ``aisquare`` and for ``uvx`` alike.
-    One search here for both, so the doctor's answer cannot drift from the launcher's
-    (review of #257). A Claude Code started from a desktop app may see another PATH;
-    this is the best a doctor run can see.
+    then ``~/.local/bin`` and ``~/.cargo/bin``, for ``aisquare`` and for ``uvx`` alike,
+    passing over one that cannot start (:func:`_starts`). One search here for both, so
+    the doctor's answer cannot drift from the launcher's (review of #257). A Claude Code
+    started from a desktop app may see another PATH; this is the best a doctor run can
+    see.
     """
     found = shutil.which(name)
-    if found:
+    if found and _starts(Path(found)):
         return Path(found)
     for candidate in (_home() / ".local" / "bin", _home() / ".cargo" / "bin"):
         program = candidate / name
-        if program.is_file() and os.access(program, os.X_OK):
+        if _starts(program):
             return program
     return None
 

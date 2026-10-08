@@ -2129,6 +2129,20 @@ async function screensListed() {
   };
 }
 
+/* The Tasks tab of a board whose tasks were all dropped, and of one with a dropped task among
+ * the rest: what it shows under its tabs. */
+async function droppedTasks() {
+  const shown = async (json) => {
+    const page = bootPage("#/p/" + PROJECT + "/tasks", signedIn({ "GET api/tasks": () => ({ status: 200, json }) }));
+    await settle();
+    return textsOf(page.main().querySelectorAll("div.data")[0].childNodes);
+  };
+  return {
+    all: await shown([{ title: "migrate the db", status: "dropped" }, { title: "old spike", status: "dropped" }]),
+    some: await shown([{ title: "ship it", status: "done" }, { title: "old spike", status: "dropped" }]),
+  };
+}
+
 /* Notifications where the page offers them (SPEC §6.3): the feed of a device the machine
  * sends nothing to yet; Settings with them on, and Send test answered not_subscribed; and
  * Settings in Safari on an iPhone, the page not on its Home Screen. */
@@ -2350,6 +2364,7 @@ async function main() {
     unlockWait: await unlockAnswered(429, { error: "rate_limited", message: "too many tries" }),
     statusStrip: await statusStrip(),
     screensListed: await screensListed(),
+    droppedTasks: await droppedTasks(),
     pushScreens: await pushScreens(),
     writeBodies: await writeBodies(),
     padOrKeyboard: await padOrKeyboard(),

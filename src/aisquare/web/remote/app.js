@@ -2197,9 +2197,12 @@ VIEWS.project = (route, main) => {
   return view;
 };
 
+/* A dropped task has no group. Counted as one that shows, a board of dropped tasks alone drew
+ * nothing at all; now it says it has none to show, and how many it leaves out. */
 function drawTasks(body, rows) {
   const tasks = rows.filter((task) => task && typeof task === "object");
-  if (!tasks.length) body.appendChild(el("p", "empty", "No tasks on this board."));
+  const dropped = tasks.filter((task) => task.status === "dropped").length;
+  if (!tasks.some((task) => TASK_GROUPS.indexOf(task.status) >= 0)) body.appendChild(el("p", "empty", "No tasks on this board."));
   for (const status of TASK_GROUPS) {
     const group = tasks.filter((task) => task.status === status);
     if (!group.length) continue;
@@ -2212,6 +2215,7 @@ function drawTasks(body, rows) {
       body.appendChild(line);
     }
   }
+  if (dropped) body.appendChild(el("p", "muted", "Not shown: " + dropped + " dropped."));
 }
 
 function drawMemory(body, rows) {

@@ -1847,6 +1847,18 @@ def test_each_listing_screen_shows_what_the_spec_lists(boot_report: dict[str, An
     assert screens["card"].splitlines()[:2] == ["Explainability: on", "model: claude-x"]
 
 
+def test_a_board_whose_tasks_were_all_dropped_says_so_instead_of_drawing_nothing(
+    boot_report: dict[str, Any],
+) -> None:
+    """A dropped task has no group on the Tasks tab (SPEC §6.3 groups doing, review, blocked,
+    todo and done), yet the empty-state check counted it: a board of dropped tasks alone drew
+    nothing under its tabs, while ``asq task list`` listed them. The tab says it has none to
+    show, and how many it leaves out."""
+    tasks = boot_report["droppedTasks"]
+    assert tasks["all"] == ["No tasks on this board.", "Not shown: 2 dropped."]
+    assert tasks["some"] == ["done · 1", "ship it", "Not shown: 1 dropped."]
+
+
 def test_notifications_say_where_they_stand_wherever_the_page_offers_them(
     boot_report: dict[str, Any],
 ) -> None:

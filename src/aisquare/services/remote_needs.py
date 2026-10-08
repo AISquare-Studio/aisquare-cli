@@ -1389,6 +1389,17 @@ def _needs_task_closed(sources: NeedsSources, task_id: str) -> bool:
     return status in CLOSED_STATUSES
 
 
+def _needs_handover_failed(event: TeamEvent | None) -> bool:
+    """Whether ``event`` is the exit a hand-over announced once its replacement did not start."""
+    from aisquare.services import fleet as fleet_service
+
+    return (
+        event is not None
+        and event.kind == "agent_exited"
+        and event.text.endswith(fleet_service.HANDOVER_FAILED)
+    )
+
+
 def _needs_manager_down(
     statuses: Sequence[FleetAgentStatus],
     rows: Sequence[FleetAgent],
@@ -1403,15 +1414,19 @@ def _needs_manager_down(
     reported only while another agent still works, waits on a prompt or is
     limited, and the manager's last word on the board was not its ``result``:
     a manager stopped after reporting, or exiting cleanly, finished its job.
-    ``newest_of`` is a session's newest board event, however long ago.
+    Not a clean exit a switch or a restart made, though, and then could not
+    start the replacement for: the hand-over's own ``/exit`` is status 0, and
+    the exit it announces says so (``fleet.HANDOVER_FAILED``). That one is
+    reported as a stop is. ``newest_of`` is a session's newest board event,
+    however long ago.
     """
     managers = [row for row in rows if _needs_is_manager(row.role)]
     if not managers or any(row.ended_at is None for row in managers):
         return []
     manager = max(managers, key=lambda row: row.created_at)
-    if manager.ended_at is None or manager.exit_status == 0:
+    if manager.ended_at is None:
         return []
-    if manager.exit_status is not None:
+    if manager.exit_status not in (0, None):
         reason = f"the manager exited unexpectedly (exit {manager.exit_status})"
     else:
         busy = [
@@ -1424,6 +1439,8 @@ def _needs_manager_down(
         if not busy:
             return []
         last = newest_of(manager.session_id) if manager.session_id else None
+        if manager.exit_status == 0 and not _needs_handover_failed(last):
+            return []
         if last is not None and last.kind == "result":
             return []
         count = len(busy)

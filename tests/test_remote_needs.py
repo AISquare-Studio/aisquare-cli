@@ -642,6 +642,36 @@ def test_a_stopped_manager_whose_work_is_done_is_not_down() -> None:
     assert _scan(Fleet(ended=[clean], agents=working)) == []
 
 
+def test_a_manager_whose_hand_over_never_started_its_replacement_is_down() -> None:
+    """A switch or a restart stops the manager with its own ``/exit``, status 0, and then
+    starts the replacement. When that start fails nothing replaces it, and "manager exited
+    (0)" read as a manager whose job was done: no card while the crew worked on unmanaged.
+    The exit announced for a hand-over that failed says so."""
+    from aisquare.services.fleet import HANDOVER_FAILED
+
+    manager = _row("manager", role="manager", ended=NOW - timedelta(minutes=5), exit_status=0)
+    managing = _session(manager, ended=NOW - timedelta(minutes=5))
+    coder = _row()
+    failed = _event(7, "agent_exited", f"manager exited (0): {HANDOVER_FAILED}", session=managing)
+    fleet = Fleet(
+        ended=[manager],
+        agents=[_status(coder, "working", _session(coder))],
+        sessions=[managing],
+        events=[failed],
+    )
+    down = _one(_scan(fleet))
+    assert (down.kind, down.reason) == (
+        "manager_down",
+        "the manager stopped while 1 agent still works",
+    )
+    assert down.detail == {"exit_status": 0, "task_id": None}
+    fleet.events = [_event(7, "agent_exited", "manager exited (0)", session=managing)]
+    assert _scan(fleet) == [], "a stop that meant it: its job was done"
+    fleet.events = [failed]
+    fleet.agents = [_status(coder, "waiting", _session(coder, state="waiting"))]
+    assert _scan(fleet) == [], "and with nobody at work, nothing needs a manager"
+
+
 def test_a_new_manager_ends_manager_down() -> None:
     old = _row("manager", role="manager", ended=NOW - timedelta(minutes=5), exit_status=3)
     new = _row("manager", role="manager", row_id="agt_new", created=NOW - timedelta(minutes=1))

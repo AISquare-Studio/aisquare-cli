@@ -80,20 +80,8 @@ def disconnect(name: AgentName, config_dir: ConfigDir = None) -> None:
         removed = agents_service.disconnect(name, config_dir)
     except KeyError:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
-    plugin = agents_service.claude_plugin(config_dir) if name == "claude-code" else None
-    if not removed and plugin is None:
-        stderr_console().print(
-            "note: no aisquare hooks found in that config dir — if you connected "
-            "with --config-dir, disconnect with the same one"
-        )
-    if plugin is not None:
-        # The plugin's hooks stand down only while settings.json runs them, so
-        # removing these hands every event to the plugin rather than stopping it.
-        stderr_console().print(
-            f"note: the aisquare plugin is still enabled in {plugin.config_dir}, so aisquare "
-            f"keeps running there — to stop it: "
-            f"{agents_service.claude_plugin_command('disable', plugin.config_dir)}"
-        )
+    for note in agents_service.disconnect_notes(name, config_dir, removed=removed):
+        stderr_console().print(f"note: {note}")
     emit_disconnected(name)
 
 

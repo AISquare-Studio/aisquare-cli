@@ -483,6 +483,38 @@ def test_disconnect_says_the_plugin_keeps_aisquare_running(runner: CliRunner, cl
     assert "no aisquare hooks found" not in result.stderr
 
 
+@posix_route  # on win32 neither mentions the plugin: test_on_native_windows_connect_and_...
+@pytest.mark.parametrize("scope", ["project", "local"])
+def test_disconnect_names_a_repository_plugin_that_keeps_aisquare_running(
+    runner: CliRunner, claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str
+) -> None:
+    """In a repository whose project- or local-scope plugin runs aisquare, disconnect said
+    only "✓ disconnected" while `agents status` and the doctor there still said connected:
+    with the hooks gone, the plugin runs every event there (review of #257). It names the
+    plugin and the scoped command that removes it, and drops the "--config-dir" guess."""
+    _connect(runner)
+    repo = _repo_plugin(claude, tmp_path / "repo", scope)
+    monkeypatch.chdir(repo)
+
+    hooked = runner.invoke(app, ["agents", "disconnect", "claude-code"])
+    plugin_only = runner.invoke(app, ["agents", "disconnect", "claude-code"])
+    status = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
+    name = "settings.json" if scope == "project" else "settings.local.json"
+    (repo / ".claude" / name).write_text("{}", encoding="utf-8")  # no longer enabled there
+    gone = runner.invoke(app, ["agents", "disconnect", "claude-code"])
+
+    remove = agent_core.claude_plugin_command("uninstall", claude, scope=scope, project=repo)
+    assert remove.endswith(f"--scope {scope}"), remove
+    for result in (hooked, plugin_only):
+        assert result.exit_code == 0, result.output
+        assert f"still enabled in {repo} ({scope} scope)" in result.stderr, result.stderr
+        assert f"to stop it: {remove}" in result.stderr, result.stderr
+        assert "no aisquare hooks found" not in result.stderr, result.stderr
+    assert status[0]["connected"] is True, "what the note explains: the plugin runs there"
+    assert gone.exit_code == 0 and "still enabled" not in gone.stderr, gone.stderr
+    assert "no aisquare hooks found" in gone.stderr, "control: nothing runs, nothing removed"
+
+
 def test_disconnect_without_the_plugin_says_nothing_about_it(
     runner: CliRunner, claude: Path
 ) -> None:

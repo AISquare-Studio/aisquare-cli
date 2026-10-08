@@ -119,6 +119,40 @@ def plugin_beside_note(name: str, config_dir: Path | None = None) -> str | None:
     )
 
 
+def disconnect_notes(name: str, config_dir: Path | None = None, *, removed: bool) -> list[str]:
+    """What `agents disconnect` says beside its ✓, given whether it ``removed`` any hooks.
+
+    Each aisquare plugin that still runs aisquare for ``config_dir``, with the command that
+    stops it: the plugin's hooks stand down only while settings.json runs aisquare's, so
+    removing those hands every event to the plugin. At user scope it runs in every
+    session; at project or local scope, in its repository's, where `agents status` and
+    the doctor still said connected after a bare "✓ disconnected" (review of #257). Where
+    nothing was removed and no plugin runs, the hooks may be in another config dir.
+    """
+    notes: list[str] = []
+    user = claude_plugin(config_dir) if name == "claude-code" else None
+    if user is not None:
+        notes.append(
+            f"the aisquare plugin is still enabled in {user.config_dir}, so aisquare keeps "
+            f"running there — to stop it: {claude_plugin_command('disable', user.config_dir)}"
+        )
+    if name == "claude-code" and agent_core.plugin_route_supported():
+        notes.extend(
+            f"the aisquare plugin is still enabled in {plugin.project} ({plugin.scope} scope), "
+            "so aisquare keeps running in sessions started there — to stop it: "
+            + agent_core.claude_plugin_command(
+                "uninstall", plugin.config_dir, scope=plugin.scope, project=plugin.project
+            )
+            for plugin in agent_core.claude_repo_plugins(config_dir)
+        )
+    if not removed and not notes:
+        notes.append(
+            "no aisquare hooks found in that config dir — if you connected with "
+            "--config-dir, disconnect with the same one"
+        )
+    return notes
+
+
 class UnsupportedAgentError(ValueError):
     """An agent aisquare can detect but has no hooks for yet (Codex, Cursor).
 

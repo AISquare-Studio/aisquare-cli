@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -38,7 +39,7 @@ from aisquare.models import CheckStatus, DoctorCheck
 from aisquare.services import agents as agents_service
 from aisquare.services import diagnostics
 from aisquare.services.onboarding import fix_commands
-from tests.fsperms import can_deny_reads
+from tests.fsperms import can_deny_reads, can_symlink
 
 _CONNECT = ("agents", "connect", "claude-code")
 
@@ -479,6 +480,34 @@ def test_a_plugin_only_install_reads_as_connected_everywhere(
     assert listed[0]["sites"] == [{"config_dir": str(claude), "hooks_installed": True}], listed
     assert "claude-code" in summary["agents_connected"], summary
     assert row.status is CheckStatus.ok, "doctor says the same"
+
+
+@posix_route
+def test_the_plugins_runner_linked_to_this_install_is_never_probed(
+    claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On the one-liner's layout the plugin runs ~/.local/bin/aisquare, a link to this
+    install's script. Compared unresolved, it was run for its version on every doctor
+    run, only to conclude "which runs this install" (review of #257)."""
+    if not can_symlink():
+        pytest.skip("this machine cannot create symlinks")
+    link = tmp_path / "local-bin" / "aisquare"
+    link.parent.mkdir()
+    link.symlink_to(agent_core.current_install())
+    probed: list[list[str]] = []
+
+    def probe(argv: Sequence[str], *, timeout: float = 10.0) -> str | None:
+        probed.append(list(argv))
+        return None
+
+    monkeypatch.setattr(agent_core, "plugin_runner", lambda: link)
+    monkeypatch.setattr(agent_core, "hook_binary_version", probe)
+    _install_plugin(claude)
+
+    check = diagnostics._check_claude_code()
+
+    assert check.status is CheckStatus.ok and "which runs this install" in check.detail, check
+    assert probed == [], "no process was started to learn it is this install"
 
 
 def test_native_windows_reads_only_the_settings_json_route(

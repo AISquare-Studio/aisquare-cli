@@ -1030,10 +1030,17 @@ def _same_install(binary: HookBinary) -> bool:
     venv beside the symlink, not the target. The file is compared RESOLVED, so
     ``python`` and ``python3`` in one venv — links to the same interpreter — are
     one install. Anything else is asked its version, once per doctor run.
+
+    A console script reached through a link is the exception that resolving gets
+    right: uv's ``~/.local/bin/aisquare`` IS this install's script when it resolves
+    to it, the same file and so the same interpreter and package. Compared
+    unresolved, the doctor ran it for its version on every run (review of #257).
     """
     program = binary.program
     this = Path(sys.executable) if binary.module_form else current_install()
     if program == this:
+        return True
+    if not binary.module_form and os.path.realpath(program) == os.path.realpath(this):
         return True
     if program.parent != this.parent:
         return False

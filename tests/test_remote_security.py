@@ -1296,6 +1296,7 @@ class FakeTeam:
 
     def __init__(self) -> None:
         self.notes: list[dict[str, Any]] = []
+        self.finished: list[tuple[str, str | None]] = []
 
     def add_note(self, text: str, **kwargs: Any) -> Any:
         self.notes.append({"text": text, **kwargs})
@@ -1306,6 +1307,7 @@ class FakeTeam:
         return SimpleNamespace(id=ref, model_dump=lambda mode: {"id": ref})
 
     def finish_task(self, ref: str, *, note: str | None, session_ref: str | None) -> Any:
+        self.finished.append((ref, note))
         return SimpleNamespace(id=ref, model_dump=lambda mode: {"id": ref})
 
 
@@ -1347,6 +1349,77 @@ def test_a_note_longer_than_the_cap_is_413(team: FakeTeam) -> None:
     assert (refused.value.status, refused.value.error) == (413, "too_large")
     live_writes().handlers["note"]({"text": "x" * NOTE_TEXT_MAX})
     assert len(team.notes) == 1
+
+
+@pytest.mark.parametrize(
+    ("text", "char"),
+    [
+        ("ok\x1b[201~\x1a\r\x03 and carry on", "U+001B"),
+        ("stop\x03", "U+0003"),
+        ("x\x1a", "U+001A"),
+        ("x\x7f", "U+007F"),
+        ("x\x00y", "U+0000"),
+    ],
+    ids=["paste-end-then-keys", "ctrl-c", "ctrl-z", "del", "nul"],
+)
+@pytest.mark.parametrize(
+    ("route", "field", "body"),
+    [
+        ("api/note", "text", {"as": "sess_coder"}),
+        ("api/task/done", "note", {"ref": "tsk_1", "as": "sess_coder"}),
+    ],
+    ids=["note", "task-done"],
+)
+def test_a_note_holding_a_control_character_is_refused_before_anything_is_written(
+    runtime: Runtime,
+    team: FakeTeam,
+    tmp_path: Path,
+    route: str,
+    field: str,
+    body: dict[str, str],
+    text: str,
+    char: str,
+) -> None:
+    """A note posted as an agent is one of its session's newest board entries, and a fresh
+    replacement's first prompt repeats them (``fleet._handoff_prompt``), pasted into its
+    pane. tmux before 3.7 pastes the bytes as they are: the ``ESC [201~`` ended the paste,
+    and Ctrl-Z, an Enter and a Ctrl-C followed as keystrokes. A task's closing note is the
+    text of its ``task_done`` event. Only a tell's text and a switch's reason were checked
+    (review of #243, round 3)."""
+    client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    before = _audit_lines()
+    response = client.post(f"{base(runtime)}/{route}", json={**body, field: text})
+    assert (response.status_code, response.json()) == (
+        400,
+        {
+            "error": "invalid",
+            "message": f"'{field}' holds the control character {char} — a note may hold tabs "
+            "and line breaks, and no other control character",
+        },
+    )
+    assert team.notes == [] and team.finished == [] and _audit_lines() == before
+
+
+def test_a_note_keeps_its_tabs_and_line_breaks(team: FakeTeam) -> None:
+    """They are a note's own lines, inside the hand-off's paste too, as in a tell's."""
+    handlers = live_writes().handlers
+    handlers["note"]({"text": "a\tb\nc\r\nd", "as": "sess_coder"})
+    handlers["task/done"]({"ref": "tsk_1", "note": "e\tf\r\ng", "as": "sess_coder"})
+    assert [note["text"] for note in team.notes] == ["a\tb\nc\r\nd"]
+    assert team.finished == [("tsk_1", "e\tf\r\ng")]
+
+
+def test_a_tasks_closing_note_is_capped_as_a_note_is(team: FakeTeam) -> None:
+    """It is the ``task_done`` event's text, and a hand-off prompt repeats it whole: only the
+    request's 64 KiB held it."""
+    with pytest.raises(RequestError) as refused:
+        live_writes().handlers["task/done"]({"ref": "tsk_1", "note": "x" * (NOTE_TEXT_MAX + 1)})
+    assert (refused.value.status, refused.value.error) == (413, "too_large")
+    assert team.finished == []
+    live_writes().handlers["task/done"]({"ref": "tsk_1", "note": "x" * NOTE_TEXT_MAX})
+    assert team.finished == [("tsk_1", "x" * NOTE_TEXT_MAX)]
 
 
 # --- (9) project/add stays inside the home directory --------------------------------------

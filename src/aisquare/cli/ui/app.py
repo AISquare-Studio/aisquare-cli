@@ -40,6 +40,8 @@ from textual.app import ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.message import Message
+from textual.notifications import SeverityLevel
 from textual.screen import ModalScreen, Screen
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
@@ -170,6 +172,16 @@ class FleetSnapshot:
 
     def agent(self, project_id: str, agent_id: str) -> FleetAgentStatus | None:
         return next((s for s in self.agents.get(project_id, []) if s.agent.id == agent_id), None)
+
+
+class RemoteNews(Message):
+    """What the Remote controller says the human should hear (``RemoteController.on_news``),
+    posted from whichever thread learned it: ``post_message`` is safe from any thread."""
+
+    def __init__(self, text: str, trouble: bool) -> None:
+        super().__init__()
+        self.text = text
+        self.trouble = trouble
 
 
 class HelpScreen(ModalScreen[None]):
@@ -366,6 +378,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         }
         """Remote's two switches' saves, as the theme's (``autosave.py``)."""
         self.remote.save_switch = self._save_remote_switch
+        self.remote.on_news = self._post_remote_news
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
         self._accounts = accounts
@@ -519,6 +532,19 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         lock on Textual's thread, two seconds a key while another process held it (r3 review
         of #243: nothing that stops or saves Remote may hold that thread)."""
         self._remote_savers[key].remember(value)
+
+    def _post_remote_news(self, text: str, trouble: bool) -> None:
+        self.post_message(RemoteNews(text, trouble))
+
+    def on_remote_news(self, news: RemoteNews) -> None:
+        """Toast what Remote says, unless the R panel is open, whose status line says it:
+        a Remote that did not come back at start, a tunnel that did not come up, auto-off.
+        Said only there, the human found out from the phone, away from the desk (sweep of
+        #243)."""
+        if isinstance(self.screen, RemotePanel):
+            return
+        severity: SeverityLevel = "warning" if news.trouble else "information"
+        self.notify(news.text, title="Remote", severity=severity, timeout=10, markup=False)
 
     def _remote_auto_off(self) -> None:
         """The 30 s auto-off check; a Remote whose timer ran out stops without this thread."""

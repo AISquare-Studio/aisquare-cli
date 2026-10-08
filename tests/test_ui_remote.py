@@ -43,7 +43,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_page, remote_server
 from aisquare.services.ngrok_tunnel import INSTALL_HINT, NgrokTunnel, build_public_url
 from aisquare.services.remote_server import UNLOCK_GLOBAL_FAILURES, Runtime, UnlockBudget
-from tests.test_remote_control import FakeTunnel, SlowServer, fake_tunnel_factory
+from tests.test_remote_control import FakeServer, FakeTunnel, SlowServer, fake_tunnel_factory
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -1204,3 +1204,82 @@ def test_quitting_leaves_remote_stopping_and_run_ui_waits_for_it_with_the_termin
     app_mod.run_ui()
     assert slow.release.is_set() and not slow.running, "run_ui returned before Remote stopped"
     assert "stopping Remote (its server and ngrok)…" in capsys.readouterr().err
+
+
+# --- what Remote says reaches the human with the panel closed (sweep of #243) ------------------
+
+
+def test_a_remote_that_does_not_come_back_at_start_is_toasted() -> None:
+    """``on_mount`` brought a Remote that was on back, and the reason it could not was only
+    in the R panel: a port taken by something else said nothing on the main screen, and the
+    human found out from the phone, away from the desk (sweep of #243)."""
+    update_state("remote_enabled", True)
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen(1)
+        controller = RemoteController(
+            server=remote_server, tunnel_factory=missing_ngrok, port=taken.getsockname()[1]
+        )
+
+        async def go(pilot: Pilot[None]) -> None:
+            app = pilot.app
+            assert isinstance(app, FleetApp)
+            await pilot.pause()
+            assert not app.remote.running
+            said = [note for note in toasts(app) if note.startswith("Remote could not start — ")]
+            assert said and "is the port in use?" in said[0]
+
+        drive_controller(go, controller)
+
+
+def test_a_tunnel_that_does_not_come_up_after_a_restore_is_toasted_from_its_thread() -> None:
+    """The wait for ngrok's URL ends on a thread of its own, and its sentence reached only
+    the status line of a panel nobody had open."""
+    update_state("remote_enabled", True)
+    controller = RemoteController(
+        server=FakeServer(), tunnel_factory=fake_tunnel_factory(url=None), url_timeout=0.2
+    )
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        assert app.remote.running and app.remote._waiter is not None
+        app.remote._waiter.join(5)
+        await pilot.pause()
+        assert (
+            "Remote is on, but phones cannot reach it — ngrok did not announce a tunnel in time"
+            in toasts(app)
+        )
+
+    drive_controller(go, controller)
+
+
+def test_auto_off_is_toasted_unless_the_panel_says_it() -> None:
+    clock = [datetime.now(UTC)]
+    controller = RemoteController(
+        server=FakeServer(), tunnel_factory=fake_tunnel_factory(url=PUBLIC), now=lambda: clock[0]
+    )
+    ran_out = "Remote turned off — the auto-off timer ran out"
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        app.remote.turn_on()
+        clock[0] += timedelta(minutes=61)
+        app._remote_auto_off()  # the app's 30 s timer, the panel closed
+        await pilot.pause()
+        assert ran_out in toasts(app)
+        app.clear_notifications()
+
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        assert app.remote.running
+        clock[0] += timedelta(minutes=61)
+        app._remote_auto_off()  # with the panel open, its status line says it
+        await pilot.pause()
+        assert ran_out not in toasts(app)
+        modal.repaint()
+        assert shown(modal.query_one("#remote-status", Static)) == ran_out
+
+    drive_controller(go, controller)

@@ -747,6 +747,125 @@ def test_an_old_tunnels_late_word_never_lands_on_the_remote_after_it() -> None:
     assert server.public_urls.count(link) == 1
 
 
+def heard_news(controller: RemoteController) -> list[tuple[str, bool]]:
+    """What ``controller`` tells the fleet UI, and whether it is trouble, in order."""
+    heard: list[tuple[str, bool]] = []
+    controller.on_news = lambda text, trouble: heard.append((text, trouble))
+    return heard
+
+
+def test_a_remote_that_does_not_come_back_at_start_is_news() -> None:
+    """``restore()`` runs as the human sits down, often just before leaving the desk with the
+    phone. A Remote that did not come back, or came back with no tunnel, was said only on
+    the R panel's status line: the human found out from the phone (sweep of #243)."""
+    server = fake_server()
+    busy = "the remote server did not come up on 127.0.0.1:8750 — is the port in use?"
+    server.fail_start = remote_server.RemoteError(busy)
+    enabled = RemoteState(remote_enabled=True)
+    held = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), state=enabled
+    )
+    heard = heard_news(held)
+    held.restore()
+    assert heard == [(f"Remote could not start — {busy}", True)]
+
+    server.fail_start = None
+    no_ngrok = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(failure=INSTALL_HINT), state=enabled
+    )
+    heard = heard_news(no_ngrok)
+    no_ngrok.restore()
+    assert no_ngrok.running
+    assert heard == [(f"Remote is on, but phones cannot reach it — {INSTALL_HINT}", True)]
+    no_ngrok.turn_off()
+
+    back = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), state=enabled
+    )
+    heard = heard_news(back)
+    back.restore()
+    assert back._waiter is not None
+    back._waiter.join(5)
+    back.turn_off()
+    assert back.running is False and heard == [], "a Remote back as it was, and turned off, is none"
+
+
+def test_a_tunnel_that_does_not_come_up_is_news_and_so_is_its_url_when_it_comes() -> None:
+    server = fake_server()
+    tunnels: list[FakeTunnel] = []
+
+    def factory(port: int) -> FakeTunnel:
+        tunnels.append(FakeTunnel(port, url=None, failure=None))
+        return tunnels[-1]
+
+    controller = RemoteController(server=server, tunnel_factory=factory)
+    heard = heard_news(controller)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    assert heard == [
+        ("Remote is on, but phones cannot reach it — ngrok did not announce a tunnel in time", True)
+    ]
+    tunnels[0].handle_line(json.dumps(STARTED))
+    assert heard[1:] == [("ngrok is up — phones can reach Remote now", False)]
+
+
+def test_auto_off_and_what_turning_off_could_not_do_are_news() -> None:
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
+    server = fake_server()
+
+    def unwritable(reason: str) -> None:
+        raise OSError("remote.json: read-only file system")
+
+    server.revoke_every_remote_device = unwritable  # type: ignore[method-assign]
+    controller = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    heard = heard_news(controller)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    clock[0] += timedelta(minutes=60)
+    assert controller.enforce_auto_off() is True
+    assert heard == [
+        ("Remote turned off — the auto-off timer ran out", True),
+        (
+            "Remote is off, but its devices could not be revoked — "
+            "remote.json: read-only file system",
+            True,
+        ),
+    ]
+
+
+def test_ngrok_back_on_a_new_link_is_news_and_a_restart_failing_alike_is_said_once() -> None:
+    """A restart on a new link leaves every phone on a dead one, and the human at the desk
+    has the new one to give; a restart that keeps failing the same way, once a minute, is
+    said once, not every minute."""
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
+    made = [
+        FakeTunnel(8750, url="https://first.ngrok-free.app", failure=None),
+        FakeTunnel(8750, url="https://second.ngrok-free.app", failure=None),
+        FakeTunnel(8750, url=None, failure="could not start ngrok: gone"),
+        FakeTunnel(8750, url=None, failure="could not start ngrok: gone"),
+    ]
+    controller = RemoteController(
+        server=fake_server(), tunnel_factory=lambda port: made.pop(0), now=lambda: clock[0]
+    )
+    heard = heard_news(controller)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    assert controller.revive_tunnel_if_dead() is True  # a FakeTunnel never runs: it died
+    controller._waiter.join(5)
+    assert heard == [("ngrok stopped and came back on a new link — R shows it", True)]
+    for _ in range(2):
+        clock[0] += timedelta(minutes=1)
+        assert controller.revive_tunnel_if_dead() is False
+    assert heard[1:] == [
+        ("Remote is on, but phones cannot reach it — could not start ngrok: gone", True)
+    ]
+
+
 class SlowServer(FakeServer):
     """A server whose stop takes until the test says: uvicorn waiting for a needs scan in
     flight and the push sender, ngrok given its seconds to exit."""

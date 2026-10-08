@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import logging
 import os
 import threading
 from collections.abc import Callable
@@ -64,7 +65,14 @@ must be down, its tunnel gone and ``remote.json`` cleared before another starts,
 Remote's last steps would undo the new one's. Past that, the switch says to try again rather
 than hold Textual's thread for the rest of a slow stop."""
 
+UNREACHABLE = "Remote is on, but phones cannot reach it"
+"""How news of a tunnel that is not up begins (:attr:`RemoteController.on_news`)."""
+
 TunnelFactory = Callable[[int], NgrokTunnel]
+NewsListener = Callable[[str, bool], None]
+"""Told a sentence, and whether it is trouble (``False``: good news), on any thread."""
+
+log = logging.getLogger(__name__)
 
 
 def _panel_port() -> tuple[int, str | None]:
@@ -186,6 +194,18 @@ class RemoteController:
         self._refused_switches: dict[str, str] = {}
         """A switch ``state.json`` refused, by key, as the status line says it, until a later
         save of that switch lands."""
+        self.on_news: NewsListener | None = None
+        """Told what the human should hear with the R panel closed, on whichever thread
+        learned it: a Remote that did not come back at a TUI start, a tunnel that did not
+        come up, came up late or came back on a new link, auto-off, and what turning off
+        could not do. Only the panel's status line said any of it, and a Remote that failed
+        to come back as the human sat down was found out from the phone, away from the
+        desk (sweep of #243). The fleet UI toasts it."""
+        self._news_lock = threading.Lock()
+        self._last_news: str | None = None
+        """The last sentence told, so a tunnel failing the same way every minute says it once."""
+        self._unreachable_told = False
+        """A tunnel not up was told of: the URL that comes after it is good news."""
 
     # --- on / off -----------------------------------------------------------------------
 
@@ -214,6 +234,8 @@ class RemoteController:
             self.message = STILL_TURNING_OFF
             return
         self.public_url = None
+        with self._news_lock:  # a new Remote: what the last one said may be news again
+            self._last_news, self._unreachable_told = None, False
         if self._port_problem is not None:  # a sentence, never Remote on another port
             self.message = f"Remote could not start — {self._port_problem}"
             return
@@ -279,8 +301,11 @@ class RemoteController:
             self._adopt_tunnel_url(tunnel, url)
             return
         with self._lock:
-            if tunnel is self.tunnel and self.public_url is None:
-                self.message = tunnel.error or "ngrok did not announce a tunnel in time"
+            if tunnel is not self.tunnel or self.public_url is not None:
+                return
+            self.message = tunnel.error or "ngrok did not announce a tunnel in time"
+            why = self.message
+        self._unreachable(why)
 
     def _adopt_tunnel_url(self, tunnel: NgrokTunnel, url: str) -> None:
         """Show ``url`` as the link and note it for push links, while ``tunnel`` is this
@@ -298,13 +323,20 @@ class RemoteController:
             if link == self.public_url:
                 return
             self.public_url = link
+            moved = tunnel is self._revived_tunnel and link != self._link_before_revive
             if tunnel is self._revived_tunnel:
-                changed = "" if link == self._link_before_revive else "; the link changed"
+                changed = "; the link changed" if moved else ""
                 self.message = f"ngrok stopped — restarted it{changed}"
             else:
                 self.message = None
             # Under the lock, so a Remote turned off meanwhile forgets it after, not before.
             self._note_public_url(link)
+        with self._news_lock:
+            told, self._unreachable_told, self._last_news = self._unreachable_told, False, None
+        if moved:  # every phone's link is dead: the human at the desk has the new one to give
+            self._remote_news("ngrok stopped and came back on a new link — R shows it")
+        elif told:
+            self._remote_news("ngrok is up — phones can reach Remote now", trouble=False)
 
     def turn_off(
         self,
@@ -409,6 +441,8 @@ class RemoteController:
                 # What turning off could not do still shows: a revoke that failed leaves
                 # phones holding cookies the next Remote accepts.
                 self.message = f"{status}. {failure}"
+            if report:
+                self._remote_news(failure)
 
     def wait_until_off(self, timeout: float | None = None) -> bool:
         """Wait for the server and ngrok of a Remote turned off to stop; whether they had.
@@ -424,9 +458,18 @@ class RemoteController:
         return not stopper.is_alive()
 
     def restore(self, *, wait: bool = True) -> None:
-        """At TUI start: a Remote that was on when the TUI last exited comes back on."""
-        if self.state.remote_enabled and not self.running:
-            self.turn_on(wait=wait)
+        """At TUI start: a Remote that was on when the TUI last exited comes back on.
+
+        What kept it off, or kept ngrok from starting, is news (:attr:`on_news`): this runs
+        as the human sits down, often just before leaving the desk with the phone.
+        """
+        if not self.state.remote_enabled or self.running:
+            return
+        self.turn_on(wait=wait)
+        if not self.running:
+            self._remote_news(self.message)
+        elif self.tunnel is None:
+            self._unreachable(self.message)
 
     def shutdown_for_exit(self, *, wait: bool = True) -> None:
         """At TUI exit: end the processes, keep the saved switches for ``restore``.
@@ -624,11 +667,9 @@ class RemoteController:
         """
         deadline = self.adopt_server_deadline()
         if self.running and deadline is not None and _aware(self._now()) >= deadline:
-            self.turn_off(
-                reason="auto-off",
-                wait=wait,
-                status="Remote turned off — the auto-off timer ran out",
-            )
+            ran_out = "Remote turned off — the auto-off timer ran out"
+            self._remote_news(ran_out)  # before what the stopping could not do, if anything
+            self.turn_off(reason="auto-off", wait=wait, status=ran_out)
             return True
         return False
 
@@ -696,6 +737,7 @@ class RemoteController:
         failure = tunnel.start_tunnel()
         if failure is not None:  # the dead one stays, so the next minute tries again
             self.message = failure
+            self._unreachable(failure)
             return False
         dead.stop_tunnel()
         with self._lock:
@@ -711,6 +753,26 @@ class RemoteController:
         )
         self._waiter.start()
         return True
+
+    def _unreachable(self, why: str | None) -> None:
+        """Tell that phones cannot reach this Remote, and ``why``: no tunnel is up."""
+        with self._news_lock:
+            self._unreachable_told = True
+        self._remote_news(f"{UNREACHABLE} — {why}" if why else UNREACHABLE)
+
+    def _remote_news(self, news: str | None, *, trouble: bool = True) -> None:
+        """Hand ``news`` to :attr:`on_news`, once for a run of the same sentence."""
+        hear = self.on_news
+        if not news or hear is None:
+            return
+        with self._news_lock:
+            if news == self._last_news:
+                return
+            self._last_news = news
+        try:
+            hear(news, trouble)
+        except Exception:  # on ngrok's or the stopper's thread: nobody else would hear of it
+            log.warning("remote: news could not be told: %s", news, exc_info=True)
 
     def _note_public_url(self, url: str) -> None:
         """Tell the server where phones reach it, so push links lead there (SPEC §5.8).

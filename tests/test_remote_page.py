@@ -1222,6 +1222,18 @@ def test_the_page_asks_for_a_board_only_while_its_board_tab_shows(
     assert steps["sockets"] == 2 and steps["woken"] == ["prj_x"], "a new socket asks again"
 
 
+def test_a_transcript_tells_each_turns_time_by_the_phones_own_clock(
+    boot_report: dict[str, Any],
+) -> None:
+    """r3 #9: the machine wrote its own clock's HH:MM into the speaker's line, so a phone in
+    UTC-7 read ``> you 17:05`` for 10:05, beside a page whose other times are the phone's.
+    The machine sends when, and the page tells it on the turn's first line."""
+    lines = boot_report["transcriptTimes"]
+    assert lines[0].startswith("> you ") and "10:05" in lines[0] and "17:05" not in lines[0]
+    assert lines[3].startswith("* claude ") and "10:06" in lines[3]
+    assert (lines[1], lines[4]) == ("  commit it", "  done")
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

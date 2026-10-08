@@ -113,9 +113,9 @@ The screens, along the bottom bar:
   **Memory**, both read-only.
 - **An agent** — **Live** (its pane, colours included, the cursor where the
   program shows one, with Fit width), **Transcript** (the conversation, wrapped
-  to the phone, older pages on demand) and **Card** (model, tokens and the
-  explainability verdict). Under Live and Transcript sit the input bar and the
-  key pad.
+  to the phone, each turn's time in the phone's own time zone, older pages on
+  demand) and **Card** (model, tokens and the explainability verdict). Under Live
+  and Transcript sit the input bar and the key pad.
 - **Devices** — every device that unlocked, which one is this one, last seen, when
   its sign-in ends. Sign out of this one, or revoke another.
 - **Settings** — notifications for this device, the version, sign out.

@@ -123,6 +123,40 @@ def test_each_speaker_is_named(conversation: Path) -> None:
     assert any(line.startswith("* claude") for line in text)
 
 
+def test_a_turns_time_goes_beside_its_lines_as_utc_never_as_the_machines_clock(
+    tmp_path: Path,
+) -> None:
+    """r3 #9: the speaker's line ended in ``astimezone()``'s HH:MM, the machine's zone: a
+    fleet on a UTC box read from a phone in UTC-7 said ``> you 17:05`` for a prompt typed
+    at 10:05 by the phone's clock. The time goes beside the lines, as UTC, by the turn's
+    first line, and the page tells it in the phone's own zone. A time written without a
+    zone is UTC, as the tail reads it; the renderer read it as the machine's own."""
+    unzoned = _user("naive", uuid="n")
+    unzoned["timestamp"] = "2026-09-12T17:07:00"
+    path = _write(
+        tmp_path / "times.jsonl",
+        [
+            _user("hello", uuid="u", stamp="2026-09-12T17:05:00.000Z"),
+            _assistant({"type": "text", "text": "hi"}, uuid="a"),
+            unzoned,
+        ],
+    )
+
+    page = read_page(path)
+
+    assert plain(page.lines) == [
+        *("> you", "  hello", ""),
+        *("* claude", "  hi", ""),
+        *("> you", "  naive", ""),
+    ]
+    assert page.stamps == {
+        0: "2026-09-12T17:05:00+00:00",
+        3: "2026-09-12T07:54:39+00:00",
+        6: "2026-09-12T17:07:00+00:00",
+    }
+    assert page.page_json()["stamps"] == {str(at): stamp for at, stamp in page.stamps.items()}
+
+
 def test_a_tool_call_is_one_summary_line(conversation: Path) -> None:
     text = plain(read_page(conversation, limit=200).lines)
     calls = [line for line in text if "Bash(" in line]

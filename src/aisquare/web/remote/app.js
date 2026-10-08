@@ -636,6 +636,13 @@ function clock(iso) {
   return new Date(when).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+/* A transcript turn's time, dim after its speaker: the machine sends when (stamps), and the
+ * phone's clock tells it, as every other time here. The machine's own said 17:05 for 10:05. */
+function turnTime(iso) {
+  const shown = typeof iso === "string" ? clock(iso) : "";
+  return shown ? "\x1b[2m " + shown + "\x1b[0m" : "";
+}
+
 const STATES = {
   working: ["working", "s-working"], waiting: ["waiting", "s-waiting"], attention: ["NEEDS YOU", "s-attention"],
   limited: ["limited", "s-limited"], exited: ["exited 💤", "s-exited"], lost: ["lost", "s-lost"],
@@ -2282,7 +2289,8 @@ VIEWS.agent = (route, main) => {
         return afterFailure(res, route);
       }
       const page = res.data;
-      const nodes = (Array.isArray(page.lines) ? page.lines : []).map((line) => renderRuns(ansiToRuns(String(line)), document));
+      const stamps = page.stamps && typeof page.stamps === "object" ? page.stamps : {};
+      const nodes = (Array.isArray(page.lines) ? page.lines : []).map((line, n) => renderRuns(ansiToRuns(String(line) + turnTime(stamps[n])), document));
       if (before) {
         const first = lines.firstChild;
         for (const node of nodes) lines.insertBefore(node, first);

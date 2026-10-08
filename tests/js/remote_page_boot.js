@@ -23,6 +23,8 @@ const BASE = "http://127.0.0.1:8750/r/" + "t".repeat(32) + "/";
 const PROJECT = "prj_x";
 const NEEDS_ID = "ny_0123456789abcdef";
 const PASSPHRASE = "amber birch cedar delta";
+/* A 12 px monospace character's advance (0.6 em), as the page measures one. */
+const CHAR_PX = 7.2;
 
 // --- a browser just big enough for the page -------------------------------------------------
 
@@ -157,6 +159,11 @@ class FakeElement extends FakeNode {
 
   blur() {
     this.dispatch("blur");
+  }
+
+  /* A layout of one kind: a monospace character is CHAR_PX wide, and nothing else has a size. */
+  getBoundingClientRect() {
+    return { width: this.classList.contains("measure") ? Array.from(this.textContent).length * CHAR_PX : 0 };
   }
 
   /* "tag" or "tag.class.class": all the page ever asks for. */
@@ -873,6 +880,29 @@ async function boardOnItsTab() {
   return steps;
 }
 
+/* A transcript read on a phone in UTC-7 from a machine that sends each turn's time as UTC:
+ * the lines it draws. */
+async function transcriptTimes() {
+  const zone = process.env.TZ;
+  process.env.TZ = "America/Los_Angeles";
+  try {
+    const page = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
+      "GET api/transcript/coder-1": () => ({
+        status: 200,
+        json: {
+          lines: ["\u001b[1;36m> you\u001b[0m", "  commit it", "", "\u001b[1;32m* claude\u001b[0m", "  done", ""],
+          cursor: null, more: false, stamps: { 0: "2026-10-07T17:05:00+00:00", 3: "2026-10-07T17:06:00+00:00" },
+        },
+      }),
+    }));
+    await settle();
+    return page.main().querySelectorAll("pre.transcript")[0].childNodes.map((line) => line.textContent);
+  } finally {
+    if (zone === undefined) delete process.env.TZ;
+    else process.env.TZ = zone;
+  }
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -903,6 +933,7 @@ async function main() {
     liveScroll: await liveScroll(),
     padScroll: await padScroll(),
     boardOnItsTab: await boardOnItsTab(),
+    transcriptTimes: await transcriptTimes(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

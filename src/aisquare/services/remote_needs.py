@@ -253,11 +253,20 @@ class NeedsItem:
 
 @dataclass(frozen=True)
 class AgentNow:
-    """One agent, re-derived now — what an action or a quick answer checks before typing."""
+    """One agent, re-derived now — what an action or a quick answer checks before typing.
+
+    :func:`needs_agent_now` derives it from its project's scan. While an action's
+    Escape lands, :func:`needs_single_agent_now` derives it from the agent's own
+    facts instead, with two differences: its ``status`` is never ``None``, and its
+    ``items`` are the agent's own without the board, so they hold no project-level
+    kind, and the usage-limit dialog is a plain ``permission`` item there, under
+    another id. No card id is matched against them.
+    """
 
     project: ProjectInfo
     status: FleetAgentStatus | None
-    """``None``: the label's newest row has ended and has no window left."""
+    """``None``: the label's newest row has ended and has no window left. Never so in
+    :func:`needs_single_agent_now`'s, where that row reads ``exited``."""
     tail: TranscriptTail | None
     pane_is_agent: bool
     """The row's own pane runs the agent; ``False`` when it is not live, or when the listing

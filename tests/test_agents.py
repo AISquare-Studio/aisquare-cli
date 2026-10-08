@@ -341,6 +341,33 @@ def test_spaced_install_path_roundtrips_through_hooks(
     assert "hooks" not in settings  # removable too
 
 
+def test_settings_json_is_written_in_utf8_as_claude_code_writes_it(
+    runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``json.dumps`` escaped every non-ASCII character, so a hook naming
+    ``~/Développement/…/aisquare`` was stored as ``D\\u00e9veloppement``, which the
+    plugin's launcher cannot read a program out of (review of #257). A lone surrogate,
+    which UTF-8 cannot hold, keeps its escape instead of costing connect a traceback."""
+    program = tmp_path / "Développement" / "aisquare"
+    program.parent.mkdir(parents=True)
+    program.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(program)])
+    settings_path = fake_home / ".claude" / "settings.json"
+    mine = '"env": {"GREETING": "café", "ODD": "\\udce9"}'
+    settings_path.write_text("{" + mine + "}", encoding="utf-8")
+
+    connected = runner.invoke(app, ["agents", "connect", "claude-code"])
+    written = settings_path.read_text(encoding="utf-8")
+    disconnected = runner.invoke(app, ["agents", "disconnect", "claude-code"])
+    left = settings_path.read_text(encoding="utf-8")
+
+    assert connected.exit_code == 0 and disconnected.exit_code == 0, connected.output
+    assert agents.hook_commands("claude-code") == [], "disconnect found every hook it wrote"
+    assert "Développement" in written and "\\u00e9" not in written, written
+    assert '"GREETING": "café"' in left and '"ODD": "\\udce9"' in left, left
+    assert json.loads(left) == {"env": {"GREETING": "café", "ODD": "\udce9"}}
+
+
 def test_disconnect_warns_when_nothing_was_removed(runner: CliRunner, fake_home: Path) -> None:
     result = runner.invoke(app, ["agents", "disconnect", "claude-code"])
     assert result.exit_code == 0

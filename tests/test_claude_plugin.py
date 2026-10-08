@@ -482,6 +482,34 @@ def test_it_runs_in_place_of_a_hook_whose_program_is_gone(
 
 
 @posix_only
+def test_it_runs_in_place_of_a_gone_program_at_a_non_ascii_path_connect_wrote(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`agents connect` run from ~/Développement/…/aisquare, and that install deleted: the
+    doctor grades those hooks dead and says the plugin runs in their place. connect stored
+    the path as ``D\\u00e9veloppement``, which the launcher cannot read a program out of,
+    so it stood down beside hooks that fail on every event and nothing ran (review of
+    #257)."""
+    claude = machine.home / ".claude"
+    machine.fake("aisquare")
+    program = machine.home / "Développement" / "aisquare-cli" / ".venv" / "bin" / "aisquare"
+    program.parent.mkdir(parents=True)
+    program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    program.chmod(0o755)
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(program)])
+    assert agent_core.install_hooks("claude-code", claude)
+    beside_the_live_one = machine.run("stop")  # control: it runs, so the launcher stands down
+    shutil.rmtree(machine.home / "Développement")
+    graded = agent_core.hook_site_health("claude-code", claude, recorded=True)
+
+    results = [machine.run(subcommand) for subcommand in _SUBCOMMANDS]
+
+    assert graded.binary_state == agent_core.HOOK_BINARY_MISSING, "the doctor's premise"
+    assert [r.returncode for r in [beside_the_live_one, *results]] == [0] * 7
+    assert machine.calls("aisquare") == [f"hook {subcommand}" for subcommand in _SUBCOMMANDS]
+
+
+@posix_only
 @pytest.mark.parametrize("indent", [2, None], ids=["indented", "minified"])
 @pytest.mark.parametrize(
     ("hooks", "runs"),

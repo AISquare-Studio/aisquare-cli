@@ -247,6 +247,21 @@ def read_settings(path: Path) -> dict[str, Any]:
     return data
 
 
+def _write_settings(path: Path, settings: dict[str, Any]) -> None:
+    """Write ``settings`` back to ``path`` the way Claude Code writes the file: UTF-8.
+
+    ``json.dumps`` escapes every non-ASCII character unless told not to, so a hook
+    naming ``~/Développement/…/aisquare`` was stored as ``D\\u00e9veloppement``. The
+    plugin's launcher reads the file as text and cannot read a program out of an
+    escape, so it trusted such a hook: when that program was deleted it stood down
+    beside a hook that fails on every event, and no aisquare ran at all (review of
+    #257). A lone surrogate (a path that is not UTF-8) cannot be written as UTF-8 and
+    keeps the escape ``json.dumps`` would give it.
+    """
+    text = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+    path.write_text(text, encoding="utf-8", errors="backslashreplace")
+
+
 def _is_aisquare_hook_command(command: str) -> bool:
     """Whether ``command`` is one of aisquare's own hook invocations.
 
@@ -344,7 +359,7 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
         hooks[event] = kept
     settings["hooks"] = hooks
     spec.settings_path.parent.mkdir(parents=True, exist_ok=True)
-    spec.settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    _write_settings(spec.settings_path, settings)
     return True
 
 
@@ -375,7 +390,7 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
     if not hooks:
         settings.pop("hooks", None)
     if removed:
-        spec.settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+        _write_settings(spec.settings_path, settings)
     return removed
 
 

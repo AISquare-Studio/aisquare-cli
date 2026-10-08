@@ -103,6 +103,22 @@ def claude_plugin_command(verb: str, config_dir: Path) -> str:
     return agent_core.claude_plugin_command(verb, config_dir)
 
 
+def plugin_beside_note(name: str, config_dir: Path | None = None) -> str | None:
+    """What connecting ``name`` in ``config_dir`` says when the aisquare plugin is enabled
+    there too, else ``None``: its hooks stand down beside these, and the doctor warns of
+    two routes. One sentence for `agents connect` and `init --agent`, whose Quickstart
+    wrote the hooks beside the plugin and said nothing (review of #257). A plugin enabled
+    for one repository is not named: beside the hooks it doubles nothing there.
+    """
+    plugin = claude_plugin(config_dir) if name == "claude-code" else None
+    if plugin is None:
+        return None
+    return (
+        f"the aisquare plugin is enabled in {plugin.config_dir} too — its hooks stand down "
+        "while these run; keep one route (aisquare doctor says how)"
+    )
+
+
 class UnsupportedAgentError(ValueError):
     """An agent aisquare can detect but has no hooks for yet (Codex, Cursor).
 

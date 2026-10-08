@@ -201,8 +201,14 @@ def initialize(
                 f'{connection.hooks_off} sets "disableAllHooks": true, so they will not run '
                 "until you remove that key."
             )
-            continue
-        notes.append(f"Connected {agent}: hooks installed, imported {connection.imported} entries.")
+        else:
+            notes.append(
+                f"Connected {agent}: hooks installed, imported {connection.imported} entries."
+            )
+        # What `agents connect` says beside an enabled plugin, from the same helper.
+        beside = agents_service.plugin_beside_note(agent)
+        if beside is not None:
+            notes.append(beside)
 
     return SetupReport(
         home=home,

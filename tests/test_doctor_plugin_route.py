@@ -507,6 +507,27 @@ def test_connect_beside_the_plugin_says_its_hooks_stand_down(
     assert "stand down" in result.stderr
 
 
+@posix_route  # on win32 neither mentions the plugin: test_on_native_windows_connect_and_...
+def test_init_beside_the_plugin_says_what_connect_says(runner: CliRunner, claude: Path) -> None:
+    """Quickstart 1's `init --agent claude-code` installs the hooks as `agents connect` does,
+    but said only "Connected" beside an enabled plugin: the two routes the doctor warns
+    about, with nothing said when they were made (review of #257). One helper, one note."""
+    argv = ["--json", "init", "--yes", "--no-onboard", "--agent", "claude-code"]
+    alone = json.loads(runner.invoke(app, argv).stdout)["notes"]
+    _install_plugin(claude)
+
+    init = runner.invoke(app, argv)
+    connect = runner.invoke(app, [*_CONNECT])
+    beside = agents_service.plugin_beside_note("claude-code")
+
+    assert init.exit_code == 0, init.output
+    assert beside is not None and f"enabled in {claude} too" in beside, beside
+    notes = json.loads(init.stdout)["notes"]
+    assert beside in notes and any(n.startswith("Connected claude-code") for n in notes), notes
+    assert f"note: {beside}" in connect.stderr, "connect says the same"
+    assert not any("plugin" in note for note in alone), f"control: no plugin, no note: {alone}"
+
+
 def _hooks_name(claude: Path, program: str) -> None:
     """Point every aisquare hook in ``claude``'s settings.json at ``program``."""
     settings_path = claude / "settings.json"

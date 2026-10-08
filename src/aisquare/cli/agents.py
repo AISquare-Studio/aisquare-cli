@@ -68,12 +68,9 @@ def connect(name: AgentName, config_dir: ConfigDir = None) -> None:
     except agents_service.AgentNotInstalledError as exc:
         fail(str(exc), error="not_installed", ref=name)
     emit_connected(connection)
-    plugin = agents_service.claude_plugin(config_dir) if name == "claude-code" else None
-    if plugin is not None:
-        stderr_console().print(
-            f"note: the aisquare plugin is enabled in {plugin.config_dir} too — its hooks "
-            "stand down while these run; keep one route (aisquare doctor says how)"
-        )
+    beside = agents_service.plugin_beside_note(name, config_dir)
+    if beside is not None:
+        stderr_console().print(f"note: {beside}")
 
 
 @app.command("disconnect")

@@ -766,6 +766,45 @@ def test_a_write_whose_audit_line_cannot_be_written_is_still_recorded_as_done(
     assert ("finish", "n4", 200, {"event": 1}) in app.kit.ledger.calls
 
 
+def test_the_server_writes_its_audit_lines_off_the_event_loop(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first line creates the log and restricts it to this account, an icacls run on
+    Windows, and every line opens and appends to a file: on the loop, each held up every
+    request and every socket meanwhile."""
+    written: list[tuple[str, bool]] = []
+    audit = Runtime.audit
+
+    def watched(self: Runtime, device_id: str, endpoint: str, summary: str) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            written.append((endpoint, False))
+        else:
+            written.append((endpoint, True))
+        audit(self, device_id, endpoint, summary)
+
+    def note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        return {"event": 1}, "note seq=1"
+
+    monkeypatch.setattr(Runtime, "audit", watched)
+    app = build_app(runtime, sources=_sources(), writes=Writes({"note": note}), dist_dir=tmp_path)
+    runtime.set_allow_write(True)
+    runtime.set_auto_off(datetime.now(UTC) + timedelta(minutes=10))
+    mine, theirs = _unlocked(app, runtime), _unlocked(app, runtime)
+    assert mine.post(f"{base(runtime)}/api/note", json={"text": "hi"}).status_code == 200
+    assert mine.post(f"{base(runtime)}/api/remote/extend", json={}).status_code == 200
+    other = _device_id(theirs, runtime)
+    assert mine.delete(f"{base(runtime)}/api/devices/{other}").status_code == 200
+    assert written == [
+        ("unlock", False),
+        ("unlock", False),
+        ("note", False),
+        ("remote/extend", False),
+        ("devices/revoke", False),
+    ]
+
+
 def _audited(endpoint: str) -> int:
     """How many audit lines this endpoint has (the unlock has its own)."""
     lines = remote_audit_path().read_text().splitlines()

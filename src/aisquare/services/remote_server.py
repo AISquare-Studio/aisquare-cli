@@ -3644,7 +3644,9 @@ def build_remote_app(
         if extended is None:
             return kit.kit_refuse(409, "no_auto_off", "Remote has no auto-off deadline to extend")
         stamp = _iso_seconds(extended)
-        kit.kit_audit(device, "remote/extend", f"extend auto_off_at={stamp}")
+        await asyncio.to_thread(
+            kit.kit_audit, device, "remote/extend", f"extend auto_off_at={stamp}"
+        )
         return JSONResponse({"auto_off_at": stamp})
 
     async def devices_list_endpoint(request: Request) -> Response:
@@ -3671,7 +3673,9 @@ def build_remote_app(
             return kit.kit_refuse(403, "read_only", READ_ONLY_REASON)
         if not await asyncio.to_thread(runtime.revoke_device, device_id):
             return kit.kit_refuse(404, "not_found", "no such device")
-        kit.kit_audit(device, "devices/revoke", "self" if own else device_id)
+        await asyncio.to_thread(
+            kit.kit_audit, device, "devices/revoke", "self" if own else device_id
+        )
         response = JSONResponse({"ok": True, "id": device_id, "signed_out": own})
         if own:
             response.delete_cookie(COOKIE, path=cookie_path(request))
@@ -3770,9 +3774,11 @@ def build_remote_app(
 
         response = await kit.kit_gated(request, device, name, dispatched)
         # After the ledger has the ending: an audit log that cannot be written fails
-        # the request, and must not make a write that went through read as failed.
+        # the request, and must not make a write that went through read as failed. In a
+        # worker thread: the first line creates the log and restricts it to this account,
+        # on Windows an icacls run, and every line opens and appends to a file.
         if summary is not None:
-            kit.kit_audit(device, name, summary)
+            await asyncio.to_thread(kit.kit_audit, device, name, summary)
         return response
 
     async def api_missing(request: Request) -> Response:

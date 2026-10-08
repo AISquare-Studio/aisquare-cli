@@ -1482,14 +1482,27 @@ def test_a_page_that_slept_holds_its_keys_until_the_machine_says_what_is_on_scre
     next second's check found the page fresh and let the pad and Send act on the screen from
     before the sleep, for as long as the first frame took. And the pane comes a tick after the
     other frames, so even a quick wake left a second of that: the Live tab's keys now wait
-    for its pane from the socket open now. Each step is [stale, Send disabled]."""
+    for its pane from the socket open now, and the pane is greyed while they do. Without the
+    grey, the first frame turned the dot green and the old pane looked live, its keys off
+    with nothing to say why. Each step is [stale, Send disabled, the pane greyed as held]."""
     assert boot_report["staleAcrossAWake"] == [
-        [False, False],  # the pane is in
-        [True, True],  # a minute with nothing heard
-        [True, True],  # a wake's socket opened, and the next second's check ran
-        [False, True],  # its first frame came, not the pane
-        [False, False],  # the pane came
+        [False, False, False],  # the pane is in
+        [True, True, False],  # a minute with nothing heard: the whole screen greyed as stale
+        [True, True, True],  # a wake's socket opened, and the next second's check ran
+        [False, True, True],  # its first frame came, not the pane
+        [False, False, False],  # the pane came
     ]
+    assert _css_value(_text("app.css"), "body.held pre.pane", "filter") == "grayscale(1)"
+
+
+def test_the_transcript_tabs_keys_never_wait_for_a_pane(boot_report: dict[str, Any]) -> None:
+    """The Live tab's keys wait for its pane to come on the socket open now. The Transcript
+    tab has the same input bar and watches no pane: were it held as Live is, Send and the
+    pad there would wait for a frame that never comes."""
+    assert boot_report["transcriptSend"] == {
+        "send": {"busy": False, "disabled": False},
+        "sent": [["Enter"]],
+    }
 
 
 def test_the_transcript_asks_for_lines_as_wide_as_fit_inside_its_padding(

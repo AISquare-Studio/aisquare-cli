@@ -1205,11 +1205,14 @@ function checkStale() {
 /* Writes off, or nothing heard for 25 s: every action button waits. "w" marks a
  * write, "a" an action that is not one. Sign out is neither: it is always there
  * (SPEC §6.3), and a plain DELETE that needs no live socket. "pk" keys and Send act on
- * the pane the Live tab shows: they also wait until that pane came on this socket. */
+ * the pane the Live tab shows: they also wait until that pane came on this socket, and the
+ * pane is greyed until then, as it may be the one from before: keys that waited beside a
+ * pane that looked live said nothing of why. */
 function gateButtons() {
   const shut = !writable() || S.stale;
   const held = !!(S.view && S.view.held && S.view.held());
   document.body.classList.toggle("ro", !writable());
+  document.body.classList.toggle("held", held);
   for (const control of document.querySelectorAll("button.w")) control.disabled = shut || control.classList.contains("busy") || (held && control.classList.contains("pk"));
   for (const control of document.querySelectorAll("button.a")) control.disabled = S.stale || control.classList.contains("busy");
 }

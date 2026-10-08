@@ -1548,12 +1548,29 @@ async function padConfirms() {
   return { steps, keys: sent().map((body) => (body.confirm_exit === true ? body.keys.concat("confirm_exit") : body.keys)) };
 }
 
-/* The Live tab across a sleep, as [stale, Send disabled]: with its pane in; after a minute
- * with nothing heard; once a wake's socket opened and a second passed; once that socket's
- * first frame came, not the pane; and once the pane came. */
+/* The Transcript tab's input bar, writes on and the socket open: it watches no pane, so
+ * nothing there waits for one. Send's state, and what ⏎ sends. */
+async function transcriptSend() {
+  const page = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
+    "GET api/transcript/coder-1": () => transcriptPage([], null, false),
+    "POST api/send-keys": () => ({ status: 200, json: { sent: true } }),
+  }));
+  await settle();
+  page.acceptSockets();
+  page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  await settle();
+  const send = sendState(page);
+  click(buttonNamed(page.main(), "⏎"));
+  await settle();
+  return { send, sent: page.sent("api/send-keys").map((body) => body.keys) };
+}
+
+/* The Live tab across a sleep, as [stale, Send disabled, pane greyed as held]: with its pane
+ * in; after a minute with nothing heard; once a wake's socket opened and a second passed;
+ * once that socket's first frame came, not the pane; and once the pane came. */
 async function staleAcrossAWake() {
   const page = await agentView();
-  const state = () => [page.run("S.stale"), buttonNamed(page.main(), "Send").disabled];
+  const state = () => [page.run("S.stale"), buttonNamed(page.main(), "Send").disabled, page.run("document.body.classList.contains('held')")];
   const steps = [state()];
   page.run("S.lastFrameAt = Date.now() - 60000; checkStale();");
   steps.push(state());
@@ -1948,6 +1965,7 @@ async function main() {
     keysInOrder: await keysInOrder(),
     padConfirms: await padConfirms(),
     staleAcrossAWake: await staleAcrossAWake(),
+    transcriptSend: await transcriptSend(),
     transcriptColumns: await transcriptColumns(),
     transcriptLoads: await transcriptLoads(),
     buttonsInFlight: await buttonsInFlight(),

@@ -15,6 +15,11 @@ removes exactly them):
 | `SessionEnd` | release claims, mark the session gone, final distill |
 | `StopFailure` | the turn ended on an API error: a usage limit (`rate_limit`) marks the session `limited` with its reset time and wakes the manager, and with `[accounts] on_limit = "switch"` a fleet agent is handed to another account ([accounts](orchestration.md#several-accounts-one-team)); any other error marks it `waiting`, with a feed line naming the error |
 
+`SessionStart` and `UserPromptSubmit` get `"timeout": 120` (seconds): Claude
+Code stops a hook after 60 seconds by default, and these two can wait that
+long. If you declare the hooks yourself (home-manager, for example), give
+those two the same timeout.
+
 Every hook is **fail-open**: any error is swallowed and the session
 continues untouched. State lives in one SQLite database (WAL mode,
 concurrency-tested against racing parallel sessions):

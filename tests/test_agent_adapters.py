@@ -816,6 +816,62 @@ def test_a_claude_md_connect_refuses_is_named_and_never_offered_connect(
     assert refusal is None and fix_commands([row]) != [], "control: a UTF-8 CLAUDE.md is offered"
 
 
+def _short_of_the_ceiling(settings_path: Path) -> None:
+    """No `timeout` on the two context hooks, as in a file declared from the docs' table."""
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    for event in ("SessionStart", "UserPromptSubmit"):
+        for group in settings["hooks"][event]:
+            for item in group["hooks"]:
+                item.pop("timeout", None)
+    settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+
+@pytest.mark.parametrize("refused", ["read-only settings.json", "UTF-16 CLAUDE.md"])
+def test_short_timeouts_connect_cannot_raise_are_named_and_never_offered_connect(
+    runner: CliRunner, claude_home: Path, refused: str
+) -> None:
+    """All six hooks, with no `timeout` on the context hooks, in a directory whose files
+    connect refuses: the row offered the Connect that raises them, every click failed, and a
+    read-only settings.json (home-manager's link into the Nix store) never cleared (review of
+    #257). Named with connect's reason, with what to set instead, and no button."""
+    _connect(runner)
+    settings_path = claude_home / "settings.json"
+    _short_of_the_ceiling(settings_path)
+    claude_md = claude_home / "CLAUDE.md"
+    if refused == "UTF-16 CLAUDE.md":
+        _utf16(claude_md)
+    else:
+        settings_path.chmod(0o444)
+    try:
+        if os.access(settings_path, os.W_OK) and refused == "read-only settings.json":
+            pytest.skip("this user can write a read-only file (root)")
+        row = diagnostics._check_claude_code()
+        argv = ["--json", "agents", "connect", "claude-code", "--config-dir", str(claude_home)]
+        clicked = runner.invoke(app, argv)
+    finally:
+        settings_path.chmod(0o644)
+        claude_md.unlink(missing_ok=True)
+    fixable = diagnostics._check_claude_code()
+
+    reason = str(json.loads(clicked.stdout)["detail"])
+    assert clicked.exit_code == 1, "connect refuses the directory"
+    assert row.status is CheckStatus.warn, row
+    assert " connected, but the context hooks allow less than 120 s in: " in row.detail, row
+    assert f"hooks cannot be written in {claude_home}: {reason}" in row.detail, row
+    assert fix_commands([row]) == [], "no Connect: the click could only fail"
+    if refused == "UTF-16 CLAUDE.md":
+        assert row.fix == f"make {claude_md} UTF-8 text this user can read, then connect again"
+    else:
+        assert row.fix == (
+            f"make {settings_path} a JSON object this user can write, then connect again, or "
+            "give its SessionStart and UserPromptSubmit hooks a timeout of at least 120 where "
+            "that file is generated"
+        )
+    assert [fix.argv for fix in fix_commands([fixable])] == [(*argv[1:],)], (
+        "control: where connect can write, the same row offers it"
+    )
+
+
 def test_hooks_switched_off_are_not_connected_and_never_offered_connect(
     runner: CliRunner, claude_home: Path
 ) -> None:

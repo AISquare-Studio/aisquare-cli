@@ -997,14 +997,7 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
             if (shortfall := agent_core.hook_timeout_shortfall("claude-code", site.config_dir))
         }
         if short:
-            listed = ", ".join(f"{path} ({', '.join(events)})" for path, events in short.items())
-            return _warn(
-                "claude-code",
-                f"{product} connected, but the context hooks allow less than "
-                f"{agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS} s in: {listed} — a CI hook still "
-                "inside the run's ceiling would be cut off and its row never written",
-                "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in short),
-            )
+            return _short_timeouts(product, short)
         where = f" in {len(sites)} config dirs" if len(sites) > 1 else ""
         hooked = [site for site in sites if site.plugin is None]
         plugins = [(site.config_dir, site.plugin) for site in sites if site.plugin is not None]
@@ -1101,6 +1094,34 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     )
     if runner_fix is not None:
         fixes.append(runner_fix)
+    return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
+
+
+def _short_timeouts(product: str, short: dict[Path, list[str]]) -> DoctorCheck:
+    """The row for hooks that run this install but give a context hook less time than the
+    CI hook may wait: ``short`` maps each directory to those events.
+
+    Connect raises the timeouts, unless it refuses a file of that directory: a read-only
+    settings.json (home-manager's link into the Nix store) kept a button that could never
+    clear the row. Named as the other branches name it, with the timeout to set where
+    that file is generated, and no button (review of #257).
+    """
+    ceiling = agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS
+    listed = ", ".join(f"{path} ({', '.join(events)})" for path, events in short.items())
+    problems = [
+        f"connected, but the context hooks allow less than {ceiling} s in: {listed} — a CI "
+        "hook still inside the run's ceiling would be cut off and its row never written"
+    ]
+    fixes: list[str] = []
+    for directory, events in short.items():
+        refusal = agents_service.refused_file("claude-code", directory)
+        if refusal is None:
+            fixes.append(f"aisquare agents connect claude-code --config-dir {directory}")
+            continue
+        path, why = refusal
+        problems.append(f"hooks cannot be written in {directory}: {why}")
+        timeout = f"give its {' and '.join(events)} hooks a timeout of at least {ceiling}"
+        fixes.append(_refused_fix(directory, path, also=timeout))
     return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
 
 

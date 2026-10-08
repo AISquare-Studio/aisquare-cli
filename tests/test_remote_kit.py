@@ -805,6 +805,56 @@ def test_the_server_writes_its_audit_lines_off_the_event_loop(
     ]
 
 
+def test_a_slow_first_audit_line_holds_up_no_other_request(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first line restricts the new log to this account, ``icacls`` on Windows, seconds
+    under an antivirus scan. Written off the loop, it still held the runtime's lock, which
+    every request's gate and every socket's tick take: a read sent meanwhile waited for it."""
+    from aisquare.core import paths
+
+    restricting, done = threading.Event(), threading.Event()
+    real = paths.restrict_to_owner
+
+    def icacls_under_a_scan(path: Path) -> bool:
+        if path == remote_audit_path():
+            restricting.set()
+            assert done.wait(10), "the test never let the restriction finish"
+        return real(path)
+
+    def note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        return {"event": 1}, "note seq=1"
+
+    app = build_app(runtime, sources=_sources(), writes=Writes({"note": note}), dist_dir=tmp_path)
+    runtime.set_allow_write(True)
+    mine, theirs = _unlocked(app, runtime), _unlocked(app, runtime)
+    remote_audit_path().unlink()  # the note's line is the log's first again
+    monkeypatch.setattr(remote_server, "restrict_to_owner", icacls_under_a_scan)
+    posted: list[int] = []
+    read: list[int] = []
+    poster = threading.Thread(
+        target=lambda: posted.append(
+            mine.post(f"{base(runtime)}/api/note", json={"text": "hi"}).status_code
+        )
+    )
+    reader = threading.Thread(
+        target=lambda: read.append(theirs.get(f"{base(runtime)}/api/remote").status_code)
+    )
+    poster.start()
+    try:
+        assert restricting.wait(5), "the note's line never reached the restriction"
+        reader.start()
+        reader.join(2)
+        assert read == [200], "the read waited for the audit log's restriction"
+    finally:
+        done.set()
+        for thread in (poster, reader):
+            if thread.is_alive():
+                thread.join(10)
+    assert posted == [200]
+    assert _audited("note") == 1
+
+
 def _audited(endpoint: str) -> int:
     """How many audit lines this endpoint has (the unlock has its own)."""
     lines = remote_audit_path().read_text().splitlines()

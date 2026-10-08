@@ -800,6 +800,11 @@ class Runtime:
         self._lock = threading.RLock()
         """Every read and change of the state in memory; the event loop takes it on every
         request, so it is never held while waiting on another process."""
+        self._audit_lock = threading.Lock()
+        """One audit line at a time, the log made and restricted before its first
+        (:meth:`audit`). Never :attr:`_lock`: that restriction is ``icacls`` on Windows,
+        another process, and a slow one held up every request's gate and every socket's
+        tick, for a line that touches nothing in memory."""
         self._writing = threading.RLock()
         """One read-modify-write of ``remote.json`` at a time in this process, held while
         ``remote.json.lock`` is waited for (:meth:`_state_file_lock`). Taken before
@@ -1463,7 +1468,8 @@ class Runtime:
         to another device. The log names devices by id, never by cookie, and is
         still owner-only before it holds a line: created empty at 0600, then
         restricted to this account (on NTFS, where the bits protect nothing, the
-        DACL), the order ``core.atomic`` restricts a temp in.
+        DACL), the order ``core.atomic`` restricts a temp in, all under
+        :attr:`_audit_lock` alone.
         """
         fields = (
             _audit_clean(device_id, AUDIT_DEVICE_MAX),
@@ -1471,7 +1477,7 @@ class Runtime:
             _audit_clean(summary, AUDIT_SUMMARY_MAX),
         )
         line = f"{_stamp()} {' '.join(fields)}\n".encode()
-        with self._lock:
+        with self._audit_lock:
             self._audit_path.parent.mkdir(parents=True, exist_ok=True)
             try:
                 os.close(os.open(self._audit_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))

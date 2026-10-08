@@ -1509,9 +1509,10 @@ def _needs_crashed(
     """Agents that died with a failing exit status in the last hour, with nobody on it.
 
     A clean ``/exit`` is 0 and a forced stop has no status: neither is a crash.
-    Except the ``/exit`` of a switch or a restart that then could not start the
-    replacement: nothing took the agent's place, and the exit it announced says
-    so (``fleet.HANDOVER_FAILED``, read from the board's day, ``board``). An
+    Except the stop of a switch or a restart that then could not start the
+    replacement (its ``/exit``, or the kill when that did not land in time):
+    nothing took the agent's place, and the exit it announced says so
+    (``fleet.HANDOVER_FAILED``, read from the board's day, ``board``). An
     agent whose task is closed did its work; one a live manager has (it was
     nudged on the exit) is the manager's; one that was restarted since — a newer
     row holds its label — was handled. The manager's own crash is
@@ -1528,8 +1529,9 @@ def _needs_crashed(
             continue
         if _needs_is_manager(row.role):
             continue
-        abandoned = row.exit_status == 0 and _needs_handover_failed(_needs_exit_of(row, board))
-        if row.exit_status in (0, None) and not abandoned:
+        clean = row.exit_status in (0, None)
+        abandoned = clean and _needs_handover_failed(_needs_exit_of(row, board))
+        if clean and not abandoned:
             continue
         if newest.get(row.label, row.created_at) > row.created_at:
             continue

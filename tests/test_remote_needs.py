@@ -785,7 +785,12 @@ def test_a_coder_whose_hand_over_never_started_its_replacement_is_reported() -> 
     assert item.actions == ("restart", "dismiss")
     fleet.events = [_event(7, "agent_exited", "coder-1 exited (0)", session=coding)]
     assert _scan(fleet) == [], "an /exit that meant it"
-    fleet.events = [failed]
+    killed = coder.model_copy(update={"exit_status": None})
+    fleet.ended = [killed]
+    fleet.events = [
+        _event(7, "agent_exited", f"coder-1 exited (?): {HANDOVER_FAILED}", session=coding)
+    ]
+    assert _one(_scan(fleet)).reason == item.reason, "its /exit not in time, so it was killed"
     assert _scan(_with_live_manager(fleet)) == [], "a live manager was nudged on it"
 
 

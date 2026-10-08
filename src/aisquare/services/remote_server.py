@@ -428,7 +428,7 @@ def _remote_now() -> datetime:
 
 
 def _stamp() -> str:
-    return _remote_now().isoformat(timespec="seconds")
+    return _iso_seconds(_remote_now())
 
 
 def new_token() -> str:

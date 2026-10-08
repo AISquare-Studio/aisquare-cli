@@ -12,7 +12,7 @@ checks that every user of it learned it.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,7 +25,11 @@ from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_needs, remote_push, remote_server
-from aisquare.services.remote_actions import ACTION_AUDIT_EXCERPT, action_audit_excerpt
+from aisquare.services.remote_actions import (
+    ACTION_AUDIT_EXCERPT,
+    ActionLedger,
+    action_audit_excerpt,
+)
 from aisquare.services.remote_server import RequestError, live_writes
 
 BORN = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
@@ -42,6 +46,24 @@ def test_a_push_stamps_its_records_as_the_api_does() -> None:
     assert remote_push._push_iso is remote_server._iso_seconds
     at = datetime(2026, 10, 7, 12, 30, 15, 999_999, tzinfo=UTC) + timedelta(hours=2)
     assert remote_push._push_iso(at) == "2026-10-07T14:30:15+00:00"
+
+
+def test_the_ledger_and_the_servers_own_stamps_are_the_apis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ledger's ``at`` and the stamp on every frame and audit line were the API's stamp
+    kept twice more, by hand and without its turn to UTC: a clock in another zone put its
+    own offset in them."""
+    east = datetime(2026, 10, 7, 14, 30, 15, 999_999, tzinfo=timezone(timedelta(hours=2)))
+    ledger = ActionLedger(clock=lambda: east)
+    ledger.ledger_finish("dev_00000001", "rq-1", 200, {})
+    monkeypatch.setattr(remote_server, "_remote_now", lambda: east)
+    stamps = [ledger.ledger_recent("dev_00000001")[0]["at"], remote_server._stamp()]
+    assert stamps == ["2026-10-07T12:30:15+00:00"] * 2
+    monkeypatch.setattr(remote_server, "_iso_seconds", lambda at: "the rule, learned")
+    ledger.ledger_finish("dev_00000001", "rq-2", 200, {})
+    stamps = [ledger.ledger_recent("dev_00000001")[0]["at"], remote_server._stamp()]
+    assert stamps == ["the rule, learned"] * 2
 
 
 class Tmux:

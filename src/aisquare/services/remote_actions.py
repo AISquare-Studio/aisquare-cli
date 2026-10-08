@@ -247,7 +247,7 @@ class ActionLedger:
                 "endpoint": endpoint,
                 "status": status,
                 "body": body,
-                "at": now.isoformat(timespec="seconds"),
+                "at": remote_server._iso_seconds(now),
             }
             finished = self._finished.setdefault(device_id, {})
             finished.pop(request_id, None)  # a repeat ends up newest, not where it first was

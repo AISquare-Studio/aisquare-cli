@@ -327,6 +327,14 @@ class WelcomeView(VerticalScroll):
     class Connected(Message):
         """Connect, the doctor's own fix, installed the hooks: the shell's report on them is old."""
 
+    class Chosen(Message):
+        """Step 1 is on this project (``None``: none yet), said on each change and each return
+        to the page: while the page is shown, the shell's Doctor answers for it, as step 2 does."""
+
+        def __init__(self, project_id: str | None) -> None:
+            self.project_id = project_id
+            super().__init__()
+
     BUTTONS: ClassVar[frozenset[str]] = frozenset(
         {
             "welcome-change",
@@ -460,7 +468,12 @@ class WelcomeView(VerticalScroll):
             self.look(full=True)
             self.find_candidates()
         self._shown = True
+        self._tell_chosen()
         self.paint()
+
+    def _tell_chosen(self) -> None:
+        """Tell the shell which project step 1 is on (:class:`Chosen`)."""
+        self.post_message(self.Chosen(self.project.id if self.project is not None else None))
 
     # ------------------------------------------------------------------ workers
 
@@ -641,6 +654,7 @@ class WelcomeView(VerticalScroll):
             # *Choose another*, or aimed step 3 at it mid-onboarding (review of #257).
             self.project = first.project
             self._follow_project()
+            self._tell_chosen()
         self._show_candidates()
 
     # ------------------------------------------------------------------ step 1
@@ -778,6 +792,7 @@ class WelcomeView(VerticalScroll):
         self.project = project
         self.project_note = None
         self._follow_project()
+        self._tell_chosen()
         self.paint()
 
     # ------------------------------------------------------------------ buttons
@@ -803,6 +818,7 @@ class WelcomeView(VerticalScroll):
                 self.project = None
                 self.steps = {}
                 self.fleet_error = None
+                self._tell_chosen()
                 self.paint()
         elif button.id == "claude-check":
             self.look(full=True)

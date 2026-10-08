@@ -35,7 +35,7 @@ from textual.widgets import Button, Input, Static
 
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import FleetApp
-from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, DoctorSection
+from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, DoctorSection, ProjectSelected
 from aisquare.cli.ui.views import welcome
 from aisquare.cli.ui.views.onboard import ProjectOnboarded
 from aisquare.cli.ui.views.welcome import FLEET_UP, Seams, WelcomeView
@@ -53,7 +53,7 @@ from aisquare.models import (
     ProjectInfo,
     SetupReport,
 )
-from aisquare.services import first_run
+from aisquare.services import diagnostics, first_run
 from aisquare.services import fleet as fleet_service
 from aisquare.services.first_run import (
     Candidate,
@@ -1452,8 +1452,63 @@ def test_connect_brings_the_sidebars_doctor_section_up_to_date(
 
     before, after = in_shell(machine, go, doctor=doctor)
     assert before == ["⚠ claude-code: Claude Code hooks are missing"], "control: warned first"
-    assert machine.connects == 1 and runs == [False, True], runs
+    # Runs before Connect (at start, and for the project step 1 chose) all warned; the
+    # run Connect asked for is the last.
+    assert machine.connects == 1 and runs[-1] and not any(runs[:-1]), runs
     assert after == [], "the section dropped the warning Connect answered"
+
+
+def test_the_sidebars_doctor_answers_for_the_project_step_one_chose(
+    captain: str | None,
+    fleet_rows: dict[str, list[FleetAgentStatus]],
+    scripted: Callable[[Machine], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Step 2 answers for the project step 1 chose, and the sidebar's Doctor answered for the
+    folder asq started in. With a project-scope plugin in one and not the other, the sidebar
+    warned "hooks are missing" under a step 2 that said connected, and its Connect would
+    have installed them for every repository (review of #257). While Welcome is shown the
+    Doctor answers for its project; once Choose another clears it, for the folder asq
+    started in; on another page, for the project that page shows."""
+    alpha = ProjectInfo(id="prj_alpha", root=tmp_path / "alpha", onboarded_at=T0)
+    beta = ProjectInfo(id="prj_beta", root=tmp_path / "beta", onboarded_at=T0)
+    with store_session() as store:
+        for project in (alpha, beta):
+            project.root.mkdir()
+            store.onboard_project(ProjectInfo(id=project.id, root=project.root))
+    listed = tuple(Candidate(root=p.root, is_git=True, project=p) for p in (alpha, beta))
+    machine = Machine(claude=[READY], found=Candidates(items=listed))
+    scripted(machine)
+    asked: list[Path | None] = []
+
+    def doctor(*, cwd: Path | None = None) -> list[DoctorCheck]:
+        asked.append(cwd)
+        return []
+
+    monkeypatch.setattr(diagnostics, "doctor", doctor)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[Any]:
+        seen: list[Any] = [(app.doctor_scope, asked[-1])]
+        first_candidate(page).press()  # Use alpha
+        await settle_page(app)
+        seen.append((app.doctor_scope, asked[-1]))
+        app.post_message(ProjectSelected(beta.id))  # beta, clicked in the sidebar
+        await settle_page(app)
+        seen.append((app.doctor_scope, asked[-1]))
+        await app.action_welcome()  # `w`
+        await settle_page(app)
+        seen.append((app.doctor_scope, asked[-1]))
+        await press(pilot, page, "welcome-change")
+        seen.append((app.doctor_scope, asked[-1]))
+        return seen
+
+    start, chosen, elsewhere, back, cleared = in_shell(machine, go, doctor=diagnostics.doctor)
+    assert start == (None, None), "control: nothing chosen, the folder asq started in"
+    assert chosen == (alpha.id, alpha.root)
+    assert elsewhere == (beta.id, beta.root), "another page's project, as before"
+    assert back == (alpha.id, alpha.root), "back on Welcome, the project step 2 is about"
+    assert cleared == (None, None)
 
 
 def test_step_one_reads_the_shells_frame_not_a_second_store_open(

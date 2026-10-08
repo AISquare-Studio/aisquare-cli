@@ -1107,6 +1107,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """Welcome ran the doctor's Connect: the checks run again, as after a Doctor-view fix."""
         self.run_doctor()
 
+    def on_welcome_view_chosen(self, event: WelcomeView.Chosen) -> None:
+        """While Welcome is shown, the Doctor answers for the project its step 2 answers for."""
+        if self.content.current == "welcome":
+            self._set_doctor_scope(event.project_id)
+
     hand_off: tuple[str, ...] | None = None
     """The ``aisquare`` command this terminal goes to when asq quits (``run_ui``)."""
 

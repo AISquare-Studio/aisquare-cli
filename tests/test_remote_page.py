@@ -575,14 +575,39 @@ BUDGETS = {
 }
 
 
+def _shipped_size(path: Path) -> int:
+    """``path``'s size as committed, which is what the wheel carries: LF line ends.
+
+    git on windows-latest checks text out with CRLF (``core.autocrlf``), a byte more a
+    line: app.js read 115 375 bytes there, for 112 627 committed in 2 748 lines (CI run
+    37719330211). The wheel PyPI serves is built from the commit on ubuntu-latest
+    (publish.yml). A file with a NUL in it is binary to git and checked out as it is, as
+    the PNG is, whose signature holds a CR LF of its own.
+    """
+    data = path.read_bytes()
+    return len(data) if b"\0" in data else len(data.replace(b"\r\n", b"\n"))
+
+
 def test_each_file_and_the_whole_page_fit_their_budgets() -> None:
     for name, budget in BUDGETS.items():
-        size = (WEB / name).stat().st_size
+        size = _shipped_size(WEB / name)
         assert size <= budget, f"{name} is {size} bytes, over {budget}"
-    icons = sum((WEB / name).stat().st_size for name in ("icon.svg", "icon-180.png"))
+    icons = sum(_shipped_size(WEB / name) for name in ("icon.svg", "icon-180.png"))
     assert icons <= 10 * 1024
-    total = sum((WEB / name).stat().st_size for name in PAGE_FILES)
+    total = sum(_shipped_size(WEB / name) for name in PAGE_FILES)
     assert total <= 150 * 1024
+
+
+def test_a_budget_counts_a_crlf_checkout_as_committed_and_a_binary_file_as_it_is(
+    tmp_path: Path,
+) -> None:
+    lf, crlf = tmp_path / "lf.js", tmp_path / "crlf.js"
+    lf.write_bytes(b"a();\nb();\n")
+    crlf.write_bytes(b"a();\r\nb();\r\n")
+    assert _shipped_size(crlf) == _shipped_size(lf) == 10
+    png = WEB / "icon-180.png"
+    assert b"\r\n" in png.read_bytes()
+    assert _shipped_size(png) == png.stat().st_size
 
 
 KEY_PX = 44

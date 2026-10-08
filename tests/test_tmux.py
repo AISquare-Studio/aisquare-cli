@@ -105,6 +105,7 @@ def _facts_line(**overrides: str) -> str:
         "mouse_sgr_flag": "0",
         "mouse_button_flag": "0",
         "mouse_all_flag": "0",
+        "start_time": "1790343472",
         "pane_title": "fedora",
     }
     values.update(overrides)
@@ -734,7 +735,20 @@ def test_pane_facts_parses_a_live_pane(fake_bin: Path, conf: Path) -> None:
         in_mode=False,
         current_command="claude",
         title="fedora",
+        server_started=datetime(2026, 9, 25, 13, 37, 52, tzinfo=UTC),
     )
+
+
+def test_the_facts_say_when_their_server_started_or_nothing(fake_bin: Path, conf: Path) -> None:
+    """``#{start_time}`` rides in the facts, the same answer :meth:`TmuxServer.started_at` gives:
+    the remote's live stream asked it in a second process for every frame. A tmux that does
+    not know the variable prints nothing for it, which judges nothing, as there."""
+    asked = _server(FakeTmux(Completed(0, "1790343472\n", "")), fake_bin, conf).started_at()
+    assert tmux_module._facts(_facts_line()).server_started == asked
+    for silent in ("", "soon", "-1"):
+        assert tmux_module._facts(_facts_line(start_time=silent)).server_started is None
+    title = f"a{_SEP}1790343472"
+    assert tmux_module._facts(_facts_line(start_time="", pane_title=title)).title == title
 
 
 def test_pane_facts_reads_which_mouse_reports_the_program_asked_for(
@@ -1290,6 +1304,8 @@ def test_live_capture_returns_the_screen_with_colours_and_consumes_the_facts_lin
     assert all(_SEP not in line for line in capture.lines)
     assert capture.facts.pane_id == window.pane_id
     assert capture.facts.dead is False and capture.facts.dead_status is None
+    assert capture.facts.server_started is not None
+    assert capture.facts.server_started == live.started_at()
     assert capture.scrollback == 0
     assert _wait(lambda: live.capture(window.pane_id).facts.current_command == "cat")
 

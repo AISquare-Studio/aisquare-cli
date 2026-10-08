@@ -1764,9 +1764,11 @@ def _live_panes(label: str, project: str | None = None, history: int = 0) -> dic
     are untouched — the history keys appear only when history was asked for.
 
     Never another agent's screen: a row whose pane id the next tmux server gave
-    away is 409 ``not_agent`` (:func:`_remote_pane_outlived`). The server is asked
-    when it started AFTER the capture, so one that restarted in between refuses
-    the frame instead of passing it.
+    away is 409 ``not_agent`` (:func:`_remote_pane_outlived`). The server says
+    when it started in the very command that took the frame
+    (``PaneFacts.server_started``), so the frame is judged by the server it came
+    from. Asked in a second process after the capture, it doubled the stream's
+    tmux processes: one more per watched pane per tick.
     """
     from aisquare.services import fleet as fleet_service
 
@@ -1776,7 +1778,7 @@ def _live_panes(label: str, project: str | None = None, history: int = 0) -> dic
         capture = server.capture(agent.pane_id)
     else:
         capture = server.capture_history(agent.pane_id, history=min(history, HISTORY_CAP))
-    if _remote_pane_outlived(server, agent):
+    if fleet_service._outlived(agent, capture.facts.server_started):
         raise RequestError(409, "not_agent", PANE_OUTLIVED.format(label=label))
     payload = _pane_payload(capture)
     if history <= 0:
@@ -1830,15 +1832,18 @@ def _pane_width(agent: FleetAgent) -> int:
     sensible 80 columns and never the page itself — the conversation is on disk
     and does not depend on the pane still being there. So does a pane id another
     agent's pane holds now (:func:`_remote_pane_outlived`): its width is that agent's.
+    One tmux process, the pane's facts alone, which say when their server started:
+    a capture of the whole screen, then a second process to ask that, read a width.
     """
     from aisquare.services import fleet as fleet_service
 
     try:
-        server = fleet_service.server_for(agent.tmux_socket)
-        width = server.capture(agent.pane_id).facts.width
-        return 80 if _remote_pane_outlived(server, agent) else width
+        facts = fleet_service.server_for(agent.tmux_socket).pane_facts(agent.pane_id)
     except Exception:
         return 80
+    if facts is None or fleet_service._outlived(agent, facts.server_started):
+        return 80
+    return facts.width
 
 
 def _agent_state_counts(agents: list[FleetAgentStatus]) -> dict[str, int]:

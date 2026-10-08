@@ -1211,14 +1211,29 @@ def test_the_live_tab_opens_at_the_foot_of_the_pane_where_a_prompt_waits(
 
 def test_the_wheel_carries_the_bundled_page(tmp_path: Path) -> None:
     """An editable install reads the page from the tree whether or not a wheel would ship
-    it, so only a real build proves ``pip install aisquare-cli`` serves a page. Built with
-    hatchling, the project's own backend, once it is a dev dependency (#240 adds it)."""
+    it, so only a real build proves ``pip install aisquare-cli`` serves a page. Built as
+    ``python -m build`` and the release build it, the sdist first and the wheel from that,
+    with hatchling, the project's own backend. It is a dev dependency, imported rather
+    than skipped without it: skipped, this ran in no CI job, and a wheel without app.js
+    passed every one, a blank page on every phone (sweep of #243)."""
+    import importlib
+    import tarfile
     import zipfile
 
-    wheel = pytest.importorskip("hatchling.builders.wheel")
+    sdist = importlib.import_module("hatchling.builders.sdist")
+    wheel = importlib.import_module("hatchling.builders.wheel")
     root = Path(__file__).resolve().parents[1]
-    builder = wheel.WheelBuilder(str(root))
-    wheels = list(builder.build(directory=str(tmp_path), versions=["standard"]))
+    (built,) = sdist.SdistBuilder(str(root)).build(
+        directory=str(tmp_path / "sdist"), versions=["standard"]
+    )
+    with tarfile.open(built) as archive:
+        archive.extractall(tmp_path / "unpacked", filter="data")
+    (unpacked,) = (tmp_path / "unpacked").iterdir()
+    wheels = list(
+        wheel.WheelBuilder(str(unpacked)).build(
+            directory=str(tmp_path / "wheel"), versions=["standard"]
+        )
+    )
 
     assert len(wheels) == 1
     with zipfile.ZipFile(wheels[0]) as archive:

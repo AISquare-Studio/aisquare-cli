@@ -1579,6 +1579,25 @@ async function transcriptSend() {
   return { send, sent: page.sent("api/send-keys").map((body) => body.keys) };
 }
 
+/* Where focus goes: a card's Tell… opens a sheet whose message box takes it; the next feed
+ * frame draws the card anew, its button with it, and then Close. */
+async function sheetFocus() {
+  const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell"] });
+  const page = bootPage("#/", signedIn({ "GET api/needs": () => ({ status: 200, json: { items: [asked] } }) }));
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const tell = buttonNamed(page.main(), "Tell…");
+  tell.focus();
+  click(tell);
+  const typing = page.run("document.activeElement").tagName;
+  page.live().frame("needs_you", { items: [Object.assign({}, asked, { reason: "coder-1 asks again" })] });
+  await settle();
+  const redrawn = !tell.isConnected;
+  click(buttonNamed(page.run("UI.sheet"), "Close"));
+  return { typing, redrawn, closedOnto: page.run("document.activeElement === UI.main ? 'main' : document.activeElement.tagName") };
+}
+
 /* The Live tab across a sleep, as [stale, Send disabled, pane greyed as held]: with its pane
  * in; after a minute with nothing heard; once a wake's socket opened and a second passed;
  * once that socket's first frame came, not the pane; and once the pane came. */
@@ -1980,6 +1999,7 @@ async function main() {
     padConfirms: await padConfirms(),
     staleAcrossAWake: await staleAcrossAWake(),
     transcriptSend: await transcriptSend(),
+    sheetFocus: await sheetFocus(),
     transcriptColumns: await transcriptColumns(),
     transcriptLoads: await transcriptLoads(),
     buttonsInFlight: await buttonsInFlight(),

@@ -1516,6 +1516,17 @@ def test_the_transcript_tabs_keys_never_wait_for_a_pane(boot_report: dict[str, A
     }
 
 
+def test_a_sheet_keeps_focus_where_it_put_it_and_closes_onto_the_screen_once_its_opener_went(
+    boot_report: dict[str, Any],
+) -> None:
+    """A sheet takes focus for a screen reader, but a Tell's message box, which its sheet
+    focuses itself, keeps it there: taken by the sheet, the phone's keyboard would close.
+    Closed, a sheet gives focus back to what opened it, and to the screen itself when that
+    is gone: here the card's Tell…, drawn anew by the next feed frame."""
+    focus = boot_report["sheetFocus"]
+    assert focus == {"typing": "TEXTAREA", "redrawn": True, "closedOnto": "main"}
+
+
 def test_the_transcript_asks_for_lines_as_wide_as_fit_inside_its_padding(
     boot_report: dict[str, Any],
 ) -> None:

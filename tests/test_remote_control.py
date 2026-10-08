@@ -93,7 +93,10 @@ def test_parse_log_line_reads_the_started_tunnel_url_and_ignores_noise() -> None
     assert parse_log_line(json.dumps({"lvl": "info", "msg": "client session established"})) == (
         ngrok_tunnel.LogEvent()
     )
-    assert parse_log_line("not json at all") == ngrok_tunnel.LogEvent()
+    # A line that is no JSON is no URL and no error: only kept, for an exit with no tunnel.
+    assert parse_log_line("not json at all") == ngrok_tunnel.LogEvent(plain="not json at all")
+    assert parse_log_line("ERROR:  bad\n") == ngrok_tunnel.LogEvent(plain="bad")
+    assert parse_log_line("\n") == ngrok_tunnel.LogEvent()
     assert parse_log_line("[1, 2, 3]") == ngrok_tunnel.LogEvent()
 
 
@@ -239,8 +242,10 @@ def test_an_ngrok_that_ignores_the_terminate_is_killed() -> None:
         popen=lambda command, **kwargs: cast("subprocess.Popen[str]", process),
     )
     assert tunnel.start_tunnel() is None
+    tunnel.wait_for_url(5)  # its empty log ends at once, and the reader asks for the exit code
     tunnel.stop_tunnel()
-    assert process.calls == ["terminate", "wait 5", "kill", "wait 5"]
+    reader_asked = f"wait {ngrok_tunnel.EXIT_CODE_WAIT_SECONDS}"
+    assert process.calls == [reader_asked, "terminate", "wait 5", "kill", "wait 5"]
     assert not tunnel.running
 
 
@@ -261,6 +266,144 @@ def test_a_url_its_listener_could_not_take_never_ends_the_log_reader(
         tunnel.handle_line(json.dumps(STARTED))
     assert heard == [STARTED["url"]] and tunnel.public_url == STARTED["url"]
     assert "the announced URL could not be taken" in caplog.text
+
+
+def ngrok_printing(tmp_path: Path, body: str) -> list[str]:
+    """A command running ``body``, a Python script standing in for ngrok, or for whatever
+    runs in its place (``sys`` and ``time`` imported)."""
+    script = tmp_path / "printing-ngrok.py"
+    script.write_text("import sys, time\n" + body)
+    return [sys.executable, str(script)]
+
+
+def test_ngroks_log_is_read_as_utf8_whatever_the_locale(tmp_path: Path) -> None:
+    """ngrok writes UTF-8. Decoded with the locale's codec, a byte that codec could not take
+    (``C:\\Users\\Иван`` on cp1251, a Latin-1 path under UTF-8) raised out of the log reader,
+    which took it for its pipe closed and ended without a word: the panel waited out its
+    15 s and said ngrok never announced a tunnel, while ngrok ran on with nobody draining
+    its log (sweep of #243)."""
+    seen: dict[str, object] = {}
+
+    def recording(command: list[str], **kwargs: Any) -> subprocess.Popen[str]:
+        seen.update(kwargs)
+        return subprocess.Popen(command, **kwargs)
+
+    body = (
+        "sys.stdout.buffer.write(b'open config file at /home/\\xd0\\x98\\xff\\xfe/ngrok.yml\\n')\n"
+        f"print({json.dumps(json.dumps(STARTED))}, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    tunnel = NgrokTunnel(8750, command=ngrok_printing(tmp_path, body), popen=recording)
+    assert tunnel.start_tunnel() is None
+    try:
+        assert tunnel.wait_for_url(timeout=5) == STARTED["url"]
+        assert tunnel.error is None
+    finally:
+        tunnel.stop_tunnel()
+    assert (seen["encoding"], seen["errors"]) == ("utf-8", "replace")
+
+
+class UnreadableLog:
+    """A log that raises as it is read: a line the reader cannot take, as a decode error was."""
+
+    def __iter__(self) -> UnreadableLog:
+        return self
+
+    def __next__(self) -> str:
+        raise ValueError("not a line")
+
+    def close(self) -> None:
+        return None
+
+
+class UpNgrok(StubbornNgrok):
+    """An ngrok that stays up, its log unreadable."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stdout = UnreadableLog()  # type: ignore[assignment]
+
+
+def test_a_log_the_reader_cannot_read_is_said_not_taken_for_a_closed_pipe() -> None:
+    """Every ``ValueError`` out of the log was read as the pipe ``stop_tunnel`` closed: the
+    reader ended without a word, the wait for the URL ran out, and the status line blamed
+    ngrok for a tunnel it may well have announced (sweep of #243)."""
+    process = UpNgrok()
+    tunnel = NgrokTunnel(
+        8750,
+        which=lambda _name: "/usr/bin/ngrok",
+        popen=lambda command, **kwargs: cast("subprocess.Popen[str]", process),
+    )
+    assert tunnel.start_tunnel() is None
+    started = time.monotonic()
+    assert tunnel.wait_for_url(timeout=10) is None
+    assert time.monotonic() - started < 5, "the reader ended without waking the wait"
+    assert tunnel.error == "ngrok's log could not be read: not a line"
+    process.returncode = 0
+    tunnel.stop_tunnel()
+
+
+@pytest.mark.parametrize(
+    ("printed", "said"),
+    [
+        (
+            [
+                "ERROR:  Error reading configuration file '/home/u/.config/ngrok/ngrok.yml': "
+                "yaml: line 3: mapping values are not allowed in this context",
+                "ERROR:  ",
+                "ERROR:  ERR_NGROK_1001",
+            ],
+            "ngrok exited (code 1) before it announced a tunnel: Error reading configuration "
+            "file '/home/u/.config/ngrok/ngrok.yml': yaml: line 3: mapping values are not "
+            "allowed in this context",
+        ),
+        (
+            [
+                "mise ERROR No version is set for shim: ngrok",
+                "Set a global default version with one of the following:",
+            ],
+            "ngrok exited (code 1) before it announced a tunnel: "
+            "mise ERROR No version is set for shim: ngrok",
+        ),
+        (
+            ["ERROR:  authentication failed: Usage of ngrok requires an authtoken."],
+            AUTHTOKEN_HINT,
+        ),
+    ],
+    ids=["a config ngrok cannot read", "a shim that cannot run it", "no authtoken"],
+)
+def test_what_ngrok_printed_before_its_json_log_is_why_it_exited(
+    tmp_path: Path, printed: list[str], said: str
+) -> None:
+    """ngrok, a launcher or a version manager's shim prints in plain text what stops it
+    before the JSON log starts, and every such line was dropped: the status line said only
+    "ngrok exited (code 1)", or "(code None)" when it asked before the exit landed, and the
+    watchdog leaves a first tunnel that never came up to that sentence (sweep of #243)."""
+    body = "".join(f"print({line!r}, file=sys.stderr)\n" for line in printed) + "sys.exit(1)\n"
+    tunnel = NgrokTunnel(8750, command=ngrok_printing(tmp_path, body))
+    assert tunnel.start_tunnel() is None
+    assert tunnel.wait_for_url(timeout=10) is None
+    assert tunnel.error == said
+    tunnel.stop_tunnel()
+
+
+def test_the_panel_says_why_ngrok_exited_before_it_announced_a_tunnel(tmp_path: Path) -> None:
+    cause = "Error reading configuration file '/home/u/.config/ngrok/ngrok.yml': EOF"
+    body = f"print({'ERROR:  ' + cause!r}, file=sys.stderr)\nsys.exit(1)\n"
+    command = ngrok_printing(tmp_path, body)
+    controller = RemoteController(
+        server=fake_server(),
+        tunnel_factory=lambda port: NgrokTunnel(port, command=command),
+        url_timeout=10,
+    )
+    heard = heard_news(controller)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(10)
+    said = f"ngrok exited (code 1) before it announced a tunnel: {cause}"
+    assert controller.message == said
+    assert heard == [(f"{remote_control.UNREACHABLE} — {said}", True)]
+    controller.turn_off()
 
 
 # --- the controller -------------------------------------------------------------------------

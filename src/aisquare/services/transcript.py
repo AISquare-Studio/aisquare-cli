@@ -392,12 +392,19 @@ def _render_transcript_record(record: dict[str, Any] | None, width: int) -> list
 
     A sub-agent's records (``isSidechain``) and Claude Code's own injected ones
     (``isMeta``: command caveats, skill bodies) are not the conversation either:
-    a meta "user" record rendered as ``> you``, words the human never wrote.
+    a meta "user" record rendered as ``> you``, words the human never wrote. Nor
+    is a compaction's summary (``isCompactSummary``): a "user" record without
+    ``isMeta`` that holds kilobytes the model wrote about the conversation so far,
+    which rendered as the human's words. It is one dim line saying the
+    conversation was compacted, since the turns above it are no longer what the
+    agent remembers.
     """
     if record is None or record.get("type") not in ("user", "assistant"):
         return []
     if record.get("isSidechain") is True or record.get("isMeta") is True:
         return []
+    if record.get("isCompactSummary") is True:
+        return [f"{_DIM}  ⎿ conversation compacted{_OFF}", ""]
     message = record.get("message")
     if not isinstance(message, dict):
         return []

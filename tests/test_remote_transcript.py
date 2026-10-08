@@ -145,6 +145,48 @@ def test_a_tool_result_record_is_never_labelled_as_the_person(tmp_path: Path) ->
     assert page.lines == []
 
 
+def test_a_compaction_summary_is_one_line_saying_so_never_the_persons_words(
+    tmp_path: Path,
+) -> None:
+    """Claude Code writes a compaction's summary as a "user" record with a string content and
+    no ``isMeta``: kilobytes the model wrote about the conversation so far, which rendered
+    under ``> you`` as words the human never wrote. A partial compaction ("summarize up to
+    here") marks its summary the same way, without ``isVisibleInTranscriptOnly``."""
+    opening = (
+        "This session is being continued from a previous conversation that ran out of "
+        "context. The summary below covers the earlier portion of the conversation."
+    )
+    summary = {
+        **_user(opening + "\n\n" + "Analysis: the cache work so far.\n" * 200, uuid="s1"),
+        "isCompactSummary": True,
+        "isVisibleInTranscriptOnly": True,
+    }
+    partial = {**_user("Summary of the messages before this point.", uuid="s2")}
+    partial["isCompactSummary"] = True
+    boundary = {
+        "type": "system",
+        "subtype": "compact_boundary",
+        "content": "Conversation compacted",
+    }
+    path = _write(
+        tmp_path / "compacted.jsonl",
+        [
+            _user("fix the cache", uuid="u1"),
+            _assistant({"type": "text", "text": "On it."}, uuid="a1"),
+            boundary,
+            summary,
+            _assistant({"type": "text", "text": "Picking up the cache work."}, uuid="a2"),
+            partial,
+            _user("ship it", uuid="u2"),
+        ],
+    )
+    text = plain(read_page(path).lines)
+    assert sum(line.startswith("> you") for line in text) == 2, "fix the cache, ship it"
+    assert not any("being continued" in line or "Summary of the" in line for line in text)
+    assert text.count("  ⎿ conversation compacted") == 2
+    assert "  Picking up the cache work." in text
+
+
 def test_metadata_records_are_skipped(tmp_path: Path) -> None:
     path = _write(
         tmp_path / "meta.jsonl",

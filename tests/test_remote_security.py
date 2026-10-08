@@ -70,6 +70,7 @@ from aisquare.services.remote_server import (
     normalize_passphrase,
 )
 from aisquare.services.remote_words import REMOTE_PASSPHRASE_WORDS
+from tests.cli_tree import root_command
 from tests.remote_kit_helpers import (
     PASSWORD,
     base,
@@ -1196,12 +1197,57 @@ def test_serve_sets_the_deadline_notes_the_public_url_and_reports_auto_off(
     assert seen["origin"] == "https://abcd-12.ngrok-free.app"
     assert seen["proxy"] == (True, "127.0.0.1") and seen["ws_max_size"] == 65_536
     assert seen["bound"] == [port]
-    assert "auto-off: at" in result.stderr and "a phone can extend it" in result.stderr
+    assert "auto-off: at" in result.stderr
+    assert "no phone can extend it while writes are off" in result.stderr
     token = remote_server.runtime().token
     assert f"public link: https://abcd-12.ngrok-free.app/r/{token}/" in result.stderr
     assert remote_server.runtime().auto_off_deadline() is None, "no server, no deadline"
     never = CliRunner().invoke(cli, ["remote", "serve", "--port", str(port), "--auto-off", "0"])
     assert "auto-off: never (--auto-off 0)" in never.stderr
+
+
+@pytest.mark.parametrize(
+    ("writes", "gate", "extend"),
+    [
+        (True, "ON — writes are audited", "a phone can extend it"),
+        (False, "off (read-only)", "no phone can extend it while writes are off"),
+    ],
+    ids=["writes-on", "writes-off"],
+)
+def test_serves_banner_offers_the_extension_only_while_writes_are_on(
+    page: Path, monkeypatch: pytest.MonkeyPatch, writes: bool, gate: str, extend: str
+) -> None:
+    """Extending auto-off is a write: with writes off, the default, the page's Extend is
+    greyed out and ``api/remote/extend`` answers 403 ``read_only``. The banner said a phone
+    could extend it all the same, on the line under "write actions: off" (review of #243,
+    round 3, 12/13)."""
+    import uvicorn
+
+    class Served:
+        def __init__(self, config: Any) -> None:
+            self.should_exit = False
+
+        def run(self, sockets: Any = None) -> None:
+            pass
+
+    monkeypatch.setattr(uvicorn, "Server", Served)
+    remote_server.runtime().set_allow_write(writes)
+    result = CliRunner().invoke(
+        cli, ["remote", "serve", "--port", str(_free_port()), "--auto-off", "5"]
+    )
+    assert result.exit_code == 0, result.output
+    lines = result.stderr.splitlines()
+    assert next(line for line in lines if line.startswith("write actions: ")).startswith(
+        f"write actions: {gate}   · "
+    )
+    auto_off = next(line for line in lines if line.startswith("auto-off: at "))
+    assert auto_off.endswith(" (in 5 min) · " + extend), auto_off
+
+
+def test_serves_auto_off_help_offers_the_extension_only_while_writes_are_on() -> None:
+    remote: Any = root_command().commands["remote"]
+    (auto_off,) = [param for param in remote.commands["serve"].params if "--auto-off" in param.opts]
+    assert "a phone can extend it while writes are on" in auto_off.help
 
 
 def test_serves_auto_off_stops_the_server_even_when_remote_json_cannot_be_written(
@@ -1314,6 +1360,7 @@ class FakeTeam:
 
     def __init__(self) -> None:
         self.notes: list[dict[str, Any]] = []
+        self.finished: list[tuple[str, str | None]] = []
 
     def add_note(self, text: str, **kwargs: Any) -> Any:
         self.notes.append({"text": text, **kwargs})
@@ -1324,6 +1371,7 @@ class FakeTeam:
         return SimpleNamespace(id=ref, model_dump=lambda mode: {"id": ref})
 
     def finish_task(self, ref: str, *, note: str | None, session_ref: str | None) -> Any:
+        self.finished.append((ref, note))
         return SimpleNamespace(id=ref, model_dump=lambda mode: {"id": ref})
 
 
@@ -1394,6 +1442,77 @@ def test_a_note_longer_than_the_cap_is_413(team: FakeTeam) -> None:
     assert (refused.value.status, refused.value.error) == (413, "too_large")
     live_writes().handlers["note"]({"text": "x" * NOTE_TEXT_MAX})
     assert len(team.notes) == 1
+
+
+@pytest.mark.parametrize(
+    ("text", "char"),
+    [
+        ("ok\x1b[201~\x1a\r\x03 and carry on", "U+001B"),
+        ("stop\x03", "U+0003"),
+        ("x\x1a", "U+001A"),
+        ("x\x7f", "U+007F"),
+        ("x\x00y", "U+0000"),
+    ],
+    ids=["paste-end-then-keys", "ctrl-c", "ctrl-z", "del", "nul"],
+)
+@pytest.mark.parametrize(
+    ("route", "field", "body"),
+    [
+        ("api/note", "text", {"as": "sess_coder"}),
+        ("api/task/done", "note", {"ref": "tsk_1", "as": "sess_coder"}),
+    ],
+    ids=["note", "task-done"],
+)
+def test_a_note_holding_a_control_character_is_refused_before_anything_is_written(
+    runtime: Runtime,
+    team: FakeTeam,
+    tmp_path: Path,
+    route: str,
+    field: str,
+    body: dict[str, str],
+    text: str,
+    char: str,
+) -> None:
+    """A note posted as an agent is one of its session's newest board entries, and a fresh
+    replacement's first prompt repeats them (``fleet._handoff_prompt``), pasted into its
+    pane. tmux before 3.7 pastes the bytes as they are: the ``ESC [201~`` ended the paste,
+    and Ctrl-Z, an Enter and a Ctrl-C followed as keystrokes. A task's closing note is the
+    text of its ``task_done`` event. Only a tell's text and a switch's reason were checked
+    (review of #243, round 3)."""
+    client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    before = _audit_lines()
+    response = client.post(f"{base(runtime)}/{route}", json={**body, field: text})
+    assert (response.status_code, response.json()) == (
+        400,
+        {
+            "error": "invalid",
+            "message": f"'{field}' holds the control character {char} — a note may hold tabs "
+            "and line breaks, and no other control character",
+        },
+    )
+    assert team.notes == [] and team.finished == [] and _audit_lines() == before
+
+
+def test_a_note_keeps_its_tabs_and_line_breaks(team: FakeTeam) -> None:
+    """They are a note's own lines, inside the hand-off's paste too, as in a tell's."""
+    handlers = live_writes().handlers
+    handlers["note"]({"text": "a\tb\nc\r\nd", "as": "sess_coder"})
+    handlers["task/done"]({"ref": "tsk_1", "note": "e\tf\r\ng", "as": "sess_coder"})
+    assert [note["text"] for note in team.notes] == ["a\tb\nc\r\nd"]
+    assert team.finished == [("tsk_1", "e\tf\r\ng")]
+
+
+def test_a_tasks_closing_note_is_capped_as_a_note_is(team: FakeTeam) -> None:
+    """It is the ``task_done`` event's text, and a hand-off prompt repeats it whole: only the
+    request's 64 KiB held it."""
+    with pytest.raises(RequestError) as refused:
+        live_writes().handlers["task/done"]({"ref": "tsk_1", "note": "x" * (NOTE_TEXT_MAX + 1)})
+    assert (refused.value.status, refused.value.error) == (413, "too_large")
+    assert team.finished == []
+    live_writes().handlers["task/done"]({"ref": "tsk_1", "note": "x" * NOTE_TEXT_MAX})
+    assert team.finished == [("tsk_1", "x" * NOTE_TEXT_MAX)]
 
 
 # --- (9) project/add stays inside the home directory --------------------------------------

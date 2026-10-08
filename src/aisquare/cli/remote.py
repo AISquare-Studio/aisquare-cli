@@ -112,7 +112,8 @@ def serve_remote(
             min=0,
             metavar="MINUTES",
             envvar="AISQUARE_REMOTE_AUTO_OFF",
-            help="Turn Remote off after this many minutes; a phone can extend it. 0: never.",
+            help="Turn Remote off after this many minutes; a phone can extend it while writes "
+            "are on. 0: never.",
         ),
     ] = DEFAULT_AUTO_OFF_MINUTES,
     public_url: Annotated[
@@ -139,9 +140,16 @@ def serve_remote(
     state = _remote_runtime()
 
     def banner() -> None:
-        """Printed once the port is bound: a link for a server that never came up is a lie."""
+        """Printed once the port is bound: a link for a server that never came up is a lie.
+
+        Extending auto-off is a write, so the auto-off line offers it only with writes
+        on: it said a phone could extend it under "write actions: off", where the page's
+        Extend is greyed out (review of #243, round 3, 12/13). The switch is read once,
+        for both lines.
+        """
         info = state.connection_info(port)
-        payload = _describe_remote(info, allow_write=state.allow_write)
+        writes = state.allow_write
+        payload = _describe_remote(info, allow_write=writes)
         deadline = state.auto_off_deadline()
         payload["auto_off_at"] = None if deadline is None else deadline.isoformat()
         if get_state().json_output:
@@ -150,7 +158,7 @@ def serve_remote(
         console = stderr_console()
         console.print(f"Remote Control on {info.url_local}", markup=False)
         console.print(f"password: {info.password}", markup=False)
-        gate = "ON — writes are audited" if state.allow_write else "off (read-only)"
+        gate = "ON — writes are audited" if writes else "off (read-only)"
         console.print(
             f"write actions: {gate}   · toggle: aisquare remote allow-write on|off", markup=False
         )
@@ -158,9 +166,11 @@ def serve_remote(
             console.print("auto-off: never (--auto-off 0)", markup=False)
         else:
             local = deadline.astimezone()
+            extend = (
+                "a phone can extend it" if writes else "no phone can extend it while writes are off"
+            )
             console.print(
-                f"auto-off: at {local:%H:%M} (in {auto_off} min) · a phone can extend it",
-                markup=False,
+                f"auto-off: at {local:%H:%M} (in {auto_off} min) · {extend}", markup=False
             )
         if public_url is not None:
             origin = remote_server.check_public_origin(public_url)

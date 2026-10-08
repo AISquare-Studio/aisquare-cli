@@ -192,12 +192,13 @@ line each:
 ```
 
 That is the time, the device, the route and what it did. Typed text is recorded
-as a length; a tell keeps its first 120 characters, because it is the one write
-that hands an agent free-form instructions. A write refused after part of it
-already reached the agent is on the trail too, with how it ended: keys typed
-before tmux failed (`failed`), an Esc sent before the action stopped short
-(`refused=<error>`), a restart that stopped the agent and could not start its
-replacement (`failed=<error>`).
+as a length; a tell keeps its first 120 characters, and a switch the start of the
+`reason` it types into the replacement's prompt, because they hand an agent
+free-form instructions. A write refused after part of it already reached the
+agent is on the trail too, with how it ended: keys typed before tmux failed
+(`failed`), an Esc sent before the action stopped short (`refused=<error>`), a
+restart that stopped the agent and could not start its replacement
+(`failed=<error>`).
 
 ---
 
@@ -301,7 +302,8 @@ the address the panel's ngrok announced or `serve --public-url` named; a
 `serve` told neither opens the page the phone subscribed from.
 
 The machine also sends: a warning 10 minutes before auto-off ("open to extend
-it"), a goodbye when Remote is turned off, an alert when someone is guessing the
+it" while writes are on; with writes off, that the phone cannot extend it), a
+goodbye when Remote is turned off, an alert when someone is guessing the
 passphrase, and a warning a day before a phone's 7-day sign-in ends.
 
 **What a notification holds.** A title and a line built from fixed sentences
@@ -330,7 +332,7 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
 
 - [ ] A static ngrok domain is set (`AISQUARE_REMOTE_NGROK_URL`), so the link and the phone's sign-in survive a restart.
 - [ ] Writes are on, if you want to act and not only watch: `aisquare remote allow-write on`.
-- [ ] Auto-off is 120 minutes or Never in the R panel, or you know the phone can extend it an hour at a time.
+- [ ] Auto-off is 120 minutes or Never in the R panel, or writes are on, so the phone can extend it an hour at a time.
 - [ ] A test notification arrived on the phone (Settings → Send test).
 - [ ] The passphrase is in the phone's password manager.
 
@@ -358,8 +360,8 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   stopping `serve` with Ctrl-C does not; expiry bounds them.
 - **Auto-off** is enforced by the server itself: past the deadline every request
   is a 404, and within half a minute Remote turns off, phones signed out, even
-  on a machine that slept through the deadline. A phone can extend it an hour
-  at a time, up to 8 hours ahead.
+  on a machine that slept through the deadline. With writes on, a phone can
+  extend it an hour at a time, up to 8 hours ahead.
 - **Origin**: every write and every live connection must come from the page's own
   origin, so another site cannot use your cookie.
 - **Where a notification leads** is only the address the panel's ngrok announced,
@@ -372,12 +374,17 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   `--inspect=false`; start yours with it too.
 - **Keys**: the pad sends key names from a fixed list (no `;`, nothing that
   tmux reads as a command); typed text travels as literal text, never as keys.
-  Typed text may hold no control character other than a tab or a newline, and a
-  tell, which goes in as one paste, a carriage return as well: the pad sends Esc,
-  Ctrl-C, Enter and its other control keys by name (a carriage return typed is
-  the Enter key itself).
+  Typed text may hold no control character other than a tab or a newline; a
+  tell and a note, which reach a pane only inside a paste, a carriage return as
+  well (a finished task's note is a note, and an agent's fresh replacement is
+  handed its newest notes); and a switch's `reason` is one line with no control
+  character at all. The pad sends Esc, Ctrl-C, Enter and its other control keys
+  by name (a carriage return typed is the Enter key itself).
 - **Caps**: 64 KiB per request, 2 048 characters per keystroke message, 8 000
   per note or tell and 200 for whom a note is to, 4 live connections per device.
+  A device turns its notifications on or off at most 6 times a minute and sends
+  one test every 10 seconds; a subscription sent again unchanged, or an
+  unsubscribe with nothing to remove, writes no audit line.
 
 From the machine:
 

@@ -14,7 +14,9 @@ test reads exactly what a phone would.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
 import http.client
 import json
 import os
@@ -30,6 +32,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from cryptography.hazmat.primitives import hashes
@@ -52,6 +55,8 @@ from aisquare.services.ngrok_tunnel import (
 )
 from aisquare.services.remote_needs import NeedsItem
 from aisquare.services.remote_push import (
+    AUTO_OFF_BODY,
+    AUTO_OFF_READ_ONLY_BODY,
     AUTO_OFF_TITLE,
     EXPIRY_TITLE,
     FAREWELL_TITLE,
@@ -587,6 +592,21 @@ def test_a_resubscription_replaces_the_devices_old_one(isolated_home: Path) -> N
     assert load_push_state().subscriptions["dev_a"].endpoint == second.endpoint
 
 
+def test_the_subscription_a_device_has_sent_again_is_no_change(isolated_home: Path) -> None:
+    """The page sends its subscription again after every unlock. The record stays as it was,
+    its failures in a row included; a new subscription, or one moving here, is a change."""
+    phone, other = Browser(f"{FCM}phone"), Browser(f"{FCM}other")
+    assert push_subscribe_device("dev_a", phone.record(), {"dev_a"}) is True
+    push_record_outcome("dev_a", phone.endpoint, 403)
+    kept = load_push_state().subscriptions["dev_a"]
+    again = push_subscription_from_body(phone.subscription(), now=T0 + timedelta(hours=1))
+    assert push_subscribe_device("dev_a", again, {"dev_a"}) is False
+    assert load_push_state().subscriptions["dev_a"] == kept and kept.failures == 1
+    assert push_subscribe_device("dev_a", other.record(), {"dev_a"}) is True
+    assert push_subscribe_device("dev_b", other.record(), {"dev_a", "dev_b"}) is True
+    assert set(load_push_state().subscriptions) == {"dev_b"}
+
+
 # --- what the push service says (SPEC §5.7, §5.10 item 6) -------------------------------------
 
 
@@ -1050,6 +1070,29 @@ def test_the_auto_off_warning_goes_once_per_deadline_and_again_after_an_extensio
     assert world.pushes()[0][1]["tag"] == "asq-auto-off"
 
 
+def test_the_auto_off_warning_offers_the_extension_only_while_writes_are_on(
+    world: World,
+) -> None:
+    """Extending is a write (SPEC §2.5). With writes off, the default, the page's Extend
+    button is greyed out and the server answers 403, and every phone was still told to open
+    and extend, then signed out at the deadline (review of #243, round 3, 12/13). The line
+    follows the switch as it is when the warning goes."""
+    world.kit.runtime.set_auto_off(T0 + timedelta(minutes=5))
+    world.later(30)
+    assert [payload["body"] for _device, payload in world.pushes()] == [
+        AUTO_OFF_READ_ONLY_BODY,
+        AUTO_OFF_READ_ONLY_BODY,
+    ]
+    world.kit.runtime.set_allow_write(True)
+    world.kit.runtime.set_auto_off(world.clock.now + timedelta(minutes=8))
+    world.later(30)
+    assert [payload["body"] for _device, payload in world.pushes()][2:] == [
+        AUTO_OFF_BODY,
+        AUTO_OFF_BODY,
+    ]
+    assert world.titles()[2:] == every_device(auto_off_title(8))
+
+
 @pytest.mark.parametrize(
     ("left", "minutes"),
     [
@@ -1102,6 +1145,65 @@ def test_the_expiry_warning_goes_only_to_the_expiring_device(
     assert world.titles() == [(DEVICES[0], EXPIRY_TITLE)]
     world.later(30)
     assert len(world.transport.sent) == 1, "once per expiry"
+
+
+@contextlib.contextmanager
+def _process_zone(monkeypatch: pytest.MonkeyPatch, zone: str) -> Iterator[ZoneInfo]:
+    """The process's local time is ``zone``'s inside, put back after; skipped where ``time``
+    has no ``tzset`` (Windows), as ``test_reset_formatter.py``'s clock is."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is POSIX-only: the process zone cannot be switched for the test")
+    with monkeypatch.context() as local:
+        local.setenv("TZ", zone)
+        time.tzset()
+        try:
+            yield ZoneInfo(zone)
+        finally:
+            local.undo()
+            time.tzset()
+
+
+ZONES = pytest.mark.parametrize(
+    "zone", ["Pacific/Kiritimati", "Etc/GMT+12"], ids=["utc+14", "utc-12"]
+)
+
+
+@ZONES
+def test_a_device_stamp_without_an_offset_is_read_as_utc_as_the_server_reads_it(
+    world: World, monkeypatch: pytest.MonkeyPatch, zone: str
+) -> None:
+    """The stamps ``remote.json`` holds carry their offset. A device's without one, a hand
+    edit, is UTC to the server, which prunes the device by it (``_remote_instant``); the
+    sender read it as the machine's local time, the rule for a naive ``auto_off_at`` alone.
+    Fourteen hours ahead of UTC, the phone with 30 hours left was told its sign-in ends in
+    24 h; twelve behind, the one with 23 hours left was never told."""
+
+    def naive_utc(left: timedelta) -> str:
+        return (T0 + left).astimezone(UTC).replace(tzinfo=None).isoformat()
+
+    rows = [
+        {"id": DEVICES[0], "expires_at": naive_utc(timedelta(hours=30))},
+        {"id": DEVICES[1], "expires_at": naive_utc(timedelta(hours=23))},
+    ]
+    monkeypatch.setattr(world.kit.runtime, "device_rows", lambda: rows)
+    with _process_zone(monkeypatch, zone):
+        world.later(30)
+    assert world.titles() == [(DEVICES[1], EXPIRY_TITLE)]
+
+
+@ZONES
+def test_an_auto_off_written_without_an_offset_is_still_read_as_local_time(
+    world: World, monkeypatch: pytest.MonkeyPatch, zone: str
+) -> None:
+    """An ``auto_off_at`` an earlier build wrote as the TUI's naive local time (SPEC §2.5),
+    which the server reads so, in a zone where local time is not UTC: five minutes left is
+    warned of as five minutes."""
+    with _process_zone(monkeypatch, zone) as local:
+        wall = (T0 + timedelta(seconds=30, minutes=5)).astimezone(local).replace(tzinfo=None)
+        remote = {"allow_write": True, "auto_off_at": wall.isoformat()}
+        monkeypatch.setattr(world.kit.runtime, "remote_json", lambda: remote)
+        world.later(30)
+    assert world.titles() == every_device(auto_off_title(5))
 
 
 def test_the_farewell_reaches_devices_revoked_right_after_it(
@@ -1358,6 +1460,134 @@ def test_deleting_the_subscription_forgets_it(app: Any, runtime: Runtime, roster
     assert device not in load_push_state().subscriptions
     assert client.get(f"{base(runtime)}/api/push").json()["subscribed"] is False
     assert audited("push/subscription") == ["-"]
+
+
+def test_only_a_change_of_subscription_is_audited(
+    app: Any, runtime: Runtime, roster: set[str]
+) -> None:
+    """Both routes need no write switch, and nothing trims the audit log: a read-only device
+    sending its subscription again, or unsubscribing with none, wrote a line each time, about
+    96 a second in a loop (review of #243, sweep of round 3). The answers are as before."""
+    client, _device = unlocked(app, runtime, roster)
+    assert runtime.allow_write is False
+    subscribe = f"{base(runtime)}/api/push/subscribe"
+    subscription = f"{base(runtime)}/api/push/subscription"
+    nothing = client.delete(subscription)
+    assert nothing.status_code == 200 and nothing.json() == {"subscribed": False}
+    phone = Browser(f"{FCM}phone")
+    for _ in range(3):
+        sent = client.post(subscribe, json=phone.subscription())
+        assert sent.status_code == 201 and sent.json() == {"subscribed": True}
+    assert client.delete(subscription).status_code == 200
+    assert client.delete(subscription).status_code == 200
+    assert audited("push/subscribe") == ["fcm.googleapis.com"]
+    assert audited("push/subscription") == ["-"]
+
+
+def test_turning_notifications_on_and_off_in_a_loop_is_paced(
+    app: Any, runtime: Runtime, roster: set[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every on and every off IS a change, so a loop of them still wrote two lines a round.
+    Six a minute per device, subscribes and unsubscribes together, as a test push is paced;
+    past that a 429 says how long to wait, and nothing is stored or audited. Another device
+    has six of its own."""
+    client, device = unlocked(app, runtime, roster)
+    other, _other_device = unlocked(app, runtime, roster)
+    phone = Browser(f"{FCM}phone")
+    subscribe = f"{base(runtime)}/api/push/subscribe"
+    subscription = f"{base(runtime)}/api/push/subscription"
+    answers = []
+    for _ in range(remote_push.PUSH_SUBSCRIPTION_CALLS // 2):
+        answers.append(client.post(subscribe, json=phone.subscription()).status_code)
+        answers.append(client.delete(subscription).status_code)
+    assert answers == [201, 200] * (remote_push.PUSH_SUBSCRIPTION_CALLS // 2)
+    refused = client.post(subscribe, json=phone.subscription())
+    assert (refused.status_code, refused.json()["error"]) == (429, "push_subscription_throttled")
+    assert 1 <= int(refused.headers["retry-after"]) <= 60
+    assert client.delete(subscription).status_code == 429
+    assert device not in load_push_state().subscriptions
+    assert len(audited("push/subscribe")) == len(audited("push/subscription")) == 3
+    theirs = Browser(f"{FCM}theirs")
+    assert other.post(subscribe, json=theirs.subscription()).status_code == 201
+    monkeypatch.setattr(remote_push, "PUSH_SUBSCRIPTION_WINDOW_SECONDS", 0.0)
+    assert client.post(subscribe, json=phone.subscription()).status_code == 201
+
+
+def test_the_subscription_routes_ask_for_the_devices_off_the_event_loop(
+    app: Any, runtime: Runtime, roster: set[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``push_device_ids`` is ``Runtime.device_ids``, which reads ``remote.json`` again and
+    hashes it: file work, which these routes keep off the event loop that serves every
+    request and socket. Both asked for it there, before their worker thread."""
+    client, _device = unlocked(app, runtime, roster)
+    on_the_loop: list[bool] = []
+
+    def device_ids(kit: object) -> frozenset[str]:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_the_loop.append(False)
+        else:
+            on_the_loop.append(True)
+        return frozenset(roster)
+
+    monkeypatch.setattr(remote_push, "push_device_ids", device_ids)
+    phone = Browser(f"{FCM}phone")
+    subscribed = client.post(f"{base(runtime)}/api/push/subscribe", json=phone.subscription())
+    assert subscribed.status_code == 201
+    assert client.delete(f"{base(runtime)}/api/push/subscription").status_code == 200
+    assert on_the_loop == [False, False]
+
+
+def test_the_push_routes_write_their_audit_lines_off_the_event_loop(
+    app: Any, runtime: Runtime, roster: set[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An audit line opens ``remote-audit.log`` and appends to it, and the first one makes the
+    file and restricts it to this account, on Windows an ``icacls`` run: file work, which the
+    server's own routes do in a worker thread. These three did it on the event loop."""
+    transport = Transport()
+    monkeypatch.setattr(remote_push, "push_https_transport", transport)
+    client, _device = unlocked(app, runtime, roster)
+    written: list[tuple[str, bool]] = []
+    audit = runtime.audit
+
+    def audit_where_it_runs(device_id: str, endpoint: str, summary: str) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            written.append((endpoint, False))
+        else:
+            written.append((endpoint, True))
+        audit(device_id, endpoint, summary)
+
+    monkeypatch.setattr(runtime, "audit", audit_where_it_runs)
+    phone = Browser(f"{FCM}phone")
+    subscribed = client.post(f"{base(runtime)}/api/push/subscribe", json=phone.subscription())
+    assert subscribed.status_code == 201
+    assert client.post(f"{base(runtime)}/api/push/test").status_code == 202
+    transport.wait_for(1)
+    assert client.delete(f"{base(runtime)}/api/push/subscription").status_code == 200
+    assert written == [
+        ("push/subscribe", False),
+        ("push/test", False),
+        ("push/subscription", False),
+    ]
+    assert audited("push/subscribe") == ["fcm.googleapis.com"]
+    assert audited("push/test") == audited("push/subscription") == ["-"]
+
+
+def test_the_pace_counts_within_its_window_and_forgets_a_device_once_it_is_quiet() -> None:
+    clock = [0.0]
+    pace = remote_push._PushPace(lambda: clock[0])
+    assert [pace.push_pace_wait("dev_a", 2, 60.0) for _ in range(3)] == [None, None, 60]
+    clock[0] = 59.5
+    assert pace.push_pace_wait("dev_a", 2, 60.0) == 1, "the first call ages out in half a second"
+    assert pace.push_pace_wait("dev_b", 2, 60.0) is None, "every device has its own"
+    clock[0] = 60.0
+    assert pace.push_pace_wait("dev_a", 2, 60.0) is None
+    clock[0] = 200.0
+    assert pace.push_pace_wait("dev_c", 2, 60.0) is None
+    assert list(pace._calls) == ["dev_c"], "the quiet devices are forgotten"
 
 
 def test_a_test_push_goes_to_this_device_only_once_in_ten_seconds(

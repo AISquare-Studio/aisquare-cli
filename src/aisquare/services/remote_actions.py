@@ -51,10 +51,10 @@ hand-over. ``GET api/actions/recent`` (:func:`action_routes`) and the stream's
 no other.
 
 What the agent shows right now comes from needs-you (``needs_agent_now`` and its
-predicates), always called through the ``remote_needs`` module, so a test can
-stand in for it. ``remote_server`` imports this module inside functions only, so
-neither is on the hook path (SPEC §0.2, §7.3). The fleet service is imported
-where it is used.
+predicates, and ``needs_single_agent_now`` while an Escape lands), always called
+through the ``remote_needs`` module, so a test can stand in for it.
+``remote_server`` imports this module inside functions only, so neither is on
+the hook path (SPEC §0.2, §7.3). The fleet service is imported where it is used.
 """
 
 from __future__ import annotations
@@ -64,6 +64,7 @@ import functools
 import logging
 import threading
 import time
+import unicodedata
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, TypeVar
@@ -312,6 +313,45 @@ def action_tell_text(body: dict[str, Any]) -> str:
     return text
 
 
+_REASON_REFUSED = {
+    "Cc": "a control character",
+    "Zl": "a line separator",
+    "Zp": "a paragraph separator",
+    "Cs": "half of a surrogate pair",
+}
+"""What a switch's ``reason`` may not hold, by Unicode category (:func:`action_switch_reason`)."""
+
+
+def action_switch_reason(body: dict[str, Any]) -> str | None:
+    """``agent/switch``'s optional ``reason``: one line of text, at most
+    :data:`ACTION_FIELD_MAX` characters. Anything else is a 400 (413 past the cap).
+
+    The reason is typed into the replacement's pane, inside the one line a resumed
+    agent goes on from (``fleet._resume_prompt``) or the hand-off a fresh one
+    starts with, and the board's ``switched`` event repeats it. So it is held to
+    more than a tell (:func:`action_tell_text`): no control character at all, and
+    no line or paragraph separator (:data:`_REASON_REFUSED`). A control character
+    in it was a keystroke in that pane: tmux before 3.7 pastes the bytes as they
+    are, and an ``ESC [201~`` ended the paste early. A line break made the one line
+    two, and the fleet types no prompt of two lines once the replacement is slow to
+    start; a tab typed past that wait is the Tab key. Half a surrogate pair cannot
+    be sent to tmux at all. Whatever else a line of text holds stays, though it
+    does not print on its own: a no-break space, a CJK space, the joiner inside an
+    emoji, a right-to-left mark, a character newer than this Python's Unicode
+    (review of #243, sweep of round 3).
+    """
+    reason = action_ref(body, "reason", limit=ACTION_FIELD_MAX)
+    for char in reason or "":
+        refused = _REASON_REFUSED.get(unicodedata.category(char))
+        if refused is not None:
+            raise RequestError(
+                400,
+                "invalid",
+                f"'reason' holds U+{ord(char):04X}, {refused} — a reason is one line of text",
+            )
+    return reason
+
+
 def action_tell_mode(body: dict[str, Any]) -> str:
     """The tell's ``mode``, ``auto`` when there is none (:data:`TELL_MODES`)."""
     mode = body.get("mode")
@@ -500,17 +540,24 @@ def action_locked(target: ProjectInfo, label: str, agent_id: str | None) -> Iter
 # --- what the agent shows now ------------------------------------------------------------------
 
 
-def action_snapshot(
-    target: ProjectInfo, label: str, pin: str, *, escaped: bool = False
+def action_snapshot(target: ProjectInfo, label: str, pin: str) -> AgentNow:
+    """The agent as needs-you's scan of its project reads it now, which must still be the
+    row ``pin`` names: what an action decides on before it sends anything."""
+    snap = action_fleet_call(lambda: remote_needs.needs_agent_now(target, label))
+    return action_still_pinned(target, label, pin, snap, escaped=False)
+
+
+def action_still_pinned(
+    target: ProjectInfo, label: str, pin: str, snap: AgentNow, *, escaped: bool
 ) -> AgentNow:
-    """The agent as needs-you reads it now, which must still be the row ``pin`` names.
+    """``snap``, while it is of the row ``pin`` names; 409 ``stale`` once another row holds
+    the label.
 
     The pin is the row read under the lock: the body's ``agent_id`` when it had
     one, else whoever held the label then. Every snapshot is checked, not only
     the first. The reads after an Escape go on for seconds, and the pane the
     paste goes to must belong to the agent the Escape went to.
     """
-    snap = action_fleet_call(lambda: remote_needs.needs_agent_now(target, label))
     if snap.status is not None and snap.status.agent.id != pin:
         raise action_stale(target, label, snap.status.agent, escaped=escaped)
     return snap
@@ -586,12 +633,19 @@ def action_settle(
 
     The first read comes one poll after the Escape, never at once. Until Claude
     Code redraws, the pane still shows what it showed before.
+
+    Each read is of this one agent (``needs_single_agent_now``): its row, its
+    session, its pane and its tail. The project's scan ran before the Escape, and
+    all a poll asks is whether the agent's dialog closed or its prompt came back.
+    One Interrupt & tell was up to 32 scans of the project, with this agent's lock
+    held: tmux on every socket, every row the project ever had, its board and
+    every agent's transcript (review of #243, round 3, 4/13).
     """
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         time.sleep(ACTION_POLL_SECONDS)
-        snap = action_snapshot(target, label, pin, escaped=True)
-        if reached(snap):
+        snap = action_fleet_call(lambda: remote_needs.needs_single_agent_now(target, label))
+        if reached(action_still_pinned(target, label, pin, snap, escaped=True)):
             return snap
     return None
 
@@ -960,18 +1014,24 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     under the lock is all that keeps a phone from moving a replacement that the
     automatic hand-over or the manager already started. There is no ``force``
     (SPEC §9.3).
+
+    A ``reason`` (:func:`action_switch_reason`) is typed into the replacement's
+    prompt, so once the hand-over has been asked for, the audit line keeps how it
+    began, last, as a tell's keeps its text.
     """
     from aisquare.services import fleet as fleet_service
 
     label, agent_id = action_pinned(body)
     to = action_ref(body, "to", limit=ACTION_FIELD_MAX)
     fresh = action_flag(body, "fresh")
-    reason = action_ref(body, "reason", limit=ACTION_FIELD_MAX)
+    reason = action_switch_reason(body)
     dismiss = action_flag(body, "dismiss_dialog")
     needs_id = action_ref(body, "needs_id", limit=ACTION_NEEDS_ID_MAX, guard=True)
     target = action_project(body)
-    # As a restart's: the row it acted on, and nothing a body typed (``to``, ``reason``).
+    # As a restart's: the row it acted on. The reason, the one field typed in the body that the
+    # line keeps, ends it, as a tell's text ends a tell's, and is cleaned as that is.
     audit_start = f"switch {label}@{target.id} agent={agent_id}"
+    said = "" if reason is None else f' reason="{action_audit_excerpt(reason)}"'
     with action_locked(target, label, agent_id) as row:
         snap = action_check_needs(target, label, row.id, needs_id)
         dismissed = row.ended_at is None and action_dialog_guard(
@@ -985,7 +1045,7 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         )
         # The hand-over stops the agent before it starts it on the other account.
         with action_audited(
-            lambda error: f"{audit_start} dismissed={action_yes_no(dismissed)} failed={error}"
+            lambda error: f"{audit_start} dismissed={action_yes_no(dismissed)} failed={error}{said}"
         ):
             receipt = action_fleet_call(
                 lambda: fleet_service.switch(
@@ -1007,7 +1067,7 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     summary = (
         f"switch {label}@{target.id} slot={from_slot}->{receipt.to_slot} "
         f"dismissed={action_yes_no(dismissed)} resumed={action_yes_no(receipt.resumed)} "
-        f"started={receipt.started.id}"
+        f"started={receipt.started.id}{said}"
     )
     return result, summary
 

@@ -28,7 +28,8 @@ agent right then (:func:`needs_agent_now`) and types only while the card is
 still true: a stale card's ``1`` must never approve the prompt that replaced it.
 :func:`needs_dialog_open` and :func:`needs_at_input_prompt` are the same
 re-derivation as predicates, for the agent actions (``remote_actions``) that
-must not press Enter into an open dialog.
+must not press Enter into an open dialog. An action that waits for its Escape
+to land asks them of :func:`needs_single_agent_now`, the one agent's own facts.
 
 The watcher (:class:`RemoteNeedsWatcher`) runs in its own daemon thread, scans
 every :data:`NEEDS_SCAN_SECONDS` while any device exists, and lives at
@@ -270,11 +271,20 @@ class NeedsItem:
 
 @dataclass(frozen=True)
 class AgentNow:
-    """One agent, re-derived now — what an action or a quick answer checks before typing."""
+    """One agent, re-derived now — what an action or a quick answer checks before typing.
+
+    :func:`needs_agent_now` derives it from its project's scan. While an action's
+    Escape lands, :func:`needs_single_agent_now` derives it from the agent's own
+    facts instead, with two differences: its ``status`` is never ``None``, and its
+    ``items`` are the agent's own without the board, so they hold no project-level
+    kind, and the usage-limit dialog is a plain ``permission`` item there, under
+    another id. No card id is matched against them.
+    """
 
     project: ProjectInfo
     status: FleetAgentStatus | None
-    """``None``: the label's newest row has ended and has no window left."""
+    """``None``: the label's newest row has ended and has no window left. Never so in
+    :func:`needs_single_agent_now`'s, where that row reads ``exited``."""
     tail: TranscriptTail | None
     pane_is_agent: bool
     """The row's own pane runs the agent; ``False`` when it is not live, or when the listing
@@ -1843,6 +1853,67 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
         )
     newest = max(rows, key=lambda row: row.created_at)
     status = next((s for s in scanned.statuses if s.agent.id == newest.id), None)
+    return _needs_snapshot(
+        project,
+        status,
+        None if status is None else scanned.tails.get(status.agent.id),
+        tuple(item for item in scanned.items if item.agent == label),
+        when,
+    )
+
+
+def needs_single_agent_now(
+    project: ProjectInfo, label: str, *, now: datetime | None = None
+) -> AgentNow:
+    """The label's newest row re-derived now from its own facts alone: never call it on the
+    event loop.
+
+    What an action reads every quarter second while its Escape lands, for up to
+    8 s, to learn whether the agent's dialog closed or its prompt came back
+    (``remote_actions.action_settle``). :func:`needs_agent_now` answers that with
+    the project's scan: tmux on every socket of the project, every row the project
+    ever had, its board, its sessions and every agent's tail, and a listing that
+    ends dead rows on the way. This reads the newest row holding the label,
+    derives it on its own server from its own session (``fleet.status_of``), asks
+    its pane what :func:`needs_agent_now` asks, and reads its tail as the scan reads
+    every agent's: through the live sources' cached reader, the one of them it uses
+    (review of #243, round 3, 4/13).
+
+    So ``items`` are what :func:`needs_from_agent` derives for this agent without
+    the board, and no project-level kind is derived. What the predicates read of
+    them is the same: the usage-limit dialog, which the board names by its
+    notification's text, is the plain dialog's ``permission`` item here, a dialog
+    all the same. An id may differ from the scan's, so no card is matched against
+    them: an action matches its card on :func:`needs_agent_now`'s snapshot, before
+    it sends anything. ``status`` is never ``None``: an ended row reads
+    ``exited``. Nothing is recorded: a dead pane reads ``exited``, and the next
+    listing ends its row. Raises ``fleet.NoSuchAgent`` when no row holds the label.
+    """
+    from aisquare.core.store import store_session
+    from aisquare.services import fleet as fleet_service
+
+    when = now or _needs_now()
+    with store_session() as store:
+        row = store.fleet_agent_by_label(project.id, label, live_only=False)
+    if row is None:
+        raise fleet_service.NoSuchAgent(f"no agent {label!r} in {project.root.name or project.id}")
+    status = fleet_service.status_of(row)
+    tail = _needs_tail_of(live_needs_sources(), status)
+    items = needs_from_agent(status, tail, project=project, events=(), now=when)
+    return _needs_snapshot(project, status, tail, tuple(items), when)
+
+
+def _needs_snapshot(
+    project: ProjectInfo,
+    status: FleetAgentStatus | None,
+    tail: TranscriptTail | None,
+    items: tuple[NeedsItem, ...],
+    now: datetime,
+) -> AgentNow:
+    """The snapshot of ``status``'s row, with tmux asked about its pane only where the
+    derivation vouched for it: a live row that reads none of :data:`_NEEDS_PANE_UNVOUCHED`."""
+    from aisquare.services import fleet as fleet_service
+
     pane_is_agent, pane_quiet = False, None
     if (
         status is not None
@@ -1852,14 +1923,14 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
         server = fleet_service.server_for(status.agent.tmux_socket)
         pane_is_agent = _needs_pane_is_the_agent(server, status.agent)
         if pane_is_agent:
-            pane_quiet = _needs_pane_quiet(server, status.agent.pane_id, when)
+            pane_quiet = _needs_pane_quiet(server, status.agent.pane_id, now)
     return AgentNow(
         project=project,
         status=status,
-        tail=None if status is None else scanned.tails.get(status.agent.id),
+        tail=tail,
         pane_is_agent=pane_is_agent,
         pane_quiet=pane_quiet,
-        items=tuple(item for item in scanned.items if item.agent == label),
+        items=items,
     )
 
 
@@ -2552,6 +2623,7 @@ __all__ = [
     "needs_push_safe",
     "needs_routes",
     "needs_scanned_iso",
+    "needs_single_agent_now",
     "needs_tool_pending",
     "needs_ws_frames",
     "record_needs_dismissal",

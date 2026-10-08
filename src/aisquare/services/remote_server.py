@@ -324,8 +324,9 @@ _TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 """What typed ``text`` may not hold: a C0 control other than tab and newline, or DEL
 (:func:`check_remote_text`). A carriage return is the Enter key, byte for byte."""
 _PASTED_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-"""What a paste (a tell) may not hold: the same, but for the carriage return, which inside a
-bracketed paste is a line break of the message and submits nothing."""
+"""What a paste (a tell, or a note an agent's fresh replacement is handed) may not hold: the
+same, but for the carriage return, which inside a bracketed paste is a line break of the
+message and submits nothing."""
 _TEXT_CONTROL_KEYS = {
     "\x03": "C-c",
     "\x04": "C-d",
@@ -1675,6 +1676,34 @@ def check_remote_text(text: str, *, pasted: bool = False) -> None:
     )
 
 
+def check_note_text(text: str, field: str) -> None:
+    """A note's ``field`` as a phone may post it: at most :data:`NOTE_TEXT_MAX` characters
+    (413), and no control character but tab, newline and carriage return (400 ``invalid``),
+    which is a tell's rule.
+
+    A note posted ``as`` an agent's session is one of that session's newest board
+    entries, and the first prompt of a fresh replacement repeats them
+    (``fleet._handoff_prompt``): one bracketed paste into its pane, whose bytes tmux
+    before 3.7 pastes as they are. ``"ok\\x1b[201~\\x1a\\r\\x03"`` ended that paste, and
+    Ctrl-Z, an Enter and a Ctrl-C followed as keystrokes, past :data:`REMOTE_KEY_NAME`
+    and the double-press guard, the next time the agent started fresh: a restart or a
+    switch asked to, from a phone or the manager, or one whose transcript was gone
+    (review of #243, round 3). A finished task's note is the text of its
+    ``task_done`` event, so ``task/done`` holds it to the same rule. A line break
+    inside the paste is the note's own, as it is in a tell.
+    """
+    if len(text) > NOTE_TEXT_MAX:
+        raise RequestError(413, "too_large", f"a note is at most {NOTE_TEXT_MAX} characters")
+    found = _PASTED_CONTROL.search(text)
+    if found is not None:
+        raise RequestError(
+            400,
+            "invalid",
+            f"{field!r} holds the control character U+{ord(found.group()):04X} — a note may "
+            "hold tabs and line breaks, and no other control character",
+        )
+
+
 def check_project_add_root(raw: object) -> Path:
     """The project root ``project/add`` may register for ``raw``; else 400 ``invalid`` (§2.9).
 
@@ -2354,12 +2383,14 @@ def live_writes() -> Writes:
         return {"task": task.model_dump(mode="json")}, f"claimed {task.id} as={author or '-'}"
 
     def task_done(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        """Close a task, with a ``note`` held to a note's rules (:func:`check_note_text`)."""
         from aisquare.services import team as team_service
 
-        author = _optional_ref(body, "as")
-        task = team_service.finish_task(
-            _required(body, "ref"), note=_optional_ref(body, "note"), session_ref=author
-        )
+        ref, author = _required(body, "ref"), _optional_ref(body, "as")
+        note = _optional_ref(body, "note")
+        if note is not None:
+            check_note_text(note, "note")
+        task = team_service.finish_task(ref, note=note, session_ref=author)
         return {"task": task.model_dump(mode="json")}, f"done {task.id} as={author or '-'}"
 
     def write_note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -2381,8 +2412,7 @@ def live_writes() -> Writes:
 
         project = _optional_ref(body, "project")
         text = _required(body, "text")
-        if len(text) > NOTE_TEXT_MAX:
-            raise RequestError(413, "too_large", f"a note is at most {NOTE_TEXT_MAX} characters")
+        check_note_text(text, "text")
         kind = _optional_ref(body, "kind") or "note"
         if kind not in NOTE_KINDS:
             kinds = ", ".join(sorted(NOTE_KINDS))

@@ -27,9 +27,22 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
+from typer.testing import CliRunner
+
+from aisquare.cli.app import app
+from aisquare.core import agents as agent_core
+from aisquare.core import paths
+from aisquare.core import snapshot as snapshot_core
+from aisquare.core.store import store_session
+from aisquare.core.workspace import project_id_for
+from aisquare.models import CheckStatus, ProjectInfo, Snapshot
+from aisquare.services import diagnostics
 
 # `install.sh` is a POSIX shell script and every test here drives it through
 # `sh`, `pty.fork` and `os.execve`. None of that exists on Windows, and `pty`
@@ -1411,7 +1424,7 @@ def test_no_system_deps_expects_the_checks_it_skipped(tmp_path: Path) -> None:
 
 
 def _summary_then_handoff(
-    tmp_path: Path, assignments: str, *, node: bool
+    tmp_path: Path, assignments: str, *, node: bool, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     """`summary` then `handoff` after a run with a project, `node` on PATH or not."""
     path = base_path(tmp_path)
@@ -1420,6 +1433,7 @@ def _summary_then_handoff(
     return sh(
         f"DRY_RUN=0; WANT_PROJECT=1; PROJECT_DIR=/p; UNEXPECTED=0; {assignments}; "
         'summary; echo "UNEXPECTED=$UNEXPECTED"; handoff',
+        env=env,
         path=path,
         no_terminal=True,
     )
@@ -1707,6 +1721,198 @@ def test_a_settings_json_connect_refuses_is_not_called_a_sign_in_to_finish(
     assert refused.returncode == 0 and missing.returncode == 0, refused.stderr + missing.stderr
     assert refused.stdout.strip() == "", f"a refusal was given a fix: {refused.stdout!r}"
     assert "authenticate" in missing.stdout, "control: a missing hook still gets the sign-in hint"
+
+
+# The rows below are the real check's, built in a temp home and printed as
+# `aisquare --json doctor` prints them, so a reworded doctor row is read here as the
+# installer will read it.
+
+
+def _claude_code_payload() -> str:
+    """The claude-code row as `aisquare --json doctor` prints it (cli/common.py emit_doctor)."""
+    return json.dumps([diagnostics._check_claude_code().model_dump(mode="json")])
+
+
+def _connect_claude_code(config_dir: Path) -> None:
+    config_dir.mkdir(parents=True, exist_ok=True)
+    argv = ["agents", "connect", "claude-code", "--config-dir", str(config_dir)]
+    result = CliRunner().invoke(app, argv)
+    assert result.exit_code == 0, result.output
+
+
+def _edit_settings(config_dir: Path, change: Callable[[dict[str, Any]], object]) -> None:
+    path = config_dir / "settings.json"
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    change(settings)
+    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+
+def _lose_the_stop_hook(config_dir: Path) -> None:
+    """What an install from before the Stop event left: "hooks are missing or outdated"."""
+    _edit_settings(config_dir, lambda settings: settings["hooks"].pop("Stop"))
+
+
+def _switch_hooks_off(config_dir: Path) -> None:
+    _edit_settings(config_dir, lambda settings: settings.update(disableAllHooks=True))
+
+
+def _install_the_plugin(config_dir: Path) -> None:
+    """What `/plugin install aisquare@aisquare-cli` leaves (Claude Code 2.1.292)."""
+    plugin = agent_core.CLAUDE_PLUGIN_ID
+    _edit_settings(
+        config_dir, lambda settings: settings.setdefault("enabledPlugins", {plugin: True})
+    )
+    record = {"scope": "user", "installPath": str(config_dir / "plugins"), "version": "0.8.0"}
+    (config_dir / "plugins").mkdir()
+    (config_dir / "plugins" / "installed_plugins.json").write_text(
+        json.dumps({"version": 2, "plugins": {plugin: [record]}}), encoding="utf-8"
+    )
+
+
+def _run_another_install(config_dir: Path, other: Path) -> None:
+    """Every hook names `other` in place of this install's aisquare."""
+
+    def rename(settings: dict[str, Any]) -> None:
+        for groups in settings["hooks"].values():
+            for hook in (hook for group in groups for hook in group["hooks"]):
+                hook["command"] = f"{other} hook {hook['command'].rsplit(' ', 1)[1]}"
+
+    _edit_settings(config_dir, rename)
+
+
+@pytest.mark.parametrize(
+    ("state", "row_says"),
+    [
+        ("switched off", 'hooks are switched off ("disableAllHooks": true)'),
+        ("plugin and hooks", "runs aisquare two ways"),
+        ("another install", "(0.7.0) — this install is"),
+        ("switched off beside missing hooks", "; hooks are missing or outdated"),
+    ],
+    ids=["switched-off", "plugin-and-hooks", "another-install", "switched-off-and-missing"],
+)
+def test_no_other_amber_claude_code_row_is_called_a_sign_in_to_finish(
+    tmp_path: Path,
+    isolated_agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    row_says: str,
+) -> None:
+    """Round 9 took the sign-in hint from the refusal row alone; every other amber
+    claude-code row still got "run `claude` once to authenticate it", counted as
+    actionable, and the run exited 0 (review of #257). Signing in fixes none of these: no
+    hook runs while they are switched off, the plugin and the hooks need one route chosen,
+    and hooks that run another aisquare need reconnecting. Each is now unexpected, exit 2,
+    with the doctor's own fix one command away. Missing hooks beside a switched-off
+    directory is no sign-in to finish either: the doctor joins the two with "; "."""
+    claude = isolated_agent_home / ".claude"
+    _connect_claude_code(claude)
+    if state == "switched off":
+        _switch_hooks_off(claude)
+    elif state == "plugin and hooks":
+        _install_the_plugin(claude)
+    elif state == "another install":
+        other = tmp_path / "old" / "aisquare"
+        other.parent.mkdir()
+        other.write_text("#!/bin/sh\n", encoding="utf-8")
+        _run_another_install(claude, other)
+        monkeypatch.setattr(agent_core, "hook_binary_version", lambda argv, **_kwargs: "0.7.0")
+    else:
+        work = isolated_agent_home / ".claude-work"
+        _connect_claude_code(work)
+        _lose_the_stop_hook(work)
+        _switch_hooks_off(claude)
+    payload = _claude_code_payload()
+
+    result = _summary_then_handoff(
+        tmp_path,
+        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        node=False,
+        env={"PAYLOAD": payload},
+    )
+
+    assert row_says in json.loads(payload)[0]["detail"], payload
+    assert "authenticate" not in result.stdout, f"{state}: a sign-in to finish\n{result.stdout}"
+    assert "Not expected, and worth a look:\n  claude-code\n" in result.stdout, result.stdout
+    assert "UNEXPECTED=1" in result.stdout
+    assert result.returncode == 2
+
+
+@pytest.mark.parametrize("directories", [1, 2])
+def test_missing_hooks_alone_keep_the_sign_in_hint(
+    tmp_path: Path, isolated_agent_home: Path, directories: int
+) -> None:
+    """The control: the row the hint was written for. In two directories the doctor's
+    fix joins two commands with "; ", which is not a second problem: only the row's
+    detail is read for one."""
+    for name in (".claude", ".claude-work")[:directories]:
+        _connect_claude_code(isolated_agent_home / name)
+        _lose_the_stop_hook(isolated_agent_home / name)
+    payload = _claude_code_payload()
+
+    result = _summary_then_handoff(
+        tmp_path,
+        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        node=False,
+        env={"PAYLOAD": payload},
+    )
+
+    row = json.loads(payload)[0]
+    assert "hooks are missing or outdated" in row["detail"], row
+    assert ("; " in row["fix"]) is (directories == 2), row
+    assert "claude-code — run `claude` once to authenticate it" in result.stdout, result.stdout
+    assert "UNEXPECTED=0" in result.stdout
+    assert result.returncode == 0
+
+
+@pytest.mark.parametrize(
+    ("packed", "summary_says", "exit_code"),
+    [
+        ("never", "  snapshot — aisquare project onboard\n", 0),
+        ("too large", "Not expected, and worth a look:\n  snapshot\n", 2),
+    ],
+    ids=["never-packed", "packed-too-large"],
+)
+def test_the_snapshot_advice_is_only_for_a_project_with_no_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, packed: str, summary_says: str, exit_code: int
+) -> None:
+    """The other row this script answers with a fixed command, by the same rule. A
+    snapshot packed too large before 0.7.0 is reused by a plain `project onboard`, so
+    "snapshot — aisquare project onboard" never turned it green: the doctor's own fix
+    became a re-pack in #82 and this one did not (review of #257)."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    project = ProjectInfo(id=project_id_for(root.resolve()), root=root.resolve(), linked_repos=[])
+    paths.ensure_home()
+    with store_session() as store:
+        store.ensure_project(project)
+    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
+    if packed == "too large":
+        snapshot_core.snapshot_dir(project.id).mkdir(parents=True)
+        verdict = Snapshot(
+            project_id=project.id,
+            generated_at=datetime.now(tz=UTC),
+            pack_path=snapshot_core.pack_path(project.id),
+            skeleton_path=snapshot_core.skeleton_path(project.id),
+            index_path=snapshot_core.index_path(project.id),
+            token_count=203_991,
+            compressed=True,
+            status="too_large",
+            full_token_count=412_318,
+            max_tokens=150_000,
+        )
+        snapshot_core.meta_path(project.id).write_text(verdict.model_dump_json(), "utf-8")
+    check = diagnostics._check_snapshot(root)
+
+    result = _summary_then_handoff(
+        tmp_path,
+        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain snapshot'",
+        node=False,
+        env={"PAYLOAD": json.dumps([check.model_dump(mode="json")])},
+    )
+
+    assert check.status is CheckStatus.warn, check
+    assert summary_says in result.stdout, result.stdout
+    assert result.returncode == exit_code
 
 
 def test_the_gh_advice_matches_whether_gh_exists(tmp_path: Path) -> None:

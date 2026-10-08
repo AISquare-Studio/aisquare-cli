@@ -1767,8 +1767,16 @@ _doctor_row() {
     printf '%s' "${DOCTOR_RAW:-}" | tr '{' '\n' | grep "\"name\": *\"$1\"" || true
 }
 
+# That check's "detail", still JSON-escaped; empty without one. Not the whole row:
+# a "fix" that names two directories joins them with "; " too.
+_doctor_detail() {
+    _doctor_row "$1" | sed -n 's/.*"detail": *"\([^"\\]*\(\\.[^"\\]*\)*\)".*/\1/p'
+}
+
 # Actionable by the user: a real credential step this script deliberately does
-# not take (§3.6). Each gets the one command that fixes it.
+# not take (§3.6). Each gets the one command that fixes it, and only for the row
+# text that command fixes: any other amber row of the same check gets none, so it
+# is listed as unexpected and sent to `aisquare doctor`.
 # shellcheck disable=SC2016  # the backticks are markdown for the reader, not
 # a command substitution — this string is printed, never evaluated.
 _actionable_fix() {
@@ -1788,15 +1796,30 @@ _actionable_fix() {
             fi
             ;;
         claude-code)
-            # A settings.json `agents connect` refuses (not valid JSON, or read-only)
-            # is no sign-in to finish: no fix here, so the row is listed as unexpected
-            # and the doctor names the file and why.
-            case "$(_doctor_row claude-code)" in
-                *"hooks cannot be written in"*) printf '' ;;
-                *) printf 'run `claude` once to authenticate it' ;;
+            # The sign-in is for the row it was written for: hooks missing, and
+            # nothing else wrong. No other amber claude-code row is a sign-in to
+            # finish: hooks switched off ("disableAllHooks"), a settings.json
+            # `agents connect` refuses, settings.json hooks beside the plugin, hooks
+            # that run another aisquare, and whatever the doctor adds next. Nor is
+            # missing hooks beside one of those: the doctor joins a row's problems
+            # with "; ". Those get no fix here, so the row is listed as unexpected,
+            # the run exits 2, and `aisquare doctor` gives each its own fix (review
+            # of #257).
+            case "$(_doctor_detail claude-code)" in
+                *"; "*) printf '' ;;
+                *"hooks are missing or outdated"*) printf 'run `claude` once to authenticate it' ;;
+                *) printf '' ;;
             esac
             ;;
-        snapshot) printf 'aisquare project onboard' ;;
+        snapshot)
+            # A project with no snapshot yet. A snapshot packed too large before
+            # 0.7.0 is reused by a plain onboard, so that advice never turned it
+            # green; the doctor's fix for it is a re-pack (#82).
+            case "$(_doctor_detail snapshot)" in
+                *"no codebase snapshot"*) printf 'aisquare project onboard' ;;
+                *) printf '' ;;
+            esac
+            ;;
         *) printf '' ;;
     esac
 }

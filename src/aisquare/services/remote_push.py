@@ -1371,12 +1371,13 @@ def push_routes(kit: RemoteKit) -> list[BaseRoute]:
 
     None is write-gated (each is in ``NOT_WRITE_GATED``): they change what this
     device is shown, never the fleet, and a phone that may not write must still
-    hear that something needs it. Every change is audited, and nothing else: the
-    subscription a device already has, sent again, and an unsubscribe with none
-    to remove, write no line. A device subscribes and unsubscribes at most
-    :data:`PUSH_SUBSCRIPTION_CALLS` times a minute, as it asks for one test every
-    10 s. Without both, a read-only device looping on these routes grew
-    ``remote-audit.log`` without bound (review of #243, sweep of round 3).
+    hear that something needs it. Every change of a subscription is audited, and
+    every test push; the subscription a device already has, sent again, and an
+    unsubscribe with none to remove, write no line. A device subscribes and
+    unsubscribes at most :data:`PUSH_SUBSCRIPTION_CALLS` times a minute, as it
+    asks for one test every 10 s. Without both, a read-only device looping on
+    these routes grew ``remote-audit.log`` without bound (review of #243, sweep of
+    round 3).
     """
     import asyncio
     from urllib.parse import urlsplit

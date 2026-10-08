@@ -367,7 +367,8 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
 - **Caps**: 64 KiB per request, 2 048 characters per keystroke message, 8 000
   per note or tell, 4 live connections per device. A device turns its
   notifications on or off at most 6 times a minute and sends one test every 10
-  seconds; only a change of its subscription is audited.
+  seconds; a subscription sent again unchanged, or an unsubscribe with nothing
+  to remove, writes no audit line.
 
 From the machine:
 

@@ -1185,14 +1185,27 @@ def test_off_a_terminal_without_yes_it_is_a_dry_run(
     assert machine.installs == []
 
 
+@pytest.mark.parametrize("latest", ["0.8.1", "0.8.0"], ids=["update", "up-to-date"])
+@pytest.mark.parametrize("flags", [[], ["--dry-run"]], ids=["no-yes", "dry-run"])
 def test_json_without_yes_prints_the_plan_and_changes_nothing(
-    runner: CliRunner, tool: Tool, machine: Machine
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    latest: str,
+    flags: list[str],
 ) -> None:
-    result = runner.invoke(app, ["--json", "upgrade"])
+    """Up to date, the plan said "dry_run": false, so a script read a plan as a run
+    (sweep of #257)."""
+    monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
+    machine.latest = LatestRelease(latest)
+
+    result = runner.invoke(app, ["--json", "upgrade", *flags])
 
     assert result.exit_code == 0, result.output
     plan = _one_object(result.stdout)
     assert plan["dry_run"] is True
+    assert plan["update_available"] is (latest == "0.8.1"), plan
     assert plan["argv"][-1] == "aisquare-cli[serve]@latest"
     assert machine.installs == []
 
@@ -1600,9 +1613,11 @@ def test_nothing_runs_when_pypi_has_nothing_newer(
     machine.latest = LatestRelease("0.9.0")
 
     result = runner.invoke(app, ["upgrade", "--yes"])
+    report = _one_object(runner.invoke(app, ["--json", "upgrade", "--yes"]).stdout)
 
     assert result.exit_code == 0, result.output
     assert "up to date" in result.stdout
+    assert report["dry_run"] is False and report["up_to_date"] is True, "a run, not a plan"
     assert machine.installs == []
 
 

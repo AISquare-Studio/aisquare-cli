@@ -279,8 +279,11 @@ def upgrade(
         )
     if plan.up_to_date:
         if json_output:
+            # Without --yes, or with --dry-run, this is the plan, as when something is newer:
+            # it said "dry_run": false, so a plan read as a run (sweep of #257).
+            planned = dry_run or not yes
             _echo_json(
-                {"dry_run": False, "upgraded": False, "up_to_date": True, **_plan_json(plan)}
+                {"dry_run": planned, "upgraded": False, "up_to_date": True, **_plan_json(plan)}
             )
         elif plan.target is not None:
             _say(f"aisquare {plan.current} is already the version asked for — nothing to do")

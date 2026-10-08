@@ -1791,7 +1791,8 @@ async function spoken() {
 }
 
 /* The writes no other scenario sends, as the machine received them: Post on the Board tab,
- * Reply on a board question, and Restart and Switch from an agent's Actions menu. */
+ * Reply on a board question, and Restart and Switch from an agent's Actions menu; and which
+ * names writePath refuses, a listed one the control. */
 async function writesReachTheirRoutes() {
   const writes = (page) => page.requests.filter((one) => one.method !== "GET").map((one) => one.method + " " + one.path);
   const ok = () => ({ status: 200, json: { ok: true } });
@@ -1824,7 +1825,16 @@ async function writesReachTheirRoutes() {
     click(buttonNamed(agent.run("UI.sheet"), go));
     await settle();
   }
-  return { board: writes(board), reply: writes(feed), agent: writes(agent) };
+  const refused = {};
+  for (const name of ["agents/stop", "notes", "agent/stop"]) {
+    try {
+      agent.run("writePath(" + JSON.stringify(name) + ")");
+      refused[name] = false;
+    } catch (error) {
+      refused[name] = true;
+    }
+  }
+  return { board: writes(board), reply: writes(feed), agent: writes(agent), refused };
 }
 
 /* Waking and reconnecting (SPEC §6.4): a 4409 while the tab is hidden, then pageshow still

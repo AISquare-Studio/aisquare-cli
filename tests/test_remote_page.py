@@ -1610,11 +1610,15 @@ def test_a_screen_reader_is_told_which_tab_is_open_and_that_a_sheet_is_a_modal_d
 
 def test_each_write_reaches_the_route_that_answers_it(boot_report: dict[str, Any]) -> None:
     """No scenario sent the board's Post, a Reply, a Restart or a Switch: their paths could
-    change, or be typed wrong, with every test green. Each, as the machine received it."""
+    change, or be typed wrong, with every test green. Each, as the machine received it. And
+    writePath throws for a name ``WRITES`` does not list, as the name of a write made up at
+    the call (``"agent/" + kind``) would otherwise go out to a path nothing answers; its
+    refusal could go with every test green, the static check reading only typed names."""
     sent = boot_report["writesReachTheirRoutes"]
     assert sent["board"] == ["POST api/note"]
     assert sent["reply"] == ["POST api/note", "POST api/needs/dismiss"]
     assert sent["agent"] == ["POST api/agent/restart", "POST api/agent/switch"]
+    assert sent["refused"] == {"agents/stop": True, "notes": True, "agent/stop": False}
 
 
 def test_the_page_reconnects_and_reads_again_when_the_phone_wakes(

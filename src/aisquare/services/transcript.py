@@ -480,10 +480,20 @@ class TranscriptTail:
     last_text_at: datetime | None
     marker_key: str | None
     """The ``uuid`` of the record that decided ``newest``, else its byte offset."""
+    empty: bool = False
+    """The file has nothing in it yet. ``newest`` is also ``none`` for a walk that met no
+    conversation record within :data:`TAIL_RECORDS` or its budget (only other kinds of
+    record, or lines it could not read): that one says nothing about what was written."""
 
 
 _TAIL_NOTHING = TranscriptTail(
-    pending=(), newest="none", newest_at=None, last_text=None, last_text_at=None, marker_key=None
+    pending=(),
+    newest="none",
+    newest_at=None,
+    last_text=None,
+    last_text_at=None,
+    marker_key=None,
+    empty=True,
 )
 """The tail of a transcript with no record in it yet."""
 

@@ -1827,11 +1827,38 @@ def test_a_row_at_work_since_its_notice_with_no_transcript_to_read_is_no_card(
     assert needs_dialog_open(snap) and action_may_answer(snap), "but no Enter either"
     nothing = TranscriptTail(
         pending=(), newest="none", newest_at=None, last_text=None, last_text_at=None,
-        marker_key=None,
+        marker_key=None, empty=True,
     )  # fmt: skip
     empty = _printed_since_the_notice(nothing, printed=NOW - timedelta(seconds=1))
     snap = _now_of(empty, FakeTmux(reference=NOW, quiet_for=1), monkeypatch)
     assert [item.kind for item in snap.items] == ["permission"] and needs_dialog_open(snap)
+
+
+def test_a_transcript_whose_tail_holds_no_conversation_is_no_card_either(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A tail's ``newest`` is ``none`` for an empty file, and also for a walk that met no
+    conversation record within its budget: a sub-agent's run, or other kinds of record,
+    filling the end of the file. That one was read as "nothing written at all", and a row
+    at work while its session still said ``attention`` got a dialog card in the feed. It
+    says nothing of what was written, so it is the doubt a transcript that cannot be read
+    is: no card, and the guard still refuses (verification of a8a6db0f)."""
+    from aisquare.services.remote_actions import action_may_answer
+
+    path = tmp_path / "coder-1.jsonl"
+    side = {"type": "assistant", "isSidechain": True, "timestamp": "2026-10-07T11:59:50Z"}
+    record = {**side, "message": {"id": "msg_s", "content": [{"type": "text", "text": "x"}]}}
+    path.write_text("\n".join(json.dumps(record) for _ in range(5)) + "\n", encoding="utf-8")
+    walked = read_transcript_tail(path)
+    assert walked is not None and walked.newest == "none" and not walked.empty
+    fleet = _printed_since_the_notice(walked, printed=NOW - timedelta(seconds=1))
+    snap = _now_of(fleet, FakeTmux(reference=NOW, quiet_for=1), monkeypatch)
+    assert snap.status is not None and snap.status.state == "working"
+    assert snap.items == (), "a card the transcript cannot vouch for"
+    assert needs_dialog_open(snap) and action_may_answer(snap), "and no Enter either"
+    path.write_text("", encoding="utf-8")
+    nothing = read_transcript_tail(path)
+    assert nothing is not None and nothing.empty, "an empty file is nothing written"
 
 
 @pytest.mark.parametrize(

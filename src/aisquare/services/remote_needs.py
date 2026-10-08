@@ -759,18 +759,23 @@ def _needs_unanswered(
     none at all. A pending tool is not looked at here: a granted one prints while it runs
     and writes nothing until it ends, so this would read it as its own prompt.
 
-    ``unread`` is the answer when the transcript cannot say: none to read, or records
-    without times. Then nothing tells a dialog whose pane printed from a granted tool at
-    work, which prints until the turn's Stop. The guard takes it for a dialog, a refusal
-    being its cheap mistake (:func:`needs_dialog_open`); the feed does not, a card it
-    cannot vouch for, there for the rest of the turn, being its dear one.
+    ``unread`` is the answer when the transcript cannot say: none to read, records without
+    times, or none the tail's walk could read as conversation (``newest`` is ``none`` then
+    as well, but the file is not empty: it says nothing of what was written). Then nothing
+    tells a dialog whose pane printed from a granted tool at work, which prints until the
+    turn's Stop. The guard takes it for a dialog, a refusal being its cheap mistake
+    (:func:`needs_dialog_open`); the feed does not, a card it cannot vouch for, there for
+    the rest of the turn, being its dear one. Nor can a key that only moves a dialog's
+    highlight be told from thinking: the card of a dialog answered at the machine stays
+    until the agent writes its first text or tool record (thinking alone moves no
+    ``newest_at``), a stale card at worst, never a key typed.
     """
     session = status.session
     if status.state != "working" or session is None or session.ended_at is not None:
         return False
     if session.state != "attention":
         return False
-    if tail is not None and tail.newest == "none":
+    if tail is not None and tail.empty:
         return True  # nothing written at all, so nothing since the notice
     if tail is None or tail.newest_at is None:
         return unread

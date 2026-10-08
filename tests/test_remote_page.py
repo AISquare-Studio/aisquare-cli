@@ -1339,18 +1339,42 @@ def test_an_answer_that_comes_after_the_human_moved_on_acts_on_its_own_sheet_onl
     ^C to coder-1 refused double_press opened an agent-less "Send it again?" over coder-2's
     own Ctrl-C sheet, its Send and exit where coder-2's button was. A restart answered after
     Back closed the Tell sheet opened since, and what was typed in it; failed, it said why in
-    its own sheet, off the screen, so nothing was said at all."""
+    its own sheet, off the screen, so nothing was said at all. With that Tell sent and still
+    out, the restart's answer took the busy mark off the Tell's sheet, and Escape or a tap
+    beside it closed the sheet while it waited. And a Tell, a Reply or a restart answered
+    once another sheet was open, done or stale, closed that one, with what was typed in it.
+    The double_press sheet waits for coder-1's own screen with no other sheet on it; a Stop
+    answered dialog_open once its sheet is gone says why, but not to press a button that is
+    gone with it."""
     late = boot_report["lateAnswers"]
-    assert late["doublePress"] == {
-        "sheet": "Send Ctrl-C?",
-        "toast": "coder-1: the second Ctrl-C was not sent — it would exit Claude Code.",
-        "exits": 0,
+    not_sent = "coder-1: the second Ctrl-C was not sent — it would exit Claude Code."
+    assert late["doublePress"] == {"sheet": "Send Ctrl-C?", "toast": not_sent, "exits": 0}
+    assert late["doubleUnderASheet"] == {"sheet": "Act on coder-1", "toast": not_sent}
+    assert late["doubleElsewhere"] == {"sheet": None, "toast": not_sent}
+    assert late["promptAfterBack"] == {
+        "sheet": None,
+        "toast": "Stop coder-1: coder-1 may be showing a prompt that stopping it now would answer.",
     }
     told = {"sheet": "Tell coder-1", "typed": "carry on"}
     assert late["restartDone"] == {**told, "toast": "Restarted coder-1 on its own conversation"}
     assert late["restartFailed"] == {
         **told,
         "toast": "Restart coder-1: The machine could not answer — try again in a moment.",
+    }
+    assert late["restartStale"] == {
+        **told,
+        "toast": "coder-1 changed since this screen loaded — look again, then retry.",
+    }
+    assert late["staleUnderATell"] == {"sheet": "Tell coder-2", "typed": "not yet", "told": 1}
+    assert late["restartUnderATell"] == {
+        "waiting": {"busy": True, "close": True, "sheet": "Tell coder-1"},
+        "told": {"sheet": "Stop coder-1", "toast": "Typed into coder-1"},
+    }
+    assert late["replyUnderAReply"] == {
+        "typed": "8080",
+        "toast": "Posted on the board",
+        "dismissed": ["ny_0123456789abcdef"],
+        "at": "#/n/ny_00000000000000b2",
     }
 
 
@@ -1360,7 +1384,9 @@ def test_a_late_refusal_neither_moves_the_page_nor_covers_a_sheet_opened_since(
     """So it went for what a refusal does besides its sentence: a Dismiss answered once
     another card was open sent the page to the feed, a read_only answered once a Tell sheet
     was open put the read-only sheet in its place, and a gone agent sent the page to its
-    fleet from another agent's screen."""
+    fleet from another agent's screen: a transcript read, a pad key, a Tell. On the gone
+    agent's own screen it still goes, in that screen's place, so Back then leaves; and a
+    Tell refused read_only still puts the read-only sheet in its own sheet's place."""
     elsewhere = boot_report["lateAnswers"]["elsewhere"]
     assert elsewhere["dismissedAt"] == "#/n/ny_fedcba9876543210"
     assert elsewhere["readOnly"] == {
@@ -1368,7 +1394,11 @@ def test_a_late_refusal_neither_moves_the_page_nor_covers_a_sheet_opened_since(
         "typed": "wait for me",
         "writable": False,
     }
+    assert elsewhere["readOnlyOwn"] == "Read-only"
     assert elsewhere["goneAt"] == "#/p/prj_x/a/coder-2/live"
+    for gone in (elsewhere["goneKey"], elsewhere["goneTell"]):
+        assert gone["elsewhere"] == {"at": "#/p/prj_x/a/coder-2/live", "left": False}
+        assert gone["own"] == {"at": "#/p/prj_x/fleet", "left": True}
 
 
 def test_a_sheet_opened_before_the_fleet_came_finds_its_agent_when_tapped(

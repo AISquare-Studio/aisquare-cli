@@ -1080,9 +1080,12 @@ function sheetTitle(page) {
 }
 
 /* Answers that come after the human moved on. A second ^C to coder-1 is refused
- * double_press while coder-2's screen shows its own Ctrl-C sheet; and a restart answers
- * after Back left its sheet and the human opened Tell and typed in it, once done and once
- * failed. */
+ * double_press while coder-2's screen shows its own Ctrl-C sheet, on coder-1's own screen
+ * once its Actions sheet is open, and once coder-2's screen shows with no sheet on it; a
+ * restart answers after Back left its sheet and the human opened Tell and typed in it (done,
+ * failed and stale), and once more with that Tell sent and out; a Reply, and a card's Tell
+ * answered stale, once another is begun; and a Stop answered dialog_open once Back closed
+ * its sheet. */
 async function lateAnswers() {
   const keys = [];
   const page = await agentView({
@@ -1128,17 +1131,175 @@ async function lateAnswers() {
     await settle();
     return { sheet: sheetTitle(one), typed: text.isConnected ? text.value : null, toast: one.toast() };
   };
+
+  /* The restart answered while the Tell opened since is out: the Tell's sheet still waits on
+   * its own answer, and neither Escape nor a tap beside it closes it. Then Back, Stop…, and
+   * the Tell's answer, which leaves the Stop sheet where it is. */
+  const restartUnderATell = async () => {
+    const restart = deferred();
+    const told = deferred();
+    const one = await agentView({
+      "POST api/agent/restart": () => restart.promise,
+      "POST api/agent/tell": () => told.promise,
+      "GET api/transcript/coder-1": () => transcriptPage([], null, false),
+    });
+    one.live().frame("fleet", FLEET);
+    await settle();
+    const menu = (item) => {
+      click(buttonNamed(one.main(), "Actions…"));
+      click(buttonNamed(one.run("UI.sheet"), item));
+    };
+    menu("Restart…");
+    click(buttonNamed(one.run("UI.sheet"), "Restart"));
+    await settle();
+    one.run("pageGo('#/p/" + PROJECT + "/a/coder-1/transcript')");
+    await settle();
+    menu("Tell…");
+    find(one.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "carry on";
+    click(buttonNamed(one.run("UI.sheet"), "Tell"));
+    await settle();
+    restart.settle({ status: 200, json: { agent: { id: "agt_1", label: "coder-1" }, resumed: true, project: PROJECT } });
+    await settle();
+    const wrap = one.run("UI.sheet");
+    const close = buttonNamed(wrap, "Close");
+    const waiting = { busy: wrap.classList.contains("busy"), close: close ? close.disabled : null };
+    one.run("for (const fn of document.listeners.keydown || []) fn({ type: 'keydown', key: 'Escape' });");
+    wrap.dispatch("click");
+    waiting.sheet = sheetTitle(one);
+    one.run("pageGo('#/p/" + PROJECT + "/a/coder-1/live')");
+    await settle();
+    menu("Stop…");
+    told.settle({ status: 200, json: { label: "coder-1", delivered: true, mode: "auto", project: PROJECT } });
+    await settle();
+    return { waiting, told: { sheet: sheetTitle(one), toast: one.toast() } };
+  };
+
+  /* A Reply posted on one question, then another question's card opened and a Reply begun
+   * there: the first one's answer leaves the second's sheet, and what is typed in it, alone. */
+  const replyUnderAReply = async () => {
+    const posted = deferred();
+    const first = Object.assign({}, ITEM, {
+      kind: "board_question", detail: { text: "Which store?", author: "lead-1" }, answers: [], actions: ["reply"],
+    });
+    const second = Object.assign({}, first, { id: "ny_00000000000000b2", detail: { text: "Which port?", author: "lead-1" } });
+    const page = bootPage("#/", signedIn({
+      "GET api/needs": () => ({ status: 200, json: { items: [first, second] } }),
+      "POST api/note": () => posted.promise,
+      "POST api/needs/dismiss": () => ({ status: 200, json: { dismissed: true } }),
+    }));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    click(buttonNamed(page.main(), "Reply…"));
+    find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "Postgres";
+    click(buttonNamed(page.run("UI.sheet"), "Post"));
+    await settle();
+    page.run("pageGo('#/n/" + second.id + "')");
+    await settle();
+    click(buttonNamed(page.main(), "Reply…"));
+    const draft = find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA");
+    draft.value = "8080";
+    posted.settle({ status: 200, json: { ok: true } });
+    await settle();
+    return {
+      typed: draft.isConnected ? draft.value : null, toast: page.toast(),
+      dismissed: page.sent("api/needs/dismiss").map((body) => body.id), at: page.location.hash,
+    };
+  };
+
+  /* A Tell from one card answered stale (the card cleared meanwhile) once another card's Tell
+   * is begun: that sheet, and what is typed in it, stays. */
+  const staleUnderATell = async () => {
+    const told = deferred();
+    const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell"] });
+    const other = Object.assign({}, asked, { id: "ny_00000000000000b3", agent: "coder-2", agent_id: "agt_2" });
+    const page = bootPage("#/n/" + asked.id, signedIn({
+      "GET api/needs": () => ({ status: 200, json: { items: [asked, other] } }),
+      "POST api/agent/tell": () => told.promise,
+    }));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    const tell = (words) => {
+      click(buttonNamed(page.main(), "Tell…"));
+      const text = find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA");
+      text.value = words;
+      return text;
+    };
+    tell("yes, merge");
+    click(buttonNamed(page.run("UI.sheet"), "Tell"));
+    await settle();
+    page.run("pageGo('#/n/" + other.id + "')");
+    await settle();
+    const draft = tell("not yet");
+    told.settle({ status: 409, json: { error: "stale", message: "the item no longer needs you", current: null } });
+    await settle();
+    return { sheet: sheetTitle(page), typed: draft.isConnected ? draft.value : null, told: page.sent("api/agent/tell").length };
+  };
+
+  /* A Stop answered dialog_open after Back closed its sheet: what the toast says. */
+  const promptAfterBack = async () => {
+    const stopped = deferred();
+    const one = await agentView({
+      "POST api/agent/stop": () => stopped.promise,
+      "GET api/transcript/coder-1": () => transcriptPage([], null, false),
+    });
+    one.live().frame("fleet", FLEET);
+    await settle();
+    click(buttonNamed(one.main(), "Actions…"));
+    click(buttonNamed(one.run("UI.sheet"), "Stop…"));
+    click(buttonNamed(one.run("UI.sheet"), "Stop"));
+    await settle();
+    one.run("pageGo('#/p/" + PROJECT + "/a/coder-1/transcript')");
+    await settle();
+    stopped.settle({ status: 409, json: { error: "dialog_open", message: "coder-1 is showing a prompt; send dismiss_dialog: true" } });
+    await settle();
+    return { sheet: sheetTitle(one), toast: one.toast() };
+  };
+
+  /* A second ^C to coder-1 refused double_press once the human moved on: `moveOn` opens
+   * coder-1's Actions sheet, or coder-2's screen with no sheet on it. */
+  const doubleLate = async (moveOn) => {
+    const sent = [];
+    const one = await agentView({ "POST api/send-keys": () => (sent[sent.length] = deferred()).promise });
+    for (const answer of [{ status: 200, json: { sent: true } }, null]) {
+      click(buttonNamed(one.main(), "^C"));
+      click(buttonNamed(one.run("UI.sheet"), "Send Ctrl-C"));
+      await settle();
+      if (answer) sent[sent.length - 1].settle(answer);
+      await settle();
+    }
+    await moveOn(one);
+    sent[1].settle({ status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits Claude Code — send confirm_exit: true" } });
+    await settle();
+    return { sheet: sheetTitle(one), toast: one.toast() };
+  };
+  const toActions = async (one) => click(buttonNamed(one.main(), "Actions…"));
+  const toCoder2 = async (one) => {
+    one.run("pageGo('#/p/" + PROJECT + "/a/coder-2/live')");
+    await settle();
+  };
   return {
     doublePress,
     restartDone: await restartThenTell({ status: 200, json: { agent: { id: "agt_1", label: "coder-1" }, resumed: true, project: PROJECT } }),
     restartFailed: await restartThenTell({ status: 503, json: { error: "fleet_unavailable", message: "tmux did not answer" } }),
+    restartStale: await restartThenTell({ status: 409, json: { error: "stale", message: "coder-1 is not the agent this was" } }),
+    restartUnderATell: await restartUnderATell(),
+    replyUnderAReply: await replyUnderAReply(),
+    staleUnderATell: await staleUnderATell(),
+    promptAfterBack: await promptAfterBack(),
+    doubleUnderASheet: await doubleLate(toActions),
+    doubleElsewhere: await doubleLate(toCoder2),
     elsewhere: await lateElsewhere(),
   };
 }
 
 /* More answers that come after the human moved on: a card's Dismiss once another card is
- * open; a pad key refused read_only once a Tell sheet is open, typed in; and a transcript
- * read that finds coder-1 gone once coder-2's screen is open. Where the page is after each. */
+ * open; a pad key refused read_only once a Tell sheet is open, typed in, and a Tell refused
+ * read_only on its own sheet, the control; a transcript read that finds coder-1 gone once
+ * coder-2's screen is open; and a pad key and a Tell to coder-1 answered "gone" once
+ * coder-2's screen is open, and on coder-1's own screen, the control. Where the page is
+ * after each, and for the last two whether Back then leaves the page. */
 async function lateElsewhere() {
   const other = Object.assign({}, ITEM, { id: "ny_fedcba9876543210", agent: "coder-2" });
   const dismissed = deferred();
@@ -1165,6 +1326,13 @@ async function lateElsewhere() {
   key.settle({ status: 403, json: { error: "read_only", message: "writes are off" } });
   await settle();
 
+  const own = await agentView({ "POST api/agent/tell": () => ({ status: 403, json: { error: "read_only", message: "writes are off" } }) });
+  click(buttonNamed(own.main(), "Actions…"));
+  click(buttonNamed(own.run("UI.sheet"), "Tell…"));
+  find(own.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "go on";
+  click(buttonNamed(own.run("UI.sheet"), "Tell"));
+  await settle();
+
   const read = deferred();
   const gone = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({ "GET api/transcript/coder-1": () => read.promise }));
   await settle();
@@ -1172,10 +1340,34 @@ async function lateElsewhere() {
   await settle();
   read.settle({ status: 404, json: { error: "no_such_agent", message: "no live agent 'coder-1'" } });
   await settle();
+
+  const goneAfter = async (send, moveOn) => {
+    const held = deferred();
+    const one = await agentView({ "POST api/send-keys": () => held.promise, "POST api/agent/tell": () => held.promise });
+    send(one);
+    await settle();
+    if (moveOn) {
+      one.run("pageGo('#/p/" + PROJECT + "/a/coder-2/live')");
+      await settle();
+    }
+    held.settle({ status: 404, json: { error: "no_such_agent", message: "no live agent 'coder-1'" } });
+    await settle();
+    return { at: one.location.hash, left: !one.back() };
+  };
+  const tapKey = (one) => click(buttonNamed(one.main(), "1"));
+  const sendTell = (one) => {
+    click(buttonNamed(one.main(), "Actions…"));
+    click(buttonNamed(one.run("UI.sheet"), "Tell…"));
+    find(one.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "go on";
+    click(buttonNamed(one.run("UI.sheet"), "Tell"));
+  };
   return {
     dismissedAt: cards.location.hash,
     readOnly: { sheet: sheetTitle(pad), typed: text.isConnected ? text.value : null, writable: pad.run("writable()") },
+    readOnlyOwn: sheetTitle(own),
     goneAt: gone.location.hash,
+    goneKey: { elsewhere: await goneAfter(tapKey, true), own: await goneAfter(tapKey, false) },
+    goneTell: { elsewhere: await goneAfter(sendTell, true), own: await goneAfter(sendTell, false) },
   };
 }
 

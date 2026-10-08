@@ -4403,11 +4403,19 @@ def _unmark_handing_over(session: TeamSession) -> str | None:
     return None
 
 
+#: What the exit :func:`_abandon_handover` announces says after its status. The hand-over's own
+#: ``/exit`` ended the row with status 0, so the board read "exited (0)" as a ``fleet stop``
+#: does, and whoever reads it (the manager, ``remote``'s needs-you for the manager itself) took
+#: an agent nothing replaced for one whose work was done.
+HANDOVER_FAILED = "its replacement did not start"
+
+
 def _abandon_handover(stopped: FleetAgent) -> None:
-    """The replacement never started: release what was parked and record the exit withheld."""
+    """The replacement never started: release what was parked and record the exit withheld,
+    saying so (:data:`HANDOVER_FAILED`)."""
     with contextlib.suppress(Exception), store_session() as store:
         _team().release_agent_claims(store, stopped, why="hand-over failed")
-        _emit_exit(store, stopped)
+        _emit_exit(store, stopped, why=HANDOVER_FAILED)
     nudge_manager(stopped.project_id, reason=f"{stopped.label} exited")
 
 
@@ -4606,8 +4614,9 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
     return report
 
 
-def _emit_exit(store: ContextStore, agent: FleetAgent) -> None:
-    """The ``agent_exited`` board event the manager's Stop hook wakes on (§7.3)."""
+def _emit_exit(store: ContextStore, agent: FleetAgent, *, why: str | None = None) -> None:
+    """The ``agent_exited`` board event the manager's Stop hook wakes on (§7.3), with
+    ``why`` after the status when the status does not say it all."""
     status = "?" if agent.exit_status is None else str(agent.exit_status)
     # The row is already ended; the event is the courtesy, not the record.
     with contextlib.suppress(Exception):
@@ -4615,7 +4624,7 @@ def _emit_exit(store: ContextStore, agent: FleetAgent) -> None:
             store,
             agent.project_id,
             "agent_exited",
-            f"{agent.label} exited ({status})",
+            f"{agent.label} exited ({status})" + (f": {why}" if why else ""),
             session_id=agent.session_id,
         )
 

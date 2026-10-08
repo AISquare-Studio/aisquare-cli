@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -330,6 +330,49 @@ def test_the_second_prompt_of_one_turn_is_a_new_item() -> None:
     assert first.id != second.id
 
 
+def _in_a_sub_agent(
+    seen: datetime, label: str = "coder-1"
+) -> tuple[FleetAgentStatus, TranscriptTail]:
+    """``label`` at a prompt of a sub-agent's, notified at ``seen``: the ``Task`` it runs in is
+    the one tool pending in the agent's own transcript."""
+    row = _row(label)
+    session = _session(row, state="attention", seen=seen)
+    task = _tool("toolu_task", "Task", at=BORN + timedelta(minutes=5), description="the cache")
+    return _status(row, "attention", session), _tail(task, at=BORN + timedelta(minutes=5))
+
+
+def test_every_prompt_of_a_sub_agent_is_a_new_item() -> None:
+    """The ``Task`` is pending through all of its sub-agent's prompts. Named after it, each
+    prompt after the first was the first again: never pushed, hidden by its dismissal, and
+    answered by a card left from it, whose "1" approved what the sub-agent asked next. Every
+    prompt is notified, and each notification moves ``last_seen_at``."""
+    first = _one(_classify(*_in_a_sub_agent(NOW - timedelta(minutes=4))))
+    second = _one(_classify(*_in_a_sub_agent(NOW - timedelta(seconds=30))))
+    assert first.kind == second.kind == "permission" and first.id != second.id
+    assert (first.since, second.since) == (NOW - timedelta(minutes=4), NOW - timedelta(seconds=30))
+    assert second.push_after == second.since, "pushed, as the first was"
+    assert second.reason == "coder-1 waits for a permission answer (in a sub-agent)"
+
+
+def test_a_sub_agents_next_prompt_has_no_item_until_its_notice() -> None:
+    """The pane goes quiet 5 s after the next prompt is drawn and its notice comes at 6 s: in
+    between, ``last_seen_at`` still names the prompt before, whose id an item would carry.
+    A notice whose hook waited out the store's lock comes some seconds later still."""
+    seen = NOW - timedelta(minutes=1)
+    status, tail = _in_a_sub_agent(seen)
+    drawn = NOW - timedelta(seconds=6)
+    assert _classify(status, tail, pane_output=lambda: drawn) == []
+    slow = NOW - timedelta(seconds=13)
+    assert _classify(status, tail, pane_output=lambda: slow) == [], "a hook slowed by the lock"
+    noticed = _one(
+        _classify(*_in_a_sub_agent(NOW - timedelta(seconds=1)), pane_output=lambda: drawn)
+    )
+    assert noticed.since == NOW - timedelta(seconds=1)
+    redrawn = _one(_classify(status, tail, pane_output=lambda: NOW - timedelta(seconds=40)))
+    assert redrawn.since == seen, "output long after the notice is a redraw, not a prompt"
+    assert _one(_classify(status, tail, pane_output=lambda: None)).since == seen
+
+
 def test_rule_6_a_prompt_dismissed_with_esc_is_interrupted_not_a_prompt() -> None:
     """Esc fires no Stop: the row keeps reading ``attention`` for its whole stale window."""
     row = _row()
@@ -383,14 +426,38 @@ def test_rule_8_attention_without_a_tool_is_a_dialog() -> None:
     row = _row()
     seen = NOW - timedelta(minutes=2)
     session = _session(row, state="attention", seen=seen)
-    events = [_event(4, "attention", "Claude Code needs your approval", session=session)]
-    item = _one(_classify(_status(row, "attention", session), _tail(newest="tool_result"), events))
+    events = [_event(4, "attention", "Claude Code needs your approval", session=session, at=seen)]
+    tail = _tail(newest="tool_result", at=seen - timedelta(seconds=8))
+    item = _one(_classify(_status(row, "attention", session), tail, events))
     assert item.kind == "permission"
     assert item.id == needs_item_id(PROJECT.id, "permission", f"attention:4:{seen.isoformat()}")
     assert item.reason == "coder-1 shows a dialog that needs you"
     assert item.detail == {"text": "Claude Code needs your approval"}
     assert item.answers == ()
     assert item.since == seen
+
+
+def test_a_dialog_after_the_agent_moved_on_is_not_named_by_the_notice_before_it() -> None:
+    """``mark_attention`` flips a session once per turn: a turn's later dialogs leave no event
+    and move ``last_seen_at`` alone. A usage-limit dialog after a Bash prompt that was
+    granted read as a permission card quoting that prompt, pushed at once and with no
+    Switch; and the reverse, a later dialog read as the usage limit with its words."""
+    row = _row()
+    first = NOW - timedelta(minutes=10)
+    session = _session(row, state="attention", seen=NOW - timedelta(minutes=1))
+    status = _status(row, "attention", session)
+    moved_on = _tail(newest="assistant_text", at=first + timedelta(minutes=2), text="Ran it.")
+    asked = "Claude needs your permission to use Bash"
+    bash = [_event(4, "attention", asked, session=session, at=first)]
+    paused = "Session paused — choose: continue on usage credits or switch models"
+    limit = [_event(4, "attention", paused, session=session, at=first)]
+    later = _one(_classify(status, moved_on, bash))
+    assert (later.kind, later.excerpt, later.detail) == ("permission", "", {"text": ""})
+    assert later.reason == "coder-1 shows a dialog that needs you"
+    assert _one(_classify(status, moved_on, limit)).kind == "permission", "not the limit's"
+    still = _tail(newest="assistant_text", at=first - timedelta(seconds=8), text="Running it.")
+    assert _one(_classify(status, still, limit)).kind == "limited", "the dialog it named"
+    assert _one(_classify(status, still, bash)).excerpt == bash[0].text
 
 
 def test_stale_attention_still_counts_as_attention() -> None:
@@ -469,6 +536,18 @@ class Fleet:
     tails: dict[str, TranscriptTail] = field(default_factory=dict)
     listing_fails: bool = False
     listed: int = 0
+    silent: set[str] = field(default_factory=set)
+    """Sockets whose tmux server does not answer."""
+    probed: list[str] = field(default_factory=list)
+    """Every socket the scan asked tmux about, once per question."""
+    asked_events: list[tuple[str, str, datetime]] = field(default_factory=list)
+    """Every session the scan asked the store for its newest event of a kind since a time."""
+    output_at: datetime | None = None
+    """When every pane last printed, as tmux tells it; ``None``: it would not say."""
+    windows: int = 0
+    """How many times the scan read the window of the newest events."""
+    board_fails: bool = False
+    """The read of the board's day raises, as a store held past its busy timeout does."""
 
 
 def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> NeedsSources:
@@ -478,17 +557,57 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
             raise fleet_service.FleetUnavailable("tmux is not installed")
         return list(fleet.agents)
 
+    def board_events(pid: str, limit: int) -> list[TeamEvent]:
+        fleet.windows += 1
+        return fleet.events[-limit:]
+
+    def board_since(pid: str, since: datetime) -> list[TeamEvent]:
+        """The store's ``team_events_since`` over the kinds the live source asks for."""
+        if fleet.board_fails:
+            raise RuntimeError("database is locked")
+        return [
+            event
+            for event in fleet.events
+            if event.created_at >= since
+            and (
+                event.kind in (*remote_needs._NEEDS_ASKED, "agent_exited")
+                or (event.session_id is None and event.kind in remote_needs._NEEDS_REPLIED)
+            )
+        ]
+
+    def tmux_answers(socket: str) -> bool:
+        fleet.probed.append(socket)
+        return socket not in fleet.silent
+
+    def session_event(pid: str, session_id: str, kind: str, since: datetime) -> TeamEvent | None:
+        fleet.asked_events.append((session_id, kind, since))
+        own = [
+            event
+            for event in fleet.events
+            if event.session_id == session_id and event.kind == kind and event.created_at >= since
+        ]
+        return max(own, key=lambda event: event.seq, default=None)
+
     return NeedsSources(
         list_projects=lambda: [PROJECT],
         list_agents=list_agents,
         ended_agents=lambda pid, since: [
             row for row in fleet.ended if row.ended_at is not None and row.ended_at >= since
         ],
-        board_events=lambda pid, limit: fleet.events[-limit:],
-        board_sessions=lambda pid: list(fleet.sessions),
+        board_events=board_events,
+        board_since=board_since,
+        board_sessions=lambda pid, since, ids: [
+            session
+            for session in fleet.sessions
+            if session.last_seen_at >= since or session.id in ids
+        ],
         task_status=lambda ref: fleet.tasks.get(ref),
         transcript_tail=lambda path: fleet.tails.get(path),
         accounts=lambda: accounts or AccountsSettings(),
+        has_live_agents=lambda pid: any(status.agent.ended_at is None for status in fleet.agents),
+        tmux_answers=tmux_answers,
+        session_event=session_event,
+        pane_output=lambda agent: fleet.output_at,
     )
 
 
@@ -596,11 +715,168 @@ def test_a_stopped_manager_whose_work_is_done_is_not_down() -> None:
     assert _scan(Fleet(ended=[clean], agents=working)) == []
 
 
+def test_a_managers_last_word_is_its_own_not_the_exit_the_fleet_announced_for_it() -> None:
+    """``fleet stop`` announces the exit under the manager's own session (``agent_exited``),
+    so the session's newest event was that announcement after every stop, never the result
+    before it: a manager stopped once it reported read as one stopped mid-work. Its last
+    word is what it posted itself, a question, a result or a decision."""
+    manager = _row("manager", role="manager", ended=NOW - timedelta(minutes=5))
+    managing = _session(manager, ended=NOW - timedelta(minutes=5))
+    coder = _row()
+    stopped = NOW - timedelta(minutes=5)
+    fleet = Fleet(
+        ended=[manager],
+        agents=[_status(coder, "working", _session(coder))],
+        sessions=[managing],
+        events=[
+            _event(5, "result", "Shipped.", session=managing, at=stopped - timedelta(minutes=1)),
+            _event(6, "note", "Signing off.", session=managing, at=stopped - timedelta(minutes=1)),
+            _event(7, "agent_exited", "manager exited (?)", session=managing, at=stopped),
+        ],
+    )
+    assert [item.kind for item in _scan(fleet)] == ["board_result"], "it reported, then stopped"
+    asked = _event(6, "question", "Anything else?", session=managing, at=stopped)
+    fleet.events[1] = asked
+    assert [item.kind for item in _scan(fleet)] == ["board_question", "manager_down"]
+
+
+def test_a_manager_whose_hand_over_never_started_its_replacement_is_down() -> None:
+    """A switch or a restart stops the manager with its own ``/exit``, status 0, and then
+    starts the replacement. When that start fails nothing replaces it, and "manager exited
+    (0)" read as a manager whose job was done: no card while the crew worked on unmanaged.
+    The exit announced for a hand-over that failed says so."""
+    from aisquare.services.fleet import HANDOVER_FAILED
+
+    manager = _row("manager", role="manager", ended=NOW - timedelta(minutes=5), exit_status=0)
+    managing = _session(manager, ended=NOW - timedelta(minutes=5))
+    coder = _row()
+    failed = _event(7, "agent_exited", f"manager exited (0): {HANDOVER_FAILED}", session=managing)
+    fleet = Fleet(
+        ended=[manager],
+        agents=[_status(coder, "working", _session(coder))],
+        sessions=[managing],
+        events=[failed],
+    )
+    down = _one(_scan(fleet))
+    assert (down.kind, down.reason) == (
+        "manager_down",
+        "the manager stopped while 1 agent still works",
+    )
+    assert down.detail == {"exit_status": 0, "task_id": None}
+    fleet.events = [_event(7, "agent_exited", "manager exited (0)", session=managing)]
+    assert _scan(fleet) == [], "a stop that meant it: its job was done"
+    fleet.events = [failed]
+    fleet.agents = [_status(coder, "waiting", _session(coder, state="waiting"))]
+    assert _scan(fleet) == [], "and with nobody at work, nothing needs a manager"
+
+
+def test_a_coder_whose_hand_over_never_started_its_replacement_is_reported() -> None:
+    """A switch (by hand, or on its usage limit with ``on_limit = "switch"``) or a restart
+    stops the coder with its own ``/exit``, status 0, and then starts the replacement. When
+    that start failed, nothing took its place, and with no manager live nobody was told: its
+    limit card went with its row, and a clean exit is no crash. The exit announced for a
+    hand-over that failed says so, and it reads as a crash that a restart answers."""
+    from aisquare.services.fleet import HANDOVER_FAILED
+
+    coder = _row(ended=NOW - timedelta(minutes=10), exit_status=0, task_id="tsk_1")
+    coding = _session(coder, ended=NOW - timedelta(minutes=10))
+    failed = _event(7, "agent_exited", f"coder-1 exited (0): {HANDOVER_FAILED}", session=coding)
+    fleet = Fleet(ended=[coder], events=[failed], tasks={"tsk_1": "todo"})
+    item = _one(_scan(fleet))
+    assert (item.kind, item.agent) == ("crashed", "coder-1")
+    assert item.reason == "coder-1 stopped, and its replacement did not start"
+    assert item.detail == {"exit_status": 0, "task_id": "tsk_1"}
+    assert item.actions == ("restart", "dismiss")
+    fleet.events = [_event(7, "agent_exited", "coder-1 exited (0)", session=coding)]
+    assert _scan(fleet) == [], "an /exit that meant it"
+    killed = coder.model_copy(update={"exit_status": None})
+    fleet.ended = [killed]
+    fleet.events = [
+        _event(7, "agent_exited", f"coder-1 exited (?): {HANDOVER_FAILED}", session=coding)
+    ]
+    assert _one(_scan(fleet)).reason == item.reason, "its /exit not in time, so it was killed"
+    assert _scan(_with_live_manager(fleet)) == [], "a live manager was nudged on it"
+
+
 def test_a_new_manager_ends_manager_down() -> None:
     old = _row("manager", role="manager", ended=NOW - timedelta(minutes=5), exit_status=3)
     new = _row("manager", role="manager", row_id="agt_new", created=NOW - timedelta(minutes=1))
     fleet = Fleet(ended=[old], agents=[_status(new, "working", _session(new))])
     assert _scan(fleet) == []
+
+
+def _crew_and_manager(manager: FleetAgentStatus) -> Fleet:
+    """coder-1 asks the manager on the board, coder-2 crashed with its task open."""
+    asker = _row("coder-1")
+    asking = _session(asker)
+    crashed = _row("coder-2", ended=NOW - timedelta(minutes=10), exit_status=1, task_id="tsk_1")
+    return Fleet(
+        agents=[manager, _status(asker, "working", asking)],
+        ended=[crashed],
+        sessions=[asking] + ([manager.session] if manager.session is not None else []),
+        events=[_event(5, "question", "Which branch?", session=asking, to="manager")],
+        tasks={"tsk_1": "doing"},
+    )
+
+
+def test_a_manager_parked_on_its_usage_limit_is_no_manager_to_leave_work_to() -> None:
+    """Parked, a manager fires no hook and takes no nudge until its reset, hours away maybe.
+    Counted live, it hid a coder's crash and a coder's question to it for the whole limit,
+    while nobody acted on either; and its own limit's push waited 90 s, for itself."""
+    manager = _row("manager", role="manager")
+    parked = _session(manager, state="limited", resets=NOW + timedelta(hours=4))
+    fleet = _crew_and_manager(_status(manager, "limited", parked, "limit resets in 4h"))
+    items = _scan(fleet)
+    assert [(item.kind, item.agent) for item in items] == [
+        ("board_question", "coder-1"),
+        ("crashed", "coder-2"),
+        ("limited", "manager"),
+    ]
+    assert items[-1].push_after == items[-1].since, "nobody else is on the manager's own limit"
+    working = _crew_and_manager(_status(manager, "working", _session(manager)))
+    assert _scan(working) == [], "a manager at work has both"
+
+
+def test_a_manager_tmux_cannot_reach_is_no_manager_to_leave_work_to() -> None:
+    manager = _row("manager", role="manager").model_copy(update={"tmux_socket": "elsewhere"})
+    fleet = _crew_and_manager(_status(manager, "unknown"))
+    assert [item.kind for item in _scan(fleet)] == ["board_question", "crashed"]
+
+
+def test_a_manager_at_the_usage_limit_dialog_does_not_wait_for_itself() -> None:
+    """At the usage-limit dialog a manager reads attention, so it counted as the live manager
+    its own limit's push waited 90 s for: itself. Its items wait for another manager only;
+    a coder's limit still waits for it."""
+    paused = "Session paused — choose: continue on usage credits or switch models"
+    at = NOW - timedelta(minutes=1)
+    manager, coder = _row("manager", role="manager"), _row()
+    managing = _session(manager, state="attention", seen=at)
+    coding = _session(coder, state="attention", seen=at)
+    fleet = Fleet(
+        agents=[_status(manager, "attention", managing), _status(coder, "attention", coding)],
+        sessions=[managing],
+        events=[
+            _event(4, "attention", paused, session=managing, at=at),
+            _event(5, "attention", paused, session=coding, at=at),
+        ],
+    )
+    pushes = {item.agent: item.push_after for item in _scan(fleet) if item.kind == "limited"}
+    assert pushes == {"manager": at, "coder-1": at + timedelta(seconds=90)}
+
+
+def test_a_manager_session_parked_on_its_limit_is_not_live_without_its_row_either() -> None:
+    """The session counts for a manager started outside the fleet, which has no row; a
+    session whose row the scan read is that row's to decide, whatever the session says."""
+    question = _event(10, "question", "Which branch?", session=CODING, to="manager")
+    parked = _session(MANAGER, state="limited", seen=NOW - timedelta(minutes=2))
+    assert len(_board([question], sessions=(parked, CODING), manager_live=None)) == 1
+    outside = _row("manager", role="manager", row_id="outside")
+    waiting = _session(outside, state="limited", seen=NOW - timedelta(minutes=2))
+    rows = (CODER,)
+    assert len(_board([question], sessions=(waiting, CODING), rows=rows, manager_live=None)) == 1
+    fleet = _crew_and_manager(_status(_row("manager", role="manager"), "lost"))
+    fleet.sessions.append(_session(_row("manager", role="manager")))
+    assert "crashed" in [item.kind for item in _scan(fleet)], "its row says it is gone"
 
 
 def test_tmux_not_answering_is_one_fleet_down_item_until_it_clears() -> None:
@@ -613,7 +889,7 @@ def test_tmux_not_answering_is_one_fleet_down_item_until_it_clears() -> None:
     again = _one(_scan(fleet, now=NOW + timedelta(seconds=3), first_seen=memory))
     assert again.id == first.id and again.since == NOW
     assert again.push_after == NOW + timedelta(seconds=60)
-    fleet.agents[0] = _status(one, "waiting", _session(one, state="waiting"))
+    fleet.agents = [_status(row, "waiting", _session(row, state="waiting")) for row in (one, two)]
     assert _scan(fleet, now=NOW + timedelta(seconds=6), first_seen=memory) == []
     assert memory == {}, "a cleared condition is forgotten"
     fleet.agents[0] = _status(one, "unknown")
@@ -622,9 +898,189 @@ def test_tmux_not_answering_is_one_fleet_down_item_until_it_clears() -> None:
 
 
 def test_one_row_tmux_answers_for_is_not_fleet_down() -> None:
-    one, two = _row("coder-1"), _row("coder-2")
-    fleet = Fleet(agents=[_status(one, "unknown"), _status(two, "waiting", _session(two))])
+    """Rows on two servers: the one that answered keeps its agent's own items."""
+    one, two = _row("coder-1"), _row("coder-2").model_copy(update={"tmux_socket": "other"})
+    attention = _session(two, state="attention")
+    fleet = Fleet(agents=[_status(one, "unknown"), _status(two, "attention", attention)])
+    assert [(item.kind, item.agent) for item in _scan(fleet)] == [("permission", "coder-2")]
+    assert fleet.probed == ["other"], "the unknown row said its own server did not answer"
+
+
+def _on_a_dead_tmux() -> Fleet:
+    """Three rows the real ``fleet._derive`` reads from the board with tmux not asked at all
+    (``observed=False``): two sessions seen seconds ago, and one parked on a limit."""
+    rows = [_row("coder-1"), _row("coder-2"), _row("coder-3")]
+    sessions = [
+        _session(rows[0], state="attention", seen=NOW - timedelta(seconds=30)),
+        _session(rows[1], state="working", seen=NOW - timedelta(seconds=30)),
+        _session(rows[2], state="limited", resets=NOW + timedelta(hours=3)),
+    ]
+    return Fleet(
+        agents=[
+            fleet_service._status(row, session, None, None, NOW)
+            for row, session in zip(rows, sessions, strict=True)
+        ]
+    )
+
+
+def test_a_tmux_that_is_gone_is_fleet_down_at_once_not_when_its_rows_go_stale() -> None:
+    """``fleet._derive`` takes a fresh board row over a silent tmux, for 30 minutes, and a
+    parked one until its reset: every live row read ``unknown`` only then, so tmux down was
+    reported half an hour late (hours, with a row on a limit), under cards for agents tmux
+    took with it. The server is asked once the rows cannot tell."""
+    fleet = _on_a_dead_tmux()
+    assert [status.state for status in fleet.agents] == ["attention", "working", "limited"]
+    fleet.silent.add("asq")
+    (down,) = _scan(fleet)
+    assert (down.kind, down.since, down.push_after) == (
+        "fleet_down",
+        NOW,
+        NOW + timedelta(minutes=1),
+    )
+    assert fleet.probed == ["asq"]
+    fleet.silent.clear()
+    assert [item.kind for item in _scan(fleet)] == ["permission", "limited"], "it answers again"
+
+
+def test_a_scan_asks_each_tmux_server_once_whatever_the_projects() -> None:
+    fleet = _on_a_dead_tmux()
+    other = ProjectInfo(id="prj_beta", root=Path("/work/beta"))
+    sources = replace(_sources(fleet), list_projects=lambda: [PROJECT, other])
+    scan_needs_you(sources, now=NOW, dismissed=())
+    assert fleet.probed == ["asq"]
+
+
+def test_a_listing_that_fails_does_not_forget_when_tmux_went_down() -> None:
+    """``fleet_down``'s id is its first sighting. A scan whose listing failed dropped that
+    date, and the next one minted a new item: pushed again, the dismissal of the first lost."""
+    fleet = Fleet(agents=[_status(_row("coder-1"), "unknown")])
+    memory: dict[str, datetime] = {}
+    first = _one(_scan(fleet, first_seen=memory))
+    fleet.listing_fails = True
+    assert _scan(fleet, now=NOW + timedelta(seconds=3), first_seen=memory) == []
+    fleet.listing_fails = False
+    again = _one(_scan(fleet, now=NOW + timedelta(seconds=6), first_seen=memory))
+    assert (again.id, again.since) == (first.id, NOW)
+
+
+def _parked_and_asking() -> Fleet:
+    """coder-1 parked on its limit, coder-2 at an MCP form, coder-3 at the usage-limit dialog:
+    each named by an event the team writes once, when it starts."""
+    rows = [_row("coder-1"), _row("coder-2"), _row("coder-3")]
+    at = NOW - timedelta(minutes=30)
+    parked = _session(rows[0], state="limited", resets=NOW + timedelta(hours=4))
+    form = _session(rows[1], state="attention", seen=at)
+    dialog = _session(rows[2], state="attention", seen=at)
+    paused = "Session paused — choose: continue on usage credits or switch models"
+    return Fleet(
+        agents=[
+            _status(rows[0], "limited", parked, "limit resets in 4h"),
+            _status(rows[1], "attention", form),
+            _status(rows[2], "attention", dialog),
+        ],
+        events=[
+            _event(
+                1, "limited", "coder-1 hit its limit", session=parked, at=at - timedelta(minutes=20)
+            ),
+            _event(2, "attention", "Claude Code needs your input", session=form, at=at),
+            _event(3, "attention", paused, session=dialog, at=at),
+        ],
+    )
+
+
+def _board_traffic(fleet: Fleet, count: int = remote_needs.NEEDS_BOARD_EVENTS) -> None:
+    """``count`` newer events of nobody's: every one the scan's window can hold."""
+    start = max(event.seq for event in fleet.events) + 1
+    fleet.events += [
+        _event(seq, "note", "fyi", at=NOW - timedelta(minutes=1))
+        for seq in range(start, start + count)
+    ]
+
+
+def test_an_item_keeps_its_id_however_many_board_events_follow_its_own() -> None:
+    """The scan reads the project's newest 300 events, and the team writes ``limited`` once a
+    park and ``attention`` once a turn. While an agent stayed parked, or a dialog stayed up,
+    300 events later its item became another: a new id pushed again, its dismissal lost, the
+    usage-limit dialog read as a plain one. The store is asked for that one session's."""
+    fleet = _parked_and_asking()
+    before = _scan(fleet)
+    assert [(item.kind, item.agent) for item in before] == [
+        ("permission", "coder-2"),
+        ("limited", "coder-1"),
+        ("limited", "coder-3"),
+    ]
+    assert fleet.asked_events == [], "the window holds them: nothing else is read"
+    _board_traffic(fleet)
+    dismissed = before[1].id
+    after = _scan(fleet, dismissed=(dismissed,))
+    assert [(item.id, item.kind) for item in after] == [
+        (before[0].id, "permission"),
+        (before[2].id, "limited"),
+    ], "the same items, coder-1's still dismissed"
+    assert sorted(fleet.asked_events) == [
+        ("ses_coder-1", "limited", BORN),
+        ("ses_coder-2", "attention", BORN),
+        ("ses_coder-3", "attention", BORN),
+    ], "since the row was created: no further back than its own process"
+
+
+def test_an_event_older_than_its_row_names_nothing_in_the_window_or_out_of_it() -> None:
+    """The store is asked for an agent's event only since its row was created, so the walk
+    stops there for a session that has none. The window keeps to the same bound, or an item
+    named by an older event while the window held it became another once it left."""
+    row = _row()
+    session = _session(row, state="attention", seen=NOW - timedelta(minutes=1))
+    asked = "Claude needs your permission to use Bash"
+    older = _event(1, "attention", asked, session=session, at=BORN - timedelta(minutes=5))
+    fleet = Fleet(agents=[_status(row, "attention", session)], events=[older])
+    (before,) = _scan(fleet)
+    assert (before.kind, before.excerpt) == ("permission", ""), "the dialog form, not its words"
+    _board_traffic(fleet)
+    (after,) = _scan(fleet)
+    assert after.id == before.id
+
+
+def test_a_manager_whose_last_word_cannot_be_read_is_not_called_down() -> None:
+    """A read of the board that failed is no board at all, and a manager with no last word
+    read as one stopped mid-work: a card, pushed if the store stayed locked, for a manager
+    that reported and was stopped. A failure costs what it would have shown instead."""
+    manager = _row("manager", role="manager", ended=NOW - timedelta(minutes=5))
+    managing = _session(manager, ended=NOW - timedelta(minutes=5))
+    coder = _row()
+    fleet = Fleet(
+        ended=[manager],
+        agents=[_status(coder, "working", _session(coder))],
+        sessions=[managing],
+        events=[_event(5, "result", "Shipped.", session=managing)],
+    )
+    assert [item.kind for item in _scan(fleet)] == ["board_result"]
+    fleet.board_fails = True
     assert _scan(fleet) == []
+    crashed = _row("manager", role="manager", ended=NOW - timedelta(minutes=5), exit_status=3)
+    fleet.ended = [crashed]
+    assert [item.kind for item in _scan(fleet)] == ["manager_down"], "a crash needs no board"
+
+
+def test_a_managers_last_word_is_read_however_long_ago_it_was() -> None:
+    """A manager stopped after its ``result`` finished its job, however busy the board has
+    been since: 300 newer events made its last word unknown, and it read as down. It is
+    read with the board's day, and nothing is asked of the store for it."""
+    manager = _row("manager", role="manager", ended=NOW - timedelta(minutes=5))
+    managing = _session(manager, ended=NOW - timedelta(minutes=5))
+    coder = _row()
+    fleet = Fleet(
+        ended=[manager],
+        agents=[_status(coder, "working", _session(coder))],
+        sessions=[managing],
+        events=[_event(5, "result", "Shipped.", session=managing, at=NOW - timedelta(hours=2))],
+    )
+    _board_traffic(fleet)
+    exited = _event(
+        fleet.events[-1].seq + 1, "agent_exited", "manager exited (?)", session=managing
+    )
+    fleet.events.append(exited)
+    assert "manager_down" not in [item.kind for item in _scan(fleet)]
+    assert fleet.asked_events == []
 
 
 def test_a_lost_pane_is_dated_from_the_first_scan_that_saw_it() -> None:
@@ -641,13 +1097,29 @@ def test_a_lost_pane_is_dated_from_the_first_scan_that_saw_it() -> None:
 def test_a_project_whose_listing_fails_still_shows_its_board() -> None:
     manager = _row("manager", role="manager")
     managing = _session(manager)
+    coder = _row("coder-2")
     fleet = Fleet(
+        agents=[_status(coder, "working", _session(coder))],
         listing_fails=True,
         sessions=[managing],
         events=[_event(5, "question", "Ship on Friday?", session=managing)],
         ended=[_row("coder-1", ended=NOW - timedelta(minutes=1), exit_status=1)],
     )
     assert [item.kind for item in _scan(fleet)] == ["board_question"]
+    assert fleet.listed == 1, "it has a live row, so it was listed, and the listing failed"
+
+
+def test_a_project_with_no_live_row_is_not_listed() -> None:
+    """``fleet.list_agents`` reads every row and session the project ever had, and the scan
+    runs every few seconds over every project. With no live row there is no pane to ask
+    about and no death to record: its ended rows and its board say all there is."""
+    fleet = _crash(exit_status=1)
+    assert [item.kind for item in _scan(fleet)] == ["crashed"]
+    assert fleet.listed == 0
+    coder = _row("coder-2")
+    fleet.agents.append(_status(coder, "working", _session(coder)))
+    _scan(fleet)
+    assert fleet.listed == 1
 
 
 def test_a_dismissed_item_leaves_the_feed() -> None:
@@ -793,6 +1265,42 @@ def test_the_authors_next_post_moves_on_from_its_question() -> None:
 def test_a_question_older_than_a_day_needs_nobody() -> None:
     old = _event(10, "question", "Ship it?", session=MANAGING, at=NOW - timedelta(hours=25))
     assert _board([old]) == []
+
+
+def test_a_board_question_stays_open_however_busy_the_board_gets() -> None:
+    """The scan read the board's items from the project's newest 300 events, and a busy fleet
+    writes that many in a few hours: a question asked in the morning was gone by the
+    afternoon, neither answered nor dismissed. An item is read for its whole day, and what
+    answers it does so however many events came between the two."""
+    asked = _event(
+        5, "question", "Ship it on Friday?", session=MANAGING, at=NOW - timedelta(hours=3)
+    )
+    fleet = Fleet(
+        agents=[_status(MANAGER, "working", MANAGING)], sessions=[MANAGING], events=[asked]
+    )
+    (item,) = _scan(fleet)
+    _board_traffic(fleet)
+    assert [found.id for found in _scan(fleet)] == [item.id], "300 events later, still open"
+    later = NOW - timedelta(minutes=1)
+    fleet.events.append(_event(fleet.events[-1].seq + 1, "note", "Friday.", to="manager", at=later))
+    _board_traffic(fleet)
+    assert _scan(fleet) == [], "answered by a reply 300 events before the scan"
+
+
+def test_the_window_of_newest_events_is_read_only_for_an_agent_that_needs_it() -> None:
+    """The board's items are read by time; the window is for the events of an agent at a
+    dialog or parked on its limit. A scan of agents doing neither reads none of it, and one
+    with several such agents reads it once."""
+    coder, other = _row("coder-1"), _row("coder-2")
+    fleet = Fleet(agents=[_status(coder, "working", _session(coder))])
+    _scan(fleet)
+    assert fleet.windows == 0
+    fleet.agents = [
+        _status(row, "attention", _session(row, state="attention", seen=NOW - timedelta(minutes=n)))
+        for n, row in enumerate((coder, other), start=1)
+    ]
+    assert [item.agent for item in _scan(fleet)] == ["coder-2", "coder-1"]
+    assert fleet.windows == 1
 
 
 def test_whether_a_manager_is_live_is_read_from_its_rows_and_sessions() -> None:
@@ -1145,6 +1653,9 @@ class FakeTmux:
     def started_at(self) -> datetime | None:
         return self.started
 
+    def answers(self) -> bool:
+        return True
+
     def run(self, *args: str, stdin: bytes | None = None) -> str:
         if args[:2] == ("list-panes", "-a"):
             return ""  # the fleet listing's output times: none, so the board's state decides
@@ -1246,6 +1757,80 @@ def test_attention_is_a_dialog_until_an_interruption_follows_it(
     assert needs_at_input_prompt(after), (
         "Esc fired no Stop: the row says attention, the pane a prompt"
     )
+
+
+def _printed_since_the_notice(tail: TranscriptTail | None, *, printed: datetime) -> Fleet:
+    """coder-1 at a dialog with no tool behind it, notified a minute ago, its row as the real
+    ``fleet._derive`` reads it once the pane printed at ``printed``; ``tail`` ``None`` is a
+    transcript that cannot be read."""
+    row = _row()
+    session = _session(row, state="attention", seen=NOW - timedelta(minutes=1))
+    view = fleet_service._PaneView(False, None, "claude", printed)
+    fleet = Fleet(agents=[fleet_service._status(row, session, {row.id: view}, None, NOW)])
+    if tail is not None:
+        fleet.tails["/transcripts/coder-1.jsonl"] = tail
+    return fleet
+
+
+def test_a_dialog_whose_pane_just_printed_is_still_a_dialog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``fleet._derive`` reads output after the notice as the dialog answered, for 5 s. A key
+    that moves the dialog's highlight prints too: a stop, a restart or a switch in those
+    seconds typed ``/exit`` and Enter into the usage-limit dialog and picked what was
+    highlighted, and the dialog's card went and came back, its Switch answered stale."""
+    from aisquare.services.remote_actions import action_may_answer
+
+    before = _tail(newest="assistant_text", text="Hit the limit.", at=NOW - timedelta(minutes=2))
+    still = _printed_since_the_notice(before, printed=NOW - timedelta(seconds=30))
+    quiet = _now_of(still, FakeTmux(reference=NOW), monkeypatch)
+    assert quiet.status is not None and quiet.status.state == "attention"
+    (card,) = quiet.items
+    moved = _printed_since_the_notice(before, printed=NOW - timedelta(seconds=1))
+    pressed = _now_of(moved, FakeTmux(reference=NOW, quiet_for=1), monkeypatch)
+    assert pressed.status is not None and pressed.status.state == "working"
+    assert needs_dialog_open(pressed) and action_may_answer(pressed)
+    assert needs_item_current(pressed, card.id), "the card stays, and its Switch is not stale"
+    replied = _tail(newest="assistant_text", text="Switched.", at=NOW - timedelta(seconds=2))
+    answered = _printed_since_the_notice(replied, printed=NOW - timedelta(seconds=1))
+    gone = _now_of(answered, FakeTmux(reference=NOW, quiet_for=1), monkeypatch)
+    assert not needs_dialog_open(gone) and gone.items == (), "it wrote since: answered"
+
+
+def test_a_granted_tool_at_work_is_not_its_own_prompt_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A granted tool prints while it runs and writes nothing until it ends: the board's
+    ``attention`` is no reason to read it as a prompt, which a stale card's "1" would answer."""
+    running = _tail(_tool("toolu_a", at=NOW - timedelta(minutes=2)), at=NOW - timedelta(minutes=2))
+    granted = _printed_since_the_notice(running, printed=NOW - timedelta(seconds=1))
+    snap = _now_of(granted, FakeTmux(reference=NOW, quiet_for=1), monkeypatch)
+    assert snap.items == () and not needs_dialog_open(snap)
+    assert needs_tool_pending(snap), "a stop still refuses for it, as it always did"
+
+
+def test_a_row_at_work_since_its_notice_with_no_transcript_to_read_is_no_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a transcript to read nothing tells a dialog whose pane just printed from a
+    granted tool at work, which prints until the turn's Stop: the feed kept the notice's
+    card for the rest of the turn. Now it shows none it cannot vouch for, while the guard
+    still refuses, a refusal being its cheap mistake. An empty transcript is no such doubt:
+    nothing at all was written since the notice."""
+    from aisquare.services.remote_actions import action_may_answer
+
+    unread = _printed_since_the_notice(None, printed=NOW - timedelta(seconds=1))
+    snap = _now_of(unread, FakeTmux(reference=NOW, quiet_for=1), monkeypatch)
+    assert snap.status is not None and snap.status.state == "working"
+    assert snap.items == (), "no card for what may be a tool at work"
+    assert needs_dialog_open(snap) and action_may_answer(snap), "but no Enter either"
+    nothing = TranscriptTail(
+        pending=(), newest="none", newest_at=None, last_text=None, last_text_at=None,
+        marker_key=None,
+    )  # fmt: skip
+    empty = _printed_since_the_notice(nothing, printed=NOW - timedelta(seconds=1))
+    snap = _now_of(empty, FakeTmux(reference=NOW, quiet_for=1), monkeypatch)
+    assert [item.kind for item in snap.items] == ["permission"] and needs_dialog_open(snap)
 
 
 @pytest.mark.parametrize(
@@ -1519,6 +2104,165 @@ def test_the_live_sources_read_an_unchanged_transcript_once(
     assert len(reads) == 2 and again is not None and again.pending == (), "it grew: read again"
 
 
+def test_a_scan_builds_none_of_a_projects_history_it_cannot_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every spawn, restart and switch leaves a fleet row, and every Claude Code start a
+    session, that is never deleted. Each scan read all of both, for every project, every 3 s,
+    after ``fleet.list_agents`` had read them already (review of #243, round 3, 11/13). Now a
+    project with no live row is not listed, and the scan's own reads keep to the day's
+    endings, the sessions seen in the last half hour and the authors of open questions."""
+    from aisquare.core import store as store_module
+
+    now = datetime.now(UTC)
+    old = now - timedelta(days=3)
+    dormant = ProjectInfo(id="prj_dormant", root=tmp_path / "dormant")
+    active = ProjectInfo(id="prj_active", root=tmp_path / "active")
+    history = 60
+    with store_session() as store:
+        for project in (dormant, active):
+            store.onboard_project(project)
+            for n in range(history):
+                sid = f"ses_{project.id}_{n}"
+                store.upsert_session(
+                    TeamSession(
+                        id=sid, project_id=project.id, role="coder", started_at=old,
+                        last_seen_at=old, ended_at=old,
+                    )
+                )  # fmt: skip
+                store.upsert_fleet_agent(
+                    FleetAgent(
+                        id=f"agt_{project.id}_{n}", project_id=project.id, label=f"coder-{n}",
+                        role="coder", pane_id=f"%{n}", session_id=sid, cwd=project.root,
+                        created_at=old, ended_at=old, exit_status=0,
+                    )
+                )  # fmt: skip
+        store.upsert_session(
+            TeamSession(
+                id="ses_live", project_id=active.id, role="coder", label="coder-live",
+                started_at=now - timedelta(hours=1), last_seen_at=now - timedelta(minutes=1),
+            )
+        )  # fmt: skip
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_live", project_id=active.id, label="coder-live", role="coder",
+                pane_id="%99", session_id="ses_live", cwd=active.root,
+                created_at=now - timedelta(hours=1),
+            )
+        )  # fmt: skip
+        store.add_team_event(
+            TeamEvent(
+                id="evt_q", project_id=active.id, session_id=f"ses_{active.id}_7",
+                kind="question", text="Which cache?", created_at=now - timedelta(hours=1),
+            )
+        )  # fmt: skip
+    built: dict[str, list[str]] = {"rows": [], "sessions": []}
+    rows, sessions = store_module._row_to_fleet_agent, store_module._row_to_session
+
+    def row_built(row: Any) -> FleetAgent:
+        built["rows"].append(row["project_id"])
+        return rows(row)
+
+    def session_built(row: Any) -> TeamSession:
+        built["sessions"].append(row["project_id"])
+        return sessions(row)
+
+    monkeypatch.setattr(store_module, "_row_to_fleet_agent", row_built)
+    monkeypatch.setattr(store_module, "_row_to_session", session_built)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+    assert [(item.kind, item.reason) for item in items] == [
+        ("board_question", "coder asks on the board")
+    ], "the question's author was read, however long ago it was seen"
+    assert dormant.id not in built["rows"] + built["sessions"], "no live row: never listed"
+    listing = history + 1  # fleet.list_agents' own read of every row and session, once
+    assert built["rows"].count(active.id) <= listing + 1, "and the live row the scan counts"
+    assert built["sessions"].count(active.id) <= listing + 2, "the live one and the author"
+
+
+def test_the_live_sources_keep_a_board_question_however_busy_the_board_gets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the store: a manager's question three hours old, under 300 newer notes, is
+    still open, and a reply to the manager under 300 more still answers it."""
+    now = datetime.now(UTC)
+    project = ProjectInfo(id="prj_busy", root=tmp_path / "busy")
+
+    def written(
+        kind: str, at: datetime, *, session_id: str | None = None, to: str | None = None
+    ) -> TeamEvent:
+        return TeamEvent(
+            id=f"evt_{kind}_{at.timestamp()}_{session_id}_{to}", project_id=project.id,
+            session_id=session_id, kind=kind, text=kind, to_role=to, created_at=at,
+        )  # fmt: skip
+
+    def traffic(store: Any, start: datetime) -> None:
+        for n in range(remote_needs.NEEDS_BOARD_EVENTS):
+            note = written("note", start + timedelta(seconds=n), session_id="ses_c")
+            store.add_team_event(note.model_copy(update={"id": f"evt_{start}_{n}"}))
+
+    with store_session() as store:
+        store.onboard_project(project)
+        store.upsert_session(
+            TeamSession(
+                id="ses_m", project_id=project.id, role="manager", label="manager",
+                started_at=now - timedelta(hours=4), last_seen_at=now - timedelta(hours=3),
+            )
+        )  # fmt: skip
+        store.add_team_event(written("question", now - timedelta(hours=3), session_id="ses_m"))
+        traffic(store, now - timedelta(hours=2))
+    sources = remote_needs.live_needs_sources()
+    (item,) = scan_needs_you(sources, now=now, dismissed=())
+    assert (item.kind, item.reason) == ("board_question", "manager asks on the board")
+    with store_session() as store:
+        store.add_team_event(written("note", now - timedelta(hours=1), to="manager"))
+        traffic(store, now - timedelta(minutes=50))
+    assert scan_needs_you(sources, now=now, dismissed=()) == []
+
+
+def test_the_live_sources_take_a_manager_stopped_after_its_result_for_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the store, with the exit announced as ``fleet stop`` announces it, under the
+    manager's own session (``fleet._emit_exit``): a manager that reported and was then
+    stopped, while a coder still works, finished its job."""
+    now = datetime.now(UTC)
+    hour_ago = now - timedelta(hours=1)
+    root = tmp_path / "alpha"
+    with store_session() as store:
+        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        for session_id, role in (("ses_m", "manager"), ("ses_c", "coder")):
+            store.upsert_session(
+                TeamSession(
+                    id=session_id, project_id=project.id, role=role, started_at=hour_ago,
+                    last_seen_at=now - timedelta(seconds=30),
+                )
+            )  # fmt: skip
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_c", project_id=project.id, label="coder-1", role="coder", pane_id="%1",
+                session_id="ses_c", cwd=root, created_at=hour_ago,
+            )
+        )  # fmt: skip
+        manager = FleetAgent(
+            id="agt_m", project_id=project.id, label="manager", role="manager", pane_id="%2",
+            session_id="ses_m", cwd=root, created_at=hour_ago, ended_at=now - timedelta(minutes=5),
+        )  # fmt: skip
+        store.upsert_fleet_agent(manager)
+        store.add_team_event(
+            TeamEvent(
+                id="evt_r", project_id=project.id, session_id="ses_m", kind="result",
+                text="Shipped.", created_at=now - timedelta(minutes=6),
+            )
+        )  # fmt: skip
+        fleet_service._emit_exit(store, manager)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+    assert [item.kind for item in items] == ["board_result"]
+
+
 # --- the watcher --------------------------------------------------------------------------
 
 
@@ -1591,6 +2335,44 @@ def test_every_scan_reaches_every_listener_and_a_failing_one_costs_nothing(
     assert sum("needs listener failed" in r.getMessage() for r in caplog.records) == 2
     assert watcher.needs_items_now() == second
     assert watcher.needs_scanned_at() == NOW + timedelta(seconds=3)
+
+
+def test_a_card_dismissed_while_a_scan_runs_stays_dismissed(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """The scan reads the dismissals before it starts and publishes its snapshot whole when
+    it ends. A dismissal in between was dropped from the snapshot of the moment, and the scan
+    then put the card back on every phone and before the push sender, which pushed it."""
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    fleet = _working(_tail(_tool("toolu_q", "AskUserQuestion", **QUESTION)))
+    listing, held = threading.Event(), threading.Event()
+
+    def slow_listing(project: ProjectInfo) -> list[FleetAgentStatus]:
+        if fleet.listed:  # every scan after the first is held while the card is dismissed
+            listing.set()
+            assert held.wait(5.0)
+        fleet.listed += 1
+        return list(fleet.agents)
+
+    watcher = RemoteNeedsWatcher(
+        app.kit, sources=lambda: replace(_sources(fleet), list_agents=slow_listing)
+    )
+    heard: list[list[str]] = []
+    app.kit.needs_listeners.append(lambda items, at: heard.append([item.id for item in items]))
+    (card,) = watcher.scan_needs_now()
+    scan = threading.Thread(target=watcher.scan_needs_now)
+    scan.start()
+    try:
+        assert listing.wait(5.0), "the second scan read the dismissals and is listing"
+        record_needs_dismissal(card.id)  # what POST api/needs/dismiss does, in its order
+        watcher.needs_forget(card.id)
+        assert watcher.needs_items_now() == []
+    finally:
+        held.set()
+        scan.join(5.0)
+    assert watcher.needs_items_now() == [] and watcher.needs_items_json() == []
+    assert heard == [[card.id], []], "the push sender heard it gone too"
+    assert watcher.scan_needs_now() == [] and heard[-1] == [], "and every scan after"
 
 
 def test_the_stream_and_the_heartbeat_read_the_watchers_snapshot(
@@ -1771,6 +2553,23 @@ def test_a_card_that_changed_under_the_phone_is_stale(live: Live) -> None:
     assert [item["id"] for item in body["current"]] == [
         needs_item_id(PROJECT.id, "permission", "toolu_next")
     ]
+    assert live.tmux.typed == []
+
+
+def test_a_sub_agents_card_is_stale_once_it_asks_again(live: Live) -> None:
+    """The ``Task`` is pending through every prompt of its sub-agent's, so the card for the
+    first prompt still matched the second, and its "1" approved whatever that one asked."""
+    live.runtime.set_allow_write(True)
+    now = datetime.now(UTC)
+    status, tail = _in_a_sub_agent(now - timedelta(minutes=2))
+    live.fleet.agents[0], live.fleet.tails["/transcripts/coder-1.jsonl"] = status, tail
+    card = live.card("permission")
+    asks_again, _same = _in_a_sub_agent(now - timedelta(seconds=1))
+    live.fleet.agents[0] = asks_again  # answered at the machine; the sub-agent asked again
+    stale = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert stale.status_code == 409 and stale.json()["error"] == "stale"
+    (current,) = stale.json()["current"]
+    assert current["kind"] == "permission" and current["id"] != card["id"]
     assert live.tmux.typed == []
 
 

@@ -14,13 +14,14 @@ rules (:func:`needs_from_agent`), each project by a few more (``crashed``,
 (:func:`needs_from_board`).
 
 Every item has an id derived from what it is about (the OLDEST pending
-``tool_use`` of a permission prompt, the marker record of an interruption, the
-seq of a board event), so it keeps its id from scan to scan and a new prompt is a
-new id — and a new push. A ``reason`` is a fixed template with every interpolated
-name passed through :func:`needs_push_safe`, because it is what a lock screen
-shows; the content a human must read before answering (the full command, every
-question and option, the plan) lives in ``excerpt`` and ``detail``, which are
-served to an unlocked page and never pushed.
+``tool_use`` of a permission prompt, with its notification when a sub-agent
+asks, the marker record of an interruption, the seq of a board event), so it
+keeps its id from scan to scan and a new prompt is a new id — and a new push.
+A ``reason`` is a fixed template with every interpolated name passed through
+:func:`needs_push_safe`, because it is what a lock screen shows; the content a
+human must read before answering (the full command, every question and option,
+the plan) lives in ``excerpt`` and ``detail``, which are served to an unlocked
+page and never pushed.
 
 A phone answers a card through ``POST api/needs/answer``, which re-derives the
 agent right then (:func:`needs_agent_now`) and types only while the card is
@@ -100,7 +101,8 @@ EXCERPT_CHARS = 280
 """The longest ``excerpt``: one plain line a card shows under its reason."""
 
 NEEDS_BOARD_EVENTS = 300
-"""How many of a project's newest board events one scan reads."""
+"""How many of a project's newest board events one scan reads for its agents' own events
+(:func:`_needs_own_events`). Its board items are read by time instead (``board_since``)."""
 
 CRASH_WINDOW = timedelta(hours=1)
 """How long after its end a crashed agent stays an item."""
@@ -128,6 +130,13 @@ OWNER_ROLES = frozenset({"", "owner", "user", "human", "all", "everyone"})
 
 _NEEDS_ANSWERABLE = frozenset({"permission", "question", "plan", "asked", "interrupted"})
 _NEEDS_BOARD_KINDS = frozenset({"board_question", "board_result"})
+
+_NEEDS_ASKED = ("question", "result", "decision")
+"""An agent's board events that open a board item (a question, a result) or move its author
+on from one (any of the three, later), in :func:`needs_from_board`."""
+
+_NEEDS_REPLIED = ("note", "decision", "result")
+"""The human's board events (no session) that answer an item addressed to its author."""
 
 _NEEDS_ACTIONS: dict[str, tuple[str, ...]] = {
     "permission": ("answer", "open", "dismiss"),
@@ -166,6 +175,15 @@ _TOOL_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,40}")
 
 _SUBAGENT_TOOLS = frozenset({"Task", "Agent"})
 """The tools a sub-agent runs inside: a prompt pending under one is the sub-agent's."""
+
+_NOTICE_WAIT = timedelta(seconds=20)
+"""How long after its pane printed a sub-agent's prompt may still be waiting for the
+notification that names it (:func:`_needs_subagent_prompt`). Claude Code sends it 6 s after
+the prompt is drawn; the hook's process starts in a second or so, and may wait out the
+store's busy timeout (5 s) for its write; tmux tells the time of output to the second,
+rounded down. That is about 13 s at worst. A notification later than this leaves the
+prompt named after the one before until it lands, and a redraw (an attach, a resize, a
+key that moves the highlight) hides the card this long."""
 
 _DETAIL_INPUT_KEYS = (
     "command",
@@ -269,9 +287,35 @@ class AgentNow:
     included, and dismissed ones too: a dismissal hides a card, it does not close a dialog."""
 
 
+def _needs_lists_every(project_id: str) -> bool:
+    """A source's ``has_live_agents`` when it says nothing: every project is listed."""
+    return True
+
+
+def _needs_answers_every(socket: str) -> bool:
+    """A source's ``tmux_answers`` when it says nothing: every server answered."""
+    return True
+
+
+def _needs_no_event(
+    project_id: str, session_id: str, kind: str, since: datetime
+) -> TeamEvent | None:
+    """A source's ``session_event`` when it says nothing: the window is all there is."""
+    return None
+
+
+def _needs_no_output(agent: FleetAgent) -> datetime | None:
+    """A source's ``pane_output`` when it says nothing: tmux would not say."""
+    return None
+
+
 @dataclass(frozen=True)
 class NeedsSources:
-    """Everything the scan reads, as callables: the live store and tmux, or a test's fakes."""
+    """Everything the scan reads, as callables: the live store and tmux, or a test's fakes.
+
+    Each read is bounded by what the scan can use. It runs every few seconds, and the
+    store keeps every row, session and event a project ever had.
+    """
 
     list_projects: Callable[[], list[ProjectInfo]]
     list_agents: Callable[[ProjectInfo], list[FleetAgentStatus]]
@@ -280,11 +324,35 @@ class NeedsSources:
     ended_agents: Callable[[str, datetime], list[FleetAgent]]
     """The project's rows that ended at or after the given time."""
     board_events: Callable[[str, int], list[TeamEvent]]
-    board_sessions: Callable[[str], list[TeamSession]]
+    """The project's newest events, as many as given: a window, read for its agents' own."""
+    board_since: Callable[[str, datetime], list[TeamEvent]]
+    """The project's events written at or after the given time that open a board item or
+    close one: its agents' questions, results and decisions (:data:`_NEEDS_ASKED`), and
+    the human's notes, decisions and results (:data:`_NEEDS_REPLIED`); and the exits the
+    fleet announces (``agent_exited``), which say how a row ended. An item lives for
+    :data:`QUESTION_HORIZON` however busy the board is, so it is read by time, not from a
+    window of the newest events that 300 notes push it out of."""
+    board_sessions: Callable[[str, datetime, Collection[str]], list[TeamSession]]
+    """The project's sessions seen at or after the given time, and those with the given ids:
+    the ones a live manager may be, and the authors of the board's open questions."""
     task_status: Callable[[str], str | None]
     """A task's status; ``None`` when it is gone."""
     transcript_tail: Callable[[str], TranscriptTail | None]
     accounts: Callable[[], AccountsSettings]
+    has_live_agents: Callable[[str], bool] = _needs_lists_every
+    """Whether the project has a row that has not ended. The scan lists only a project that
+    has: ``fleet.list_agents`` reads every row and session the project ever had, and with
+    no live row there is no pane to ask tmux about and no death to record."""
+    tmux_answers: Callable[[str], bool] = _needs_answers_every
+    """Whether a tmux server listens on the given socket (``TmuxServer.answers``): asked
+    only where the listing's states cannot tell (:func:`_needs_unheard`)."""
+    session_event: Callable[[str, str, str, datetime], TeamEvent | None] = _needs_no_event
+    """A session's newest board event of a kind written at or after the given time, for the
+    facts the window of ``board_events`` no longer holds (:func:`_needs_own_events`). The
+    time bounds what the store walks back through to find none."""
+    pane_output: Callable[[FleetAgent], datetime | None] = _needs_no_output
+    """When the row's pane last printed (``#{window_activity}``); ``None``: tmux would not
+    say. Asked only of an agent whose sub-agent waits on a prompt (:func:`needs_from_agent`)."""
 
 
 # --- names on a lock screen, and text on a card -------------------------------------------
@@ -475,6 +543,7 @@ def needs_from_agent(
     now: datetime,
     manager_live: bool = False,
     accounts: AccountsSettings | None = None,
+    pane_output: Callable[[], datetime | None] | None = None,
 ) -> list[NeedsItem]:
     """What one agent needs from the human: at most one item, by the first rule that holds.
 
@@ -485,7 +554,10 @@ def needs_from_agent(
     3. a pending ``AskUserQuestion`` → ``question``;
     4. a pending ``ExitPlanMode`` → ``plan``;
     5. any other pending tool, with attention → ``permission``, about the OLDEST one: each
-       prompt has its own tool use, so the 2nd prompt of a turn is a new item;
+       prompt has its own tool use, so the 2nd prompt of a turn is a new item. Not under
+       a ``Task``, whose sub-agent's tool uses are in its own records: every prompt of the
+       sub-agent's has that one pending tool, so the prompt is also its notice, the
+       ``last_seen_at`` each notification moves (:func:`_needs_subagent_prompt`);
     6. no pending tool, and the newest record an interruption later than the session's last
        hook → ``interrupted``, whatever the row reads (Esc fires no Stop, so a dismissed
        prompt still reads ``attention`` and an interrupted turn ``working``);
@@ -493,13 +565,25 @@ def needs_from_agent(
     8. attention → ``permission``, the dialog form: an MCP elicitation, Claude Code's own;
     9. ``waiting`` on its own words, which end on a question → ``asked``.
 
+    Rules 7 and 8 read the notification from the session's newest ``attention`` event
+    only while it still names the dialog on screen (:func:`_needs_notice`); after it a
+    dialog is the plain form, its words not on the board. So the usage-limit dialog is a
+    ``limited`` card only as the first notice of its turn; later in a turn it is the
+    plain dialog's, without Switch (the agent's own menu has it) and pushed at once.
+
     Attention is the derived ``attention``, or a session still marked so after the row
     went stale (past ``_STALE_AFTER`` it derives ``waiting``, the dialog maybe still up).
+    Rules 7 and 8 also hold for a row that reads ``working`` on output since the notice,
+    while its transcript shows its agent wrote nothing since (:func:`_needs_unanswered`):
+    a key that moves the dialog's highlight prints too, and a card that went and came back
+    with it answered ``stale``. Rule 5 does not: a granted tool prints until it ends, its
+    prompt answered.
     Records older than the row are ignored throughout: a resumed session's old pending tool
     or closing question belong to the process before it. Without a readable tail, rules
     3 to 6 and 9 cannot hold. ``exited`` and ``unknown`` agents need nothing here; ``crashed``,
     ``manager_down`` and ``fleet_down`` speak for them. ``manager_live`` and ``accounts``
-    decide only when a push may go out.
+    decide only when a push may go out. ``pane_output`` says when the agent's pane last
+    printed, asked only of a sub-agent's prompt.
     """
     if status.state in ("exited", "unknown"):
         return []
@@ -545,23 +629,28 @@ def needs_from_agent(
     if pending:
         if not attention:
             return []  # a tool running, or the 6 s before Claude Code's notification
+        if pending[0].name in _SUBAGENT_TOOLS and session is not None:
+            return _needs_subagent_prompt(
+                pending[0], session, pane_output, project=project, agent=agent, now=now
+            )
         return [
             _needs_permission_item(pending[0], project=project, agent=agent, name=name, now=now)
         ]
     if tail is not None and _needs_marker_later(status, tail):
         return [_needs_interrupted_item(tail, project=project, agent=agent, name=name, now=now)]
-    if attention:
-        if attention_event is not None and LIMIT_DIALOG.search(attention_event.text):
-            since = attention_event.created_at
+    if attention or _needs_unanswered(status, tail, unread=False):
+        notice = _needs_notice(attention_event, tail)
+        if notice is not None and LIMIT_DIALOG.search(notice.text):
+            since = notice.created_at
             return [
                 _needs_item(
                     "limited",
-                    f"attention:{attention_event.seq}",
+                    f"attention:{notice.seq}",
                     project=project,
                     agent=agent,
                     reason=f"{name} hit its usage limit (Claude Code is asking what to do)",
-                    excerpt=attention_event.text,
-                    detail=_needs_fit({"text": attention_event.text}, _DETAIL_TEXT_MAX),
+                    excerpt=notice.text,
+                    detail=_needs_fit({"text": notice.text}, _DETAIL_TEXT_MAX),
                     since=since,
                     push_after=_needs_limited_push(
                         since, None, now=now, manager_live=manager_live, accounts=accounts
@@ -570,7 +659,7 @@ def needs_from_agent(
             ]
         seen = session.last_seen_at if session is not None else now
         seq = "-" if attention_event is None else str(attention_event.seq)
-        text = "" if attention_event is None else attention_event.text
+        text = "" if notice is None else notice.text
         return [
             _needs_item(
                 "permission",
@@ -615,12 +704,64 @@ def _needs_seq(event: TeamEvent) -> int:
     return event.seq
 
 
+def _needs_notice(event: TeamEvent | None, tail: TranscriptTail | None) -> TeamEvent | None:
+    """The session's newest ``attention`` event, while it still names the dialog on screen.
+
+    ``mark_attention`` flips a session once per turn, so a turn's first notice is
+    the only one the board records: a later one moves ``last_seen_at`` and writes
+    nothing. Once the agent wrote anything after the event (a granted tool's
+    result, its reply after the dialog was answered), the dialog the event named
+    was answered, and one on screen now is another, which its text would misname:
+    the usage-limit dialog read as the Bash prompt approved before it, and the
+    reverse. Without a tail nothing says it moved on.
+    """
+    if event is None:
+        return None
+    if tail is not None and tail.newest_at is not None and tail.newest_at > event.created_at:
+        return None
+    return event
+
+
 def _needs_attention(status: FleetAgentStatus) -> bool:
     """Derived ``attention``, or a session still marked so after its row went stale."""
     session = status.session
     return status.state == "attention" or (
         status.state == "waiting" and session is not None and session.state == "attention"
     )
+
+
+def _needs_unanswered(
+    status: FleetAgentStatus, tail: TranscriptTail | None, *, unread: bool
+) -> bool:
+    """A row that reads ``working`` while its session is still marked ``attention``, and its
+    agent wrote nothing since the notice: a dialog may be up all the same.
+
+    ``fleet._derive`` takes output after the notice for the dialog answered (#153), for
+    ``fleet.ACTIVITY_WINDOW``. But a key that moves the dialog's highlight, the redraw of
+    an attach or a resize and an Escape that did not close it print too, and for those
+    seconds a dialog with no tool behind it (the usage-limit one, Claude Code's own) read
+    as an agent at work: no card, and a stop's ``/exit`` and Enter picked the highlighted
+    option. An answer leaves a record newer than the notice in the transcript (the reply
+    to a choice, an interruption); a dialog still up leaves none, and an empty transcript
+    none at all. A pending tool is not looked at here: a granted one prints while it runs
+    and writes nothing until it ends, so this would read it as its own prompt.
+
+    ``unread`` is the answer when the transcript cannot say: none to read, or records
+    without times. Then nothing tells a dialog whose pane printed from a granted tool at
+    work, which prints until the turn's Stop. The guard takes it for a dialog, a refusal
+    being its cheap mistake (:func:`needs_dialog_open`); the feed does not, a card it
+    cannot vouch for, there for the rest of the turn, being its dear one.
+    """
+    session = status.session
+    if status.state != "working" or session is None or session.ended_at is not None:
+        return False
+    if session.state != "attention":
+        return False
+    if tail is not None and tail.newest == "none":
+        return True  # nothing written at all, so nothing since the notice
+    if tail is None or tail.newest_at is None:
+        return unread
+    return tail.newest_at <= session.last_seen_at
 
 
 def _needs_marker_later(status: FleetAgentStatus, tail: TranscriptTail) -> bool:
@@ -803,15 +944,61 @@ def _needs_plan_item(
     )
 
 
+def _needs_subagent_prompt(
+    tool: PendingTool,
+    session: TeamSession,
+    pane_output: Callable[[], datetime | None] | None,
+    *,
+    project: ProjectInfo,
+    agent: FleetAgent,
+    now: datetime,
+) -> list[NeedsItem]:
+    """A prompt of a sub-agent's: one item per notification, never the one before's.
+
+    The sub-agent's own tool uses are in its own records, so the ``Task`` it runs
+    in is the one pending tool through all its prompts. Named after it alone,
+    every prompt after the first was the first again: never pushed, hidden by its
+    dismissal, and answered by a card left from it, whose "1" approved whatever
+    the sub-agent asked next. Each prompt sends its own notification, which moves
+    ``last_seen_at``, so the item is about the tool and that moment. In the seconds
+    between a new prompt's drawing and its notification, the pane printed after
+    ``last_seen_at``, which still names the prompt before: there is no item until the
+    notification lands, or :data:`_NOTICE_WAIT` passes without one.
+    """
+    seen = session.last_seen_at
+    output = None if pane_output is None else pane_output()
+    if output is not None and output > seen and now - output < _NOTICE_WAIT:
+        return []
+    return [
+        _needs_permission_item(
+            tool,
+            project=project,
+            agent=agent,
+            name=needs_push_safe(agent.label),
+            now=now,
+            subject=f"{tool.tool_use_id}:{seen.isoformat()}",
+            since=seen,
+        )
+    ]
+
+
 def _needs_permission_item(
-    tool: PendingTool, *, project: ProjectInfo, agent: FleetAgent, name: str, now: datetime
+    tool: PendingTool,
+    *,
+    project: ProjectInfo,
+    agent: FleetAgent,
+    name: str,
+    now: datetime,
+    subject: str | None = None,
+    since: datetime | None = None,
 ) -> NeedsItem:
     """A permission prompt: the full command or path in ``detail``, so nobody approves blind.
 
     The buttons are the dialog's own digits and Esc; the card shows the live
     pane beside them, so the options' real text is on screen. A prompt under a
     ``Task``/``Agent`` tool is a sub-agent's, whose own tool use is in its own
-    records, not this transcript.
+    records, not this transcript. ``subject`` and ``since`` default to the
+    tool use's.
     """
     if tool.name in _SUBAGENT_TOOLS:
         reason = f"{name} waits for a permission answer (in a sub-agent)"
@@ -826,10 +1013,10 @@ def _needs_permission_item(
             shown[key] = _needs_cut(value, _DETAIL_STRING_MAX)
         elif isinstance(value, bool | int) or (isinstance(value, float) and math.isfinite(value)):
             shown[key] = value
-    since = tool.at or now
+    since = since or tool.at or now
     return _needs_item(
         "permission",
-        tool.tool_use_id,
+        subject or tool.tool_use_id,
         project=project,
         agent=agent,
         reason=reason,
@@ -905,7 +1092,7 @@ def needs_from_board(
     later question, result or decision: they have moved on. An unaddressed
     human note clears nothing; it is news, not an answer. ``agents`` names each
     author by its fleet label; ``manager_live`` defaults to what the sessions and
-    rows say.
+    rows say, a row whose session is parked on its usage limit not counting.
     """
     by_session = {session.id: session for session in sessions}
     rows: dict[str, FleetAgent] = {}
@@ -913,15 +1100,16 @@ def needs_from_board(
         if agent.session_id:
             rows[agent.session_id] = agent  # the newest row of a session names it
     if manager_live is None:
-        gone = {row.session_id for row in agents if row.ended_at is not None and row.session_id}
-        live_rows = [row for row in agents if row.ended_at is None]
-        manager_live = _needs_manager_live(live_rows, gone, sessions, now)
+        parked = {session.id for session in sessions if session.state == "limited"}
+        live_rows = [row for row in agents if row.ended_at is None and row.session_id not in parked]
+        rowed = {row.session_id for row in agents if row.session_id}
+        manager_live = _needs_manager_live(live_rows, rowed, sessions, now)
     addressed: set[str] = set()  # whom the human's later writes were addressed to
     moved_on: set[str] = set()  # sessions that asked, reported or decided again later
     items: list[NeedsItem] = []
     for event in sorted(events, key=_needs_seq, reverse=True):
         if event.session_id is None:
-            if event.kind in ("note", "decision", "result"):
+            if event.kind in _NEEDS_REPLIED:
                 addressed.add((event.to_role or "").strip().lower())
             continue
         if event.kind in ("question", "result") and now - event.created_at <= QUESTION_HORIZON:
@@ -938,7 +1126,7 @@ def needs_from_board(
                 items.append(
                     _needs_board_item(event, project=project, row=row, author=label or role)
                 )
-        if event.kind in ("question", "result", "decision"):
+        if event.kind in _NEEDS_ASKED:
             moved_on.add(event.session_id)
     return items
 
@@ -966,30 +1154,41 @@ def _needs_board_item(
 
 def _needs_manager_live(
     live_rows: Sequence[FleetAgent],
-    gone: Collection[str],
+    rowed: Collection[str],
     sessions: Sequence[TeamSession],
     now: datetime,
 ) -> bool:
     """Whether the project has a manager to act on what needs doing.
 
-    A live manager row says so outright. Otherwise a manager session counts
-    (one started outside the fleet, say) while it has not ended and was seen
-    within the board's stale window — unless its fleet row is ``gone``: a crash
-    fires no ``SessionEnd``, and its session would otherwise read live for half
-    an hour after the manager died.
+    A manager among ``live_rows`` says so outright: the caller passes only the
+    rows that can act, never one parked on its usage limit (it fires no hook and
+    takes no nudge until the reset, which can be hours away) or one whose tmux
+    would not answer. Otherwise a manager session with no fleet row (one started
+    outside the fleet, say) counts while it has not ended, is not parked on a
+    limit and was seen within the board's stale window. A session that has a row
+    (``rowed``) is its row's to decide: a crash fires no ``SessionEnd``, so a
+    dead manager's session read live for half an hour after it died, and a
+    parked one's for as long as it waited.
     """
     if any(_needs_is_manager(row.role) for row in live_rows):
         return True
     return any(
         _needs_is_manager(session.role)
         and session.ended_at is None
+        and session.state != "limited"
         and now - session.last_seen_at <= _MANAGER_FRESH
-        and session.id not in gone
+        and session.id not in rowed
         for session in sessions
     )
 
 
 # --- one project --------------------------------------------------------------------------
+
+
+_NEEDS_NOT_ACTING = frozenset({"exited", "lost", "limited", "unknown"})
+"""Derived states of a live row that takes no nudge: dead, gone, parked on its usage limit
+until a reset that can be hours away, or on a tmux server that would not answer. A manager
+in one of them is no manager to leave a crash or a coder's question to."""
 
 
 @dataclass(frozen=True)
@@ -1008,11 +1207,19 @@ _T = TypeVar("_T")
 
 def _needs_read(read: Callable[[], list[_T]], what: str, project: ProjectInfo) -> list[_T]:
     """One source read for one project; a failure costs what it would have shown."""
+    return _needs_read_or_none(read, what, project) or []
+
+
+def _needs_read_or_none(
+    read: Callable[[], list[_T]], what: str, project: ProjectInfo
+) -> list[_T] | None:
+    """:func:`_needs_read`, ``None`` when the read failed: for facts whose absence says
+    something, as a manager's last word that is not its result does."""
     try:
         return read()
     except Exception:
         log.debug("remote: needs could not read %s of %s", what, project.id, exc_info=True)
-        return []
+        return None
 
 
 def _needs_scan_project(
@@ -1024,6 +1231,7 @@ def _needs_scan_project(
     first_seen: MutableMapping[str, datetime],
     seen: set[str],
     accounts: AccountsSettings | None,
+    answers: Callable[[str], bool] | None = None,
 ) -> _NeedsProject:
     """Every item of one project. ``statuses`` is its ``list_agents``; ``None``, it failed.
 
@@ -1031,60 +1239,74 @@ def _needs_scan_project(
     manager gone and tmux down all depend on rows the listing could not read.
     ``first_seen`` dates the items whose facts carry no date (a pane gone, tmux
     not answering) from the first scan that saw them; ``seen`` collects what
-    this scan saw, so the caller can forget the rest.
+    this scan saw, so the caller can forget the rest. ``answers`` says whether a
+    tmux server answers (:func:`_needs_unheard`), once per socket for a whole scan.
     """
     from aisquare.services.fleet import RECENTLY_ENDED
 
+    if statuses is not None:
+        statuses = _needs_unheard(statuses, answers or _needs_hearing(sources))
     ended = _needs_read(
         lambda: sources.ended_agents(project.id, now - RECENTLY_ENDED), "rows", project
     )
-    events = _needs_read(
-        lambda: sources.board_events(project.id, NEEDS_BOARD_EVENTS), "board", project
+    day = now - max(QUESTION_HORIZON, RECENTLY_ENDED)
+    board_read = _needs_read_or_none(lambda: sources.board_since(project.id, day), "board", project)
+    board = board_read or []
+    window = _needs_window(sources, project)
+    authors = _needs_board_authors(board, now)
+    sessions = _needs_read(
+        lambda: sources.board_sessions(project.id, now - _MANAGER_FRESH, authors),
+        "sessions",
+        project,
     )
-    sessions = _needs_read(lambda: sources.board_sessions(project.id), "sessions", project)
     listed = statuses or []
     rows = list({row.id: row for row in [*ended, *(status.agent for status in listed)]}.values())
-    gone = {row.session_id for row in ended if row.session_id}
-    gone |= {
-        status.agent.session_id
-        for status in listed
-        if status.agent.session_id
-        and (status.agent.ended_at is not None or status.state in ("exited", "lost"))
-    }
-    live_rows = [
+    rowed = {row.session_id for row in rows if row.session_id}
+    acting = [
         status.agent
         for status in listed
-        if status.agent.ended_at is None and status.state not in ("exited", "lost")
+        if status.agent.ended_at is None and status.state not in _NEEDS_NOT_ACTING
     ]
-    manager_live = _needs_manager_live(live_rows, gone, sessions, now)
+    manager_live = _needs_manager_live(acting, rowed, sessions, now)
     items: list[NeedsItem] = []
     tails: dict[str, TranscriptTail | None] = {}
     if statuses is not None:
         for status in statuses:
             tail = tails[status.agent.id] = _needs_tail_of(sources, status)
+            live = manager_live
+            if _needs_is_manager(status.agent.role):
+                # Its own items wait for no manager but another: at the usage-limit dialog
+                # a manager reads attention, and its limit's push waited 90 s for itself.
+                others = [row for row in acting if row.id != status.agent.id]
+                live = _needs_manager_live(others, rowed, sessions, now)
             for item in needs_from_agent(
                 status,
                 tail,
                 project=project,
-                events=events,
+                events=_needs_own_events(sources, project, status, window),
                 now=now,
-                manager_live=manager_live,
+                manager_live=live,
                 accounts=accounts,
+                pane_output=_needs_output_of(sources, status.agent),
             ):
                 items.append(_needs_dated(item, first_seen, seen) if item.kind == "lost" else item)
         items.extend(
             _needs_crashed(
-                ended, rows, project=project, now=now, manager_live=manager_live, sources=sources
+                ended,
+                rows,
+                board,
+                project=project,
+                now=now,
+                manager_live=manager_live,
+                sources=sources,
             )
         )
-        items.extend(_needs_manager_down(statuses, rows, events, project=project, now=now))
+        items.extend(_needs_manager_down(statuses, rows, board_read, project=project, now=now))
         items.extend(
             _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
         )
     items.extend(
-        needs_from_board(
-            events, sessions, rows, project=project, now=now, manager_live=manager_live
-        )
+        needs_from_board(board, sessions, rows, project=project, now=now, manager_live=manager_live)
     )
     return _NeedsProject(items=items, statuses=listed, ended=ended, tails=tails)
 
@@ -1102,12 +1324,160 @@ def _needs_tail_of(sources: NeedsSources, status: FleetAgentStatus) -> Transcrip
         return None
 
 
+def _needs_own_events(
+    sources: NeedsSources,
+    project: ProjectInfo,
+    status: FleetAgentStatus,
+    window: Callable[[], Sequence[TeamEvent]],
+) -> list[TeamEvent]:
+    """The board events :func:`needs_from_agent` reads of an agent: its session's newest
+    ``attention`` and ``limited`` events, wherever they are.
+
+    ``window`` is the project's newest :data:`NEEDS_BOARD_EVENTS`, read only for a row
+    parked on its limit or a session marked ``attention``: no rule reads the events of any
+    other. The team writes ``limited`` once per park and ``attention`` once per turn, so
+    while an agent stays parked, or a dialog stays up overnight, its event leaves that
+    window as newer ones come in; and the item keyed on it became another: a new id,
+    pushed again, its dismissal lost, the usage-limit dialog read as a plain one. A kind
+    the window lacks is asked of the store, for that one session, where a rule reads it.
+    Only since the row was created, from the window too: a session's start puts it back
+    to ``working``, so the park or the dialog it is in began after its process did, and
+    an older event is the process before it's. Asked without that bound, a session with
+    no such event cost every event the project ever had, every scan.
+    """
+    session = status.session
+    if session is None or status.state in ("exited", "unknown", "lost"):
+        return []
+    if status.state != "limited" and session.state != "attention":
+        return []
+    born = status.agent.created_at
+    own = [e for e in window() if e.session_id == session.id and e.created_at >= born]
+    # A limit names its item by its own event, and falls back on the attention one.
+    wanted = ("limited", "attention") if status.state == "limited" else ("attention",)
+    for kind in wanted:
+        if any(event.kind == kind for event in own):
+            break
+        found = _needs_session_event(sources, project, session.id, kind, born)
+        if found is not None:
+            own.append(found)
+            break
+    return own
+
+
+def _needs_output_of(sources: NeedsSources, agent: FleetAgent) -> Callable[[], datetime | None]:
+    """When ``agent``'s pane last printed, asked of tmux only when called."""
+
+    def needs_output() -> datetime | None:
+        try:
+            return sources.pane_output(agent)
+        except Exception:
+            log.debug("remote: needs could not ask tmux about %s", agent.pane_id, exc_info=True)
+            return None
+
+    return needs_output
+
+
+def _needs_window(sources: NeedsSources, project: ProjectInfo) -> Callable[[], list[TeamEvent]]:
+    """The project's newest :data:`NEEDS_BOARD_EVENTS` events, read the first time they are
+    asked for in a scan, and not at all by one that asks nothing of them: most scans of
+    most projects, whose agents are not at a dialog or parked on a limit."""
+    read: list[list[TeamEvent]] = []
+
+    def needs_window() -> list[TeamEvent]:
+        if not read:
+            read.append(
+                _needs_read(
+                    lambda: sources.board_events(project.id, NEEDS_BOARD_EVENTS), "board", project
+                )
+            )
+        return read[0]
+
+    return needs_window
+
+
+def _needs_session_event(
+    sources: NeedsSources, project: ProjectInfo, session_id: str, kind: str, since: datetime
+) -> TeamEvent | None:
+    try:
+        return sources.session_event(project.id, session_id, kind, since)
+    except Exception:
+        log.debug("remote: needs could not read %s's events", session_id, exc_info=True)
+        return None
+
+
+def _needs_hearing(sources: NeedsSources) -> Callable[[str], bool]:
+    """``sources.tmux_answers``, asked once per socket: one per scan, across its projects.
+
+    A question that fails to be put is no sign the server is gone: it answers yes.
+    """
+    heard: dict[str, bool] = {}
+
+    def needs_heard(socket: str) -> bool:
+        if socket not in heard:
+            try:
+                heard[socket] = sources.tmux_answers(socket)
+            except Exception:
+                log.debug("remote: needs could not ask tmux on %s", socket, exc_info=True)
+                heard[socket] = True
+        return heard[socket]
+
+    return needs_heard
+
+
+def _needs_unheard(
+    statuses: list[FleetAgentStatus], answers: Callable[[str], bool]
+) -> list[FleetAgentStatus]:
+    """The listing, with each live row on a tmux server that does not answer read ``unknown``.
+
+    ``fleet._derive`` takes a fresh board row over tmux (§5.1). With the server
+    gone, a row reads working, waiting or attention for the board's stale window
+    (30 minutes), and ``limited`` until its reset: ``fleet_down``, every live row
+    ``unknown``, came that late, under cards for agents tmux had taken with it. A
+    row reads ``unknown`` only when the listing could not ask its server, since a
+    row it could ask reads its pane (``lost`` once it is gone, ``exited`` once it
+    is dead), so one such row says its server did not answer and one of those says
+    it did. A server whose live rows all read from the board is asked.
+    """
+    live = [status for status in statuses if status.agent.ended_at is None]
+    silent: set[str] = set()
+    for socket in sorted({status.agent.tmux_socket for status in live}):
+        states = {status.state for status in live if status.agent.tmux_socket == socket}
+        if "unknown" in states or (not states & {"lost", "exited"} and not answers(socket)):
+            silent.add(socket)
+    return [
+        status.model_copy(
+            update={
+                "state": "unknown",
+                "detail": "tmux unavailable" + ("" if status.agent.session_id else "; no hooks"),
+            }
+        )
+        if status.agent.ended_at is None
+        and status.agent.tmux_socket in silent
+        and status.state != "unknown"
+        else status
+        for status in statuses
+    ]
+
+
+def _needs_board_authors(events: Sequence[TeamEvent], now: datetime) -> set[str]:
+    """The sessions whose board questions and results may still need the human: the ones
+    :func:`needs_from_board` names an item's author from."""
+    return {
+        event.session_id
+        for event in events
+        if event.session_id
+        and event.kind in ("question", "result")
+        and now - event.created_at <= QUESTION_HORIZON
+    }
+
+
 def _needs_dated(
     item: NeedsItem, first_seen: MutableMapping[str, datetime], seen: set[str]
 ) -> NeedsItem:
     """``item`` dated from the first scan that saw it, its push delay moved with it."""
-    seen.add(item.id)
-    since = first_seen.setdefault(item.id, item.since)
+    key = _needs_memory_key(item.project_id, item.id)
+    seen.add(key)
+    since = first_seen.setdefault(key, item.since)
     if since == item.since:
         return item
     shift = item.since - since
@@ -1115,9 +1485,29 @@ def _needs_dated(
     return replace(item, since=since, push_after=pushed)
 
 
+def _needs_memory_key(project_id: str, what: str) -> str:
+    """The watcher's key for when it first saw ``what`` of a project, the project's first."""
+    return f"{project_id}|{what}"
+
+
+def _needs_still_remembered(
+    first_seen: MutableMapping[str, datetime], seen: set[str], project: ProjectInfo
+) -> None:
+    """Keep every date ``first_seen`` holds for ``project`` through a scan that could not look.
+
+    A listing that failed, or a project whose scan did, says nothing of whether a
+    pane is still gone or tmux still silent. Forgotten, the next scan that saw it
+    again dated it anew: ``fleet_down``, whose id is its first sighting, became a
+    new item, pushed again past the dismissal of the one before.
+    """
+    prefix = _needs_memory_key(project.id, "")
+    seen.update(key for key in first_seen if key.startswith(prefix))
+
+
 def _needs_crashed(
     ended: Sequence[FleetAgent],
     rows: Sequence[FleetAgent],
+    board: Sequence[TeamEvent],
     *,
     project: ProjectInfo,
     now: datetime,
@@ -1127,7 +1517,11 @@ def _needs_crashed(
     """Agents that died with a failing exit status in the last hour, with nobody on it.
 
     A clean ``/exit`` is 0 and a forced stop has no status: neither is a crash.
-    An agent whose task is closed did its work; one a live manager has (it was
+    Except the stop of a switch or a restart that then could not start the
+    replacement (its ``/exit``, or the kill when that did not land in time):
+    nothing took the agent's place, and the exit it announced says so
+    (``fleet.HANDOVER_FAILED``, read from the board's day, ``board``). An
+    agent whose task is closed did its work; one a live manager has (it was
     nudged on the exit) is the manager's; one that was restarted since — a newer
     row holds its label — was handled. The manager's own crash is
     ``manager_down``.
@@ -1141,19 +1535,28 @@ def _needs_crashed(
     for row in ended:
         if row.ended_at is None or now - row.ended_at > CRASH_WINDOW:
             continue
-        if row.exit_status in (0, None) or _needs_is_manager(row.role):
+        if _needs_is_manager(row.role):
+            continue
+        clean = row.exit_status in (0, None)
+        abandoned = clean and _needs_handover_failed(_needs_exit_of(row, board))
+        if clean and not abandoned:
             continue
         if newest.get(row.label, row.created_at) > row.created_at:
             continue
         if row.task_id is not None and _needs_task_closed(sources, row.task_id):
             continue
+        name = needs_push_safe(row.label)
         items.append(
             _needs_item(
                 "crashed",
                 row.id,
                 project=project,
                 agent=row,
-                reason=f"{needs_push_safe(row.label)} exited unexpectedly (exit {row.exit_status})",
+                reason=(
+                    f"{name} stopped, and its replacement did not start"
+                    if abandoned
+                    else f"{name} exited unexpectedly (exit {row.exit_status})"
+                ),
                 excerpt=None,
                 detail={"exit_status": row.exit_status, "task_id": row.task_id},
                 since=row.ended_at,
@@ -1171,10 +1574,55 @@ def _needs_task_closed(sources: NeedsSources, task_id: str) -> bool:
     return status in CLOSED_STATUSES
 
 
+def _needs_handover_failed(event: TeamEvent | None) -> bool:
+    """Whether ``event`` is the exit a hand-over announced once its replacement did not start."""
+    from aisquare.services import fleet as fleet_service
+
+    return (
+        event is not None
+        and event.kind == "agent_exited"
+        and event.text.endswith(fleet_service.HANDOVER_FAILED)
+    )
+
+
+def _needs_exit_of(row: FleetAgent, board: Sequence[TeamEvent]) -> TeamEvent | None:
+    """The exit the fleet announced for ``row`` (``agent_exited``, under its session), from
+    the board's day; none older than the row, which is an earlier row's of the session."""
+    if row.session_id is None:
+        return None
+    return max(
+        (
+            event
+            for event in board
+            if event.kind == "agent_exited"
+            and event.session_id == row.session_id
+            and event.created_at >= row.created_at
+        ),
+        key=_needs_seq,
+        default=None,
+    )
+
+
+def _needs_last_word(row: FleetAgent, board: Sequence[TeamEvent]) -> TeamEvent | None:
+    """What ``row``'s session last posted of its own on the board's day: its newest question,
+    result or decision. Not its notes, and not the exits the fleet announces under it."""
+    if row.session_id is None:
+        return None
+    return max(
+        (
+            event
+            for event in board
+            if event.session_id == row.session_id and event.kind in _NEEDS_ASKED
+        ),
+        key=_needs_seq,
+        default=None,
+    )
+
+
 def _needs_manager_down(
     statuses: Sequence[FleetAgentStatus],
     rows: Sequence[FleetAgent],
-    events: Sequence[TeamEvent],
+    board: Sequence[TeamEvent] | None,
     *,
     project: ProjectInfo,
     now: datetime,
@@ -1185,14 +1633,23 @@ def _needs_manager_down(
     reported only while another agent still works, waits on a prompt or is
     limited, and the manager's last word on the board was not its ``result``:
     a manager stopped after reporting, or exiting cleanly, finished its job.
+    Its last word is its newest question, result or decision of the board's
+    day (``board``), not the exit the fleet announces for it under its session
+    once it is stopped, which followed every result and hid it. Not a clean
+    exit a switch or a restart made, though, and then could not start the
+    replacement for: the hand-over's own ``/exit`` is status 0, and the exit it
+    announces says so (``fleet.HANDOVER_FAILED``). That one is reported as a
+    stop is. ``board`` is ``None`` when the day could not be read: a stop is then
+    not reported at all, rather than for a last word nobody read; a crash needs no
+    board.
     """
     managers = [row for row in rows if _needs_is_manager(row.role)]
     if not managers or any(row.ended_at is None for row in managers):
         return []
     manager = max(managers, key=lambda row: row.created_at)
-    if manager.ended_at is None or manager.exit_status == 0:
+    if manager.ended_at is None:
         return []
-    if manager.exit_status is not None:
+    if manager.exit_status not in (0, None):
         reason = f"the manager exited unexpectedly (exit {manager.exit_status})"
     else:
         busy = [
@@ -1202,9 +1659,12 @@ def _needs_manager_down(
             and status.agent.ended_at is None
             and status.state in ("working", "attention", "limited")
         ]
-        own = [e for e in events if manager.session_id and e.session_id == manager.session_id]
-        last = max(own, key=_needs_seq, default=None)
-        if not busy or (last is not None and last.kind == "result"):
+        if not busy or board is None:
+            return []
+        if manager.exit_status == 0 and not _needs_handover_failed(_needs_exit_of(manager, board)):
+            return []
+        said = _needs_last_word(manager, board)
+        if said is not None and said.kind == "result":
             return []
         count = len(busy)
         reason = (
@@ -1236,13 +1696,15 @@ def _needs_fleet_down(
 ) -> list[NeedsItem]:
     """Every live row of the project derives ``unknown``: its tmux is not answering.
 
-    The subject is the first scan that saw it, so it is one item until the
-    condition clears and a new one if it comes back.
+    ``statuses`` has been through :func:`_needs_unheard`, so a fresh board row on a
+    server that is gone reads ``unknown`` too. The subject is the first scan that
+    saw it, so it is one item until the condition clears and a new one if it comes
+    back.
     """
     live = [status for status in statuses if status.agent.ended_at is None]
     if not live or any(status.state != "unknown" for status in live):
         return []
-    key = f"fleet_down:{project.id}"
+    key = _needs_memory_key(project.id, "fleet_down")
     seen.add(key)
     first = first_seen.setdefault(key, now)
     return [
@@ -1275,30 +1737,51 @@ def scan_needs_you(
     A project whose listing fails still yields its board items, and one that
     fails outright costs only its own items. ``first_seen`` is the watcher's
     memory of when it first saw the items whose facts carry no date; without
-    it, each scan is the first.
+    it, each scan is the first. What it holds for a project that could not be
+    looked at this time is kept for the next look.
     """
     memory: MutableMapping[str, datetime] = {} if first_seen is None else first_seen
     seen: set[str] = set()
     accounts = _needs_accounts(sources)
+    answers = _needs_hearing(sources)
     items: list[NeedsItem] = []
     for project in sources.list_projects():
         statuses: list[FleetAgentStatus] | None
         try:
-            statuses = sources.list_agents(project)
+            statuses = sources.list_agents(project) if _needs_has_live(sources, project) else []
         except Exception:
             log.debug("remote: needs could not list the agents of %s", project.id, exc_info=True)
             statuses = None
+        if statuses is None:
+            _needs_still_remembered(memory, seen, project)
         try:
             scanned = _needs_scan_project(
-                sources, project, statuses, now=now, first_seen=memory, seen=seen, accounts=accounts
+                sources,
+                project,
+                statuses,
+                now=now,
+                first_seen=memory,
+                seen=seen,
+                accounts=accounts,
+                answers=answers,
             )
         except Exception:
             log.warning("remote: the needs scan of %s failed", project.id, exc_info=True)
+            _needs_still_remembered(memory, seen, project)
             continue
         items.extend(scanned.items)
     for key in [key for key in memory if key not in seen]:
         del memory[key]
     return _needs_ranked([item for item in items if item.id not in dismissed])
+
+
+def _needs_has_live(sources: NeedsSources, project: ProjectInfo) -> bool:
+    """Whether to list ``project``: it has a live row, or the store would not say."""
+    try:
+        return sources.has_live_agents(project.id)
+    except Exception:
+        log.debug("remote: needs could not count the live rows of %s", project.id, exc_info=True)
+        return True
 
 
 def _needs_accounts(sources: NeedsSources) -> AccountsSettings | None:
@@ -1404,13 +1887,18 @@ def _needs_pane_quiet(server: TmuxServer, pane_id: str, now: datetime) -> bool |
     """
     from aisquare.services import fleet as fleet_service
 
+    output = _needs_pane_output_at(server, pane_id)
+    return None if output is None else now - output > fleet_service.ACTIVITY_WINDOW
+
+
+def _needs_pane_output_at(server: TmuxServer, pane_id: str) -> datetime | None:
+    """When the pane's window last printed (``#{window_activity}``, to the second rounded
+    down); ``None`` when tmux would not say."""
     try:
         raw = server.run("display-message", "-p", "-t", pane_id, "#{window_activity}").strip()
     except Exception:
         return None
-    if not raw.isdigit():
-        return None
-    return now - datetime.fromtimestamp(int(raw), tz=UTC) > fleet_service.ACTIVITY_WINDOW
+    return datetime.fromtimestamp(int(raw), tz=UTC) if raw.isdigit() else None
 
 
 def needs_dialog_open(snap: AgentNow) -> bool:
@@ -1419,10 +1907,13 @@ def needs_dialog_open(snap: AgentNow) -> bool:
     Never for a pane that is not the agent's: an exited, lost or not-yet-started
     agent shows no dialog, even when its transcript ends on a pending tool (a
     crash mid-tool). Otherwise any of: a pending tool in a quiet pane (the
-    spinner stops while a dialog waits); attention with no interruption since; a
-    current prompt, question or plan item, or the usage-limit dialog. A false
-    positive costs a refusal with a sentence, or an Escape to an agent about to
-    be stopped anyway — never an Enter into a dialog.
+    spinner stops while a dialog waits); attention with no interruption since,
+    the row reading ``working`` on output its dialog may have printed included,
+    unless its transcript shows the agent wrote since (:func:`_needs_unanswered`,
+    which a transcript that cannot be read does not show); a current prompt,
+    question or plan item, or the usage-limit dialog. A false positive costs a
+    refusal with a sentence, or an Escape to an agent about to be stopped anyway —
+    never an Enter into a dialog.
 
     A dialog's first seconds are not seen here: quiet means no output for
     ``fleet.ACTIVITY_WINDOW`` (5 s), and the notification that makes the row
@@ -1432,11 +1923,14 @@ def needs_dialog_open(snap: AgentNow) -> bool:
     status = snap.status
     if status is None or not snap.pane_is_agent:
         return False
-    if _needs_pending(snap.tail, status.agent) and snap.pane_quiet is not False:
+    pending = _needs_pending(snap.tail, status.agent)
+    if pending and snap.pane_quiet is not False:
         return True
     if _needs_attention(status) and not (
         snap.tail is not None and _needs_marker_later(status, snap.tail)
     ):
+        return True
+    if not pending and _needs_unanswered(status, snap.tail, unread=True):
         return True
     return any(
         item.kind in ("permission", "question", "plan")
@@ -1499,16 +1993,27 @@ def live_needs_sources() -> NeedsSources:
 
     def needs_rows_ended(project_id: str, since: datetime) -> list[FleetAgent]:
         with store_session() as store:
-            rows = store.fleet_agents(project_id, live_only=False)
-        return [row for row in rows if row.ended_at is not None and row.ended_at >= since]
+            return store.fleet_agents_ended_since(project_id, since)
+
+    def needs_rows_live(project_id: str) -> bool:
+        with store_session() as store:
+            return bool(store.fleet_agents(project_id, live_only=True))
 
     def needs_board_events(project_id: str, limit: int) -> list[TeamEvent]:
         with store_session() as store:
             return store.recent_events(project_id, limit=limit)
 
-    def needs_board_sessions(project_id: str) -> list[TeamSession]:
+    def needs_board_since(project_id: str, since: datetime) -> list[TeamEvent]:
         with store_session() as store:
-            return store.team_sessions(project_id)
+            return store.team_events_since(
+                project_id, since, kinds=(*_NEEDS_ASKED, "agent_exited"), human_kinds=_NEEDS_REPLIED
+            )
+
+    def needs_board_sessions(
+        project_id: str, since: datetime, ids: Collection[str]
+    ) -> list[TeamSession]:
+        with store_session() as store:
+            return store.team_sessions_seen_since(project_id, since, ids=sorted(ids))
 
     def needs_task_status(ref: str) -> str | None:
         with store_session() as store:
@@ -1521,15 +2026,32 @@ def live_needs_sources() -> NeedsSources:
     def needs_live_agents(project: ProjectInfo) -> list[FleetAgentStatus]:
         return fleet_service.list_agents(project, live_only=True)
 
+    def needs_tmux_answers(socket: str) -> bool:
+        return fleet_service.server_for(socket).answers()
+
+    def needs_pane_output(agent: FleetAgent) -> datetime | None:
+        return _needs_pane_output_at(fleet_service.server_for(agent.tmux_socket), agent.pane_id)
+
+    def needs_session_event(
+        project_id: str, session_id: str, kind: str, since: datetime
+    ) -> TeamEvent | None:
+        with store_session() as store:
+            return store.newest_session_event(project_id, session_id, kind, since=since)
+
     return NeedsSources(
         list_projects=project_service.list_projects,
         list_agents=needs_live_agents,
         ended_agents=needs_rows_ended,
         board_events=needs_board_events,
+        board_since=needs_board_since,
         board_sessions=needs_board_sessions,
         task_status=needs_task_status,
         transcript_tail=_needs_cached_tail,
         accounts=claude_accounts_service.accounts_settings,
+        has_live_agents=needs_rows_live,
+        tmux_answers=needs_tmux_answers,
+        session_event=needs_session_event,
+        pane_output=needs_pane_output,
     )
 
 
@@ -1646,6 +2168,8 @@ class RemoteNeedsWatcher:
         self._scanned_at: datetime | None = None
         self._projects: dict[str, ProjectInfo] = {}
         self._first_seen: dict[str, datetime] = {}
+        self._forgotten: set[str] = set()
+        """Ids :meth:`needs_forget` dropped that no scan has read from the dismissals file yet."""
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -1685,19 +2209,30 @@ class RemoteNeedsWatcher:
             return False
 
     def scan_needs_now(self) -> list[NeedsItem]:
-        """One synchronous scan: the snapshot replaced, then every listener called."""
+        """One synchronous scan: the snapshot replaced, then every listener called.
+
+        The dismissals are read before the scan starts, and a scan takes as long as
+        its projects' tmux and store reads do. A card dismissed meanwhile is not in
+        what it read, and :meth:`needs_forget` drops it only from the snapshot there
+        is then: published, the scan put it back on every phone and before the push
+        sender, which could push it. So each id dropped since is dropped from what the
+        scan publishes too, until a scan that read it from the file has published.
+        """
         with self._scanning:
             now = self._clock()
             sources = self._sources()
             projects = sources.list_projects()
-            items = scan_needs_you(
+            dismissed = load_needs_dismissals()
+            scanned = scan_needs_you(
                 replace(sources, list_projects=lambda: projects),
                 now=now,
-                dismissed=load_needs_dismissals(),
+                dismissed=dismissed,
                 first_seen=self._first_seen,
             )
-            payload = [item.needs_item_json() for item in items]
             with self._lock:
+                items = [item for item in scanned if item.id not in self._forgotten]
+                self._forgotten.difference_update(dismissed)
+                payload = [item.needs_item_json() for item in items]
                 self._latest, self._latest_json, self._scanned_at = items, payload, now
                 self._projects = {project.id: project for project in projects}
             for listener in list(self._kit.needs_listeners):
@@ -1738,8 +2273,13 @@ class RemoteNeedsWatcher:
         return None if item is None or project is None else (item, project)
 
     def needs_forget(self, item_id: str) -> None:
-        """Drop a dismissed item now, rather than at the next scan."""
+        """Drop a dismissed item now, rather than at the next scan, and from a scan in flight.
+
+        Called once the dismissal is on file: the scan that publishes next drops it too,
+        whether or not it read the file before the dismissal reached it.
+        """
         with self._lock:
+            self._forgotten.add(item_id)
             self._latest = [item for item in self._latest if item.id != item_id]
             self._latest_json = [item for item in self._latest_json if item.get("id") != item_id]
 

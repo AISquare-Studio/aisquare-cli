@@ -6625,7 +6625,8 @@ def test_a_hand_over_that_does_not_complete_leaves_nothing_parked(
         rows = store.fleet_agents(project.id)
     assert released is not None and released.status == "todo" and released.claimed_by is None
     assert any(kind == "task_released" and "hand-over failed" in text for kind, text in kinds)
-    assert any(kind == "agent_exited" for kind, _ in kinds)
+    exited = f"{agent.label} exited (0): {fleet_service.HANDOVER_FAILED}"
+    assert ("agent_exited", exited) in kinds, "not the clean exit a stop announces"
     assert all(row.ended_at is not None for row in rows)  # the old row ended; no replacement
 
 
@@ -8267,7 +8268,9 @@ def test_restarting_a_running_agent_hands_its_claims_to_the_replacement_and_anno
 
     freed = _task_now(mine.id)
     assert freed.claimed_by is None and freed.status == "todo"
-    assert _events(project, "agent_exited") == [f"{agent.label} exited (0)"]
+    assert _events(project, "agent_exited") == [
+        f"{agent.label} exited (0): {fleet_service.HANDOVER_FAILED}"
+    ]
     assert nudges == [f"{agent.label} exited"]
 
 

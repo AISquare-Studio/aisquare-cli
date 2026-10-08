@@ -216,15 +216,15 @@ aisquare --json remote needs
 | permission | an agent waits for you to allow a tool (a Bash command, an edit), or shows one of Claude Code's own dialogs |
 | question | an agent asks you a question with options |
 | plan | an agent asks you to approve its plan |
-| board_question | the manager (or a coder with no manager left) asks on the board |
-| manager_down | the manager stopped while agents still work, or crashed |
-| crashed | an agent exited with an error, its task unfinished |
+| board_question | the manager asks on the board, or a coder asks you (no `--to`, or `--to` you), or asks a manager that is not there to answer (stopped, or parked on its usage limit) |
+| manager_down | the manager crashed, or stopped while agents still work and before it reported a result |
+| crashed | an agent exited with an error in the last hour, or was stopped for a switch or a restart that could not start its replacement, its task unfinished, while no manager runs to handle it (one parked on its usage limit does not count) |
 | limited | an agent hit its usage limit |
 | lost | an agent's pane is gone |
 | fleet_down | tmux is not answering for a project |
 | asked | an agent ended its turn with a question in plain text |
-| board_result | the manager reports a result |
-| interrupted | you pressed Esc on an agent, and it waits for you |
+| board_result | the manager (or a coder with no manager left) reports a result |
+| interrupted | you pressed Esc on an agent, or turned its prompt down, and it waits for you |
 
 A card holds what you must read before answering, in full: the exact command a
 permission is for, every question with its options, the plan, the text. Under a

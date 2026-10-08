@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 
@@ -1905,6 +1905,202 @@ def test_an_unreadable_snapshot_is_no_evidence_and_the_store_still_opens(
         locked.chmod(0o700)
     assert shown == {"prj_snap"}, "a readable snapshot still adopts its row"
     assert everything == {"prj_snap", "prj_locked"}, "the unreadable one stays captured"
+
+
+# --- the reads a poller makes every few seconds (remote's needs scan) -------------------------
+
+
+def test_the_rows_that_ended_since_are_chosen_by_the_query(store: ContextStore) -> None:
+    """Every spawn, restart and switch leaves a row that is never deleted, so a reader that
+    wants the last day's endings must not build all of them to keep a few."""
+    from datetime import timedelta, timezone
+
+    from aisquare.models import FleetAgent
+
+    now = datetime.now(tz=UTC)
+    for n, ended in ((1, now - timedelta(days=2)), (2, now - timedelta(hours=1)), (3, None)):
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=f"agt_{n}", project_id=PROJECT.id, label=f"coder-{n}", role="coder",
+                pane_id=f"%{n}", cwd=Path("/w"), created_at=now - timedelta(days=3),
+                ended_at=ended, exit_status=None if ended is None else 1,
+            )
+        )  # fmt: skip
+    since = now - timedelta(days=1)
+    assert [row.id for row in store.fleet_agents_ended_since(PROJECT.id, since)] == ["agt_2"]
+    toronto = since.astimezone(timezone(timedelta(hours=-4)))
+    assert [row.id for row in store.fleet_agents_ended_since(PROJECT.id, toronto)] == ["agt_2"]
+    assert store.fleet_agents_ended_since("prj_other", since) == []
+
+
+def test_the_sessions_seen_since_and_the_ones_named_are_chosen_by_the_query(
+    store: ContextStore,
+) -> None:
+    """Every Claude Code start leaves a session that is never deleted: the reader names the
+    old ones it needs (the authors of open board questions) and gets the recent ones."""
+    from datetime import timedelta
+
+    from aisquare.models import TeamSession
+
+    now = datetime.now(tz=UTC)
+    for n, seen in ((1, now - timedelta(days=2)), (2, now - timedelta(minutes=5)), (3, now)):
+        store.upsert_session(
+            TeamSession(
+                id=f"ses_{n}", project_id=PROJECT.id, role="coder",
+                started_at=seen, last_seen_at=seen,
+            )
+        )  # fmt: skip
+    recent = now - timedelta(minutes=30)
+    assert [s.id for s in store.team_sessions_seen_since(PROJECT.id, recent)] == ["ses_3", "ses_2"]
+    named = store.team_sessions_seen_since(PROJECT.id, recent, ids=["ses_1", "ses_2", "ses_9"])
+    assert [s.id for s in named] == ["ses_3", "ses_2", "ses_1"], "newest seen first, once each"
+    assert store.team_sessions_seen_since("prj_other", recent, ids=["ses_1"]) == []
+
+
+def _board(store: ContextStore, project_id: str, *events: tuple[str, str | None, datetime]) -> None:
+    """``(kind, session id, written at)`` events on ``project_id``'s board, in that order."""
+    from aisquare.core.ids import new_event_id
+    from aisquare.models import TeamEvent
+
+    for kind, session_id, at in events:
+        store.add_team_event(
+            TeamEvent(
+                id=new_event_id(), project_id=project_id, session_id=session_id, kind=kind,
+                text=kind, created_at=at,
+            )
+        )  # fmt: skip
+
+
+def test_the_events_since_a_time_are_the_kinds_asked_for_from_that_time_on(
+    store: ContextStore,
+) -> None:
+    """A board's last day, for a reader that asks every few seconds (remote's needs scan):
+    the agents' events of ``kinds``, the human's (no session) of ``human_kinds`` too, and
+    nothing written before ``since`` or on another board."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    store.ensure_project(ProjectInfo(id="prj_other", root=Path("/tmp/other")))
+    _board(
+        store,
+        PROJECT.id,
+        ("question", "ses_1", now - timedelta(days=2)),
+        ("question", "ses_1", now - timedelta(hours=3)),
+        ("note", "ses_1", now - timedelta(hours=2)),
+        ("note", None, now - timedelta(hours=2)),
+        ("decision", None, now - timedelta(hours=1)),
+        ("attention", None, now - timedelta(hours=1)),
+        ("result", "ses_2", now),
+    )
+    _board(store, "prj_other", ("question", "ses_9", now))
+    since = now - timedelta(days=1)
+    read = store.team_events_since(
+        PROJECT.id, since, kinds=["question", "result"], human_kinds=["note", "decision"]
+    )
+    assert [(e.kind, e.session_id) for e in read] == [
+        ("question", "ses_1"),
+        ("note", None),
+        ("decision", None),
+        ("result", "ses_2"),
+    ], "oldest first; an agent's note is not the human's"
+    assert all(event.created_at >= since for event in read)
+    assert store.team_events_since(PROJECT.id, now + timedelta(seconds=1), kinds=["result"]) == []
+    assert store.team_events_since(PROJECT.id, since, kinds=[]) == []
+
+
+def _short_and_long_boards(store: ContextStore, now: datetime) -> int:
+    """``prj_short`` and ``prj_long``: the same last half hour, a question a minute, over 20
+    and 2 000 older notes. Returns how many questions that half hour holds."""
+    from datetime import timedelta
+
+    day = [("question", "ses_1", now - timedelta(minutes=n)) for n in range(30, 0, -1)]
+    for project_id, history in (("prj_short", 20), ("prj_long", 2_000)):
+        store.ensure_project(ProjectInfo(id=project_id, root=Path(f"/tmp/{project_id}")))
+        old = now - timedelta(days=30)
+        _board(
+            store,
+            project_id,
+            *[("note", "ses_1", old + timedelta(seconds=n)) for n in range(history)],
+        )
+        _board(store, project_id, *day)
+    return len(day)
+
+
+def _steps(store: ContextStore, read: Callable[[], object]) -> int:
+    """How many SQLite VM steps ``read`` took: what its queries cost, on any machine."""
+    connection = store._conn  # type: ignore[attr-defined]
+    counted = [0]
+
+    def step() -> int:
+        counted[0] += 1
+        return 0
+
+    connection.set_progress_handler(step, 1)
+    try:
+        read()
+    finally:
+        connection.set_progress_handler(None, 1)
+    return counted[0]
+
+
+def test_the_events_since_a_time_cost_that_time_not_the_boards_history(
+    store: ContextStore,
+) -> None:
+    """``created_at`` has no index, so filtered on it alone a read walks every event a board
+    ever had, which is never pruned. The read starts past the newest event written before
+    ``since``: a board with a hundred times the history costs the same to read."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    asked = _short_and_long_boards(store, now)
+    since = now - timedelta(days=1)
+    for project_id in ("prj_short", "prj_long"):
+        assert len(store.team_events_since(project_id, since, kinds=["question"])) == asked
+    short = _steps(store, lambda: store.team_events_since("prj_short", since, kinds=["question"]))
+    long = _steps(store, lambda: store.team_events_since("prj_long", since, kinds=["question"]))
+    assert long < short + 500, (short, long)
+
+
+def test_a_sessions_newest_event_of_a_kind_is_the_one_since_a_time(store: ContextStore) -> None:
+    """The session's newest event of the kind, when it was written at or after ``since``."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    _board(
+        store,
+        PROJECT.id,
+        ("attention", "ses_1", now - timedelta(hours=3)),
+        ("attention", "ses_1", now - timedelta(hours=1)),
+        ("attention", "ses_2", now - timedelta(minutes=30)),
+        ("limited", "ses_1", now - timedelta(minutes=20)),
+        ("note", None, now - timedelta(minutes=10)),
+    )
+    found = store.newest_session_event(
+        PROJECT.id, "ses_1", "attention", since=now - timedelta(hours=2)
+    )
+    assert found is not None and found.created_at == now - timedelta(hours=1)
+    later = now - timedelta(minutes=50)
+    assert store.newest_session_event(PROJECT.id, "ses_1", "attention", since=later) is None
+    assert store.newest_session_event(PROJECT.id, "ses_3", "attention", since=later) is None
+    assert store.newest_session_event("prj_other", "ses_1", "limited", since=later) is None
+
+
+def test_a_session_with_no_such_event_costs_the_time_asked_not_the_boards_history(
+    store: ContextStore,
+) -> None:
+    """Asked by the session and the kind alone, a session that has no such event walked
+    every event its board ever had to say so, every few seconds. The walk stops at the first
+    event written before ``since``: a hundred times the history costs the same."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    _short_and_long_boards(store, now)
+    since = now - timedelta(days=1)
+    short = _steps(
+        store, lambda: store.newest_session_event("prj_short", "ses_9", "x", since=since)
+    )
+    long = _steps(store, lambda: store.newest_session_event("prj_long", "ses_9", "x", since=since))
+    assert long < short + 500, (short, long)
 
 
 # --- the launch spec and ui_state (#144) ----------------------------------------------------

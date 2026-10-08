@@ -653,7 +653,8 @@ def hook_binaries(directory: Path) -> tuple[list[agent_core.HookBinary], str | N
         return [], unreadable
     try:
         commands = agent_core.hook_commands(HOOK_AGENT, directory)
-    except (OSError, ValueError, TypeError) as exc:
+    except (OSError, ValueError, TypeError, RuntimeError) as exc:
+        # RuntimeError: pathlib's, for a recorded `~olduser/.claude` (sweep of #257).
         return [], f"its settings.json could not be read ({exc})"
     binaries: list[agent_core.HookBinary] = []
     for command in commands:

@@ -1372,6 +1372,56 @@ def test_a_recorded_config_dir_this_user_cannot_enter_is_left_with_its_reason(
     assert "its settings.json could not be read" in left[0]["reason"], left
 
 
+@pytest.mark.parametrize(
+    "program",
+    ["~aisquare-no-such-user/.local/bin/aisquare", "~.local/bin/aisquare"],
+    ids=["another-users-home", "a-typo"],
+)
+def test_a_hook_naming_a_home_this_machine_lacks_counts_as_gone(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path, program: str
+) -> None:
+    """``~olduser/…`` (dotfiles from another machine) or ``~.local/…`` names a home pathlib
+    cannot find, and it raised RuntimeError on every Python: upgrade, --check and asq's
+    Update ended in a traceback with nothing on stdout (sweep of #257). Those hooks fail
+    every session, so re-connecting is the fix."""
+    site = _hooked(tmp_path / "claude", program)
+    _record(site)
+
+    result = runner.invoke(app, ["--json", "upgrade", "--check"])
+
+    assert result.exit_code == 0, result.output
+    assert _one_object(result.stdout)["refresh_hooks"] == [str(site)], result.stdout
+    assert agent_core.hook_binary(f"{program} hook stop") is not None
+
+
+@pytest.mark.parametrize("shape", ["symlink-loop", "another-users-home"])
+def test_a_recorded_dir_pathlib_raises_on_is_left_and_the_rest_still_run(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path, shape: str
+) -> None:
+    """pathlib raises RuntimeError, not OSError, for a symlink loop on 3.11 and 3.12 and for
+    a ``~olduser`` naming no user here: a recorded ~/.claude-old linked to itself, or one a
+    hand-edited agents.json spells ``~olduser/.claude``, ended upgrade, --check and asq's
+    Update in a traceback, and the good directory after it was never reached (sweep of
+    #257)."""
+    if sys.platform == "win32":
+        pytest.skip("NTFS reports a link loop differently, and Windows guesses a user's home")
+    if shape == "symlink-loop":
+        bad = tmp_path / "claude-old"
+        bad.symlink_to(bad)
+    else:
+        bad = Path("~aisquare-no-such-user") / ".claude"
+    good = _hooked(tmp_path / "claude", tool.script)
+    _record(bad, good)
+
+    result = runner.invoke(app, ["--json", "upgrade", "--check"])
+
+    assert result.exit_code == 0, result.output
+    plan = _one_object(result.stdout)
+    assert plan["refresh_hooks"] == [str(good)], plan
+    assert [entry["config_dir"] for entry in plan["hooks_left"]] == [str(bad)], plan
+    assert "its settings.json could not be read" in plan["hooks_left"][0]["reason"], plan
+
+
 #: What the new install's own process wrote to a pipe, laid out by Rich at 80 columns.
 _WRAPPED_TRACEBACK = (
     "╭───────────────────── Traceback (most recent call last) ──────────────────────╮\n"

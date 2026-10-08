@@ -8,6 +8,7 @@ known context file) exists. The set of connected agents is persisted in
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -1152,13 +1153,19 @@ def _resolve_program(token: str) -> Path:
     through PATH exactly as the shell would send it, and an unfindable one is
     returned as written so it grades as missing rather than crashing. ``$HOME/``
     and ``${HOME}/`` are expanded as ``~/`` is: the hook's shell expands them, and
-    read literally a working hook graded as missing (review of #257).
+    read literally a working hook graded as missing (review of #257). So is a
+    ``~olduser/…`` naming a user this machine does not have, on which pathlib
+    raises RuntimeError: upgrade, its ``--check`` and doctor ended in a traceback
+    (sweep of #257).
     """
-    for prefix in ("$HOME/", "${HOME}/"):
-        if token.startswith(prefix):
-            token = str(Path("~").expanduser() / token[len(prefix) :])
-            break
-    path = Path(token).expanduser()
+    try:
+        for prefix in ("$HOME/", "${HOME}/"):
+            if token.startswith(prefix):
+                token = str(Path("~").expanduser() / token[len(prefix) :])
+                break
+        path = Path(token).expanduser()
+    except RuntimeError:
+        path = Path(token)
     if not path.is_absolute() and path.parent == Path("."):
         found = shutil.which(token)
         return Path(found) if found else path
@@ -1367,11 +1374,18 @@ def _claude_dirs_on_disk() -> list[Path]:
 
 
 def _dir_key(path: Path) -> Path:
-    """One identity for the several spellings of a directory (``~``, symlinks)."""
+    """One identity for the several spellings of a directory (``~``, symlinks).
+
+    pathlib raises RuntimeError, not OSError, for a symlink loop on 3.11 and 3.12 and
+    for a ``~olduser`` naming no user here: a recorded directory that was either ended
+    upgrade, its ``--check``, uninstall and doctor in a traceback (sweep of #257).
+    """
+    with contextlib.suppress(RuntimeError):
+        path = path.expanduser()
     try:
-        return path.expanduser().resolve()
-    except OSError:
-        return path.expanduser().absolute()
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return path.absolute()
 
 
 def dir_identity(path: Path) -> Path:

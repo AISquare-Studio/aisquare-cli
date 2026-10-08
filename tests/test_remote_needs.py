@@ -383,14 +383,38 @@ def test_rule_8_attention_without_a_tool_is_a_dialog() -> None:
     row = _row()
     seen = NOW - timedelta(minutes=2)
     session = _session(row, state="attention", seen=seen)
-    events = [_event(4, "attention", "Claude Code needs your approval", session=session)]
-    item = _one(_classify(_status(row, "attention", session), _tail(newest="tool_result"), events))
+    events = [_event(4, "attention", "Claude Code needs your approval", session=session, at=seen)]
+    tail = _tail(newest="tool_result", at=seen - timedelta(seconds=8))
+    item = _one(_classify(_status(row, "attention", session), tail, events))
     assert item.kind == "permission"
     assert item.id == needs_item_id(PROJECT.id, "permission", f"attention:4:{seen.isoformat()}")
     assert item.reason == "coder-1 shows a dialog that needs you"
     assert item.detail == {"text": "Claude Code needs your approval"}
     assert item.answers == ()
     assert item.since == seen
+
+
+def test_a_dialog_after_the_agent_moved_on_is_not_named_by_the_notice_before_it() -> None:
+    """``mark_attention`` flips a session once per turn: a turn's later dialogs leave no event
+    and move ``last_seen_at`` alone. A usage-limit dialog after a Bash prompt that was
+    granted read as a permission card quoting that prompt, pushed at once and with no
+    Switch; and the reverse, a later dialog read as the usage limit with its words."""
+    row = _row()
+    first = NOW - timedelta(minutes=10)
+    session = _session(row, state="attention", seen=NOW - timedelta(minutes=1))
+    status = _status(row, "attention", session)
+    moved_on = _tail(newest="assistant_text", at=first + timedelta(minutes=2), text="Ran it.")
+    asked = "Claude needs your permission to use Bash"
+    bash = [_event(4, "attention", asked, session=session, at=first)]
+    paused = "Session paused — choose: continue on usage credits or switch models"
+    limit = [_event(4, "attention", paused, session=session, at=first)]
+    later = _one(_classify(status, moved_on, bash))
+    assert (later.kind, later.excerpt, later.detail) == ("permission", "", {"text": ""})
+    assert later.reason == "coder-1 shows a dialog that needs you"
+    assert _one(_classify(status, moved_on, limit)).kind == "permission", "not the limit's"
+    still = _tail(newest="assistant_text", at=first - timedelta(seconds=8), text="Running it.")
+    assert _one(_classify(status, still, limit)).kind == "limited", "the dialog it named"
+    assert _one(_classify(status, still, bash)).excerpt == bash[0].text
 
 
 def test_stale_attention_still_counts_as_attention() -> None:
@@ -473,6 +497,8 @@ class Fleet:
     """Sockets whose tmux server does not answer."""
     probed: list[str] = field(default_factory=list)
     """Every socket the scan asked tmux about, once per question."""
+    asked_events: list[tuple[str, str | None]] = field(default_factory=list)
+    """Every session the scan asked the store for its newest event of a kind."""
 
 
 def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> NeedsSources:
@@ -485,6 +511,11 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
     def tmux_answers(socket: str) -> bool:
         fleet.probed.append(socket)
         return socket not in fleet.silent
+
+    def session_event(pid: str, session_id: str, kind: str | None) -> TeamEvent | None:
+        fleet.asked_events.append((session_id, kind))
+        own = [e for e in fleet.events if e.session_id == session_id and kind in (None, e.kind)]
+        return max(own, key=lambda event: event.seq, default=None)
 
     return NeedsSources(
         list_projects=lambda: [PROJECT],
@@ -503,6 +534,7 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
         accounts=lambda: accounts or AccountsSettings(),
         has_live_agents=lambda pid: any(status.agent.ended_at is None for status in fleet.agents),
         tmux_answers=tmux_answers,
+        session_event=session_event,
     )
 
 
@@ -752,6 +784,84 @@ def test_a_listing_that_fails_does_not_forget_when_tmux_went_down() -> None:
     fleet.listing_fails = False
     again = _one(_scan(fleet, now=NOW + timedelta(seconds=6), first_seen=memory))
     assert (again.id, again.since) == (first.id, NOW)
+
+
+def _parked_and_asking() -> Fleet:
+    """coder-1 parked on its limit, coder-2 at an MCP form, coder-3 at the usage-limit dialog:
+    each named by an event the team writes once, when it starts."""
+    rows = [_row("coder-1"), _row("coder-2"), _row("coder-3")]
+    at = NOW - timedelta(hours=1)
+    parked = _session(rows[0], state="limited", resets=NOW + timedelta(hours=4))
+    form = _session(rows[1], state="attention", seen=at)
+    dialog = _session(rows[2], state="attention", seen=at)
+    paused = "Session paused — choose: continue on usage credits or switch models"
+    return Fleet(
+        agents=[
+            _status(rows[0], "limited", parked, "limit resets in 4h"),
+            _status(rows[1], "attention", form),
+            _status(rows[2], "attention", dialog),
+        ],
+        events=[
+            _event(
+                1, "limited", "coder-1 hit its limit", session=parked, at=at - timedelta(hours=1)
+            ),
+            _event(2, "attention", "Claude Code needs your input", session=form, at=at),
+            _event(3, "attention", paused, session=dialog, at=at),
+        ],
+    )
+
+
+def _board_traffic(fleet: Fleet, count: int = remote_needs.NEEDS_BOARD_EVENTS) -> None:
+    """``count`` newer events of nobody's: every one the scan's window can hold."""
+    start = max(event.seq for event in fleet.events) + 1
+    fleet.events += [
+        _event(seq, "note", "fyi", at=NOW - timedelta(minutes=1))
+        for seq in range(start, start + count)
+    ]
+
+
+def test_an_item_keeps_its_id_however_many_board_events_follow_its_own() -> None:
+    """The scan reads the project's newest 300 events, and the team writes ``limited`` once a
+    park and ``attention`` once a turn. While an agent stayed parked, or a dialog stayed up,
+    300 events later its item became another: a new id pushed again, its dismissal lost, the
+    usage-limit dialog read as a plain one. The store is asked for that one session's."""
+    fleet = _parked_and_asking()
+    before = _scan(fleet)
+    assert [(item.kind, item.agent) for item in before] == [
+        ("permission", "coder-2"),
+        ("limited", "coder-1"),
+        ("limited", "coder-3"),
+    ]
+    assert fleet.asked_events == [], "the window holds them: nothing else is read"
+    _board_traffic(fleet)
+    dismissed = before[1].id
+    after = _scan(fleet, dismissed=(dismissed,))
+    assert [(item.id, item.kind) for item in after] == [
+        (before[0].id, "permission"),
+        (before[2].id, "limited"),
+    ], "the same items, coder-1's still dismissed"
+    assert sorted(fleet.asked_events) == [
+        ("ses_coder-1", "limited"),
+        ("ses_coder-2", "attention"),
+        ("ses_coder-3", "attention"),
+    ]
+
+
+def test_a_managers_last_word_is_read_however_long_ago_it_was() -> None:
+    """A manager stopped after its ``result`` finished its job, however busy the board has
+    been since: 300 newer events made its last word unknown, and it read as down."""
+    manager = _row("manager", role="manager", ended=NOW - timedelta(minutes=5))
+    managing = _session(manager, ended=NOW - timedelta(minutes=5))
+    coder = _row()
+    fleet = Fleet(
+        ended=[manager],
+        agents=[_status(coder, "working", _session(coder))],
+        sessions=[managing],
+        events=[_event(5, "result", "Shipped.", session=managing, at=NOW - timedelta(hours=2))],
+    )
+    _board_traffic(fleet)
+    assert "manager_down" not in [item.kind for item in _scan(fleet)]
+    assert fleet.asked_events == [("ses_manager", None)]
 
 
 def test_a_lost_pane_is_dated_from_the_first_scan_that_saw_it() -> None:

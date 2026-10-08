@@ -279,6 +279,11 @@ def _needs_answers_every(socket: str) -> bool:
     return True
 
 
+def _needs_no_event(project_id: str, session_id: str, kind: str | None) -> TeamEvent | None:
+    """A source's ``session_event`` when it says nothing: the window is all there is."""
+    return None
+
+
 @dataclass(frozen=True)
 class NeedsSources:
     """Everything the scan reads, as callables: the live store and tmux, or a test's fakes.
@@ -308,6 +313,9 @@ class NeedsSources:
     tmux_answers: Callable[[str], bool] = _needs_answers_every
     """Whether a tmux server listens on the given socket (``TmuxServer.answers``): asked
     only where the listing's states cannot tell (:func:`_needs_unheard`)."""
+    session_event: Callable[[str, str, str | None], TeamEvent | None] = _needs_no_event
+    """A session's newest board event of a kind (of any kind with ``None``), for the facts
+    the window of ``board_events`` no longer holds (:func:`_needs_own_events`)."""
 
 
 # --- names on a lock screen, and text on a card -------------------------------------------
@@ -516,6 +524,10 @@ def needs_from_agent(
     8. attention → ``permission``, the dialog form: an MCP elicitation, Claude Code's own;
     9. ``waiting`` on its own words, which end on a question → ``asked``.
 
+    Rules 7 and 8 read the notification from the session's newest ``attention`` event
+    only while it still names the dialog on screen (:func:`_needs_notice`); after it a
+    dialog is the plain form, its words not on the board.
+
     Attention is the derived ``attention``, or a session still marked so after the row
     went stale (past ``_STALE_AFTER`` it derives ``waiting``, the dialog maybe still up).
     Records older than the row are ignored throughout: a resumed session's old pending tool
@@ -574,17 +586,18 @@ def needs_from_agent(
     if tail is not None and _needs_marker_later(status, tail):
         return [_needs_interrupted_item(tail, project=project, agent=agent, name=name, now=now)]
     if attention:
-        if attention_event is not None and LIMIT_DIALOG.search(attention_event.text):
-            since = attention_event.created_at
+        notice = _needs_notice(attention_event, tail)
+        if notice is not None and LIMIT_DIALOG.search(notice.text):
+            since = notice.created_at
             return [
                 _needs_item(
                     "limited",
-                    f"attention:{attention_event.seq}",
+                    f"attention:{notice.seq}",
                     project=project,
                     agent=agent,
                     reason=f"{name} hit its usage limit (Claude Code is asking what to do)",
-                    excerpt=attention_event.text,
-                    detail=_needs_fit({"text": attention_event.text}, _DETAIL_TEXT_MAX),
+                    excerpt=notice.text,
+                    detail=_needs_fit({"text": notice.text}, _DETAIL_TEXT_MAX),
                     since=since,
                     push_after=_needs_limited_push(
                         since, None, now=now, manager_live=manager_live, accounts=accounts
@@ -593,7 +606,7 @@ def needs_from_agent(
             ]
         seen = session.last_seen_at if session is not None else now
         seq = "-" if attention_event is None else str(attention_event.seq)
-        text = "" if attention_event is None else attention_event.text
+        text = "" if notice is None else notice.text
         return [
             _needs_item(
                 "permission",
@@ -636,6 +649,24 @@ def needs_from_agent(
 
 def _needs_seq(event: TeamEvent) -> int:
     return event.seq
+
+
+def _needs_notice(event: TeamEvent | None, tail: TranscriptTail | None) -> TeamEvent | None:
+    """The session's newest ``attention`` event, while it still names the dialog on screen.
+
+    ``mark_attention`` flips a session once per turn, so a turn's first notice is
+    the only one the board records: a later one moves ``last_seen_at`` and writes
+    nothing. Once the agent wrote anything after the event (a granted tool's
+    result, its reply after the dialog was answered), the dialog the event named
+    was answered, and one on screen now is another, which its text would misname:
+    the usage-limit dialog read as the Bash prompt approved before it, and the
+    reverse. Without a tail nothing says it moved on.
+    """
+    if event is None:
+        return None
+    if tail is not None and tail.newest_at is not None and tail.newest_at > event.created_at:
+        return None
+    return event
 
 
 def _needs_attention(status: FleetAgentStatus) -> bool:
@@ -1104,7 +1135,7 @@ def _needs_scan_project(
                 status,
                 tail,
                 project=project,
-                events=events,
+                events=_needs_own_events(sources, project, status, events),
                 now=now,
                 manager_live=manager_live,
                 accounts=accounts,
@@ -1115,7 +1146,15 @@ def _needs_scan_project(
                 ended, rows, project=project, now=now, manager_live=manager_live, sources=sources
             )
         )
-        items.extend(_needs_manager_down(statuses, rows, events, project=project, now=now))
+        items.extend(
+            _needs_manager_down(
+                statuses,
+                rows,
+                lambda session_id: _needs_newest_of(sources, project, events, session_id),
+                project=project,
+                now=now,
+            )
+        )
         items.extend(
             _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
         )
@@ -1125,6 +1164,61 @@ def _needs_scan_project(
         )
     )
     return _NeedsProject(items=items, statuses=listed, ended=ended, tails=tails)
+
+
+def _needs_own_events(
+    sources: NeedsSources,
+    project: ProjectInfo,
+    status: FleetAgentStatus,
+    events: Sequence[TeamEvent],
+) -> list[TeamEvent]:
+    """The board events :func:`needs_from_agent` reads of an agent: its session's newest
+    ``attention`` and ``limited`` events, wherever they are.
+
+    ``events`` is the project's newest :data:`NEEDS_BOARD_EVENTS`. The team writes
+    ``limited`` once per park and ``attention`` once per turn, so while an agent
+    stays parked, or a dialog stays up overnight, its event leaves that window as
+    newer ones come in; and the item keyed on it became another: a new id, pushed
+    again, its dismissal lost, the usage-limit dialog read as a plain one. A kind
+    the window lacks is asked of the store, for that one session, where a rule
+    reads it.
+    """
+    session = status.session
+    if session is None or status.state in ("exited", "unknown", "lost"):
+        return []
+    own = [event for event in events if event.session_id == session.id]
+    # A limit names its item by its own event, and falls back on the attention one.
+    wanted = ("limited", "attention") if status.state == "limited" else ("attention",)
+    if status.state != "limited" and session.state != "attention":
+        return own
+    for kind in wanted:
+        if any(event.kind == kind for event in own):
+            break
+        found = _needs_session_event(sources, project, session.id, kind)
+        if found is not None:
+            own.append(found)
+            break
+    return own
+
+
+def _needs_newest_of(
+    sources: NeedsSources, project: ProjectInfo, events: Sequence[TeamEvent], session_id: str
+) -> TeamEvent | None:
+    """A session's newest board event: the window's, or the store's once it left the window."""
+    own = [event for event in events if event.session_id == session_id]
+    if own:
+        return max(own, key=_needs_seq)
+    return _needs_session_event(sources, project, session_id, None)
+
+
+def _needs_session_event(
+    sources: NeedsSources, project: ProjectInfo, session_id: str, kind: str | None
+) -> TeamEvent | None:
+    try:
+        return sources.session_event(project.id, session_id, kind)
+    except Exception:
+        log.debug("remote: needs could not read %s's events", session_id, exc_info=True)
+        return None
 
 
 def _needs_hearing(sources: NeedsSources) -> Callable[[str], bool]:
@@ -1298,7 +1392,7 @@ def _needs_task_closed(sources: NeedsSources, task_id: str) -> bool:
 def _needs_manager_down(
     statuses: Sequence[FleetAgentStatus],
     rows: Sequence[FleetAgent],
-    events: Sequence[TeamEvent],
+    newest_of: Callable[[str], TeamEvent | None],
     *,
     project: ProjectInfo,
     now: datetime,
@@ -1309,6 +1403,7 @@ def _needs_manager_down(
     reported only while another agent still works, waits on a prompt or is
     limited, and the manager's last word on the board was not its ``result``:
     a manager stopped after reporting, or exiting cleanly, finished its job.
+    ``newest_of`` is a session's newest board event, however long ago.
     """
     managers = [row for row in rows if _needs_is_manager(row.role)]
     if not managers or any(row.ended_at is None for row in managers):
@@ -1326,9 +1421,10 @@ def _needs_manager_down(
             and status.agent.ended_at is None
             and status.state in ("working", "attention", "limited")
         ]
-        own = [e for e in events if manager.session_id and e.session_id == manager.session_id]
-        last = max(own, key=_needs_seq, default=None)
-        if not busy or (last is not None and last.kind == "result"):
+        if not busy:
+            return []
+        last = newest_of(manager.session_id) if manager.session_id else None
+        if last is not None and last.kind == "result":
             return []
         count = len(busy)
         reason = (
@@ -1683,6 +1779,11 @@ def live_needs_sources() -> NeedsSources:
     def needs_tmux_answers(socket: str) -> bool:
         return fleet_service.server_for(socket).answers()
 
+    def needs_session_event(project_id: str, session_id: str, kind: str | None) -> TeamEvent | None:
+        with store_session() as store:
+            found = store.filtered_events(project_id, session_id=session_id, kind=kind, limit=1)
+        return found[-1] if found else None
+
     return NeedsSources(
         list_projects=project_service.list_projects,
         list_agents=needs_live_agents,
@@ -1694,6 +1795,7 @@ def live_needs_sources() -> NeedsSources:
         accounts=claude_accounts_service.accounts_settings,
         has_live_agents=needs_rows_live,
         tmux_answers=needs_tmux_answers,
+        session_event=needs_session_event,
     )
 
 

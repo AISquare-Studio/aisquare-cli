@@ -130,6 +130,109 @@ def test_neither_route_still_offers_the_one_click_connect(claude: Path) -> None:
     assert agents_service.claude_code_connected() is False
 
 
+def _repo_plugin(config_dir: Path, repo: Path, scope: str, *, git: str = "dir") -> Path:
+    """What ``claude plugin install aisquare@aisquare-cli --scope <scope>``, run in ``repo``,
+    leaves (Claude Code 2.1.294): the key in the repository's settings file, none in the
+    config dir's, and a record in the config dir naming the scope and the repository.
+    ``git`` is the repository's ``.git``: a directory, or a file as in a linked worktree."""
+    name = "settings.json" if scope == "project" else "settings.local.json"
+    (repo / ".claude").mkdir(parents=True, exist_ok=True)
+    (repo / ".claude" / name).write_text(
+        json.dumps({"enabledPlugins": {agent_core.CLAUDE_PLUGIN_ID: True}}), encoding="utf-8"
+    )
+    if git == "dir":
+        (repo / ".git").mkdir(exist_ok=True)
+    else:
+        (repo / ".git").write_text("gitdir: /elsewhere/.git/worktrees/repo\n", encoding="utf-8")
+    (repo / "src").mkdir(exist_ok=True)
+    record = {"scope": scope, "projectPath": str(repo), "version": "0.8.0"}
+    (config_dir / "plugins").mkdir(parents=True, exist_ok=True)
+    (config_dir / "plugins" / "installed_plugins.json").write_text(
+        json.dumps({"version": 2, "plugins": {agent_core.CLAUDE_PLUGIN_ID: [record]}}),
+        encoding="utf-8",
+    )
+    return repo
+
+
+@posix_route
+@pytest.mark.parametrize("scope", ["project", "local"])
+def test_a_repo_scope_plugin_connects_the_sessions_that_load_it(
+    runner: CliRunner,
+    claude: Path,
+    tmp_path: Path,
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: str,
+) -> None:
+    """Installed with --scope project or local, the plugin is enabled in the repository, not
+    in the config dir, so the shared check said "not connected" there: the doctor offered
+    Connect, which installs the settings.json hooks beside it, and Welcome agreed (review
+    of #257). Claude Code reads project settings from the directory a session starts in,
+    and local settings from the root of its repository."""
+    repo = _repo_plugin(claude, tmp_path / "repo", scope)
+
+    def asked_from(where: Path) -> tuple[bool, bool, DoctorCheck]:
+        monkeypatch.chdir(where)
+        listed = runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout
+        return (
+            agents_service.claude_code_connected(),
+            json.loads(listed)[0]["connected"],
+            diagnostics._check_claude_code(),
+        )
+
+    root, below, elsewhere = asked_from(repo), asked_from(repo / "src"), asked_from(work_dir)
+
+    assert root[:2] == (True, True), root
+    assert root[2].status is CheckStatus.ok and _buttons(root[2]) == [], root[2]
+    assert f"through the aisquare plugin 0.8.0 at {scope} scope in {repo}" in root[2].detail
+    loads_below = scope == "local"
+    assert below[:2] == (loads_below, loads_below), below
+    assert _buttons(below[2]) == ([] if loads_below else [_CONNECT]), below[2]
+    assert elsewhere[:2] == (False, False) and _buttons(elsewhere[2]) == [_CONNECT], "control"
+
+
+@posix_route
+def test_hooks_beside_a_repo_scope_plugin_name_the_command_that_removes_it(
+    runner: CliRunner, claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both routes in one repository: the way out that keeps the hooks must name the
+    plugin's scope, run in its repository, or Claude Code answers that it is not installed."""
+    repo = _repo_plugin(claude, tmp_path / "repo", "project")
+    _connect(runner)
+    monkeypatch.chdir(repo)
+
+    row = diagnostics._check_claude_code()
+
+    assert row.status is CheckStatus.warn and "runs aisquare two ways" in row.detail, row
+    assert f"cd {repo} && claude plugin uninstall" in (row.fix or ""), row.fix
+    assert f"{agent_core.CLAUDE_PLUGIN_ID} --scope project" in (row.fix or ""), row.fix
+    assert _buttons(row) == [], "keeping one route is the operator's call"
+
+
+@posix_route
+@pytest.mark.parametrize("shape", ["worktree", "home"])
+def test_local_settings_are_read_from_the_repository_root_only_where_claude_code_does(
+    claude: Path,
+    tmp_path: Path,
+    isolated_agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    """Claude Code reads local settings from the repository's root only when it is a git
+    directory this user owns and not the home directory; else from the session's own
+    directory. A linked worktree (a ``.git`` file) is not followed to its main repository."""
+    if shape == "worktree":
+        repo = _repo_plugin(claude, tmp_path / "repo", "local", git="file")
+    else:
+        repo = _repo_plugin(claude, isolated_agent_home, "local")  # the home is a git repo
+    monkeypatch.chdir(repo / "src")
+    below = agents_service.claude_code_connected()
+    monkeypatch.chdir(repo)
+    at_root = agents_service.claude_code_connected()
+
+    assert (below, at_root) == (False, True)
+
+
 @posix_route
 def test_both_routes_warn_and_name_both_ways_out_without_a_button(
     runner: CliRunner, claude: Path

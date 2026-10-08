@@ -810,7 +810,11 @@ def _hook_binary_problems(sites: list[agent_core.HookSiteHealth]) -> list[str]:
 
 
 def _plugin_label(plugin: agent_core.ClaudePlugin) -> str:
-    return f"the aisquare plugin {plugin.version}" if plugin.version else "the aisquare plugin"
+    label = f"the aisquare plugin {plugin.version}" if plugin.version else "the aisquare plugin"
+    if plugin.project is not None:
+        # Installed for one repository: it runs only in sessions started there.
+        label += f" at {plugin.scope} scope in {plugin.project}"
+    return label
 
 
 def _plugin_runner(pin: str | None) -> tuple[str, str | None, str | None]:
@@ -1045,12 +1049,24 @@ def _check_claude_code() -> DoctorCheck:
     )
     fixes.extend(
         f"keep the plugin: aisquare agents disconnect claude-code --config-dir {site.config_dir}"
-        f" (or keep the hooks: {agent_core.claude_plugin_command('uninstall', site.config_dir)})"
+        f" (or keep the hooks: {_plugin_uninstall(site)})"
         for site in live
     )
     if runner_fix is not None:
         fixes.append(runner_fix)
     return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
+
+
+def _plugin_uninstall(site: agent_core.HookSiteHealth) -> str:
+    """The command that removes the plugin ``site`` loads, at the scope it was installed:
+    without its ``--scope``, run in its repository, a project- or local-scope install
+    is not found."""
+    plugin = site.plugin
+    if plugin is None:
+        return agent_core.claude_plugin_command("uninstall", site.config_dir)
+    return agent_core.claude_plugin_command(
+        "uninstall", site.config_dir, scope=plugin.scope, project=plugin.project
+    )
 
 
 def _planned_agent_checks() -> list[DoctorCheck]:

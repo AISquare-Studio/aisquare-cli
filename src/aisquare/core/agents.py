@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -471,15 +472,74 @@ def claude_code_connected(config_dir: Path | None = None) -> bool:
     Two routes, in a directory whose ``settings.json`` does not switch hooks off:
     every lifecycle hook ``agents connect`` installs is in that file, or the
     aisquare Claude Code plugin is installed and enabled there
-    (:func:`claude_plugin`). The switch comes first because it silences every
-    route, the plugin's included. Never raises: everything it reads goes through
-    :func:`read_json`.
+    (:func:`claude_plugin`), or installed at project or local scope for the
+    repository a session started in this process's working directory loads it
+    from (:func:`claude_repo_plugin_here`). The switch comes first because it
+    silences every route, the plugin's included. Never raises: everything it
+    reads goes through :func:`read_json`.
     """
     if hooks_disabled("claude-code", config_dir):
         return False
     if hooks_installed("claude-code", config_dir):
         return True
-    return plugin_route_supported() and claude_plugin(config_dir) is not None
+    if not plugin_route_supported():
+        return False
+    return claude_plugin(config_dir) is not None or claude_repo_plugin_here(config_dir) is not None
+
+
+def claude_repo_plugin_here(
+    config_dir: Path | None = None, cwd: Path | None = None
+) -> ClaudePlugin | None:
+    """The project- or local-scope install (:func:`claude_repo_plugins`) that a session
+    of ``config_dir`` started in ``cwd`` loads, else ``None``. ``cwd`` is this process's
+    working directory unless given: the current project.
+
+    Claude Code 2.1.294's settings loader reads project settings from the directory
+    the session starts in, never a parent, so a project-scope install counts only
+    there; and local settings from :func:`_local_settings_root`. Told "not connected"
+    in that repository, a user with only such an install was offered Connect, which
+    installs the settings.json hooks beside it (review of #257). Read-only; never
+    raises.
+    """
+    try:
+        here = _dir_key(cwd if cwd is not None else Path.cwd())
+    except OSError:
+        return None  # the working directory was removed
+    plugins = claude_repo_plugins(config_dir)
+    if not plugins:
+        return None
+    reads = {"project": here, "local": _local_settings_root(here)}
+    for plugin in plugins:
+        if plugin.project is not None and _dir_key(plugin.project) == reads.get(plugin.scope):
+            return plugin
+    return None
+
+
+def _local_settings_root(directory: Path) -> Path:
+    """Where Claude Code reads ``.claude/settings.local.json`` for a session started in
+    ``directory`` (resolved): the root of the git repository it is in, when that root,
+    its ``.git`` and its ``.claude`` belong to this user and it is not the home
+    directory; else ``directory`` itself (Claude Code 2.1.294).
+
+    Claude Code follows a linked worktree to its main repository; a ``.git`` that is
+    not a directory is not followed here, so such an install reads as not loaded.
+    """
+    geteuid = getattr(os, "geteuid", None)
+    for root in (directory, *directory.parents):
+        try:
+            git = os.lstat(root / ".git")
+        except OSError:
+            continue
+        if geteuid is None or not stat.S_ISDIR(git.st_mode) or root == _dir_key(_home()):
+            return directory
+        try:
+            owners = [os.stat(root).st_uid, git.st_uid]
+            if os.path.lexists(root / ".claude"):
+                owners.append(os.lstat(root / ".claude").st_uid)
+        except OSError:
+            return directory
+        return root if all(owner == geteuid() for owner in owners) else directory
+    return directory
 
 
 def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> list[str]:
@@ -1041,7 +1101,8 @@ class HookSiteHealth:
     binary_version: str | None = None
     binary_state: str | None = None
     plugin: ClaudePlugin | None = None
-    """The aisquare plugin, when this directory has it enabled (:func:`claude_plugin`)."""
+    """The aisquare plugin, when this directory has it enabled (:func:`claude_plugin`), or
+    a project- or local-scope install of it a session started here loads."""
 
 
 def hook_commands(name: str, config_dir: Path | None = None) -> list[str]:
@@ -1198,11 +1259,15 @@ def hook_site_health(
     recorded: bool,
     cache: dict[HookBinary, tuple[str, str | None]] | None = None,
 ) -> HookSiteHealth:
-    """Grade one config directory: are the hooks all there, and what do they run?"""
+    """Grade one config directory: are the hooks all there, and what do they run?
+
+    Its ``plugin`` is the one a session started here loads: the user-scope install,
+    else a project- or local-scope one for this repository (:func:`claude_repo_plugin_here`).
+    """
     installed = hooks_installed(name, config_dir)
-    plugin = (
-        claude_plugin(config_dir) if name == "claude-code" and plugin_route_supported() else None
-    )
+    plugin = None
+    if name == "claude-code" and plugin_route_supported():
+        plugin = claude_plugin(config_dir) or claude_repo_plugin_here(config_dir)
     binaries: list[HookBinary] = []
     for command in hook_commands(name, config_dir):
         binary = hook_binary(command)

@@ -50,7 +50,10 @@ def claude_code_connected(config_dir: Path | None = None) -> bool:
     Two routes connect it, in a directory whose ``settings.json`` does not switch
     hooks off: every lifecycle hook ``agents connect`` installs is in that file,
     or the aisquare Claude Code plugin is installed and enabled there
-    (:func:`claude_plugin`), whose hooks run the same ``aisquare hook <event>``.
+    (:func:`claude_plugin`), whose hooks run the same ``aisquare hook <event>``,
+    or installed at project or local scope for the repository a session started
+    in this process's working directory loads it from
+    (``agent_core.claude_repo_plugin_here``).
     A partial install from an older version answers False, because Connect is
     what completes it. So does ``"disableAllHooks": true``, which Connect
     cannot change: a surface that offers Connect asks
@@ -58,8 +61,8 @@ def claude_code_connected(config_dir: Path | None = None) -> bool:
     does. Which aisquare the hooks run is the doctor's question, not this one:
     answering it can start a process.
 
-    Read-only and offline, and it never raises: one file is read and nothing is
-    written, so no ``~/.aisquare`` appears. ``agents.json`` is not consulted,
+    Read-only and offline, and it never raises: a few files are read and nothing
+    is written, so no ``~/.aisquare`` appears. ``agents.json`` is not consulted,
     because hooks on disk run whether or not this home recorded them (#84). A
     ``settings.json`` that cannot be read answers False: nothing shows our hooks
     are there.

@@ -212,14 +212,39 @@ def _aisquare_command() -> str:
     return " ".join(_quote(part) for part in selfcli.argv_for([]))
 
 
-def _read_settings(path: Path) -> dict[str, Any]:
+class SettingsNotAnObjectError(ValueError):
+    """A ``settings.json`` whose text is not a JSON object, which the hook writers leave alone.
+
+    ``install_hooks`` edits the object it reads and writes it back. Text that did
+    not parse was read as ``{}``, so one trailing comma cost the user every other
+    setting: the file came back holding only ``hooks`` (review of #257). The
+    message names the file and what is wrong with it.
+    """
+
+
+def read_settings(path: Path) -> dict[str, Any]:
+    """The object in ``path`` that the hook writers edit: ``{}`` when there is no file.
+
+    The writers' reader, deliberately not :func:`read_json`, because what it returns
+    is written back. Text that is not a JSON object raises
+    :class:`SettingsNotAnObjectError`, and a file that cannot be read raises its
+    ``OSError`` or ``UnicodeDecodeError``. An empty file holds nothing to lose.
+    """
     if not path.exists():
         return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
         return {}
-    return data if isinstance(data, dict) else {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SettingsNotAnObjectError(
+            f"can't read {path}: it is not valid JSON "
+            f"({exc.msg}, line {exc.lineno} column {exc.colno})"
+        ) from exc
+    if not isinstance(data, dict):
+        raise SettingsNotAnObjectError(f"can't read {path}: it is not a JSON object")
+    return data
 
 
 def _is_aisquare_hook_command(command: str) -> bool:
@@ -293,11 +318,15 @@ def _without_aisquare(groups: list[Any]) -> list[Any]:
 
 
 def install_hooks(name: str, config_dir: Path | None = None) -> bool:
-    """Install aisquare's lifecycle hooks. False if the agent is unsupported."""
+    """Install aisquare's lifecycle hooks. False if the agent is unsupported.
+
+    Raises :class:`SettingsNotAnObjectError` for a settings file it must not
+    rewrite, and ``OSError`` or ``UnicodeDecodeError`` for one it cannot read.
+    """
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
         return False
-    settings = _read_settings(spec.settings_path)
+    settings = read_settings(spec.settings_path)  # raises rather than lose what is in it
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         hooks = {}
@@ -324,7 +353,10 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None or not spec.settings_path.exists():
         return False
-    settings = _read_settings(spec.settings_path)
+    try:
+        settings = read_settings(spec.settings_path)
+    except SettingsNotAnObjectError:
+        return False  # nothing of ours can be found in it to take out, and it is left alone
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         return False
@@ -429,7 +461,7 @@ def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> 
 
     Read through :func:`read_json`, this module's rule for a file it only reads:
     a ``settings.json`` that is missing, unreadable, not UTF-8 or a directory
-    holds no hooks. Read through ``_read_settings``, which must raise for the
+    holds no hooks. Read through :func:`read_settings`, which must raise for the
     writers, each of those cost ``aisquare doctor`` its whole report.
     """
     spec = _spec(name, config_dir)
@@ -527,10 +559,10 @@ def read_json(path: Path) -> dict[str, Any]:
     The rule for a config file this package only READS: one that cannot be read
     is ``{}``, said once here for the agent registry and for every
     ``.claude.json`` / ``settings.json`` the doctor scans, rather than a copy of
-    the same three lines per caller (review of #203). :func:`_read_settings`
+    the same three lines per caller (review of #203). :func:`read_settings`
     is deliberately NOT this: it feeds a read-modify-WRITE of the operator's
-    ``settings.json``, where a permission error swallowed into ``{}`` would be
-    written back over their hooks — so it raises on ``OSError``.
+    ``settings.json``, where a permission error or a trailing comma swallowed
+    into ``{}`` would be written back over everything in it — so it raises.
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))

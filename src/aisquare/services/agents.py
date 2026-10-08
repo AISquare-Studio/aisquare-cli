@@ -90,7 +90,8 @@ class AgentNotInstalledError(ValueError):
 
 
 class AgentFileUnreadableError(ValueError):
-    """A file ``connect`` must read (``CLAUDE.md``, ``settings.json``) is not readable UTF-8 text.
+    """A file ``connect`` must read (``CLAUDE.md``, ``settings.json``) is not readable UTF-8
+    text, or a ``settings.json`` that is not a JSON object, which is never rewritten.
 
     Any ``ValueError`` used to be reported as ``not_installed``, which is what an
     undecodable ``CLAUDE.md`` became, and an ``OSError`` (a directory where the
@@ -110,6 +111,20 @@ def _read_agent_file(path: Path) -> str | None:
         raise AgentFileUnreadableError(f"can't read {path}: it is not UTF-8 text") from exc
     except OSError as exc:
         raise AgentFileUnreadableError(f"can't read {path}: {exc.strerror or exc}") from exc
+
+
+def _check_settings(path: Path) -> None:
+    """Refuse, naming it, a settings file the hooks cannot be written into: before any write.
+
+    ``install_hooks`` edits the object it parses and writes it back, so it raises
+    for text that is not a JSON object rather than replace it (review of #257).
+    Asked here first, so a refusal comes before the context is ingested.
+    """
+    _read_agent_file(path)
+    try:
+        agent_core.read_settings(path)
+    except agent_core.SettingsNotAnObjectError as exc:
+        raise AgentFileUnreadableError(str(exc)) from exc
 
 
 def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
@@ -138,7 +153,7 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
     # Every file is read before anything is written: a settings.json that cannot
     # be read stopped connect after the context was ingested and the home built.
     if spec.settings_path is not None:
-        _read_agent_file(spec.settings_path)
+        _check_settings(spec.settings_path)
     sections: list[str] = []
     for path in agent_core.context_files(name, config_dir):
         sections.extend(_split_sections(_read_agent_file(path) or ""))
@@ -199,14 +214,18 @@ def refresh_hooks(name: str, config_dir: Path | None = None) -> bool:
     every section it does not already hold, so running it on each upgrade brought
     back a ``CLAUDE.md`` section the user had removed and added an edited one
     beside its old text. A refresh imports nothing and never opens the store.
-    Returns whether hooks were written; raises ``KeyError`` for an unknown agent
-    and ``ValueError`` when the agent is not installed there.
+    Returns whether hooks were written; raises ``KeyError`` for an unknown agent,
+    :class:`AgentFileUnreadableError` for a settings file it may not rewrite, and
+    ``ValueError`` when the agent is not installed there.
     """
     info = agent_core.detect(name, config_dir)
     if info is None:
         raise KeyError(name)
     if not info.detected:
         raise ValueError(f"{name} is not installed on this machine")
+    spec = agent_core.spec(name, config_dir)
+    if spec is not None and spec.settings_path is not None:
+        _check_settings(spec.settings_path)
     written = agent_core.install_hooks(name, config_dir)
     if written:
         agent_core.set_connected(name, True, config_dir)

@@ -20,6 +20,7 @@ import shutil
 import socket
 import subprocess
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -29,10 +30,11 @@ from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import paths
+from aisquare.core.selfcli import CliResult
 from aisquare.models import CheckStatus, DoctorCheck
 from aisquare.services import agents as agents_service
 from aisquare.services import claude_accounts as claude_accounts_service
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, first_run
 from aisquare.services.onboarding import fix_commands
 from tests.fsperms import can_deny_reads
 from tests.test_no_traceback_on_a_damaged_store import damaged_store  # noqa: F401
@@ -385,6 +387,52 @@ def test_connect_names_a_settings_json_it_cannot_read_and_leaves_it_alone(
     assert not built, "refused before the context was ingested or the home built"
     assert left == _content(reference), "the file is left exactly as it was"
     assert connected.exit_code == 0, "control: the same connect succeeds once it can read"
+
+
+_SETTINGS = {"model": "opus", "permissions": {"allow": ["Bash(git status)"]}, "env": {"FOO": "1"}}
+
+
+@pytest.mark.parametrize(
+    ("text", "why"),
+    [
+        (json.dumps(_SETTINGS)[:-1] + ",}\n", "it is not valid JSON (Expecting property name"),
+        (json.dumps([_SETTINGS]), "it is not a JSON object"),
+    ],
+    ids=["trailing-comma", "an-array"],
+)
+def test_connect_never_rewrites_a_settings_json_that_is_not_a_json_object(
+    runner: CliRunner, claude_home: Path, text: str, why: str
+) -> None:
+    """Read as ``{}``, then written back as ``{"hooks": …}``: one trailing comma cost the
+    user their model, permissions and env (review of #257). Welcome's Connect and the
+    doctor's button run this command, and their card shows the file and why."""
+    settings_path = claude_home / "settings.json"
+    settings_path.write_text(text, encoding="utf-8")
+
+    def run(args: Sequence[str], *, cwd: Path | None = None) -> CliResult:
+        result = runner.invoke(app, list(args))
+        return CliResult(
+            argv=list(args), returncode=result.exit_code, stdout=result.stdout, stderr=""
+        )
+
+    clicked = first_run.connect(run=run)
+    refreshed = runner.invoke(app, ["--json", "agents", "refresh-hooks", "claude-code"])
+    with pytest.raises(agent_core.SettingsNotAnObjectError):
+        agent_core.install_hooks("claude-code")
+    left = settings_path.read_text(encoding="utf-8")
+    built = paths.aisquare_home().exists()
+    settings_path.write_text(json.dumps(_SETTINGS), encoding="utf-8")
+    fixed = first_run.connect(run=run)
+    kept = json.loads(settings_path.read_text(encoding="utf-8"))
+    settings_path.write_text("\n", encoding="utf-8")
+
+    reason = f"can't read {settings_path}: {why}"
+    assert not clicked.ok and reason in (clicked.reason or ""), clicked.reason
+    assert json.loads(refreshed.stdout)["detail"].startswith(reason), refreshed.stdout
+    assert left == text, "the file is left exactly as it was"
+    assert not built, "refused before the context was ingested or the home built"
+    assert fixed.ok and {k: kept[k] for k in _SETTINGS} == _SETTINGS and "hooks" in kept, kept
+    assert first_run.connect(run=run).ok, "an empty file holds nothing to lose"
 
 
 def test_a_connection_that_installs_nothing_is_refused_not_recorded(

@@ -78,6 +78,9 @@ and an aisquare that upgrades and uninstalls itself.**
   two coders, with a stand-in agent (#256).
 
 ### Fixed
+- `aisquare agents connect`, and the Connect in Welcome and the Doctor, refuse
+  a `settings.json` that is not valid JSON and name it, instead of rewriting it
+  with aisquare's hooks and nothing else.
 - The Accounts page could say `usage: …` for up to a minute after it opened;
   it now reads usage on its first frame. CI: the frequent Windows-leg flakes
   are gone, CI also runs nightly and on demand, and ruff and mypy are pinned

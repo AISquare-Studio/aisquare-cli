@@ -379,7 +379,14 @@ def _programs(machine: Machine) -> Path:
     """Executables the settings.json hooks below name: they exist, so the launcher
     stands down beside them (it does not beside a program that is gone)."""
     programs = machine.home / "programs"
-    for relative in ("aisquare", "asq", "python3", "My Tools/aisquare"):
+    for relative in (
+        "aisquare",
+        "asq",
+        "python3",
+        "My Tools/aisquare",
+        "Jane's Tools/aisquare",
+        "Jane's Tools/python3",
+    ):
         script = programs / relative
         script.parent.mkdir(parents=True, exist_ok=True)
         script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -395,6 +402,10 @@ def _programs(machine: Machine) -> Path:
 _OURS = [
     ("{bin}/aisquare hook stop", True),
     ("'{bin}/My Tools/aisquare' hook stop", True),
+    # An apostrophe in the path, as shlex.quote writes it for connect, and as '\''.
+    ("'{bin}/Jane'\"'\"'s Tools/aisquare' hook stop", True),
+    ("'{bin}/Jane'\"'\"'s Tools/python3' -P -m aisquare hook stop", True),
+    ("'{bin}/Jane'\\''s Tools/aisquare' hook stop", True),
     # Double quotes, and a quoted bare name: hand edits and templates (review of #257).
     ('"{bin}/My Tools/aisquare" hook stop', True),
     ('"{bin}/aisquare" hook stop', True),
@@ -412,6 +423,8 @@ _OURS = [
     # The hook's shell expands these, as it does ~/ (review of #257).
     ("$HOME/programs/aisquare hook stop", True),
     ("${{HOME}}/programs/aisquare hook stop", True),
+    ('"$HOME"/programs/aisquare hook stop', True),
+    ('"${{HOME}}"/programs/aisquare hook stop', True),
     (r"C:\Users\u\.local\bin\aisquare.exe hook stop", False),
     (r'"C:\Program Files\aisquare\bin\aisquare.EXE" hook stop', False),
 ]
@@ -461,6 +474,9 @@ def test_the_doctor_reads_a_home_relative_program_as_its_shell_does(
         '"/x/notaisquare" hook stop',
         "echo aisquare hook stop",
         'echo "aisquare" hook stop',
+        # The program is the first word, a live one wherever its quotes end.
+        "'{bin}/Jane'\"'\"'s Tools/python3' {bin}/aisquare hook stop",
+        '"$HOME"/programs/python3 {bin}/aisquare hook stop',
         "{bin}/aisquare hook stop-failure",
         "{bin}/aisquare hook session-end",
     ],
@@ -489,6 +505,11 @@ def test_it_runs_beside_hooks_that_are_not_ours_for_this_event(
         # Read from between its \" quotes and graded, not trusted for the backslash.
         ('"{gone}/My Tools/aisquare" hook stop', False),
         ('"{gone}/python3" -m aisquare hook stop', False),
+        ("'{gone}/Jane'\"'\"'s Tools/aisquare' hook stop", False),
+        # A double quote between single quotes is the path's, not an escape to trust.
+        ("'{gone}/Jane'\"'\"'s \"Tools\"/aisquare' hook stop", False),
+        ("{gone}/aisquare\thook\tstop", False),
+        ('"$HOME"/uninstalled/aisquare hook stop', False),
         # A bare name the hook's shell would not find: the CLI is on no PATH, only in
         # ~/.local/bin, where the launcher still finds it.
         ("aisquare hook stop", True),
@@ -498,6 +519,10 @@ def test_it_runs_beside_hooks_that_are_not_ours_for_this_event(
         "gone-quoted",
         "gone-double-quoted",
         "gone-double-quoted-python",
+        "gone-apostrophe",
+        "gone-apostrophe-and-double-quotes",
+        "gone-tab-separated",
+        "gone-quoted-home",
         "bare-not-on-path",
     ],
 )
@@ -542,6 +567,46 @@ def test_it_runs_in_place_of_a_gone_program_at_a_non_ascii_path_connect_wrote(
 
     assert graded.binary_state == agent_core.HOOK_BINARY_MISSING, "the doctor's premise"
     assert [r.returncode for r in [beside_the_live_one, *results]] == [0] * 7
+    assert machine.calls("aisquare") == [f"hook {subcommand}" for subcommand in _SUBCOMMANDS]
+
+
+@posix_only
+@pytest.mark.parametrize("form", ["console-script", "python-m"])
+def test_it_reads_the_hooks_connect_writes_for_a_path_with_an_apostrophe(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, form: str
+) -> None:
+    """`agents connect` run from an install under ~/Jane's Tools: shlex.quote writes the
+    path as '…/Jane'"'"'s Tools/…', which the launcher did not match, or read as `…/Jane`
+    in the `python -P -m aisquare` form, so it ran beside those live hooks and every event
+    fired twice (sweep of #257). It stands down beside them; once that install is deleted,
+    the doctor grades them dead and the launcher runs in their place."""
+    claude = machine.home / ".claude"
+    machine.fake("aisquare")
+    tools = machine.home / "Jane's Tools"
+    program = tools / ("aisquare" if form == "console-script" else "python3")
+    tools.mkdir(parents=True)
+    program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    program.chmod(0o755)
+    if form == "console-script":
+        monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(program)])
+    else:  # no aisquare runs connect or is on PATH, so the hooks run python -P -m aisquare
+        monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(machine.home / "pytest")])
+        monkeypatch.setenv("PATH", str(machine.tools))
+        monkeypatch.setattr(sys, "executable", str(program))
+    assert agent_core.install_hooks("claude-code", claude)
+    written = agent_core.hook_commands("claude-code", claude)
+    beside_the_live_ones = [machine.run(subcommand) for subcommand in _SUBCOMMANDS]
+    ran_beside_them = machine.calls("aisquare")
+    shutil.rmtree(tools)
+    graded = agent_core.hook_site_health("claude-code", claude, recorded=True)
+
+    results = [machine.run(subcommand) for subcommand in _SUBCOMMANDS]
+
+    assert len(written) == len(_SUBCOMMANDS), written
+    assert all("/Jane'\"'\"'s Tools/" in command for command in written), "the shape under test"
+    assert ran_beside_them == [], "ran beside the live hooks connect wrote"
+    assert graded.binary_state == agent_core.HOOK_BINARY_MISSING, "the doctor's premise"
+    assert [r.returncode for r in [*beside_the_live_ones, *results]] == [0] * 12
     assert machine.calls("aisquare") == [f"hook {subcommand}" for subcommand in _SUBCOMMANDS]
 
 

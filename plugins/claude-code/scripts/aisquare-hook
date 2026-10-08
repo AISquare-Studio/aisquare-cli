@@ -41,15 +41,20 @@ esac
 # own `webhook stop`, `~/bin/my-hook stop` or `echo aisquare hook stop` does not
 # match.
 _a="'"
+# One character of a single-quoted word. An apostrophe in the word is written
+# '"'"' ('\"'\"' in JSON text), as shlex.quote does for `agents connect`, or '\''.
+_sq="[^$_a]|$_a\\\\\"$_a\\\\\"$_a|$_a\\\\\\\\$_a$_a"
 _dq='\"'                   # a double quote, as JSON escapes it
 _ws='( |\\t)'              # a space, or a tab as JSON escapes it
-_p1="${_a}([^${_a}]*/)?"   # '/a path/with spaces/ (or a bare name, quoted)
+_p1="${_a}(($_sq)*/)?"     # '/a path/with spaces/ (or a bare name, quoted)
 _p2="[^ \"${_a}\\\\]*/"    # /a/plain/path/
 _p3="[^ \"${_a}]*\\\\\\\\" # C:\\a\\windows\\path\\ (JSON escapes \)
 _p4="\\\\\"[^\"]*\\\\\\\\" # \"C:\\a quoted\\windows\\path\\
 _p5='([^"]|\\")* -m '      # python -P -m, its path quoted or not
 _p6='\\"([^"]*/)?'         # \"/a path/with spaces/ (or a bare name, quoted)
-_program="($_p1|$_p2|$_p3|$_p4|$_p5|$_p6)?(aisquare|asq)(\\.[eE][xX][eE])?(\\\\\"|$_a)?"
+# \"$HOME\"/a/path/ and \"${HOME}\"/a/path/, which the hook's shell reads as $HOME/
+_p7="\\\\\"[\$]([{]HOME[}]|HOME)\\\\\"$_p2"
+_program="($_p1|$_p2|$_p3|$_p4|$_p5|$_p6|$_p7)?(aisquare|asq)(\\.[eE][xX][eE])?(\\\\\"|$_a)?"
 _ours="\"command\" *: *\"$_program($_ws+-[^\"]*)?$_ws+hook$_ws+$event$_ws*\""
 
 # Whether the program at path $1 can start: an executable file and, when it is a
@@ -78,24 +83,53 @@ _starts() {
 # start. A hook naming an aisquare that is gone -- the CLI uninstalled after
 # `agents connect` -- fails on every event, and standing down beside it would
 # leave the session running none. The program is read from between its quotes,
-# single or double, else up to the first space. One sh cannot read out of the
-# JSON text (an escape: a Windows or non-ASCII path) is trusted, as every match
-# was before this check.
+# single or double, else up to the first space or tab. One sh cannot read out of
+# the JSON text (an escape other than a \" in single quotes: a Windows or
+# non-ASCII path) is trusted, as every match was before this check.
 _runnable() {
     _cmd=${1#*\"command\"}
     _cmd=${_cmd#*:}
     _cmd=${_cmd#*\"}
+    # "$HOME"/ and "${HOME}"/ are $HOME/, expanded below.
+    case $_cmd in
+        "$_dq\$HOME$_dq/"* | "$_dq\${HOME}$_dq/"*) _cmd=\$HOME/${_cmd#*"$_dq/"} ;;
+    esac
     case $_cmd in
         "$_dq"*)
             _prog=${_cmd#"$_dq"}
             _prog=${_prog%%"$_dq"*}
             ;;
         "$_a"*)
-            _prog=${_cmd#"$_a"}
-            _prog=${_prog%%"$_a"*}
+            # Quoted piece by piece, an apostrophe in the path between two
+            # pieces (see $_sq): read whole, or Jane's was graded as Jane.
+            _cmd=${_cmd#"$_a"}
+            _prog=
+            while :; do
+                _prog=$_prog${_cmd%%"$_a"*}
+                _cmd=${_cmd#*"$_a"}
+                case $_cmd in
+                    "$_dq$_a$_dq$_a"*) _cmd=${_cmd#"$_dq$_a$_dq$_a"} ;;
+                    "\\\\$_a$_a"*) _cmd=${_cmd#"\\\\$_a$_a"} ;;
+                    *) break ;;
+                esac
+                _prog=$_prog$_a
+            done
+            # Then each \" left is a double quote in the path, as JSON escapes it.
+            _cmd=$_prog
+            _prog=
+            while :; do
+                case $_cmd in
+                    *"$_dq"*) ;;
+                    *) break ;;
+                esac
+                _prog=$_prog${_cmd%%"$_dq"*}\"
+                _cmd=${_cmd#*"$_dq"}
+            done
+            _prog=$_prog$_cmd
             ;;
         *)
             _prog=${_cmd%% *}
+            _prog=${_prog%%"\\t"*}
             _prog=${_prog%%\"*}
             ;;
     esac

@@ -76,6 +76,11 @@ FRAME_WAIT_SECONDS = 0.1
 FLEET_WORK = frozenset({"manager", "coders"})
 """Step 3's workers: one start at a time."""
 
+HOLDS_STEP_ONE = FLEET_WORK | {"onboard"}
+"""The work that keeps step 1 on its folder until it lands: onboarding settles it, and a
+start in flight is that folder's. A start that landed after *Choose another* was written
+onto the next folder's card (review of #257)."""
+
 FLEET_UP = "Your fleet is up."
 """The sentence step 3 ends on — stable, so a recording can wait for it."""
 
@@ -718,7 +723,7 @@ class WelcomeView(VerticalScroll):
 
     def choose(self, root: Path, listed: ProjectInfo | None) -> None:
         """Settle step 1 on ``root``: at once when it is listed, else once it is onboarded."""
-        if "onboard" in self.busy:
+        if self.busy & HOLDS_STEP_ONE:
             return
         self._picked = True
         self.project_note = None
@@ -793,7 +798,7 @@ class WelcomeView(VerticalScroll):
         if button.id == "welcome-path-use":
             self._use_typed()
         elif button.id == "welcome-change":
-            if "onboard" not in self.busy:  # not while a folder is being set up
+            if not self.busy & HOLDS_STEP_ONE:  # not while a folder is set up or started in
                 self._picked = True
                 self.project = None
                 self.steps = {}

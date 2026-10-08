@@ -633,6 +633,53 @@ def test_choose_another_is_not_undone_by_a_return_to_the_page(tmp_path: Path) ->
     assert after is None, "Choose another stands"
 
 
+@dataclass
+class HeldStart(Machine):
+    """A machine whose spawns wait for ``release``: a start still in flight."""
+
+    release: threading.Event = field(default_factory=threading.Event)
+    entered: threading.Event = field(default_factory=threading.Event)
+
+    def spawn(self, project: ProjectInfo, role: str, **kwargs: Any) -> fleet_service.SpawnReceipt:
+        self.entered.set()
+        self.release.wait(10)
+        return super().spawn(project, role, **kwargs)
+
+
+def test_step_one_holds_its_folder_while_a_start_runs(tmp_path: Path) -> None:
+    """*Choose another* was refused only while a folder was being set up. Pressed while
+    Start manager ran, then *Use beta*, alpha's start landed on beta's card: "✓ manager —
+    started", Open opening alpha's manager, and Start the coders starting coders in beta
+    under no manager (review of #257). Step 1 holds its folder until the start lands, as
+    during onboarding; ``choose`` is what *Use beta* and an owed Enter run."""
+    alpha = ProjectInfo(id="prj_alpha", root=tmp_path / "alpha", onboarded_at=T0)
+    beta = ProjectInfo(id="prj_beta", root=tmp_path / "beta", onboarded_at=T0)
+    other = Candidate(root=beta.root, is_git=True, project=beta)
+    machine = HeldStart(claude=[READY], found=Candidates(items=(here(alpha.root, alpha), other)))
+
+    async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> list[Any]:
+        page.query_one("#fleet-manager", Button).press()
+        # The start is held on purpose: settle no worker group while it is.
+        await settle_until(host, machine.entered.is_set, group="held")
+        page.query_one("#welcome-change", Button).press()
+        await settle_page(host, group="held")
+        page.choose(beta.root, beta)
+        await settle_page(host, group="held")
+        seen: list[Any] = [page.project, card(page, "fleet-status")]
+        machine.release.set()  # alpha's start lands
+        await settle_page(host)
+        seen += [page.project, card(page, "fleet-status")]
+        await press(pilot, page, "welcome-change")
+        seen.append(page.project)
+        return seen
+
+    during, starting, after, landed, moved = hosted(machine, go)
+    assert during == alpha and "Starting the manager…" in starting, starting
+    assert after == alpha and "✓ manager — started" in landed, landed
+    assert [(agent.project_id, agent.label) for agent in machine.live] == [("prj_alpha", "manager")]
+    assert moved is None, "control: once the start has landed, Choose another works"
+
+
 def test_step_three_waits_while_step_one_sets_a_folder_up(tmp_path: Path) -> None:
     """An unlisted folder is listed by the store before its snapshot is packed, so the
     shell's next frame listed it mid-onboarding, step 1 was listed again, and the folder

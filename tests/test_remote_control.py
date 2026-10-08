@@ -130,10 +130,19 @@ def test_a_tunnel_without_the_binary_reports_instead_of_raising() -> None:
 # --- the subprocess lifecycle against a fake ngrok ----------------------------------------
 
 
-def fake_ngrok(tmp_path: Path, *lines: dict[str, Any], linger: bool = True) -> list[str]:
-    """A command that prints ``lines`` as ngrok's JSON log would, then (optionally) stays up."""
+def fake_ngrok(tmp_path: Path, *lines: dict[str, Any] | float, linger: bool = True) -> list[str]:
+    """A command that prints ``lines`` as ngrok's JSON log would, then (optionally) stays up.
+
+    A number among them is a pause of that many seconds: ngrok retrying a session it could
+    not open yet, before it announces its tunnel.
+    """
     script = tmp_path / "fake-ngrok.py"
-    lines_out = [f"print({json.dumps(json.dumps(line))}, flush=True)" for line in lines]
+    lines_out = [
+        f"time.sleep({line})"
+        if isinstance(line, float)
+        else f"print({json.dumps(json.dumps(line))}, flush=True)"
+        for line in lines
+    ]
     if linger:
         lines_out.append("time.sleep(60)")
     script.write_text("import sys, time\n" + "\n".join(lines_out) + "\n")
@@ -159,6 +168,25 @@ def test_a_tunnel_that_exits_without_a_url_says_so_instead_of_hanging(tmp_path: 
     assert tunnel.wait_for_url(timeout=10) is None
     assert tunnel.error == AUTHTOKEN_HINT
     tunnel.stop_tunnel()
+
+
+def test_a_url_its_listener_could_not_take_never_ends_the_log_reader(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The reader is what drains ngrok's log: a listener that raised on its thread ended it,
+    and an ngrok whose log nobody reads stalls once the pipe is full."""
+    tunnel = NgrokTunnel(8750, which=lambda _name: None)
+    heard: list[str] = []
+
+    def refuse(url: str) -> None:
+        heard.append(url)
+        raise RuntimeError("the controller is gone")
+
+    tunnel.on_announce = refuse
+    with caplog.at_level("WARNING", logger=ngrok_tunnel.__name__):
+        tunnel.handle_line(json.dumps(STARTED))
+    assert heard == [STARTED["url"]] and tunnel.public_url == STARTED["url"]
+    assert "the announced URL could not be taken" in caplog.text
 
 
 # --- the controller -------------------------------------------------------------------------
@@ -512,6 +540,67 @@ def test_turning_remote_off_revokes_every_device_before_the_server_stops() -> No
         "note_public_url",
         "stop_remote_server",
     ]
+
+
+def test_a_url_ngrok_announces_after_the_wait_is_the_link_and_the_push_origin_all_the_same(
+    tmp_path: Path,
+) -> None:
+    """``restore()`` brings Remote back at a TUI start, often before a waking laptop's Wi-Fi
+    is up, and ngrok retries its session until it is. The URL it announced a minute later
+    was never taken: the panel kept "ngrok did not announce a tunnel in time" and the local
+    link, and push links had no origin, until Remote was turned off and on (r3 review of
+    #243). A real tunnel's log reader hands it over whenever it comes."""
+    server = fake_server()
+    command = fake_ngrok(tmp_path, 1.0, STARTED)
+    controller = RemoteController(
+        server=server,
+        tunnel_factory=lambda port: NgrokTunnel(port, command=command),
+        url_timeout=0.2,
+    )
+    controller.turn_on()
+    try:
+        assert controller._waiter is not None
+        controller._waiter.join(5)
+        assert controller.message == "ngrok did not announce a tunnel in time"
+        assert controller.link_url() == f"http://127.0.0.1:8750/r/{server.token}/"
+        assert server.public_urls == []
+        deadline = time.monotonic() + 15
+        while controller.public_url is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        link = build_public_url(STARTED["url"], server.token)
+        assert controller.link_url() == link, "the URL that came late is the link"
+        assert server.public_urls == [link], "and where push links lead"
+        assert controller.message is None
+    finally:
+        controller.turn_off()
+
+
+def test_a_url_announced_again_is_taken_once_and_one_that_changed_is_taken_again() -> None:
+    """A URL is noted once however often it is announced: the thread that waited for it and
+    the log reader both hand it over. A new one, ngrok's session back on another address, is
+    the link from then on."""
+    server = fake_server()
+    tunnels: list[FakeTunnel] = []
+
+    def factory(port: int) -> FakeTunnel:
+        tunnels.append(FakeTunnel(port, url=None, failure=None))
+        return tunnels[-1]
+
+    controller = RemoteController(server=server, tunnel_factory=factory)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    assert controller.message == "ngrok did not announce a tunnel in time"
+    (tunnel,) = tunnels
+    tunnel.handle_line(json.dumps(STARTED))
+    tunnel.handle_line(json.dumps(STARTED))
+    link = build_public_url(STARTED["url"], server.token)
+    assert controller.link_url() == link and controller.message is None
+    assert server.public_urls == [link]
+    moved = {**STARTED, "url": "https://efgh-34.ngrok-free.app"}
+    tunnel.handle_line(json.dumps(moved))
+    assert controller.link_url() == build_public_url(moved["url"], server.token)
+    assert server.public_urls == [link, controller.link_url()]
 
 
 class SlowServer(FakeServer):

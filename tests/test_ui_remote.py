@@ -238,6 +238,43 @@ def test_with_ngrok_absent_the_modal_shows_the_install_hint_and_the_local_link()
     drive(go, tunnel=missing_ngrok)
 
 
+def test_a_link_ngrok_announces_after_the_wait_replaces_the_local_one_in_the_panel() -> None:
+    """ngrok still retrying its session when the wait for its URL ended (a TUI started before
+    the Wi-Fi was up): the URL it announced later never reached the panel, which kept the
+    local link, its QR and "did not announce a tunnel in time" (r3 review of #243)."""
+    tunnels: list[FakeTunnel] = []
+
+    def late(port: int) -> NgrokTunnel:
+        tunnels.append(FakeTunnel(port, url=None, failure=None))
+        return tunnels[-1]
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        assert app.remote._waiter is not None
+        app.remote._waiter.join(5)
+        modal.repaint()
+        info = app.remote.info
+        assert info is not None
+        status = modal.query_one("#remote-status", Static)
+        assert shown(status) == "ngrok did not announce a tunnel in time"
+        assert shown(modal.query_one("#remote-link", Static)) == info.url_local
+
+        tunnels[0].handle_line(json.dumps({"lvl": "info", "msg": "started tunnel", "url": PUBLIC}))
+        modal.repaint()
+        await pilot.pause()
+        expected = build_public_url(PUBLIC, info.token)
+        assert shown(modal.query_one("#remote-link", Static)) == expected
+        assert shown(modal.query_one("#remote-qr", Static)) == qr_text(expected)
+        assert shown(status) == ""
+        assert remote_server.runtime().remote_public_origin() == PUBLIC, "push links lead there"
+
+    drive(go, tunnel=late)
+
+
 def test_with_no_page_to_serve_the_modal_says_to_reinstall_and_remote_stays_off(
     installed_page: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

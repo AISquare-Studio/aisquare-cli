@@ -21,6 +21,7 @@ path to ``allow_write=True`` is the user's switch.
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import threading
 from collections.abc import Callable
@@ -167,6 +168,10 @@ class RemoteController:
         seen to read the file again: till then the running server may hold a deadline
         ``remote.json`` does not (:meth:`adopt_server_deadline`)."""
         self._waiter: threading.Thread | None = None
+        self._lock = threading.Lock()
+        """Around the tunnel, the link and the status line as a tunnel's URL lands on them: a URL
+        comes from ngrok's own threads, whenever ngrok announces it (:meth:`_adopt_tunnel_url`),
+        and must not land on a Remote turned off, or on a tunnel replaced, meanwhile."""
         self._stopper: threading.Thread | None = None
         """The thread that stops the server and ngrok after :meth:`turn_off`, the latest one."""
 
@@ -223,7 +228,7 @@ class RemoteController:
             return
         self.message = None
         self._set_state(remote_enabled=True)
-        tunnel = self._tunnel_factory(self._port)
+        tunnel = self._watched_tunnel()
         failure = tunnel.start_tunnel()
         if failure is not None:
             # No tunnel, but the local server is up: the modal keeps the local link
@@ -231,23 +236,62 @@ class RemoteController:
             self.message = failure
             self.tunnel = None
             return
-        self.tunnel = tunnel
-        self.message = "starting ngrok…"
+        with self._lock:  # its URL may land at once, and must not find "starting" after it
+            self.tunnel = tunnel
+            self.message = "starting ngrok…"
         self._waiter = threading.Thread(
             target=self._await_url, args=(tunnel,), name="ngrok-url", daemon=True
         )
         self._waiter.start()
 
+    def _watched_tunnel(self) -> NgrokTunnel:
+        """A tunnel for this Remote's port that hands every URL it announces to
+        :meth:`_adopt_tunnel_url`, however late it comes."""
+        tunnel = self._tunnel_factory(self._port)
+        tunnel.on_announce = functools.partial(self._adopt_tunnel_url, tunnel)
+        return tunnel
+
     def _await_url(self, tunnel: NgrokTunnel) -> None:
+        """Wait for the tunnel's URL; past :attr:`_url_timeout`, say why there is none yet.
+
+        The wait ends there, the watching does not: ngrok retries a session it could not
+        open, and ``restore()`` brings Remote back at a TUI start, often before a waking
+        laptop's Wi-Fi is up. The URL announced a minute later reaches
+        :meth:`_adopt_tunnel_url` from the tunnel's log reader. Waited for once, it was
+        never shown, nor noted for push links, until Remote was turned off and on (r3
+        review of #243).
+        """
         url = tunnel.wait_for_url(self._url_timeout)
-        if tunnel is not self.tunnel:  # turned off (or restarted) while we waited
+        if url is not None:
+            self._adopt_tunnel_url(tunnel, url)
             return
-        if url is not None and self.info is not None:
-            self.public_url = build_public_url(url, self.info.token)
-            self.message = None
-            self._note_public_url(self.public_url)
-        else:
-            self.message = tunnel.error or "ngrok did not announce a tunnel in time"
+        with self._lock:
+            if tunnel is self.tunnel and self.public_url is None:
+                self.message = tunnel.error or "ngrok did not announce a tunnel in time"
+
+    def _adopt_tunnel_url(self, tunnel: NgrokTunnel, url: str) -> None:
+        """Show ``url`` as the link and note it for push links, while ``tunnel`` is this
+        Remote's: one turned off, or replaced by a restart, speaks for no Remote now.
+
+        From the thread that waited for the URL and from the tunnel's log reader, both:
+        the first to land shows it, and the same URL again changes nothing. A restarted
+        tunnel's says so, and whether the link changed (SPEC §5.8).
+        """
+        with self._lock:
+            info = self.info
+            if tunnel is not self.tunnel or info is None:
+                return
+            link = build_public_url(url, info.token)
+            if link == self.public_url:
+                return
+            self.public_url = link
+            if tunnel is self._revived_tunnel:
+                changed = "" if link == self._link_before_revive else "; the link changed"
+                self.message = f"ngrok stopped — restarted it{changed}"
+            else:
+                self.message = None
+            # Under the lock, so a Remote turned off meanwhile forgets it after, not before.
+            self._note_public_url(link)
 
     def turn_off(
         self,
@@ -284,11 +328,12 @@ class RemoteController:
         from a Textual timer, where an exception ends the whole fleet UI, and a
         ``remote.json`` that would not write once left ngrok up and the switch on.
         """
-        served, tunnel = self.info is not None, self.tunnel
-        self.info = None
-        self.tunnel = None
-        self.public_url = None
-        self.auto_off_at = None
+        with self._lock:  # a URL landing now must find the Remote off (_adopt_tunnel_url)
+            served, tunnel = self.info is not None, self.tunnel
+            self.info = None
+            self.tunnel = None
+            self.public_url = None
+            self.auto_off_at = None
         if persist:
             self._set_state(remote_enabled=False)
         if not served and tunnel is None:
@@ -603,43 +648,32 @@ class RemoteController:
         ):
             return False
         self._revived_at = now
-        tunnel = self._tunnel_factory(self._port)
+        tunnel = self._watched_tunnel()
         failure = tunnel.start_tunnel()
         if failure is not None:  # the dead one stays, so the next minute tries again
             self.message = failure
             return False
         dead.stop_tunnel()
-        if self.public_url is not None:  # else the last restart never came up: keep the link
-            self._link_before_revive = self.public_url
-        self.tunnel = self._revived_tunnel = tunnel
-        self.public_url = None  # the modal shows the local link until ngrok announces one
-        self.message = "ngrok stopped — restarting it…"
+        with self._lock:
+            if self.public_url is not None:  # else the last restart never came up: keep it
+                self._link_before_revive = self.public_url
+            self.tunnel = self._revived_tunnel = tunnel
+            self.public_url = None  # the modal shows the local link until ngrok announces one
+            self.message = "ngrok stopped — restarting it…"
+        # Its URL says ngrok was restarted, and whether the link changed (_adopt_tunnel_url);
+        # a restart that dies before it announces leaves ngrok's own error on the status line.
         self._waiter = threading.Thread(
-            target=self._await_revived_url,
-            args=(tunnel, self._link_before_revive),
-            name="ngrok-url",
-            daemon=True,
+            target=self._await_url, args=(tunnel,), name="ngrok-url", daemon=True
         )
         self._waiter.start()
         return True
-
-    def _await_revived_url(self, tunnel: NgrokTunnel, dead_link: str | None) -> None:
-        """:meth:`_await_url`, then say ngrok was restarted, and whether the link changed.
-
-        A restart that dies before it announces leaves :meth:`_await_url`'s
-        message, ngrok's own error, on the status line until the next one.
-        """
-        self._await_url(tunnel)
-        if tunnel is self.tunnel and self.public_url is not None:
-            changed = "" if self.public_url == dead_link else "; the link changed"
-            self.message = f"ngrok stopped — restarted it{changed}"
 
     def _note_public_url(self, url: str) -> None:
         """Tell the server where phones reach it, so push links lead there (SPEC §5.8).
 
         Only an https URL on a DNS name is an origin: a tunnel that announces
         anything else leaves push links without one, rather than raising in the
-        thread that waited for it.
+        thread that took it (the one that waited for it, or ngrok's log reader).
         """
         with contextlib.suppress(ValueError):
             self._server.note_public_url(url)

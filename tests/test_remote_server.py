@@ -10,6 +10,7 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -883,6 +884,38 @@ def test_a_stop_that_ends_while_a_new_server_runs_leaves_it_the_home(
     assert not _held_elsewhere(isolated_home)
 
 
+def test_a_stop_that_ends_while_a_new_server_starts_leaves_it_the_home(
+    isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop ending on the fleet UI's thread after the new server's claim, and before that
+    server was recorded, found nothing serving and let the home go: the new server ran on
+    unclaimed, and a second Remote could start beside it."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    release, claim = remote_server._release_remote_home, remote_server._claim_remote_home
+    remote_server.start_remote_server(dist, port=_free_port())
+    monkeypatch.setattr(remote_server, "_release_remote_home", lambda: None)
+    remote_server.stop_remote_server()  # all but its last step, which ends it below
+    monkeypatch.setattr(remote_server, "_release_remote_home", release)
+    ending = threading.Thread(target=release, name="asq-test-stop-ends")
+
+    def claim_as_the_stop_ends(state: Runtime) -> bool:
+        claimed = claim(state)
+        ending.start()
+        ending.join(0.2)  # a stop that can end here, before the server is recorded, does
+        return claimed
+
+    monkeypatch.setattr(remote_server, "_claim_remote_home", claim_as_the_stop_ends)
+    remote_server.start_remote_server(dist, port=_free_port())
+    try:
+        ending.join(10)
+        assert not ending.is_alive()
+        assert _held_elsewhere(isolated_home), "the new server keeps the home"
+    finally:
+        remote_server.stop_remote_server()
+    assert not _held_elsewhere(isolated_home)
+
+
 def test_a_remote_whose_process_ended_holds_the_home_no_more(
     isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -895,7 +928,9 @@ def test_a_remote_whose_process_ended_holds_the_home_no_more(
             "-c",
             "import sys\n"
             "from aisquare.services import remote_server as r\n"
-            "r._claim_remote_home(r.runtime())\n"
+            "state = r.runtime()\n"
+            "with r._lock:\n"
+            "    r._claim_remote_home(state)\n"
             "print('serving', flush=True)\n"
             "sys.stdin.read()\n",
         ],

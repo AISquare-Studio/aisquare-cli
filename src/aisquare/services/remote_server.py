@@ -4216,12 +4216,16 @@ def _claim_remote_home(state: Runtime) -> bool:
     is the operating system's: it goes with the process however that ends. A home
     where the lock file cannot be made or locked for another reason serves without
     it, and says so in the log.
+
+    Called holding :data:`_lock`, which :func:`start_remote_server` keeps until its
+    server is recorded. Claimed before that lock was taken, the home was let go by a
+    stop ending on another thread in between, which found nothing serving
+    (:func:`_release_remote_home`), and the new server ran unclaimed.
     """
     global _home_claim
     path = state._state_path.with_name(SERVE_LOCK_NAME)
-    with _lock:
-        if _home_claim is not None and _home_claim[0] == path:
-            return False  # this process serves from here already
+    if _home_claim is not None and _home_claim[0] == path:
+        return False  # this process serves from here already
     try:
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     except OSError as exc:
@@ -4235,8 +4239,7 @@ def _claim_remote_home(state: Runtime) -> bool:
             raise RemoteAlreadyOn(REMOTE_ALREADY_ON) from None
         log.warning("remote: %s could not be locked (%s); serving without it", path, exc)
         return False
-    with _lock:
-        previous, _home_claim = _home_claim, (path, fd)
+    previous, _home_claim = _home_claim, (path, fd)
     if previous is not None:  # another home's, which this process serves no more
         _release_remote_claim(previous[1])
     return True
@@ -4332,14 +4335,12 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
     if page_problem is not None:
         raise NoRemotePage(page_problem)
     state = runtime()
-    with _lock:
-        if _server is not None and _server.running:
-            return state.connection_info(_server.port)
-    claimed = _claim_remote_home(state)
+    claimed = False
     try:
         with _lock:
             if _server is not None and _server.running:
                 return state.connection_info(_server.port)
+            claimed = _claim_remote_home(state)
             app = build_remote_app(state, dist_dir=dist_dir)
             server = _Server(app, port)
             server.start_serving()
@@ -4627,7 +4628,8 @@ def run_foreground(
 
     origin = None if public_url is None else check_public_origin(public_url)
     state = runtime()
-    claimed = _claim_remote_home(state)  # before anything is bound or printed
+    with _lock:
+        claimed = _claim_remote_home(state)  # before anything is bound or printed
     try:
         sock = _bind_remote_socket(port)
     except BaseException:

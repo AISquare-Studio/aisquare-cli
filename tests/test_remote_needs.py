@@ -18,7 +18,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -2580,6 +2580,29 @@ def test_the_stream_and_the_heartbeat_read_the_watchers_snapshot(
         "items": [item.needs_item_json()],
         "scanned_at": "2026-10-07T12:00:00+00:00",
     }
+
+
+def test_the_feeds_stamps_are_the_apis_whatever_zone_they_were_read_in(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """``since`` and ``scanned_at`` were made by hand, ``isoformat(timespec="seconds")``:
+    copies of ``remote_server._iso_seconds`` that agreed with the API's other stamps only
+    while the clock and every fact read were in UTC. A watcher on a clock in another zone
+    said that zone's offset where every other stamp of the API says ``+00:00`` (sweep of
+    #243, the hand-made stamps round 3 left in this file)."""
+    elsewhere = timezone(timedelta(hours=-7))
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    fleet = _working(_tail(_tool("toolu_q", "AskUserQuestion", **QUESTION)))
+    watcher = RemoteNeedsWatcher(
+        app.kit, sources=lambda: _sources(fleet), clock=lambda: NOW.astimezone(elsewhere)
+    )
+    app.kit.lane_state["needs"] = watcher
+    (item,) = watcher.scan_needs_now()
+    assert remote_needs.needs_scanned_iso(app.kit) == "2026-10-07T12:00:00+00:00"
+    assert watcher.needs_payload_now()["scanned_at"] == "2026-10-07T12:00:00+00:00"
+    shown = replace(item, since=item.since.astimezone(elsewhere)).needs_item_json()["since"]
+    assert shown == item.since.astimezone(UTC).isoformat(timespec="seconds")
+    assert isinstance(shown, str) and shown.endswith("+00:00")
 
 
 # --- the routes (SPEC §4.6) ---------------------------------------------------------------

@@ -253,7 +253,10 @@ class NeedsItem:
     """When a push may go out; ``None`` is feed only. Internal: never serialized."""
 
     def needs_item_json(self) -> dict[str, object]:
-        """The wire shape (SPEC §1.4): the project as ``{id, name}``, ``push_after`` left out."""
+        """The wire shape (SPEC §1.4): the project as ``{id, name}``, ``push_after`` left out,
+        ``since`` the API's ISO stamp (``remote_server._iso_seconds``)."""
+        from aisquare.services.remote_server import _iso_seconds
+
         return {
             "id": self.id,
             "kind": self.kind,
@@ -264,7 +267,7 @@ class NeedsItem:
             "excerpt": self.excerpt,
             "detail": dict(self.detail),
             "answers": [{"label": a.label, "keys": list(a.keys)} for a in self.answers],
-            "since": self.since.isoformat(timespec="seconds"),
+            "since": _iso_seconds(self.since),
             "actions": list(self.actions),
         }
 
@@ -2330,10 +2333,12 @@ class RemoteNeedsWatcher:
 
     def needs_payload_now(self) -> dict[str, object]:
         """``GET api/needs``: ``{"items", "scanned_at"}``."""
+        from aisquare.services.remote_server import _iso_seconds
+
         with self._lock:
             scanned = self._scanned_at
             items = list(self._latest_json)
-        stamp = None if scanned is None else scanned.isoformat(timespec="seconds")
+        stamp = None if scanned is None else _iso_seconds(scanned)
         return {"items": items, "scanned_at": stamp}
 
     def needs_lookup(self, item_id: str) -> tuple[NeedsItem, ProjectInfo] | None:
@@ -2577,20 +2582,24 @@ def needs_ws_frames(kit: RemoteKit) -> list[tuple[str, object]]:
 
 def needs_scanned_iso(kit: RemoteKit) -> str | None:
     """When the watcher last scanned, for the heartbeat frame; ``None``: it never has."""
+    from aisquare.services.remote_server import _iso_seconds
+
     watcher = kit.lane_state.get("needs")
     if not isinstance(watcher, RemoteNeedsWatcher):
         return None
     scanned = watcher.needs_scanned_at()
-    return None if scanned is None else scanned.isoformat(timespec="seconds")
+    return None if scanned is None else _iso_seconds(scanned)
 
 
 def needs_cli_payload() -> dict[str, object]:
     """``asq remote needs``: one scan, here and now, in the shape of ``GET api/needs``."""
+    from aisquare.services.remote_server import _iso_seconds
+
     now = _needs_now()
     items = scan_needs_you(live_needs_sources(), now=now, dismissed=load_needs_dismissals())
     return {
         "items": [item.needs_item_json() for item in items],
-        "scanned_at": now.isoformat(timespec="seconds"),
+        "scanned_at": _iso_seconds(now),
     }
 
 

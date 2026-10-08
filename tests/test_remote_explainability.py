@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -123,6 +123,27 @@ def test_an_agent_with_no_session_yields_only_availability_and_a_stamp() -> None
 
 def test_updated_at_is_the_latest_fact() -> None:
     late = _turn(30, 1, 1)
+    card = explainability_payload(
+        agent=_agent(), session=_session(), turns=[late], verdict=GREEN, policy=None
+    )
+    assert card["updated_at"] == "2026-09-12T10:30:30+00:00"
+
+
+def test_updated_at_is_the_apis_iso_stamp_whatever_zone_a_fact_carries() -> None:
+    """The card made its stamp by hand, ``isoformat(timespec="seconds")``: the copy of
+    ``_iso_seconds`` the round-3 fix of the API's stamps left behind. It agreed with every
+    other stamp of the API only while each fact came out of the store in UTC, and a turn
+    timed in another zone gave the card that zone's offset."""
+    elsewhere = timezone(timedelta(hours=2))
+    late = TurnMetric(
+        trace_id="trc-late",
+        project_id="prj_1",
+        session_id="ses-1",
+        started_at=(T0 + timedelta(minutes=30)).astimezone(elsewhere),
+        ended_at=(T0 + timedelta(minutes=30, seconds=30)).astimezone(elsewhere),
+        tokens_in=1,
+        tokens_out=1,
+    )
     card = explainability_payload(
         agent=_agent(), session=_session(), turns=[late], verdict=GREEN, policy=None
     )

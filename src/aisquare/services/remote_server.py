@@ -2176,8 +2176,7 @@ def explainability_payload(
         stamps.append(session.last_seen_at)
     stamps.extend(t.ended_at or t.started_at for t in turns)
     stamps.append(agent.created_at)
-    latest = max(stamps)
-    payload["updated_at"] = latest.isoformat(timespec="seconds")
+    payload["updated_at"] = _iso_seconds(max(stamps))
     return payload
 
 

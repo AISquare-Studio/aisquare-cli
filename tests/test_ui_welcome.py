@@ -56,7 +56,7 @@ from aisquare.services.first_run import (
 )
 from aisquare.services.onboarding import FixResult, OnboardOutcome, PathVerdict
 from tests.pane_harness import asks_a_server, socket_of
-from tests.ui_workers import settle_page
+from tests.ui_workers import settle_page, settle_until
 
 T = TypeVar("T")
 SIZE = (140, 60)
@@ -491,6 +491,63 @@ def test_a_typed_folder_is_judged_then_used(tmp_path: Path) -> None:
     before, enabled, text = hosted(machine, go)
     assert not before and enabled  # the verdict decides the button
     assert machine.onboarded == [folder] and "✓ typed" in text
+
+
+def test_choose_another_is_not_undone_by_a_return_to_the_page(tmp_path: Path) -> None:
+    """Step 1 is listed again on every return (`w`, back from Accounts), and each listing
+    picked the folder asq started in again, undoing *Choose another* (review of #257)."""
+    machine, project = _ready_machine(tmp_path)
+
+    async def go(
+        pilot: Pilot[None], page: WelcomeView, host: Host
+    ) -> tuple[ProjectInfo | None, ProjectInfo | None, int]:
+        started = page.project
+        await press(pilot, page, "welcome-change")
+        page.on_show()  # what a return to the page runs
+        await settle_page(host)
+        return started, page.project, len(machine.frames)
+
+    started, after, listings = hosted(machine, go)
+    assert started == project, "control: the folder asq started in is picked at first"
+    assert listings == 2, "the return listed step 1 again"
+    assert after is None, "Choose another stands"
+
+
+def test_step_three_waits_while_step_one_sets_a_folder_up(tmp_path: Path) -> None:
+    """An unlisted folder is listed by the store before its snapshot is packed, so the
+    shell's next frame listed it mid-onboarding, step 1 was listed again, and the folder
+    asq started in came back: Start manager would have started there (review of #257)."""
+    machine, _ = _ready_machine(tmp_path)
+    other = tmp_path / "project-b"
+    other.mkdir()
+    release = threading.Event()
+
+    def held(path: Path) -> OnboardOutcome:
+        release.wait(10)
+        project = ProjectInfo(id=project_id_for(path), root=path, onboarded_at=T0)
+        machine.stored[project.id] = project
+        report = SetupReport(home=path / ".home", already_initialized=False, project=project)
+        return OnboardOutcome(path=path, project_id=project.id, report=report)
+
+    machine.onboard_answer = held
+
+    async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> list[Any]:
+        await press(pilot, page, "welcome-change")
+        page.choose(other, None)
+        page.find_candidates()  # what the tick runs once the frame lists project-b
+        # The onboarding is held on purpose: wait for the listing alone (no such group).
+        await settle_until(host, lambda: not page._in_flight("candidates"), group="held")
+        await settle_page(host, group="held")
+        seen: list[Any] = [page.project, visible(page, "fleet-manager")]
+        release.set()
+        await settle_page(host)
+        seen.append(page.project.root if page.project else None)
+        return seen
+
+    during, manager_offered, settled = hosted(machine, go)
+    assert during is None, "the folder asq started in is not picked mid-onboarding"
+    assert not manager_offered, "step 3 waits for the folder being set up"
+    assert settled == other, "control: the onboarding settles step 1 on the new folder"
 
 
 @dataclass

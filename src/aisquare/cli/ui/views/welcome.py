@@ -313,6 +313,9 @@ class WelcomeView(VerticalScroll):
         """Enter was pressed while the box's text was still being judged."""
         self.project: ProjectInfo | None = None
         """The project step 1 settled on; step 3's agents start in it."""
+        self._picked = False
+        """The user acted in step 1 (*Choose another*, or a folder), so the folder asq
+        started in is never picked for them again."""
         self.busy: set[str] = set()
         """The workers in flight, by step: ``onboard``, ``connect``, ``manager``, ``coders``.
         Steps 1 and 2 work side by side; a press waits only on its own step's work."""
@@ -542,9 +545,13 @@ class WelcomeView(VerticalScroll):
         else:
             self.candidates = Candidates(items=(), store_error=_reason(error))
         first = self.candidates.items[0] if self.candidates.items else None
-        if self.project is None and first is not None and first.here and first.project:
+        unpicked = self.project is None and not self._picked and "onboard" not in self.busy
+        if unpicked and first is not None and first.here and first.project:
             # Started inside a project that is listed already: there is nothing to add,
             # so nothing to click — the installer's case (it lists the folder first).
+            # Only until the user acts: step 1 is listed again on every return to the
+            # page and when the frame changes, and picking the old folder then undid
+            # *Choose another*, or aimed step 3 at it mid-onboarding (review of #257).
             self.project = first.project
         self._show_candidates()
 
@@ -630,6 +637,7 @@ class WelcomeView(VerticalScroll):
         """Settle step 1 on ``root``: at once when it is listed, else once it is onboarded."""
         if "onboard" in self.busy:
             return
+        self._picked = True
         self.project_note = None
         if listed is not None:
             self._settle(listed)
@@ -702,6 +710,7 @@ class WelcomeView(VerticalScroll):
             self._use_typed()
         elif button.id == "welcome-change":
             if "onboard" not in self.busy:  # not while a folder is being set up
+                self._picked = True
                 self.project = None
                 self.steps = {}
                 self.fleet_error = None
@@ -808,10 +817,15 @@ class WelcomeView(VerticalScroll):
         return live
 
     def _ready(self) -> bool:
-        """Steps 1 and 2 done and tmux usable: what step 3's buttons wait for."""
+        """Steps 1 and 2 done and tmux usable: what step 3's buttons wait for.
+
+        Not while step 1 is still setting a folder up: step 3 starts in the folder that
+        onboarding settles on, never the one it is leaving.
+        """
         claude, tmux = self.claude, self.tmux
         return (
             self.project is not None
+            and "onboard" not in self.busy
             and claude is not None
             and claude.ready
             and (tmux is None or tmux.ok)

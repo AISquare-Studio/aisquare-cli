@@ -417,6 +417,31 @@ def test_a_record_without_a_version_still_counts(claude: Path) -> None:
 
 
 @posix_route
+@pytest.mark.parametrize("scope", ["project", "local"])
+def test_the_version_named_is_the_user_scope_installs(
+    claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str
+) -> None:
+    """An older release installed for one repository, listed first in
+    installed_plugins.json, named its version for the user-scope plugin every other
+    session runs, and the uvx pin with it (sweep of #257)."""
+    _install_plugin(claude, version="0.8.1")
+    installed = claude / "plugins" / "installed_plugins.json"
+    records = json.loads(installed.read_text(encoding="utf-8"))
+    older = {"scope": scope, "projectPath": str(tmp_path / "repo"), "version": "0.8.0"}
+    records["plugins"][agent_core.CLAUDE_PLUGIN_ID].insert(0, older)
+    installed.write_text(json.dumps(records), encoding="utf-8")
+    monkeypatch.setattr(agent_core, "plugin_runner", lambda: None)
+    monkeypatch.setattr(agent_core, "launcher_finds", lambda name: tmp_path / "bin" / name)
+
+    plugin = agent_core.claude_plugin(claude)
+    check = diagnostics._check_claude_code()
+
+    assert plugin is not None and plugin.version == "0.8.1", plugin
+    assert check.status is CheckStatus.ok, check
+    assert "plugin 0.8.1, which runs aisquare-cli==0.8.1 through uvx" in check.detail, check
+
+
+@posix_route
 def test_a_plugin_dir_found_on_disk_is_graded_with_the_rest(
     runner: CliRunner, claude: Path, isolated_agent_home: Path
 ) -> None:

@@ -728,6 +728,12 @@ def claude_plugin(config_dir: Path | None = None) -> ClaudePlugin | None:
     false and ``/plugin uninstall`` removes both (measured on Claude Code 2.1.292,
     which writes ``{"version": 2, "plugins": {id: [records]}}``).
 
+    The version is the user-scope record's. A project- or local-scope record is
+    another install, for one repository (:func:`claude_repo_plugins`), and may be
+    an older release: listed first, it named the wrong version and uvx pin (sweep
+    of #257). A record with no scope is the single record from before version 2.
+    Any record's, where none is the user scope's.
+
     Per directory, like the hooks: Claude Code keeps plugins under each config
     dir, so one installed in ``~/.claude`` does not reach ``~/.claude-c2``.
     ``None`` is the directory a session from this shell reads
@@ -739,7 +745,8 @@ def claude_plugin(config_dir: Path | None = None) -> ClaudePlugin | None:
     records = _plugin_records(directory)
     if not records:
         return None
-    versions = [record.get("version") for record in records if isinstance(record, dict)]
+    user = [r for r in records if isinstance(r, dict) and r.get("scope", "user") == "user"]
+    versions = [record.get("version") for record in user or records if isinstance(record, dict)]
     version = next((found for found in versions if isinstance(found, str) and found), None)
     return ClaudePlugin(config_dir=directory, version=version)
 

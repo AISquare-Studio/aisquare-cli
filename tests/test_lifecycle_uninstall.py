@@ -899,6 +899,8 @@ def test_an_enabled_plugin_is_named_with_its_removal_and_a_purge_waits_for_it(
     disabled = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
 
     assert removal.endswith("claude plugin uninstall aisquare@aisquare-cli"), removal
+    scopes = [(plugin.pop("scope"), plugin.pop("project")) for plugin in plan["plugins"]]
+    assert scopes == [("user", None)], "enabled in the config dir itself: user scope"
     assert plan["plugins"] == [{"config_dir": str(site), "version": "0.9.0", "remove": removal}]
     refused = _one_object(purge.stdout)
     assert (purge.exit_code, refused["error"]) == (1, "plugin_enabled"), refused
@@ -936,6 +938,158 @@ def test_a_plugin_inside_the_home_a_purge_deletes_does_not_hold_the_purge_up(
     assert result.exit_code == 0, result.output
     assert not paths.aisquare_home().exists() and world.events[-1][0] == "package"
     assert "the aisquare plugin is still enabled" not in result.stdout, result.stdout
+
+
+def _repo_plugin_installed(
+    config_dir: Path, repo: Path, scope: str, *, enabled: bool = True
+) -> Path:
+    """What `claude plugin install aisquare@aisquare-cli --scope <project|local>`, run in
+    ``repo``, leaves (measured on Claude Code 2.1.294): the key in the REPOSITORY's
+    settings file, none in the config dir's, and a record there naming the scope and repo."""
+    settings = repo / ".claude" / ("settings.json" if scope == "project" else "settings.local.json")
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(
+        json.dumps({"enabledPlugins": {agent_core.CLAUDE_PLUGIN_ID: enabled}}), encoding="utf-8"
+    )
+    installed = config_dir / "plugins" / "installed_plugins.json"
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    data = json.loads(installed.read_text("utf-8")) if installed.is_file() else {"plugins": {}}
+    data["version"] = 2
+    records = data["plugins"].setdefault(agent_core.CLAUDE_PLUGIN_ID, [])
+    records.append({"scope": scope, "projectPath": str(repo), "version": "0.8.0"})
+    installed.write_text(json.dumps(data), encoding="utf-8")
+    if not (config_dir / "settings.json").exists():
+        (config_dir / "settings.json").write_text('{"enabledPlugins": {}}', encoding="utf-8")
+    return repo
+
+
+@pytest.mark.parametrize("scope", ["project", "local"])
+def test_a_plugin_a_repository_enables_is_named_with_its_removal_and_a_purge_waits_for_it(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: str,
+) -> None:
+    """`/plugin install` offers project and local scope, which enable the plugin in the
+    repository's settings file and not the config dir's: uninstall never saw it, so --purge
+    went ahead and the next session in that repository made the home again (sweep of #257).
+    The record sits in a hookless ~/.claude* sibling, so the command names that dir too."""
+    monkeypatch.setattr(agent_core, "plugin_route_supported", lambda: True)  # the route's rule
+    _initialised(runner, tmp_path)
+    config = isolated_agent_home / ".claude-c2"
+    repo = _repo_plugin_installed(config, tmp_path / "repo", scope)
+    removal = agent_core.claude_plugin_command("uninstall", config, scope=scope, project=repo)
+    before = _snapshot(tmp_path)
+
+    plan = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+    purge = runner.invoke(app, ["--json", "uninstall", "--yes", "--purge"])
+    untouched = _snapshot(tmp_path) == before and world.events == []
+    plain = runner.invoke(app, ["uninstall", "--yes"])
+    _repo_plugin_installed(config, repo, scope, enabled=False)
+    disabled = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
+
+    assert removal.startswith(f"cd {repo}") and str(config) in removal, removal
+    assert removal.endswith(f"claude plugin uninstall aisquare@aisquare-cli --scope {scope}")
+    assert plan["plugins"] == [
+        {
+            "config_dir": str(config),
+            "version": "0.8.0",
+            "scope": scope,
+            "project": str(repo),
+            "remove": removal,
+        }
+    ]
+    refused = _one_object(purge.stdout)
+    assert (purge.exit_code, refused["error"]) == (1, "plugin_enabled"), refused
+    assert removal in refused["detail"] and untouched, "refused with the command, nothing touched"
+    assert plain.exit_code == 0, plain.output
+    assert f"the aisquare plugin is still enabled in {repo} ({scope} scope)" in plain.stdout
+    assert f"remove it: {removal}" in plain.stdout, plain.stdout
+    assert disabled["plugins"] == [] and disabled["refusal"] is None, "control: off there now"
+
+
+def test_removing_the_user_scope_plugin_leaves_a_repositorys_holding_the_purge(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a user-scope install beside a project-scope one, the plan named only the bare
+    `claude plugin uninstall aisquare@aisquare-cli`, which acts on the user scope. Run as
+    told, the project install stayed enabled and --purge went ahead (sweep of #257)."""
+    monkeypatch.setattr(agent_core, "plugin_route_supported", lambda: True)  # the route's rule
+    _initialised(runner, tmp_path)
+    claude = _plugin_installed(isolated_agent_home / ".claude")
+    repo = _repo_plugin_installed(claude, tmp_path / "repo", "project")
+
+    both = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
+    # What the user-scope removal does: the config dir's key and its record go.
+    (claude / "settings.json").write_text('{"enabledPlugins": {}}', encoding="utf-8")
+    installed = json.loads((claude / "plugins" / "installed_plugins.json").read_text("utf-8"))
+    records = installed["plugins"][agent_core.CLAUDE_PLUGIN_ID]
+    installed["plugins"][agent_core.CLAUDE_PLUGIN_ID] = [r for r in records if r["scope"] != "user"]
+    (claude / "plugins" / "installed_plugins.json").write_text(json.dumps(installed), "utf-8")
+    after = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
+
+    assert [(p["scope"], p["project"]) for p in both["plugins"]] == [
+        ("user", None),
+        ("project", str(repo)),
+    ]
+    assert len({p["remove"] for p in both["plugins"]}) == 2, "one command per install"
+    assert [(p["scope"], p["project"]) for p in after["plugins"]] == [("project", str(repo))]
+    assert after["refusal"]["error"] == "plugin_enabled", after["refusal"]
+    assert f"cd {repo}" in after["refusal"]["message"], after["refusal"]
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"scope": ["project"], "projectPath": "REPO"},
+        {"scope": "project"},
+        {"scope": "project", "projectPath": 7},
+        {"scope": "project", "projectPath": ""},
+        {"scope": "project", "projectPath": "."},
+        {"scope": "managed", "projectPath": "REPO"},
+        "not a record",
+    ],
+    ids=[
+        "scope-a-list",
+        "no-path",
+        "path-a-number",
+        "path-empty",
+        "path-relative",
+        "other-scope",
+        "a-string",
+    ],
+)
+def test_a_malformed_install_record_finds_nothing_and_never_raises(
+    isolated_agent_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: object
+) -> None:
+    """installed_plugins.json is Claude Code's file, read as it is: a record of a shape this
+    reader does not know is no install, never a traceback in uninstall's plan. Run from
+    inside the repository, so a path read relative to the cwd would find it."""
+    claude = isolated_agent_home / ".claude"
+    repo = _repo_plugin_installed(claude, tmp_path / "repo", "project")
+    monkeypatch.chdir(repo)
+    measured = agent_core.claude_repo_plugins(claude)
+    installed = claude / "plugins" / "installed_plugins.json"
+    if isinstance(record, dict) and record.get("projectPath") == "REPO":
+        record = {**record, "projectPath": str(repo)}
+    installed.write_text(
+        json.dumps({"version": 2, "plugins": {agent_core.CLAUDE_PLUGIN_ID: [record]}}), "utf-8"
+    )
+
+    assert [plugin.project for plugin in measured] == [repo], "control: the measured shape"
+    assert agent_core.claude_repo_plugins(claude) == []
 
 
 # --- the non-grading directory list ----------------------------------------------------

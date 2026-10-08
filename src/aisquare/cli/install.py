@@ -340,6 +340,8 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
             {
                 "config_dir": str(plugin.config_dir),
                 "version": plugin.version,
+                "scope": plugin.scope,
+                "project": None if plugin.project is None else str(plugin.project),
                 "remove": lifecycle_service.plugin_removal(plugin),
             }
             for plugin in plan.plugins
@@ -426,7 +428,8 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
             _say(f"    {entry.name} in {where}")
     for plugin in plan.lasting_plugins:
         # Claude Code's to remove, and it keeps running aisquare: said, never silent.
-        _say(f"  the aisquare plugin in {plugin.config_dir}, which keeps running aisquare")
+        where = lifecycle_service.plugin_place(plugin)
+        _say(f"  the aisquare plugin in {where}, which keeps running aisquare")
         _say("  there (through uvx once the package is gone) — remove it with:")
         _say(f"    {lifecycle_service.plugin_removal(plugin)}")
     _say("  uv, tmux, Node, gh and Claude Code")

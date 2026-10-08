@@ -48,12 +48,12 @@ To keep the `settings.json` hooks instead, run `/plugin uninstall aisquare@aisqu
 ## Limits
 
 - macOS, Linux and WSL. Native Windows keeps the `settings.json` route (`aisquare agents connect claude-code`): the hooks run `sh`, and `aisquare doctor` there reads only that route.
-- Plugins belong to one Claude Code config directory. One installed in `~/.claude` does not reach the fleet's account directories (`~/.aisquare/claude-accounts/<slot>`), which keep their `settings.json` hooks.
+- Plugins belong to one Claude Code config directory. One installed in `~/.claude` does not reach the fleet's account directories (`~/.aisquare/claude-accounts/<slot>`), which keep their `settings.json` hooks. One installed at project or local scope runs only in the repository it was installed in.
 - Claude Code does not update third-party marketplaces on its own by default. After an aisquare release, run `claude plugin marketplace update aisquare-cli` and then `claude plugin update aisquare@aisquare-cli` from a shell, and restart Claude Code. To have it update on its own instead, open `/plugin`, go to the Marketplaces tab, select `aisquare-cli` and choose Enable auto-update.
 - The marketplace is this repository, so adding it clones the repository.
 
 ## Removing it
 
-Run `/plugin uninstall aisquare@aisquare-cli`, and `/plugin marketplace remove aisquare-cli` if you no longer want the marketplace. Your memory stays in `~/.aisquare`.
+Run `/plugin uninstall aisquare@aisquare-cli`, and `/plugin marketplace remove aisquare-cli` if you no longer want the marketplace. Your memory stays in `~/.aisquare`. A project or local install is removed from inside its repository, with its scope: `claude plugin uninstall aisquare@aisquare-cli --scope project` (or `--scope local`).
 
-`aisquare uninstall` leaves the plugin to you, because the plugin is Claude Code's: it names the command that removes it, and `--purge` waits until it is gone, since the plugin would run aisquare again and make `~/.aisquare` anew.
+`aisquare uninstall` leaves the plugin to you, because the plugin is Claude Code's: it names the command that removes each install, at every scope, and `--purge` waits until they are gone, since the plugin would run aisquare again and make `~/.aisquare` anew.

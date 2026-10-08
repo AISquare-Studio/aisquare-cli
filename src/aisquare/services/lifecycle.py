@@ -820,9 +820,10 @@ class UninstallPlan:
     fleet_error: str | None
     """Why the fleet's live agents could not be counted, when they could not."""
     plugins: tuple[agent_core.ClaudePlugin, ...] = ()
-    """Directories where the aisquare Claude Code plugin is enabled. Uninstall leaves
-    it, as Claude Code owns it, and it keeps running aisquare there: through uvx
-    once the package is gone, which makes the home again (review of #257)."""
+    """Where the aisquare Claude Code plugin is enabled: in a config dir (user scope) or
+    in a repository (project and local scope). Uninstall leaves it, as Claude Code owns
+    it, and it keeps running aisquare there: through uvx once the package is gone,
+    which makes the home again (review of #257)."""
 
     @property
     def package_command(self) -> str:
@@ -874,7 +875,7 @@ class UninstallPlan:
         if self.purges and lasting:
             # A purge the next session undoes is not one: refused like the fleet, with
             # the command that clears the way. A plain uninstall only says so.
-            where = ", ".join(str(plugin.config_dir) for plugin in lasting)
+            where = ", ".join(plugin_place(plugin) for plugin in lasting)
             return UninstallRefused(
                 f"--purge would not last: the aisquare plugin is enabled in {where}, so "
                 f"Claude Code's next session there runs aisquare and makes {self.home} again. "
@@ -886,8 +887,18 @@ class UninstallPlan:
 
 
 def plugin_removal(plugin: agent_core.ClaudePlugin) -> str:
-    """The command that removes the aisquare plugin from its config dir."""
-    return agent_core.claude_plugin_command("uninstall", plugin.config_dir)
+    """The command that removes the aisquare plugin from its config dir — at its scope,
+    and for a project- or local-scope install from inside its repository."""
+    return agent_core.claude_plugin_command(
+        "uninstall", plugin.config_dir, scope=plugin.scope, project=plugin.project
+    )
+
+
+def plugin_place(plugin: agent_core.ClaudePlugin) -> str:
+    """Where the aisquare plugin runs: its config dir, or the repository that enables it."""
+    if plugin.project is None:
+        return str(plugin.config_dir)
+    return f"{plugin.project} ({plugin.scope} scope)"
 
 
 @dataclass(frozen=True)
@@ -1072,6 +1083,28 @@ def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ..
     return tuple(found)
 
 
+def _plugins(directories: Iterable[Path]) -> tuple[agent_core.ClaudePlugin, ...]:
+    """The aisquare plugin wherever these config dirs enable it: in the dir itself (user
+    scope), and in each repository a project- or local-scope install of theirs enables
+    (sweep of #257: those were never read, so --purge went ahead and the next session
+    in the repository made the home again). Read only; empty where the plugin route
+    does not run (:func:`agent_core.plugin_route_supported`)."""
+    if not agent_core.plugin_route_supported():
+        return ()
+    found: list[agent_core.ClaudePlugin] = []
+    seen: set[Path] = set()
+    for directory in directories:
+        key = agent_core.dir_identity(directory)
+        if key in seen:
+            continue
+        seen.add(key)
+        user = agent_core.claude_plugin(directory)
+        if user is not None:
+            found.append(user)
+        found.extend(agent_core.claude_repo_plugins(directory))
+    return tuple(found)
+
+
 def _claude_dirs_for_mcp() -> list[Path]:
     """``~/.claude`` and every ``~/.claude*`` directory, hooked or not, for the MCP scan.
 
@@ -1207,17 +1240,12 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
     candidates = [*agent_core.hook_dirs(HOOK_AGENT), *_account_dirs(), *_siblings_hiding_hooks()]
     hooks: list[HookSite] = []
     unreadable: list[HookSite] = []
-    plugins: list[agent_core.ClaudePlugin] = []
-    plugin_route = agent_core.plugin_route_supported()
     seen: set[Path] = set()
     for directory in candidates:
         key = agent_core.dir_identity(directory)
         if key in seen:
             continue
         seen.add(key)
-        plugin = agent_core.claude_plugin(directory) if plugin_route else None
-        if plugin is not None:
-            plugins.append(plugin)
         binaries, error = hook_binaries(directory)
         unwritable = (
             agents_service.settings_unwritable(directory / "settings.json") if binaries else None
@@ -1237,11 +1265,12 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         entries = ()
     live, unlistened, fleet_error = running_fleet()
     custom = custom_home(home)
+    claude_dirs = [*candidates, *_claude_dirs_for_mcp()]
     return UninstallPlan(
         route=route,
         hooks=tuple(hooks),
         unreadable=tuple(unreadable),
-        mcp=_mcp_registrations([*candidates, *_claude_dirs_for_mcp()]),
+        mcp=_mcp_registrations(claude_dirs),
         package_argv=tuple(install_route.remove_argv(route)),
         package_env=install_route.installer_env(route),
         package_reason=install_route.not_removable(route),
@@ -1255,7 +1284,7 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         live_agents=live,
         unlistened=unlistened,
         fleet_error=fleet_error,
-        plugins=tuple(plugins),
+        plugins=_plugins(claude_dirs),
     )
 
 
@@ -1379,7 +1408,7 @@ def _uninstall_notes(
 def plugin_note(plugin: agent_core.ClaudePlugin) -> str:
     """What an uninstall leaves running in a directory that enables the aisquare plugin."""
     return (
-        f"the aisquare plugin is still enabled in {plugin.config_dir}, so Claude Code keeps "
+        f"the aisquare plugin is still enabled in {plugin_place(plugin)}, so Claude Code keeps "
         f"running aisquare there (through uvx once the package is gone) — remove it: "
         f"{plugin_removal(plugin)}"
     )

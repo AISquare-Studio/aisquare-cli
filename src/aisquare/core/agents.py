@@ -580,7 +580,13 @@ def enabled_plugins(config_dir: Path) -> list[str]:
     plugin route (:func:`claude_plugin`) both ask here. Read-only; a file that
     cannot be read enables nothing (:func:`read_json`).
     """
-    plugins = read_json(config_dir / "settings.json").get("enabledPlugins")
+    return _enabled_in(config_dir / "settings.json")
+
+
+def _enabled_in(settings: Path) -> list[str]:
+    """The ``enabledPlugins`` keys one settings file sets to true: a config dir's
+    (:func:`enabled_plugins`) or a repository's (:func:`claude_repo_plugins`)."""
+    plugins = read_json(settings).get("enabledPlugins")
     if not isinstance(plugins, dict):
         return []
     return [str(key) for key, enabled in plugins.items() if enabled]
@@ -588,11 +594,16 @@ def enabled_plugins(config_dir: Path) -> list[str]:
 
 @dataclass(frozen=True)
 class ClaudePlugin:
-    """The aisquare plugin, installed and enabled in one Claude Code config directory."""
+    """The aisquare plugin, installed in one Claude Code config directory and enabled
+    there (user scope) or in one repository (project and local scope)."""
 
     config_dir: Path
     version: str | None
     """What ``plugins/installed_plugins.json`` records; ``None`` when it records none."""
+    scope: str = "user"
+    """``user``, or ``project``/``local``: the scope ``claude plugin install`` was given."""
+    project: Path | None = None
+    """The repository a project- or local-scope install is enabled in; ``None`` at user scope."""
 
 
 def plugin_route_supported() -> bool:
@@ -625,15 +636,57 @@ def claude_plugin(config_dir: Path | None = None) -> ClaudePlugin | None:
     directory = _claude_home(config_dir)
     if CLAUDE_PLUGIN_ID not in enabled_plugins(directory):
         return None
-    installed = read_json(directory / "plugins" / "installed_plugins.json").get("plugins")
-    records = installed.get(CLAUDE_PLUGIN_ID) if isinstance(installed, dict) else None
-    if isinstance(records, dict):
-        records = [records]
-    if not isinstance(records, list) or not records:
+    records = _plugin_records(directory)
+    if not records:
         return None
     versions = [record.get("version") for record in records if isinstance(record, dict)]
     version = next((found for found in versions if isinstance(found, str) and found), None)
     return ClaudePlugin(config_dir=directory, version=version)
+
+
+def _plugin_records(config_dir: Path) -> list[Any]:
+    """The aisquare plugin's install records in ``config_dir``'s
+    ``plugins/installed_plugins.json``: a list since its version 2, one record before."""
+    installed = read_json(config_dir / "plugins" / "installed_plugins.json").get("plugins")
+    records = installed.get(CLAUDE_PLUGIN_ID) if isinstance(installed, dict) else None
+    if isinstance(records, dict):
+        return [records]
+    return records if isinstance(records, list) else []
+
+
+#: The file in a repository's ``.claude`` that enables a plugin installed at each
+#: repository scope (``claude plugin install --scope``, or the ``/plugin`` dialog).
+_REPO_SCOPES = {"project": "settings.json", "local": "settings.local.json"}
+
+
+def claude_repo_plugins(config_dir: Path | None = None) -> list[ClaudePlugin]:
+    """The project- and local-scope installs of the aisquare plugin that ``config_dir``
+    records and whose repository still enables it.
+
+    Those scopes enable the plugin in the repository, in ``.claude/settings.json``
+    (project, shared with the team) or ``.claude/settings.local.json`` (local), and
+    not in ``config_dir``'s own settings.json, so :func:`claude_plugin` does not see
+    them. ``plugins/installed_plugins.json`` records each with its ``scope`` and
+    ``projectPath``, and a session of ``config_dir`` started in that repository runs
+    it (measured on Claude Code 2.1.294). Read-only; never raises.
+    """
+    directory = _claude_home(config_dir)
+    found: list[ClaudePlugin] = []
+    for record in _plugin_records(directory):
+        if not isinstance(record, dict):
+            continue
+        scope, project = record.get("scope"), record.get("projectPath")
+        if not isinstance(scope, str) or scope not in _REPO_SCOPES:
+            continue
+        if not isinstance(project, str) or not Path(project).is_absolute():
+            continue  # Claude Code records an absolute path; any other would read the cwd's
+        repo = Path(project)
+        if CLAUDE_PLUGIN_ID not in _enabled_in(repo / ".claude" / _REPO_SCOPES[scope]):
+            continue  # removed or disabled there: nothing runs
+        version = record.get("version")
+        recorded = version if isinstance(version, str) and version else None
+        found.append(ClaudePlugin(directory, recorded, scope=scope, project=repo))
+    return found
 
 
 def _starts(program: Path) -> bool:
@@ -687,22 +740,32 @@ def plugin_runner() -> Path | None:
     return launcher_finds("aisquare")
 
 
-def claude_plugin_command(verb: str, config_dir: Path) -> str:
+def claude_plugin_command(
+    verb: str, config_dir: Path, *, scope: str = "user", project: Path | None = None
+) -> str:
     """``claude plugin <verb> aisquare@aisquare-cli``, aimed at ``config_dir``.
 
     Plugins belong to one config dir, and ``claude`` acts on the one it starts in, so
     a bare ``/plugin`` typed into the usual session would act on the wrong one for a
     fleet account dir. The ambient dir needs nothing; ``~/.claude`` needs
     ``CLAUDE_CONFIG_DIR`` unset (pointed at it, Claude Code would look for
-    ``.claude.json`` inside it); any other dir is named.
+    ``.claude.json`` inside it); any other dir is named. A project- or local-scope
+    install (:func:`claude_repo_plugins`) takes its ``--scope``, run from inside its
+    ``project``: without it ``claude plugin uninstall`` acts on the user scope, and
+    run anywhere else it answers that the plugin is not installed at that scope
+    (measured on Claude Code 2.1.294).
     """
     command = f"claude plugin {verb} {CLAUDE_PLUGIN_ID}"
+    if scope != "user":
+        command += f" --scope {scope}"
     key = _dir_key(config_dir)
     if key == _dir_key(_claude_home()):
-        return command
-    if key == _dir_key(_home() / ".claude"):
-        return f"env -u CLAUDE_CONFIG_DIR {command}"
-    return f"CLAUDE_CONFIG_DIR={_quote(str(config_dir))} {command}"
+        line = command
+    elif key == _dir_key(_home() / ".claude"):
+        line = f"env -u CLAUDE_CONFIG_DIR {command}"
+    else:
+        line = f"CLAUDE_CONFIG_DIR={_quote(str(config_dir))} {command}"
+    return line if project is None else f"cd {_quote(str(project))} && {line}"
 
 
 def _registry() -> dict[str, Any]:

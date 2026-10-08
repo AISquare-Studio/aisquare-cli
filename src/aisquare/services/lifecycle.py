@@ -20,7 +20,7 @@ import shutil
 import socket
 import sqlite3
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PureWindowsPath
 
 from aisquare.core import agents as agent_core
@@ -390,9 +390,14 @@ class UpgradeReport:
     plan: UpgradePlan
     exit_code: int
     version: str | None = None
+    """What the install reports afterwards, asked in a new process, also after a failed
+    install; ``None`` when it could not say."""
     problem: str | None = None
     hooks: tuple[HookRefresh, ...] = ()
     notes: tuple[str, ...] = ()
+    cutoff: str | None = None
+    """The uv cutoff the install ran under (``--exclude-newer P14D``), from the receipt uv
+    wrote for it, or ``None``."""
 
     @property
     def installed(self) -> bool:
@@ -403,19 +408,6 @@ class UpgradeReport:
     def upgraded(self) -> bool:
         """Whether a NEW process reports the version this upgrade was for."""
         return self.installed and self.problem is None and self.version is not None
-
-    @property
-    def way_back(self) -> str | None:
-        """The command that reinstalls the release that ran, when a run with no ``--version``
-        landed on an older one (:func:`_verify`); ``None`` otherwise. Running the same
-        command again would land there again."""
-        if self.plan.target is not None or self.version is None:
-            return None
-        if install_route.is_newer(self.plan.current, self.version) is not True:
-            return None
-        return install_route.command_line(
-            install_route.upgrade_argv(self.plan.route, self.plan.current)
-        )
 
 
 def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePlan:
@@ -454,7 +446,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         current=__version__,
         target=target,
         latest=latest,
-        argv=tuple(install_route.upgrade_argv(route, target)),
+        argv=tuple(install_route.upgrade_argv(route, target, current=__version__)),
         env=install_route.installer_env(route),
         reason=reason,
         refresh=refresh,
@@ -464,23 +456,26 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
     )
 
 
-def _latest_for(route: install_route.InstallRoute) -> install_route.LatestRelease:
-    """PyPI's newest release, unless it says nothing about what this install's ``@latest``
-    gets: one that resolves from its own index, or under a uv cutoff. With a cutoff, PyPI's
-    newest was taken as the target, and the unchanged version uv correctly left was
-    reported as §3.9.1's silent no-op on every run (sweep of #257)."""
+def _beyond_pypi(route: install_route.InstallRoute) -> str | None:
+    """Why PyPI's newest says nothing about what this install's upgrade gets, or ``None``:
+    it resolves from its own index, or takes nothing uploaded after a uv cutoff."""
     own = install_route.own_index(route)
     if own is not None:
-        return install_route.LatestRelease(
-            None, f"PyPI was not asked: this install resolves from its own index ({own})"
-        )
+        return f"this install resolves from its own index ({own})"
     cutoff = install_route.cutoff(route)
     if cutoff is not None:
-        return install_route.LatestRelease(
-            None,
-            f"PyPI was not asked: this install takes no release uploaded after its uv cutoff "
-            f"({cutoff})",
-        )
+        return f"this install takes no release uploaded after its uv cutoff ({cutoff})"
+    return None
+
+
+def _latest_for(route: install_route.InstallRoute) -> install_route.LatestRelease:
+    """PyPI's newest release, unless it says nothing about what this install's upgrade gets
+    (:func:`_beyond_pypi`). With a cutoff, PyPI's newest was taken as the target, and the
+    unchanged version uv correctly left was reported as §3.9.1's silent no-op on every run
+    (sweep of #257)."""
+    why = _beyond_pypi(route)
+    if why is not None:
+        return install_route.LatestRelease(None, f"PyPI was not asked: {why}")
     return install_route.fetch_latest()
 
 
@@ -676,15 +671,24 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
         raise UpgradeRefused(plan.reason, plan.command)
     code = install_route.run_installer(plan.argv, env=plan.env, to_stderr=to_stderr)
     if code != 0:
-        return UpgradeReport(plan, exit_code=code, problem=f"{plan.argv[0]} exited {code}")
-    version, problem = _verify(plan)
+        # Asked too: uv resolves before it replaces anything (measured, uv 0.12.19), so a
+        # run it could not resolve, as under a cutoff that excludes even the release that
+        # runs, leaves that release installed, and no reinstall from nothing is needed.
+        kept, _ = _installed_version(plan)
+        return UpgradeReport(
+            plan, exit_code=code, version=kept, problem=f"{plan.argv[0]} exited {code}"
+        )
+    ran = _as_recorded(plan.route)
+    cutoff = install_route.cutoff(ran) or install_route.cutoff(plan.route)
+    version, problem = _verify(plan, ran)
     if problem is not None:
-        return UpgradeReport(plan, exit_code=code, version=version, problem=problem)
+        return UpgradeReport(plan, exit_code=code, version=version, problem=problem, cutoff=cutoff)
     notes: list[str] = []
     latest = plan.latest_version
     moved_elsewhere = latest is not None and not install_route.same_version(version or "", latest)
     if plan.target is None and version is not None and moved_elsewhere:
-        notes.append(f"PyPI's latest is {latest}; your package index served {version}")
+        held = "your uv cutoff allows" if cutoff is not None else "your package index served"
+        notes.append(f"PyPI's latest is {latest}; {held} {version}")
     notes.append(
         f"asq and `aisquare serve` processes that were already running keep {plan.current} "
         "until they are restarted"
@@ -696,9 +700,28 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
             f"{version} is older than {plan.current}, so the hooks were left as they were; "
             f"`aisquare agents connect {HOOK_AGENT}` rewrites them for {version}"
         )
-        return UpgradeReport(plan, exit_code=code, version=version, notes=tuple(notes))
+        return UpgradeReport(
+            plan, exit_code=code, version=version, notes=tuple(notes), cutoff=cutoff
+        )
     hooks = tuple(_refresh(site, plan.route.facts) for site in plan.refresh)
-    return UpgradeReport(plan, exit_code=code, version=version, hooks=hooks, notes=tuple(notes))
+    return UpgradeReport(
+        plan, exit_code=code, version=version, hooks=hooks, notes=tuple(notes), cutoff=cutoff
+    )
+
+
+def _as_recorded(route: install_route.InstallRoute) -> install_route.InstallRoute:
+    """``route`` with the receipt uv wrote for the install that just ran.
+
+    A cutoff or an index set in uv's own settings (uv.toml, ``UV_EXCLUDE_NEWER``,
+    ``UV_INDEX_URL``) applies to that install and is recorded in its receipt, never in
+    the one the plan read (measured, uv 0.12.19). Only reads: tomllib and the receipt
+    parser are already in memory (see the module docstring).
+    """
+    try:
+        receipt = install_route.read_receipt(route.facts.prefix)
+    except OSError:
+        receipt = None
+    return route if receipt is None else replace(route, receipt=receipt)
 
 
 def _reason_line(*texts: str) -> str:
@@ -714,17 +737,9 @@ def _reason_line(*texts: str) -> str:
     return ""
 
 
-def _verify(plan: UpgradePlan) -> tuple[str | None, str | None]:
-    """``(version, problem)`` from asking the NEW install its version in a new process.
-
-    The exit code of the installer is not the evidence: §3.9.1's failure was a
-    success code over an unchanged version. So success is a version the new
-    process reports — the pin when one was asked for, otherwise any move that is
-    not BACK: a downgrade is only done by asking for one with ``--version``. An
-    unchanged version is a failure exactly when PyPI said there is something
-    newer; when PyPI was not asked or could not answer, it is the newest release
-    the index serves, or the install's uv cutoff allows (:func:`_latest_for`).
-    """
+def _installed_version(plan: UpgradePlan) -> tuple[str | None, str | None]:
+    """``(version, problem)``: what the install in ``plan``'s prefix reports, asked in a NEW
+    process, or why it could not say."""
     probe = agent_core.HookBinary(plan.route.facts.executable, module_form=True)
     answer = install_route.run_captured(probe.version_argv(), timeout=VERSION_CHECK_TIMEOUT_SECONDS)
     if answer.error is not None:
@@ -735,22 +750,39 @@ def _verify(plan: UpgradePlan) -> tuple[str | None, str | None]:
     found = agent_core.version_in(answer.stdout)
     if found is None:
         return None, "the new install did not report a version"
+    return found, None
+
+
+def _verify(plan: UpgradePlan, ran: install_route.InstallRoute) -> tuple[str | None, str | None]:
+    """``(version, problem)`` from asking the NEW install its version in a new process.
+
+    The exit code of the installer is not the evidence: §3.9.1's failure was a
+    success code over an unchanged version. So success is a version the new
+    process reports — the pin when one was asked for, otherwise any move that is
+    not BACK: a downgrade is only done by asking for one with ``--version``. An
+    unchanged version is a failure exactly when PyPI said there is something
+    newer; when PyPI was not asked or could not answer, or the install ``ran``
+    under (:func:`_as_recorded`) has its own index or a uv cutoff, it is the newest
+    release the index serves, or the cutoff allows (:func:`_beyond_pypi`).
+    """
+    found, problem = _installed_version(plan)
+    if found is None:
+        return None, problem
     if plan.target is not None:
         if install_route.same_version(found, plan.target):
             return found, None
         return found, f"{plan.target} was asked for, but the new install reports {found}"
     if install_route.is_newer(plan.current, found):
-        # uv's @latest went back: a cutoff set in uv's settings after the install, which the
-        # receipt therefore does not record, or an index that is behind. Reported as a
-        # success, it said ✓, exit 0 and reopened asq, possibly on a release with no
-        # `upgrade` of its own (sweep of #257).
-        return found, (
-            f"the new install reports {found}, which is older than {plan.current} — an "
-            "exclude-newer cutoff in uv's settings (uv.toml, UV_EXCLUDE_NEWER) or an index "
-            "that is behind can make uv take an older release"
-        )
+        # The command asks for this release or newer (install_route._uv_spec), so uv fails
+        # rather than resolve below it. Still a failure, never ✓ and asq reopened on a
+        # release that may have no `upgrade` of its own (sweep of #257).
+        return found, f"the new install reports {found}, which is older than {plan.current}"
     latest = plan.latest_version
     if not install_route.same_version(found, plan.current) or latest is None:
+        return found, None
+    if _beyond_pypi(ran) is not None:
+        # A cutoff or an index in uv's own settings, which only the receipt uv just wrote
+        # shows: blamed on §3.9.1, the newest release it allows failed (sweep of #257).
         return found, None
     return found, (
         f"uv reported success but aisquare still reports {found}, not {latest} — the "

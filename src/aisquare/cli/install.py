@@ -115,13 +115,10 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
         _say(f"(`aisquare upgrade` does not run it: {plan.reason})")
 
 
-def _newest(plan: lifecycle_service.UpgradePlan) -> str:
-    """What stops ``@latest`` when PyPI was not asked: the install's uv cutoff, or its index."""
-    return (
-        "your uv cutoff allows"
-        if install_route.cutoff(plan.route) is not None
-        else "your package index serves"
-    )
+def _newest(cutoff: str | None) -> str:
+    """What holds the latest release back when PyPI's word is not used: a uv cutoff, else
+    the install's index."""
+    return "your uv cutoff allows" if cutoff is not None else "your package index serves"
 
 
 def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
@@ -135,7 +132,8 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
     )
     _say(f"aisquare {plan.current} → {where}")
     if plan.target is None and plan.latest is not None and plan.latest.version is None:
-        _say(f"  {plan.latest.error}; uv will install the newest release {_newest(plan)}")
+        newest = _newest(install_route.cutoff(plan.route))
+        _say(f"  {plan.latest.error}; uv will install the newest release {newest}")
     _say(f"  install: {plan.route.describe()}")
     _say(f"  runs:    {plan.command}")
     for site in plan.refresh:
@@ -176,11 +174,11 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
         )
         return
     if report.version is not None and install_route.same_version(report.version, plan.current):
-        # Only reachable when PyPI was not asked or could not answer: with an answer,
-        # an unchanged version is a failure (lifecycle._verify).
-        cutoff = install_route.cutoff(plan.route)
-        named = f" ({cutoff})" if cutoff is not None else ""
-        _say(f"✓ aisquare {report.version} is the newest release {_newest(plan)}{named}")
+        # Only reachable when PyPI was not asked or could not answer, or when the receipt uv
+        # wrote shows a cutoff or an index from uv's own settings: otherwise an unchanged
+        # version is a failure (lifecycle._verify).
+        named = f" ({report.cutoff})" if report.cutoff is not None else ""
+        _say(f"✓ aisquare {report.version} is the newest release {_newest(report.cutoff)}{named}")
     else:
         _say(f"✓ aisquare {report.version} (was {plan.current}) — checked in a new process")
     for hook in report.hooks:
@@ -333,21 +331,28 @@ def upgrade(
         _say(f"{move}: {plan.command}")
     report = lifecycle_service.upgrade(plan, to_stderr=json_output)
     if not report.installed:
+        # A run uv could not resolve (a cutoff in its settings that excludes even the release
+        # that runs) leaves that release in place. The one-liner's own upgrade asks uv for
+        # @latest, which under the same cutoff moves the install BACK (sweep of #257).
+        kept = report.version is not None and install_route.same_version(
+            report.version, plan.current
+        )
+        then = (
+            f"aisquare {plan.current} is still installed. Run it again by hand: {plan.command}"
+            if kept
+            else _fallback(plan)
+        )
         fail(
-            f"the upgrade failed: {report.problem} (its output is above). {_fallback(plan)}",
+            f"the upgrade failed: {report.problem} (its output is above). {then}",
             error="upgrade_failed",
             hint=plan.command,
             detail=report.problem,
         )
     if not report.upgraded:
-        # Landed on an older release: the same command would land there again, so the
-        # way out is the one back to the release that ran.
-        back = report.way_back
-        then = f"Go back to {plan.current} with: {back}" if back else _fallback(plan)
         fail(
-            f"the upgrade could not be confirmed: {report.problem}. {then}",
+            f"the upgrade could not be confirmed: {report.problem}. {_fallback(plan)}",
             error="upgrade_not_confirmed",
-            hint=back or plan.command,
+            hint=plan.command,
             detail=report.problem,
         )
     _emit_report(report)

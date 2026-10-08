@@ -463,8 +463,8 @@ def _uv_route(tmp_path: Path, receipt: str, **facts: Any) -> install_route.Insta
 def test_the_command_restates_the_receipt_and_replaces_the_pin(tmp_path: Path) -> None:
     route = _uv_route(tmp_path, _receipt(_OURS_PINNED, _TIKTOKEN))
 
-    latest = install_route.upgrade_argv(route)
-    pinned = install_route.upgrade_argv(route, "0.9.1")
+    latest = install_route.upgrade_argv(route, current="0.9.0")
+    pinned = install_route.upgrade_argv(route, "0.9.1", current="0.9.0")
 
     assert latest == [
         "uv",
@@ -475,10 +475,39 @@ def test_the_command_restates_the_receipt_and_replaces_the_pin(tmp_path: Path) -
         "3.14",
         "--with",
         "tiktoken",
-        "aisquare-cli[serve]@latest",
+        "--refresh-package",
+        "aisquare-cli",
+        "aisquare-cli[serve]>=0.9.0",
     ]
     assert pinned[-1] == "aisquare-cli[serve]@0.9.1"
     assert not any("==0.6.0" in part for part in latest + pinned), "the old pin must go"
+
+
+@pytest.mark.parametrize(
+    ("current", "spec"),
+    [
+        ("0.8.0", "aisquare-cli>=0.8.0"),
+        ("1.0.0rc1", "aisquare-cli>=1.0.0rc1"),
+        ("0.8.1.dev3+g1a2b3c", "aisquare-cli>=0.8.1.dev3"),
+        ("not-a-version", "aisquare-cli@latest"),
+    ],
+    ids=["release", "pre-release", "local-label", "no-version"],
+)
+def test_the_latest_is_asked_for_no_older_than_the_running_release(
+    tmp_path: Path, current: str, spec: str
+) -> None:
+    """With `@latest`, a cutoff in uv's settings (uv.toml, UV_EXCLUDE_NEWER) or an index that
+    is behind took uv to a release OLDER than the one running, which replaced it; the way back
+    failed under the same cutoff (measured, uv 0.12.19; sweep of #257). Asked for the running
+    release or newer, uv fails to resolve instead, before it touches the environment
+    (measured). The refresh is the one `@latest` implied. `>=` takes no local label."""
+    route = _uv_route(tmp_path, _receipt('{ name = "aisquare-cli" }'))
+
+    argv = install_route.upgrade_argv(route, current=current)
+
+    assert argv[-1] == spec, argv
+    floored = spec != "aisquare-cli@latest"
+    assert (argv[-3:-1] == ["--refresh-package", "aisquare-cli"]) is floored, argv
 
 
 def test_with_requirements_keep_their_specifier_marker_and_extras(tmp_path: Path) -> None:
@@ -492,11 +521,11 @@ def test_with_requirements_keep_their_specifier_marker_and_extras(tmp_path: Path
         ),
     )
 
-    argv = install_route.upgrade_argv(route)
+    argv = install_route.upgrade_argv(route, current="0.9.0")
 
     withs = [argv[i + 1] for i, part in enumerate(argv) if part == "--with"]
     assert withs == ["tiktoken>=0.7", "truststore; sys_platform == 'linux'", "rich[jupyter]"]
-    assert argv[-1] == "aisquare-cli@latest", "no extras recorded, none invented"
+    assert argv[-1] == "aisquare-cli>=0.9.0", "no extras recorded, none invented"
 
 
 def test_a_receipt_without_a_python_restates_the_running_one(tmp_path: Path) -> None:
@@ -755,9 +784,13 @@ def test_a_command_printed_on_windows_pastes_into_cmd_and_powershell(
         '{ name = "rich", specifier = "<15" }',
         tail='\n[tool.options]\nindex-url = "https://x.example/simple?project=a&token=b"\n',
     )
-    argv = install_route.upgrade_argv(_uv_route(tmp_path / "w", receipt, platform="win32"))
+    argv = install_route.upgrade_argv(
+        _uv_route(tmp_path / "w", receipt, platform="win32"), current="0.8.0"
+    )
     plain = install_route.upgrade_argv(
-        _uv_route(tmp_path / "p", _receipt(_OURS_PINNED, _TIKTOKEN), platform="win32")
+        _uv_route(tmp_path / "p", _receipt(_OURS_PINNED, _TIKTOKEN), platform="win32"),
+        "0.8.1",
+        current="0.8.0",
     )
     with monkeypatch.context() as windows:
         windows.setattr(sys, "platform", "win32")
@@ -770,17 +803,15 @@ def test_a_command_printed_on_windows_pastes_into_cmd_and_powershell(
     assert line == (
         'uv tool install --force --python 3.14 --with "tiktoken>=0.7" --with "rich<15" '
         '--index-url "https://x.example/simple?project=a&token=b" '
-        '"aisquare-cli[mcp,serve]@latest"'
+        '--refresh-package aisquare-cli "aisquare-cli[mcp,serve]>=0.8.0"'
     ), line
     outside_quotes = re.sub(r'"[^"]*"', "", line)
     assert not re.search(r"[<>|&^,;]", outside_quotes), outside_quotes
-    assert (
-        bare == "uv tool install --force --python 3.14 --with tiktoken aisquare-cli[serve]@latest"
-    )
+    assert bare == "uv tool install --force --python 3.14 --with tiktoken aisquare-cli[serve]@0.8.1"
     assert posix_line == (
         "uv tool install --force --python 3.14 --with 'tiktoken>=0.7' --with 'rich<15' "
         "--index-url 'https://x.example/simple?project=a&token=b' "
-        "'aisquare-cli[mcp,serve]@latest'"
+        "--refresh-package aisquare-cli 'aisquare-cli[mcp,serve]>=0.8.0'"
     ), "control: POSIX keeps shlex's quoting"
 
 
@@ -1222,7 +1253,7 @@ def test_json_without_yes_prints_the_plan_and_changes_nothing(
     plan = _one_object(result.stdout)
     assert plan["dry_run"] is True
     assert plan["update_available"] is (latest == "0.8.1"), plan
-    assert plan["argv"][-1] == "aisquare-cli[serve]@latest"
+    assert plan["argv"][-1] == "aisquare-cli[serve]>=0.8.0"
     assert machine.installs == []
 
 
@@ -1622,7 +1653,9 @@ def test_yes_runs_the_restated_command_checks_the_version_and_refreshes_the_hook
         "3.14",
         "--with",
         "tiktoken",
-        "aisquare-cli[serve]@latest",
+        "--refresh-package",
+        "aisquare-cli",
+        "aisquare-cli[serve]>=0.9.0",
     ]
     assert env["UV_TOOL_DIR"] == str(tool.prefix.parent)
     assert to_stderr is False, "a human sees uv's own output as it happens"
@@ -1672,7 +1705,7 @@ def test_with_pypi_unreachable_an_unchanged_version_is_the_newest_the_index_has(
     result = runner.invoke(app, ["upgrade", "--yes"])
 
     assert result.exit_code == 0, result.output
-    assert machine.installs[0][0][-1] == "aisquare-cli[serve]@latest"
+    assert machine.installs[0][0][-1] == "aisquare-cli[serve]>=0.9.0"
     assert "is the newest release your package index serves" in result.stdout
 
 
@@ -1693,18 +1726,40 @@ def test_a_pin_is_confirmed_against_the_pin_and_names_both_on_a_mismatch(
     assert "0.7.0 was asked for, but the new install reports 0.9.0" in mismatch.stderr
 
 
-def test_a_failing_installer_names_the_fallback_and_checks_nothing(
-    runner: CliRunner, tool: Tool, machine: Machine
+@pytest.mark.parametrize(
+    "answers", ["0.9.0", "0.9.1", None], ids=["the-release-that-ran", "another", "nothing"]
+)
+def test_a_failed_install_offers_a_reinstall_only_when_the_release_that_ran_is_gone(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    answers: str | None,
 ) -> None:
+    """uv resolves before it replaces anything (measured, uv 0.12.19), and the upgrade asks
+    for the running release or newer, so a cutoff in uv's settings that excludes even that
+    release fails with the install as it was. The advice was a reinstall from nothing, whose
+    own `@latest` takes the same cutoff back to an older release (sweep of #257). Asked its
+    version, only an install that no longer answers as the release that ran gets it."""
     machine.installer_exit = 2
+    if answers is None:
+        monkeypatch.setattr(
+            install_route, "run_captured", lambda argv, *, timeout: Captured(None, error="gone")
+        )
+    else:
+        machine.new_version = answers
 
-    result = runner.invoke(app, ["--json", "upgrade", "--yes"])
+    human = runner.invoke(app, ["upgrade", "--yes"])
+    error = _one_object(runner.invoke(app, ["--json", "upgrade", "--yes"]).stdout)
 
-    assert result.exit_code == 1
-    error = _one_object(result.stdout)
-    assert error["error"] == "upgrade_failed"
-    assert error["hint"].startswith("uv tool install --force")
-    assert machine.captured == [], "no version check and no hook refresh after a failed install"
+    command = install_route.command_line(machine.installs[0][0])
+    kept = answers == "0.9.0"
+    assert human.exit_code == 1
+    assert f"Run it again by hand: {command}" in human.stderr, human.stderr
+    assert ("aisquare 0.9.0 is still installed" in human.stderr) is kept, human.stderr
+    assert (install_route.INSTALLER_ONE_LINER in human.stderr) is not kept, human.stderr
+    assert error["error"] == "upgrade_failed" and error["hint"] == command, error
+    assert machine.connects() == [], "no hook refresh after a failed install"
 
 
 def test_nothing_runs_when_pypi_has_nothing_newer(
@@ -1736,7 +1791,7 @@ def test_a_build_ahead_of_pypi_is_not_moved_back_without_a_pin(
 @pytest.mark.parametrize(
     "index", [None, "https://mirror.example/simple"], ids=["pypi", "own-index"]
 )
-def test_a_reinstall_that_lands_on_an_older_release_is_no_upgrade(
+def test_the_upgrade_asks_for_nothing_older_and_an_older_answer_still_fails(
     runner: CliRunner,
     tool: Tool,
     machine: Machine,
@@ -1745,10 +1800,11 @@ def test_a_reinstall_that_lands_on_an_older_release_is_no_upgrade(
     index: str | None,
 ) -> None:
     """A cooldown added to uv.toml after the install, which the receipt therefore does not
-    record, or an index that is behind, lands uv's @latest on an OLDER release with exit 0
-    (measured, uv 0.12.19). That was "✓ aisquare 0.8.0 (was 0.8.1)", exit 0 and asq
-    reopened, maybe on a release with no `upgrade` of its own (sweep of #257). It fails,
-    names the way back, and asq stays shut."""
+    record, or an index that is behind, took uv's @latest to an OLDER release with exit 0,
+    and the way back printed then failed under the same cutoff (measured, uv 0.12.19; sweep
+    of #257). The command asks for the running release or newer, which uv refuses to
+    resolve before it replaces anything. A new install that still reports an older release
+    is no upgrade: no ✓, no hook refresh, and asq stays shut."""
     monkeypatch.setattr(lifecycle, "__version__", "0.8.1")
     machine.latest = LatestRelease("0.8.2")
     machine.new_version = "0.8.0"
@@ -1758,9 +1814,6 @@ def test_a_reinstall_that_lands_on_an_older_release_is_no_upgrade(
             _receipt(_OURS_PINNED, _TIKTOKEN, tail=options), encoding="utf-8"
         )
     _record(_hooked(tmp_path / "claude", tool.script))
-    back = install_route.command_line(
-        install_route.upgrade_argv(install_route.classify(tool.facts), "0.8.1")
-    )
     prompts: list[str] = []
 
     def enter(prompt: str = "") -> str:
@@ -1773,13 +1826,16 @@ def test_a_reinstall_that_lands_on_an_older_release_is_no_upgrade(
     human = runner.invoke(app, ["upgrade", "--yes", "--reopen"])
     error = _one_object(runner.invoke(app, ["--json", "upgrade", "--yes"]).stdout)
 
+    argv = machine.installs[0][0]
+    assert argv[-3:] == ["--refresh-package", "aisquare-cli", "aisquare-cli[serve]>=0.8.1"]
+    assert index is None or index in argv, argv
     assert human.exit_code == 1, human.output
     assert "the new install reports 0.8.0, which is older than 0.8.1" in human.stderr
-    assert f"Go back to 0.8.1 with: {back}" in human.stderr, human.stderr
-    assert "aisquare-cli[serve]@0.8.1" in back and (index is None or index in back), back
+    assert "Go back" not in human.stderr, "no way back that the same cutoff refuses"
     assert "✓" not in human.stdout and prompts == [], "no success, and asq is not reopened"
     assert machine.connects() == [], "no hook refresh for a release that moved back"
-    assert error["error"] == "upgrade_not_confirmed" and error["hint"] == back, error
+    assert error["error"] == "upgrade_not_confirmed", error
+    assert error["hint"] == install_route.command_line(argv), error
 
 
 def test_a_version_that_is_not_a_version_is_refused_before_anything(
@@ -2059,7 +2115,69 @@ def test_an_install_under_a_uv_cutoff_does_not_take_pypis_word_for_latest(
     assert f"✓ aisquare 0.8.0 is the newest release your uv cutoff allows ({restated})" in (
         run.stdout
     )
-    assert machine.installs[0][0][-3:] == [*restated.split(), "aisquare-cli[serve]@latest"]
+    assert machine.installs[0][0][-5:] == [
+        *restated.split(),
+        "--refresh-package",
+        "aisquare-cli",
+        "aisquare-cli[serve]>=0.8.0",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("tail", "newest", "held"),
+    [
+        (_COOLDOWN, "your uv cutoff allows (--exclude-newer P7D)", "your uv cutoff allows"),
+        (
+            _FIXED_CUTOFF,
+            "your uv cutoff allows (--exclude-newer 2026-10-01T00:00:00Z)",
+            "your uv cutoff allows",
+        ),
+        (
+            '\n[tool.options]\nindex-url = "https://mirror.example/simple"\n',
+            "your package index serves",
+            "your package index served",
+        ),
+    ],
+    ids=["cooldown", "fixed-date", "index"],
+)
+def test_an_unchanged_version_under_uvs_own_settings_is_the_newest_they_allow(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    tail: str,
+    newest: str,
+    held: str,
+) -> None:
+    """A cutoff or an index set in uv's own settings (uv.toml, UV_EXCLUDE_NEWER) is in no
+    receipt the plan can read, so PyPI's newer release was the target, and the version uv
+    rightly left as it was failed as §3.9.1's silent no-op (sweep of #257). uv records those
+    settings in the receipt it writes (measured, uv 0.12.19), which is read after the
+    install."""
+    machine.new_version = "0.9.0"  # PyPI says 0.9.1; uv's settings allow nothing newer
+    plain = _receipt(_OURS_PINNED, _TIKTOKEN)
+    installer = install_route.run_installer
+
+    def install_under_settings(argv: Any, *, env: Any, to_stderr: bool) -> int:
+        written = '{ name = "aisquare-cli", extras = ["serve"], specifier = ">=0.9.0" }'
+        (tool.prefix / install_route.RECEIPT_NAME).write_text(
+            _receipt(written, _TIKTOKEN, tail=tail), encoding="utf-8"
+        )
+        return installer(argv, env=env, to_stderr=to_stderr)
+
+    monkeypatch.setattr(install_route, "run_installer", install_under_settings)
+
+    result = runner.invoke(app, ["upgrade", "--yes"])
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(plain, encoding="utf-8")
+    report = _one_object(runner.invoke(app, ["--json", "upgrade", "--yes"]).stdout)
+
+    assert machine.lookups == 2, "PyPI was asked: the plan's receipt named neither"
+    assert result.exit_code == 0, result.output
+    assert f"✓ aisquare 0.9.0 is the newest release {newest}" in result.stdout, result.stdout
+    assert f"· PyPI's latest is 0.9.1; {held} 0.9.0" in result.stdout, result.stdout
+    assert "§3.9.1" not in result.output
+    assert report["upgraded"] is True and report["version"] == "0.9.0", report
+    assert f"PyPI's latest is 0.9.1; {held} 0.9.0" in report["notes"], report
 
 
 def test_check_with_a_pin_advises_the_pin(runner: CliRunner, tool: Tool, machine: Machine) -> None:

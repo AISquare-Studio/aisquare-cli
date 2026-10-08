@@ -764,11 +764,21 @@ def runs_from_uv_cache() -> bool:
 # --- what upgrades it -------------------------------------------------------------------
 
 
-def _uv_spec(route: InstallRoute, target: str | None) -> list[str]:
-    """The package argument(s) for ``uv tool install``: ``name[extras]@latest`` or a source."""
+def _uv_spec(route: InstallRoute, target: str | None, current: str) -> list[str]:
+    """The package argument(s) for ``uv tool install``: ``name[extras]@target``, the latest
+    release no older than ``current`` (``name[extras]>=current``), or a source."""
     receipt = route.receipt or UvReceipt()
     extras = f"[{','.join(receipt.extras)}]" if receipt.extras else ""
     if receipt.source is None:
+        floor = _floor(current) if target is None else None
+        if floor is not None:
+            # Not `@latest`: under a cutoff in uv's own settings (uv.toml, UV_EXCLUDE_NEWER),
+            # or from an index that is behind, uv resolved it BELOW the running release and
+            # replaced the install with that, and the way back failed under the same cutoff
+            # (sweep of #257). A floor fails to resolve instead, before uv touches the
+            # environment (measured, uv 0.12.19). The refresh is the one `@latest` implied,
+            # so a release published minutes ago is seen.
+            return ["--refresh-package", DISTRIBUTION, f"{DISTRIBUTION}{extras}>={floor}"]
         return [f"{DISTRIBUTION}{extras}@{target or 'latest'}"]
     kind, where = receipt.source
     if kind == "editable":
@@ -804,14 +814,21 @@ def _git_reference(recorded: str, subdirectory: str | None) -> str:
     return base + (f"#subdirectory={inner}" if inner else "")
 
 
-def _uv_install_argv(route: InstallRoute, target: str | None) -> list[str]:
+def _floor(version: str) -> str | None:
+    """``version`` as the oldest release an upgrade may land on, or ``None`` when it is not a
+    version (the upgrade then asks for ``@latest``). A local label goes: ``>=`` takes none."""
+    public = version_argument(version)
+    return public.split("+", 1)[0] if public is not None else None
+
+
+def _uv_install_argv(route: InstallRoute, target: str | None, current: str) -> list[str]:
     receipt = route.receipt or UvReceipt()
     argv = ["uv", "tool", "install", "--force", "--python"]
     argv.append(receipt.python or route.facts.python_version)
     for requirement in receipt.withs:
         argv.extend(["--with", requirement])
     argv.extend(receipt.options)
-    argv.extend(_uv_spec(route, target))
+    argv.extend(_uv_spec(route, target, current))
     return argv
 
 
@@ -828,11 +845,15 @@ def _pip_argv(route: InstallRoute, verb: str, *arguments: str) -> list[str]:
     return [str(route.facts.executable), "-m", "pip", verb, *arguments]
 
 
-def upgrade_argv(route: InstallRoute, target: str | None = None) -> list[str]:
-    """The command that moves this install to ``target`` (``None`` = the latest release)."""
+def upgrade_argv(
+    route: InstallRoute, target: str | None = None, *, current: str | None = None
+) -> list[str]:
+    """The command that moves this install to ``target``; with ``None``, to the latest
+    release, and for a uv tool never to one older than ``current`` (the running version
+    unless given): a move back is only made by asking for it with ``--version``."""
     pinned = f"{DISTRIBUTION}=={target}" if target else DISTRIBUTION
     if route.receipt is not None:
-        return _uv_install_argv(route, target)
+        return _uv_install_argv(route, target, __version__ if current is None else current)
     if route.kind == EDITABLE:
         # The reinstall, not only `git pull`: hatchling writes the version and the
         # dependencies into the install's metadata, so a pulled checkout still

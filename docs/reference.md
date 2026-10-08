@@ -13,7 +13,7 @@ removes exactly them):
 | `Stop` | mark the session waiting; renew its task leases |
 | `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |
 | `SessionEnd` | release claims, mark the session gone, final distill |
-| `StopFailure` | mark the session limited when its turn ends on an API error (a usage limit above all), and when the limit lifts |
+| `StopFailure` | the turn ended on an API error: a usage limit (`rate_limit`) marks the session `limited` with its reset time and wakes the manager, and with `[accounts] on_limit = "switch"` a fleet agent is handed to another account ([accounts](orchestration.md#several-accounts-one-team)); any other error marks it `waiting`, with a feed line naming the error |
 
 Every hook is **fail-open**: any error is swallowed and the session
 continues untouched. State lives in one SQLite database (WAL mode,

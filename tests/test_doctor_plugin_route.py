@@ -192,6 +192,44 @@ def test_a_repo_scope_plugin_connects_the_sessions_that_load_it(
 
 
 @posix_route
+@pytest.mark.parametrize("asked_from", ["the repository", "elsewhere"])
+def test_partial_hooks_beside_a_repo_scope_plugin_are_judged_on_themselves(
+    runner: CliRunner,
+    claude: Path,
+    tmp_path: Path,
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    asked_from: str,
+) -> None:
+    """Five of the six hooks, as an install from before StopFailure leaves them, beside a
+    project-scope plugin: inside its repository the shared check counted the plugin, so the
+    doctor said "all lifecycle hooks installed" with no Connect, and `agents status` gave
+    the directory `hooks_installed`, while every other repository ran without StopFailure
+    (review of #257). A
+    directory with hooks of its own is judged on them, in the repository as outside it."""
+    repo = _repo_plugin(claude, tmp_path / "repo", "project")
+    _connect(runner)
+    settings_path = claude / "settings.json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert settings["hooks"].pop("StopFailure"), "the sixth hook was there to drop"
+    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    monkeypatch.chdir(repo if asked_from == "the repository" else work_dir)
+
+    listed = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
+    partial = diagnostics._check_claude_code()
+    connected = agents_service.claude_code_connected()
+    _connect(runner)
+    completed = diagnostics._check_claude_code()
+
+    hooked = {site["config_dir"]: site["hooks_installed"] for site in listed[0]["sites"]}
+    assert connected is False and hooked.get(str(claude)) is False, listed
+    assert partial.status is CheckStatus.warn, partial
+    assert "all lifecycle hooks installed" not in partial.detail, partial
+    assert _buttons(partial) == [_CONNECT], partial
+    assert completed.status is CheckStatus.ok, f"control: Connect completes them: {completed}"
+
+
+@posix_route
 def test_the_first_run_probe_answers_for_the_folder_the_fleet_starts_in(
     claude: Path, tmp_path: Path, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

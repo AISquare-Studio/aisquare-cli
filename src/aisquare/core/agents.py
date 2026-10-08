@@ -476,9 +476,9 @@ def claude_code_connected(config_dir: Path | None = None, *, cwd: Path | None = 
     Two routes, in a directory whose ``settings.json`` does not switch hooks off:
     every lifecycle hook ``agents connect`` installs is in that file, or the
     aisquare Claude Code plugin is installed and enabled there
-    (:func:`claude_plugin`), or installed at project or local scope for the
-    repository a session started in ``cwd`` loads it from
-    (:func:`claude_repo_plugin_here`). The switch comes first because it
+    (:func:`claude_plugin`), or, where that file has none of our hooks, installed at
+    project or local scope for the repository a session started in ``cwd`` loads it
+    from (:func:`claude_repo_plugin_here`). The switch comes first because it
     silences every route, the plugin's included. Never raises: everything it
     reads goes through :func:`read_json`.
     """
@@ -490,6 +490,12 @@ def claude_code_connected(config_dir: Path | None = None, *, cwd: Path | None = 
         return False
     if claude_plugin(config_dir) is not None:
         return True
+    if hook_commands("claude-code", config_dir):
+        # Its own hooks, partial ones included, are what every other repository runs on;
+        # a repository's plugin covers its repository alone (as in `hook_site_health`).
+        # Counted, five of six hooks read "all lifecycle hooks installed" there, with no
+        # Connect to add the sixth (review of #257).
+        return False
     return claude_repo_plugin_here(config_dir, cwd) is not None
 
 

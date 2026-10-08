@@ -719,13 +719,21 @@ def _check_repomix() -> DoctorCheck:
 
 
 def _check_tiktoken() -> DoctorCheck:
-    if _has_module("tiktoken"):
-        return _ok("tiktoken", "exact snapshot token counts enabled")
+    installed = _has_module("tiktoken")
     if not snapshot_core.can_pack():
-        # Only the snapshot counts tokens, so with snapshots off there is nothing
-        # for it to sharpen -- an amber line here was a fix for a feature that is
-        # not running, on exactly the machines that chose not to run it.
-        return _ok("tiktoken", "off — only snapshot token counts use it, and snapshots are off")
+        # Only packing a snapshot counts tokens, so where nothing can pack there is
+        # nothing for it to sharpen, installed or not. An amber line here was a fix
+        # for a feature that is not running, on exactly the machines that chose not
+        # to run it; "enabled" was a claim about one, and the one-liner always adds
+        # tiktoken. It says packing, not snapshots: a pack made before Node went is
+        # still what agents get, and the snapshot row says so (review of #257).
+        return _ok(
+            "tiktoken",
+            ("installed, but unused" if installed else "off")
+            + " — only packing a codebase snapshot uses it, and nothing can pack here",
+        )
+    if installed:
+        return _ok("tiktoken", "exact snapshot token counts enabled")
     # `pipx inject` takes the name of an INSTALLED PIPX ENVIRONMENT, which is
     # this distribution -- so `pipx inject aisquare tiktoken` failed on every
     # machine that had followed the documented install, naming an environment

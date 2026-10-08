@@ -145,7 +145,7 @@ def test_doctor_without_node_reads_snapshots_off_with_nothing_to_click(runner: C
         assert rows[name].fix is None, rows[name]
     assert rows["repomix"].detail == snapshot_core.OFF_DETAIL
     assert rows["snapshot"].detail == snapshot_core.OFF_DETAIL
-    assert "snapshots are off" in rows["tiktoken"].detail
+    assert "nothing can pack here" in rows["tiktoken"].detail
     assert _onboard_buttons(checks) == []
 
 
@@ -304,3 +304,26 @@ def test_a_pack_that_failed_says_why_and_sends_nobody_to_the_doctor(
     assert kept.exit_code == 0, kept.output
     assert f"snapshot: not refreshed — the pack failed: {_NPM_REASON}. " in kept.stdout
     assert "Agents still get the last pack" in kept.stdout
+
+
+@pytest.mark.usefixtures("no_node")
+def test_an_installed_tiktoken_is_not_called_enabled_where_nothing_can_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one-liner always adds ``--with tiktoken``, so a machine without Node has it.
+
+    Its row said "exact snapshot token counts enabled" between a repomix row and a
+    snapshot row that both said off (review of #257).
+    """
+    monkeypatch.setattr(
+        diagnostics, "_has_module", lambda name: name == "tiktoken" or _REAL_HAS_MODULE(name)
+    )
+    row = diagnostics._check_tiktoken()
+    monkeypatch.setattr(shutil, "which", _which("/opt/node/bin"))
+    control = diagnostics._check_tiktoken()
+
+    assert row.status is CheckStatus.ok and row.fix is None
+    assert "enabled" not in row.detail
+    assert row.detail.startswith("installed, but unused — "), row.detail
+    assert "nothing can pack here" in row.detail
+    assert control.detail == "exact snapshot token counts enabled"

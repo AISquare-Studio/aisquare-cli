@@ -356,11 +356,29 @@ def test_it_runs_the_cli_with_the_event_and_the_payload_untouched(
 
 
 @posix_only
-def test_it_stands_down_where_agents_connect_installed_the_hooks(machine: Machine) -> None:
-    """Both routes on one machine run each hook once; disconnect hands them to the plugin."""
+@pytest.mark.parametrize("form", ["console-script", "python-m"])
+def test_it_stands_down_where_agents_connect_installed_the_hooks(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, form: str
+) -> None:
+    """Both routes on one machine run each hook once; disconnect hands them to the plugin.
+
+    The hooks name a program this test chooses, in each shape connect writes. Left to
+    the host, they named the first `aisquare` on its PATH, and one whose Python is gone
+    made the launcher run beside them, so the test failed (sweep of #257)."""
     claude = machine.home / ".claude"
     machine.fake("aisquare")
+    if form == "console-script":
+        program = machine.home / "venv" / "bin" / "aisquare"
+        program.parent.mkdir(parents=True)
+        program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        program.chmod(0o755)
+        monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(program)])
+    else:  # no aisquare runs connect or is on PATH: this interpreter's -P -m aisquare
+        monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(machine.home / "pytest")])
+        monkeypatch.setenv("PATH", str(machine.tools))
     assert agent_core.install_hooks("claude-code", claude)
+    written = agent_core.hook_commands("claude-code", claude)
+    assert all((" -P -m aisquare " in c) == (form == "python-m") for c in written), written
 
     quiet = {subcommand: machine.run(subcommand) for subcommand in _SUBCOMMANDS}
 

@@ -847,7 +847,8 @@ async function paneCursor() {
 }
 
 /* Stop, on an agent that shows a prompt: the machine refuses in its API's words, the
- * sheet says why in its own, and the next tap sends dismiss_dialog. */
+ * sheet says why in its own and adds the dismissal to what Stop will do, and the next tap
+ * sends dismiss_dialog. */
 async function stopAtAPrompt() {
   const refused = "coder-1 is showing a prompt; stopping would answer it — send dismiss_dialog: true to press Esc (No) first";
   const stopped = { agent: { id: "agt_1", label: "coder-1" }, claims_released: [], release_failed: null, project: PROJECT };
@@ -863,9 +864,10 @@ async function stopAtAPrompt() {
   click(buttonNamed(page.run("UI.sheet"), "Stop"));
   await settle();
   const said = find(page.run("UI.sheet"), (node) => node.className === "status").textContent;
+  const lead = find(page.run("UI.sheet"), (node) => node.className === "lead").textContent;
   click(buttonNamed(page.run("UI.sheet"), "Press Esc (No) first"));
   await settle();
-  return { said, dismissed: page.sent("api/agent/stop").map((body) => body.dismiss_dialog === true), toast: page.toast() };
+  return { said, lead, dismissed: page.sent("api/agent/stop").map((body) => body.dismiss_dialog === true), toast: page.toast() };
 }
 
 /* A pad key refused read_only: writes went off on the machine, and no remote frame has
@@ -2128,6 +2130,99 @@ async function pushScreens() {
   };
 }
 
+/* What each write carries (SPEC §6.3), as the machine received it, its request_id left out:
+ * Send with ⏎ unticked; a note from the Board tab; a Reply on a board question; a card's
+ * Tell; a usage limit card's Switch account; and a Tell refused agent_busy, then sent again
+ * from its sheet. And an agent at its usage limit: its Actions menu, in order. */
+async function writeBodies() {
+  const ok = () => ({ status: 200, json: { ok: true } });
+  const bodies = (page, where) => page.sent(where).map((one) => {
+    const copy = Object.assign({}, one);
+    delete copy.request_id;
+    return copy;
+  });
+  const send = await agentView({ "POST api/send-keys": ok });
+  find(send.main(), (node) => node.tagName === "INPUT" && node.parentNode.textContent === "⏎").checked = false;
+  await typeAndSend(send, "hi");
+  const board = bootPage("#/p/" + PROJECT + "/board", signedIn({ "POST api/note": ok }));
+  await settle();
+  board.acceptSockets();
+  await settle();
+  find(board.main(), (node) => node.tagName === "TEXTAREA").value = "shipping now";
+  find(board.main(), (node) => node.tagName === "SELECT").value = "decision";
+  find(board.main(), (node) => node.tagName === "INPUT").value = "lead-1";
+  click(buttonNamed(board.main(), "Post"));
+  await settle();
+  const feed = async (item, routes) => {
+    const page = bootPage("#/", signedIn(Object.assign({ "GET api/needs": () => ({ status: 200, json: { items: [item] } }) }, routes)));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    return page;
+  };
+  const question = Object.assign({}, ITEM, { kind: "board_question", detail: { text: "Which store?", author: "lead-1" }, answers: [], actions: ["reply"] });
+  const reply = await feed(question, { "POST api/note": ok, "POST api/needs/dismiss": ok });
+  click(buttonNamed(reply.main(), "Reply…"));
+  find(reply.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "Postgres";
+  click(buttonNamed(reply.run("UI.sheet"), "Post"));
+  await settle();
+  const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell"] });
+  const tell = await feed(asked, { "POST api/agent/tell": () => ({ status: 200, json: { label: "coder-1", delivered: false, mode: "prompt", project: PROJECT } }) });
+  click(buttonNamed(tell.main(), "Tell…"));
+  find(tell.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "yes, merge";
+  click(buttonNamed(tell.run("UI.sheet"), "Tell"));
+  await settle();
+  const limited = Object.assign({}, ITEM, { kind: "limited", detail: {}, answers: [], actions: ["switch"] });
+  const switched = await feed(limited, { "POST api/agent/switch": ok });
+  click(buttonNamed(switched.main(), "Switch account…"));
+  click(buttonNamed(switched.run("UI.sheet"), "Switch account"));
+  await settle();
+  const busy = await agentView({
+    "POST api/agent/tell": (body) => (body.mode === "interrupt"
+      ? { status: 200, json: { label: "coder-1", delivered: true, mode: "interrupt", project: PROJECT } }
+      : { status: 409, json: { error: "agent_busy", message: "coder-1 is working: interrupt it to tell it now" } }),
+  });
+  busy.live().frame("fleet", FLEET);
+  await settle();
+  click(buttonNamed(busy.main(), "Actions…"));
+  click(buttonNamed(busy.run("UI.sheet"), "Tell…"));
+  find(busy.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "stop and commit";
+  click(buttonNamed(busy.run("UI.sheet"), "Tell"));
+  await settle();
+  const offered = buttonNamed(busy.run("UI.sheet"), "Interrupt & tell");
+  click(offered);
+  await settle();
+  const menu = await agentView();
+  menu.live().frame("fleet", Object.assign({}, FLEET, { agents: [Object.assign({}, FLEET.agents[0], { state: "limited" })] }));
+  await settle();
+  click(buttonNamed(menu.main(), "Actions…"));
+  return {
+    send: bodies(send, "api/send-keys"),
+    note: bodies(board, "api/note"),
+    reply: bodies(reply, "api/note"),
+    tell: bodies(tell, "api/agent/tell"),
+    switched: bodies(switched, "api/agent/switch"),
+    busy: { offered: !!offered, modes: busy.sent("api/agent/tell").map((body) => body.mode) },
+    limitedMenu: textsOf(menu.run("UI.sheet").querySelectorAll("button.row")),
+  };
+}
+
+/* The key pad and the phone's keyboard never share the screen (SPEC §6.3): the box focused,
+ * then Keys tapped, then the box focused again. After each: whether the pad is open, and
+ * whether the box has the focus. */
+async function padOrKeyboard() {
+  const page = await agentView();
+  const say = find(page.main(), (node) => node.tagName === "TEXTAREA" && node.className === "say");
+  const state = () => [page.main().querySelectorAll("div.pad.open").length === 1, page.run("document.activeElement") === say];
+  say.focus();
+  const steps = [state()];
+  click(buttonNamed(page.main(), "Keys"));
+  steps.push(state());
+  say.focus();
+  steps.push(state());
+  return steps;
+}
+
 /* Cards the machine answers 409 stale (SPEC §6.3, §6.4): a quick answer, the feed's read that
  * follows still listing the card (the machine has not scanned since), then the note's 6 s up
  * and a frame that lists the card still; a Tell from an asked card, nothing waiting on coder-1
@@ -2229,6 +2324,8 @@ async function main() {
     statusStrip: await statusStrip(),
     screensListed: await screensListed(),
     pushScreens: await pushScreens(),
+    writeBodies: await writeBodies(),
+    padOrKeyboard: await padOrKeyboard(),
     staleCards: await staleCards(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");

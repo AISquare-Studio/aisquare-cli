@@ -1223,11 +1223,16 @@ def test_a_stop_refused_at_a_prompt_is_explained_in_the_pages_own_words(
 ) -> None:
     """The sheet showed the machine's sentence, which is written for curl: "send
     dismiss_dialog: true to press Esc (No) first" means nothing on a phone, where the way
-    to say that is the button the sheet offers next."""
+    to say that is the button the sheet offers next. And what Stop will do then says the
+    prompt is dismissed first (SPEC §6.3), as the next tap does it: no test read it."""
     stop = boot_report["stopAtAPrompt"]
     assert stop["said"] == (
         "coder-1 may be showing a prompt that stopping it now would answer. "
         "Press Esc (No) first to dismiss it."
+    )
+    assert stop["lead"] == (
+        "Stop coder-1: /exit, then its window is killed after 5 s. "
+        "Its prompt is dismissed (No) first."
     )
     assert stop["dismissed"] == [False, True]
     assert stop["toast"] == "Stopped coder-1"
@@ -1798,6 +1803,45 @@ def test_notifications_say_where_they_stand_wherever_the_page_offers_them(
         "test": "The machine has no subscription for this device — turn notifications on again.",
     }
     assert push["iphone"].startswith("On iPhone and iPad, notifications need the page on the")
+
+
+def test_each_write_carries_what_the_spec_says_it_sends(boot_report: dict[str, Any]) -> None:
+    """SPEC §6.3's writes, as the machine received them. Send carries the ⏎ toggle; a note
+    and a Reply their project, a Reply the question's author; a card's Tell mode prompt and
+    the card's needs_id; a card's Switch agent_id, confirm and needs_id, the fields the
+    machine's stale and double-run guards stand on. A Tell refused agent_busy offers
+    Interrupt & tell, and an agent at its usage limit has Switch account first. No test
+    read these fields: each could go with every test green, and the machine then refuse
+    the write, post it to another project, or act on a card that no longer needs you."""
+    writes = boot_report["writeBodies"]
+    agent = {"agent": "coder-1", "project": "prj_x"}
+    assert writes["send"] == [{**agent, "text": "hi", "enter": False}]
+    assert writes["note"] == [
+        {"text": "shipping now", "kind": "decision", "project": "prj_x", "to": "lead-1"}
+    ]
+    assert writes["reply"] == [
+        {"text": "Postgres", "kind": "note", "project": "prj_x", "to": "lead-1"}
+    ]
+    card = {"needs_id": "ny_0123456789abcdef", "agent_id": "agt_1"}
+    assert writes["tell"] == [{**agent, "text": "yes, merge", "mode": "prompt", **card}]
+    assert writes["switched"] == [{**agent, "confirm": "coder-1", **card}]
+    assert writes["busy"] == {"offered": True, "modes": ["auto", "interrupt"]}
+    assert writes["limitedMenu"] == [
+        "Switch account…",
+        "Tell…",
+        "Interrupt & tell…",
+        "Stop…",
+        "Restart…",
+    ]
+
+
+def test_the_key_pad_and_the_phones_keyboard_never_share_the_screen(
+    boot_report: dict[str, Any],
+) -> None:
+    """SPEC §6.3: focusing the box closes the pad, and opening the pad takes the focus from
+    the box, so the phone's keyboard goes. Neither had a test. Each step is [the pad is
+    open, the box has the focus]."""
+    assert boot_report["padOrKeyboard"] == [[False, True], [True, False], [False, True]]
 
 
 def test_an_answer_after_its_screen_was_left_neither_lands_on_the_next_nor_goes_unsaid(

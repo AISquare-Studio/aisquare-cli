@@ -2764,6 +2764,8 @@ NOT_UNLOCKED = "no unlocked device for this request — unlock with the passphra
 """401 ``unauthorized``: no cookie, or one whose device is signed out, revoked or expired."""
 WRONG_PASSWORD = "that is not the passphrase"
 """401 ``wrong_password``."""
+NOT_TEXT = "the body holds a lone surrogate (an unpaired \\ud800-\\udfff escape), which is not text"
+"""400 ``invalid`` for a body string no UTF-8 can hold (:meth:`RemoteKit.kit_json_object`)."""
 CRASHED = "the machine hit an error answering that"
 """500 ``internal_error``: what the ledger answers a retry of a request that crashed, in the
 words the page uses for a crash."""
@@ -2775,8 +2777,12 @@ def _error_body(error: str, message: str) -> dict[str, object]:
     The message is always there: the docs promise one, and the page shows it, so a
     refusal without one left the unlock line saying ``not_found``. A message that came
     out empty, the ``str()`` of an exception that holds no text, is the code in words.
+    And a sentence that echoes what a request or the disk held, a name or a path, may
+    hold a lone surrogate, which no response can encode: each is a ``?``, or the
+    refusal would end as a bare 500 in plain text instead.
     """
-    return {"error": error, "message": message or error.replace("_", " ")}
+    said = message or error.replace("_", " ")
+    return {"error": error, "message": said.encode("utf-8", "replace").decode("utf-8")}
 
 
 def _json_error(status: int, error: str, message: str) -> Response:
@@ -3105,7 +3111,11 @@ class RemoteKit:
         pins it), so every route refuses a malformed one the same way: 400 ``invalid``.
         That includes a body nested deeper than ``json`` recurses into: it raises
         ``RecursionError``, not ``ValueError`` (from about 1 000 levels on 3.11), and
-        anyone holding only the URL can post one to ``unlock``.
+        anyone holding only the URL can post one to ``unlock``. And a string holding a
+        lone surrogate, which ``json`` reads from a ``\\ud800`` escape and no UTF-8
+        can hold: a refusal that echoed one (a stop's ``confirm=<label>``, a path
+        ``project/add`` would not take) could not be encoded, and answered a bare 500
+        in plain text that the ledger kept as a crash (sweep of #243).
         """
         from starlette.requests import ClientDisconnect
 
@@ -3121,6 +3131,12 @@ class RemoteKit:
             raise RequestError(400, "invalid", "the body must be a JSON object") from None
         if not isinstance(body, dict):
             raise RequestError(400, "invalid", "the body must be a JSON object")
+        try:
+            json.dumps(body, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError:
+            raise RequestError(400, "invalid", NOT_TEXT) from None
+        except (ValueError, RecursionError):
+            raise RequestError(400, "invalid", "the body must be a JSON object") from None
         return body
 
     def kit_refuse(

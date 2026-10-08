@@ -509,29 +509,54 @@ def _hook_sites(agent: AgentInfo) -> str:
     """One cell summarising where an agent's hooks live and whether they're healthy.
 
     Parallel installs each own a config dir, so a bare yes/no would hide a dir
-    whose hooks went missing — name the broken ones explicitly.
+    whose hooks went missing — name the broken ones explicitly. A dir whose
+    settings switch every hook off is named as that: "missing" pointed at Connect,
+    which cannot change it (review of #257).
     """
     if not agent.sites:
         return "—"
-    broken = [site.config_dir for site in agent.sites if not site.hooks_installed]
-    if not broken:
+    off = [site.config_dir for site in agent.sites if site.hooks_off is not None]
+    missing = [
+        site.config_dir
+        for site in agent.sites
+        if not site.hooks_installed and site.hooks_off is None
+    ]
+    if not off and not missing:
         if len(agent.sites) == 1:
             return str(agent.sites[0].config_dir)
         return f"{len(agent.sites)} dirs, all ok"
-    listed = ", ".join(str(path) for path in broken)
-    return f"{len(agent.sites) - len(broken)}/{len(agent.sites)} ok — missing in {listed}"
+    clauses = [
+        f"{what} in {', '.join(str(path) for path in dirs)}"
+        for what, dirs in (("missing", missing), ("switched off", off))
+        if dirs
+    ]
+    ok = len(agent.sites) - len(off) - len(missing)
+    return f"{ok}/{len(agent.sites)} ok — {'; '.join(clauses)}"
 
 
 def emit_connected(connection: AgentConnection) -> None:
-    """Confirm an agent connection: hook install + context ingested."""
+    """Confirm an agent connection: hook install + context ingested.
+
+    Hooks installed where the settings switch every hook off are not a connection:
+    Claude Code runs none of them until that key goes, so the line says so and
+    names the file (review of #257).
+    """
     if get_state().json_output:
         typer.echo(connection.model_dump_json())
         return
     # Always installed: `connect` refuses rather than return a connection without hooks.
     noun = "entry" if connection.imported == 1 else "entries"
-    stdout_console().print(
-        f"✓ connected {connection.name} — hooks installed; imported {connection.imported} {noun}"
-    )
+    imported = f"imported {connection.imported} {noun}"
+    if connection.hooks_off is not None:
+        stdout_console().print(
+            f"hooks installed for {connection.name}, but switched off — {imported}"
+        )
+        stderr_console().print(
+            f'note: {connection.hooks_off} sets "disableAllHooks": true, so Claude Code runs '
+            "none of its hooks, aisquare's included — remove that key to turn them on"
+        )
+        return
+    stdout_console().print(f"✓ connected {connection.name} — hooks installed; {imported}")
 
 
 def emit_onboard(report: OnboardReport) -> None:

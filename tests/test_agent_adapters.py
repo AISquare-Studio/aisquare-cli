@@ -738,6 +738,51 @@ def test_only_a_literal_true_switches_hooks_off(claude_home: Path) -> None:
     assert answers == {"True": True, "False": False, "'true'": False, "1": False, "None": False}
 
 
+def test_agents_list_status_connect_and_init_name_hooks_switched_off(
+    runner: CliRunner, claude_home: Path
+) -> None:
+    """`agents list` and `agents status` read a switched-off directory as "missing in", which
+    points at Connect; Connect said "✓ connected" and changed nothing, so connect then list
+    went round in a loop, and `init` said "Connected" too. Each now names the switch, and the
+    hooks are still installed, so they run once the key goes (review of #257)."""
+    settings_path = claude_home / "settings.json"
+    settings_path.write_text('{"disableAllHooks": true, "model": "opus"}', encoding="utf-8")
+    work = claude_home.parent / ".claude-work"
+    work.mkdir()
+    _connect(runner, work)
+    (work / "settings.json").write_text("{}", encoding="utf-8")  # recorded, hooks gone: missing
+    wide = {"COLUMNS": "1000"}
+
+    connect = runner.invoke(app, ["agents", "connect", "claude-code"])
+    again = json.loads(runner.invoke(app, ["--json", "agents", "connect", "claude-code"]).stdout)
+    listed = runner.invoke(app, ["agents", "list"], env=wide).stdout
+    status = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
+    init = runner.invoke(app, ["--json", "init", "--yes", "--no-onboard", "--agent", "claude-code"])
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    del settings["disableAllHooks"]
+    settings_path.write_text(json.dumps(settings), encoding="utf-8")
+    back_on = runner.invoke(app, ["agents", "list"], env=wide).stdout
+
+    assert connect.exit_code == 0, connect.output
+    assert connect.stdout.startswith("hooks installed for claude-code, but switched off"), connect
+    assert f'note: {settings_path} sets "disableAllHooks": true' in connect.stderr, connect.stderr
+    assert (again["hooks_installed"], again["hooks_off"]) == (True, str(settings_path)), again
+    assert f"0/2 ok — missing in {work}; switched off in {claude_home}" in listed, listed
+    sites = {site["config_dir"]: site for site in status[0]["sites"]}
+    assert sites[str(claude_home)] == {
+        "config_dir": str(claude_home),
+        "hooks_installed": False,
+        "hooks_off": str(settings_path),
+    }
+    assert (sites[str(work)]["hooks_installed"], sites[str(work)]["hooks_off"]) == (False, None)
+    notes = " ".join(json.loads(init.stdout)["notes"])
+    assert f'{settings_path} sets "disableAllHooks": true' in notes, notes
+    assert "Connected claude-code" not in notes, notes
+    assert f"1/2 ok — missing in {work}" in back_on and "switched off" not in back_on, (
+        "control: with the key gone, the hooks connect already wrote run"
+    )
+
+
 def test_the_agent_rows_read_paths_only(
     isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

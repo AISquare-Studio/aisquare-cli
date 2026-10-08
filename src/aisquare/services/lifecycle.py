@@ -195,6 +195,13 @@ def initialize(
             notes.append(f"Could not connect {agent}: {exc}")
             continue
         # Always installed: `connect` refuses rather than return a connection without hooks.
+        if connection.hooks_off is not None:
+            notes.append(
+                f"Installed {agent}'s hooks and imported {connection.imported} entries, but "
+                f'{connection.hooks_off} sets "disableAllHooks": true, so they will not run '
+                "until you remove that key."
+            )
+            continue
         notes.append(f"Connected {agent}: hooks installed, imported {connection.imported} entries.")
 
     return SetupReport(

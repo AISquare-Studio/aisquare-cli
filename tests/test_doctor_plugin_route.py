@@ -477,7 +477,9 @@ def test_a_plugin_only_install_reads_as_connected_everywhere(
 
     assert before[0]["connected"] is False, "control: nothing runs aisquare yet"
     assert listed[0]["connected"] is True, listed
-    assert listed[0]["sites"] == [{"config_dir": str(claude), "hooks_installed": True}], listed
+    assert listed[0]["sites"] == [
+        {"config_dir": str(claude), "hooks_installed": True, "hooks_off": None}
+    ], listed
     assert "claude-code" in summary["agents_connected"], summary
     assert row.status is CheckStatus.ok, "doctor says the same"
 

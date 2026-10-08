@@ -75,6 +75,10 @@ class AgentHookSite(BaseModel):
 
     config_dir: Path
     hooks_installed: bool = False
+    hooks_off: Path | None = None
+    """The directory's settings file, when it switches every hook off (``"disableAllHooks":
+    true``): Claude Code runs none of them however complete they are, so ``hooks_installed``
+    is False, and ``agents connect`` cannot change that. ``None`` otherwise."""
 
 
 class AgentInfo(BaseModel):
@@ -769,6 +773,10 @@ class AgentConnection(BaseModel):
     name: str
     hooks_installed: bool = False
     imported: int = 0
+    hooks_off: Path | None = None
+    """The settings file the hooks went into, when it switches every hook off
+    (``"disableAllHooks": true``): they are installed, and Claude Code runs none of them
+    until that key goes. ``agents connect`` leaves the key alone. ``None`` otherwise."""
 
 
 FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited", "lost", "unknown"]

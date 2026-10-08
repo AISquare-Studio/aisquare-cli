@@ -448,6 +448,18 @@ def hooks_disabled(name: str, config_dir: Path | None = None) -> bool:
     return read_json(spec.settings_path).get("disableAllHooks") is True
 
 
+def hooks_off(name: str, config_dir: Path | None = None) -> Path | None:
+    """The settings file that switches every hook off (:func:`hooks_disabled`), else ``None``.
+
+    What `agents connect`, `agents list` and `agents status` name in place of a
+    connection or a "missing": the cause is that key, and Connect cannot change it.
+    """
+    spec = _spec(name, config_dir)
+    if spec is None or spec.settings_path is None or not hooks_disabled(name, config_dir):
+        return None
+    return spec.settings_path
+
+
 def claude_code_connected(config_dir: Path | None = None) -> bool:
     """Whether Claude Code in ``config_dir`` runs aisquare: the one "connected?" answer.
 
@@ -891,6 +903,9 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False
                 if spec.name == "claude-code"
                 else hooks_installed(spec.name, directory)
             ),
+            # And why it is False where hooks are switched off: read as "missing", it
+            # sent the user to Connect, which cannot change it (review of #257).
+            hooks_off=hooks_off(spec.name, directory),
         )
         for directory in connected_dirs(spec.name, registry)
     ]

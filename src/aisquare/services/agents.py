@@ -199,6 +199,11 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
     for one aisquare cannot connect yet, :class:`AgentNotInstalledError` if it
     is not installed, and :class:`AgentFileUnreadableError` for a file of its
     that cannot be read. The last three are ``ValueError``.
+
+    A settings file that switches every hook off (``"disableAllHooks": true``)
+    still gets the hooks, so they run once that key goes, and the result names it
+    (``hooks_off``): until then Claude Code runs none of them, and "connected"
+    there was not true (review of #257).
     """
     spec = agent_core.spec(name, config_dir)
     if spec is None:
@@ -237,7 +242,12 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
         # for, and it must never be recorded, or printed, as connected.
         raise UnsupportedAgentError(f"aisquare can't connect {spec.label} yet")
     agent_core.set_connected(name, True, config_dir)
-    return AgentConnection(name=name, hooks_installed=True, imported=added)
+    return AgentConnection(
+        name=name,
+        hooks_installed=True,
+        imported=added,
+        hooks_off=agent_core.hooks_off(name, config_dir),
+    )
 
 
 def disconnect(name: str, config_dir: Path | None = None) -> bool:

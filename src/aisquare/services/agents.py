@@ -127,8 +127,13 @@ def disconnect_notes(name: str, config_dir: Path | None = None, *, removed: bool
     removing those hands every event to the plugin. At user scope it runs in every
     session; at project or local scope, in its repository's, where `agents status` and
     the doctor still said connected after a bare "✓ disconnected" (review of #257). Where
-    nothing was removed and no plugin runs, the hooks may be in another config dir.
+    nothing was removed and no plugin runs, the hooks may be in another config dir. Nothing
+    for an agent aisquare has no hooks for (Codex, Cursor): the record an older aisquare's
+    `agents connect` wrote is all disconnect clears, and no hooks were ever there.
     """
+    spec = agent_core.spec(name, config_dir)
+    if spec is None or not spec.connectable:
+        return []
     notes: list[str] = []
     user = claude_plugin(config_dir) if name == "claude-code" else None
     if user is not None:

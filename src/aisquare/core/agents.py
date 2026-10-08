@@ -975,6 +975,10 @@ def claude_on_path() -> str | None:
 
 def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False) -> AgentInfo:
     existing = [path for path in spec.context_files if path.exists()]
+    # A record of an agent aisquare has no hooks for is no connection: 0.7.0's `agents
+    # connect codex` wrote one and installed nothing, and it read as connected beside the
+    # doctor's "can't connect it yet" (review of #257). `agents disconnect` clears it.
+    recorded = connected_dirs(spec.name, registry) if spec.connectable else []
     sites = [
         AgentHookSite(
             config_dir=directory,
@@ -988,10 +992,10 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False
             # sent the user to Connect, which cannot change it (review of #257).
             hooks_off=hooks_off(spec.name, directory),
         )
-        for directory in connected_dirs(spec.name, registry)
+        for directory in recorded
     ]
     found = detected(spec)
-    connected = spec.name in _connected_set(registry)
+    connected = spec.connectable and spec.name in _connected_set(registry)
     if spec.name == "claude-code":
         # The answer doctor and Welcome give, so `agents list`/`status` and `aisquare
         # status` agree with them (review of #257). A directory whose hooks or plugin

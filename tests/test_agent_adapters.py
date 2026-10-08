@@ -330,6 +330,49 @@ def test_init_reports_the_refusal_as_a_note_and_records_nothing(
     assert connected == {"claude-code": False, "cursor": False, "codex": False}, connected
 
 
+@pytest.mark.parametrize(("name", "label", "planned"), _DETECT_ONLY)
+def test_a_record_an_older_aisquare_wrote_is_no_connection(
+    runner: CliRunner, claude_home: Path, name: str, label: str, planned: str | None
+) -> None:
+    """0.7.0's `agents connect codex` exited 0 and recorded the agent in agents.json while
+    writing nothing under ~/.codex. On this release `agents list`/`status` and `aisquare
+    status` still called it connected, beside a doctor row saying aisquare can't connect it
+    and a connect that refuses (review of #257). A record alone is no connection, and
+    `agents disconnect` still clears it, with no note about hooks it never had."""
+    agent_dir = claude_home.parent / f".{name}"
+    agent_dir.mkdir()
+    _connect(runner)
+    (claude_home / "settings.json").write_text("{}", encoding="utf-8")  # recorded, hooks gone
+    registry_path = paths.agents_registry_path()
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["connected"] = sorted([*registry["connected"], name])
+    registry["connections"][name] = [str(agent_dir)]  # what 0.7.0's set_connected wrote
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    listed = {
+        a["name"]: a for a in json.loads(runner.invoke(app, ["--json", "agents", "list"]).stdout)
+    }
+    status = json.loads(runner.invoke(app, ["--json", "agents", "status", name]).stdout)[0]
+    summary = json.loads(runner.invoke(app, ["--json", "status"]).stdout)
+    row = next(row for row in diagnostics._planned_agent_checks() if row.name == name)
+    disconnected = runner.invoke(app, ["agents", "disconnect", name])
+    after = json.loads(registry_path.read_text(encoding="utf-8"))
+
+    assert (listed[name]["connected"], listed[name]["sites"]) == (False, []), listed[name]
+    assert (status["connected"], status["sites"]) == (False, []), status
+    assert name not in summary["agents_connected"], summary
+    assert f"{label} detected at {agent_dir}, but aisquare can't connect it yet" in row.detail
+    claude = listed["claude-code"]
+    assert claude["connected"] is True and "claude-code" in summary["agents_connected"], (
+        "control: a record of an agent aisquare has hooks for still counts"
+    )
+    assert claude["sites"][0]["hooks_installed"] is False, "control: and reads as missing"
+    assert disconnected.exit_code == 0 and "no aisquare hooks" not in disconnected.output
+    assert name not in after["connected"] and not after["connections"].get(name), after
+    assert "claude-code" in after["connected"], "disconnecting it leaves claude-code's record"
+    assert list(agent_dir.iterdir()) == [], f"nothing is ever written under ~/.{name}"
+
+
 def test_the_refusal_never_reaches_a_damaged_store(
     runner: CliRunner,
     isolated_agent_home: Path,

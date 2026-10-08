@@ -62,6 +62,7 @@ base install; :func:`start_remote_server` and the CLI say what to install.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import errno
 import functools
 import hashlib
@@ -759,6 +760,13 @@ def _lock_state_file(path: Path) -> int | None:
             time.sleep(0.01)
 
 
+_STATE_CHECKED: contextvars.ContextVar[Runtime | None] = contextvars.ContextVar(
+    "asq_remote_state_checked", default=None
+)
+"""The runtime whose ``remote.json`` this request, or this socket's tick, has checked already
+for another process's change (:meth:`Runtime.remote_state_checked`)."""
+
+
 class Runtime:
     """The server's mutable state: ``remote.json``, the live sockets, the audit log.
 
@@ -783,6 +791,9 @@ class Runtime:
         self._closers: dict[str, set[Callable[[int], None]]] = {}
         """Each device's live sockets, by device id, as closers that take the close code."""
         self._file_lock_depth = 0
+        self._writer: int | None = None
+        """The thread in :meth:`_state_file_lock`, while one is: what it writes must start from
+        the file, so its check is never one a request made earlier (:meth:`reload_if_changed`)."""
         self._unpublished: bytes | None = None
         """What the read-modify-write in hand decided to write (:meth:`_write_state`), until
         its outermost :meth:`_state_file_lock` publishes it."""
@@ -867,6 +878,7 @@ class Runtime:
                     unmade = exc
                 fd = _lock_state_file(self._state_path)
                 self._file_lock_depth = 1
+                self._writer = threading.get_ident()
                 try:
                     try:
                         with self._lock:
@@ -877,6 +889,7 @@ class Runtime:
                             self._publish_state(pending, unmade, body)
                 finally:
                     self._file_lock_depth = 0
+                    self._writer = None
                     if fd is not None:
                         with contextlib.suppress(OSError):
                             unlock(fd)
@@ -910,7 +923,12 @@ class Runtime:
         So a read made while :attr:`_disk` moved, by a write here or by another
         reload's adoption, is never adopted: what is in hand is that newer state,
         and anything newer still on disk is read by the next check.
+
+        Inside :meth:`remote_state_checked` the block's first check stands for the
+        rest, but never for a read-modify-write's own, under the file lock.
         """
+        if _STATE_CHECKED.get() is self and self._writer != threading.get_ident():
+            return False
         with self._lock:
             moves = self._disk_moves
         signature = self._signature()
@@ -940,6 +958,27 @@ class Runtime:
             for device_id in [device_id for device_id in known if device_id not in kept]:
                 self._close_sockets(device_id, WS_CLOSE_UNAUTHORIZED)
             return True
+
+    @contextlib.contextmanager
+    def remote_state_checked(self) -> Iterator[None]:
+        """Check ``remote.json`` for another process's change ONCE for everything inside:
+        one request, gates and route, or one tick of a socket.
+
+        Every read of the state checks the file (:meth:`reload_if_changed`), a read and a
+        digest each, and one request made three or four of them on the event loop that
+        serves every request and socket: the token, the deadline and the cookie's device
+        at the gate, then the route's own (``api/remote``, the write gate); and every
+        socket three a second (review of #243, round 3). Inside this block the first
+        check stands for the rest, so another process's change is still seen by the next
+        request and the next tick. A read-modify-write in it still reads the file under
+        the file lock: what it writes must start from what is on disk.
+        """
+        self.reload_if_changed()
+        token = _STATE_CHECKED.set(self)
+        try:
+            yield
+        finally:
+            _STATE_CHECKED.reset(token)
 
     def _read_state_file(self) -> tuple[bytes, dict[str, Any]] | None:
         """The file's bytes and its JSON object; ``None`` when there is nothing to keep.
@@ -2924,12 +2963,26 @@ class _TokenGate:
         if kind not in ("http", "websocket"):  # lifespan: the lanes start and stop with the app
             await self._app(scope, receive, send)
             return
+        # remote.json is checked for another process's change once, here, for the gates
+        # and, over HTTP, for the route behind them (Runtime.remote_state_checked).
+        with self._runtime.remote_state_checked():
+            passed = await self._remote_gated(scope, receive, send)
+            if passed is not None and kind == "http":
+                await self._app(scope, passed, send)
+                return
+        if passed is not None:
+            # A socket lives for hours: its stream checks the file once a tick instead.
+            await self._app(scope, passed, send)
+
+    async def _remote_gated(self, scope: Any, receive: Any, send: Any) -> Any | None:
+        """The five gates: the ``receive`` to hand the app, or ``None`` once a refusal went."""
         runtime = self._runtime
+        kind = scope.get("type")
         if not (remote_gate_token(runtime, scope) and remote_gate_auto_off(runtime, scope)):
             await _refuse_at_the_gate(
                 scope, receive, send, 404, "not_found", LINK_GONE, WS_CLOSE_NOT_FOUND
             )
-            return
+            return None
         method = scope.get("method")  # a handshake has none, and is always asked
         if method not in ("GET", "HEAD") and not remote_gate_origin(scope):
             await _refuse_at_the_gate(
@@ -2941,23 +2994,23 @@ class _TokenGate:
                 "this request did not come from the remote page",
                 WS_CLOSE_BAD_ORIGIN,
             )
-            return
+            return None
         if _needs_a_device(scope):
             device = remote_gate_device(runtime, scope)
             if device is None:
                 await _refuse_at_the_gate(
                     scope, receive, send, 401, "unauthorized", NOT_UNLOCKED, WS_CLOSE_UNAUTHORIZED
                 )
-                return
+                return None
             scope[DEVICE_SCOPE] = device
         if kind == "http" and method not in ("GET", "HEAD", "OPTIONS"):
             replayed = await remote_gate_body(scope, receive)
             if replayed is None:
                 too_large = f"the body is over {MAX_BODY_BYTES} bytes"
                 await _json_error(413, "too_large", too_large)(scope, receive, send)
-                return
-            receive = replayed
-        await self._app(scope, receive, send)
+                return None
+            return replayed
+        return receive
 
 
 # --- the kit: what every route of one app shares ---------------------------------------
@@ -3826,15 +3879,17 @@ def build_remote_app(
         reading = asyncio.ensure_future(reader())
         try:
             while not reading.done():
-                # By id, every tick: Remote off (auto-off included) is 4410, a device that is
-                # gone, expired or idle past the limit is 4401, whatever the cookie said.
-                if runtime.auto_off_passed(_remote_now()):
-                    await close_with(WS_CLOSE_REMOTE_OFF)
-                    break
-                if not runtime.device_is_live(device.id):
-                    await close_with(WS_CLOSE_UNAUTHORIZED)
-                    break
-                await tick_once()
+                # One check of remote.json a tick, for everything the tick reads of it.
+                with runtime.remote_state_checked():
+                    # By id, every tick: Remote off (auto-off included) is 4410, a device that
+                    # is gone, expired or idle past the limit is 4401, whatever the cookie said.
+                    if runtime.auto_off_passed(_remote_now()):
+                        await close_with(WS_CLOSE_REMOTE_OFF)
+                        break
+                    if not runtime.device_is_live(device.id):
+                        await close_with(WS_CLOSE_UNAUTHORIZED)
+                        break
+                    await tick_once()
                 await asyncio.wait([reading], timeout=tick)
         except WebSocketDisconnect:
             pass

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -274,3 +275,88 @@ def test_the_cli_toggle_in_this_process_reaches_a_separate_runtime(isolated_home
     shell.regenerate_password()
     assert server.password == shell.password
     assert remote_server.WRITE_ENDPOINTS  # module still importable with the singleton untouched
+
+
+# --- one check a request, one a tick ----------------------------------------------------
+
+
+def _counting_checks(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """How often the file is read and digested to check it (``Runtime._signature``)."""
+    checks = [0]
+    read = Runtime._signature
+
+    def counted(self: Runtime) -> tuple[bytes, bytes] | None:
+        checks[0] += 1
+        return read(self)
+
+    monkeypatch.setattr(Runtime, "_signature", counted)
+    return checks
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "remote", None),
+        ("GET", "fleet", None),
+        ("GET", "devices", None),
+        ("POST", "note", {"text": "x"}),
+        ("POST", "nothing-here", {}),
+    ],
+)
+def test_a_request_checks_the_file_once_for_its_gates_and_its_route(
+    client: TestClient,
+    runtime: Runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    path: str,
+    body: dict[str, Any] | None,
+) -> None:
+    """The token, the deadline and the cookie's device at the gate, then the route's own
+    read (``remote_json``, the write gate): ``GET api/remote`` read and digested the file
+    four times on the event loop, ``api/fleet`` and ``POST api/note`` three (review of
+    #243, round 3)."""
+    runtime.set_allow_write(True)
+    checks = _counting_checks(monkeypatch)
+    client.request(method, f"{base(runtime)}/api/{path}", json=body)
+    assert checks == [1]
+
+
+def test_a_socket_checks_the_file_once_a_tick(
+    client: TestClient, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remote off, the device, and the ``remote`` frame were each a check, every tick of
+    every socket (review of #243, round 3)."""
+    ticks: list[str] = []
+    live = Runtime.device_is_live
+
+    def ticked(self: Runtime, device_id: str) -> bool:
+        ticks.append(device_id)  # asked once a tick, after the tick's check
+        return live(self, device_id)
+
+    monkeypatch.setattr(Runtime, "device_is_live", ticked)
+    checks = _counting_checks(monkeypatch)
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        _frames_until(ws, "remote")
+        before = (checks[0], len(ticks))
+        deadline = time.monotonic() + 10
+        while len(ticks) < before[1] + 10 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        after = (checks[0], len(ticks))
+    tick_count = after[1] - before[1]
+    assert tick_count >= 10
+    assert after[0] - before[0] <= tick_count + 1, "one check a tick, give or take the edge"
+
+
+def test_a_write_inside_a_checked_request_still_starts_from_the_file(runtime: Runtime) -> None:
+    """Inside a request the gate's check stands for the route's reads; a read-modify-write
+    still reads the file under its lock, or it would write back what another process had
+    just changed."""
+    with runtime.remote_state_checked():
+        other_process_writes(lambda raw: raw.__setitem__("allow_write", True))
+        assert runtime.allow_write is False, "checked once already: the request's view"
+        later = datetime.now(UTC) + timedelta(hours=1)
+        runtime.set_auto_off(later)
+    on_disk = json.loads(remote_state_path().read_bytes())
+    assert on_disk["allow_write"] is True, "the other process's switch survived the write"
+    assert on_disk["auto_off_at"] is not None
+    assert runtime.allow_write is True, "and the next request sees it"

@@ -80,7 +80,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mappin
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from aisquare.core.atomic import Replacement, replacement
 from aisquare.core.locking import lock_exclusive, unlock
@@ -97,7 +97,8 @@ from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSessi
 
 if TYPE_CHECKING:
     import socket
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import Executor, Future, ThreadPoolExecutor
+    from types import FrameType, TracebackType
 
     import uvicorn
     from starlette.requests import HTTPConnection, Request
@@ -271,7 +272,10 @@ the response SAYS so (``history_capped``) rather than truncating quietly, so a
 short answer is never mistaken for a short pane.
 """
 
-INSTALL_HINT = "pip install 'aisquare-cli[remote]' (or: pipx inject aisquare-cli websockets)"
+REMOTE_SERVER_NEEDS = ("starlette", "uvicorn", "websockets")
+"""What the server cannot start without (:func:`_remote_dependency_error`)."""
+REMOTE_EXTRA = (*REMOTE_SERVER_NEEDS, "cryptography")
+"""What the ``remote`` extra installs: the server's three, and what Web Push needs."""
 
 NO_PAGE_HINT = "the bundled remote page is missing from this install — reinstall aisquare-cli"
 """Shown by the modal's status line, ``asq remote serve``'s exit, and the raise of
@@ -1876,9 +1880,11 @@ def _live_panes(label: str, project: str | None = None, history: int = 0) -> dic
     are untouched — the history keys appear only when history was asked for.
 
     Never another agent's screen: a row whose pane id the next tmux server gave
-    away is 409 ``not_agent`` (:func:`_remote_pane_outlived`). The server is asked
-    when it started AFTER the capture, so one that restarted in between refuses
-    the frame instead of passing it.
+    away is 409 ``not_agent`` (:func:`_remote_pane_outlived`). The server says
+    when it started in the very command that took the frame
+    (``PaneFacts.server_started``), so the frame is judged by the server it came
+    from. Asked in a second process after the capture, it doubled the stream's
+    tmux processes: one more per watched pane per tick.
     """
     from aisquare.services import fleet as fleet_service
 
@@ -1888,7 +1894,7 @@ def _live_panes(label: str, project: str | None = None, history: int = 0) -> dic
         capture = server.capture(agent.pane_id)
     else:
         capture = server.capture_history(agent.pane_id, history=min(history, HISTORY_CAP))
-    if _remote_pane_outlived(server, agent):
+    if fleet_service._outlived(agent, capture.facts.server_started):
         raise RequestError(409, "not_agent", PANE_OUTLIVED.format(label=label))
     payload = _pane_payload(capture)
     if history <= 0:
@@ -1942,15 +1948,18 @@ def _pane_width(agent: FleetAgent) -> int:
     sensible 80 columns and never the page itself — the conversation is on disk
     and does not depend on the pane still being there. So does a pane id another
     agent's pane holds now (:func:`_remote_pane_outlived`): its width is that agent's.
+    One tmux process, the pane's facts alone, which say when their server started:
+    a capture of the whole screen, then a second process to ask that, read a width.
     """
     from aisquare.services import fleet as fleet_service
 
     try:
-        server = fleet_service.server_for(agent.tmux_socket)
-        width = server.capture(agent.pane_id).facts.width
-        return 80 if _remote_pane_outlived(server, agent) else width
+        facts = fleet_service.server_for(agent.tmux_socket).pane_facts(agent.pane_id)
     except Exception:
         return 80
+    if facts is None or fleet_service._outlived(agent, facts.server_started):
+        return 80
+    return facts.width
 
 
 def _agent_state_counts(agents: list[FleetAgentStatus]) -> dict[str, int]:
@@ -2563,13 +2572,22 @@ class _RateLimiter:
         return None
 
 
-@dataclass(eq=False)
-class _CacheTurn:
-    """Whose turn it is to compute one kind (:class:`_Cache`): the lock its callers take
-    turns on, and how many of them hold it or wait for it."""
+@dataclass(frozen=True, eq=False)
+class _Failed:
+    """A snapshot that raised (:class:`_Cache`): the exception and the traceback it was
+    raised with. It is the tick's answer as a value is, and each caller it is raised to
+    gets that traceback back, so the traceback does not grow by every caller's frames."""
 
-    lock: threading.Lock = field(default_factory=threading.Lock)
-    callers: int = 0
+    error: BaseException
+    traceback: TracebackType | None
+
+
+def _cache_answer(outcome: object) -> object:
+    """What a caller of :class:`_Cache` takes from an outcome: the snapshot, or its failure,
+    raised."""
+    if isinstance(outcome, _Failed):
+        raise outcome.error.with_traceback(outcome.traceback)
+    return outcome
 
 
 class _Cache:
@@ -2591,6 +2609,18 @@ class _Cache:
     fleet, a tmux call each, and a tmux that stops answering costs 30 s a call,
     while every socket's board and fleet frames, and every cached read, waited
     behind it.
+
+    What a compute comes to is the tick's answer, a failure as much as a value,
+    and every caller of the tick takes that. Only a value was kept, so the
+    callers waiting on a kind that raised computed it again one after another:
+    a store locked past its 5 s ``busy_timeout`` held the Nth socket's ``board``
+    frame N x 5 s, its ``fleet`` frame as long again, and its heartbeat behind
+    both.
+
+    A caller waits on the event loop, and only the one computing takes a
+    thread. Each caller waited in a thread of the loop's default pool, which
+    also runs every unlock, write and transcript read, so a few sockets waiting
+    on one slow kind held all of it.
     """
 
     def __init__(self, ttl: float, *, clock: Callable[[], float] = time.monotonic) -> None:
@@ -2599,47 +2629,103 @@ class _Cache:
         self._lock = threading.Lock()
         """Guards the two tables, and is never held while a snapshot is computed."""
         self._values: dict[str, tuple[float, object]] = {}
-        self._turns: dict[str, _CacheTurn] = {}
-        """The kinds being computed or waited for now. A kind's turn goes with its last
-        caller, so this holds the kinds in flight and no more, whatever kinds are asked for."""
+        """Each kind's outcome within the tick: its snapshot, or :class:`_Failed`."""
+        self._flights: dict[str, Future[object]] = {}
+        """The kinds being computed now, each to the future its callers wait on. A flight
+        goes when its compute ends, so this holds the kinds in flight and no more,
+        whatever kinds are asked for."""
 
     def _cache_fresh(self, kind: str) -> tuple[float, object] | None:
-        """``kind``'s snapshot while it is younger than the ttl; call it holding ``_lock``."""
+        """``kind``'s outcome while it is younger than the ttl; call it holding ``_lock``."""
         hit = self._values.get(kind)
         return hit if hit is not None and self._clock() - hit[0] < self._ttl else None
 
-    def _cache_store(self, kind: str, value: object) -> None:
-        """Keep ``value`` as ``kind``'s snapshot, once what expired is dropped; hold ``_lock``."""
+    def _cache_store(self, kind: str, outcome: object) -> None:
+        """Keep ``outcome`` as ``kind``'s, once what expired is dropped; hold ``_lock``."""
         now = self._clock()
-        for stale in [k for k, (at, _value) in self._values.items() if now - at >= self._ttl]:
+        for stale in [k for k, (at, _kept) in self._values.items() if now - at >= self._ttl]:
             del self._values[stale]
         self._values.pop(kind, None)  # stored anew, so the dict stays oldest first
-        self._values[kind] = (now, value)
+        self._values[kind] = (now, outcome)
         while len(self._values) > CACHE_KINDS_MAX:
             del self._values[next(iter(self._values))]
 
-    def cached_snapshot(self, kind: str, compute: Snapshot) -> object:
+    def _cache_claim(self, kind: str) -> tuple[Future[object], bool]:
+        """``kind``'s outcome as a future, and whether this caller is the one to compute it:
+        settled already for what the tick kept, the flight another caller computes, or a
+        new flight (``True``), which :meth:`_cache_compute` settles."""
+        from concurrent.futures import Future
+
         with self._lock:
             hit = self._cache_fresh(kind)
-            if hit is not None:
-                return hit[1]
-            turn = self._turns.setdefault(kind, _CacheTurn())
-            turn.callers += 1
+            if hit is None:
+                flight = self._flights.get(kind)
+                if flight is not None:
+                    return flight, False
+                flight = self._flights[kind] = Future()
+                # Running, so a waiter that is cancelled (its socket closed) ends its own
+                # wait and never the flight the other callers wait on.
+                flight.set_running_or_notify_cancel()
+                return flight, True
+        kept: Future[object] = Future()
+        kept.set_result(hit[1])
+        return kept, False
+
+    def _cache_compute(self, kind: str, flight: Future[object], compute: Snapshot) -> None:
+        """Compute ``kind`` in a worker thread and settle its flight with what came of it. An
+        exception is kept for the tick as a value is; anything rarer (``SystemExit``) only
+        reaches the callers waiting now."""
         try:
-            with turn.lock:
-                with self._lock:
-                    hit = self._cache_fresh(kind)  # the caller this one waited for made it
-                if hit is not None:
-                    return hit[1]
-                value = compute()
-                with self._lock:
-                    self._cache_store(kind, value)
-                return value
-        finally:
-            with self._lock:
-                turn.callers -= 1
-                if not turn.callers:
-                    del self._turns[kind]
+            outcome: object = compute()
+        except BaseException as exc:
+            failed = _Failed(exc, exc.__traceback__)
+            self._cache_settle(kind, flight, failed, keep=isinstance(exc, Exception))
+        else:
+            self._cache_settle(kind, flight, outcome, keep=True)
+
+    def _cache_settle(
+        self, kind: str, flight: Future[object], outcome: object, *, keep: bool
+    ) -> None:
+        """End ``kind``'s flight with ``outcome``, kept as the tick's when ``keep``; a flight
+        ends once, and a later ending changes nothing."""
+        with self._lock:
+            if self._flights.get(kind) is not flight:
+                return
+            del self._flights[kind]
+            if keep:
+                self._cache_store(kind, outcome)
+        flight.set_result(outcome)
+
+    def _cache_job_done(self, kind: str, flight: Future[object]) -> None:
+        """A compute's job ended: if it never ran (its pool shut down first), its flight ends
+        here, since its callers must not wait for it forever."""
+        if not flight.done():
+            never = RuntimeError("the snapshot was not taken: its thread pool shut down")
+            self._cache_settle(kind, flight, _Failed(never, None), keep=False)
+
+    async def cached_snapshot(
+        self, kind: str, compute: Snapshot, pool: Executor | None = None
+    ) -> object:
+        """``kind``'s snapshot this tick: what the tick kept, what the compute in flight comes
+        to, or this caller's own compute, run in a thread of ``pool`` (``None``: the loop's
+        default pool). A failure is raised to every caller it is the answer for."""
+        import asyncio
+        import contextvars
+
+        flight, mine = self._cache_claim(kind)
+        if mine:
+            run = functools.partial(
+                contextvars.copy_context().run, self._cache_compute, kind, flight, compute
+            )
+            try:
+                job = asyncio.get_running_loop().run_in_executor(pool, run)
+            except BaseException as exc:  # a pool shut down: the callers waiting hear why
+                self._cache_settle(kind, flight, _Failed(exc, exc.__traceback__), keep=False)
+                raise
+            job.add_done_callback(lambda _job: self._cache_job_done(kind, flight))
+        if not flight.done():
+            await asyncio.wrap_future(flight)
+        return _cache_answer(flight.result())
 
 
 def _client_of(scope: Any) -> str:
@@ -3486,12 +3572,17 @@ def build_remote_app(
         from starlette.status import WS_1011_INTERNAL_ERROR
         from starlette.websockets import WebSocketDisconnect
     except ImportError as exc:  # pragma: no cover - exercised only in a base install
-        raise RemoteUnavailable(f"the remote extra is not installed — {INSTALL_HINT}") from exc
+        raise RemoteUnavailable(
+            f"the remote extra is not installed — {remote_install_hint()}"
+        ) from exc
 
     from aisquare.services import remote_actions, remote_needs, remote_push
 
     reads = sources or live_sources()
-    handlers = (writes or live_writes()).handlers
+    handlers = {
+        name: _remote_write_tracked(name, handler)
+        for name, handler in (writes or live_writes()).handlers.items()
+    }
     dist = (dist_dir or remote_dist_dir()).resolve()
     limiter = _RateLimiter(clock)
     budget = UnlockBudget(runtime)
@@ -3502,7 +3593,7 @@ def build_remote_app(
         return f"/r/{request.path_params['token']}"
 
     async def snapshot(kind: str, compute: Snapshot) -> object:
-        return await asyncio.to_thread(cache.cached_snapshot, kind, compute)
+        return await cache.cached_snapshot(kind, compute)
 
     def remote_pane_frame(label: str, project: str) -> dict[str, object]:
         """A pane subscription's live frame: the capture, or what stopped it (``error``).
@@ -3967,11 +4058,10 @@ def build_remote_app(
                     # One capture per pane per tick however many sockets watch it, as for
                     # board and fleet, and on the pane pool (§2.10). The key is the pair as
                     # JSON: a ':' in a ref or a label must not make two pairs one kind.
-                    payload = await loop.run_in_executor(
-                        kit.kit_pane_pool(),
-                        cache.cached_snapshot,
+                    payload = await cache.cached_snapshot(
                         "pane:" + json.dumps([project, label]),
                         functools.partial(remote_pane_frame, label, project),
+                        kit.kit_pane_pool(),
                     )
                 except Exception as exc:  # the pool, shut down under a socket still ticking
                     payload = {"rows": [], "width": 0, "height": 0, "error": str(exc)}
@@ -4106,17 +4196,232 @@ assignment is not a def, so the alias bridges nothing."""
 # --- process lifecycle: the module API the TUI modal calls (PLAN §4-F) ----------------
 
 
+def remote_install_hint() -> str:
+    """The one command that adds the ``remote`` extra to the install that is running, made
+    the way that install was made.
+
+    It said ``pip install 'aisquare-cli[remote]' (or: pipx inject aisquare-cli
+    websockets)``, and neither fixed the install the docs give, a uv tool
+    (``install.sh``, the README): its environment has no pip, and there is no pipx
+    environment to inject into. Nor did the inject fix a pipx install made without
+    the extra, which misses starlette and uvicorn too: the same sentence came back
+    after it.
+
+    A uv tool is installed again as its receipt says it was, the extra added
+    (:func:`_remote_uv_tool_hint`): uv has no inject. A pipx install gets what is
+    missing injected, which keeps what was injected before. A virtualenv, or any
+    other Python, gets the extra from its own interpreter: ``uv pip`` when uv made
+    it, since it has no pip, else ``-m pip``. Each word is quoted for the shells of
+    this platform (:func:`_remote_shell_word`).
+    """
+    import importlib.util
+    import sys
+
+    from aisquare.core.version import DISTRIBUTION
+
+    prefix = Path(sys.prefix)
+    if (prefix / "uv-receipt.toml").is_file():
+        return _remote_uv_tool_hint(prefix / "uv-receipt.toml")
+    if (prefix / "pipx_metadata.json").is_file():
+        missing = [name for name in REMOTE_EXTRA if importlib.util.find_spec(name) is None]
+        return f"pipx inject {DISTRIBUTION} {' '.join(missing or REMOTE_EXTRA)}"
+    python = _remote_shell_word(sys.executable)
+    extra = _remote_shell_word(f"{DISTRIBUTION}[remote]")
+    if _remote_made_by_uv(prefix):
+        return f"uv pip install --python {python} {extra}"
+    return f"{python} -m pip install {extra}"
+
+
+_UV_SOURCES = ("url", "path", "directory", "editable", "git")
+"""The keys a uv receipt gives a requirement's source by, when an index is not it."""
+_UV_REQUIREMENT_KEYS = frozenset(
+    {"name", "extras", "specifier", "marker", "subdirectory", *_UV_SOURCES}
+)
+"""What :func:`_remote_uv_requirement` can say again: a requirement with any other key is one
+it cannot say whole."""
+_UV_GIT_REFS = ("rev", "branch", "tag")
+"""How a receipt's ``git`` URL names the reference asked for, in its query."""
+_UV_FROM_FILES = ("constraints", "overrides", "build-constraint-dependencies", "excludes")
+"""What a receipt records from files (``-c``, ``--overrides``, ``-b``, ``--excludes``), which
+no command line carries."""
+
+
+def _remote_uv_tool_hint(receipt: Path) -> str:
+    """``uv tool install`` as this tool's receipt says it was installed, ``remote`` added to
+    aisquare-cli's extras.
+
+    Installing a tool again resolves it from that command alone (measured with uv
+    0.12.19): what the command does not name goes. A fixed ``--with tiktoken
+    'aisquare-cli[remote]'`` took the ``serve`` extra's mcp, and ``aisquare serve``
+    with it, from a tool installed with ``[serve]``, and any other ``--with``. So the
+    command names all the receipt records: each requirement as it was given (a pin, a
+    marker, a git or local source, editable or not), the packages whose executables
+    it took, and the Python: the receipt's, else the one it runs on, since without
+    ``--python`` uv takes its own default and makes the tool anew on another. A
+    receipt that cannot be read gets the command ``install.sh`` installs with; one
+    that records what no command line carries, a constraints file or a requirement in
+    a shape this does not know, gets a sentence naming it rather than a command that
+    would drop it.
+    """
+    import sys
+    import tomllib
+
+    from aisquare.core.version import DISTRIBUTION
+
+    running = f"{sys.version_info.major}.{sys.version_info.minor}"
+    try:
+        tool = tomllib.loads(receipt.read_text(encoding="utf-8"))["tool"]
+        requirements = tool["requirements"]
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError):
+        tool, requirements = {}, None
+    if not isinstance(requirements, list) or not requirements:
+        as_installed = ["--python", running, "--with", "tiktoken", f"{DISTRIBUTION}[remote]"]
+        return " ".join(
+            _remote_shell_word(word) for word in ["uv", "tool", "install", *as_installed]
+        )
+    said = _remote_uv_tool_words(tool, requirements, running)
+    if said is None:
+        return (
+            f"install {DISTRIBUTION} again with uv tool install, as {receipt} records it, "
+            "adding remote to its extras"
+        )
+    return " ".join(_remote_shell_word(word) for word in said)
+
+
+def _remote_uv_tool_words(
+    tool: dict[str, Any], requirements: list[Any], running: str
+) -> list[str] | None:
+    """The words of :func:`_remote_uv_tool_hint`'s command; ``None`` when they would drop
+    something the receipt records."""
+    from aisquare.core.version import DISTRIBUTION
+
+    python, points = tool.get("python", running), tool.get("entrypoints", [])
+    main, *others = requirements
+    if (
+        not isinstance(python, str)
+        or not isinstance(points, list)
+        or any(tool.get(key) for key in _UV_FROM_FILES)
+        or not isinstance(main, dict)
+        or main.get("name") != DISTRIBUTION
+    ):
+        return None
+    froms = [point.get("from") for point in points if isinstance(point, dict)]
+    executables = {name for name in froms if isinstance(name, str)}
+    words = ["uv", "tool", "install", "--python", python]
+    for entry in others:
+        given = _remote_uv_requirement(entry)
+        if given is None:
+            return None
+        editable, requirement = given
+        flag = "--with-executables-from" if entry["name"] in executables else "--with"
+        words += ["--with-editable" if editable else flag, requirement]
+    given = _remote_uv_requirement(main, extra="remote")
+    if given is None:
+        return None
+    editable, requirement = given
+    return [*words, *(["--editable"] if editable else []), requirement]
+
+
+def _remote_uv_requirement(entry: object, *, extra: str = "") -> tuple[bool, str] | None:
+    """A receipt's requirement as a command gives it, ``extra`` added to its extras: whether
+    it is editable, and the requirement; ``None`` for one it cannot give whole.
+
+    The receipt's shape is uv's own (``RequirementWire``): a name, extras, a marker, and
+    a specifier for a package from an index, else one source, given back as a direct
+    reference.
+    """
+    if not isinstance(entry, dict) or not entry.keys() <= _UV_REQUIREMENT_KEYS:
+        return None
+    extras = entry.get("extras", [])
+    if not isinstance(extras, list) or "name" not in entry:
+        return None
+    fields = [value for key, value in entry.items() if key != "extras"]
+    if not all(isinstance(value, str) for value in [*fields, *extras]):
+        return None
+    at = _remote_uv_source(entry)
+    if at is None:
+        return None
+    named = sorted({*extras, extra} - {""})
+    requirement = entry["name"] + (f"[{','.join(named)}]" if named else "") + at
+    if "marker" in entry:
+        requirement += f" ; {entry['marker']}"
+    return "editable" in entry, requirement
+
+
+def _remote_uv_source(entry: dict[str, Any]) -> str | None:
+    """What follows a receipt requirement's name and extras: its specifier, or `` @ `` and
+    its source as a direct reference; ``None`` for a source it cannot give whole."""
+    from urllib.parse import parse_qsl, urlsplit, urlunsplit
+
+    sources = [key for key in _UV_SOURCES if key in entry]
+    subdirectory = entry.get("subdirectory", "")
+    if not sources:
+        return None if subdirectory else entry.get("specifier", "")
+    kind = sources[0]
+    if len(sources) > 1 or "specifier" in entry or (subdirectory and kind != "url"):
+        return None
+    if kind == "url":
+        if subdirectory and "#" in entry["url"]:
+            return None
+        return f" @ {entry['url']}" + (f"#subdirectory={subdirectory}" if subdirectory else "")
+    if kind == "git":
+        try:
+            url = urlsplit(entry["git"])
+        except ValueError:  # an IPv6 host left open, say: no URL uv writes
+            return None
+        query = dict(parse_qsl(url.query))
+        refs = [f"@{query.pop(key)}" for key in _UV_GIT_REFS if key in query]
+        subdirectory = query.pop("subdirectory", "")
+        if query or len(refs) > 1:
+            return None
+        repository = urlunsplit((*url[:3], "", "")).removeprefix("git+")
+        fragment = f"#subdirectory={subdirectory}" if subdirectory else ""
+        return f" @ git+{repository}{''.join(refs)}{fragment}"
+    try:
+        return f" @ {Path(entry[kind]).as_uri()}"
+    except ValueError:  # a relative path, which a receipt does not record
+        return None
+
+
+_WINDOWS_BARE_WORD = re.compile(r"[\w.:\\/-]+")
+"""A word cmd.exe and PowerShell both pass on as it is."""
+
+
+def _remote_shell_word(word: str) -> str:
+    """``word`` quoted for the shells a human types the hint into on this platform.
+
+    POSIX quoting is wrong on Windows (``core.agents._quote`` says how for a hook's
+    path): cmd.exe has no single quotes and passes them on, so ``'aisquare-cli[remote]'``
+    reached pip quotes and all, and ``shlex.quote`` wraps every Windows path, whose
+    ``\\`` it counts unsafe, in them. There a word is bare when cmd.exe and
+    PowerShell both read it as it is, and double-quoted otherwise: a space, a ``,`` or
+    ``;`` (PowerShell's), a ``<`` or ``>`` (cmd.exe's), an extra's brackets.
+    """
+    import shlex
+    import sys
+
+    if sys.platform != "win32":
+        return shlex.quote(word)
+    return word if _WINDOWS_BARE_WORD.fullmatch(word) else f'"{word}"'
+
+
+def _remote_made_by_uv(prefix: Path) -> bool:
+    """Whether uv made the virtualenv at ``prefix``: its ``pyvenv.cfg`` names uv's version."""
+    try:
+        lines = (prefix / "pyvenv.cfg").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return any(line.partition("=")[0].strip() == "uv" for line in lines)
+
+
 def _remote_dependency_error() -> str | None:
     import importlib.util
 
-    missing = [
-        name
-        for name in ("starlette", "uvicorn", "websockets")
-        if importlib.util.find_spec(name) is None
-    ]
+    missing = [name for name in REMOTE_SERVER_NEEDS if importlib.util.find_spec(name) is None]
     if not missing:
         return None
-    return f"the remote extra is not installed ({', '.join(missing)} missing) — {INSTALL_HINT}"
+    named = ", ".join(missing)
+    return f"the remote extra is not installed ({named} missing) — {remote_install_hint()}"
 
 
 def runtime() -> Runtime:
@@ -4192,6 +4497,192 @@ class _Server:
     @property
     def running(self) -> bool:
         return self._thread.is_alive() and self._server.started
+
+    @property
+    def winding_down(self) -> bool:
+        """Told to stop, and still finishing what was asked of it: the requests in flight,
+        then the lanes, then the threads of its default pool."""
+        return self._server.should_exit and self._thread.is_alive()
+
+    def wound_down(self, timeout: float) -> bool:
+        """Wait at most ``timeout`` s for it to finish stopping; whether it has."""
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
+
+
+_winding_down: list[_Server] = []
+"""Servers :func:`stop_remote_server` stopped that were still finishing what was asked of them,
+for :func:`remote_wait_for_writes` to see out."""
+
+REMOTE_WINDING_DOWN_SECONDS = 5.0
+"""How long :func:`remote_wait_for_writes` gives a stopped server once its writes are done: the
+answers go out, then the lanes stop, as :meth:`_Server.stop_serving` allows."""
+
+_WRITE_TARGET = re.compile(r"[\w.@-]{1,64}\Z")
+"""An agent named in a write's body that may be printed to the terminal: a label, never a
+control character a phone sent."""
+_writes_lock = threading.RLock()
+"""Re-entrant: ``serve``'s signal handler reads the writes, and Python runs a handler in the
+main thread between two bytecodes, so a second Ctrl-C's can land while the first's holds it."""
+_writes: dict[object, str] = {}
+"""What phones asked for that a worker thread is doing now, oldest first: the writes quitting
+waits for (:func:`remote_wait_for_writes`, :func:`_remote_serve_server`)."""
+
+
+@contextlib.contextmanager
+def _remote_write_running(what: str) -> Iterator[None]:
+    """Count ``what`` among the writes running (:data:`_writes`) for as long as it runs."""
+    ticket = object()
+    with _writes_lock:
+        _writes[ticket] = what
+    try:
+        yield
+    finally:
+        with _writes_lock:
+            del _writes[ticket]
+
+
+def _remote_write_tracked(name: str, handler: WriteHandler) -> WriteHandler:
+    """``handler``, counted among the writes running while its worker thread runs it.
+
+    In the thread, not around the request: uvicorn's shutdown can end a request whose
+    thread goes on, and that thread is what the process waits for at exit.
+    """
+
+    def tracked_write(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        agent = body.get("agent")
+        named = isinstance(agent, str) and _WRITE_TARGET.fullmatch(agent) is not None
+        with _remote_write_running(f"{name} for {agent}" if named else name):
+            return handler(body)
+
+    return tracked_write
+
+
+def remote_writes_running() -> list[str]:
+    """The writes phones asked for that are still running in this process, oldest first:
+    the endpoint, and the agent it is for (``agent/restart for coder-1``)."""
+    with _writes_lock:
+        return list(_writes.values())
+
+
+def _remote_say(line: str) -> None:
+    """One line on stderr, written once and unbuffered: it may be said from a signal handler,
+    which must not re-enter a write the interrupted code was making.
+
+    In the encoding the terminal reads (a Windows console's code page), else in
+    ``sys.stderr``'s: UTF-8 bytes written past ``sys.stderr`` showed an agent's ``é`` as
+    two other characters on a legacy console. A stderr that is gone loses the line,
+    never the shutdown saying it.
+    """
+    import sys
+
+    encoding = os.device_encoding(2) or getattr(sys.stderr, "encoding", None) or "utf-8"
+    with contextlib.suppress(OSError, LookupError):
+        os.write(2, f"{line}\n".encode(encoding, errors="replace"))
+
+
+def _remote_writes_announced(ctrl_c: str) -> bool:
+    """Say which writes the way out waits for, and that ``ctrl_c`` quits at once instead;
+    whether any is running."""
+    running = remote_writes_running()
+    if running:
+        _remote_say(
+            f"waiting for {', '.join(running)} to finish (a restart or switch can take 40 s); "
+            f"{ctrl_c} quits now and leaves it unfinished"
+        )
+    return bool(running)
+
+
+REMOTE_QUIT_PUSH_SECONDS = 2.0
+"""How long quitting at once (:func:`_remote_quit_now`) still gives the one-shot pushes in
+flight, such as the farewell ``serve``'s auto-off queued just before: the exit it skips would
+have given them ``remote_push.PUSH_DRAIN_SECONDS``."""
+
+_quitting = False
+"""Set once :func:`_remote_quit_now` has begun. A plain flag, read and set without a lock: a
+Ctrl-C's handler may run it again while it waits for a push."""
+
+
+def _remote_quit_now() -> NoReturn:
+    """End the process at once, saying which writes it leaves unfinished.
+
+    At once is the point: Python's own exit waits for every worker thread, the ones
+    still running a write included (``concurrent.futures`` joins them all), so an exit
+    any other way waits as long as the write does, and a Ctrl-C at that point only
+    prints a traceback. What that exit runs is skipped with it. ``serve``'s
+    ``remote.json`` cleanup: the next Remote sets its own deadline, and the devices'
+    expiry bounds them. And the wait that lets a one-shot push in flight arrive
+    (``remote_push.push_drain``), which runs here instead, for
+    :data:`REMOTE_QUIT_PUSH_SECONDS` at most, so the farewell an auto-off sent still
+    goes out; one more Ctrl-C ends that wait too.
+    """
+    import sys
+
+    global _quitting
+    if _quitting:  # a Ctrl-C landing while it waits: serve's handler, calling it again
+        os._exit(130)
+    _quitting = True
+    try:
+        left = remote_writes_running()
+        if left:
+            _remote_say(
+                f"Remote quit with {', '.join(left)} unfinished: "
+                "`aisquare fleet ls` shows where the agent is"
+            )
+        pushes = sys.modules.get("aisquare.services.remote_push")  # loaded by all that push
+        if pushes is not None:
+            pushes.push_drain(REMOTE_QUIT_PUSH_SECONDS)
+    finally:
+        os._exit(130)
+
+
+def remote_wait_for_writes() -> None:
+    """Once the fleet UI is gone: see out the writes phones started that still run, saying
+    so, and quit at once on Ctrl-C (:func:`_remote_quit_now`).
+
+    Quitting stopped the server and returned after 5 s whatever it was doing, and then
+    the process waited, silently, for any write still running: a restart or a switch
+    takes up to 40 s, and cut short between its ``/exit`` and its spawn it leaves the
+    agent down, so the wait is right and only its silence was not. Then the stopped
+    server gets :data:`REMOTE_WINDING_DOWN_SECONDS` to send the answers and stop.
+    """
+    try:
+        if _remote_writes_announced("Ctrl-C"):
+            while remote_writes_running():
+                time.sleep(0.05)
+        with _lock:
+            stopped, _winding_down[:] = list(_winding_down), []
+        deadline = time.monotonic() + REMOTE_WINDING_DOWN_SECONDS
+        for server in stopped:
+            server.wound_down(max(0.0, deadline - time.monotonic()))
+    except KeyboardInterrupt:
+        _remote_quit_now()
+
+
+def _remote_serve_server(config: uvicorn.Config) -> uvicorn.Server:
+    """uvicorn for ``serve``, whose Ctrl-C says what it waits for, and whose second one quits.
+
+    uvicorn's shutdown waits for every request in flight, and a phone's restart or
+    switch takes up to 40 s; its log level hides the line saying so. And a second
+    Ctrl-C did not end the wait: on Python 3.12 and later its ``wait_closed`` waits for
+    the connection all the same, and ``asyncio.run`` then waits for the write's thread.
+    With no write running, the second Ctrl-C is uvicorn's own, and the way out still
+    clears the deadline and saves ``last_seen``. ``timeout_graceful_shutdown`` would not
+    do: it ends the request before its answer goes out, and the thread runs on.
+    """
+    import signal
+
+    import uvicorn
+
+    class RemoteServe(uvicorn.Server):
+        def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+            again = self.should_exit and sig == signal.SIGINT
+            super().handle_exit(sig, frame)
+            if again and remote_writes_running():
+                _remote_quit_now()
+            _remote_writes_announced("Ctrl-C again")
+
+    return RemoteServe(config)
 
 
 _lock = threading.Lock()
@@ -4379,6 +4870,9 @@ def stop_remote_server() -> None:
         flusher.cancel()
     if server is not None:
         server.stop_serving()
+        with _lock:
+            kept = [*_winding_down, server]
+            _winding_down[:] = [stopped for stopped in kept if stopped.winding_down]
     if _runtime is not None:
         try:
             _runtime.flush_last_seen()
@@ -4561,12 +5055,18 @@ class _AutoOffTimer:
 
 def _remote_serve_off(state: Runtime, server: Any) -> None:
     """``serve``'s auto-off firing: the farewell, every device revoked (4410), the deadline
-    cleared, and the server told to stop, even when ``remote.json`` cannot be written."""
+    cleared, and the server told to stop, even when ``remote.json`` cannot be written.
+
+    Its way out waits for a phone's write still running, and says so: told to stop
+    already, the server takes the next Ctrl-C as the second, which quits at once
+    (:func:`_remote_serve_server`).
+    """
     try:
         revoke_every_remote_device("auto-off")
         state.set_auto_off(None)
     finally:
         server.should_exit = True
+        _remote_writes_announced("Ctrl-C")
 
 
 class RemoteBindError(RemoteError):
@@ -4634,8 +5134,6 @@ def run_foreground(
     page_problem = _page_missing(dist_dir)
     if page_problem is not None:
         raise NoRemotePage(page_problem)
-    import uvicorn
-
     origin = None if public_url is None else check_public_origin(public_url)
     state = runtime()
     with _lock:
@@ -4648,7 +5146,7 @@ def run_foreground(
         raise
     try:
         app = build_remote_app(state, dist_dir=dist_dir)
-        server = uvicorn.Server(_remote_uvicorn_config(app, port))
+        server = _remote_serve_server(_remote_uvicorn_config(app, port))
 
         timer = _AutoOffTimer(state, lambda: _remote_serve_off(state, server))
         minutes = max(0, auto_off_minutes)
@@ -4723,7 +5221,10 @@ __all__ = [
     "regenerate_password",
     "remote_board_payload",
     "remote_gate_token",
+    "remote_install_hint",
     "remote_server_status",
+    "remote_wait_for_writes",
+    "remote_writes_running",
     "revoke_remote_device",
     "run_foreground",
     "runtime",

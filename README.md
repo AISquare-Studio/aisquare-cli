@@ -539,7 +539,7 @@ stop, restart or switch it. It is one server on `127.0.0.1:8750` behind your own
 ngrok tunnel, and the page it serves ships inside aisquare-cli.
 
 ```sh
-pipx install 'aisquare-cli[remote]'
+uv tool install --python 3.13 --with tiktoken 'aisquare-cli[remote]'   # pipx, pip or more extras: docs/remote.md
 export AISQUARE_REMOTE_NGROK_URL=https://your-name.ngrok-free.app   # your static domain
 aisquare remote serve                # or press R in `aisquare ui`
 ngrok http --url=your-name.ngrok-free.app --inspect=false 8750      # in another terminal

@@ -210,6 +210,7 @@ _FACTS_FIELDS = (
     "mouse_sgr_flag",
     "mouse_button_flag",
     "mouse_all_flag",
+    "start_time",
     "pane_title",
 )
 _FACTS_FORMAT = _SEP.join(f"#{{{name}}}" for name in _FACTS_FIELDS)
@@ -356,6 +357,12 @@ class PaneFacts:
     tracking) or for every motion (``?1003``). Without either, a program gets
     presses and releases only, and a drag forwarded to it would be a report it
     never asked for (#148)."""
+    server_started: datetime | None = None
+    """When the server that answered started (``#{start_time}``), as
+    :meth:`TmuxServer.started_at` says it, and ``None`` when tmux does not say.
+    Asked in the same command as the rest, so a frame says which server's
+    lifetime its pane id belongs to without a second process: the remote's live
+    stream asked separately, once per watched pane per tick."""
 
 
 @dataclass(frozen=True)
@@ -419,6 +426,13 @@ def _optional_int(value: str) -> int | None:
         return None
 
 
+def _started(epoch: str) -> datetime | None:
+    """``#{start_time}`` as tmux prints it, whole seconds since the epoch; ``None`` for
+    anything else, a tmux too old to know the variable (an empty answer) included."""
+    epoch = epoch.strip()
+    return datetime.fromtimestamp(int(epoch), tz=UTC) if epoch.isdigit() else None
+
+
 def _facts(line: str) -> PaneFacts:
     # maxsplit: the title is last and is the one field a program controls.
     fields = line.split(_SEP, len(_FACTS_FIELDS) - 1)
@@ -442,6 +456,7 @@ def _facts(line: str) -> PaneFacts:
         mouse_on=values["mouse_any_flag"] == "1",
         mouse_sgr=values["mouse_sgr_flag"] == "1",
         mouse_drag=values["mouse_button_flag"] == "1" or values["mouse_all_flag"] == "1",
+        server_started=_started(values["start_time"]),
     )
 
 
@@ -854,8 +869,7 @@ class TmuxServer:
             if _ABSENT.search(completed.stderr):
                 return None
             raise TmuxError(completed.stderr.strip() or "tmux display-message could not be reached")
-        epoch = completed.stdout.strip()
-        return datetime.fromtimestamp(int(epoch), tz=UTC) if epoch.isdigit() else None
+        return _started(completed.stdout)
 
     def spawn_window(
         self,

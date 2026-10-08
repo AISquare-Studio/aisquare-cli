@@ -160,6 +160,7 @@ class _FakeFacts:
     width = 80
     height = 24
     cursor_visible = True
+    server_started = T0 - timedelta(hours=1)  # said with the capture, as tmux says it
 
 
 class _FakeCapture:

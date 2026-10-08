@@ -23,6 +23,7 @@ import os
 import shutil
 import threading
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,8 +33,9 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli
+from aisquare.core import tmux as tmux_module
 from aisquare.core.store import store_session
-from aisquare.core.tmux import CHECK_SOCKET_SUFFIX, TmuxError, TmuxServer
+from aisquare.core.tmux import _SEP, CHECK_SOCKET_SUFFIX, Completed, TmuxError, TmuxServer
 from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_server
@@ -46,6 +48,7 @@ from aisquare.services.remote_server import (
     live_writes,
     remote_agent_lock,
 )
+from tests import fakebin
 from tests.remote_kit_helpers import base, frame_within, make_client, make_runtime, unlock
 
 requires_tmux = pytest.mark.skipif(
@@ -116,12 +119,22 @@ class Tmux:
     def pane_facts(self, pane_id: str) -> SimpleNamespace | None:
         if self.gone:
             return None
-        return SimpleNamespace(dead=self.dead, dead_status=None, current_command=self.command)
+        return SimpleNamespace(
+            pane_id=pane_id,
+            dead=self.dead,
+            dead_status=None,
+            current_command=self.command,
+            cursor_x=0,
+            cursor_y=0,
+            width=132,
+            height=1,
+            cursor_visible=False,
+            history_size=0,
+            server_started=self.started,  # as tmux says it with the rest of the facts
+        )
 
     def capture(self, pane_id: str, **kwargs: Any) -> SimpleNamespace:
-        facts = SimpleNamespace(
-            cursor_x=0, cursor_y=0, width=132, height=1, cursor_visible=False, history_size=0
-        )
+        facts = self.pane_facts(pane_id)
         return SimpleNamespace(lines=[f"the screen of {pane_id}"], facts=facts, scrollback=0)
 
     def capture_history(self, pane_id: str, *, history: int) -> SimpleNamespace:
@@ -245,6 +258,58 @@ def _sources() -> Sources:
         panes=_live_panes,
         explainability=lambda agent, project: {"available": False},
     )
+
+
+def _scripted_tmux(started: datetime, calls: list[list[str]], tmp_path: Path) -> TmuxServer:
+    """A real :class:`TmuxServer` whose tmux is a script: every process it starts is recorded,
+    and each answers as a server that started at ``started`` would."""
+
+    def tmux(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        calls.append(list(argv))
+        epoch = str(int(started.timestamp()))
+        facts = dict.fromkeys(tmux_module._FACTS_FIELDS, "")
+        facts.update(pane_id="%2", pane_width="132", pane_height="1", start_time=epoch)
+        line = _SEP.join(facts.values())
+        if "capture-pane" in argv:
+            return Completed(0, f"the screen of %2\n{line}\n", "")
+        if argv[-1] == tmux_module._FACTS_FORMAT:
+            return Completed(0, f"{line}\n", "")
+        return Completed(0, f"{epoch}\n", "")  # #{start_time}, asked on its own
+
+    binary = fakebin.executable_fake(tmp_path / "bin", "tmux", posix="", windows="")
+    return TmuxServer("asq", runner=tmux, binary=str(binary), conf=tmp_path / "fleet.conf")
+
+
+@pytest.mark.parametrize(
+    ("started", "width"), [(OLDER, 132), (YOUNGER, 80)], ids=["its own server", "a younger one"]
+)
+def test_a_live_frame_and_a_transcripts_width_each_cost_one_tmux_process(
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    started: datetime,
+    width: int,
+) -> None:
+    """The stream takes a frame of every watched pane every tick, and each frame asked tmux in
+    a second process when its server started: half the stream's tmux processes. Every
+    transcript page did the same after a whole capture, for a width. Their own command says
+    it now, so the server that answered is the one judged."""
+    calls: list[list[str]] = []
+    server = _scripted_tmux(started, calls, tmp_path)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: server)
+    if started == OLDER:
+        assert _live_panes("coder-1", None, 0)["rows"] == ["the screen of %2"]
+    else:
+        with pytest.raises(RequestError) as refused:
+            _live_panes("coder-1", None, 0)
+        assert refused.value.error == "not_agent"
+    assert len(calls) == 1, [argv[5:7] for argv in calls]
+    calls.clear()
+    with store_session() as store:
+        row = store.fleet_agent_by_label(project.id, "coder-1", live_only=True)
+    assert row is not None
+    assert remote_server._pane_width(row) == width
+    assert len(calls) == 1, [argv[5:7] for argv in calls]
 
 
 def test_over_http_and_on_the_stream_such_a_row_is_not_agent_and_an_error_frame(

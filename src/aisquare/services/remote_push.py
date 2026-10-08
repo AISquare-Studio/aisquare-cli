@@ -64,7 +64,7 @@ from typing import TYPE_CHECKING, Any
 
 from aisquare.core.atomic import write_replacing
 from aisquare.core.paths import remote_push_path
-from aisquare.services.remote_server import RequestError, _iso_seconds
+from aisquare.services.remote_server import RequestError, _iso_seconds, remote_install_hint
 
 if TYPE_CHECKING:
     from cryptography.hazmat.primitives.asymmetric import ec
@@ -133,7 +133,9 @@ PUSH_HOST_SUFFIXES = (".push.apple.com", ".notify.windows.com")
 """Apple's and Windows' services, which shard by subdomain. The leading dot is the point:
 ``evilpush.apple.com`` ends in ``push.apple.com`` and is somebody else's."""
 
-PUSH_INSTALL_HINT = "Web Push needs the cryptography package — pip install 'aisquare-cli[remote]'"
+PUSH_INSTALL_HINT = f"Web Push needs the cryptography package — {remote_install_hint()}"
+"""Said in the one command that fits how aisquare-cli was installed: ``pip install`` reaches
+neither a uv tool's environment nor a pipx one."""
 
 AUTO_OFF_TITLE = "Remote turns off in {minutes} min"
 """With the minutes left, rounded up: 10 when the first check inside :data:`AUTO_OFF_WARNING`

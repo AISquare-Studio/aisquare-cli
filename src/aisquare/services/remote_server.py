@@ -1706,6 +1706,28 @@ def check_note_text(text: str, field: str) -> None:
         )
 
 
+def check_note_to(to: str) -> None:
+    """A note's ``to`` as a phone may post it: a role or a label, every character one that
+    prints (400 ``invalid``).
+
+    The board keeps it with the event as it came, and ``team.event_line`` puts it on
+    the line ``asq board`` prints and every agent's team delta repeats: ``manager``
+    and an OSC 52 after it set the owner's clipboard from the terminal ``asq board``
+    ran in, past Rich, which strips only BEL, BS, VT, FF and CR. The note's text was
+    refused the same bytes (review of #243, round 4). A name has no use for a tab, a
+    line break, a C1 control or a bidi override, so none is kept, where a text keeps
+    its tabs and line breaks (:func:`check_note_text`).
+    """
+    for char in to:
+        if not char.isprintable():
+            raise RequestError(
+                400,
+                "invalid",
+                f"'to' holds U+{ord(char):04X}, which does not print — 'to' names a role or a "
+                "label",
+            )
+
+
 def check_project_add_root(raw: object) -> Path:
     """The project root ``project/add`` may register for ``raw``; else 400 ``invalid`` (§2.9).
 
@@ -2436,7 +2458,8 @@ def live_writes() -> Writes:
         order, and ``to`` quoted: it is whatever the body says, and written before
         ``as=`` and bare, ``"to": "coder-1 as=manager"`` read as a note posted as
         the manager, and 300 characters of it cut the real ``as=`` off the line
-        (sweep of #243). ``as`` must name a session, or the note is refused.
+        (sweep of #243). ``to`` holds only characters that print
+        (:func:`check_note_to`). ``as`` must name a session, or the note is refused.
         """
         from aisquare.services import team as team_service
 
@@ -2448,6 +2471,8 @@ def live_writes() -> Writes:
             kinds = ", ".join(sorted(NOTE_KINDS))
             raise RequestError(400, "invalid", f"'kind' must be one of {kinds}")
         author, to = _optional_ref(body, "as"), _optional_ref(body, "to", limit=NOTE_TO_MAX)
+        if to is not None:
+            check_note_to(to)
         event = team_service.add_note(
             text,
             session_ref=author,

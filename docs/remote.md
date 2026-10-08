@@ -394,9 +394,11 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   Typed text may hold no ASCII control character other than a tab or a
   newline; a tell and a note, which reach a pane only inside a paste, a carriage
   return as well (a finished task's note is a note, and an agent's fresh
-  replacement is handed its newest notes); and a switch's `reason` is one line
-  with no control character at all. The pad sends Esc, Ctrl-C, Enter and its
-  other control keys by name (a carriage return typed is the Enter key itself).
+  replacement is handed its newest notes); a switch's `reason` is one line
+  with no control character at all; and whom a note is `to`, a role or a label
+  that `aisquare board` prints, holds only characters that print. The pad sends
+  Esc, Ctrl-C, Enter and its other control keys by name (a carriage return typed
+  is the Enter key itself).
 - **Caps**: 64 KiB per request, 2 048 characters per keystroke message, 8 000
   per note or tell and 200 for whom a note is to, 4 live connections per device.
   A device turns its notifications on or off at most 6 times a minute and sends

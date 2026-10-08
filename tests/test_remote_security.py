@@ -1495,6 +1495,53 @@ def test_a_note_holding_a_control_character_is_refused_before_anything_is_writte
     assert team.notes == [] and team.finished == [] and _audit_lines() == before
 
 
+@pytest.mark.parametrize(
+    ("to", "char"),
+    [
+        ("manager\x1b]52;c;cHduZWQ=\x07", "U+001B"),
+        ("manager\x07", "U+0007"),
+        ("coder\n1", "U+000A"),
+        ("coder\t1", "U+0009"),
+        ("x\x9b31m", "U+009B"),
+        ("ma\u202enager", "U+202E"),
+        ("coder\u20281", "U+2028"),
+    ],
+    ids=["osc-52", "bel", "newline", "tab", "c1-csi", "bidi-override", "line-separator"],
+)
+def test_a_notes_to_holding_a_character_that_does_not_print_is_refused(
+    runtime: Runtime, team: FakeTeam, tmp_path: Path, to: str, char: str
+) -> None:
+    """``to`` is a role or a label, and the board keeps it with the event as it came:
+    ``asq board`` printed ``manager`` and the OSC 52 after it, which set the owner's
+    clipboard from the terminal it ran in, and every agent's team delta repeated it. The
+    note's text was refused those bytes; its ``to`` was not (review of #243, round 4)."""
+    client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    before = _audit_lines()
+    response = client.post(f"{base(runtime)}/api/note", json={"text": "hi", "to": to})
+    assert (response.status_code, response.json()) == (
+        400,
+        {
+            "error": "invalid",
+            "message": f"'to' holds {char}, which does not print — 'to' names a role or a label",
+        },
+    )
+    assert team.notes == [] and _audit_lines() == before
+
+
+def test_a_notes_to_may_be_any_role_or_label_that_prints(team: FakeTeam) -> None:
+    handlers = live_writes().handlers
+    for to in ("manager", "coder 2", "équipe-données", "レビュー"):
+        handlers["note"]({"text": "x", "to": to})
+    assert [note["to_role"] for note in team.notes] == [
+        "manager",
+        "coder 2",
+        "équipe-données",
+        "レビュー",
+    ]
+
+
 def test_a_note_keeps_its_tabs_and_line_breaks(team: FakeTeam) -> None:
     """They are a note's own lines, inside the hand-off's paste too, as in a tell's."""
     handlers = live_writes().handlers

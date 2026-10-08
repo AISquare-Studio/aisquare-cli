@@ -23,20 +23,25 @@ and an aisquare that upgrades and uninstalls itself.**
 
 **Upgrading:**
 - From 0.7.0 or earlier, re-run the one-line installer, or run
-  `UV_PYTHON_DOWNLOADS=automatic uv tool install --force --python 3.13 --with tiktoken 'aisquare-cli@latest'`.
+  `UV_PYTHON_DOWNLOADS=automatic uv tool install --force --python 3.13 --with tiktoken --refresh-package aisquare-cli 'aisquare-cli>=0.8.0'`.
   Not `uv tool upgrade`: on a pinned install it silently does nothing. Both
   replace the install and drop its extras; with the command, name yours, as in
-  `'aisquare-cli[serve]@latest'`. From 0.8.0 on, `aisquare upgrade` does it for
-  you and keeps them.
+  `'aisquare-cli[serve]>=0.8.0'`. Under a uv cooldown (`exclude-newer`) that
+  still hides 0.8.0, the command stops with "No solution found" instead of
+  moving you back. From 0.8.0 on, `aisquare upgrade` does it for you and keeps
+  them.
 - The store stays at schema v24; nothing migrates.
 - `aisquare agents connect codex` and `… cursor` now exit 1 with "can't connect
-  … yet", instead of reporting a connection that installed nothing.
+  … yet", instead of reporting a connection that installed nothing. One 0.7.0
+  recorded no longer reads as connected; `aisquare agents disconnect codex` (or
+  `cursor`) clears it.
 
 ### Added
 - `asq` opens on **Welcome**, the guided first run: use the folder you are in
   or choose another, connect Claude Code (Welcome names the install command if
   it is missing and offers the sign-in if it is signed out), then start a
-  manager and two coders, each a real Claude Code session (#248).
+  manager and two coders, each a real Claude Code session. After a reboot,
+  *Start the coders* restarts the coders whose windows are gone (#248).
 - **The Claude Code plugin route**: in Claude Code, run
   `/plugin marketplace add AISquare-Studio/aisquare-cli`, then
   `/plugin install aisquare@aisquare-cli`. Its six hooks run the installed
@@ -44,7 +49,9 @@ and an aisquare that upgrades and uninstalls itself.**
   already has aisquare's hooks, so nothing runs twice. See
   `docs/claude-code-plugin.md` (#249).
 - **`aisquare upgrade`** reinstalls the one-liner's uv tool install in place,
-  keeps its extras and rewrites the hooks without re-importing `CLAUDE.md`;
+  keeps its extras and rewrites the hooks without re-importing `CLAUDE.md`. It
+  never moves an install back to an older release, under a uv cooldown either,
+  and says when the release you have is the newest the cooldown allows.
   `--check` says whether PyPI has a newer release, any other install is shown
   the command that updates it, and fleet agents still running are named
   before their hooks' program is replaced (#251).
@@ -87,9 +94,14 @@ and an aisquare that upgrades and uninstalls itself.**
   connect a Claude Code from npm or Homebrew that has never started: they make
   its `~/.claude`, as Welcome's Connect did, instead of saying it is not
   installed.
-- `aisquare agents connect`, and the Connect in Welcome and the Doctor, refuse
-  a `settings.json` that is not valid JSON and name it, instead of rewriting it
-  with aisquare's hooks and nothing else.
+- `aisquare agents connect` and `init --agent` refuse a `settings.json` that is
+  not valid JSON or that you may not write, and a `CLAUDE.md` they cannot read,
+  and name the file, instead of rewriting `settings.json` with aisquare's hooks
+  and nothing else. The doctor, Welcome and `agents list` name such a file
+  instead of offering a Connect that would fail.
+- A Claude Code config dir this home connected and that was since removed
+  reads as gone in the doctor, with the `aisquare agents disconnect claude-code
+  --config-dir` that forgets it, instead of a Connect that would fail.
 - The Accounts page could say `usage: …` for up to a minute after it opened;
   it now reads usage on its first frame. CI: the frequent Windows-leg flakes
   are gone, CI also runs nightly and on demand, and ruff and mypy are pinned

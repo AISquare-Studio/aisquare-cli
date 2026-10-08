@@ -1666,3 +1666,112 @@ def test_the_question_never_offers_what_an_unreadable_site_rules_out(
         "Remove aisquare's hooks from 1 directory "
         "(the package stays: the hooks in 1 other directory cannot be taken out)?"
     ]
+
+
+# --- sweep of #257 -----------------------------------------------------------------------------
+
+
+def _retired_slot_with_broken_hooks(program: Path | str) -> Path:
+    """A slot `accounts remove` retired with aisquare's hooks still in it: its settings.json
+    was not valid JSON, so they could not be taken out first, and that failure is swallowed."""
+    slot = paths.claude_accounts_dir() / "2.removed-20261001T120000Z"
+    slot.mkdir(parents=True)
+    (slot / "settings.json").write_text(_hooks_text(program, trailing_comma=True), "utf-8")
+    return slot
+
+
+def test_hooks_a_purge_deletes_with_the_home_do_not_hold_the_purge_up(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+) -> None:
+    """A retired slot's hooks cannot be taken out, but --purge deletes the slot with the home:
+    the purge was refused for them all the same, exit 1, and the plan said they "still call"
+    the package (sweep of #257). Without --purge they stay, so they keep it (control)."""
+    _initialised(runner, tmp_path)
+    slot = _retired_slot_with_broken_hooks(tool.script)
+
+    plain = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+    plan = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
+    human = runner.invoke(app, ["uninstall", "--purge", "--dry-run"]).stdout
+    result = runner.invoke(app, ["uninstall", "--yes", "--purge"])
+
+    assert [(site["config_dir"], site["blocks"]) for site in plain["unreadable"]] == [
+        (str(slot), True)
+    ]
+    assert plain["package"]["runs"] is False, "control: no purge, so the hooks stay and keep it"
+    assert [(site["config_dir"], site["blocks"]) for site in plan["unreadable"]] == [
+        (str(slot), False)
+    ]
+    assert (plan["package"]["runs"], plan["home"]["action"]) == (True, "delete"), plan
+    assert f"they are deleted with {paths.aisquare_home()}" in human, human
+    assert "then stop" not in human and "DELETE" in human, human
+    assert result.exit_code == 0, result.output
+    assert not paths.aisquare_home().exists() and world.events[-1][0] == "package"
+
+
+def test_a_slot_the_purge_did_not_delete_is_reported_with_its_hooks(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its hooks go only with the home. When another site fails and the purge is not
+    attempted, they are still there, and the report names them with the rest."""
+    _initialised(runner, tmp_path)
+    slot = _retired_slot_with_broken_hooks(tool.script)
+    stuck = _hooked(isolated_agent_home / ".claude", tool.script)
+
+    def refuse(name: str, config_dir: Path | None = None) -> bool:
+        raise PermissionError(13, "Permission denied", str(config_dir))
+
+    monkeypatch.setattr(agent_core, "remove_hooks", refuse)
+
+    result = runner.invoke(app, ["--json", "uninstall", "--yes", "--purge"])
+
+    report = _one_object(result.stdout)
+    assert result.exit_code == 1
+    assert {(hook["config_dir"], hook["removed"]) for hook in report["hooks"]} == {
+        (str(stuck), False),
+        (str(slot), False),
+    }
+    assert report["home"]["deleted"] is False and paths.aisquare_home().is_dir()
+    assert world.execs == []
+
+
+def test_a_slot_that_links_out_of_the_home_still_holds_the_purge_up(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+) -> None:
+    """The purge unlinks a slot that is a link and leaves what it points at: hooks there
+    outlive the purge, so they still hold it up. "Inside the home" is where a directory
+    really is, never the path that names it."""
+    if not can_symlink():
+        pytest.skip("this machine cannot create symlinks")
+    _initialised(runner, tmp_path)
+    broken = tmp_path / "elsewhere" / "claude-old"  # reached through the slot alone
+    broken.mkdir(parents=True)
+    (broken / "settings.json").write_text(_hooks_text(tool.script, trailing_comma=True), "utf-8")
+    slot = paths.claude_accounts_dir() / "3"
+    slot.parent.mkdir(parents=True, exist_ok=True)
+    slot.symlink_to(broken, target_is_directory=True)
+
+    plan = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
+
+    assert [(site["config_dir"], site["blocks"]) for site in plan["unreadable"]] == [
+        (str(slot), True)
+    ]
+    assert (plan["package"]["runs"], plan["home"]["action"]) == (False, "keep"), plan

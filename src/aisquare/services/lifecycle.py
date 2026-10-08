@@ -830,16 +830,30 @@ class UninstallPlan:
         return install_route.command_line(self.package_argv)
 
     @property
+    def blocking(self) -> tuple[HookSite, ...]:
+        """The ``unreadable`` sites whose hooks keep the package and the home: every one,
+        except, when --purge may delete the home, those inside it (an account slot, a
+        retired one too), whose hooks the purge deletes with them (sweep of #257), as it
+        does a plugin there (:attr:`lasting_plugins`)."""
+        if not (self.purge and self.home_exists and self.purge_refusal is None):
+            return self.unreadable
+        return tuple(site for site in self.unreadable if not self.in_home(site.config_dir))
+
+    @property
     def blocked(self) -> bool:
-        """Whether some directory's hooks cannot be taken out (``unreadable``). The run then
+        """Whether some directory's hooks cannot be taken out (:attr:`blocking`). The run then
         keeps the package and the home, which those hooks still call, so the plan, its
         --json and the question say so too (review of #257)."""
-        return bool(self.unreadable)
+        return bool(self.blocking)
 
     @property
     def purges(self) -> bool:
         """Whether this run deletes the home: --purge, a home to delete, and nothing blocked."""
         return self.purge and self.home_exists and not self.blocked
+
+    def in_home(self, directory: Path) -> bool:
+        """Whether ``directory`` is inside the home, so a purge deletes it with everything in it."""
+        return agent_core.dir_identity(self.home) in agent_core.dir_identity(directory).parents
 
     @property
     def lasting_plugins(self) -> tuple[agent_core.ClaudePlugin, ...]:
@@ -848,12 +862,7 @@ class UninstallPlan:
         which go with it and can run nothing afterwards (review of #257)."""
         if not self.purges:
             return self.plugins
-        home = agent_core.dir_identity(self.home)
-        return tuple(
-            plugin
-            for plugin in self.plugins
-            if home not in agent_core.dir_identity(plugin.config_dir).parents
-        )
+        return tuple(plugin for plugin in self.plugins if not self.in_home(plugin.config_dir))
 
     @property
     def refusal(self) -> UninstallRefused | None:
@@ -1316,14 +1325,23 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
             removals.append(HookRemoval(site.config_dir, True))
     # A site that could not be read may still hold our hooks, and nothing here can
     # take them out: a failure like any other, so the package stays and the
-    # command is still there to run again (review of #253).
-    removals.extend(HookRemoval(site.config_dir, False, site.reason) for site in plan.unreadable)
+    # command is still there to run again (review of #253). One inside the home
+    # waits for the purge, which deletes it, hooks and all (sweep of #257).
+    blocking = plan.blocking
+    removals.extend(HookRemoval(site.config_dir, False, site.reason) for site in blocking)
     purged, purge_error = False, None
     hooks_failed = any(not removal.ok for removal in removals)
     if plan.purge and plan.home_exists and not hooks_failed:
         purged, purge_error = _purge(plan.home)
     elif plan.purge and hooks_failed:
         purge_error = "not attempted: hooks were left in a directory above"
+    if not purged:
+        # The purge that would have taken them did not happen: they are still there.
+        removals.extend(
+            HookRemoval(site.config_dir, False, site.reason)
+            for site in plan.unreadable
+            if site not in blocking
+        )
     record_error: str | None = None
     if not purged and paths.agents_registry_path().is_file():
         # The home survives — no purge, or one not attempted or not finished — so

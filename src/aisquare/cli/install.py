@@ -324,13 +324,20 @@ def upgrade(
 
 def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any]:
     refusal = plan.refusal
+    blocking = plan.blocking
     return {
         "hooks": [
             {"config_dir": str(site.config_dir), "programs": list(site.programs)}
             for site in plan.hooks
         ],
         "unreadable": [
-            {"config_dir": str(site.config_dir), "reason": site.reason} for site in plan.unreadable
+            {
+                "config_dir": str(site.config_dir),
+                "reason": site.reason,
+                # False for a site inside the home this run deletes: it goes with it.
+                "blocks": site in blocking,
+            }
+            for site in plan.unreadable
         ],
         "mcp": [
             {"name": entry.name, "file": str(entry.file), "project": entry.project}
@@ -371,7 +378,7 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
 
 def _blocked_reason(plan: lifecycle_service.UninstallPlan) -> str:
     """Why a blocked run keeps the package (and the home): what ``uninstall`` then does."""
-    count = len(plan.unreadable)
+    count = len(plan.blocking)
     return (
         f"the hooks in {count} director{'ies' if count != 1 else 'y'} cannot be taken out, "
         "and they still call it"
@@ -398,8 +405,11 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
             _say(f"    {site.config_dir}{runs}")
     elif not plan.unreadable:
         _say("  find no aisquare hooks in any Claude Code directory")
+    blocking = plan.blocking
     for site in plan.unreadable:
         _say(f"  ⚠ cannot take the hooks out of {site.config_dir}: {site.reason}")
+        if site not in blocking:
+            _say(f"    they are deleted with {plan.home}")
     if plan.purges:
         _say(f"  DELETE {_home_line(plan)}")
         if plan.keychain and plan.accounts:
@@ -508,12 +518,12 @@ def _emit_uninstall_report(report: lifecycle_service.UninstallReport) -> None:
 def _uninstall_question(plan: lifecycle_service.UninstallPlan) -> str | None:
     """The y/N question, naming every step that will happen — ``None`` when none will.
 
-    A site whose hooks cannot be taken out (``plan.unreadable``) fails the run, which
+    A site whose hooks cannot be taken out (``plan.blocking``) fails the run, which
     then keeps the package and the home (``UninstallReport.package_runs``), so the
     question does not offer them: it asks only what the run will really do (review
     of #254).
     """
-    blocked = len(plan.unreadable)
+    blocked = len(plan.blocking)
     steps: list[str] = []
     if plan.hooks:
         count = len(plan.hooks)
@@ -591,8 +601,8 @@ def uninstall(
             return
         question = _uninstall_question(plan)
         if question is None:
-            if plan.unreadable:
-                checked = ", ".join(str(site.config_dir) for site in plan.unreadable)
+            if plan.blocking:
+                checked = ", ".join(str(site.config_dir) for site in plan.blocking)
                 _say(
                     f"✗ nothing can be removed until the hooks in {checked} can be taken out "
                     "(see above)"

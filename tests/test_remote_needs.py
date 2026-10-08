@@ -1705,14 +1705,16 @@ def test_attention_is_a_dialog_until_an_interruption_follows_it(
     )
 
 
-def _printed_since_the_notice(tail: TranscriptTail, *, printed: datetime) -> Fleet:
+def _printed_since_the_notice(tail: TranscriptTail | None, *, printed: datetime) -> Fleet:
     """coder-1 at a dialog with no tool behind it, notified a minute ago, its row as the real
-    ``fleet._derive`` reads it once the pane printed at ``printed``."""
+    ``fleet._derive`` reads it once the pane printed at ``printed``; ``tail`` ``None`` is a
+    transcript that cannot be read."""
     row = _row()
     session = _session(row, state="attention", seen=NOW - timedelta(minutes=1))
     view = fleet_service._PaneView(False, None, "claude", printed)
     fleet = Fleet(agents=[fleet_service._status(row, session, {row.id: view}, None, NOW)])
-    fleet.tails["/transcripts/coder-1.jsonl"] = tail
+    if tail is not None:
+        fleet.tails["/transcripts/coder-1.jsonl"] = tail
     return fleet
 
 
@@ -1751,6 +1753,30 @@ def test_a_granted_tool_at_work_is_not_its_own_prompt_again(
     snap = _now_of(granted, FakeTmux(reference=NOW, quiet_for=1), monkeypatch)
     assert snap.items == () and not needs_dialog_open(snap)
     assert needs_tool_pending(snap), "a stop still refuses for it, as it always did"
+
+
+def test_a_row_at_work_since_its_notice_with_no_transcript_to_read_is_no_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a transcript to read nothing tells a dialog whose pane just printed from a
+    granted tool at work, which prints until the turn's Stop: the feed kept the notice's
+    card for the rest of the turn. Now it shows none it cannot vouch for, while the guard
+    still refuses, a refusal being its cheap mistake. An empty transcript is no such doubt:
+    nothing at all was written since the notice."""
+    from aisquare.services.remote_actions import action_may_answer
+
+    unread = _printed_since_the_notice(None, printed=NOW - timedelta(seconds=1))
+    snap = _now_of(unread, FakeTmux(reference=NOW, quiet_for=1), monkeypatch)
+    assert snap.status is not None and snap.status.state == "working"
+    assert snap.items == (), "no card for what may be a tool at work"
+    assert needs_dialog_open(snap) and action_may_answer(snap), "but no Enter either"
+    nothing = TranscriptTail(
+        pending=(), newest="none", newest_at=None, last_text=None, last_text_at=None,
+        marker_key=None,
+    )  # fmt: skip
+    empty = _printed_since_the_notice(nothing, printed=NOW - timedelta(seconds=1))
+    snap = _now_of(empty, FakeTmux(reference=NOW, quiet_for=1), monkeypatch)
+    assert [item.kind for item in snap.items] == ["permission"] and needs_dialog_open(snap)
 
 
 @pytest.mark.parametrize(

@@ -568,9 +568,10 @@ def needs_from_agent(
     Attention is the derived ``attention``, or a session still marked so after the row
     went stale (past ``_STALE_AFTER`` it derives ``waiting``, the dialog maybe still up).
     Rules 7 and 8 also hold for a row that reads ``working`` on output since the notice,
-    while its agent wrote nothing since (:func:`_needs_unanswered`): a key that moves the
-    dialog's highlight prints too, and a card that went and came back with it answered
-    ``stale``. Rule 5 does not: a granted tool prints until it ends, its prompt answered.
+    while its transcript shows its agent wrote nothing since (:func:`_needs_unanswered`):
+    a key that moves the dialog's highlight prints too, and a card that went and came back
+    with it answered ``stale``. Rule 5 does not: a granted tool prints until it ends, its
+    prompt answered.
     Records older than the row are ignored throughout: a resumed session's old pending tool
     or closing question belong to the process before it. Without a readable tail, rules
     3 to 6 and 9 cannot hold. ``exited`` and ``unknown`` agents need nothing here; ``crashed``,
@@ -631,7 +632,7 @@ def needs_from_agent(
         ]
     if tail is not None and _needs_marker_later(status, tail):
         return [_needs_interrupted_item(tail, project=project, agent=agent, name=name, now=now)]
-    if attention or _needs_unanswered(status, tail):
+    if attention or _needs_unanswered(status, tail, unread=False):
         notice = _needs_notice(attention_event, tail)
         if notice is not None and LIMIT_DIALOG.search(notice.text):
             since = notice.created_at
@@ -723,7 +724,9 @@ def _needs_attention(status: FleetAgentStatus) -> bool:
     )
 
 
-def _needs_unanswered(status: FleetAgentStatus, tail: TranscriptTail | None) -> bool:
+def _needs_unanswered(
+    status: FleetAgentStatus, tail: TranscriptTail | None, *, unread: bool
+) -> bool:
     """A row that reads ``working`` while its session is still marked ``attention``, and its
     agent wrote nothing since the notice: a dialog may be up all the same.
 
@@ -733,16 +736,26 @@ def _needs_unanswered(status: FleetAgentStatus, tail: TranscriptTail | None) -> 
     seconds a dialog with no tool behind it (the usage-limit one, Claude Code's own) read
     as an agent at work: no card, and a stop's ``/exit`` and Enter picked the highlighted
     option. An answer leaves a record newer than the notice in the transcript (the reply
-    to a choice, an interruption); a dialog still up leaves none. Without a tail nothing
-    says it was answered. A pending tool is not looked at here: a granted one prints while
-    it runs and writes nothing until it ends, so this would read it as its own prompt.
+    to a choice, an interruption); a dialog still up leaves none, and an empty transcript
+    none at all. A pending tool is not looked at here: a granted one prints while it runs
+    and writes nothing until it ends, so this would read it as its own prompt.
+
+    ``unread`` is the answer when the transcript cannot say: none to read, or records
+    without times. Then nothing tells a dialog whose pane printed from a granted tool at
+    work, which prints until the turn's Stop. The guard takes it for a dialog, a refusal
+    being its cheap mistake (:func:`needs_dialog_open`); the feed does not, a card it
+    cannot vouch for, there for the rest of the turn, being its dear one.
     """
     session = status.session
     if status.state != "working" or session is None or session.ended_at is not None:
         return False
     if session.state != "attention":
         return False
-    return tail is None or tail.newest_at is None or tail.newest_at <= session.last_seen_at
+    if tail is not None and tail.newest == "none":
+        return True  # nothing written at all, so nothing since the notice
+    if tail is None or tail.newest_at is None:
+        return unread
+    return tail.newest_at <= session.last_seen_at
 
 
 def _needs_marker_later(status: FleetAgentStatus, tail: TranscriptTail) -> bool:
@@ -1878,10 +1891,12 @@ def needs_dialog_open(snap: AgentNow) -> bool:
     agent shows no dialog, even when its transcript ends on a pending tool (a
     crash mid-tool). Otherwise any of: a pending tool in a quiet pane (the
     spinner stops while a dialog waits); attention with no interruption since,
-    the row reading ``working`` on output its dialog may have printed included
-    (:func:`_needs_unanswered`); a current prompt, question or plan item, or the
-    usage-limit dialog. A false positive costs a refusal with a sentence, or an
-    Escape to an agent about to be stopped anyway — never an Enter into a dialog.
+    the row reading ``working`` on output its dialog may have printed included,
+    unless its transcript shows the agent wrote since (:func:`_needs_unanswered`,
+    which a transcript that cannot be read does not show); a current prompt,
+    question or plan item, or the usage-limit dialog. A false positive costs a
+    refusal with a sentence, or an Escape to an agent about to be stopped anyway —
+    never an Enter into a dialog.
 
     A dialog's first seconds are not seen here: quiet means no output for
     ``fleet.ACTIVITY_WINDOW`` (5 s), and the notification that makes the row
@@ -1898,7 +1913,7 @@ def needs_dialog_open(snap: AgentNow) -> bool:
         snap.tail is not None and _needs_marker_later(status, snap.tail)
     ):
         return True
-    if not pending and _needs_unanswered(status, snap.tail):
+    if not pending and _needs_unanswered(status, snap.tail, unread=True):
         return True
     return any(
         item.kind in ("permission", "question", "plan")

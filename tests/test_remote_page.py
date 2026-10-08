@@ -1340,6 +1340,31 @@ def test_keys_reach_an_agent_one_at_a_time_in_the_order_they_were_tapped(
     assert keys["afterAnswer"] == {"whileAnswering": 0, "after": 1}
 
 
+def test_the_pads_exit_and_rewind_guards_each_ask_before_a_key_goes(
+    boot_report: dict[str, Any],
+) -> None:
+    """Only the page asks before ^C or ^D (one interrupts the agent, a second within 3 s exits
+    Claude Code) and before a second Esc within 1.5 s (two open its Rewind selector): the
+    machine lets the first of each through. Nothing tested any of them, nor the resend of a
+    second ^C the machine refused. Each step: the key, the sheet it left, the keys sent."""
+    pad = boot_report["padConfirms"]
+    assert pad["steps"] == [
+        ["^C", "Send Ctrl-C?", 0],
+        ["Send Ctrl-C", None, 1],
+        ["^D", "Send Ctrl-D?", 1],
+        ["Close", None, 1],
+        ["^C", "Send Ctrl-C?", 1],
+        ["Send Ctrl-C", "Send Ctrl-C to coder-1 again?", 2],
+        ["Send and exit", None, 3],
+        ["Esc", None, 4],
+        ["Esc", None, 5],  # two seconds after the last
+        ["Esc", "Press Esc again?", 5],
+        ["Send Esc", None, 6],
+    ]
+    escapes = [["Escape"]] * 3
+    assert pad["keys"] == [["C-c"], ["C-c"], ["C-c", "confirm_exit"], *escapes]
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

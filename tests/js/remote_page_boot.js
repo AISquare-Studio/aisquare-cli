@@ -1245,6 +1245,39 @@ async function keysInOrder() {
   };
 }
 
+/* The pad's guards, which only the page keeps: ^C and ^D each ask first; a second Esc within
+ * 1.5 s asks first (two open Claude Code's Rewind), and one 2 s after the last does not; a
+ * second ^C the machine refuses double_press goes again, with confirm_exit, only once the
+ * human says so. After each step: the sheet on screen and how many keys were sent. */
+async function padConfirms() {
+  let ctrlC = 0;
+  const page = await agentView({
+    "POST api/send-keys": (body) => (body.keys[0] === "C-c" && body.confirm_exit !== true && ++ctrlC > 1
+      ? { status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits Claude Code" } }
+      : { status: 200, json: { sent: true } }),
+  });
+  const steps = [];
+  const sent = () => page.sent("api/send-keys");
+  const act = async (where, name) => {
+    click(buttonNamed(where === "sheet" ? page.run("UI.sheet") : page.main(), name));
+    await settle();
+    steps.push([name, sheetTitle(page), sent().length]);
+  };
+  await act("pad", "^C");
+  await act("sheet", "Send Ctrl-C");
+  await act("pad", "^D");
+  await act("sheet", "Close");
+  await act("pad", "^C");
+  await act("sheet", "Send Ctrl-C");
+  await act("sheet", "Send and exit");
+  await act("pad", "Esc");
+  page.run("Date.now = ((then) => () => then + 2000)(Date.now());");
+  await act("pad", "Esc");
+  await act("pad", "Esc");
+  await act("sheet", "Send Esc");
+  return { steps, keys: sent().map((body) => (body.confirm_exit === true ? body.keys.concat("confirm_exit") : body.keys)) };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -1281,6 +1314,7 @@ async function main() {
     lateAnswers: await lateAnswers(),
     sheetBeforeFleet: await sheetBeforeFleet(),
     keysInOrder: await keysInOrder(),
+    padConfirms: await padConfirms(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

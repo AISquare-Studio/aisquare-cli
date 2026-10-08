@@ -485,10 +485,15 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
             row for row in fleet.ended if row.ended_at is not None and row.ended_at >= since
         ],
         board_events=lambda pid, limit: fleet.events[-limit:],
-        board_sessions=lambda pid: list(fleet.sessions),
+        board_sessions=lambda pid, since, ids: [
+            session
+            for session in fleet.sessions
+            if session.last_seen_at >= since or session.id in ids
+        ],
         task_status=lambda ref: fleet.tasks.get(ref),
         transcript_tail=lambda path: fleet.tails.get(path),
         accounts=lambda: accounts or AccountsSettings(),
+        has_live_agents=lambda pid: any(status.agent.ended_at is None for status in fleet.agents),
     )
 
 
@@ -641,13 +646,29 @@ def test_a_lost_pane_is_dated_from_the_first_scan_that_saw_it() -> None:
 def test_a_project_whose_listing_fails_still_shows_its_board() -> None:
     manager = _row("manager", role="manager")
     managing = _session(manager)
+    coder = _row("coder-2")
     fleet = Fleet(
+        agents=[_status(coder, "working", _session(coder))],
         listing_fails=True,
         sessions=[managing],
         events=[_event(5, "question", "Ship on Friday?", session=managing)],
         ended=[_row("coder-1", ended=NOW - timedelta(minutes=1), exit_status=1)],
     )
     assert [item.kind for item in _scan(fleet)] == ["board_question"]
+    assert fleet.listed == 1, "it has a live row, so it was listed, and the listing failed"
+
+
+def test_a_project_with_no_live_row_is_not_listed() -> None:
+    """``fleet.list_agents`` reads every row and session the project ever had, and the scan
+    runs every few seconds over every project. With no live row there is no pane to ask
+    about and no death to record: its ended rows and its board say all there is."""
+    fleet = _crash(exit_status=1)
+    assert [item.kind for item in _scan(fleet)] == ["crashed"]
+    assert fleet.listed == 0
+    coder = _row("coder-2")
+    fleet.agents.append(_status(coder, "working", _session(coder)))
+    _scan(fleet)
+    assert fleet.listed == 1
 
 
 def test_a_dismissed_item_leaves_the_feed() -> None:
@@ -1517,6 +1538,83 @@ def test_the_live_sources_read_an_unchanged_transcript_once(
         handle.write(json.dumps(answer) + "\n")
     again = tail_of(str(transcript))
     assert len(reads) == 2 and again is not None and again.pending == (), "it grew: read again"
+
+
+def test_a_scan_builds_none_of_a_projects_history_it_cannot_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every spawn, restart and switch leaves a fleet row, and every Claude Code start a
+    session, that is never deleted. Each scan read all of both, for every project, every 3 s,
+    after ``fleet.list_agents`` had read them already (review of #243, round 3, 11/13). Now a
+    project with no live row is not listed, and the scan's own reads keep to the day's
+    endings, the sessions seen in the last half hour and the authors of open questions."""
+    from aisquare.core import store as store_module
+
+    now = datetime.now(UTC)
+    old = now - timedelta(days=3)
+    dormant = ProjectInfo(id="prj_dormant", root=tmp_path / "dormant")
+    active = ProjectInfo(id="prj_active", root=tmp_path / "active")
+    history = 60
+    with store_session() as store:
+        for project in (dormant, active):
+            store.onboard_project(project)
+            for n in range(history):
+                sid = f"ses_{project.id}_{n}"
+                store.upsert_session(
+                    TeamSession(
+                        id=sid, project_id=project.id, role="coder", started_at=old,
+                        last_seen_at=old, ended_at=old,
+                    )
+                )  # fmt: skip
+                store.upsert_fleet_agent(
+                    FleetAgent(
+                        id=f"agt_{project.id}_{n}", project_id=project.id, label=f"coder-{n}",
+                        role="coder", pane_id=f"%{n}", session_id=sid, cwd=project.root,
+                        created_at=old, ended_at=old, exit_status=0,
+                    )
+                )  # fmt: skip
+        store.upsert_session(
+            TeamSession(
+                id="ses_live", project_id=active.id, role="coder", label="coder-live",
+                started_at=now - timedelta(hours=1), last_seen_at=now - timedelta(minutes=1),
+            )
+        )  # fmt: skip
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_live", project_id=active.id, label="coder-live", role="coder",
+                pane_id="%99", session_id="ses_live", cwd=active.root,
+                created_at=now - timedelta(hours=1),
+            )
+        )  # fmt: skip
+        store.add_team_event(
+            TeamEvent(
+                id="evt_q", project_id=active.id, session_id=f"ses_{active.id}_7",
+                kind="question", text="Which cache?", created_at=now - timedelta(hours=1),
+            )
+        )  # fmt: skip
+    built: dict[str, list[str]] = {"rows": [], "sessions": []}
+    rows, sessions = store_module._row_to_fleet_agent, store_module._row_to_session
+
+    def row_built(row: Any) -> FleetAgent:
+        built["rows"].append(row["project_id"])
+        return rows(row)
+
+    def session_built(row: Any) -> TeamSession:
+        built["sessions"].append(row["project_id"])
+        return sessions(row)
+
+    monkeypatch.setattr(store_module, "_row_to_fleet_agent", row_built)
+    monkeypatch.setattr(store_module, "_row_to_session", session_built)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+    assert [(item.kind, item.reason) for item in items] == [
+        ("board_question", "coder asks on the board")
+    ], "the question's author was read, however long ago it was seen"
+    assert dormant.id not in built["rows"] + built["sessions"], "no live row: never listed"
+    listing = history + 1  # fleet.list_agents' own read of every row and session, once
+    assert built["rows"].count(active.id) <= listing + 1, "and the live row the scan counts"
+    assert built["sessions"].count(active.id) <= listing + 2, "the live one and the author"
 
 
 # --- the watcher --------------------------------------------------------------------------

@@ -1907,6 +1907,56 @@ def test_an_unreadable_snapshot_is_no_evidence_and_the_store_still_opens(
     assert everything == {"prj_snap", "prj_locked"}, "the unreadable one stays captured"
 
 
+# --- the reads a poller makes every few seconds (remote's needs scan) -------------------------
+
+
+def test_the_rows_that_ended_since_are_chosen_by_the_query(store: ContextStore) -> None:
+    """Every spawn, restart and switch leaves a row that is never deleted, so a reader that
+    wants the last day's endings must not build all of them to keep a few."""
+    from datetime import timedelta, timezone
+
+    from aisquare.models import FleetAgent
+
+    now = datetime.now(tz=UTC)
+    for n, ended in ((1, now - timedelta(days=2)), (2, now - timedelta(hours=1)), (3, None)):
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=f"agt_{n}", project_id=PROJECT.id, label=f"coder-{n}", role="coder",
+                pane_id=f"%{n}", cwd=Path("/w"), created_at=now - timedelta(days=3),
+                ended_at=ended, exit_status=None if ended is None else 1,
+            )
+        )  # fmt: skip
+    since = now - timedelta(days=1)
+    assert [row.id for row in store.fleet_agents_ended_since(PROJECT.id, since)] == ["agt_2"]
+    toronto = since.astimezone(timezone(timedelta(hours=-4)))
+    assert [row.id for row in store.fleet_agents_ended_since(PROJECT.id, toronto)] == ["agt_2"]
+    assert store.fleet_agents_ended_since("prj_other", since) == []
+
+
+def test_the_sessions_seen_since_and_the_ones_named_are_chosen_by_the_query(
+    store: ContextStore,
+) -> None:
+    """Every Claude Code start leaves a session that is never deleted: the reader names the
+    old ones it needs (the authors of open board questions) and gets the recent ones."""
+    from datetime import timedelta
+
+    from aisquare.models import TeamSession
+
+    now = datetime.now(tz=UTC)
+    for n, seen in ((1, now - timedelta(days=2)), (2, now - timedelta(minutes=5)), (3, now)):
+        store.upsert_session(
+            TeamSession(
+                id=f"ses_{n}", project_id=PROJECT.id, role="coder",
+                started_at=seen, last_seen_at=seen,
+            )
+        )  # fmt: skip
+    recent = now - timedelta(minutes=30)
+    assert [s.id for s in store.team_sessions_seen_since(PROJECT.id, recent)] == ["ses_3", "ses_2"]
+    named = store.team_sessions_seen_since(PROJECT.id, recent, ids=["ses_1", "ses_2", "ses_9"])
+    assert [s.id for s in named] == ["ses_3", "ses_2", "ses_1"], "newest seen first, once each"
+    assert store.team_sessions_seen_since("prj_other", recent, ids=["ses_1"]) == []
+
+
 # --- the launch spec and ui_state (#144) ----------------------------------------------------
 
 

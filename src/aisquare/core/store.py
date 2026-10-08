@@ -1013,6 +1013,9 @@ class ContextStore(Protocol):
     def upsert_session(self, session: TeamSession) -> TeamSession: ...
     def get_session(self, session_id: str) -> TeamSession | None: ...
     def team_sessions(self, project_id: str) -> list[TeamSession]: ...
+    def team_sessions_seen_since(
+        self, project_id: str, since: datetime, *, ids: Sequence[str] = ()
+    ) -> list[TeamSession]: ...
     def update_session(
         self,
         session_id: str,
@@ -1091,6 +1094,7 @@ class ContextStore(Protocol):
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
+    def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
     def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
@@ -2005,6 +2009,33 @@ class SqliteStore:
             (project_id,),
         ).fetchall()
         return [_row_to_session(row) for row in rows]
+
+    def team_sessions_seen_since(
+        self, project_id: str, since: datetime, *, ids: Sequence[str] = ()
+    ) -> list[TeamSession]:
+        """The project's sessions seen at or after ``since``, and those named in ``ids`` however
+        long ago they were seen; newest seen first.
+
+        For a reader that runs every few seconds and needs the live few (``remote``'s needs
+        scan): :meth:`team_sessions` is every session the project ever had, and every Claude
+        Code start adds one that is never deleted. The window rides the ``(project_id,
+        last_seen_at)`` index; ``since`` compares as the stored ISO-8601 UTC strings do.
+        """
+        rows = self._conn.execute(
+            f"SELECT {_SESSION_COLUMNS} FROM team_session "
+            "WHERE project_id = ? AND last_seen_at >= ?",
+            (project_id, since.astimezone(UTC).isoformat()),
+        ).fetchall()
+        named = sorted(set(ids))
+        for start in range(0, len(named), 500):  # well under SQLite's bound on parameters
+            chunk = named[start : start + 500]
+            rows += self._conn.execute(
+                f"SELECT {_SESSION_COLUMNS} FROM team_session "
+                f"WHERE project_id = ? AND id IN ({', '.join('?' * len(chunk))})",
+                (project_id, *chunk),
+            ).fetchall()
+        sessions = {row["id"]: _row_to_session(row) for row in rows}
+        return sorted(sessions.values(), key=lambda session: session.last_seen_at, reverse=True)
 
     def update_session(
         self,
@@ -3327,6 +3358,21 @@ class SqliteStore:
             f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
             f"WHERE project_id = ?{clause} ORDER BY created_at, id",
             (project_id,),
+        ).fetchall()
+        return [_row_to_fleet_agent(row) for row in rows]
+
+    def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]:
+        """The project's rows that ended at or after ``since``, oldest first.
+
+        Filtered here, not by the caller: every spawn, restart and switch adds a row that is
+        never deleted, and a reader that runs every few seconds for the last day's endings
+        (``remote``'s needs scan) built every row the project ever had to keep a handful.
+        ``since`` compares as the stored ISO-8601 UTC strings do.
+        """
+        rows = self._conn.execute(
+            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            "WHERE project_id = ? AND ended_at >= ? ORDER BY created_at, id",
+            (project_id, since.astimezone(UTC).isoformat()),
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 

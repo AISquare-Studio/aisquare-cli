@@ -269,9 +269,18 @@ class AgentNow:
     included, and dismissed ones too: a dismissal hides a card, it does not close a dialog."""
 
 
+def _needs_lists_every(project_id: str) -> bool:
+    """A source's ``has_live_agents`` when it says nothing: every project is listed."""
+    return True
+
+
 @dataclass(frozen=True)
 class NeedsSources:
-    """Everything the scan reads, as callables: the live store and tmux, or a test's fakes."""
+    """Everything the scan reads, as callables: the live store and tmux, or a test's fakes.
+
+    Each read is bounded by what the scan can use. It runs every few seconds, and the
+    store keeps every row, session and event a project ever had.
+    """
 
     list_projects: Callable[[], list[ProjectInfo]]
     list_agents: Callable[[ProjectInfo], list[FleetAgentStatus]]
@@ -280,11 +289,17 @@ class NeedsSources:
     ended_agents: Callable[[str, datetime], list[FleetAgent]]
     """The project's rows that ended at or after the given time."""
     board_events: Callable[[str, int], list[TeamEvent]]
-    board_sessions: Callable[[str], list[TeamSession]]
+    board_sessions: Callable[[str, datetime, Collection[str]], list[TeamSession]]
+    """The project's sessions seen at or after the given time, and those with the given ids:
+    the ones a live manager may be, and the authors of the board's open questions."""
     task_status: Callable[[str], str | None]
     """A task's status; ``None`` when it is gone."""
     transcript_tail: Callable[[str], TranscriptTail | None]
     accounts: Callable[[], AccountsSettings]
+    has_live_agents: Callable[[str], bool] = _needs_lists_every
+    """Whether the project has a row that has not ended. The scan lists only a project that
+    has: ``fleet.list_agents`` reads every row and session the project ever had, and with
+    no live row there is no pane to ask tmux about and no death to record."""
 
 
 # --- names on a lock screen, and text on a card -------------------------------------------
@@ -1041,7 +1056,12 @@ def _needs_scan_project(
     events = _needs_read(
         lambda: sources.board_events(project.id, NEEDS_BOARD_EVENTS), "board", project
     )
-    sessions = _needs_read(lambda: sources.board_sessions(project.id), "sessions", project)
+    authors = _needs_board_authors(events, now)
+    sessions = _needs_read(
+        lambda: sources.board_sessions(project.id, now - _MANAGER_FRESH, authors),
+        "sessions",
+        project,
+    )
     listed = statuses or []
     rows = list({row.id: row for row in [*ended, *(status.agent for status in listed)]}.values())
     gone = {row.session_id for row in ended if row.session_id}
@@ -1087,6 +1107,18 @@ def _needs_scan_project(
         )
     )
     return _NeedsProject(items=items, statuses=listed, ended=ended, tails=tails)
+
+
+def _needs_board_authors(events: Sequence[TeamEvent], now: datetime) -> set[str]:
+    """The sessions whose board questions and results may still need the human: the ones
+    :func:`needs_from_board` names an item's author from."""
+    return {
+        event.session_id
+        for event in events
+        if event.session_id
+        and event.kind in ("question", "result")
+        and now - event.created_at <= QUESTION_HORIZON
+    }
 
 
 def _needs_tail_of(sources: NeedsSources, status: FleetAgentStatus) -> TranscriptTail | None:
@@ -1284,7 +1316,7 @@ def scan_needs_you(
     for project in sources.list_projects():
         statuses: list[FleetAgentStatus] | None
         try:
-            statuses = sources.list_agents(project)
+            statuses = sources.list_agents(project) if _needs_has_live(sources, project) else []
         except Exception:
             log.debug("remote: needs could not list the agents of %s", project.id, exc_info=True)
             statuses = None
@@ -1299,6 +1331,15 @@ def scan_needs_you(
     for key in [key for key in memory if key not in seen]:
         del memory[key]
     return _needs_ranked([item for item in items if item.id not in dismissed])
+
+
+def _needs_has_live(sources: NeedsSources, project: ProjectInfo) -> bool:
+    """Whether to list ``project``: it has a live row, or the store would not say."""
+    try:
+        return sources.has_live_agents(project.id)
+    except Exception:
+        log.debug("remote: needs could not count the live rows of %s", project.id, exc_info=True)
+        return True
 
 
 def _needs_accounts(sources: NeedsSources) -> AccountsSettings | None:
@@ -1506,16 +1547,21 @@ def live_needs_sources() -> NeedsSources:
 
     def needs_rows_ended(project_id: str, since: datetime) -> list[FleetAgent]:
         with store_session() as store:
-            rows = store.fleet_agents(project_id, live_only=False)
-        return [row for row in rows if row.ended_at is not None and row.ended_at >= since]
+            return store.fleet_agents_ended_since(project_id, since)
+
+    def needs_rows_live(project_id: str) -> bool:
+        with store_session() as store:
+            return bool(store.fleet_agents(project_id, live_only=True))
 
     def needs_board_events(project_id: str, limit: int) -> list[TeamEvent]:
         with store_session() as store:
             return store.recent_events(project_id, limit=limit)
 
-    def needs_board_sessions(project_id: str) -> list[TeamSession]:
+    def needs_board_sessions(
+        project_id: str, since: datetime, ids: Collection[str]
+    ) -> list[TeamSession]:
         with store_session() as store:
-            return store.team_sessions(project_id)
+            return store.team_sessions_seen_since(project_id, since, ids=sorted(ids))
 
     def needs_task_status(ref: str) -> str | None:
         with store_session() as store:
@@ -1537,6 +1583,7 @@ def live_needs_sources() -> NeedsSources:
         task_status=needs_task_status,
         transcript_tail=_needs_cached_tail,
         accounts=claude_accounts_service.accounts_settings,
+        has_live_agents=needs_rows_live,
     )
 
 

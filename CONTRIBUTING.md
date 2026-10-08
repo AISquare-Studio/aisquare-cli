@@ -472,9 +472,9 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   real home in a test or example.
 - Keep CLI modules thin and services free of CLI concerns.
 - New shared plumbing goes in `core/`; new domain shapes go in `models.py`.
-- A change that makes the CLI keep something new on disk, or reach the network,
-  updates SECURITY.md's "What it keeps on your machine" or "What leaves your
-  machine" in the same PR.
+- A change that makes the CLI keep something new on disk, change Claude Code's
+  settings, or reach the network updates SECURITY.md's "What the CLI stores,
+  changes and sends" (its Stored, Changed or Sent list) in the same PR.
 
 ## Reporting bugs / proposing features
 

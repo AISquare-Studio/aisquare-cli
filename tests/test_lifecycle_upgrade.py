@@ -383,6 +383,24 @@ def test_the_seam_registry_names_the_command_the_new_install_runs() -> None:
     assert f"``{runs}``" in listed and "agents connect" not in listed, listed
 
 
+def test_contributing_names_the_security_md_section_that_exists() -> None:
+    """CONTRIBUTING's rule named two SECURITY.md sections that never existed, so a
+    contributor following it looked for headings that are not there (review of #257)."""
+    root = Path(__file__).resolve().parents[1]
+    rule = " ".join((root / "CONTRIBUTING.md").read_text(encoding="utf-8").split())
+    security = (root / "SECURITY.md").read_text(encoding="utf-8")
+    headings = {line[3:].strip() for line in security.splitlines() if line.startswith("## ")}
+    named = re.search(
+        r"updates SECURITY\.md's \"([^\"]+)\" \(its (\w+), (\w+) or (\w+) list\)", rule
+    )
+
+    assert named is not None, "the rule no longer names a SECURITY.md section"
+    assert named.group(1) in headings, (named.group(1), headings)
+    assert "What leaves your machine" not in headings, "control: a name that was never there"
+    labels = named.groups()[1:]
+    assert all(f"**{label}" in security for label in labels), labels
+
+
 def test_security_md_lists_what_upgrade_and_the_plugin_change_and_send() -> None:
     """SECURITY.md is an inventory that says only what the code does, and it predated
     upgrade's hook rewrite, its PyPI requests and the plugin's uvx (review of #257)."""

@@ -165,11 +165,18 @@ class FakeElement extends FakeNode {
   }
 
   focus() {
+    this.ownerDocument.activeElement = this;
     this.dispatch("focus");
   }
 
   blur() {
+    if (this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = this.ownerDocument.body;
     this.dispatch("blur");
+  }
+
+  contains(node) {
+    for (let at = node; at; at = at.parentNode) if (at === this) return true;
+    return false;
   }
 
   /* A layout of one kind: a monospace character is CHAR_PX wide, a pre is preWidth, and
@@ -273,6 +280,7 @@ function bootPage(hash, answer, globals) {
   };
   doc.documentElement = new FakeElement(doc, "html");
   doc.body = new FakeElement(doc, "body");
+  doc.activeElement = doc.body;
   const app = new FakeElement(doc, "div");
   app.id = "app";
   doc.documentElement.appendChild(doc.body);
@@ -1458,6 +1466,41 @@ async function stripCap() {
   return { most, held: Array.from(held).sort() };
 }
 
+/* What a screen reader is told on the agent view: the connection dot, live and then stale;
+ * each tab and each bottom nav button; the Actions… sheet (the dialog, the page behind it,
+ * where focus went), then Stop… in its place, then Escape; and the Keys and More toggles
+ * before and after a tap. */
+async function spoken() {
+  const page = await agentView();
+  const sheet = () => page.run("UI.sheet").childNodes[0];
+  const behind = () => page.run("[UI.top, UI.banner, UI.main, UI.nav].map((part) => part.inert === true)");
+  const dot = () => page.run("UI.dot").attrs["aria-label"] || null;
+  const live = dot();
+  page.run("S.lastFrameAt = Date.now() - 60000; checkStale();");
+  const dots = [live, dot()];
+  page.live().frame("heartbeat", { needs_scanned_at: null });
+  const tabs = page.main().querySelectorAll("div.tabs")[0].childNodes.map((tab) => [tab.textContent, tab.attrs["aria-selected"] || null]);
+  const nav = page.run("[UI.navNeeds, UI.navProjects, UI.navDevices, UI.navSettings]").map((tab) => tab.attrs["aria-current"] || null);
+  const actions = buttonNamed(page.main(), "Actions…");
+  actions.focus();
+  click(actions);
+  const opened = {
+    dialog: ["role", "aria-modal", "aria-labelledby"].map((name) => sheet().attrs[name] || null),
+    named: (find(sheet(), (node) => node.id && node.id === sheet().attrs["aria-labelledby"]) || { textContent: null }).textContent,
+    behind: behind(),
+    focusIn: sheet().contains(page.run("document.activeElement")),
+  };
+  click(buttonNamed(page.run("UI.sheet"), "Stop…"));
+  const replaced = { named: sheetTitle(page), behind: behind(), focusIn: sheet().contains(page.run("document.activeElement")) };
+  page.run("for (const fn of document.listeners.keydown || []) fn({ type: 'keydown', key: 'Escape' });");
+  const escaped = { open: page.run("UI.sheet.classList.contains('open')"), behind: behind(), focusBack: page.run("document.activeElement") === actions };
+  const toggles = () => ["Keys", "More"].map((name) => buttonNamed(page.main(), name).attrs["aria-expanded"] || null);
+  const shut = toggles();
+  click(buttonNamed(page.main(), "Keys"));
+  click(buttonNamed(page.main(), "More"));
+  return { dots, tabs, nav, opened, replaced, escaped, toggles: [shut, toggles()] };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -1500,6 +1543,7 @@ async function main() {
     transcriptLoads: await transcriptLoads(),
     buttonsInFlight: await buttonsInFlight(),
     stripCap: await stripCap(),
+    spoken: await spoken(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

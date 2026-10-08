@@ -389,12 +389,18 @@ def test_the_external_url_check_can_fail() -> None:
 
 # --- 6. no dangerous sinks ------------------------------------------------------------------
 
-#: SPEC §6.6: the only attribute names the page may set, each as a literal.
+#: SPEC §6.6: the only attribute names the page may set, each as a literal; and the ARIA
+#: states a modal sheet, a tab, the bottom nav and a toggle need, whose values are literals.
 ALLOWED_ATTRIBUTES = frozenset(
     {
         "aria-label",
         "aria-hidden",
         "aria-live",
+        "aria-modal",
+        "aria-labelledby",
+        "aria-selected",
+        "aria-current",
+        "aria-expanded",
         "role",
         "type",
         "autocapitalize",
@@ -1455,6 +1461,29 @@ def test_the_feed_keeps_to_six_pane_strips_as_prompts_come_in_above_the_rest(
     cap = boot_report["stripCap"]
     assert cap["most"] == 6
     assert cap["held"] == ["coder-7", "coder-8", "coder-9", "planner-1", "planner-2", "planner-3"]
+
+
+def test_a_screen_reader_is_told_which_tab_is_open_and_that_a_sheet_is_a_modal_dialog(
+    boot_report: dict[str, Any],
+) -> None:
+    """Tabs and the bottom nav marked the current one with a class, so a screen reader heard
+    none of them selected. A sheet was an unnamed dialog that left focus on the button behind
+    it, with the page under it still in the reading order and Tab moving through it; Escape
+    did nothing. Each sheet is named by its heading now, modal, the page behind it inert,
+    focus in it, and back on what opened it once Escape closes it."""
+    said = boot_report["spoken"]
+    assert said["dots"] == ["Live", "Stale: nothing heard for 25 s"], "the dot said it by colour"
+    assert said["tabs"] == [["Live", "true"], ["Transcript", "false"], ["Card", "false"]]
+    assert said["nav"] == ["false", "page", "false", "false"]
+    assert said["opened"] == {
+        "dialog": ["dialog", "true", "sheet-title"],
+        "named": "Act on coder-1",
+        "behind": [True] * 4,
+        "focusIn": True,
+    }
+    assert said["replaced"] == {"named": "Stop coder-1", "behind": [True] * 4, "focusIn": True}
+    assert said["escaped"] == {"open": False, "behind": [False] * 4, "focusBack": True}
+    assert said["toggles"] == [["false", "false"], ["true", "true"]]
 
 
 # --- 11. the wheel --------------------------------------------------------------------------

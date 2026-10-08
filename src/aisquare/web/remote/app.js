@@ -1214,11 +1214,13 @@ function viewCall(name) {
 
 // --- the frame around every screen: status strip, banner, nav, sheet, toast ---
 
+const DOT_SAID = { down: "Not connected", live: "Live", stale: "Stale: nothing heard for 25 s", wait: "Connecting" };
+
 function buildShell() {
   const app = document.getElementById("app");
   UI.top = el("header", "top");
   UI.dot = el("span", "dot");
-  UI.dot.setAttribute("aria-hidden", "true");
+  UI.dot.setAttribute("role", "img");
   UI.where = el("span", "where", "aisquare");
   UI.ro = button("pill ro-pill", "READ-ONLY", () => readOnlySheet());
   UI.off = el("span", "autooff");
@@ -1235,9 +1237,13 @@ function buildShell() {
   UI.navDevices = button("tab", "Devices", () => pageGo("#/devices"));
   UI.navSettings = button("tab", "Settings", () => pageGo("#/settings"));
   UI.nav.append(UI.navNeeds, UI.navProjects, UI.navDevices, UI.navSettings);
+  UI.main.tabIndex = -1;
   UI.sheet = el("div", "sheet-wrap");
   UI.sheet.addEventListener("click", (event) => {
     if (event.target === UI.sheet && !UI.sheet.classList.contains("busy")) closeSheet();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && sheetOpen() && !UI.sheet.classList.contains("busy")) closeSheet();
   });
   UI.toast = el("div", "toast");
   UI.toast.setAttribute("role", "status");
@@ -1250,7 +1256,9 @@ function buildShell() {
 function drawStatus() {
   if (!UI.dot) return;
   const live = S.sockState === "open" && !S.stale;
-  UI.dot.className = "dot " + (S.offline ? "down" : live ? "live" : S.stale ? "stale" : "wait");
+  const state = S.offline ? "down" : live ? "live" : S.stale ? "stale" : "wait";
+  UI.dot.className = "dot " + state;
+  UI.dot.setAttribute("aria-label", DOT_SAID[state]); // its colour alone said stale to sight only
   UI.ro.hidden = !S.remote || writable();
   const at = S.remote && typeof S.remote.auto_off_at === "string" ? Date.parse(S.remote.auto_off_at) : NaN;
   if (Number.isFinite(at) && !S.locked) {
@@ -1284,10 +1292,14 @@ function drawNav() {
   const name = S.route ? S.route.name : "";
   const count = (S.needs || []).length;
   UI.badge.textContent = count ? String(count) : "";
-  UI.navNeeds.classList.toggle("on", name === "home" || name === "card");
-  UI.navProjects.classList.toggle("on", name === "projects" || name === "project" || name === "agent");
-  UI.navDevices.classList.toggle("on", name === "devices");
-  UI.navSettings.classList.toggle("on", name === "settings");
+  const here = [
+    [UI.navNeeds, name === "home" || name === "card"], [UI.navProjects, name === "projects" || name === "project" || name === "agent"],
+    [UI.navDevices, name === "devices"], [UI.navSettings, name === "settings"],
+  ];
+  for (const [tab, on] of here) {
+    tab.classList.toggle("on", on);
+    tab.setAttribute("aria-current", on ? "page" : "false"); // the class alone said it to sight only
+  }
   UI.nav.hidden = name === "unlock" || !!S.off;
 }
 
@@ -1301,11 +1313,20 @@ function toast(text) {
   UI.toastTimer = setTimeout(() => UI.toast.classList.remove("show"), Math.min(10000, 4000 + Math.max(0, shown.length - 60) * 60));
 }
 
+/* A modal sheet, as a screen reader is told it too: named by its heading, the page behind
+ * it inert, focus in it, and back on what opened it (the first, when one sheet takes the
+ * place of another) once it closes. It was an unnamed dialog that left focus behind it. */
 function openSheet(title, build) {
-  closeSheet();
+  if (!sheetOpen()) UI.opener = document.activeElement;
+  closeSheet(true);
   const panel = el("div", "sheet");
   panel.setAttribute("role", "dialog");
-  panel.appendChild(el("h2", null, title));
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-labelledby", "sheet-title");
+  panel.tabIndex = -1;
+  const heading = el("h2", null, title);
+  heading.id = "sheet-title";
+  panel.appendChild(heading);
   const body = el("div", "sheet-body");
   const status = el("p", "status");
   status.setAttribute("aria-live", "polite");
@@ -1335,16 +1356,24 @@ function openSheet(title, build) {
       if (sheet.isOpen()) closeSheet();
     },
   };
+  for (const part of [UI.top, UI.banner, UI.main, UI.nav]) part.inert = true;
   build(sheet);
-  bar.appendChild(button("quiet", "Close", closeSheet));
+  bar.appendChild(button("quiet", "Close", () => closeSheet()));
   gateButtons();
+  if (!panel.contains(document.activeElement)) panel.focus();
   return sheet;
 }
 
-function closeSheet() {
-  if (!UI.sheet) return;
+/* replaced: another sheet takes its place, and keeps the page inert and the first opener. */
+function closeSheet(replaced) {
+  if (!sheetOpen()) return;
   UI.sheet.classList.remove("open", "busy");
   clear(UI.sheet);
+  if (replaced) return;
+  for (const part of [UI.top, UI.banner, UI.main, UI.nav]) part.inert = false;
+  const back = UI.opener && UI.opener.isConnected ? UI.opener : UI.main;
+  UI.opener = null;
+  back.focus();
 }
 
 function sheetOpen() {
@@ -2040,6 +2069,7 @@ function tabBar(tabs, current, go) {
   for (const tab of tabs) {
     const control = button("tab" + (tab[0] === current ? " on" : ""), tab[1], () => go(tab[0]));
     control.setAttribute("role", "tab");
+    control.setAttribute("aria-selected", tab[0] === current ? "true" : "false");
     bar.appendChild(control);
   }
   return bar;
@@ -2454,6 +2484,7 @@ function inputBar(pid, label, cleanups) {
   enter.box.setAttribute("aria-label", "Press Enter after the text");
   const send = button("w primary pk", "Send", () => sendText());
   const padToggle = button("ghost", "Keys", () => setPad(!pad.classList.contains("open")));
+  padToggle.setAttribute("aria-expanded", "false");
   line.append(text, enter.label, send, padToggle);
   const pad = el("div", "pad");
   const more = el("div", "pad-more");
@@ -2463,7 +2494,9 @@ function inputBar(pid, label, cleanups) {
     return control;
   };
   for (const key of PAD_ROW) pad.appendChild(keyButton(key));
-  pad.appendChild(button("ghost key", "More", () => more.classList.toggle("open")));
+  const moreToggle = button("ghost key", "More", () => moreToggle.setAttribute("aria-expanded", String(more.classList.toggle("open"))));
+  moreToggle.setAttribute("aria-expanded", "false");
+  pad.appendChild(moreToggle);
   for (const key of PAD_MORE) more.appendChild(keyButton(key));
   pad.appendChild(more);
   bar.append(line, pad);
@@ -2473,6 +2506,7 @@ function inputBar(pid, label, cleanups) {
     const main = UI.main;
     const atFoot = main.scrollHeight - main.scrollTop - main.clientHeight < 2;
     pad.classList.toggle("open", open);
+    padToggle.setAttribute("aria-expanded", String(open));
     if (open) text.blur();
     if (open && atFoot) main.scrollTop = main.scrollHeight;
   };

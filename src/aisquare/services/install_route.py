@@ -364,6 +364,14 @@ def _option_flags(options: Mapping[str, Any]) -> tuple[list[str], list[str]]:
     """The ``uv tool install`` flags that restate ``[tool.options]``, and what cannot be."""
     flags: list[str] = []
     refused: list[str] = []
+    options = dict(options)
+    if "exclude-newer-span" in options:
+        # A cooldown (`exclude-newer = "7 days"` or `P7D`, from a flag, UV_EXCLUDE_NEWER or
+        # uv.toml) is recorded as this span AND the cutoff uv worked out from it at install
+        # time (measured, uv 0.12.19). The span is the setting: restating the cutoff froze
+        # it, so no later release could be installed, and the span was gone from the
+        # receipt the reinstall wrote (sweep of #257).
+        options["exclude-newer"] = options.pop("exclude-newer-span")
     for key, value in options.items():
         if key == "index":
             indexes = _index_flags(value)
@@ -873,6 +881,21 @@ def own_index(route: InstallRoute) -> str | None:
         return None
     named = [flag for flag in route.receipt.options if flag in _INDEX_FLAGS]
     return ", ".join(dict.fromkeys(named)) or None
+
+
+#: The receipt flag that holds ``@latest`` back by upload date: uv takes no release
+#: uploaded after the cutoff (a date, or a span before now), so PyPI's newest may be
+#: one this install would never get, and an unchanged version is no silent no-op.
+_CUTOFF_FLAG = "--exclude-newer"
+
+
+def cutoff(route: InstallRoute) -> str | None:
+    """The upload-date cutoff this install resolves under (``--exclude-newer P7D``), or ``None``."""
+    options = route.receipt.options if route.receipt is not None else ()
+    if _CUTOFF_FLAG not in options:
+        return None
+    at = options.index(_CUTOFF_FLAG)
+    return command_line(options[at : at + 2])
 
 
 def find_uv() -> str | None:

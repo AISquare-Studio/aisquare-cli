@@ -414,14 +414,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
     reason = install_route.not_automated(route)
     latest: install_route.LatestRelease | None = None
     if check or (reason is None and target is None):
-        own = install_route.own_index(route)
-        latest = (
-            install_route.LatestRelease(
-                None, f"PyPI was not asked: this install resolves from its own index ({own})"
-            )
-            if own is not None
-            else install_route.fetch_latest()
-        )
+        latest = _latest_for(route)
     refresh: tuple[HookSite, ...] = ()
     left: tuple[HookSite, ...] = ()
     live: tuple[str, ...] = ()
@@ -449,6 +442,26 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         live_agents=live,
         fleet_error=fleet_error,
     )
+
+
+def _latest_for(route: install_route.InstallRoute) -> install_route.LatestRelease:
+    """PyPI's newest release, unless it says nothing about what this install's ``@latest``
+    gets: one that resolves from its own index, or under a uv cutoff. With a cutoff, PyPI's
+    newest was taken as the target, and the unchanged version uv correctly left was
+    reported as §3.9.1's silent no-op on every run (sweep of #257)."""
+    own = install_route.own_index(route)
+    if own is not None:
+        return install_route.LatestRelease(
+            None, f"PyPI was not asked: this install resolves from its own index ({own})"
+        )
+    cutoff = install_route.cutoff(route)
+    if cutoff is not None:
+        return install_route.LatestRelease(
+            None,
+            f"PyPI was not asked: this install takes no release uploaded after its uv cutoff "
+            f"({cutoff})",
+        )
+    return install_route.fetch_latest()
 
 
 def runs_this_install(binary: agent_core.HookBinary, found: install_route.Facts) -> bool:
@@ -686,7 +699,8 @@ def _verify(plan: UpgradePlan) -> tuple[str | None, str | None]:
     success code over an unchanged version. So success is a version the new
     process reports — the pin when one was asked for, otherwise any MOVE. An
     unchanged version is a failure exactly when PyPI said there is something
-    newer; when PyPI could not be asked it means the index had nothing newer.
+    newer; when PyPI was not asked or could not answer, it is the newest release
+    the index serves, or the install's uv cutoff allows (:func:`_latest_for`).
     """
     probe = agent_core.HookBinary(plan.route.facts.executable, module_form=True)
     answer = install_route.run_captured(probe.version_argv(), timeout=VERSION_CHECK_TIMEOUT_SECONDS)

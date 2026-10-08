@@ -96,6 +96,15 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
         _say(f"(`aisquare upgrade` does not run it: {plan.reason})")
 
 
+def _newest(plan: lifecycle_service.UpgradePlan) -> str:
+    """What stops ``@latest`` when PyPI was not asked: the install's uv cutoff, or its index."""
+    return (
+        "your uv cutoff allows"
+        if install_route.cutoff(plan.route) is not None
+        else "your package index serves"
+    )
+
+
 def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
     if get_state().json_output:
         _echo_json({"dry_run": True, **_plan_json(plan)})
@@ -107,7 +116,7 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
     )
     _say(f"aisquare {plan.current} → {where}")
     if plan.target is None and plan.latest is not None and plan.latest.version is None:
-        _say(f"  {plan.latest.error}; uv will install the newest release its index serves")
+        _say(f"  {plan.latest.error}; uv will install the newest release {_newest(plan)}")
     _say(f"  install: {plan.route.describe()}")
     _say(f"  runs:    {plan.command}")
     for site in plan.refresh:
@@ -148,9 +157,11 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
         )
         return
     if report.version is not None and install_route.same_version(report.version, plan.current):
-        # Only reachable when PyPI could not be asked: with an answer, an
-        # unchanged version is a failure (lifecycle._verify).
-        _say(f"✓ aisquare {report.version} is the newest release your package index serves")
+        # Only reachable when PyPI was not asked or could not answer: with an answer,
+        # an unchanged version is a failure (lifecycle._verify).
+        cutoff = install_route.cutoff(plan.route)
+        named = f" ({cutoff})" if cutoff is not None else ""
+        _say(f"✓ aisquare {report.version} is the newest release {_newest(plan)}{named}")
     else:
         _say(f"✓ aisquare {report.version} (was {plan.current}) — checked in a new process")
     for hook in report.hooks:

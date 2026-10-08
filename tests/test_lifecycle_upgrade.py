@@ -532,6 +532,38 @@ def test_index_tables_are_restated_as_index_flags(tmp_path: Path) -> None:
     assert route.receipt is not None and route.receipt.unrestatable == ()
 
 
+#: A cooldown as uv 0.12.19 records it, whether it came from `exclude-newer = "7 days"` in
+#: uv.toml, UV_EXCLUDE_NEWER or `--exclude-newer P7D` (measured in a scratch HOME): the
+#: span, and the cutoff uv worked out from it at install time.
+_COOLDOWN = (
+    "\n[tool.options]\n"
+    'exclude-newer = "2026-10-01T16:23:50.494898703Z"\n'
+    'exclude-newer-span = "P7D"\n'
+)
+#: A fixed date given any of those three ways: the date alone.
+_FIXED_CUTOFF = '\n[tool.options]\nexclude-newer = "2026-10-01T00:00:00Z"\n'
+
+
+def test_a_cooldown_is_restated_as_its_span_not_the_cutoff_uv_worked_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The span was refused, and the command printed instead restated the cutoff: that froze
+    the cooldown, so no later release could be installed, and the receipt it wrote had no
+    span left (measured, uv 0.12.19; sweep of #257). A fixed date is restated as it is."""
+    monkeypatch.setattr(install_route, "find_uv", lambda: "/usr/bin/uv")
+    cooldown = _uv_route(tmp_path / "span", _receipt(_OURS_PINNED, tail=_COOLDOWN))
+    fixed = _uv_route(tmp_path / "date", _receipt(_OURS_PINNED, tail=_FIXED_CUTOFF))
+
+    argv = install_route.upgrade_argv(cooldown)
+    dated = install_route.upgrade_argv(fixed)
+
+    assert argv[argv.index("--exclude-newer") + 1] == "P7D", argv
+    assert argv.count("--exclude-newer") == 1 and "2026-10-01T16:23:50.494898703Z" not in argv
+    assert install_route.not_automated(cooldown) is None, "the span is restated, not refused"
+    assert dated[dated.index("--exclude-newer") + 1] == "2026-10-01T00:00:00Z", dated
+    assert install_route.not_automated(fixed) is None
+
+
 @pytest.mark.parametrize(
     "entry",
     [
@@ -1772,6 +1804,42 @@ def test_an_install_on_its_own_index_does_not_take_pypis_word_for_latest(
     assert report["latest"] is None and "--index-url" in report["latest_error"]
     assert run.exit_code == 0, run.output
     assert "is the newest release your package index serves" in run.stdout
+
+
+@pytest.mark.parametrize(
+    ("tail", "restated"),
+    [(_COOLDOWN, "--exclude-newer P7D"), (_FIXED_CUTOFF, "--exclude-newer 2026-10-01T00:00:00Z")],
+    ids=["cooldown", "fixed-date"],
+)
+def test_an_install_under_a_uv_cutoff_does_not_take_pypis_word_for_latest(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    tail: str,
+    restated: str,
+) -> None:
+    """uv takes nothing uploaded after the cutoff, so PyPI's newest may be out of reach.
+    Taken as the target, the version uv rightly left unchanged failed every run as
+    §3.9.1's silent no-op, after --check had said an update was available (sweep of #257)."""
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        _receipt(_OURS_PINNED, tail=tail), encoding="utf-8"
+    )
+    monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
+    machine.new_version = "0.8.0"  # nothing newer was uploaded before the cutoff
+
+    check = runner.invoke(app, ["--json", "upgrade", "--check"])
+    run = runner.invoke(app, ["upgrade", "--yes"])
+
+    assert machine.lookups == 0, "PyPI's newest says nothing about what the cutoff allows"
+    report = _one_object(check.stdout)
+    assert report["runnable"] is True, report
+    assert report["latest"] is None and f"its uv cutoff ({restated})" in report["latest_error"]
+    assert run.exit_code == 0, run.output
+    assert f"✓ aisquare 0.8.0 is the newest release your uv cutoff allows ({restated})" in (
+        run.stdout
+    )
+    assert machine.installs[0][0][-3:] == [*restated.split(), "aisquare-cli[serve]@latest"]
 
 
 def test_check_with_a_pin_advises_the_pin(runner: CliRunner, tool: Tool, machine: Machine) -> None:

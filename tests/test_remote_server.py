@@ -867,6 +867,22 @@ def test_a_second_remote_on_one_home_is_refused_until_the_first_is_off(
     assert not _held_elsewhere(isolated_home), "turned off, it lets the home go"
 
 
+def test_a_stop_that_ends_while_a_new_server_runs_leaves_it_the_home(
+    isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fleet UI stops Remote on a thread of its own: a stop coming to its end after a
+    new server started must not let the home go under it."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    remote_server.start_remote_server(dist, port=_free_port())
+    try:
+        remote_server._release_remote_home()  # where an earlier stop ends
+        assert _held_elsewhere(isolated_home), "the running server keeps the home"
+    finally:
+        remote_server.stop_remote_server()
+    assert not _held_elsewhere(isolated_home)
+
+
 def test_a_remote_whose_process_ended_holds_the_home_no_more(
     isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

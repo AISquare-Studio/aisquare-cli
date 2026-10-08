@@ -4237,9 +4237,15 @@ def _claim_remote_home(state: Runtime) -> bool:
 
 
 def _release_remote_home() -> None:
-    """Let :data:`SERVE_LOCK_NAME` go: this process serves Remote no more."""
+    """Let :data:`SERVE_LOCK_NAME` go: this process serves Remote no more.
+
+    Unless it does again: a server started while an earlier one was still being stopped,
+    on a thread of its own, would serve on unclaimed once that stop came to its end.
+    """
     global _home_claim
     with _lock:
+        if (_server is not None and _server.running) or _foreground is not None:
+            return
         claim, _home_claim = _home_claim, None
     if claim is not None:
         _release_remote_claim(claim[1])

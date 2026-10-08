@@ -35,7 +35,7 @@ from textual.widgets import Button, Input, Static
 
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import FleetApp
-from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected
+from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, DoctorSection
 from aisquare.cli.ui.views import welcome
 from aisquare.cli.ui.views.onboard import ProjectOnboarded
 from aisquare.cli.ui.views.welcome import FLEET_UP, Seams, WelcomeView
@@ -44,7 +44,14 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed
 from aisquare.core.workspace import project_id_for
-from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, SetupReport
+from aisquare.models import (
+    CheckStatus,
+    DoctorCheck,
+    FleetAgent,
+    FleetAgentStatus,
+    ProjectInfo,
+    SetupReport,
+)
 from aisquare.services import first_run
 from aisquare.services import fleet as fleet_service
 from aisquare.services.first_run import (
@@ -947,12 +954,15 @@ def fleet_rows(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[FleetAgentStat
 
 
 def in_shell(
-    machine: Machine, fn: Callable[[Pilot[None], FleetApp, WelcomeView], Awaitable[T]]
+    machine: Machine,
+    fn: Callable[[Pilot[None], FleetApp, WelcomeView], Awaitable[T]],
+    *,
+    doctor: Callable[[], list[DoctorCheck]] = lambda: [],
 ) -> T:
     """Run ``fn`` against the real shell, its Welcome page scripted by ``machine``."""
 
     async def run() -> T:
-        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=None)
+        app = FleetApp(refresh_seconds=3600, doctor=doctor, accounts=None)
         async with app.run_test(size=SIZE) as pilot:
             await pilot.pause()
             await settle_page(app)
@@ -1213,6 +1223,53 @@ def test_what_the_page_adds_shows_in_the_sidebar_and_the_page_stays(
     listed, current = in_shell(machine, go)
     assert listed == [project_id_for(folder)]  # refreshed now, not at the next tick
     assert current == "welcome"  # unlike `+`, the page does not navigate away
+
+
+def doctor_lines(app: FleetApp) -> list[str]:
+    """The ⚠/✗ lines the sidebar's Doctor section shows under its counts."""
+    section = app.query_one(DoctorSection)
+    return [shown(line) for line in section.query(".doctor-line").results(Static) if line.display]
+
+
+def test_connect_brings_the_sidebars_doctor_section_up_to_date(
+    captain: str | None,
+    fleet_rows: dict[str, list[FleetAgentStatus]],
+    scripted: Callable[[Machine], None],
+    tmp_path: Path,
+) -> None:
+    """Connect is the doctor's own fix, run from Welcome, and the shell's report follows it.
+
+    It never told the shell, so the sidebar kept "⚠ claude-code: … hooks are missing"
+    under a step 2 that said connected, until ``r`` or a selection ran the checks again
+    (review of #257). A fix in the Doctor view has always refreshed the section.
+    """
+    machine, _ = _ready_machine(tmp_path, claude=[UNHOOKED])
+    scripted(machine)
+    runs: list[bool] = []
+
+    def doctor() -> list[DoctorCheck]:
+        connected = machine.connects > 0
+        runs.append(connected)
+        if connected:
+            return [DoctorCheck(name="claude-code", status=CheckStatus.ok, detail="connected")]
+        return [
+            DoctorCheck(
+                name="claude-code",
+                status=CheckStatus.warn,
+                detail="Claude Code hooks are missing",
+                fix="aisquare agents connect claude-code",
+            )
+        ]
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[list[str]]:
+        before = doctor_lines(app)
+        await press(pilot, page, "claude-connect")
+        return [before, doctor_lines(app)]
+
+    before, after = in_shell(machine, go, doctor=doctor)
+    assert before == ["⚠ claude-code: Claude Code hooks are missing"], "control: warned first"
+    assert machine.connects == 1 and runs == [False, True], runs
+    assert after == [], "the section dropped the warning Connect answered"
 
 
 def test_step_one_reads_the_shells_frame_not_a_second_store_open(

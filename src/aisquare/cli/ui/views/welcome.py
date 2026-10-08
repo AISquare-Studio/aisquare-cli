@@ -276,6 +276,9 @@ class WelcomeView(VerticalScroll):
             self.project_id = project_id
             super().__init__()
 
+    class Connected(Message):
+        """Connect, the doctor's own fix, installed the hooks: the shell's report on them is old."""
+
     BUTTONS: ClassVar[frozenset[str]] = frozenset(
         {
             "welcome-change",
@@ -743,6 +746,7 @@ class WelcomeView(VerticalScroll):
 
     def _connected(self, result: Any, error: BaseException | None) -> None:
         if isinstance(result, FixResult) and result.ok:
+            self.post_message(self.Connected())
             self.look(full=True)
             return
         reason = result.reason if isinstance(result, FixResult) else _reason(error)

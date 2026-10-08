@@ -1103,6 +1103,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """Welcome added a project or started an agent: the sidebar shows it now."""
         self.refresh_data()
 
+    def on_welcome_view_connected(self, event: WelcomeView.Connected) -> None:
+        """Welcome ran the doctor's Connect: the checks run again, as after a Doctor-view fix."""
+        self.run_doctor()
+
     hand_off: tuple[str, ...] | None = None
     """The ``aisquare`` command this terminal goes to when asq quits (``run_ui``)."""
 

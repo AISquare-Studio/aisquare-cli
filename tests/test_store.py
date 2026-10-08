@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 
@@ -2008,15 +2008,11 @@ def test_the_events_since_a_time_are_the_kinds_asked_for_from_that_time_on(
     assert store.team_events_since(PROJECT.id, since, kinds=[]) == []
 
 
-def test_the_events_since_a_time_cost_that_time_not_the_boards_history(
-    store: ContextStore,
-) -> None:
-    """``created_at`` has no index, so filtered on it alone a read walks every event a board
-    ever had, which is never pruned. The read starts past the newest event written before
-    ``since``: a board with a hundred times the history costs the same to read."""
+def _short_and_long_boards(store: ContextStore, now: datetime) -> int:
+    """``prj_short`` and ``prj_long``: the same last half hour, a question a minute, over 20
+    and 2 000 older notes. Returns how many questions that half hour holds."""
     from datetime import timedelta
 
-    now = datetime.now(tz=UTC)
     day = [("question", "ses_1", now - timedelta(minutes=n)) for n in range(30, 0, -1)]
     for project_id, history in (("prj_short", 20), ("prj_long", 2_000)):
         store.ensure_project(ProjectInfo(id=project_id, root=Path(f"/tmp/{project_id}")))
@@ -2027,23 +2023,84 @@ def test_the_events_since_a_time_cost_that_time_not_the_boards_history(
             *[("note", "ses_1", old + timedelta(seconds=n)) for n in range(history)],
         )
         _board(store, project_id, *day)
-    steps: dict[str, int] = {}
+    return len(day)
+
+
+def _steps(store: ContextStore, read: Callable[[], object]) -> int:
+    """How many SQLite VM steps ``read`` took: what its queries cost, on any machine."""
     connection = store._conn  # type: ignore[attr-defined]
+    counted = [0]
+
+    def step() -> int:
+        counted[0] += 1
+        return 0
+
+    connection.set_progress_handler(step, 1)
+    try:
+        read()
+    finally:
+        connection.set_progress_handler(None, 1)
+    return counted[0]
+
+
+def test_the_events_since_a_time_cost_that_time_not_the_boards_history(
+    store: ContextStore,
+) -> None:
+    """``created_at`` has no index, so filtered on it alone a read walks every event a board
+    ever had, which is never pruned. The read starts past the newest event written before
+    ``since``: a board with a hundred times the history costs the same to read."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    asked = _short_and_long_boards(store, now)
+    since = now - timedelta(days=1)
     for project_id in ("prj_short", "prj_long"):
-        counted = [0]
+        assert len(store.team_events_since(project_id, since, kinds=["question"])) == asked
+    short = _steps(store, lambda: store.team_events_since("prj_short", since, kinds=["question"]))
+    long = _steps(store, lambda: store.team_events_since("prj_long", since, kinds=["question"]))
+    assert long < short + 500, (short, long)
 
-        def step(counted: list[int] = counted) -> int:
-            counted[0] += 1
-            return 0
 
-        connection.set_progress_handler(step, 1)
-        try:
-            read = store.team_events_since(project_id, now - timedelta(days=1), kinds=["question"])
-        finally:
-            connection.set_progress_handler(None, 1)
-        assert len(read) == len(day)
-        steps[project_id] = counted[0]
-    assert steps["prj_long"] < steps["prj_short"] + 500, steps
+def test_a_sessions_newest_event_of_a_kind_is_the_one_since_a_time(store: ContextStore) -> None:
+    """The session's newest event of the kind, when it was written at or after ``since``."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    _board(
+        store,
+        PROJECT.id,
+        ("attention", "ses_1", now - timedelta(hours=3)),
+        ("attention", "ses_1", now - timedelta(hours=1)),
+        ("attention", "ses_2", now - timedelta(minutes=30)),
+        ("limited", "ses_1", now - timedelta(minutes=20)),
+        ("note", None, now - timedelta(minutes=10)),
+    )
+    found = store.newest_session_event(
+        PROJECT.id, "ses_1", "attention", since=now - timedelta(hours=2)
+    )
+    assert found is not None and found.created_at == now - timedelta(hours=1)
+    later = now - timedelta(minutes=50)
+    assert store.newest_session_event(PROJECT.id, "ses_1", "attention", since=later) is None
+    assert store.newest_session_event(PROJECT.id, "ses_3", "attention", since=later) is None
+    assert store.newest_session_event("prj_other", "ses_1", "limited", since=later) is None
+
+
+def test_a_session_with_no_such_event_costs_the_time_asked_not_the_boards_history(
+    store: ContextStore,
+) -> None:
+    """Asked by the session and the kind alone, a session that has no such event walked
+    every event its board ever had to say so, every few seconds. The walk stops at the first
+    event written before ``since``: a hundred times the history costs the same."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    _short_and_long_boards(store, now)
+    since = now - timedelta(days=1)
+    short = _steps(
+        store, lambda: store.newest_session_event("prj_short", "ses_9", "x", since=since)
+    )
+    long = _steps(store, lambda: store.newest_session_event("prj_long", "ses_9", "x", since=since))
+    assert long < short + 500, (short, long)
 
 
 # --- the launch spec and ui_state (#144) ----------------------------------------------------

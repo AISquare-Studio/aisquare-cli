@@ -537,8 +537,8 @@ class Fleet:
     """Sockets whose tmux server does not answer."""
     probed: list[str] = field(default_factory=list)
     """Every socket the scan asked tmux about, once per question."""
-    asked_events: list[tuple[str, str | None]] = field(default_factory=list)
-    """Every session the scan asked the store for its newest event of a kind."""
+    asked_events: list[tuple[str, str, datetime]] = field(default_factory=list)
+    """Every session the scan asked the store for its newest event of a kind since a time."""
     output_at: datetime | None = None
     """When every pane last printed, as tmux tells it; ``None``: it would not say."""
     windows: int = 0
@@ -572,9 +572,13 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
         fleet.probed.append(socket)
         return socket not in fleet.silent
 
-    def session_event(pid: str, session_id: str, kind: str | None) -> TeamEvent | None:
-        fleet.asked_events.append((session_id, kind))
-        own = [e for e in fleet.events if e.session_id == session_id and kind in (None, e.kind)]
+    def session_event(pid: str, session_id: str, kind: str, since: datetime) -> TeamEvent | None:
+        fleet.asked_events.append((session_id, kind, since))
+        own = [
+            event
+            for event in fleet.events
+            if event.session_id == session_id and event.kind == kind and event.created_at >= since
+        ]
         return max(own, key=lambda event: event.seq, default=None)
 
     return NeedsSources(
@@ -930,7 +934,7 @@ def _parked_and_asking() -> Fleet:
     """coder-1 parked on its limit, coder-2 at an MCP form, coder-3 at the usage-limit dialog:
     each named by an event the team writes once, when it starts."""
     rows = [_row("coder-1"), _row("coder-2"), _row("coder-3")]
-    at = NOW - timedelta(hours=1)
+    at = NOW - timedelta(minutes=30)
     parked = _session(rows[0], state="limited", resets=NOW + timedelta(hours=4))
     form = _session(rows[1], state="attention", seen=at)
     dialog = _session(rows[2], state="attention", seen=at)
@@ -943,7 +947,7 @@ def _parked_and_asking() -> Fleet:
         ],
         events=[
             _event(
-                1, "limited", "coder-1 hit its limit", session=parked, at=at - timedelta(hours=1)
+                1, "limited", "coder-1 hit its limit", session=parked, at=at - timedelta(minutes=20)
             ),
             _event(2, "attention", "Claude Code needs your input", session=form, at=at),
             _event(3, "attention", paused, session=dialog, at=at),
@@ -981,10 +985,26 @@ def test_an_item_keeps_its_id_however_many_board_events_follow_its_own() -> None
         (before[2].id, "limited"),
     ], "the same items, coder-1's still dismissed"
     assert sorted(fleet.asked_events) == [
-        ("ses_coder-1", "limited"),
-        ("ses_coder-2", "attention"),
-        ("ses_coder-3", "attention"),
-    ]
+        ("ses_coder-1", "limited", BORN),
+        ("ses_coder-2", "attention", BORN),
+        ("ses_coder-3", "attention", BORN),
+    ], "since the row was created: no further back than its own process"
+
+
+def test_an_event_older_than_its_row_names_nothing_in_the_window_or_out_of_it() -> None:
+    """The store is asked for an agent's event only since its row was created, so the walk
+    stops there for a session that has none. The window keeps to the same bound, or an item
+    named by an older event while the window held it became another once it left."""
+    row = _row()
+    session = _session(row, state="attention", seen=NOW - timedelta(minutes=1))
+    asked = "Claude needs your permission to use Bash"
+    older = _event(1, "attention", asked, session=session, at=BORN - timedelta(minutes=5))
+    fleet = Fleet(agents=[_status(row, "attention", session)], events=[older])
+    (before,) = _scan(fleet)
+    assert (before.kind, before.excerpt) == ("permission", ""), "the dialog form, not its words"
+    _board_traffic(fleet)
+    (after,) = _scan(fleet)
+    assert after.id == before.id
 
 
 def test_a_managers_last_word_is_read_however_long_ago_it_was() -> None:

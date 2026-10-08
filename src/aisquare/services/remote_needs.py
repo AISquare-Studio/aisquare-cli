@@ -293,7 +293,9 @@ def _needs_answers_every(socket: str) -> bool:
     return True
 
 
-def _needs_no_event(project_id: str, session_id: str, kind: str | None) -> TeamEvent | None:
+def _needs_no_event(
+    project_id: str, session_id: str, kind: str, since: datetime
+) -> TeamEvent | None:
     """A source's ``session_event`` when it says nothing: the window is all there is."""
     return None
 
@@ -340,9 +342,10 @@ class NeedsSources:
     tmux_answers: Callable[[str], bool] = _needs_answers_every
     """Whether a tmux server listens on the given socket (``TmuxServer.answers``): asked
     only where the listing's states cannot tell (:func:`_needs_unheard`)."""
-    session_event: Callable[[str, str, str | None], TeamEvent | None] = _needs_no_event
-    """A session's newest board event of a kind (of any kind with ``None``), for the facts
-    the window of ``board_events`` no longer holds (:func:`_needs_own_events`)."""
+    session_event: Callable[[str, str, str, datetime], TeamEvent | None] = _needs_no_event
+    """A session's newest board event of a kind written at or after the given time, for the
+    facts the window of ``board_events`` no longer holds (:func:`_needs_own_events`). The
+    time bounds what the store walks back through to find none."""
     pane_output: Callable[[FleetAgent], datetime | None] = _needs_no_output
     """When the row's pane last printed (``#{window_activity}``); ``None``: tmux would not
     say. Asked only of an agent whose sub-agent waits on a prompt (:func:`needs_from_agent`)."""
@@ -1304,19 +1307,24 @@ def _needs_own_events(
     window as newer ones come in; and the item keyed on it became another: a new id,
     pushed again, its dismissal lost, the usage-limit dialog read as a plain one. A kind
     the window lacks is asked of the store, for that one session, where a rule reads it.
+    Only since the row was created, from the window too: a session's start puts it back
+    to ``working``, so the park or the dialog it is in began after its process did, and
+    an older event is the process before it's. Asked without that bound, a session with
+    no such event cost every event the project ever had, every scan.
     """
     session = status.session
     if session is None or status.state in ("exited", "unknown", "lost"):
         return []
     if status.state != "limited" and session.state != "attention":
         return []
-    own = [event for event in window() if event.session_id == session.id]
+    born = status.agent.created_at
+    own = [e for e in window() if e.session_id == session.id and e.created_at >= born]
     # A limit names its item by its own event, and falls back on the attention one.
     wanted = ("limited", "attention") if status.state == "limited" else ("attention",)
     for kind in wanted:
         if any(event.kind == kind for event in own):
             break
-        found = _needs_session_event(sources, project, session.id, kind)
+        found = _needs_session_event(sources, project, session.id, kind, born)
         if found is not None:
             own.append(found)
             break
@@ -1355,10 +1363,10 @@ def _needs_window(sources: NeedsSources, project: ProjectInfo) -> Callable[[], l
 
 
 def _needs_session_event(
-    sources: NeedsSources, project: ProjectInfo, session_id: str, kind: str | None
+    sources: NeedsSources, project: ProjectInfo, session_id: str, kind: str, since: datetime
 ) -> TeamEvent | None:
     try:
-        return sources.session_event(project.id, session_id, kind)
+        return sources.session_event(project.id, session_id, kind, since)
     except Exception:
         log.debug("remote: needs could not read %s's events", session_id, exc_info=True)
         return None
@@ -1992,10 +2000,11 @@ def live_needs_sources() -> NeedsSources:
     def needs_pane_output(agent: FleetAgent) -> datetime | None:
         return _needs_pane_output_at(fleet_service.server_for(agent.tmux_socket), agent.pane_id)
 
-    def needs_session_event(project_id: str, session_id: str, kind: str | None) -> TeamEvent | None:
+    def needs_session_event(
+        project_id: str, session_id: str, kind: str, since: datetime
+    ) -> TeamEvent | None:
         with store_session() as store:
-            found = store.filtered_events(project_id, session_id=session_id, kind=kind, limit=1)
-        return found[-1] if found else None
+            return store.newest_session_event(project_id, session_id, kind, since=since)
 
     return NeedsSources(
         list_projects=project_service.list_projects,

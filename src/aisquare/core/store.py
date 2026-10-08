@@ -1095,6 +1095,9 @@ class ContextStore(Protocol):
         kinds: Sequence[str],
         human_kinds: Sequence[str] = (),
     ) -> list[TeamEvent]: ...
+    def newest_session_event(
+        self, project_id: str, session_id: str, kind: str, *, since: datetime
+    ) -> TeamEvent | None: ...
     def latest_seq(self, project_id: str) -> int: ...
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
@@ -2825,6 +2828,30 @@ class SqliteStore:
             params,
         ).fetchall()
         return [_row_to_event(row) for row in rows]
+
+    def newest_session_event(
+        self, project_id: str, session_id: str, kind: str, *, since: datetime
+    ) -> TeamEvent | None:
+        """The session's newest event of ``kind`` written at or after ``since``; ``None``.
+
+        For a reader that asks every few seconds (``remote``'s needs scan). It walks back
+        from the newest event on the ``(project_id, seq)`` index and stops at the first
+        that is either the one asked for or written before ``since``, so a session that
+        has no such event costs the events since ``since``: asked with a filter on the
+        session and the kind alone, it cost every event the project ever had, each time.
+        ``since`` compares as the stored ISO-8601 UTC strings do.
+        """
+        moment = since.astimezone(UTC).isoformat()
+        row = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE project_id = ? "
+            "AND ((session_id = ? AND kind = ?) OR created_at < ?) ORDER BY seq DESC LIMIT 1",
+            (project_id, session_id, kind, moment),
+        ).fetchone()
+        if row is None:
+            return None
+        event = _row_to_event(row)
+        asked = event.session_id == session_id and event.kind == kind and event.created_at >= since
+        return event if asked else None
 
     def latest_seq(self, project_id: str) -> int:
         row = self._conn.execute(

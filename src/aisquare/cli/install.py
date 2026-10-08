@@ -16,6 +16,7 @@ from typing import Annotated, Any
 import typer
 
 from aisquare.cli.common import fail
+from aisquare.core import selfcli
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 from aisquare.services import install_route
@@ -156,6 +157,25 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
         _say(f"· {note}")
 
 
+def _reopen(reopen: bool) -> None:
+    """Hand the terminal back to asq (``--reopen``: what asq's Update and Uninstall run).
+
+    Only at a terminal, never under ``--json``, and only where the caller says
+    nothing failed or was removed. It waits for Enter first: asq opens on the
+    alternate screen, and the lines above (the answer, a site left as it was,
+    the notes) would vanish unread. Ctrl-C or a closed stdin stays here. The asq
+    that opens is a new process of THIS install, so after an upgrade it is the
+    version just installed.
+    """
+    if not reopen or get_state().json_output or not _stdin_is_a_terminal():
+        return
+    try:
+        input("Press Enter to go back to asq ")
+    except (EOFError, KeyboardInterrupt):
+        return
+    selfcli.exec_self(["ui"])
+
+
 def _fallback(plan: lifecycle_service.UpgradePlan) -> str:
     return (
         f"Run it again by hand: {plan.command} — or reinstall from nothing: "
@@ -184,6 +204,14 @@ def upgrade(
     ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show what would run, and run nothing.")
+    ] = False,
+    reopen: Annotated[
+        bool,
+        typer.Option(
+            "--reopen",
+            hidden=True,
+            help="Open asq again afterwards, unless something failed (asq's Update button).",
+        ),
     ] = False,
 ) -> None:
     """Upgrade aisquare in place, then re-connect its Claude Code hooks.
@@ -228,6 +256,7 @@ def upgrade(
                 f"aisquare {plan.current} is up to date (PyPI's latest is "
                 f"{plan.latest_version}) — nothing to do"
             )
+        _reopen(reopen)
         return
     if dry_run or not yes:
         _emit_plan(plan)
@@ -240,6 +269,7 @@ def upgrade(
             f"Upgrade aisquare {plan.current} → {plan.destination}?", default=False
         ):
             _say("nothing changed")
+            _reopen(reopen)
             return
     elif not json_output:
         _say(f"upgrading aisquare {plan.current} → {plan.destination}: {plan.command}")
@@ -261,6 +291,7 @@ def upgrade(
     _emit_report(report)
     if any(not hook.ok for hook in report.hooks):
         raise typer.Exit(1)
+    _reopen(reopen)
 
 
 # --- uninstall ---------------------------------------------------------------------------
@@ -461,6 +492,14 @@ def uninstall(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show what would be removed, and remove nothing.")
     ] = False,
+    reopen: Annotated[
+        bool,
+        typer.Option(
+            "--reopen",
+            hidden=True,
+            help="Open asq again if nothing was removed (asq's Uninstall button).",
+        ),
+    ] = False,
 ) -> None:
     """Remove aisquare: its Claude Code hooks, then the package. Keeps ~/.aisquare.
 
@@ -482,6 +521,7 @@ def uninstall(
         if refusal is not None:
             # The plan just said why. At a terminal, asking would offer a yes that is
             # refused; off one, "re-run with --yes" would send them into the refusal.
+            _reopen(reopen)
             raise typer.Exit(1)
         if not _stdin_is_a_terminal():
             _say("dry run: nothing removed — re-run with --yes to uninstall")
@@ -495,9 +535,11 @@ def uninstall(
             _say(
                 f"nothing for aisquare to remove here — remove the package: {plan.package_command}"
             )
+            _reopen(reopen)
             return
         if not typer.confirm(question, default=False):
             _say("nothing removed")
+            _reopen(reopen)
             return
     if refusal is not None:
         fail(str(refusal), error=refusal.error, detail=str(refusal))

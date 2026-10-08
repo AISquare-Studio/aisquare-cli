@@ -399,7 +399,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 # The Onboard view is built on the first `+` (on_add_project): its
                 # DirectoryTree scans the home directory and keeps a loader worker
                 # alive for its whole life — not a cost to pay at every start-up.
-                yield DoctorView(id="doctor")
+                yield DoctorView(id="doctor", machine=True)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1103,6 +1103,21 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """Welcome added a project or started an agent: the sidebar shows it now."""
         self.refresh_data()
 
+    hand_off: tuple[str, ...] | None = None
+    """The ``aisquare`` command this terminal goes to when asq quits (``run_ui``)."""
+
+    def on_doctor_view_hand_off(self, event: DoctorView.HandOff) -> None:
+        """Update or Uninstall in the Doctor view: quit, and let ``run_ui`` hand over.
+
+        Never under a fix that is still writing, in ANY Doctor view: the Project
+        tab's and Onboard's run their own, and quitting would cut them off.
+        """
+        if any(view.busy for view in self.query(DoctorView)):
+            self.notify("a fix is still running — try again when it ends", severity="warning")
+            return
+        self.hand_off = event.args
+        self.exit()
+
     def on_doctor_refreshed(self, event: DoctorRefreshed) -> None:
         """A view re-ran the doctor after a one-click fix — follow it.
 
@@ -1144,3 +1159,10 @@ def run_ui(**options: Any) -> None:
     app.run()
     for line in app.unsaved:
         stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
+    # The terminal is ours again: give it to the command. Read with getattr so an
+    # app still needs only `run()` and `unsaved` to be run here.
+    hand_off = getattr(app, "hand_off", None)
+    if hand_off is not None:
+        from aisquare.core import selfcli
+
+        selfcli.exec_self(hand_off)

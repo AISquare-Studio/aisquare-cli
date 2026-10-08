@@ -15,6 +15,8 @@ staying hermetic enough to run anywhere.
 from __future__ import annotations
 
 import json
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -130,7 +132,8 @@ def test_a_turns_time_goes_beside_its_lines_as_utc_never_as_the_machines_clock(
     fleet on a UTC box read from a phone in UTC-7 said ``> you 17:05`` for a prompt typed
     at 10:05 by the phone's clock. The time goes beside the lines, as UTC, by the turn's
     first line, and the page tells it in the phone's own zone. A time written without a
-    zone is UTC, as the tail reads it; the renderer read it as the machine's own."""
+    zone is UTC, as the tail reads it; the renderer read it as the machine's own. One
+    written with another offset goes out as UTC too."""
     unzoned = _user("naive", uuid="n")
     unzoned["timestamp"] = "2026-09-12T17:07:00"
     path = _write(
@@ -139,6 +142,7 @@ def test_a_turns_time_goes_beside_its_lines_as_utc_never_as_the_machines_clock(
             _user("hello", uuid="u", stamp="2026-09-12T17:05:00.000Z"),
             _assistant({"type": "text", "text": "hi"}, uuid="a"),
             unzoned,
+            _user("offset", uuid="o", stamp="2026-09-12T19:08:00+02:00"),
         ],
     )
 
@@ -148,13 +152,41 @@ def test_a_turns_time_goes_beside_its_lines_as_utc_never_as_the_machines_clock(
         *("> you", "  hello", ""),
         *("* claude", "  hi", ""),
         *("> you", "  naive", ""),
+        *("> you", "  offset", ""),
     ]
     assert page.stamps == {
         0: "2026-09-12T17:05:00+00:00",
         3: "2026-09-12T07:54:39+00:00",
         6: "2026-09-12T17:07:00+00:00",
+        9: "2026-09-12T17:08:00+00:00",
     }
     assert page.page_json()["stamps"] == {str(at): stamp for at, stamp in page.stamps.items()}
+
+
+def test_a_turns_time_written_without_a_zone_is_utc_on_a_machine_in_another_zone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The test above, on a machine whose zone is not UTC, where the two readings differ:
+    on CI's runners, which are UTC, the machine's own zone reads 17:07 as 17:07 UTC too, so
+    a renderer that took a time without a zone as local time passed there. In UTC-7 it sent
+    00:07 the next day. Skipped where ``time`` has no ``tzset`` (Windows): the zone cannot
+    be switched for the process there, as ``test_reset_formatter.py`` says."""
+    # In the body and on `sys.platform`, as test_usage_aware_accounts.py has it: mypy's run
+    # on the Windows leg then narrows past the skip and never sees `time.tzset` missing.
+    if sys.platform == "win32":
+        pytest.skip("time.tzset is POSIX-only: the process zone cannot be switched for the test")
+    unzoned = _user("naive", uuid="n")
+    unzoned["timestamp"] = "2026-09-12T17:07:00"
+    path = _write(tmp_path / "unzoned.jsonl", [unzoned])
+    with monkeypatch.context() as local:
+        local.setenv("TZ", "America/Los_Angeles")
+        time.tzset()
+        try:
+            page = read_page(path)
+        finally:
+            local.undo()
+            time.tzset()
+    assert page.stamps == {0: "2026-09-12T17:07:00+00:00"}
 
 
 def test_a_tool_call_is_one_summary_line(conversation: Path) -> None:

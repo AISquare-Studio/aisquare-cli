@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1689,6 +1689,44 @@ def test_every_scan_reaches_every_listener_and_a_failing_one_costs_nothing(
     assert sum("needs listener failed" in r.getMessage() for r in caplog.records) == 2
     assert watcher.needs_items_now() == second
     assert watcher.needs_scanned_at() == NOW + timedelta(seconds=3)
+
+
+def test_a_card_dismissed_while_a_scan_runs_stays_dismissed(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """The scan reads the dismissals before it starts and publishes its snapshot whole when
+    it ends. A dismissal in between was dropped from the snapshot of the moment, and the scan
+    then put the card back on every phone and before the push sender, which pushed it."""
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    fleet = _working(_tail(_tool("toolu_q", "AskUserQuestion", **QUESTION)))
+    listing, held = threading.Event(), threading.Event()
+
+    def slow_listing(project: ProjectInfo) -> list[FleetAgentStatus]:
+        if fleet.listed:  # every scan after the first is held while the card is dismissed
+            listing.set()
+            assert held.wait(5.0)
+        fleet.listed += 1
+        return list(fleet.agents)
+
+    watcher = RemoteNeedsWatcher(
+        app.kit, sources=lambda: replace(_sources(fleet), list_agents=slow_listing)
+    )
+    heard: list[list[str]] = []
+    app.kit.needs_listeners.append(lambda items, at: heard.append([item.id for item in items]))
+    (card,) = watcher.scan_needs_now()
+    scan = threading.Thread(target=watcher.scan_needs_now)
+    scan.start()
+    try:
+        assert listing.wait(5.0), "the second scan read the dismissals and is listing"
+        record_needs_dismissal(card.id)  # what POST api/needs/dismiss does, in its order
+        watcher.needs_forget(card.id)
+        assert watcher.needs_items_now() == []
+    finally:
+        held.set()
+        scan.join(5.0)
+    assert watcher.needs_items_now() == [] and watcher.needs_items_json() == []
+    assert heard == [[card.id], []], "the push sender heard it gone too"
+    assert watcher.scan_needs_now() == [] and heard[-1] == [], "and every scan after"
 
 
 def test_the_stream_and_the_heartbeat_read_the_watchers_snapshot(

@@ -1700,6 +1700,8 @@ class RemoteNeedsWatcher:
         self._scanned_at: datetime | None = None
         self._projects: dict[str, ProjectInfo] = {}
         self._first_seen: dict[str, datetime] = {}
+        self._forgotten: set[str] = set()
+        """Ids :meth:`needs_forget` dropped that no scan has read from the dismissals file yet."""
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -1739,19 +1741,30 @@ class RemoteNeedsWatcher:
             return False
 
     def scan_needs_now(self) -> list[NeedsItem]:
-        """One synchronous scan: the snapshot replaced, then every listener called."""
+        """One synchronous scan: the snapshot replaced, then every listener called.
+
+        The dismissals are read before the scan starts, and a scan takes as long as
+        its projects' tmux and store reads do. A card dismissed meanwhile is not in
+        what it read, and :meth:`needs_forget` drops it only from the snapshot there
+        is then: published, the scan put it back on every phone and before the push
+        sender, which could push it. So each id dropped since is dropped from what the
+        scan publishes too, until a scan that read it from the file has published.
+        """
         with self._scanning:
             now = self._clock()
             sources = self._sources()
             projects = sources.list_projects()
-            items = scan_needs_you(
+            dismissed = load_needs_dismissals()
+            scanned = scan_needs_you(
                 replace(sources, list_projects=lambda: projects),
                 now=now,
-                dismissed=load_needs_dismissals(),
+                dismissed=dismissed,
                 first_seen=self._first_seen,
             )
-            payload = [item.needs_item_json() for item in items]
             with self._lock:
+                items = [item for item in scanned if item.id not in self._forgotten]
+                self._forgotten.difference_update(dismissed)
+                payload = [item.needs_item_json() for item in items]
                 self._latest, self._latest_json, self._scanned_at = items, payload, now
                 self._projects = {project.id: project for project in projects}
             for listener in list(self._kit.needs_listeners):
@@ -1792,8 +1805,13 @@ class RemoteNeedsWatcher:
         return None if item is None or project is None else (item, project)
 
     def needs_forget(self, item_id: str) -> None:
-        """Drop a dismissed item now, rather than at the next scan."""
+        """Drop a dismissed item now, rather than at the next scan, and from a scan in flight.
+
+        Called once the dismissal is on file: the scan that publishes next drops it too,
+        whether or not it read the file before the dismissal reached it.
+        """
         with self._lock:
+            self._forgotten.add(item_id)
             self._latest = [item for item in self._latest if item.id != item_id]
             self._latest_json = [item for item in self._latest_json if item.get("id") != item_id]
 

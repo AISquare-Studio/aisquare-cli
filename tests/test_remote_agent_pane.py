@@ -319,7 +319,7 @@ def test_keys_are_refused_busy_while_an_action_on_the_agent_runs(
     and Enter then submitted them and the tell as one message; text between a stop's
     ``/exit`` and its Enter made ``/exitfoo``."""
     tmux = _serving(monkeypatch, Tmux(OLDER))
-    monkeypatch.setattr(remote_server, "SEND_KEYS_LOCK_WAIT_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(remote_server, "SEND_KEYS_LOCK_WAIT_SECONDS", 0.05)
     action = remote_agent_lock(project.id, "coder-1")
     assert action.acquire(blocking=False)
     try:

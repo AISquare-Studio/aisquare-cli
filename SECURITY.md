@@ -79,7 +79,9 @@ that mode, Claude Code's classifier, not you, approves each tool call.
   was made from.
 - **The Claude Code plugin.** With no aisquare CLI installed, its hooks run
   `uvx --from aisquare-cli==<version>`, which downloads that release from PyPI
-  on the first session.
+  on the first session. If no Python 3.11 to 3.13 is installed, uv first
+  downloads a CPython build from Astral (python-build-standalone), unless uv's
+  `python-downloads` setting (`UV_PYTHON_DOWNLOADS`) is `manual` or `never`.
 - **Snapshots.** Packing a snapshot (`aisquare init`, `aisquare project
   onboard`) runs `npx --yes repomix` when no `repomix` is installed, which
   fetches the latest Repomix from npm. With tiktoken installed, the first token

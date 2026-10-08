@@ -417,11 +417,14 @@ def test_contributing_names_the_security_md_section_that_exists() -> None:
 
 def test_security_md_lists_what_upgrade_and_the_plugin_change_and_send() -> None:
     """SECURITY.md is an inventory that says only what the code does, and it predated
-    upgrade's hook rewrite, its PyPI requests and the plugin's uvx (review of #257)."""
+    upgrade's hook rewrite, its PyPI requests and the plugin's uvx (review of #257). The
+    launcher's uvx asks for a Python CI tests, which uv downloads from Astral when none
+    is installed, and the plugin's item named only PyPI (a later review of #257)."""
     root = Path(__file__).resolve().parents[1]
     text = (root / "SECURITY.md").read_text(encoding="utf-8")
     changed = text.split("**Changed in Claude Code's settings:**")[1].split("**Sent:**")[0]
     sent = text.split("**Sent:**")[1]
+    plugin = sent.split("**The Claude Code plugin.**")[1].split("\n- **")[0]
     launcher = (root / "plugins" / "claude-code" / "scripts" / "aisquare-hook").read_text("utf-8")
 
     assert (
@@ -430,7 +433,9 @@ def test_security_md_lists_what_upgrade_and_the_plugin_change_and_send() -> None
     )
     assert install_route.PYPI_JSON_URL in sent and "User-Agent" in sent
     assert '--from "$_from" aisquare hook' in launcher, "the launcher still runs uvx --from"
-    assert f"uvx --from {DISTRIBUTION}==" in sent
+    assert f"uvx --from {DISTRIBUTION}==" in plugin
+    assert "--python '>=3.11,<3.14'" in launcher, "the launcher still asks uv for a Python"
+    assert "CPython" in plugin and "UV_PYTHON_DOWNLOADS" in plugin, plugin
     assert "`aisquare uninstall`" in changed and "`--purge`" in changed, "uninstall too"
     assert "Keychain" in changed, "a purge leaves the macOS slots' tokens, and says so"
 

@@ -443,6 +443,24 @@ def _pane(agent: str, project: str | None = None) -> Any:
     return lambda f: f["type"] == "pane" and f["agent"] == agent and f.get("project") == project
 
 
+def _captured_within(panes: Panes, pane: tuple[str, str | None], seconds: float = 5.0) -> bool:
+    """Whether ``pane`` is captured within ``seconds``, its frame unchanged and so not sent.
+
+    Not within one tick: the stream's captures go through the read cache, one per pane per
+    tick however many sockets watch it, and the cache serves one younger than 0.9 of a
+    tick. On windows-latest, CPython 3.12's monotonic clock moves in 15.6 ms steps and
+    asyncio fires a timer up to one step early, so two 20 ms ticks can read one step apart,
+    inside the 18 ms ttl: the tick that sent coder-3's first frame served coder-1's capture
+    from the tick before and made no new one (CI run 37719330211).
+    """
+    deadline = time.monotonic() + seconds
+    while pane not in panes.asked:
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.005)
+    return True
+
+
 def test_a_pane_subscription_reads_the_pane_of_the_project_it_names(
     runtime: Runtime, reads: Reads, tmp_path: Path
 ) -> None:
@@ -476,8 +494,9 @@ def test_unsubscribing_one_project_leaves_the_same_label_in_another(
         panes.asked.clear()
         ws.send_text(json.dumps({"subscribe": "coder-3"}))
         _until(ws, _pane("coder-3"))
+        still = _captured_within(panes, ("coder-1", "prj_b"))
+    assert still, "the same label in another project: still captured"
     assert ("coder-1", "prj_a") not in panes.asked, "unsubscribed: no longer captured"
-    assert ("coder-1", "prj_b") in panes.asked
 
 
 def test_a_pane_unsubscribed_while_it_is_captured_gets_no_frame(

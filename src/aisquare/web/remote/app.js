@@ -748,11 +748,11 @@ async function apiCall(method, path, options) {
  * reconnect when the phone lost the request, if that comes soon enough
  * (flushRetries). The server's ledger answers a retried id from what it
  * recorded, so a restart never runs twice. onWait hears when the answer has
- * to wait for the phone to be back. */
-async function apiWrite(path, body, verb, onWait) {
+ * to wait for the phone to be back; at is when it was tapped, if not now. */
+async function apiWrite(path, body, verb, onWait, at) {
   const id = newRequestId();
   const pending = {
-    id, path, body: Object.assign({}, body, { request_id: id }), verb, at: Date.now(), resolve: null, retried: false, dropped: false,
+    id, path, body: Object.assign({}, body, { request_id: id }), verb, at: at || Date.now(), resolve: null, retried: false, dropped: false,
   };
   S.pending.set(id, pending);
   savePending();
@@ -807,6 +807,25 @@ function dropRetries() {
     pending.retried = true;
     finishPending(pending, notSentAgain("gone"));
   }
+}
+
+/* Keys to one agent go one at a time, each once the one before it was answered. Sent
+ * together (two quick taps, or two lost ones resent on a reconnect), the machine could
+ * type a later one first: ↓ ↓ ⏎ chose another option. A key queued behind one that did
+ * not go through, or that waited past RETRY_WITHIN_MS, is not sent ("held"): it was
+ * tapped for a screen that never came. send(at) sends it, at being when it was tapped. */
+const keyTurns = new Map();
+
+function keysInTurn(pid, label, send) {
+  const key = pid + "\n" + label;
+  const turn = keyTurns.get(key) || { tail: Promise.resolve(true), queued: 0 };
+  keyTurns.set(key, turn);
+  const at = Date.now();
+  turn.queued++;
+  const mine = turn.tail.then((before) => (before && Date.now() - at <= RETRY_WITHIN_MS ? send(at) : notSentAgain("held")));
+  // Nothing queued behind it: the next tap starts afresh, whatever this one came to.
+  turn.tail = mine.then((res) => --turn.queued === 0 || res.ok, () => --turn.queued === 0);
+  return mine;
 }
 
 /* The answer to a lost write that flushRetries or dropRetries kept from going out again. */
@@ -874,6 +893,7 @@ function settleFromLedger(entries) {
  * once nothing will retry it: a write's one retry was lost as well, or a call
  * that is never retried. */
 function failText(res, max) {
+  if (res.notSent === "held") return "Not sent — the key before it did not go through, or took too long. Look at the pane, then tap it again.";
   if (res.notSent) {
     const why = res.notSent === "late" ? "the phone was away too long to be sure the agent still shows what you saw" : "the phone was signed out, or Remote went off, before the machine answered";
     return "Not sent again — " + why + ". If the machine got it, its result shows here; if not, look, then send it again.";
@@ -1710,7 +1730,8 @@ async function answerCard(item, answer, row) {
   const quick = row ? Array.from(row.querySelectorAll("button.qa")) : [];
   for (const control of quick) control.classList.add("busy");
   gateButtons();
-  const res = await apiWrite(API.needsAnswer, { id: item.id, keys }, "Answer " + label);
+  const project = item.project && typeof item.project === "object" ? item.project : {};
+  const res = await keysInTurn(project.id, item.agent, (at) => apiWrite(API.needsAnswer, { id: item.id, keys }, "Answer " + label, null, at));
   for (const control of quick) control.classList.remove("busy");
   gateButtons();
   if (res.ok) return toast("Sent " + label + " to " + plainText(item.agent || "the agent"));
@@ -2432,7 +2453,7 @@ function inputBar(pid, label, cleanups) {
   }
   let lastEsc = 0;
   const post = async (body, what) => {
-    const res = await apiWrite("api/send-keys", Object.assign({ agent: label, project: pid }, body), what);
+    const res = await keysInTurn(pid, label, (at) => apiWrite("api/send-keys", Object.assign({ agent: label, project: pid }, body), what, null, at));
     if (res.ok) return true;
     if (res.status === 409 && res.error === "double_press") {
       // Asked on this agent's own screen, over no other sheet: the answer can come after

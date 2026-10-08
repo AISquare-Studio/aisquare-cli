@@ -1323,6 +1323,23 @@ def test_a_sheet_opened_before_the_fleet_came_finds_its_agent_when_tapped(
     assert early["told"] == ["agt_1"]
 
 
+def test_keys_reach_an_agent_one_at_a_time_in_the_order_they_were_tapped(
+    boot_report: dict[str, Any],
+) -> None:
+    """Each pad key was its own request, sent without waiting for the one before, and the
+    machine could type them in any order: ↓ ↓ ⏎ on a plan dialog could be ⏎ first, which
+    accepts option 1 where No was meant. Lost keys were resent together on a reconnect, and
+    a key tapped behind a lost one went first. Now a key goes once the one before it was
+    answered, and not at all behind one that did not go through; a card's quick answer is
+    keys too, and a key tapped while it is typed waits for it."""
+    keys = boot_report["keysInOrder"]
+    assert keys["quick"] == {"atOnce": 1, "order": ["Down", "Down", "Enter"]}
+    assert keys["refused"]["sent"] == 1 and keys["refused"]["toast"].startswith("Not sent — ")
+    assert keys["refused"]["after"] == ["Down", "Enter"], "a key tapped after the refusal goes"
+    assert keys["lost"] == ["Down", "Down", "Enter"]
+    assert keys["afterAnswer"] == {"whileAnswering": 0, "after": 1}
+
+
 # --- 11. the wheel --------------------------------------------------------------------------
 
 

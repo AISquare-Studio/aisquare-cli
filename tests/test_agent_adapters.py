@@ -395,7 +395,9 @@ _SETTINGS = {"model": "opus", "permissions": {"allow": ["Bash(git status)"]}, "e
 @pytest.mark.parametrize(
     ("text", "why"),
     [
-        (json.dumps(_SETTINGS)[:-1] + ",}\n", "it is not valid JSON (Expecting property name"),
+        # The parenthesis holds the json module's own words, which differ by Python
+        # version (3.13: "Illegal trailing comma ..."), then the line and column.
+        (json.dumps(_SETTINGS)[:-1] + ",}\n", "it is not valid JSON ("),
         (json.dumps([_SETTINGS]), "it is not a JSON object"),
     ],
     ids=["trailing-comma", "an-array"],
@@ -428,6 +430,7 @@ def test_connect_never_rewrites_a_settings_json_that_is_not_a_json_object(
 
     reason = f"can't read {settings_path}: {why}"
     assert not clicked.ok and reason in (clicked.reason or ""), clicked.reason
+    assert ("line 1 column" in (clicked.reason or "")) == why.endswith("("), clicked.reason
     assert json.loads(refreshed.stdout)["detail"].startswith(reason), refreshed.stdout
     assert left == text, "the file is left exactly as it was"
     assert not built, "refused before the context was ingested or the home built"

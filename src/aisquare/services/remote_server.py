@@ -2144,8 +2144,15 @@ def live_writes() -> Writes:
         return {"project": project.model_dump(mode="json")}, f"switched to {project.id}"
 
     def project_add(body: dict[str, Any]) -> tuple[dict[str, object], str]:
-        """Register a project the phone names, within :func:`check_project_add_root`'s limits;
-        ``added`` is false when it was registered already."""
+        """Add a project the phone names, within :func:`check_project_add_root`'s limits;
+        ``added`` is false when it was listed already.
+
+        An add on purpose (``onboard_project``), as ``project switch`` and ``link``
+        are, never the hooks' capture (``ensure_project``): a capture is never listed,
+        so the phone was told ``added`` and its Projects screen, ``project list`` and
+        the sidebar did not change. A directory the hooks captured, or one forgotten,
+        is listed from now on, so it is added.
+        """
         from aisquare.core.store import store_session
         from aisquare.core.workspace import project_id_for
         from aisquare.models import ProjectInfo
@@ -2153,8 +2160,9 @@ def live_writes() -> Writes:
         root = check_project_add_root(body.get("path"))
         project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
         with store_session() as store:
-            added = store.get_project(project.id) is None
-            store.ensure_project(project)
+            known = store.get_project(project.id)
+            project = store.onboard_project(project)
+        added = known is None or known.onboarded_at is None
         payload = {"project": project.model_dump(mode="json"), "added": added}
         return payload, f"added {project.id} {root}"
 

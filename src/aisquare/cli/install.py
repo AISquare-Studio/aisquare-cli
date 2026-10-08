@@ -446,6 +446,16 @@ def _blocked_reason(plan: lifecycle_service.UninstallPlan) -> str:
     )
 
 
+def _blocked_keeps(plan: lifecycle_service.UninstallPlan) -> str:
+    """What a blocked run keeps of what it was asked to remove, in the plan and the question:
+    the package, and the home a --purge would have deleted."""
+    return (
+        f"the package and {plan.home} stay"
+        if plan.purge and plan.home_exists
+        else "the package stays"
+    )
+
+
 def _package_kept(report: lifecycle_service.UninstallReport) -> str | None:
     """Why the run leaves the package, in the plan's words; ``None`` when it removes it."""
     plan = report.plan
@@ -492,12 +502,7 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
             _say("    (/logout in Claude Code) first to remove them")
     if plan.blocked:
         # What the run does: a site it cannot clean fails it, and it keeps both.
-        stays = (
-            f"the package and {plan.home} stay"
-            if plan.purge and plan.home_exists
-            else "the package stays"
-        )
-        _say(f"  then stop: {stays}, as {_blocked_reason(plan)}")
+        _say(f"  then stop: {_blocked_keeps(plan)}, as {_blocked_reason(plan)}")
     elif plan.package_reason is None:
         _say(f"  then remove the package: {plan.package_command}")
     else:
@@ -505,8 +510,9 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
         _say(f"    (aisquare does not run it: {plan.package_reason})")
     _say("and keep:")
     if plan.home_exists and not plan.purges:
-        later = "" if plan.purge else " (delete it too with --purge)"
-        _say(f"  {_home_line(plan)}{later}")
+        # Offered only where --purge could delete it, never for a home the guard refuses.
+        offer = not plan.purge and plan.purge_refusal is None
+        _say(f"  {_home_line(plan)}{' (delete it too with --purge)' if offer else ''}")
     if plan.mcp:
         _say("  MCP servers that run aisquare (Claude Code owns .claude.json; remove each with")
         _say("  `claude mcp remove <name>`):")
@@ -614,7 +620,7 @@ def _uninstall_question(plan: lifecycle_service.UninstallPlan) -> str | None:
     text = steps[0] if len(steps) == 1 else ", ".join(steps[:-1]) + " and " + steps[-1]
     if blocked:
         text += (
-            f" (the package stays: the hooks in {blocked} other "
+            f" ({_blocked_keeps(plan)}: the hooks in {blocked} other "
             f"director{'ies' if blocked != 1 else 'y'} cannot be taken out)"
         )
     if plan.lasting_plugins:
@@ -680,7 +686,14 @@ def uninstall(
         question = _uninstall_question(plan)
         if question is None:
             if plan.blocking:
-                checked = ", ".join(str(site.config_dir) for site in plan.blocking)
+                # A --purge that gets here is one the guard allows (a refused one stopped
+                # above), so a site inside the home is not one to fix: once the sites outside
+                # it are fixed, the purge deletes it with the home.
+                checked = ", ".join(
+                    str(site.config_dir)
+                    for site in plan.blocking
+                    if not (plan.purge and plan.in_home(site.config_dir))
+                )
                 _say(
                     f"✗ nothing can be removed until the hooks in {checked} can be taken out "
                     "(see above)"

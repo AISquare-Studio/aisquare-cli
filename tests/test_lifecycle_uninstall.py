@@ -1837,6 +1837,162 @@ def test_the_json_plan_deletes_the_home_exactly_when_the_text_plan_does(
     assert ("DELETE" in human) is home, human
 
 
+# --- sweep 2 of #257: one rule decides whether the run deletes the home --------------------
+
+
+def _broken_hooks(directory: Path, program: Path | str) -> Path:
+    """A Claude Code directory holding aisquare's hooks in a settings.json that is not valid
+    JSON, so they cannot be taken out."""
+    directory.mkdir(parents=True)
+    (directory / "settings.json").write_text(_hooks_text(program, trailing_comma=True), "utf-8")
+    return directory
+
+
+def test_a_blocker_outside_the_home_keeps_the_slots_hooks_with_the_home(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under --purge a slot's hooks go with the home, but a site outside the home that cannot
+    be cleaned keeps the home. The plan still said the slot's hooks "are deleted with" it,
+    beside "the package and ~/.aisquare stay", and counted 1 directory where the run leaves 2,
+    in its --json, the question and the run's report too (sweep 2 of #257)."""
+    _initialised(runner, tmp_path)
+    home = paths.aisquare_home()
+    slot = _retired_slot_with_broken_hooks(tool.script)
+    outside = _broken_hooks(isolated_agent_home / ".claude", tool.script)
+    clean = _hooked(isolated_agent_home / ".claude-c2", tool.script)
+    monkeypatch.setattr("aisquare.cli.install._stdin_is_a_terminal", lambda: True)
+    asked: list[str] = []
+
+    def answer_no(text: str, **_: object) -> bool:
+        asked.append(text)
+        return False
+
+    monkeypatch.setattr("aisquare.cli.install.typer.confirm", answer_no)
+
+    plan = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
+    human = runner.invoke(app, ["uninstall", "--purge", "--dry-run"]).stdout
+    runner.invoke(app, ["uninstall", "--purge"])
+    ran = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge", "--yes"]).stdout)
+
+    two = "the hooks in 2 directories cannot be taken out, and they still call it"
+    blocks = {site["config_dir"]: site["blocks"] for site in plan["unreadable"]}
+    assert blocks == {str(outside): True, str(slot): True}, plan["unreadable"]
+    assert (plan["home"]["action"], plan["package"]["reason"]) == ("keep", two), plan
+    assert "they are deleted with" not in human, human
+    assert f"then stop: the package and {home} stay, as {two}" in human, human
+    assert asked == [
+        f"Remove aisquare's hooks from 1 directory (the package and {home} stay: "
+        "the hooks in 2 other directories cannot be taken out)?"
+    ]
+    assert {(hook["config_dir"], hook["removed"]) for hook in ran["hooks"]} == {
+        (str(clean), True),
+        (str(outside), False),
+        (str(slot), False),
+    }
+    assert (ran["home"]["deleted"], ran["package"]["reason"]) == (False, two), ran
+    assert home.is_dir() and world.execs == []
+
+
+def test_with_nothing_to_remove_a_purge_names_only_the_sites_to_fix_first(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no hooks it can take out, the run asks nothing and says what to fix. Under --purge
+    that is the site outside the home: once it is fixed, the purge deletes the slot's hooks
+    with the home. Without --purge the slot stays, so it is named too (control)."""
+    _initialised(runner, tmp_path)
+    slot = _retired_slot_with_broken_hooks(tool.script)
+    outside = _broken_hooks(isolated_agent_home / ".claude", tool.script)
+    monkeypatch.setattr("aisquare.cli.install._stdin_is_a_terminal", lambda: True)
+
+    purge = runner.invoke(app, ["uninstall", "--purge"])
+    plain = runner.invoke(app, ["uninstall"])
+
+    lines = [
+        next(line for line in result.stdout.splitlines() if "nothing can be removed" in line)
+        for result in (purge, plain)
+    ]
+    assert (purge.exit_code, plain.exit_code) == (1, 1)
+    assert str(outside) in lines[0] and str(slot) not in lines[0], lines[0]
+    assert str(outside) in lines[1] and str(slot) in lines[1], lines[1]
+    assert world.events == []
+
+
+def test_a_purge_the_guard_refuses_is_planned_as_keeping_the_home(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard never purges a home AISQUARE_HOME moved, yet the plan of such a --purge said
+    "DELETE <home>" above "it will not start", its --json said "action": "delete", and the
+    home and the plugin in its slot fell out of "and keep:". Without --purge, it offered
+    "delete it too with --purge" for a home --purge refuses (sweep 2 of #257)."""
+    monkeypatch.setattr(agent_core, "plugin_route_supported", lambda: True)  # the route's rule
+    _initialised(runner, tmp_path)  # in AISQUARE_HOME, which the suite moves
+    home = paths.aisquare_home()
+    slot = _plugin_installed(paths.claude_accounts_dir() / "2")
+    _hooked(isolated_agent_home / ".claude", tool.script)
+
+    machine = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
+    human = runner.invoke(app, ["uninstall", "--purge", "--dry-run"]).stdout
+    plain = runner.invoke(app, ["uninstall", "--dry-run"]).stdout
+    monkeypatch.setattr(lifecycle, "custom_home", lambda _home: False)
+    offered = runner.invoke(app, ["uninstall", "--dry-run"]).stdout
+
+    assert machine["refusal"]["error"] == "purge_refused", machine["refusal"]
+    assert machine["home"]["action"] == "keep", machine["home"]
+    assert "DELETE" not in human and "✗ it will not start: --purge will not" in human, human
+    kept = human.split("and keep:", 1)[1]
+    assert str(home) in kept and f"the aisquare plugin in {slot}" in kept, human
+    assert "delete it too with --purge" not in plain, plain
+    assert "delete it too with --purge" in offered, "control: a home --purge may delete"
+    assert world.events == []
+
+
+@pytest.mark.parametrize("home", [True, False], ids=["a-home", "no-home"])
+def test_a_purge_the_run_did_not_attempt_is_reported_only_for_a_home_that_is_there(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    home: bool,
+) -> None:
+    """With --purge, a site that cannot be cleaned and no home, the report said
+    "✗ <home> was not deleted: not attempted", for a home the plan never named and that is
+    not there (sweep 2 of #257). With a home, that is what happened to it (control)."""
+    if home:
+        _initialised(runner, tmp_path)
+    _broken_hooks(isolated_agent_home / ".claude", tool.script)
+
+    machine = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge", "--yes"]).stdout)
+    human = runner.invoke(app, ["uninstall", "--purge", "--yes"]).stdout
+
+    assert machine["home"]["deleted"] is False, machine["home"]
+    assert (machine["home"]["error"] is not None) is home, machine["home"]
+    assert ("was not deleted" in human) is home, human
+    assert world.execs == []
+
+
 _REPO = Path(__file__).resolve().parents[1]
 
 #: When `aisquare uninstall` removes the package itself, as CHANGELOG.md and docs/install.md

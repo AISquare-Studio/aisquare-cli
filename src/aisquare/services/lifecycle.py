@@ -903,7 +903,8 @@ class UninstallPlan:
     """Whether those logins' tokens live in the macOS Keychain, which a purge leaves."""
     purge: bool
     purge_refusal: str | None
-    """Why the home may not be deleted — consulted only when ``purge`` is set."""
+    """Why --purge may not delete the home: it refuses a run with ``purge`` set, and a
+    plan without it does not offer --purge for this home."""
     live_agents: tuple[str, ...]
     """Live fleet rows that may still be running: with tmux on PATH every live row,
     without it those whose socket still has a server listening."""
@@ -923,13 +924,11 @@ class UninstallPlan:
 
     @property
     def blocking(self) -> tuple[HookSite, ...]:
-        """The ``unreadable`` sites whose hooks keep the package and the home: every one,
-        except, when --purge may delete the home, those inside it (an account slot, a
-        retired one too), whose hooks the purge deletes with them (sweep of #257), as it
-        does a plugin there (:attr:`lasting_plugins`)."""
-        if not (self.purge and self.home_exists and self.purge_refusal is None):
-            return self.unreadable
-        return tuple(site for site in self.unreadable if not self.in_home(site.config_dir))
+        """The ``unreadable`` sites whose hooks keep the package and the home: every one, unless
+        this run purges (:attr:`purges`). Every one is then inside the home (an account slot, a
+        retired one too), and the purge deletes their hooks with it, as it does a plugin there
+        (:attr:`lasting_plugins`) (sweep of #257)."""
+        return () if self.purges else self.unreadable
 
     @property
     def blocked(self) -> bool:
@@ -940,8 +939,16 @@ class UninstallPlan:
 
     @property
     def purges(self) -> bool:
-        """Whether this run deletes the home: --purge, a home to delete, and nothing blocked."""
-        return self.purge and self.home_exists and not self.blocked
+        """Whether this run deletes the home: --purge, a home the guard lets it delete
+        (:attr:`purge_refusal`), and no site outside the home whose hooks cannot be taken
+        out, as such a site stops the run before the purge. The plan, its --json, the
+        question and :func:`uninstall` all follow this one rule (sweep of #257)."""
+        return (
+            self.purge
+            and self.home_exists
+            and self.purge_refusal is None
+            and all(self.in_home(site.config_dir) for site in self.unreadable)
+        )
 
     def in_home(self, directory: Path) -> bool:
         """Whether ``directory`` is inside the home, so a purge deletes it with everything in it."""
@@ -1423,9 +1430,9 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
     removals.extend(HookRemoval(site.config_dir, False, site.reason) for site in blocking)
     purged, purge_error = False, None
     hooks_failed = any(not removal.ok for removal in removals)
-    if plan.purge and plan.home_exists and not hooks_failed:
+    if plan.purges and not hooks_failed:
         purged, purge_error = _purge(plan.home)
-    elif plan.purge and hooks_failed:
+    elif plan.purge and plan.home_exists and hooks_failed:
         purge_error = "not attempted: hooks were left in a directory above"
     if not purged:
         # The purge that would have taken them did not happen: they are still there.

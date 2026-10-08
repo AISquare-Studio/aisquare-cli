@@ -932,7 +932,8 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     # not made it yet: npm and Homebrew make it on the first start, and
     # CLAUDE_CONFIG_DIR can name a new profile. No site grades it, so beside any other
     # site this row was green while those sessions ran no hooks, and Welcome offered
-    # Connect. Only the bare `agents connect` makes it (review of #257).
+    # Connect. `agents connect` makes it (review of #257); a recorded one that was
+    # removed is graded below, and its --config-dir Connect makes it too.
     unmade = _unmade_ambient_dir(sites)
 
     # The shared answer, which counts the plugin route as connected.
@@ -1079,8 +1080,8 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
             broken.append(site.config_dir)
     fixes.extend(f"aisquare agents connect claude-code --config-dir {p}" for p in broken)
     if unmade is not None:
-        # Bare: connect makes the directory a session from this shell reads, and never
-        # a --config-dir one, so that form would refuse with "not installed".
+        # Bare: the directory a session from this shell reads, which connect makes. A
+        # --config-dir naming any other it never makes, so that form refuses as not installed.
         fixes.append(_RECONNECT)
     fixes.extend(
         "remove them, and the plugin runs alone: "

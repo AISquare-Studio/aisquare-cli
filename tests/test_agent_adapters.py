@@ -476,6 +476,59 @@ def test_a_claude_code_on_path_that_never_started_is_connected_not_refused(
     assert "Connected claude-code: hooks installed" in notes, notes
 
 
+def test_a_recorded_claude_dir_that_was_removed_is_made_by_the_doctors_connect(
+    runner: CliRunner, isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """~/.claude connected and then removed (`rm -rf ~/.claude` resets Claude Code), with
+    `claude` still on PATH: the doctor's Connect names the recorded directory with
+    --config-dir, and connect refused it as not installed, while the bare Connect, Welcome's,
+    made it and connected (review of #257). Named or not, that directory is made."""
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    claude = isolated_agent_home / ".claude"
+    claude.mkdir(parents=True)
+    _connect(runner)
+    shutil.rmtree(claude)
+
+    row = diagnostics._check_claude_code()
+    buttons = [fix.argv for fix in fix_commands([row])]
+    clicked = runner.invoke(app, ["--json", *buttons[0]]) if buttons else None
+    after = diagnostics._check_claude_code()
+    other = isolated_agent_home / ".claude-gone"
+    elsewhere = runner.invoke(
+        app, ["--json", "agents", "connect", "claude-code", "--config-dir", str(other)]
+    )
+
+    assert buttons == [("agents", "connect", "claude-code", "--config-dir", str(claude))], row
+    assert clicked is not None and clicked.exit_code == 0, clicked and clicked.output
+    assert agent_core.hooks_installed("claude-code", claude), "the button made it and connected"
+    assert after.status is CheckStatus.ok, after
+    assert json.loads(elsewhere.stdout)["error"] == "not_installed" and not other.exists(), (
+        "control: a --config-dir naming another directory is never made"
+    )
+
+
+def test_a_config_dir_that_is_a_symlink_loop_is_not_installed_not_a_traceback(
+    runner: CliRunner, isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Connect asks whether a --config-dir is the directory a session from this shell reads
+    (above), and pathlib raises RuntimeError for a symlink loop on 3.11 and 3.12: a
+    traceback where connect said "not installed" before."""
+    if os.name == "nt":
+        pytest.skip("a symlink loop is a POSIX shape; NTFS links need a privilege")
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    isolated_agent_home.mkdir(parents=True, exist_ok=True)
+    loop = isolated_agent_home / "loop"
+    loop.symlink_to(loop)
+
+    result = runner.invoke(
+        app, ["--json", "agents", "connect", "claude-code", "--config-dir", str(loop)]
+    )
+
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    assert json.loads(result.stdout)["error"] == "not_installed", result.stdout
+    assert not (isolated_agent_home / ".claude").exists(), "nothing made for another dir"
+
+
 @pytest.mark.parametrize("shape", ["new-profile", "never-started"])
 def test_a_config_dir_claude_code_has_not_made_is_offered_connect_beside_other_sites(
     runner: CliRunner, isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch, shape: str

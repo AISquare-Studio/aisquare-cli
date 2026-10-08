@@ -258,10 +258,10 @@ def connect_refusal(name: str, config_dir: Path | None = None) -> str | None:
     """Why `agents connect` would refuse ``config_dir``, in its own words, or ``None`` when
     it would write the hooks: :func:`refused_file`'s reason. Reads only.
 
-    Asked before Connect is offered or implied: by the doctor's row, Welcome's step 2
-    and ``agents list``/``status``. A file connect refuses can only fail the click, and
-    a read-only settings.json (home-manager's link into the Nix store) never cleared
-    (review of #257).
+    Asked by Welcome's step 2 and ``agents list``/``status``, and through
+    :func:`refused_file` by the doctor's row, before Connect is offered or implied. A
+    file connect refuses can only fail the click, and a read-only settings.json
+    (home-manager's link into the Nix store) never cleared (review of #257).
     """
     refused = refused_file(name, config_dir)
     return None if refused is None else refused[1]
@@ -301,14 +301,23 @@ def _make_first_run_dir(name: str, config_dir: Path | None) -> None:
     exists), so `agents connect`, `init --agent claude-code` and Welcome's Connect
     refused a Claude Code that is on PATH. Welcome alone used to make it (review of
     #257). With ``claude`` on PATH, the directory a session from this shell reads is
-    made, as that first start would make it. A ``--config-dir`` is never made: a
-    typo must not get hooks.
+    made, as that first start would make it, however it is named: the doctor names a
+    recorded ``~/.claude`` that was removed with ``--config-dir``, and that Connect
+    refused it as not installed while the bare one made it. Any other ``--config-dir``
+    is never made: a typo must not get hooks.
     """
-    if name != "claude-code" or config_dir is not None or agent_core.claude_on_path() is None:
+    if name != "claude-code" or agent_core.claude_on_path() is None:
         return
     where = agent_core.ambient_hook_dir(name)
     if where is None or where.exists():
         return
+    if config_dir is not None:
+        try:
+            elsewhere = agent_core.dir_identity(config_dir) != agent_core.dir_identity(where)
+        except RuntimeError:  # pathlib's symlink loop on 3.11 and 3.12: nothing to make
+            elsewhere = True
+        if elsewhere:
+            return
     try:
         where.mkdir(parents=True, exist_ok=True)
     except OSError as exc:

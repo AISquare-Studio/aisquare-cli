@@ -853,6 +853,24 @@ def test_a_user_agent_that_is_rich_markup_is_painted_as_text() -> None:
     drive(go, tunnel=missing_ngrok, size=(160, 100))  # tall enough that the table is painted
 
 
+def test_a_status_sentence_that_reads_as_markup_is_painted_as_it_is() -> None:
+    """The status line's sentences carry exception text and paths: painted as a str they were
+    markup, a ``[b]`` in a path a tag that vanished and a ``[/b]`` a ``MarkupError`` raised
+    out of the repaint, which a one-second timer runs."""
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        sentence = "/home/[b]x[/b]/remote.json could not be written: [/i] is read-only"
+        app.remote.message = sentence
+        modal.repaint()
+        await pilot.pause()
+        assert shown(modal.query_one("#remote-status", Static)) == sentence
+
+    drive(go, tunnel=missing_ngrok)
+
+
 def test_the_password_shown_follows_a_regenerate_from_another_shell() -> None:
     """The modal showed the passphrase Remote started with, which a ``regenerate-password``
     from a shell had already made wrong (review of #243)."""

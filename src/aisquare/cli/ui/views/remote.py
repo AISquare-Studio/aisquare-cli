@@ -173,7 +173,7 @@ class RemotePanel(ModalScreen[None]):
         self._paint_switch("remote-allow-write", writes, heard)
         self.query_one("#remote-state", Static).update(self._state_text())
         # Text, never a str, which is read as markup: the sentences carry exception text
-        # and paths, and "[Errno 13]" there was taken for a tag.
+        # and paths, where "[b]" was a tag and "[/b]" a MarkupError out of the repaint.
         self.query_one("#remote-status", Static).update(Text(controller.status_line()))
         self.query_one("#remote-password", Static).update(
             Text(controller.password() or "—", style="bold")

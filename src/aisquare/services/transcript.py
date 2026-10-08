@@ -105,8 +105,13 @@ INTERRUPTED_MARKER = "[Request interrupted by user"
 """How Claude Code 2.1.292 records an Esc, as the text of a user record (a prefix: the
 rejection of a tool use adds `` for tool use]``). A Claude Code string, not a contract."""
 
-REJECTED_MARKER = "doesn't want to proceed"
-"""What the error result of a tool use the human rejected says, in Claude Code 2.1.292."""
+REJECTED_MARKER = "The user doesn't want to proceed"
+"""How the error result of a tool use the human rejected begins, in Claude Code 2.1.292."""
+
+REJECTED_WITH_WORDS = "To tell you how to proceed, the user said:"
+"""What that result says, in place of "STOP what you are doing", when the human turned the
+tool use down with words for the agent ("No, and tell Claude what to do differently").
+Claude Code does not stop the turn then: the agent goes on, to work on them."""
 
 _DIM = "\x1b[2m"
 _OFF = "\x1b[0m"
@@ -659,7 +664,10 @@ def _tail_user_kind(content: object, blocks: list[dict[str, Any]]) -> str:
 
     An interruption is Claude Code's marker text after an Esc, or the error
     result of a tool use the human rejected; either way the agent stopped and
-    sits at its prompt. Anything else that is not a tool result is the human.
+    sits at its prompt. Not a rejection with words for the agent, after which
+    it goes on working (:data:`REJECTED_WITH_WORDS`), nor a failed tool whose
+    output only quotes the sentence (a test run of this very module): that is
+    a result. Anything else that is not a tool result is the human.
     """
     texts = [content] if isinstance(content, str) else []
     texts += [
@@ -668,9 +676,17 @@ def _tail_user_kind(content: object, blocks: list[dict[str, Any]]) -> str:
     if any(text.lstrip().startswith(INTERRUPTED_MARKER) for text in texts):
         return "interrupted"
     results = [block for block in blocks if block.get("type") == "tool_result"]
-    if any(b.get("is_error") is True and REJECTED_MARKER in _tail_result_text(b) for b in results):
+    if any(_tail_rejected(block) for block in results):
         return "interrupted"
     return "tool_result" if results else "user_prompt"
+
+
+def _tail_rejected(block: dict[str, Any]) -> bool:
+    """Whether a ``tool_result`` is a tool use the human turned down and left at that."""
+    if block.get("is_error") is not True:
+        return False
+    text = _tail_result_text(block).lstrip()
+    return text.startswith(REJECTED_MARKER) and REJECTED_WITH_WORDS not in text
 
 
 def _tail_pending(block: dict[str, Any], at: datetime | None) -> PendingTool | None:
@@ -737,6 +753,7 @@ __all__ = [
     "LIMIT_CAP",
     "MAX_LINE",
     "REJECTED_MARKER",
+    "REJECTED_WITH_WORDS",
     "SCAN_BUDGET",
     "TAIL_BUDGET",
     "TAIL_RECORDS",

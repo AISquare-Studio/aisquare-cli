@@ -239,7 +239,7 @@ aisquare --json remote needs
 | fleet_down | tmux is not answering for a project |
 | asked | an agent ended its turn with a question in plain text |
 | board_result | the manager (or a coder with no manager left) reports a result |
-| interrupted | you pressed Esc on an agent, or turned its prompt down, and it waits for you |
+| interrupted | you pressed Esc on an agent, or turned its prompt down without saying what to do instead, and it waits for you |
 
 A card holds what you must read before answering, in full: the exact command a
 permission is for, every question with its options, the plan, the text. Under a

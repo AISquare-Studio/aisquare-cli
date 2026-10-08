@@ -409,6 +409,51 @@ def test_an_interruption_from_before_the_last_hook_is_history() -> None:
     assert item.kind == "permission" and item.answers == ()
 
 
+def _turned_down(path: Path, said: str) -> TranscriptTail:
+    """coder-1's transcript: a Bash call it asked to run, turned down with ``said``, and its
+    next message begun, thinking only. Read as the scan reads it."""
+
+    def record(kind: str, uuid: str, seconds: int, content: object, **message: str) -> str:
+        at = (NOW - timedelta(seconds=seconds)).isoformat()
+        body = {"role": kind, "content": content, **message}
+        return json.dumps({"type": kind, "uuid": uuid, "timestamp": at, "message": body}) + "\n"
+
+    call = {"type": "tool_use", "id": "toolu_rm", "name": "Bash", "input": {"command": "rm -rf x"}}
+    result = {"type": "tool_result", "tool_use_id": "toolu_rm", "content": said, "is_error": True}
+    thinking = {"type": "thinking", "thinking": "Tests, then."}
+    path.write_text(
+        record("user", "u1", 300, "go")
+        + record("assistant", "a1", 240, [call], id="m1")
+        + record("user", "r1", 60, [result])
+        + record("assistant", "a2", 50, [thinking], id="m2"),
+        encoding="utf-8",
+    )
+    tail = read_transcript_tail(path)
+    assert tail is not None
+    return tail
+
+
+def test_a_prompt_turned_down_with_words_for_the_agent_is_no_interruption(tmp_path: Path) -> None:
+    """Turned down with "No, and tell Claude what to do differently", Claude Code does not stop
+    the turn, and the agent works on the words. Its card said it "was interrupted and waits
+    for you" until its next message wrote more than thinking, and the card's Tell offered
+    Interrupt & tell, whose Esc would cut short the very work the words had started. Turned
+    down and left at that, it is the interruption it always was."""
+    row = _row()
+    status = _status(
+        row, "working", _session(row, state="attention", seen=NOW - timedelta(minutes=3))
+    )
+    stop = (
+        "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if "
+        "it was a file edit, the new_string was NOT written to the file). STOP what you are "
+        "doing and wait for the user to tell you how to proceed."
+    )
+    words = stop.split(" STOP ")[0] + " To tell you how to proceed, the user said:\nrun the tests"
+    assert _classify(status, _turned_down(tmp_path / "words.jsonl", words)) == []
+    item = _one(_classify(status, _turned_down(tmp_path / "stop.jsonl", stop)))
+    assert (item.kind, item.since) == ("interrupted", NOW - timedelta(seconds=60))
+
+
 def test_rule_7_the_session_paused_dialog_reads_as_limited() -> None:
     row = _row()
     session = _session(row, state="attention")

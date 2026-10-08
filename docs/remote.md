@@ -448,9 +448,13 @@ once: the page sends the header that skips it on every request it makes.
 rewrote the `Host` header; ngrok's `--host-header=rewrite` does exactly that.
 Start ngrok without it (the R panel never uses it).
 
-**`serve` says the port is in use.** Another Remote is running (the fleet UI's,
-perhaps), or something else took 8750. Turn the other one off, or pass `--port`
-and give ngrok (and `status`) the same port.
+**`serve`, or the R panel, says another Remote is on.** One `~/.aisquare` serves
+one Remote: the fleet UI's panel, or a `serve` in another shell, has it. Turn that
+one off, or use it. Two would share one link, one passphrase, one auto-off and
+one list of phones, and either going off would sign the other's phones out.
+
+**`serve` says the port is in use.** Something else took 8750. Pass `--port` and
+give ngrok (and `status`) the same port.
 
 **ngrok says `--url` is an unknown flag.** That ngrok is too old for static
 domains; run `ngrok update`.

@@ -350,6 +350,10 @@ class NoRemotePage(RemoteError):
     """No built ``aisquare-remote`` page is installed at the directory the server would serve."""
 
 
+class RemoteAlreadyOn(RemoteError):
+    """Another process serves Remote from this home already (:func:`_claim_remote_home`)."""
+
+
 class RequestError(Exception):
     """A handler's refusal, carried to the client as ``{error, message}``.
 
@@ -4171,6 +4175,71 @@ _server: _Server | None = None
 _foreground: uvicorn.Server | None = None
 """The server :func:`run_foreground` runs (``asq remote serve``), while it runs."""
 _flusher: threading.Timer | None = None
+_home_claim: tuple[Path, int] | None = None
+"""``remote-serve.lock`` and its descriptor, while this process serves Remote from that home."""
+
+SERVE_LOCK_NAME = "remote-serve.lock"
+"""Beside ``remote.json``: held by the one process that serves Remote from that home."""
+REMOTE_ALREADY_ON = (
+    "another Remote is on for this ~/.aisquare (the fleet UI's R panel, or `aisquare remote "
+    "serve` in another shell) — turn it off first: two would share one link, one passphrase, "
+    "one auto-off and one list of phones"
+)
+
+
+def _claim_remote_home(state: Runtime) -> bool:
+    """Hold :data:`SERVE_LOCK_NAME` for as long as this process serves Remote; ``True`` when
+    this call took it, :class:`RemoteAlreadyOn` when another process holds it.
+
+    Two Remotes on one home, the TUI's and a ``serve`` on another port as the docs
+    once advised, share one ``remote.json`` and every file beside it, and undo each
+    other: the TUI's switch revoked the phones that had unlocked against ``serve``
+    and cleared the deadline, and ``serve``'s timer, reading none, never armed again,
+    so ``serve`` ran on past its printed deadline, publicly tunnelled; each server's
+    push sender kept its own record of what it had pushed, so every notification
+    came twice (sweep of #243). So the second is refused, whichever it is. The lock
+    is the operating system's: it goes with the process however that ends. A home
+    where the lock file cannot be made or locked for another reason serves without
+    it, and says so in the log.
+    """
+    global _home_claim
+    path = state._state_path.with_name(SERVE_LOCK_NAME)
+    with _lock:
+        if _home_claim is not None and _home_claim[0] == path:
+            return False  # this process serves from here already
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        log.warning("remote: %s could not be opened (%s); serving without it", path, exc)
+        return False
+    try:
+        lock_exclusive(fd)
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in _LOCK_HELD:
+            raise RemoteAlreadyOn(REMOTE_ALREADY_ON) from None
+        log.warning("remote: %s could not be locked (%s); serving without it", path, exc)
+        return False
+    with _lock:
+        previous, _home_claim = _home_claim, (path, fd)
+    if previous is not None:  # another home's, which this process serves no more
+        _release_remote_claim(previous[1])
+    return True
+
+
+def _release_remote_home() -> None:
+    """Let :data:`SERVE_LOCK_NAME` go: this process serves Remote no more."""
+    global _home_claim
+    with _lock:
+        claim, _home_claim = _home_claim, None
+    if claim is not None:
+        _release_remote_claim(claim[1])
+
+
+def _release_remote_claim(fd: int) -> None:
+    with contextlib.suppress(OSError):
+        unlock(fd)
+    os.close(fd)
 
 
 def _page_missing(dist_dir: Path | None) -> str | None:
@@ -4229,7 +4298,11 @@ def install_page(source: Path) -> Path:
 
 
 def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) -> RemoteInfo:
-    """Serve in the background; idempotent while running. ``allow_write`` is left as persisted."""
+    """Serve in the background; idempotent while running. ``allow_write`` is left as persisted.
+
+    :class:`RemoteAlreadyOn` while another process serves Remote from this home
+    (:func:`_claim_remote_home`): a ``serve``, or another fleet UI's panel.
+    """
     global _server
     problem = _remote_dependency_error()
     if problem is not None:
@@ -4241,10 +4314,19 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
     with _lock:
         if _server is not None and _server.running:
             return state.connection_info(_server.port)
-        app = build_remote_app(state, dist_dir=dist_dir)
-        server = _Server(app, port)
-        server.start_serving()
-        _server = server
+    claimed = _claim_remote_home(state)
+    try:
+        with _lock:
+            if _server is not None and _server.running:
+                return state.connection_info(_server.port)
+            app = build_remote_app(state, dist_dir=dist_dir)
+            server = _Server(app, port)
+            server.start_serving()
+            _server = server
+    except BaseException:
+        if claimed:
+            _release_remote_home()
+        raise
     _schedule_flush()
     return state.connection_info(port)
 
@@ -4270,6 +4352,7 @@ def stop_remote_server() -> None:
             _runtime.flush_last_seen()
         except Exception:  # the server is already down; only last_seen is lost
             log.warning("remote: flushing remote.json as the server stopped failed", exc_info=True)
+    _release_remote_home()
 
 
 def remote_server_status() -> dict[str, object]:
@@ -4500,11 +4583,13 @@ def run_foreground(
 ) -> bool:
     """``asq remote serve``: serve in this thread until Ctrl-C or auto-off.
 
-    ``True`` when auto-off ended it. In order: the port is bound (:class:`RemoteBindError`
-    when another process holds it, before ``ready`` prints anything); the deadline is set
-    ``auto_off_minutes`` from now (0 is never) and ``public_url`` noted as the origin
-    of push links; ``ready`` runs (the CLI's banner); uvicorn serves on the bound
-    socket. A timer that reads the wall clock every 30 s turns Remote off at the
+    ``True`` when auto-off ended it. In order: this home is claimed
+    (:class:`RemoteAlreadyOn` while another process serves Remote from it,
+    :func:`_claim_remote_home`) and the port bound (:class:`RemoteBindError` when
+    another process holds it), both before ``ready`` prints anything; the deadline is
+    set ``auto_off_minutes`` from now (0 is never) and ``public_url`` noted as the
+    origin of push links; ``ready`` runs (the CLI's banner); uvicorn serves on the
+    bound socket. A timer that reads the wall clock every 30 s turns Remote off at the
     deadline, or at the first check after the machine slept past it, and waits
     on while a phone keeps extending it, with the farewell push and every device
     revoked (4410); the flusher writes ``last_seen`` and prunes devices every
@@ -4521,7 +4606,13 @@ def run_foreground(
 
     origin = None if public_url is None else check_public_origin(public_url)
     state = runtime()
-    sock = _bind_remote_socket(port)
+    claimed = _claim_remote_home(state)  # before anything is bound or printed
+    try:
+        sock = _bind_remote_socket(port)
+    except BaseException:
+        if claimed:
+            _release_remote_home()
+        raise
     try:
         app = build_remote_app(state, dist_dir=dist_dir)
         server = uvicorn.Server(_remote_uvicorn_config(app, port))
@@ -4558,6 +4649,8 @@ def run_foreground(
         return timer.fired
     finally:
         sock.close()
+        if claimed:
+            _release_remote_home()
 
 
 __all__ = [
@@ -4576,6 +4669,7 @@ __all__ = [
     "NoRemotePage",
     "NoSuchAgent",
     "NoSuchProject",
+    "RemoteAlreadyOn",
     "RemoteBindError",
     "RemoteError",
     "RemoteInfo",

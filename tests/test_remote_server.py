@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
 import socket
 import stat
+import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -792,6 +795,106 @@ def test_start_reports_a_busy_port(
         port = int(taken.getsockname()[1])
         with pytest.raises(remote_server.RemoteError, match="did not come up"):
             remote_server.start_remote_server(dist, port=port)
+    remote_server.stop_remote_server()
+
+
+@contextlib.contextmanager
+def _another_process_serves(home: Path) -> Iterator[None]:
+    """``remote-serve.lock`` held as another Remote's process holds it: through a
+    descriptor of its own, which conflicts with this process's as another process's does."""
+    from aisquare.core.locking import lock_exclusive, unlock
+
+    home.mkdir(parents=True, exist_ok=True)
+    fd = os.open(home / remote_server.SERVE_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        lock_exclusive(fd)
+        try:
+            yield
+        finally:
+            unlock(fd)
+    finally:
+        os.close(fd)
+
+
+def _held_elsewhere(home: Path) -> bool:
+    """Whether a process other than this caller holds the home's serving lock."""
+    from aisquare.core.locking import lock_exclusive, unlock
+
+    fd = os.open(home / remote_server.SERVE_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        lock_exclusive(fd)
+    except OSError:
+        return True
+    else:
+        unlock(fd)
+        return False
+    finally:
+        os.close(fd)
+
+
+def test_a_second_remote_on_one_home_is_refused_until_the_first_is_off(
+    isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The TUI's Remote and a ``serve --port`` beside it, as the docs once advised, shared
+    one remote.json: the TUI's switch revoked serve's phones and cleared its deadline, so
+    serve never turned itself off, and both pushed every notification (sweep of #243)."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    port = _free_port()
+    with _another_process_serves(isolated_home):
+        with pytest.raises(remote_server.RemoteAlreadyOn, match="another Remote is on"):
+            remote_server.start_remote_server(dist, port=port)
+        assert remote_server._server is None
+        printed: list[str] = []
+        with pytest.raises(remote_server.RemoteAlreadyOn):
+            remote_server.run_foreground(dist, port, ready=lambda: printed.append("banner"))
+        assert printed == [], "refused before the banner"
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", port))  # and before the port was bound
+        refused = CliRunner().invoke(cli, ["--json", "remote", "serve", "--port", str(port)])
+        assert refused.exit_code == 1
+        answer = json.loads(refused.stdout)
+        assert answer["error"] == "remote_failed" and "another Remote is on" in answer["detail"]
+        assert "url_local" not in refused.stdout and "password" not in refused.stdout
+    remote_server.start_remote_server(dist, port=port)
+    try:
+        assert _held_elsewhere(isolated_home), "the panel's server holds the home"
+        assert remote_server.start_remote_server(dist, port=port).url_local.endswith(
+            f":{port}/r/{remote_server.runtime().token}/"
+        ), "this process's own server is no other Remote"
+    finally:
+        remote_server.stop_remote_server()
+    assert not _held_elsewhere(isolated_home), "turned off, it lets the home go"
+
+
+def test_a_remote_whose_process_ended_holds_the_home_no_more(
+    isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lock is the operating system's: a Remote killed, not turned off, leaves none."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            "from aisquare.services import remote_server as r\n"
+            "r._claim_remote_home(r.runtime())\n"
+            "print('serving', flush=True)\n"
+            "sys.stdin.read()\n",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None and holder.stdout.readline().strip() == "serving"
+        with pytest.raises(remote_server.RemoteAlreadyOn):
+            remote_server.start_remote_server(dist, port=_free_port())
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)
+    remote_server.start_remote_server(dist, port=_free_port())
     remote_server.stop_remote_server()
 
 

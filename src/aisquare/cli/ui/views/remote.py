@@ -150,7 +150,9 @@ class RemotePanel(ModalScreen[None]):
         self.query_one("#remote-on", Switch).value = running
         self.query_one("#remote-allow-write", Switch).value = writes
         self.query_one("#remote-state", Static).update(self._state_text())
-        self.query_one("#remote-status", Static).update(controller.message or "")
+        # Text, never a str, which is read as markup: the sentences carry exception text
+        # and paths, and "[Errno 13]" there was taken for a tag.
+        self.query_one("#remote-status", Static).update(Text(controller.status_line()))
         self.query_one("#remote-password", Static).update(
             Text(controller.password() or "—", style="bold")
         )

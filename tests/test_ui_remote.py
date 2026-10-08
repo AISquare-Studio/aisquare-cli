@@ -767,17 +767,17 @@ def test_a_remote_json_that_will_not_write_is_a_sentence_for_each_control_of_the
 
         modal.query_one("#remote-auto-off", Select).value = 30
         await pilot.pause()
-        assert status().startswith("auto-off could not be saved to remote.json — [Errno 13]")
+        assert "\nauto-off could not be saved to remote.json — [Errno 13]" in status()
         modal.query_one("#remote-revoke", Button).press()
         await pilot.pause()
         assert "could not be revoked in remote.json" in status()
         assert not any(text.startswith("Revoked") for text in toasts(app)), "the revoke failed"
         modal.query_one("#remote-regen", Button).press()
         await pilot.pause()
-        assert status().startswith("the new password could not be saved to remote.json")
+        assert "\nthe new password could not be saved to remote.json" in status()
         modal.query_one("#remote-allow-write", Switch).toggle()
         await pilot.pause()
-        assert status().startswith("write actions could not be saved to remote.json — [Errno 13]")
+        assert "\nwrite actions could not be saved to remote.json — [Errno 13]" in status()
         assert modal.query_one("#remote-allow-write", Switch).value is True
         assert remote_server.remote_allow_write() is True, "the running server took it"
         assert app.screen is modal and app.remote.running
@@ -797,6 +797,30 @@ def test_a_remote_json_that_will_not_write_is_a_sentence_for_each_control_of_the
         assert status().startswith("Remote could not start — remote.json could not be written")
         assert app.remote.wait_until_off(10)
         assert remote_server.remote_server_status()["running"] is False
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def test_a_write_that_lands_takes_away_the_sentence_that_one_did_not_in_the_panel() -> None:
+    """The panel said write actions had not been saved for as long as Remote stayed on, after
+    the switch, flipped back, had saved them (sweep of #243)."""
+
+    async def go(pilot: Pilot[None]) -> None:
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        status = modal.query_one("#remote-status", Static)
+        writes = modal.query_one("#remote-allow-write", Switch)
+        with pytest.MonkeyPatch.context() as home:
+            refuse_remote_json(home)
+            writes.toggle()
+            await pilot.pause()
+            assert shown(status).startswith(f"{INSTALL_HINT}\nwrite actions could not be saved")
+        writes.toggle()  # off again, and this write lands
+        await pilot.pause()
+        assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
+        modal.repaint()
+        assert shown(status) == INSTALL_HINT, "what Remote is doing stays"
 
     drive(go, tunnel=missing_ngrok)
 

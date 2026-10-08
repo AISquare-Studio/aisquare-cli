@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 import types
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -864,7 +865,7 @@ def test_each_control_says_when_remote_json_will_not_write_instead_of_raising() 
     server.unwritable = DENIED
 
     controller.set_auto_off(30)
-    assert controller.message == (
+    assert controller.save_problem == (
         "auto-off could not be saved to remote.json — [Errno 13] Permission denied: 'remote.json'"
     )
     assert controller.state.auto_off_minutes == 30
@@ -873,28 +874,80 @@ def test_each_control_says_when_remote_json_will_not_write_instead_of_raising() 
     assert controller.adopt_server_deadline() == shorter
 
     assert controller.regenerate_password() is None
-    assert (controller.message or "").startswith(
+    assert (controller.save_problem or "").startswith(
         "the new password could not be saved to remote.json — [Errno 13]"
     )
     assert controller.password() == "ember-glade-heron-indigo", "the one phones need now"
 
     assert controller.revoke_device("dev_0000000a") is False
-    assert (controller.message or "").startswith(
+    assert (controller.save_problem or "").startswith(
         "dev_0000000a could not be revoked in remote.json — [Errno 13]"
     )
     assert controller.devices() == [], "signed out of the running server all the same"
 
     controller.set_allow_write(True)
-    assert controller.message == (
+    assert controller.save_problem == (
         "write actions could not be saved to remote.json — "
         "[Errno 13] Permission denied: 'remote.json'"
     )
     assert controller.write_actions_allowed() is True
     assert controller.running and server.running
+    assert controller.message is None, "what Remote is doing has a line of its own"
 
     clock[0] += timedelta(minutes=30)
     assert controller.enforce_auto_off() is True, "the timer it could not save still ends it"
     assert not controller.running and not server.running
+
+
+def test_a_write_that_lands_takes_away_the_sentence_of_one_that_did_not() -> None:
+    """Every write of ``remote.json`` puts the whole state the server holds, the change that
+    did not land included, so the next one that lands has saved it too. The sentence that
+    it had not been saved stayed on the status line all the same, until ngrok had something
+    to say: writes off, or a phone revoked, read as not stuck when they had (sweep of #243).
+    Whichever control's write lands takes it away, and so does turning Remote off or on."""
+    server = fake_server()
+    server.devices = [
+        {"id": f"dev_0000000{tail}", "ua": "iPhone", "first_seen": "t0", "last_seen": "t1"}
+        for tail in "abcd"
+    ]
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    attempts: list[tuple[Callable[[], object], Callable[[], object]]] = [
+        (lambda: controller.set_allow_write(True), lambda: controller.set_allow_write(False)),
+        (lambda: controller.set_auto_off(30), lambda: controller.set_auto_off(120)),
+        (controller.regenerate_password, controller.regenerate_password),
+        (
+            lambda: controller.revoke_device("dev_0000000a"),
+            lambda: controller.revoke_device("dev_0000000b"),
+        ),
+        (
+            lambda: controller.revoke_device("dev_0000000c"),
+            lambda: controller.set_allow_write(True),
+        ),
+    ]
+    for refused, landed in attempts:
+        server.unwritable = DENIED
+        refused()
+        assert (controller.save_problem or "").endswith(
+            "[Errno 13] Permission denied: 'remote.json'"
+        )
+        assert controller.status_line() == controller.save_problem
+        server.unwritable = None
+        landed()
+        assert controller.save_problem is None and controller.status_line() == ""
+
+    server.unwritable = DENIED
+    controller.revoke_device("dev_0000000d")
+    server.unwritable = None
+    controller.turn_off()
+    assert controller.save_problem is None, "turning off wrote the whole state"
+    server.unwritable = DENIED
+    controller.set_allow_write(False)
+    server.unwritable = None
+    controller.turn_on()
+    assert controller.save_problem is None, "and so did turning on"
 
 
 def test_a_timer_remote_json_will_not_take_gives_way_to_the_files_once_it_is_read_again() -> None:
@@ -916,7 +969,7 @@ def test_a_timer_remote_json_will_not_take_gives_way_to_the_files_once_it_is_rea
     server.unwritable = DENIED
     for minutes, picked in ((120, datetime(2026, 9, 11, 20, 0, tzinfo=UTC)), (None, None)):
         controller.set_auto_off(minutes)
-        assert (controller.message or "").startswith("auto-off could not be saved"), minutes
+        assert (controller.save_problem or "").startswith("auto-off could not be saved"), minutes
         assert server.server_auto_off_at == picked, "the running server took it"
         assert controller.adopt_server_deadline() == picked, minutes
         server.server_auto_off_at = in_the_file  # a shell's allow-write: the file, read again
@@ -1058,15 +1111,16 @@ def test_a_real_remote_json_that_will_not_write_is_a_sentence_for_each_control(
     with pytest.MonkeyPatch.context() as home:
         home.setattr(remote_server, "replacement", unwritable)
         controller.set_auto_off(30)
-        assert (controller.message or "").startswith("auto-off could not be saved to remote.json")
+        problem = controller.save_problem or ""
+        assert problem.startswith("auto-off could not be saved to remote.json")
         assert controller.revoke_device(device_id) is False
-        assert (controller.message or "").startswith(f"{device_id} could not be revoked")
+        assert (controller.save_problem or "").startswith(f"{device_id} could not be revoked")
         assert controller.devices() == [], "signed out of the running server all the same"
         assert controller.regenerate_password() is None
-        assert (controller.message or "").startswith("the new password could not be saved")
+        assert (controller.save_problem or "").startswith("the new password could not be saved")
         assert controller.password() != passphrase, "the running server has the new one"
         controller.set_allow_write(True)
-        assert (controller.message or "").startswith(
+        assert (controller.save_problem or "").startswith(
             "write actions could not be saved to remote.json"
         )
         assert controller.write_actions_allowed() is True

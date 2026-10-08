@@ -162,6 +162,14 @@ class RemoteController:
         """``https://<ngrok-host>/r/<token>`` once the tunnel announced itself."""
         self.message: str | None = None
         """What the status line says: waiting for ngrok, the install hint, an error."""
+        self.save_problem: str | None = None
+        """The last write of ``remote.json`` a control could not make, until one goes through.
+
+        Every write puts the whole state the server holds, the failed change included, so
+        the next one that lands has saved that too, and the sentence goes then. A field
+        of its own: kept in :attr:`message`, nothing cleared it but a sentence about
+        ngrok, and the panel went on saying the write switch or a revoke had not been
+        saved long after both had been (sweep of #243)."""
         self.auto_off_at: datetime | None = None
         self._deadline_unsaved = False
         """Set by a write of the deadline that failed, until one goes through or the server is
@@ -227,6 +235,7 @@ class RemoteController:
             )
             return
         self.message = None
+        self.save_problem = None  # the deadline's write put the whole state
         self._set_state(remote_enabled=True)
         tunnel = self._watched_tunnel()
         failure = tunnel.start_tunnel()
@@ -376,6 +385,8 @@ class RemoteController:
                     self._server.set_auto_off(None)
                 except Exception as exc:  # a deadline left in the file ends nothing
                     failure = failure or f"Remote is off, but remote.json was not updated — {exc}"
+                else:
+                    self.save_problem = None  # that write put the whole state
                 try:
                     self._server.stop_remote_server()
                 except Exception as exc:
@@ -442,7 +453,9 @@ class RemoteController:
         try:
             self._server.set_allow_write(bool(enabled))
         except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
-            self.message = f"write actions could not be saved to remote.json — {exc}"
+            self.save_problem = f"write actions could not be saved to remote.json — {exc}"
+        else:
+            self.save_problem = None
 
     def set_auto_off(self, minutes: int | None) -> None:
         """Pick a timer, or ``None`` for Never. Takes effect at once while Remote is on.
@@ -461,7 +474,9 @@ class RemoteController:
             try:
                 self._arm_auto_off()
             except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
-                self.message = f"auto-off could not be saved to remote.json — {exc}"
+                self.save_problem = f"auto-off could not be saved to remote.json — {exc}"
+            else:
+                self.save_problem = None
 
     def regenerate_password(self) -> str | None:
         """A new passphrase from the server; ``None`` while Remote is off (nothing to unlock),
@@ -472,10 +487,12 @@ class RemoteController:
         if self.info is None:
             return None
         try:
-            return str(self._server.regenerate_password())
+            password = str(self._server.regenerate_password())
         except Exception as exc:  # raised into the Regenerate button's handler: the UI ended
-            self.message = f"the new password could not be saved to remote.json — {exc}"
+            self.save_problem = f"the new password could not be saved to remote.json — {exc}"
             return None
+        self.save_problem = None
+        return password
 
     def remote_status(self) -> dict[str, Any]:
         """``remote_server_status()``; ``{}`` while ``remote.json`` cannot be read. A paint
@@ -501,8 +518,9 @@ class RemoteController:
         try:
             self._server.revoke_remote_device(device_id)
         except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
-            self.message = f"{device_id} could not be revoked in remote.json — {exc}"
+            self.save_problem = f"{device_id} could not be revoked in remote.json — {exc}"
             return False
+        self.save_problem = None
         return True
 
     def unlock_failures(self, status: dict[str, Any] | None = None) -> tuple[int, str | None]:
@@ -516,6 +534,11 @@ class RemoteController:
         )
 
     # --- what the modal paints ---------------------------------------------------------------
+
+    def status_line(self) -> str:
+        """The status line: what Remote is doing or why it is not, then a write of
+        ``remote.json`` that did not land (:attr:`save_problem`), each on a line of its own."""
+        return "\n".join(line for line in (self.message, self.save_problem) if line)
 
     def link_url(self) -> str | None:
         """The public link when ngrok is up, else the local one — ``None`` while Remote is off."""

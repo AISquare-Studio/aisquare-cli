@@ -11,9 +11,13 @@
 # sources docs/demo/seed.sh, which writes a sample project into HOME and puts a
 # stand-in `claude` first on PATH, and which refuses to run outside the image.
 #
-# Today's flow from an empty home: open asq, onboard the sample project
-# ~/acme-api, start its manager. The agent is a stand-in
-# (docs/demo/bin/claude), because nothing is signed in where this renders.
+# The Welcome walkthrough, from an empty home to a manager and two coders, all
+# from the keyboard: asq in ~/acme-api, use that folder (init and doctor run),
+# connect Claude Code, start the manager, start the coders. The agent is a
+# stand-in (docs/demo/stand-in/claude), because nothing is signed in where this
+# renders; it asks no trust question, so the walkthrough goes straight from the
+# manager to the coders. Opening the manager's pane would need F12 to come
+# back, and vhs has no F12.
 
 Output out/demo.gif
 Output out/demo.txt
@@ -40,7 +44,8 @@ Hide
 Type ". docs/demo/seed.sh"
 Enter
 Wait+Screen@15s /seeded:/
-Type "clear"
+# asq offers the folder it starts in, so it starts in the sample project.
+Type "cd ~/acme-api && clear"
 Enter
 Wait
 Show
@@ -49,36 +54,39 @@ Sleep 500ms
 Type "asq"
 Sleep 300ms
 Enter
-Wait+Screen /aisquare fleet/
-Sleep 3s
-
-# The + beside Fleet is the first row the cursor reaches.
-Down
-Sleep 600ms
-Enter
-Wait+Screen /Onboard a project/
-Sleep 1.5s
-
-# Past the directory tree to the path box.
-Tab
-Tab
-Sleep 400ms
-Type "~/acme-api"
-Wait+Screen /will register/
-Sleep 1.5s
-Enter
-
-# init and doctor run, then the project opens on its Manager tab.
-Wait+Screen /has no manager yet/
+Wait+Screen /Pick the folder your agents will work in/
+# The "Use acme-api" row comes from a worker after the first paint; until it is
+# drawn, Tab would land on the path box (review of #256).
+Wait+Screen /· this folder/
 Sleep 2.5s
 
-# Onboarding hands the keyboard to the project's next step, Start manager,
-# rather than leaving it on the hidden path box.
+# From the sidebar, Tab reaches "Use acme-api": init and doctor run, as + does.
+Tab
+Sleep 600ms
+Enter
+Wait+Screen /Choose another/
+Sleep 1.5s
+
+# Each finished step hands the keyboard to the next one's button: Connect puts
+# aisquare's hooks into the stand-in's config...
+Enter
+Wait+Screen /the manager gets its instructions through/
+Sleep 1.5s
+
+# ...then Start manager.
+Enter
+Wait+Screen /answer Claude Code's question/
+Sleep 2.5s
+
+# The keyboard is on Open the manager; the next button is Start the coders.
+Tab
+Sleep 600ms
 Enter
 
-# The manager's window opens in tmux and runs the stand-in. The hold lets the
-# spawn toast time out (6 s), so the still shows the fleet and not the toast.
-Wait+Screen /stand-in agent/
-Sleep 6.5s
+# The manager and both coders are live, each in its own tmux window, the coders
+# in worktrees. render.sh also checks the last snapshot shows coder-1, coder-2
+# and step 2's ".../stand-in/claude", the screen's disclosure of the stand-in.
+Wait+Screen /Your fleet is up/
+Sleep 4s
 Screenshot out/welcome.png
 Sleep 1s

@@ -6,14 +6,17 @@
 # network, no account, nothing signed in. It says so in its banner, then hands
 # the pane to `cat`, which echoes what is typed at it.
 #
+# Its directory is named stand-in so that what the Welcome page prints for it,
+# "Claude Code · …/stand-in/claude", says so on the GIF's last screen; render.sh
+# fails the render if that line is not there (review of #256).
+#
 # `exec cat`, never a `while read` loop: the fleet tells a live agent from the
 # shell an agent leaves behind by the pane's foreground process
 # (services/fleet.py, _NOT_AN_AGENT). A loop in sh IS a shell, so the row would
 # never read as the agent and a prompt typed at spawn would wait out the 20 s
 # PROMPT_TIMEOUT first. cat is not a shell.
 
-# The banner below is the only line that says "stand-in agent": the tape waits
-# for those words, and tests/test_demo_tape.py checks them against this file.
+# The banner below is the only line that says "stand-in agent".
 case "${1:-}" in
 --version | -v)
     echo "0.0.0 (the aisquare demo's stand-in, not Claude Code)"

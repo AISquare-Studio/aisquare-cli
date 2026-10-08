@@ -16,6 +16,8 @@ seconds:
   render.sh's snapshot check reads; COLORTERM is truecolor; every Screenshot
   has a Sleep after it;
 - the tape ends where the walkthrough does, and takes its still there;
+- render.sh's end-screen texts are the coders the page starts and the
+  stand-in's path, the screen's disclosure that its Claude Code is a stand-in;
 - the stand-in agent ends by exec'ing a program the fleet takes for an agent,
   in a form dash runs;
 - the seed refuses outside the render image, and says why when it refuses.
@@ -39,32 +41,37 @@ import pytest
 from textual.binding import Binding
 from textual.keys import _character_to_key
 from textual.screen import Screen
-from textual.widgets import Button, Input
+from textual.widgets import Button
 
+from aisquare.services import first_run
 from aisquare.services.fleet import _agent_running
 from tests import demo_tape
 from tests.demo_tape import Command, parse
 
 REPO = Path(__file__).resolve().parents[1]
 TAPE = REPO / "docs" / "demo.tape"
-STAND_IN = REPO / "docs" / "demo" / "bin" / "claude"
+STAND_IN = REPO / "docs" / "demo" / "stand-in" / "claude"
 SEED = REPO / "docs" / "demo" / "seed.sh"
 UI = REPO / "src" / "aisquare" / "cli" / "ui"
 
-#: Where the walkthrough ends today: the manager's window, running the stand-in.
-END = "stand-in agent"
+WELCOME = UI / "views" / "welcome.py"
+
+#: Where the walkthrough ends: the Welcome page's last step, a manager and two
+#: coders live (welcome.py's FLEET_UP, "the stable string a recording can wait for").
+END = "Your fleet is up"
 
 #: The one file that prints each text the tape waits for, on the screen it waits
 #: on. Checked against that file alone, docstrings and comments left out: against
-#: the pooled UI, three of these six stayed found after their screen stopped
-#: showing them (review of #250).
+#: the pooled UI, three of the first tape's six stayed found after their screen
+#: stopped showing them (review of #250).
 PRINTED_BY: dict[str, Path] = {
     "seeded:": SEED,
-    "aisquare fleet": UI / "views" / "welcome.py",
-    "Onboard a project": UI / "views" / "onboard.py",
-    "will register": REPO / "src" / "aisquare" / "services" / "onboarding.py",
-    "has no manager yet": UI / "views" / "project.py",
-    END: STAND_IN,
+    "Pick the folder your agents will work in": WELCOME,
+    "· this folder": WELCOME,
+    "Choose another": WELCOME,
+    "the manager gets its instructions through": WELCOME,
+    "answer Claude Code's question": WELCOME,
+    END: WELCOME,
 }
 
 
@@ -72,13 +79,23 @@ def _tape() -> list[Command]:
     return parse(TAPE.read_text(encoding="utf-8"))
 
 
+#: The coders the end screen shows, as the Welcome page labels them: first_run's
+#: own labels, so a third coder or a new label format changes this list too.
+_CODERS = list(first_run._free_labels("coder", first_run.CODERS, set()))
+
+#: The end screen's disclosure that its "Claude Code" is the stand-in: step 2
+#: prints the path the agent resolves to, and the stand-in's directory says so.
+DISCLOSURE = "stand-in/claude"
+
+
 def _bound() -> set[str]:
     """The keys the walkthrough's screens bind: the UI's own ``BINDINGS``, and
-    Textual's for the three things the tape does with built-in widgets: move focus
-    (Screen: tab), press the focused button (Button: enter), submit the path box
-    (Input: enter)."""
+    Textual's for the two things the tape does with built-in widgets: move focus
+    (Screen: tab) and press the focused button (Button: enter). Not Input's: the
+    tape types into no box, and its editing keys would pass an arrow pressed at
+    the page's buttons, which bind none (review of #256)."""
     keys = demo_tape.bound_keys(sorted(UI.rglob("*.py")))
-    for widget in (Screen, Button, Input):
+    for widget in (Screen, Button):
         for binding in widget.BINDINGS:
             key = binding.key if isinstance(binding, Binding) else binding[0]
             keys.update(part.strip() for part in key.split(","))
@@ -147,13 +164,13 @@ def test_the_stand_in_is_executable_in_git() -> None:
     check says so when it does.
     """
     staged = subprocess.run(
-        ["git", "-C", str(REPO), "ls-files", "--stage", "--", "docs/demo/bin/claude"],
+        ["git", "-C", str(REPO), "ls-files", "--stage", "--", "docs/demo/stand-in/claude"],
         capture_output=True,
         text=True,
         check=True,
     ).stdout
 
-    assert staged.startswith("100755 "), f"docs/demo/bin/claude is staged as {staged!r}"
+    assert staged.startswith("100755 "), f"docs/demo/stand-in/claude is staged as {staged!r}"
 
 
 # ------------------------------------------------------------------ the parser
@@ -174,7 +191,7 @@ def test_the_parser_separates_timing_and_target_from_the_name() -> None:
 #: A tape every rule accepts, for the negative controls: each rule is handed the
 #: same synthetic sources, bindings and end, so a rule that accuses everything
 #: fails here rather than passing its positive control for free.
-_GOOD = """\
+_GOOD = f"""\
 Output out/demo.gif
 Output out/demo.txt
 Env COLORTERM "truecolor"
@@ -184,7 +201,7 @@ Wait+Screen /aisquare fleet/
 Down
 Type "q"
 Type "~/acme-api"
-Wait+Line /stand-in agent/
+Wait+Line /{END}/
 Sleep 1s
 Screenshot out/welcome.png
 Sleep 500ms
@@ -275,14 +292,11 @@ _SCREENSHOT_SHAPES = {
 }
 _ENDING_SHAPES = {
     "the last Wait is elsewhere": (
-        "Wait+Screen /stand-in agent/\nWait+Screen /aisquare fleet/\n"
-        "Screenshot out/a.png\nSleep 1s\n"
+        f"Wait+Screen /{END}/\nWait+Screen /aisquare fleet/\nScreenshot out/a.png\nSleep 1s\n"
     ),
-    "a key after the last Wait": (
-        "Wait+Screen /stand-in agent/\nEnter\nScreenshot out/a.png\nSleep 1s\n"
-    ),
+    "a key after the last Wait": f"Wait+Screen /{END}/\nEnter\nScreenshot out/a.png\nSleep 1s\n",
     "no Screenshot after the last Wait": (
-        "Screenshot out/a.png\nSleep 1s\nWait+Screen /stand-in agent/\nSleep 1s\n"
+        f"Screenshot out/a.png\nSleep 1s\nWait+Screen /{END}/\nSleep 1s\n"
     ),
     "no Wait at all": 'Type "asq"\nScreenshot out/a.png\nSleep 1s\n',
 }
@@ -345,7 +359,7 @@ def test_the_wait_rule_counts_text_that_is_drawn(shape: str, tmp_path: Path) -> 
 def test_the_wait_rule_accepts_a_sound_tape(tmp_path: Path) -> None:
     printed_by = {
         "aisquare fleet": _source(tmp_path, "ui.py", 'TITLE = "aisquare fleet"\n'),
-        "stand-in agent": _source(tmp_path, "claude", 'line "stand-in agent: $name"\n'),
+        END: _source(tmp_path, "fleet.py", 'FLEET_UP = "Your fleet is up."\n'),
     }
 
     assert demo_tape.wait_problems(parse(_GOOD), printed_by) == []
@@ -439,12 +453,31 @@ _SOUND_RENDERS = {
 
 @pytest.mark.parametrize("shape", sorted(_SNAPSHOT_SHAPES))
 def test_the_snapshot_check_fires_on_each_shape(shape: str) -> None:
-    assert demo_tape.snapshot_problems(_SNAPSHOT_SHAPES[shape], END), f"missed: {shape}"
+    assert demo_tape.snapshot_problems(_SNAPSHOT_SHAPES[shape], [END]), f"missed: {shape}"
 
 
 @pytest.mark.parametrize("shape", sorted(_SOUND_RENDERS))
 def test_the_snapshot_check_accepts_a_sound_render(shape: str) -> None:
-    assert demo_tape.snapshot_problems(_SOUND_RENDERS[shape], END) == []
+    assert demo_tape.snapshot_problems(_SOUND_RENDERS[shape], [END]) == []
+
+
+@pytest.mark.parametrize(
+    "last",
+    [f"{END}. manager", f"{END}. manager coder-1", f"{END}. manager coder-2"],
+)
+def test_the_snapshot_check_fires_on_an_end_screen_missing_a_coder(last: str) -> None:
+    assert demo_tape.snapshot_problems(_render("aisquare fleet", last), [END, *_CODERS])
+
+
+def test_the_snapshot_check_accepts_an_end_screen_with_both_coders() -> None:
+    last = f"{END}. ✓ manager ✓ coder-1 ✓ coder-2"
+
+    assert demo_tape.snapshot_problems(_render("aisquare fleet", last), [END, *_CODERS]) == []
+
+
+def test_the_snapshot_check_refuses_an_empty_end_text() -> None:
+    """``"" in snapshot`` is always true: an empty text to look for must not pass."""
+    assert demo_tape.snapshot_problems(_render(END), [END, ""]) != []
 
 
 def test_snapshots_split_on_the_rule_line_and_only_on_it() -> None:
@@ -476,6 +509,33 @@ def test_the_render_check_exits_zero_on_a_sound_render(tmp_path: Path) -> None:
     assert demo_tape.main([str(rendered), str(TAPE)]) == 0
 
 
+def test_render_sh_checks_the_coders_and_the_stand_in_on_the_end_screen() -> None:
+    """The texts render.sh passes after the tape are the coders the page starts and
+    the stand-in's disclosure: read back from render.sh, not copied (review of #256)."""
+    script = (REPO / "docs" / "demo" / "render.sh").read_text(encoding="utf-8")
+    joined = script.replace("\\\n", " ")
+    commands = [line for line in joined.splitlines() if not line.lstrip().startswith("#")]
+    calls = [line for line in commands if "-m tests.demo_tape" in line]
+    assert len(calls) == 1, calls
+    words = calls[0].split()
+    passed = words[words.index("docs/demo.tape") + 1 :]
+
+    assert passed == [*_CODERS, DISCLOSURE]
+    assert STAND_IN.as_posix().endswith(f"/{DISCLOSURE}"), "the stand-in moved: update DISCLOSURE"
+
+
+def test_the_render_check_reads_the_end_screen_texts_render_sh_passes(tmp_path: Path) -> None:
+    """render.sh passes the coders' labels after the tape; without them on the last
+    snapshot the check fails, with them it passes."""
+    rendered = tmp_path / "demo.txt"
+    rendered.write_text(_render(f"{END}. manager coder-1"), encoding="utf-8", newline="\n")
+    complete = tmp_path / "complete.txt"
+    complete.write_text(_render(f"{END}. manager coder-1 coder-2"), encoding="utf-8", newline="\n")
+
+    assert demo_tape.main([str(rendered), str(TAPE), *_CODERS]) == 1
+    assert demo_tape.main([str(complete), str(TAPE), *_CODERS]) == 0
+
+
 # ------------------------------------------------------------------- the seed
 
 _POSIX_SH = pytest.mark.skipif(
@@ -491,10 +551,10 @@ def _source_seed(
     """Source a copy of the seed from a scratch checkout, as the tape's hidden opening
     does, with ``HOME`` a fresh directory under ``tmp_path``."""
     checkout = tmp_path / "checkout"
-    (checkout / "docs" / "demo" / "bin").mkdir(parents=True)
+    (checkout / "docs" / "demo" / "stand-in").mkdir(parents=True)
     shutil.copyfile(SEED, checkout / "docs" / "demo" / "seed.sh")
     if stand_in_mode is not None:
-        stand_in = checkout / "docs" / "demo" / "bin" / "claude"
+        stand_in = checkout / "docs" / "demo" / "stand-in" / "claude"
         shutil.copyfile(STAND_IN, stand_in)
         stand_in.chmod(stand_in_mode)
     home = tmp_path / "home"

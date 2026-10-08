@@ -11,17 +11,18 @@ that runs everywhere:
   runs every rule over docs/demo.tape on every leg of the suite, with a
   positive control per shape and a negative control per rule.
 - **The render.** :func:`snapshot_problems` reads the ``.txt`` Output and says
-  whether a snapshot shows a traceback and whether the last one is still the
-  screen the walkthrough ends on. render.sh runs it as
-  ``python -m tests.demo_tape out/demo.txt docs/demo.tape``.
+  whether a snapshot shows a traceback and whether the last one still shows the
+  end screen: the tape's last Wait, plus the texts render.sh passes after the
+  tape (``python -m tests.demo_tape out/demo.txt docs/demo.tape <text>...``).
 
   The ``.txt`` is not every frame of the GIF. vhs writes one snapshot of the
-  screen after each command of the tape (45 here; the GIF has ~530 frames),
-  and a Wait's snapshot is taken once its text is already on screen. What is on
-  screen only while a Wait polls, such as the Onboard view's log of ``init`` and
-  ``doctor``, is in no snapshot, so render.sh asks doctor again itself. When a
-  Wait times out, the file stops at the command before it, and vhs's error
-  prints the screen it gave up on.
+  screen after each command of the tape (a few dozen; the GIF has hundreds of
+  frames), and a Wait's snapshot is taken once its text is already on screen.
+  What is on screen only while a Wait polls is in no snapshot: on this tape,
+  step 1's note on ``init`` and ``doctor``, shown while the tape waits for
+  "Choose another". So render.sh asks doctor again itself. When a Wait times
+  out, the file stops at the command before it, and vhs's error prints the
+  screen it gave up on.
 
 Standard library only: render.sh runs it on the render image's Python, which
 has neither pytest nor this checkout's environment.
@@ -458,14 +459,18 @@ def snapshots(text: str) -> list[str]:
     return [joined for lines in found if (joined := "\n".join(lines)).strip()]
 
 
-def snapshot_problems(text: str, end: str) -> list[str]:
-    """No snapshot shows a traceback, and the last one still shows ``end``.
+def snapshot_problems(text: str, ends: list[str] | tuple[str, ...]) -> list[str]:
+    """No snapshot shows a traceback, and the last one still shows every text in ``ends``.
 
-    The last snapshot is checked because a Wait passes the moment its text
-    appears: an app that fell over just after would still have passed every
-    Wait.
+    ``ends`` is the end screen: the text the tape's last Wait waits for, and any
+    other text that screen must show which no Wait can name, such as the labels
+    the fleet gives its coders. A list or tuple, never one string: a ``str`` is a
+    ``Sequence[str]`` too, and was then looked for one character at a time
+    (review of #256). The last snapshot is checked because a Wait
+    passes the moment its text appears: an app that fell over just after would
+    still have passed every Wait.
     """
-    if not end.strip():
+    if not ends or not all(end.strip() for end in ends):
         return ["no end text to look for: an empty one is found in every snapshot"]
     shown = snapshots(text)
     if not shown:
@@ -475,28 +480,40 @@ def snapshot_problems(text: str, end: str) -> list[str]:
         for number, snapshot in enumerate(shown, start=1)
         if TRACEBACK.search(snapshot)
     ]
-    if end not in shown[-1]:
-        problems.append(f"the last snapshot does not show {end!r}, where the walkthrough ends")
+    problems.extend(
+        f"the last snapshot does not show {end!r}, where the walkthrough ends"
+        for end in ends
+        if end not in shown[-1]
+    )
     return problems
 
 
 def main(argv: Sequence[str]) -> int:
-    """``python -m tests.demo_tape <demo.txt> <tape>``: 0 when the render is sound."""
-    if len(argv) != 2:
-        print("usage: python -m tests.demo_tape <demo.txt> <tape>", file=sys.stderr)
+    """``python -m tests.demo_tape <demo.txt> <tape> [text the end screen shows...]``.
+
+    0 when the render is sound. The end screen is the tape's last Wait, plus any
+    texts given after the tape.
+    """
+    if len(argv) < 2:
+        print(
+            "usage: python -m tests.demo_tape <demo.txt> <tape> [text the end screen shows...]",
+            file=sys.stderr,
+        )
         return 2
     rendered, tape = Path(argv[0]), Path(argv[1])
     end = end_text(parse(tape.read_text(encoding="utf-8")))
     if end is None:
         print(f"{tape}: waits for no text, so nothing says where it ends", file=sys.stderr)
         return 1
+    ends = [end, *argv[2:]]
     text = rendered.read_text(encoding="utf-8")
-    problems = snapshot_problems(text, end)
+    problems = snapshot_problems(text, ends)
     for problem in problems:
         print(f"{rendered}: {problem}", file=sys.stderr)
     if problems:
         return 1
-    print(f"{rendered}: {len(snapshots(text))} snapshots, no traceback, the last shows {end!r}")
+    shows = ", ".join(repr(end) for end in ends)
+    print(f"{rendered}: {len(snapshots(text))} snapshots, no traceback, the last shows {shows}")
     return 0
 
 

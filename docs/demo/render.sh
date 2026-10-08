@@ -46,17 +46,24 @@ in_image() {
 }
 
 in_image "$image" docs/demo.tape
-in_image --entrypoint python3 "$image" -B -m tests.demo_tape out/demo.txt docs/demo.tape
-# The Onboard view's log of init and doctor is on screen only while the tape
-# waits for the project view, so no snapshot holds it, and a doctor that crashed
-# there rendered green (review of #250). Ask doctor again, with the command
-# onboarding ran, in the home and with the PATH the walkthrough used: a
-# traceback, or a check that fails (the GIF's sidebar would show it), fails the
-# render here, with doctor's report or traceback just above. The quotes are
+# What the end screen must show besides the tape's last Wait, none of which a
+# Wait can take from the source: the coders' labels, which the fleet makes at
+# spawn (first_run.CODERS of them), and step 2's path to the stand-in, the
+# screen's one disclosure that its "Claude Code" is not the real one (review of
+# #256). tests/test_demo_tape.py reads these arguments back.
+in_image --entrypoint python3 "$image" -B -m tests.demo_tape out/demo.txt docs/demo.tape \
+    coder-1 coder-2 stand-in/claude
+# Step 1's note on init and doctor is on screen only while the tape waits for
+# "Choose another", so no snapshot holds it, and a doctor that crashed there
+# would render green (review of #250). So doctor is asked again here, with the
+# command onboarding runs, in the home the walkthrough leaves (Claude Code
+# connected, three agents recorded whose tmux server is gone; not the home step
+# 1 saw): a traceback, or a check that fails (the GIF's sidebar would show it),
+# fails the render, with doctor's report or traceback just above. The quotes are
 # single on purpose: $PATH is the container's, expanded in there.
 # shellcheck disable=SC2016
 in_image --workdir /home/demo/acme-api --entrypoint sh "$image" -c \
-    'PATH=/vhs/docs/demo/bin:$PATH AISQUARE_HARNESS_PROBE=0 aisquare --json doctor'
+    'PATH=/vhs/docs/demo/stand-in:$PATH AISQUARE_HARNESS_PROBE=0 aisquare --json doctor'
 in_image --entrypoint gifsicle "$image" --batch -O3 --lossy=60 out/demo.gif
 
 size=$(($(wc -c <out/demo.gif)))

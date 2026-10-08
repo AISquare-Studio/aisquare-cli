@@ -297,6 +297,10 @@ class RemoteController:
         :meth:`_adopt_tunnel_url` from the tunnel's log reader. Waited for once, it was
         never shown, nor noted for push links, until Remote was turned off and on (r3
         review of #243).
+
+        The trouble is told under the lock that adoption takes, as it is decided: told
+        after letting go, a URL adopted in between found nothing told yet and said
+        nothing, and the trouble followed it, for a Remote that had its link by then.
         """
         url = tunnel.wait_for_url(self._url_timeout)
         if url is not None:
@@ -306,8 +310,7 @@ class RemoteController:
             if tunnel is not self.tunnel or self.public_url is not None:
                 return
             self.message = tunnel.error or "ngrok did not announce a tunnel in time"
-            why = self.message
-        self._unreachable(why)
+            self._unreachable(self.message)
 
     def _adopt_tunnel_url(self, tunnel: NgrokTunnel, url: str) -> None:
         """Show ``url`` as the link and note it for push links, while ``tunnel`` is this

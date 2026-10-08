@@ -836,6 +836,48 @@ def test_a_tunnel_that_does_not_come_up_is_news_and_so_is_its_url_when_it_comes(
     assert heard[1:] == [("ngrok is up — phones can reach Remote now", False)]
 
 
+def test_a_url_that_lands_as_the_wait_runs_out_is_told_as_up_after_the_trouble(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The waiter decided on the trouble under the lock and told it after letting go. ngrok's
+    log reader adopting the URL in between found nothing told yet, so said nothing, and the
+    trouble came after it: "phones cannot reach it" for a Remote that had its public link
+    and push origin, and no word after (verification of c6e1e149, by forced interleaving)."""
+    server = fake_server()
+    tunnels: list[FakeTunnel] = []
+
+    def factory(port: int) -> FakeTunnel:
+        tunnels.append(FakeTunnel(port, url=None, failure=None))
+        return tunnels[-1]
+
+    controller = RemoteController(server=server, tunnel_factory=factory, url_timeout=0.1)
+    heard = heard_news(controller)
+    told = controller._unreachable
+    readers: list[threading.Thread] = []
+
+    def the_url_lands_as_the_trouble_is_told(why: str | None) -> None:
+        reader = threading.Thread(target=tunnels[0].handle_line, args=(json.dumps(STARTED),))
+        readers.append(reader)
+        reader.start()
+        reader.join(0.5)  # ngrok's log reader, adopting the URL wherever it can
+        told(why)
+
+    monkeypatch.setattr(controller, "_unreachable", the_url_lands_as_the_trouble_is_told)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    readers[0].join(5)
+    assert controller.link_url() == build_public_url(STARTED["url"], server.token)
+    assert controller.message is None
+    assert heard == [
+        (
+            "Remote is on, but phones cannot reach it — ngrok did not announce a tunnel in time",
+            True,
+        ),
+        ("ngrok is up — phones can reach Remote now", False),
+    ]
+
+
 def test_auto_off_and_what_turning_off_could_not_do_are_news() -> None:
     clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
     server = fake_server()

@@ -2610,6 +2610,9 @@ def live_writes() -> Writes:
         return payload, f"added {project.id} {root}"
 
     def project_remove(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        """Forget a registration, as ``project forget`` does, refusals and their codes
+        included: one with live fleet agents is 409 ``project_busy``, where it fell to
+        400 ``write_failed`` as if the write had failed (sweep 2 of #243)."""
         from aisquare.services import project as project_service
 
         ref = _required(body, "ref")
@@ -2619,6 +2622,8 @@ def live_writes() -> Writes:
             raise RequestError(404, "not_found", f"no project matches {ref!r}") from None
         except ValueError as exc:
             raise RequestError(400, "ambiguous_project", str(exc)) from None
+        except project_service.ProjectBusyError as exc:
+            raise RequestError(409, "project_busy", str(exc)) from None
         return {"report": _as_json(report)}, f"removed {ref}"
 
     def write_send_keys(body: dict[str, Any]) -> tuple[dict[str, object], str]:

@@ -1935,6 +1935,122 @@ def test_adding_a_directory_that_is_not_listed_lists_it(home: Path, before: str)
     assert summary == f"added {project.id} {root}"
 
 
+def _projects(home: Path, *roots: str) -> list[ProjectInfo]:
+    """Repositories under ``home``, added on purpose as ``project add`` adds them."""
+    with store_session() as store:
+        return [
+            store.onboard_project(ProjectInfo(id=project_id_for(root), root=root, linked_repos=[]))
+            for root in (_repo(home / where) for where in roots)
+        ]
+
+
+def _project_writes(runtime: Runtime, tmp_path: Path) -> TestClient:
+    """A phone with writes on, over the real project services and store."""
+    sources = remote_server.live_sources()
+    app = build_app(runtime, sources=sources, writes=live_writes(), dist_dir=tmp_path)
+    client = make_client(app)
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    return client
+
+
+def test_a_switch_from_the_phone_pins_the_project_every_command_resolves(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``project/switch`` moves the machine-wide pin that every CLI command and hook
+    resolves, and no test ran it: a switch that pinned nothing answered 200 green (sweep 2
+    of #243)."""
+    alpha, beta = _projects(home, "code/alpha", "code/beta")
+    monkeypatch.chdir(beta.root)
+    assert project_service.info().id == beta.id
+    client = _project_writes(runtime, tmp_path)
+    switched = client.post(f"{base(runtime)}/api/project/switch", json={"name": "alpha"})
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["project"]["id"] == alpha.id
+    assert project_service.info().id == alpha.id, "pinned over the directory it runs in"
+    assert _audit_lines()[-1][2:] == ["project/switch", f"switched to {alpha.id}"]
+
+
+def test_a_remove_from_the_phone_forgets_the_registration(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``project/remove`` forgets a registration, and no test ran it either (sweep 2 of
+    #243)."""
+    alpha, beta = _projects(home, "code/alpha", "code/beta")
+    monkeypatch.chdir(alpha.root)
+    client = _project_writes(runtime, tmp_path)
+    removed = client.post(f"{base(runtime)}/api/project/remove", json={"ref": "beta"})
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["report"]["project"]["id"] == beta.id
+    assert [project.id for project in project_service.list_projects()] == [alpha.id]
+    assert _audit_lines()[-1][2:] == ["project/remove", "removed beta"]
+
+
+def test_a_project_with_live_agents_is_not_removed_and_the_phone_hears_why(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``project forget`` refuses it as ``project_busy``; from the phone the refusal fell to
+    400 ``write_failed``, "the write failed", where nothing had failed (sweep 2 of #243)."""
+    from aisquare.core.ids import new_agent_id
+    from aisquare.models import FleetAgent
+
+    (alpha,) = _projects(home, "code/alpha")
+    monkeypatch.chdir(alpha.root)
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=new_agent_id(),
+                project_id=alpha.id,
+                label="coder1",
+                role="coder",
+                pane_id="%1",
+                cwd=alpha.root,
+                created_at=datetime.now(UTC),
+            )
+        )
+    client = _project_writes(runtime, tmp_path)
+    before = _audit_lines()
+    refused = client.post(f"{base(runtime)}/api/project/remove", json={"ref": "alpha"})
+    assert (refused.status_code, refused.json()["error"]) == (409, "project_busy")
+    assert "coder1" in refused.json()["message"]
+    assert [project.id for project in project_service.list_projects()] == [alpha.id]
+    assert _audit_lines() == before
+
+
+@pytest.mark.parametrize(
+    ("route", "body", "status", "error"),
+    [
+        ("switch", {"name": "ghost"}, 404, "not_found"),
+        ("switch", {"name": "app"}, 400, "ambiguous_project"),
+        ("switch", {"name": 5}, 400, "invalid"),
+        ("switch", {"ref": "alpha"}, 400, "invalid"),
+        ("remove", {"ref": "ghost"}, 404, "not_found"),
+        ("remove", {"ref": "app"}, 400, "ambiguous_project"),
+        ("remove", {"ref": ["alpha"]}, 400, "invalid"),
+        ("remove", {"name": "alpha"}, 400, "invalid"),
+    ],
+)
+def test_a_switch_or_a_remove_that_names_no_one_project_changes_nothing(
+    home: Path,
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+    body: dict[str, object],
+    status: int,
+    error: str,
+) -> None:
+    alpha, *_apps = _projects(home, "code/alpha", "work/app", "play/app")
+    monkeypatch.chdir(alpha.root)
+    client = _project_writes(runtime, tmp_path)
+    before = _audit_lines()
+    refused = client.post(f"{base(runtime)}/api/project/{route}", json=body)
+    assert (refused.status_code, refused.json()["error"]) == (status, error), refused.text
+    assert len(project_service.list_projects()) == 3
+    assert project_service.info().id == alpha.id
+    assert _audit_lines() == before
+
+
 # --- (8) the Origin of a write or a socket ------------------------------------------------
 
 

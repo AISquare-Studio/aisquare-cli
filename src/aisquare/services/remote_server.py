@@ -3975,9 +3975,15 @@ def build_remote_app(
         and removing what it installed hands back, without a restart. Every answer
         carries the page headers (no referrer: the token is in the path); only the
         bundled page also gets its CSP, since an installed build may need another.
-        An installed build's file is typed by the page's own closed list
-        (:func:`remote_page.build_content_type`), not the machine's tables.
+        Decided in a worker thread: it asks the disk (the installed index, the file's
+        path resolved), and the first answer reads the bundled page's files, which on
+        the event loop held up every request and socket it serves.
         """
+        return await asyncio.to_thread(page_answer, request)
+
+    def page_answer(request: Request) -> Response:
+        """:func:`static`'s answer. An installed build's file is typed by the page's own
+        closed list (:func:`remote_page.build_content_type`), not the machine's tables."""
         from aisquare.services import remote_page
 
         rel = request.path_params.get("path", "")

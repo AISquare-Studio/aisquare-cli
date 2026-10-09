@@ -331,6 +331,40 @@ def test_an_installed_build_is_typed_by_a_closed_list_never_the_machines_tables(
     assert index.headers["x-content-type-options"] == "nosniff"
 
 
+def test_the_page_is_decided_and_read_off_the_event_loop(
+    runtime: Runtime, built: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Which page answers asks the disk (the installed index, a file's path resolved), and
+    the first answer reads the bundled page's files: all of it ran in the request's coroutine,
+    on the event loop that serves every request and socket. The bundled page, then an
+    installed build, each answered from a worker thread."""
+    import asyncio
+
+    ran: list[tuple[str, bool]] = []
+
+    def watched(name: str, real: Any) -> Any:
+        def call(*args: Any) -> Any:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                ran.append((name, False))
+            else:
+                ran.append((name, True))
+            return real(*args)
+
+        return call
+
+    for name in ("bundled_page_response", "build_content_type"):
+        monkeypatch.setattr(remote_page, name, watched(name, getattr(remote_page, name)))
+    client = make_client(build_app(runtime, sources=_sources()))
+
+    assert client.get(f"{base(runtime)}/app.js").status_code == 200
+    remote_server.install_page(built)
+    assert client.get(f"{base(runtime)}/assets/app.js").status_code == 200
+
+    assert ran == [("bundled_page_response", False), ("build_content_type", False)]
+
+
 def test_the_page_headers_keep_the_token_in_the_path_to_ourselves() -> None:
     assert remote_page.remote_page_headers() == {
         "x-content-type-options": "nosniff",

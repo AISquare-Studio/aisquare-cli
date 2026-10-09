@@ -235,6 +235,7 @@ aisquare --json remote needs
 | manager_down | the manager crashed; or, while agents still work and before it reported a result, it was killed or lost (no exit status), or a switch or a restart could not start its replacement. A manager that exits cleanly (`fleet stop`, the phone's Stop, its own `/exit`) is taken to be done |
 | crashed | an agent exited with an error in the last hour, or was stopped for a switch or a restart that could not start its replacement, its task unfinished, while no manager runs to handle it (one parked on its usage limit does not count) |
 | limited | an agent hit its usage limit; when the limit named its reset, the card tells it by the phone's clock |
+| failed | an agent's turn ended on an API error (a login that expired, credit that ran out, the API overloaded past Claude Code's own retries), and it waits at its prompt |
 | lost | an agent's pane is gone |
 | fleet_down | tmux is not answering for a project |
 | asked | an agent ended its turn with a question in plain text |
@@ -255,9 +256,10 @@ Claude Code's own dialogs, a question of several answers) is answered from the
 agent's key pad.
 
 The other buttons follow the kind: **Tell** for a question asked in text,
-**Reply** on the board, **Switch account** for a usage limit, **Restart** for a
-crash. **Dismiss** hides a card for good. A tell or a reply dismisses its card
-itself once it was delivered.
+**Reply** on the board, **Switch account** for a usage limit, **Tell** (to go on)
+or **Switch account** for a failed turn, **Restart** for a crash. **Dismiss**
+hides a card for good. A tell or a reply dismisses its card itself once it was
+delivered.
 
 ---
 
@@ -313,8 +315,8 @@ than 15 seconds, is not sent, and the page says so.
 Settings → **Turn on** asks the browser for permission, subscribes, and tells
 the machine. **Send test** checks the whole path. A notification goes out when an
 item has been there for two scans in a row: at once for a permission, a
-question, a plan, a board question or result, and later for the kinds that
-often clear by themselves, or that someone else is already on:
+question, a plan, a board question or result and a failed turn, and later for
+the kinds that often clear by themselves, or that someone else is already on:
 
 - a crash: after 30 seconds;
 - a lost pane, a stopped manager, or tmux not answering: after a minute, since

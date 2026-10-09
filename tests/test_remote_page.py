@@ -937,6 +937,14 @@ def test_the_page_names_a_tool_call_by_the_keys_the_server_summarises_it_by() ->
     assert set(keys) <= set(remote_needs._DETAIL_INPUT_KEYS)
 
 
+def test_the_page_has_a_badge_for_every_kind_the_feed_has() -> None:
+    """A kind the page has no badge for is a card that says only "Needs you": every kind of
+    ``remote_needs.NEEDS_KINDS`` is in the page's own table, and nothing else is."""
+    table = re.search(r"\nconst KINDS = \{(.*?)\};", _text("app.js"), re.S)
+    assert table is not None, "the KINDS table is not where the page declares it"
+    assert re.findall(r"(\w+): \[", table.group(1)) == list(remote_needs.NEEDS_KINDS)
+
+
 def test_routes_are_built_only_from_ids_that_validate(node_report: dict[str, Any]) -> None:
     routes = node_report["routes"]
     assert routes["#/n/ny_0123456789abcdef/p/prj_x/a/coder-1"] == {

@@ -572,6 +572,67 @@ def test_without_a_tail_only_the_dialog_forms_remain() -> None:
     assert _classify(_status(row, "waiting", _session(row, state="waiting")), None) == []
 
 
+LOGIN_EXPIRED = "authentication_failed: Login expired · Please run /login"
+
+
+def _turn_failed(
+    *,
+    row: FleetAgent | None = None,
+    state: str = "waiting",
+    marked: str = "waiting",
+    seen: datetime = NOW - timedelta(minutes=2),
+    at: datetime = NOW - timedelta(minutes=2),
+    text: str = LOGIN_EXPIRED,
+) -> tuple[FleetAgentStatus, TranscriptTail, list[TeamEvent]]:
+    """coder-1 after ``team.hook_stop_failure``: its session marked ``waiting`` at ``seen``,
+    the ``turn_failed`` event written at ``at``, its transcript ending on Claude Code's own
+    ``API Error`` text."""
+    row = row or _row()
+    session = _session(row, state=marked, seen=seen)
+    tail = _tail(newest="assistant_text", at=at, text="API Error: 401 · Please run /login")
+    events = [_event(12, "turn_failed", text, session=session, at=at)]
+    return _status(row, state, session), tail, events
+
+
+def test_rule_10_a_turn_that_ended_on_an_api_error_is_failed() -> None:
+    """A login that expired, credit run out, the API overloaded past Claude Code's retries:
+    ``StopFailure`` marks the session ``waiting``, as a Stop would, and writes
+    ``turn_failed``. The row read idle, no manager was nudged, nothing retried, and the feed
+    stayed empty while the agent sat at its prompt holding its claim."""
+    item = _one(_classify(*_turn_failed()))
+    assert (item.kind, item.agent) == ("failed", "coder-1")
+    assert item.id == needs_item_id(PROJECT.id, "failed", "12")
+    assert item.reason == "coder-1's turn failed (authentication_failed)"
+    assert (item.excerpt, item.detail) == (LOGIN_EXPIRED, {"text": LOGIN_EXPIRED})
+    assert item.since == item.push_after == NOW - timedelta(minutes=2)
+    assert item.actions == ("tell", "switch", "open", "dismiss")
+
+
+@pytest.mark.parametrize(
+    "facts",
+    [
+        pytest.param({"seen": NOW - timedelta(seconds=30)}, id="a hook fired since"),
+        pytest.param({"state": "working"}, id="at work again"),
+        pytest.param({"marked": "switching"}, id="a hand-over's own"),
+        pytest.param({"row": _row(created=NOW - timedelta(minutes=1))}, id="the process before"),
+    ],
+)
+def test_a_failed_turn_needs_nobody_once_the_agent_moved_on(facts: dict[str, Any]) -> None:
+    assert _classify(*_turn_failed(**facts)) == []
+
+
+def test_a_failed_turns_reason_names_an_error_only_a_lock_screen_can_show() -> None:
+    item = _one(_classify(*_turn_failed(text="\x1b[31mred alert\x1b[0m: the API said no")))
+    assert item.reason == "coder-1's turn failed"
+
+
+def test_a_failed_turn_is_read_from_the_boards_day() -> None:
+    status, tail, events = _turn_failed()
+    fleet = Fleet(agents=[status], events=events, tails={"/transcripts/coder-1.jsonl": tail})
+    assert [(item.kind, item.agent) for item in _scan(fleet)] == [("failed", "coder-1")]
+    assert fleet.windows == 0, "the day is read every scan anyway: no window for it"
+
+
 # --- a project, over fake sources ---------------------------------------------------------
 
 
@@ -621,7 +682,7 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
             for event in fleet.events
             if event.created_at >= since
             and (
-                event.kind in (*remote_needs._NEEDS_ASKED, "agent_exited")
+                event.kind in remote_needs._NEEDS_DAY_KINDS
                 or (event.session_id is None and event.kind in remote_needs._NEEDS_REPLIED)
             )
         ]
@@ -2777,6 +2838,48 @@ def test_the_live_sources_take_a_manager_stopped_after_its_result_for_done(
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
     items = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
     assert [item.kind for item in items] == ["board_result"]
+
+
+def test_the_live_sources_take_a_turn_that_died_on_an_api_error_for_one_that_needs_you(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the team's own hook (``hook_stop_failure``) and the store: an expired login
+    is a ``failed`` card, and the agent's next prompt ends it."""
+    from aisquare.services import team as team_service
+
+    hour_ago = datetime.now(UTC) - timedelta(hours=1)
+    root = tmp_path / "alpha"
+    with store_session() as store:
+        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        store.upsert_session(
+            TeamSession(
+                id="ses_c", project_id=project.id, role="coder", started_at=hour_ago,
+                last_seen_at=hour_ago, state="working",
+            )
+        )  # fmt: skip
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_c", project_id=project.id, label="coder-1", role="coder", pane_id="%1",
+                session_id="ses_c", cwd=root, created_at=hour_ago,
+            )
+        )  # fmt: skip
+    team_service.hook_stop_failure(
+        "ses_c",
+        error="authentication_failed",
+        message="Login expired · Please run /login",
+        details=None,
+    )
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=())
+    assert [(item.kind, item.reason) for item in items] == [
+        ("failed", "coder-1's turn failed (authentication_failed)")
+    ]
+    with store_session() as store:
+        store.touch_session("ses_c", state="working")  # its next prompt
+    assert (
+        scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=()) == []
+    )
 
 
 # --- the watcher --------------------------------------------------------------------------

@@ -44,8 +44,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Needs you.** Every 3 s the server works out what waits on the human across
   every project: a permission prompt (each prompt of a turn on its own), a
   question, a plan to approve, a board question or result, a crashed agent, a
-  stopped manager, a usage limit, a lost pane, tmux not answering, a turn that
-  ended with a question, an interruption. Each card carries what must be read
+  stopped manager, a usage limit, a turn that died on an API error (an expired
+  login, credit run out), a lost pane, tmux not answering, a turn that ended
+  with a question, an interruption. Each card carries what must be read
   first (the full command, every question and its options, the plan) and the
   quick answers it offers, checked against the agent as it is now before a key
   is typed (`409 stale` otherwise). `GET api/needs`, a `needs_you` frame,

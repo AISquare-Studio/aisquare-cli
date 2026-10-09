@@ -81,6 +81,7 @@ NEEDS_KINDS = (
     "manager_down",
     "crashed",
     "limited",
+    "failed",
     "lost",
     "fleet_down",
     "asked",
@@ -139,6 +140,11 @@ on from one (any of the three, later), in :func:`needs_from_board`."""
 _NEEDS_REPLIED = ("note", "decision", "result")
 """The human's board events (no session) that answer an item addressed to its author."""
 
+_NEEDS_DAY_KINDS = (*_NEEDS_ASKED, "agent_exited", "turn_failed")
+"""The kinds of its agents' events the scan reads of a project's day (``board_since``): what
+opens a board item or moves on from one, the exits the fleet announces, and the turns that
+died on an API error."""
+
 _NEEDS_ACTIONS: dict[str, tuple[str, ...]] = {
     "permission": ("answer", "open", "dismiss"),
     "question": ("answer", "open", "dismiss"),
@@ -148,6 +154,7 @@ _NEEDS_ACTIONS: dict[str, tuple[str, ...]] = {
     "board_question": ("reply", "dismiss"),
     "board_result": ("reply", "dismiss"),
     "limited": ("switch", "open", "dismiss"),
+    "failed": ("tell", "switch", "open", "dismiss"),
     "lost": ("restart", "stop", "dismiss"),
     "crashed": ("restart", "dismiss"),
     "manager_down": ("restart", "dismiss"),
@@ -173,6 +180,10 @@ _MANAGER_FRESH = timedelta(minutes=30)
 
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,40}")
 """A tool name a reason may carry; anything else is left out of the sentence."""
+
+_FAILURE_KIND = re.compile(r"[A-Za-z0-9_.-]{1,40}")
+"""The error a failed turn's reason may name (``authentication_failed``, ``billing_error``,
+``server_error``): Claude Code's word for it, or nothing."""
 
 _SUBAGENT_TOOLS = frozenset({"Task", "Agent"})
 """The tools a sub-agent runs inside: a prompt pending under one is the sub-agent's."""
@@ -341,10 +352,11 @@ class NeedsSources:
     board_since: Callable[[str, datetime], list[TeamEvent]]
     """The project's events written at or after the given time that open a board item or
     close one: its agents' questions, results and decisions (:data:`_NEEDS_ASKED`), and
-    the human's notes, decisions and results (:data:`_NEEDS_REPLIED`); and the exits the
-    fleet announces (``agent_exited``), which say how a row ended. An item lives for
-    :data:`QUESTION_HORIZON` however busy the board is, so it is read by time, not from a
-    window of the newest events that 300 notes push it out of."""
+    the human's notes, decisions and results (:data:`_NEEDS_REPLIED`); the exits the
+    fleet announces (``agent_exited``), which say how a row ended; and the turns that
+    ended on an API error (``turn_failed``). An item lives for :data:`QUESTION_HORIZON`
+    however busy the board is, so it is read by time, not from a window of the newest
+    events that 300 notes push it out of."""
     board_sessions: Callable[[str, datetime, Collection[str]], list[TeamSession]]
     """The project's sessions seen at or after the given time, and those with the given ids:
     the ones a live manager may be, and the authors of the board's open questions."""
@@ -623,7 +635,9 @@ def needs_from_agent(
        prompt still reads ``attention`` and an interrupted turn ``working``);
     7. attention, and its notification is the usage-limit dialog → ``limited``;
     8. attention → ``permission``, the dialog form: an MCP elicitation, Claude Code's own;
-    9. ``waiting`` on its own words, which end on a question → ``asked``.
+    9. ``waiting`` on its own words, which end on a question → ``asked``;
+    10. ``waiting`` since its turn ended on an API error (the session's ``turn_failed``
+        event, no hook since) → ``failed``.
 
     Rules 7 and 8 read the notification from the session's newest ``attention`` event
     only while it still names the dialog on screen (:func:`_needs_notice`); after it a
@@ -652,6 +666,7 @@ def needs_from_agent(
     own = [e for e in events if session is not None and e.session_id == session.id]
     attention_event = max((e for e in own if e.kind == "attention"), key=_needs_seq, default=None)
     limited_event = max((e for e in own if e.kind == "limited"), key=_needs_seq, default=None)
+    failed_event = max((e for e in own if e.kind == "turn_failed"), key=_needs_seq, default=None)
     if status.state == "lost":
         return [
             _needs_item(
@@ -757,6 +772,14 @@ def needs_from_agent(
                 push_after=since if prompt_now else since + _ASKED_PUSH_DELAY,
             )
         ]
+    if (
+        status.state == "waiting"
+        and session is not None
+        and session.state == "waiting"
+        and failed_event is not None
+        and failed_event.created_at >= max(agent.created_at, session.last_seen_at)
+    ):
+        return [_needs_failed_item(failed_event, project=project, agent=agent, name=name)]
     return []
 
 
@@ -1126,6 +1149,34 @@ def _needs_permission_item(
     )
 
 
+def _needs_failed_item(
+    event: TeamEvent, *, project: ProjectInfo, agent: FleetAgent, name: str
+) -> NeedsItem:
+    """A turn that ended on an API error, its agent at its prompt since: no hook has fired.
+
+    ``team.hook_stop_failure`` marks the session ``waiting``, as a Stop would, and writes
+    ``turn_failed`` (``<error>: <message>``): a login that expired, credit run out, the API
+    overloaded past Claude Code's own retries. Nothing else tells anyone, no manager is
+    nudged, and nothing retries: the agent sits there, its claim held, until someone logs
+    it in, switches its account or tells it to go on. The next prompt, or any hook, moves
+    ``last_seen_at`` past the event and ends the item; a hand-over's own failures are the
+    hand-over's (the session reads ``switching`` then, not ``waiting``).
+    """
+    error = event.text.split(":", 1)[0].strip()
+    said = f" ({error})" if _FAILURE_KIND.fullmatch(error) else ""
+    return _needs_item(
+        "failed",
+        str(event.seq),
+        project=project,
+        agent=agent,
+        reason=f"{name}'s turn failed{said}",
+        excerpt=event.text,
+        detail=_needs_fit({"text": event.text}, _DETAIL_TEXT_MAX),
+        since=event.created_at,
+        push_after=event.created_at,
+    )
+
+
 def _needs_interrupted_item(
     tail: TranscriptTail, *, project: ProjectInfo, agent: FleetAgent, name: str, now: datetime
 ) -> NeedsItem:
@@ -1377,7 +1428,10 @@ def _needs_scan_project(
                 status,
                 tail,
                 project=project,
-                events=_needs_own_events(sources, project, status, window),
+                events=[
+                    *_needs_own_events(sources, project, status, window),
+                    *_needs_failures(board, status),
+                ],
                 now=now,
                 manager_live=live,
                 accounts=accounts,
@@ -1456,6 +1510,15 @@ def _needs_own_events(
             own.append(found)
             break
     return own
+
+
+def _needs_failures(board: Sequence[TeamEvent], status: FleetAgentStatus) -> list[TeamEvent]:
+    """The ``turn_failed`` events of the agent's session in the board's day, which rule 10 of
+    :func:`needs_from_agent` reads: the day is read every scan anyway, for all its kinds."""
+    session = status.session
+    if session is None:
+        return []
+    return [e for e in board if e.kind == "turn_failed" and e.session_id == session.id]
 
 
 def _needs_output_of(sources: NeedsSources, agent: FleetAgent) -> Callable[[], datetime | None]:
@@ -2193,7 +2256,7 @@ def live_needs_sources() -> NeedsSources:
     def needs_board_since(project_id: str, since: datetime) -> list[TeamEvent]:
         with store_session() as store:
             return store.team_events_since(
-                project_id, since, kinds=(*_NEEDS_ASKED, "agent_exited"), human_kinds=_NEEDS_REPLIED
+                project_id, since, kinds=_NEEDS_DAY_KINDS, human_kinds=_NEEDS_REPLIED
             )
 
     def needs_board_sessions(

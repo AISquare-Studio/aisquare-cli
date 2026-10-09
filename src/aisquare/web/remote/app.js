@@ -348,7 +348,8 @@ function renderRuns(runs, doc) {
 const KINDS = {
   permission: ["Permission", "k-urgent"], question: ["Question", "k-urgent"], plan: ["Plan", "k-urgent"],
   board_question: ["Board question", "k-ask"], manager_down: ["Manager down", "k-alarm"],
-  crashed: ["Crashed", "k-alarm"], limited: ["Usage limit", "k-warn"], lost: ["Pane gone", "k-alarm"],
+  crashed: ["Crashed", "k-alarm"], limited: ["Usage limit", "k-warn"], failed: ["Turn failed", "k-alarm"],
+  lost: ["Pane gone", "k-alarm"],
   fleet_down: ["tmux down", "k-alarm"], asked: ["Asked you", "k-ask"], board_result: ["Result", "k-info"],
   interrupted: ["Interrupted", "k-info"],
 };

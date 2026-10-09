@@ -2080,11 +2080,22 @@ def live_sources() -> Sources:
         from aisquare.services import project as project_service
 
         all_projects = project_service.list_projects()
+        # Listed: a project with a live row, or one that ended within the day (its window may
+        # linger, an ``exited`` row). Any other lists no agent, and ``list_agents`` read every
+        # row and session it ever had to say so, for each project, on every read (sweep of
+        # #243, round 4).
+        since = fleet_service._now() - fleet_service.RECENTLY_ENDED
         with store_session() as store:
             group_names = {g.id: g.name for g in store.project_groups()}
+            listed = {
+                one.id
+                for one in all_projects
+                if store.fleet_agents(one.id, live_only=True)
+                or store.fleet_agents_ended_since(one.id, since)
+            }
         rows = projects_json(all_projects, group_names=group_names)
         for row, one in zip(rows, all_projects, strict=True):
-            agents = fleet_service.list_agents(one, live_only=True)
+            agents = fleet_service.list_agents(one, live_only=True) if one.id in listed else []
             row["agents"] = _agent_state_counts(agents)
         return rows
 

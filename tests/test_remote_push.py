@@ -898,6 +898,13 @@ def test_the_title_counts_what_is_open_beyond_the_push(world: World) -> None:
     assert world.titles() == every_device("aisquare-cli: coder-auth needs you · 3 open")
 
 
+def test_a_notification_names_at_most_50_items(world: World) -> None:
+    """A fleet on fire is one notification, its payload in budget: the page reads the feed."""
+    items = [needs_item(n) for n in range(60)]
+    message = remote_push.push_needs_message(items, total=60, base_url=None)
+    assert message["ids"] == [item.id for item in items[:50]]
+
+
 def test_a_project_level_item_is_titled_by_its_project(world: World) -> None:
     item = needs_item(1, kind="fleet_down", agent=None, reason="tmux is not answering")
     world.scan(item)

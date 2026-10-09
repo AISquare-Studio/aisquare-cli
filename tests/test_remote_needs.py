@@ -2415,6 +2415,22 @@ def test_the_live_sources_read_an_unchanged_transcript_once(
     assert len(reads) == 2 and again is not None and again.pending == (), "it grew: read again"
 
 
+def test_the_cache_of_tails_keeps_the_newest_it_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One entry a transcript path, for every agent a long-running server ever scanned: past
+    its bound the oldest read goes first."""
+    monkeypatch.setattr(remote_needs, "_tails", {})
+    monkeypatch.setattr(remote_needs, "_TAILS_KEPT", 3)
+    paths = [tmp_path / f"coder-{n}.jsonl" for n in range(5)]
+    for path in paths:
+        path.write_text(json.dumps(_asking_record(NOW)) + "\n", encoding="utf-8")
+    tail_of = remote_needs.live_needs_sources().transcript_tail
+    for path in paths:
+        assert tail_of(str(path)) is not None
+    assert list(remote_needs._tails) == [str(path) for path in paths[2:]]
+
+
 def test_a_scan_builds_none_of_a_projects_history_it_cannot_use(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2684,6 +2700,23 @@ def test_a_card_dismissed_while_a_scan_runs_stays_dismissed(
     assert watcher.needs_items_now() == [] and watcher.needs_items_json() == []
     assert heard == [[card.id], []], "the push sender heard it gone too"
     assert watcher.scan_needs_now() == [] and heard[-1] == [], "and every scan after"
+
+
+def test_a_dismissal_is_held_apart_only_until_a_scan_has_read_it(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """A card dismissed while a scan runs is dropped from what that scan publishes, until a
+    scan that read the dismissal from the file has published: no longer, or the watcher kept
+    every id ever dismissed for as long as the server ran."""
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    fleet = _working(_tail(_tool("toolu_q", "AskUserQuestion", **QUESTION)))
+    watcher = RemoteNeedsWatcher(app.kit, sources=lambda: _sources(fleet))
+    (card,) = watcher.scan_needs_now()
+    record_needs_dismissal(card.id)
+    watcher.needs_forget(card.id)
+    assert watcher._forgotten == {card.id}
+    assert watcher.scan_needs_now() == []
+    assert watcher._forgotten == set(), "the file says it now"
 
 
 def test_the_stream_and_the_heartbeat_read_the_watchers_snapshot(

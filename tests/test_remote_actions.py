@@ -723,8 +723,11 @@ class FakePane:
         self.log.append("literal")
 
     def pane_facts(self, pane_id: str) -> SimpleNamespace:
-        """What ``fleet tell`` and ``send-keys`` ask before they type: the pane runs the agent."""
-        return SimpleNamespace(dead=False, current_command="claude")
+        """What ``fleet tell`` and ``send-keys`` ask before they type: the pane runs the agent,
+        on a server that started before its row was written (said in the same answer)."""
+        return SimpleNamespace(
+            dead=False, current_command="claude", server_started=self.started_at()
+        )
 
     def started_at(self) -> datetime:
         """The server started before every row here was written: no pane outlived its row."""

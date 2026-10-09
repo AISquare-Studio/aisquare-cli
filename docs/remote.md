@@ -310,13 +310,27 @@ than 15 seconds, is not sent, and the page says so.
 
 Settings → **Turn on** asks the browser for permission, subscribes, and tells
 the machine. **Send test** checks the whole path. A notification goes out when an
-item has been there for two scans in a row, with a delay for kinds that often
-clear by themselves (a crash: 30 seconds; a lost pane or a stopped manager: a
-minute, since they flash during a restart). Several at once come as one
-notification, at most one every 20 seconds per phone; a new one takes the place
-of the one still shown and sounds all the same. Tapping it opens the card, at
-the address the panel's ngrok announced or `serve --public-url` named; a
-`serve` told neither opens the page the phone subscribed from.
+item has been there for two scans in a row: at once for a permission, a
+question, a plan, a board question or result, and later for the kinds that
+often clear by themselves, or that someone else is already on:
+
+- a crash: after 30 seconds;
+- a lost pane, a stopped manager, or tmux not answering: after a minute, since
+  they flash during a restart;
+- a usage limit: never when it lifts within
+  `[accounts] wait_if_reset_within_minutes` (15 by default), since Claude Code
+  carries on by itself at the reset; after 90 seconds when `on_limit = "switch"`
+  or a live manager is on it; at once otherwise;
+- a turn that ended with a question: after 5 minutes while a manager is live,
+  for an agent that is neither the manager nor one you started yourself, since
+  the manager is to answer it first; at once otherwise;
+- an interruption: after 10 minutes, since it follows your own Esc.
+
+Several at once come as one notification, at most one every 20 seconds per
+phone; a new one takes the place of the one still shown and sounds all the
+same. Tapping it opens the card, at the address the panel's ngrok announced or
+`serve --public-url` named; a `serve` told neither opens the page the phone
+subscribed from.
 
 The machine also sends: a warning 10 minutes before auto-off ("open to extend
 it" while writes are on; with writes off, that the phone cannot extend it), a

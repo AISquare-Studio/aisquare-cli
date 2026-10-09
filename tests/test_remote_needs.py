@@ -1684,6 +1684,30 @@ def test_a_closing_question_waits_for_the_manager_to_answer_it_first(
     assert item.push_after == item.since + timedelta(minutes=minutes)
 
 
+def test_the_guide_says_when_each_kind_is_pushed_as_the_scan_decides_it() -> None:
+    """docs/remote.md gave the delays of a crash and a lost pane only, and said every other
+    item went out after two scans: a usage limit near its reset never does, a question of an
+    agent the manager runs waits five minutes for it, an interruption ten. Each delay the guide
+    gives is the scan's own."""
+    guide = Path(__file__).resolve().parents[1] / "docs" / "remote.md"
+    prose = " ".join(guide.read_text(encoding="utf-8").split())
+    delays = remote_needs._NEEDS_PUSH_DELAY
+    said: list[tuple[str, object, object]] = [
+        ("a crash: after 30 seconds", delays["crashed"], timedelta(seconds=30)),
+        ("a lost pane, a stopped manager, or tmux not answering: after a minute",
+         {delays["lost"], delays["manager_down"], delays["fleet_down"]}, {timedelta(minutes=1)}),
+        ("a usage limit: never when it lifts within `[accounts] wait_if_reset_within_minutes`"
+         " (15 by default)", AccountsSettings().wait_if_reset_within_minutes, 15),
+        ('after 90 seconds when `on_limit = "switch"` or a live manager is on it',
+         remote_needs._LIMITED_PUSH_DELAY, timedelta(seconds=90)),
+        ("a turn that ended with a question: after 5 minutes while a manager is live",
+         remote_needs._ASKED_PUSH_DELAY, timedelta(minutes=5)),
+        ("an interruption: after 10 minutes", delays["interrupted"], timedelta(minutes=10)),
+    ]  # fmt: skip
+    assert [sentence for sentence, _code, _guide in said if sentence not in prose] == []
+    assert [sentence for sentence, code, guide in said if code != guide] == []
+
+
 @pytest.mark.parametrize(
     "text",
     [

@@ -45,16 +45,30 @@ from aisquare.core import paths
 from aisquare.core.state_file import read_state, update_state
 from aisquare.services import ngrok_tunnel, remote_server
 from aisquare.services.ngrok_tunnel import (
+    API_ON,
     AUTHTOKEN_HINT,
     INSTALL_HINT,
     NgrokTunnel,
+    api_off_configs,
     build_public_url,
     missing_binary_message,
     ngrok_command,
+    ngrok_default_config,
     parse_log_line,
 )
 
 STARTED = {"lvl": "info", "msg": "started tunnel", "url": "https://abcd-12.ngrok-free.app"}
+OURS = {
+    "lvl": "info",
+    "msg": "started tunnel",
+    "obj": "tunnels",
+    "name": "command_line",
+    "addr": "http://localhost:8750",
+    "url": "https://owner-1234.ngrok-free.app",
+}
+"""The line ngrok logs for the tunnel ``ngrok http 8750`` asked for, as ngrok v3 logs it."""
+WEB_SERVICE = {"lvl": "info", "msg": "starting web service", "obj": "web", "addr": "127.0.0.1:4040"}
+"""The line ngrok logs as it starts its local web interface and agent API."""
 PORT_ENV = remote_control.PORT_ENV
 AUTO_OFF_ENV = "AISQUARE_REMOTE_AUTO_OFF"
 
@@ -101,6 +115,58 @@ def test_parse_log_line_reads_the_started_tunnel_url_and_ignores_noise() -> None
     assert parse_log_line("ERROR:  bad\n") == ngrok_tunnel.LogEvent(plain="bad")
     assert parse_log_line("\n") == ngrok_tunnel.LogEvent()
     assert parse_log_line("[1, 2, 3]") == ngrok_tunnel.LogEvent()
+
+
+def test_parse_log_line_reads_which_tunnel_started_and_where_the_api_listens() -> None:
+    assert parse_log_line(json.dumps(OURS)) == ngrok_tunnel.LogEvent(
+        url=OURS["url"], name="command_line", addr="http://localhost:8750"
+    )
+    assert parse_log_line(json.dumps(WEB_SERVICE)) == ngrok_tunnel.LogEvent(web="127.0.0.1:4040")
+
+
+def test_ngroks_log_reaches_the_status_line_with_nothing_that_drives_a_terminal() -> None:
+    """ngrok's log is in part the agent API's caller's to fill: a tunnel's name, an error about
+    it. The status line painted it as it came, and Textual hands an ESC in a sentence to the
+    terminal the fleet UI runs in as it is (sweep of #243). It goes as the house's one policy
+    for outside bytes has it (``core.injection.sanitise_text``), on one line."""
+    escape = "\x1b]0;owned\x07\x1b[2J"
+    error = parse_log_line(json.dumps({"lvl": "eror", "err": f"no tunnel {escape}x\n\u2028y"}))
+    assert error.error == "no tunnel ]0;owned[2Jx y"
+    assert parse_log_line(f"ERROR:  bad {escape}\n").plain == "bad ]0;owned[2J"
+    foreign = parse_log_line(json.dumps({**OURS, "name": f"x{escape}", "addr": f"{escape}:9"}))
+    assert (foreign.name, foreign.addr) == ("x]0;owned[2J", "]0;owned[2J:9")
+    assert parse_log_line(json.dumps({**OURS, "name": "\x1b"})).name is None
+    tunnel = NgrokTunnel(8750, command=[sys.executable, "-c", "import time; time.sleep(60)"])
+    assert tunnel.start_tunnel() is None
+    try:
+        tunnel.handle_line(json.dumps({**OURS, "name": f"x{escape}\nmore"}))
+        warning = tunnel.api_warning
+        assert warning is not None and "\x1b" not in warning and "\n" not in warning
+        assert "(x]0;owned[2J more → http://localhost:8750)" in warning
+        assert tunnel.public_url is None, "not this Remote's tunnel"
+    finally:
+        tunnel.stop_tunnel()
+    assert tunnel.api_warning is None, "said while ngrok is up, and its API with it"
+
+
+@pytest.mark.parametrize(
+    ("addr", "ours"),
+    [
+        ("http://localhost:8750", True),
+        ("localhost:8750", True),
+        ("8750", True),
+        ("http://127.0.0.1:8750", True),
+        ("http://[::1]:8750", True),
+        ("http://localhost:9999", False),
+        ("https://example.com:8750", False),
+        ("http://localhost", False),
+        ("not an address", False),
+    ],
+)
+def test_a_tunnel_forwards_to_this_port_only_on_this_machines_loopback(
+    addr: str, ours: bool
+) -> None:
+    assert ngrok_tunnel.forwards_to(addr, 8750) is ours
 
 
 def test_parse_log_line_turns_an_authtoken_error_into_the_authtoken_hint() -> None:
@@ -620,6 +686,268 @@ def test_every_ngrok_this_process_started_is_signalled_as_it_ends_not_only_a_rem
             os.kill(real, signal.SIGKILL)
         tunnel.stop_tunnel()
     assert tunnel not in ngrok_tunnel._LIVE
+
+
+# --- ngrok's agent API (sweep of #243) -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "foreign",
+    [
+        {
+            "name": "x",
+            "addr": "http://localhost:9999",
+            "url": "https://attacker-5678.ngrok-free.app",
+        },
+        {"name": "command_line", "addr": "http://localhost:9999", "url": "https://a-1.ngrok.app"},
+        {"name": "y", "addr": "http://localhost:8750", "url": "https://inspected.ngrok-free.app"},
+        {"name": "z", "addr": "https://example.com:443", "url": "https://example.com"},
+    ],
+    ids=["another port", "our name, another port", "our port, another name", "another host"],
+)
+def test_a_tunnel_ngroks_api_started_is_never_the_link_nor_where_a_push_leads(
+    tmp_path: Path, foreign: dict[str, str]
+) -> None:
+    """ngrok's agent API on 127.0.0.1:4040 asks no one for a password: any user of the machine
+    could start a tunnel in the panel's ngrok, which logged it as it logs its own, and the
+    panel made it the link, the QR and where every notification leads. A tap then carried
+    the token to that user's host, which asked for the passphrase (sweep of #243). Only the
+    tunnel ``ngrok http`` asked for, to this port, is Remote's; the status line says another
+    was started."""
+    server = fake_server()
+    command = fake_ngrok(tmp_path, OURS, 0.2, {**OURS, **foreign})
+    controller = RemoteController(
+        server=server, tunnel_factory=lambda port: NgrokTunnel(port, command=command)
+    )
+    controller.turn_on()
+    try:
+        assert controller._waiter is not None
+        controller._waiter.join(10)
+        link = build_public_url(OURS["url"], server.token)
+        assert controller.link_url() == link
+        tunnel = controller.tunnel
+        assert tunnel is not None
+        deadline = time.monotonic() + 10
+        while tunnel.foreign is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert controller.link_url() == link, "another tunnel became the link"
+        assert server.public_urls == [link], "and where a notification leads"
+        assert tunnel.public_url == OURS["url"]
+        assert "ngrok's local API started a tunnel that is not Remote's" in (
+            controller.status_line()
+        )
+    finally:
+        controller.turn_off()
+
+
+def write_ngrok_config(tmp_path: Path, text: str) -> tuple[dict[str, str], Path]:
+    """An ``XDG_CONFIG_HOME`` holding an ngrok config with ``text``, and that config's path."""
+    xdg = tmp_path / "xdg"
+    own = xdg / "ngrok" / "ngrok.yml"
+    own.parent.mkdir(parents=True)
+    own.write_text(text)
+    return {"XDG_CONFIG_HOME": str(xdg)}, own
+
+
+@pytest.mark.parametrize(
+    ("version", "line", "api"),
+    [
+        ("2", 'version: "2"', "web_addr: false"),
+        ("3", "version: 3", "agent:\n  web_addr: false"),
+        ("3", "version: '3'  # upgraded", "agent:\n  web_addr: false"),
+    ],
+)
+def test_ngroks_api_is_turned_off_in_a_config_merged_over_the_humans_own(
+    tmp_path: Path, version: str, line: str, api: str
+) -> None:
+    """``web_addr: false`` turns ngrok's agent API off, and a flag cannot: it goes in a config
+    of ours, of the version the human's own is, named after theirs (``--config`` replaces
+    where ngrok looks), so their authtoken and reserved domain still hold."""
+    environ, own = write_ngrok_config(tmp_path, f"{line}\nauthtoken: tok_123\n")
+    configs = api_off_configs(environ=environ)
+    assert configs is not None
+    first, ours = configs
+    assert first == own == ngrok_default_config(environ=environ)
+    assert ours == paths.aisquare_home() / f"remote-ngrok-v{version}.yml"
+    assert ours.read_text().endswith(f'version: "{version}"\n{api}\n')
+    assert api_off_configs(environ=environ) == configs, "written once, the same each start"
+    command = ngrok_command(8750, configs=configs)
+    assert command[-1] == f"--config={own},{ours}"
+
+
+def test_without_a_config_of_the_humans_ngrok_starts_as_it_always_did(tmp_path: Path) -> None:
+    """No config to keep and nothing to sign in with: ngrok says so itself, once. An authtoken
+    in the environment signs it in with ours alone; a version not known here, or a path
+    ``--config`` would split, keeps ngrok as it always was."""
+    missing = {"XDG_CONFIG_HOME": str(tmp_path / "nowhere")}
+    assert api_off_configs(environ=missing) is None
+    signed_in = api_off_configs(environ={**missing, "NGROK_AUTHTOKEN": "tok_123"})
+    assert signed_in == [paths.aisquare_home() / "remote-ngrok-v2.yml"]
+    environ, _own = write_ngrok_config(tmp_path, "authtoken: tok_123\n")
+    assert api_off_configs(environ=environ) is None, "a config with no version"
+    environ, _own = write_ngrok_config(tmp_path / "v1", 'version: "1"\n')
+    assert api_off_configs(environ=environ) is None
+    environ, _own = write_ngrok_config(tmp_path / "a,b", 'version: "2"\n')
+    assert api_off_configs(environ=environ) is None, "--config splits on the comma"
+
+
+@pytest.mark.parametrize(
+    ("platform", "environ", "where"),
+    [
+        ("linux", {}, ".config/ngrok/ngrok.yml"),
+        ("linux", {"XDG_CONFIG_HOME": "relative"}, ".config/ngrok/ngrok.yml"),
+        ("darwin", {"XDG_CONFIG_HOME": "/xdg"}, "Library/Application Support/ngrok/ngrok.yml"),
+        ("win32", {}, "AppData/Local/ngrok/ngrok.yml"),
+    ],
+)
+def test_ngroks_own_config_is_where_ngroks_docs_place_it(
+    tmp_path: Path, platform: str, environ: dict[str, str], where: str
+) -> None:
+    assert ngrok_default_config(platform=platform, environ=environ, home=tmp_path) == (
+        tmp_path / where
+    )
+    assert ngrok_default_config(
+        platform="linux", environ={"XDG_CONFIG_HOME": "/xdg"}, home=tmp_path
+    ) == Path("/xdg/ngrok/ngrok.yml")
+    assert (
+        ngrok_default_config(
+            platform="win32", environ={"LOCALAPPDATA": str(tmp_path / "local")}, home=tmp_path
+        )
+        == tmp_path / "local" / "ngrok" / "ngrok.yml"
+    )
+
+
+def test_a_config_of_ours_that_is_no_utf8_is_written_again_not_raised_into_the_ui(
+    tmp_path: Path,
+) -> None:
+    """Our config was read as strict UTF-8, and a byte that is none raised a UnicodeDecodeError,
+    no OSError, out of every start of ngrok: the watchdog's, on Textual's thread, ended the
+    fleet UI (sweep of #243, as ngrok's log was)."""
+    environ, own = write_ngrok_config(tmp_path, 'version: "2"\nauthtoken: tok_123\n')
+    paths.ensure_home()
+    ours = paths.aisquare_home() / "remote-ngrok-v2.yml"
+    ours.write_bytes(b"web_addr: \xff\n")
+    assert api_off_configs(environ=environ) == [own, ours]
+    assert ours.read_text(encoding="utf-8").endswith('version: "2"\nweb_addr: false\n')
+
+
+def test_an_ngrok_whose_api_off_config_cannot_be_had_starts_as_before(tmp_path: Path) -> None:
+    """Whatever finding the config raises is no reason to keep Remote without ngrok, nor to
+    raise into the fleet UI, where the watchdog starts ngrok on Textual's thread."""
+
+    def unhad() -> list[Path] | None:
+        raise UnicodeError("unreadable")
+
+    seen: list[list[str]] = []
+
+    def recording(command: list[str], **kwargs: Any) -> subprocess.Popen[str]:
+        seen.append(command)
+        return subprocess.Popen(command, **kwargs)
+
+    tunnel = NgrokTunnel(
+        8750,
+        binary=sys.executable,
+        which=lambda name: name,
+        popen=recording,
+        api_off=True,
+        configs=unhad,
+    )
+    assert tunnel.start_tunnel() is None
+    tunnel.stop_tunnel()
+    assert seen == [ngrok_command(8750, sys.executable, url=tunnel.static_host)], "as before"
+
+
+def fake_ngrok_binary(tmp_path: Path, *, refuses_our_config: bool) -> tuple[Path, Path]:
+    """An executable standing in for the ngrok binary, and the file where it records each
+    command line it was run with, one JSON list a line. It serves its API, and says so, only
+    when run without our config; ``refuses_our_config``: run with it, it exits as ngrok does
+    when it cannot read a config (a snap that may not read ours, say)."""
+    runs = tmp_path / "ngrok-runs.jsonl"
+    binary = tmp_path / "ngrok"
+    refuse = (
+        "    print('ERROR:  open /home/u/.aisquare/remote-ngrok-v2.yml: permission denied',"
+        " file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+        if refuses_our_config
+        else "    pass\n"
+    )
+    binary.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys, time\n"
+        f"with open({str(runs)!r}, 'a') as runs:\n"
+        "    runs.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "ours = any(arg.startswith('--config=') for arg in sys.argv)\n"
+        "if ours:\n"
+        f"{refuse}"
+        "else:\n"
+        f"    print({json.dumps(json.dumps(WEB_SERVICE))}, flush=True)\n"
+        f"print({json.dumps(json.dumps(OURS))}, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    binary.chmod(0o755)
+    return binary, runs
+
+
+def test_the_panels_ngrok_runs_with_its_agent_api_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The panel's ngrok served its agent API, which any user of the machine could use to stop
+    Remote's tunnel and start it again with the inspector on, reading the passphrase and every
+    cookie off it (sweep of #243). It runs with the API off, and says nothing of it."""
+    environ, own = write_ngrok_config(tmp_path, 'version: "2"\nauthtoken: tok_123\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", environ["XDG_CONFIG_HOME"])
+    binary, runs = fake_ngrok_binary(tmp_path, refuses_our_config=False)
+    tunnel = NgrokTunnel(8750, binary=str(binary), which=lambda name: name, api_off=True)
+    assert tunnel.start_tunnel() is None
+    try:
+        assert tunnel.wait_for_url(10) == OURS["url"]
+        ours = paths.aisquare_home() / "remote-ngrok-v2.yml"
+        (run,) = [json.loads(line) for line in runs.read_text().splitlines()]
+        assert run[-1] == f"--config={own},{ours}" and "--inspect=false" in run
+        assert tunnel.api_warning is None and tunnel.api_refused is None
+    finally:
+        tunnel.stop_tunnel()
+
+
+def test_an_ngrok_that_will_not_take_our_config_runs_as_before_and_the_panel_says_its_api_is_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Merging is ngrok's to judge, and a Remote with ngrok's API on is better than none: an
+    ngrok that ends before it announces, run with our config, is run again without it, and
+    the status line says the API is on, and what to set."""
+    environ, _own = write_ngrok_config(tmp_path, 'version: "2"\nauthtoken: tok_123\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", environ["XDG_CONFIG_HOME"])
+    binary, runs = fake_ngrok_binary(tmp_path, refuses_our_config=True)
+    server = fake_server()
+    controller = RemoteController(
+        server=server,
+        tunnel_factory=lambda port: NgrokTunnel(
+            port, binary=str(binary), which=lambda name: name, api_off=True
+        ),
+    )
+    controller.turn_on()
+    try:
+        assert controller._waiter is not None
+        controller._waiter.join(10)
+        assert controller.link_url() == build_public_url(OURS["url"], server.token)
+        first, second = [json.loads(line) for line in runs.read_text().splitlines()]
+        assert first[-1].startswith("--config=") and not any(
+            arg.startswith("--config=") for arg in second
+        )
+        tunnel = controller.tunnel
+        assert tunnel is not None
+        assert "permission denied" in (tunnel.api_refused or "")
+        assert controller.message is None
+        assert controller.status_line() == API_ON.format(addr="127.0.0.1:4040")
+    finally:
+        controller.turn_off()
+
+
+def test_the_panel_starts_its_ngrok_with_the_api_off() -> None:
+    default = inspect.signature(RemoteController).parameters["tunnel_factory"].default
+    assert default is remote_control.ngrok_without_its_api
+    tunnel = remote_control.ngrok_without_its_api(8750)
+    assert tunnel.api_off and tunnel.port == 8750
 
 
 def test_the_panel_says_why_ngrok_exited_before_it_announced_a_tunnel(tmp_path: Path) -> None:
@@ -1902,3 +2230,21 @@ def test_an_auto_off_past_a_week_is_a_usage_error_never_a_traceback(
     for raw in ("10080", "0"):
         assert runner.invoke(cli, ["remote", "serve", "--auto-off", raw]).exit_code == 0
     assert timers == [10080, 0]
+
+
+def test_serve_says_to_turn_a_hand_started_ngroks_local_api_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``serve`` gives the ngrok command to run beside it, with its inspector off; the agent
+    API on the same port, which starts and stops tunnels for any user of the machine, is
+    turned off only in ngrok's config, and the banner says so (sweep of #243)."""
+
+    def served(dist: object, port: int, auto_off: int, *args: object, **kwargs: Any) -> bool:
+        kwargs["ready"]()
+        return False
+
+    monkeypatch.setattr(remote_server, "run_foreground", served)
+    result = CliRunner().invoke(cli, ["remote", "serve", "--port", "9004"])
+    assert result.exit_code == 0, result.output
+    assert "ngrok http 9004 --inspect=false" in result.output
+    assert "web_addr: false in ngrok.yml" in result.output

@@ -381,14 +381,22 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   extend it an hour at a time, up to 8 hours ahead.
 - **Origin**: every write and every live connection must come from the page's own
   origin, so another site cannot use your cookie.
-- **Where a notification leads** is only the address the panel's ngrok announced,
-  or `--public-url` named: never what a request or ngrok's local API says, since
-  anyone on the machine can answer on that API's port before your ngrok does.
-- **ngrok's inspector is off.** Left on, ngrok keeps every request and answer on
-  its local web interface (`127.0.0.1:4040`), which asks for no password: the
-  passphrase you unlock with, every device's cookie, the token and the
-  transcripts, readable by any user of the machine. The panel starts ngrok with
-  `--inspect=false`; start yours with it too.
+- **Where a notification leads** is only the address the panel's ngrok announced
+  for the tunnel the panel asked for, to Remote's own port, or `--public-url`
+  named: never what a request or ngrok's local API says, since anyone on the
+  machine can answer on that API's port before your ngrok does, or start a tunnel
+  of their own through it.
+- **ngrok's inspector and local API are off.** Left on, ngrok keeps every request
+  and answer on its local web interface (`127.0.0.1:4040`), which asks for no
+  password: the passphrase you unlock with, every device's cookie, the token and
+  the transcripts, readable by any user of the machine. The agent API on that
+  port asks for none either, and starts, stops and inspects tunnels. The panel
+  starts ngrok with `--inspect=false` and, in a config it merges over your own
+  `ngrok.yml`, `web_addr: false`. Where it cannot (no `ngrok.yml` where ngrok keeps
+  it, or an ngrok that will not start with that config) ngrok starts as before, and
+  the panel says its API is on. Start yours with `--inspect=false`, and
+  on a machine others use, put `web_addr: false` in `ngrok.yml` (`ngrok config
+  edit`; under `agent:` in a version 3 file).
 - **Keys**: the pad sends key names from a fixed list (no `;`, nothing that
   tmux reads as a command); typed text travels as literal text, never as keys.
   Typed text may hold no ASCII control character other than a tab or a

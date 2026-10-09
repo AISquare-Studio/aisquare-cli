@@ -229,9 +229,15 @@ def serve_remote(
                 markup=False,
             )
         # The inspector off: it keeps every request (the passphrase, the cookies) on a local
-        # web interface that any user of this machine can read (ngrok_tunnel says more).
+        # web interface that any user of this machine can read, and the agent API there,
+        # which starts and stops tunnels for anyone, off too (ngrok_tunnel says more).
         console.print(
             f"expose with: ngrok http {port} --inspect=false   · Ctrl-C stops", markup=False
+        )
+        console.print(
+            "  on a machine others use, also web_addr: false in ngrok.yml (ngrok config edit):"
+            " its local API asks no one",
+            markup=False,
         )
 
     try:

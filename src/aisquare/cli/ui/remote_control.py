@@ -71,6 +71,15 @@ UNREACHABLE = "Remote is on, but phones cannot reach it"
 """How news of a tunnel that is not up begins (:attr:`RemoteController.on_news`)."""
 
 TunnelFactory = Callable[[int], NgrokTunnel]
+
+
+def ngrok_without_its_api(port: int) -> NgrokTunnel:
+    """The panel's ngrok, for ``port``: its agent API off, which any user of the machine could
+    otherwise use to start a tunnel of their own in it, or stop Remote's and start it again
+    with the inspector on (``ngrok_tunnel``)."""
+    return NgrokTunnel(port, api_off=True)
+
+
 NewsListener = Callable[[str, bool], None]
 """Told a sentence, and whether it is trouble (``False``: good news), on any thread."""
 
@@ -149,7 +158,7 @@ class RemoteController:
         self,
         *,
         server: ModuleType = remote_server,
-        tunnel_factory: TunnelFactory = NgrokTunnel,
+        tunnel_factory: TunnelFactory = ngrok_without_its_api,
         dist_dir: Path | None = None,
         port: int | None = None,
         now: Callable[[], datetime] = _utc_now,
@@ -602,10 +611,13 @@ class RemoteController:
     # --- what the modal paints ---------------------------------------------------------------
 
     def status_line(self) -> str:
-        """The status line: what Remote is doing or why it is not, then a write of
-        ``remote.json`` that did not land (:attr:`save_problem`) and a switch ``state.json``
-        refused, each on a line of its own."""
-        lines = (self.message, self.save_problem, *self._refused_switches.values())
+        """The status line: what Remote is doing or why it is not, then what ngrok's agent API
+        allows while it is on (:attr:`NgrokTunnel.api_warning`), a write of ``remote.json``
+        that did not land (:attr:`save_problem`) and a switch ``state.json`` refused, each on
+        a line of its own."""
+        tunnel = self.tunnel
+        api = tunnel.api_warning if tunnel is not None else None
+        lines = (self.message, api, self.save_problem, *self._refused_switches.values())
         return "\n".join(line for line in lines if line)
 
     def link_url(self) -> str | None:

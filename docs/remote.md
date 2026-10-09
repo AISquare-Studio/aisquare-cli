@@ -567,8 +567,9 @@ Start ngrok without it (the R panel never uses it).
 
 **`serve`, or the R panel, says another Remote is on.** One `~/.aisquare` serves
 one Remote: the fleet UI's panel, or a `serve` in another shell, has it. The panel
-says so whenever it is open, its state reading on in another process. Turn that
-one off, or use it. Two would share one link, one passphrase, one auto-off and
+says so whenever it is open, its state reading on in another process, with that
+Remote's auto-off; its own Auto-off picker is off meanwhile, since that timer is
+set where the Remote runs. Turn that one off, or use it. Two would share one link, one passphrase, one auto-off and
 one list of phones, and either going off would sign the other's phones out. One
 turned off while a phone's restart or switch was still running keeps the home
 until that is done, since its notifications go on until then; a restart or

@@ -1298,7 +1298,7 @@ def test_the_panel_says_remote_is_on_while_another_process_serves_this_home(
                 if shown(state) != "off":
                     break
                 await asyncio.sleep(0.02)
-            assert shown(state) == remote_view.ELSEWHERE
+            assert shown(state) == f"{remote_view.ELSEWHERE}  · no auto-off"
             assert shown(modal.query_one("#remote-link", Static)) == remote_view.ELSEWHERE_LINK
             assert shown(modal.query_one("#remote-password", Static)) == passphrase
             modal.query_one("#remote-on", Switch).toggle()
@@ -1317,6 +1317,49 @@ def test_the_panel_says_remote_is_on_while_another_process_serves_this_home(
         assert shown(state) == "off"
         assert shown(status) == "", "the home is free: the start may be tried again"
         assert shown(modal.query_one("#remote-link", Static)) == "turn Remote on for a link"
+
+    drive(go, tunnel=missing_ngrok)
+
+
+@pytest.mark.parametrize("minutes", [45, None], ids=["a timer", "never"])
+def test_while_another_process_serves_the_panel_shows_its_auto_off_and_picks_none(
+    monkeypatch: pytest.MonkeyPatch, minutes: int | None
+) -> None:
+    """The Auto-off picker beside "on in another process" showed this UI's saved 60 min, and a
+    pick of it was taken without a word while the serving Remote kept its own deadline, or
+    none at all with ``serve --auto-off 0`` (sweep 3 of #243). The state says that Remote's
+    timer, and the picker is off until this UI's Remote is the one to set."""
+    monkeypatch.setattr(remote_control, "ELSEWHERE_EVERY_SECONDS", 0.0)
+    monkeypatch.setattr(remote_view, "LOCAL_ZONE", UTC)
+    paths.ensure_home()
+    serving = paths.remote_state_path().with_name(remote_server.SERVE_LOCK_NAME)
+    deadline = None if minutes is None else datetime(2026, 10, 9, 21, 58, tzinfo=UTC)
+    said = "no auto-off" if deadline is None else "auto-off at 21:58"
+
+    async def go(pilot: Pilot[None]) -> None:
+        remote_server.set_auto_off(deadline)  # the other process's serve set it
+        fd = os.open(serving, os.O_RDWR | os.O_CREAT, 0o600)
+        lock_exclusive(fd)
+        try:
+            modal = await open_panel(pilot)
+            await written(pilot)
+            state = modal.query_one("#remote-state", Static)
+            for _ in range(100):
+                modal.repaint()
+                if shown(state) != "off":
+                    break
+                await asyncio.sleep(0.02)
+            assert shown(state) == f"{remote_view.ELSEWHERE}  · {said}"
+            assert modal.query_one("#remote-auto-off", Select).disabled
+        finally:
+            unlock(fd)
+            os.close(fd)
+        for _ in range(100):
+            modal.repaint()
+            if shown(state) == "off":
+                break
+            await asyncio.sleep(0.02)
+        assert not modal.query_one("#remote-auto-off", Select).disabled
 
     drive(go, tunnel=missing_ngrok)
 

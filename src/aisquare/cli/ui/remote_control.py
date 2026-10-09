@@ -994,6 +994,17 @@ class RemoteController:
         with self._elsewhere_lock:
             self._elsewhere_looking = False
 
+    def served_auto_off(self) -> tuple[bool, datetime | None]:
+        """Whether ``remote.json`` could be read, and when the Remote serving this home turns
+        itself off as it says now (``None``: Never): for the panel while another process
+        serves it (:attr:`elsewhere`), whose timer is that process's own, not this UI's."""
+        if self._first_read() is not None:
+            return False, None
+        try:
+            return True, self._server.remote_auto_off_at()
+        except Exception:  # unreadable for a moment: the panel says nothing of a timer
+            return False, None
+
     def link_url(self) -> str | None:
         """The public link when ngrok is up, else the local one — ``None`` while Remote is off."""
         if self.info is None:

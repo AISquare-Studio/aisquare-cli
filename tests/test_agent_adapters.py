@@ -959,6 +959,55 @@ def test_a_claude_md_connect_refuses_is_named_and_never_offered_connect(
     assert refusal is None and fix_commands([row]) != [], "control: a UTF-8 CLAUDE.md is offered"
 
 
+@_NEEDS_DENIED_READS
+@pytest.mark.parametrize("where", ["a recorded profile", "the ambient dir"])
+def test_a_claude_md_that_cannot_be_stated_is_a_named_refusal_not_a_traceback(
+    runner: CliRunner, claude_home: Path, where: str
+) -> None:
+    """A CLAUDE.md that is a link into a directory this user cannot search: Path.exists
+    raises PermissionError there on 3.11 to 3.13, and `doctor --json`, `agents
+    list/status/scan`, connect and init ended in a traceback with nothing on stdout
+    (review of #257). Such a file is there to read, and the read names it."""
+    if os.name == "nt":
+        pytest.skip("a link into a directory denied to this user is a POSIX shape")
+    _connect(runner)
+    target = claude_home
+    if where == "a recorded profile":
+        target = claude_home.parent / ".claude-c2"
+        target.mkdir()
+        _connect(runner, target)
+    (target / "settings.json").write_text("{}", encoding="utf-8")  # hooks gone: asked
+    locked = claude_home.parent / "locked"
+    locked.mkdir()
+    (locked / "CLAUDE.md").write_text("# Prefs\n", encoding="utf-8")
+    claude_md = target / "CLAUDE.md"
+    claude_md.symlink_to(locked / "CLAUDE.md")
+    locked.chmod(0)
+    try:
+        doctor = runner.invoke(app, ["--json", "doctor"])
+        listed = runner.invoke(app, ["--json", "agents", "list"])
+        argv = ["--json", "agents", "connect", "claude-code", "--config-dir", str(target)]
+        clicked = runner.invoke(app, argv)
+        welcome = first_run.probe_claude(sign_in=False, which=lambda _name: None)
+    finally:
+        locked.chmod(0o755)
+    readable = agents_service.connect_refusal("claude-code", target)
+
+    reason = f"can't read {claude_md}: Permission denied"
+    assert doctor.exception is None or isinstance(doctor.exception, SystemExit), repr(
+        doctor.exception
+    )
+    row = _row_named(doctor.stdout, "claude-code")
+    assert f"hooks cannot be written in {target}: {reason}" in str(row["detail"]), row
+    assert listed.exit_code == 0, listed.output
+    sites = {site["config_dir"]: site for site in json.loads(listed.stdout)[0]["sites"]}
+    assert sites[str(target)]["refused"] == reason, sites
+    assert clicked.exit_code == 1 and json.loads(clicked.stdout)["detail"] == reason, clicked
+    if where == "the ambient dir":
+        assert (welcome.connected, welcome.refused) == (False, reason), welcome
+    assert readable is None, "control: unlocked, the same CLAUDE.md is read"
+
+
 def _short_of_the_ceiling(settings_path: Path) -> None:
     """No `timeout` on the two context hooks, as in a file declared from the docs' table."""
     settings = json.loads(settings_path.read_text(encoding="utf-8"))

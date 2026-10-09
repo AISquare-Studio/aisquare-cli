@@ -958,6 +958,32 @@ def set_connected(name: str, connected: bool, config_dir: Path | None = None) ->
     )
 
 
+#: What ``Path.exists`` reads as "nothing there" (pathlib's ignored errnos and Windows
+#: errors): no such file, not a directory, a bad descriptor, a symlink loop.
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+_ABSENT_WINERRORS = frozenset({21, 123, 1921})
+
+
+def _present(path: Path) -> bool:
+    """Whether there is something at ``path`` for a reader to open; never raises.
+
+    Absent only where ``Path.exists`` reads absence. Every other error from stat (a link
+    into a directory this user cannot search, EIO, ESTALE) counts as present, so the
+    reader opens it and names it: ``Path.exists`` raised those on 3.11 to 3.13, which cost
+    the doctor and `agents list` their whole output for one CLAUDE.md, and answers False
+    on 3.14, where connect skipped a CLAUDE.md it never read (review of #257).
+    """
+    try:
+        os.stat(path)
+    except OSError as exc:
+        return exc.errno not in _ABSENT_ERRNOS and (
+            getattr(exc, "winerror", None) not in _ABSENT_WINERRORS
+        )
+    except ValueError:  # an embedded NUL: no such file can exist
+        return False
+    return True
+
+
 def detected(spec: AgentSpec) -> bool:
     """Whether ``spec``'s agent is on this machine: its home or one of its context files exists.
 
@@ -965,7 +991,7 @@ def detected(spec: AgentSpec) -> bool:
     question, so the doctor's rows for agents aisquare cannot connect ask here
     rather than through :func:`detect`.
     """
-    return spec.home.exists() or any(path.exists() for path in spec.context_files)
+    return _present(spec.home) or any(_present(path) for path in spec.context_files)
 
 
 def claude_on_path() -> str | None:
@@ -980,7 +1006,7 @@ def claude_on_path() -> str | None:
 
 
 def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False) -> AgentInfo:
-    existing = [path for path in spec.context_files if path.exists()]
+    existing = [path for path in spec.context_files if _present(path)]
     # A record of an agent aisquare has no hooks for is no connection: 0.7.0's `agents
     # connect codex` wrote one and installed nothing, and it read as connected beside the
     # doctor's "can't connect it yet" (review of #257). `agents disconnect` clears it.
@@ -1039,9 +1065,9 @@ def detect(name: str, config_dir: Path | None = None) -> AgentInfo | None:
 
 
 def context_files(name: str, config_dir: Path | None = None) -> list[Path]:
-    """Existing context files for an agent (its content, for ingestion)."""
+    """An agent's context files that are there to read (:func:`_present`), for ingestion."""
     spec = _spec(name, config_dir)
-    return [path for path in spec.context_files if path.exists()] if spec else []
+    return [path for path in spec.context_files if _present(path)] if spec else []
 
 
 # --- which aisquare do the hooks actually RUN? (#84) -------------------------------------

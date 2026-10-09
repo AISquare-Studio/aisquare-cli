@@ -238,8 +238,8 @@ def _read_before_writing(name: str, config_dir: Path | None) -> list[str]:
 
 def refused_file(name: str, config_dir: Path | None = None) -> tuple[Path, str] | None:
     """The file `agents connect` would refuse in ``config_dir``, and why in its own words, or
-    ``None`` when it would write the hooks. Reads only, and returns the refusal rather than
-    raising it.
+    ``None`` when it would write the hooks. Reads only, and never raises: a file it cannot
+    even stat is a refusal that names it.
 
     Every check connect makes before it writes (:func:`_read_before_writing`): a
     settings.json that is not a JSON object, or that this user may not write, and a
@@ -256,13 +256,19 @@ def refused_file(name: str, config_dir: Path | None = None) -> tuple[Path, str] 
     if spec is None or not spec.connectable:
         return None
     try:
-        _read_before_writing(name, config_dir)
+        # In connect's order, so the reason is connect's whichever check refuses first.
         if config_dir is not None and _first_run_dir(name, config_dir) is None:
             _check_found(name, config_dir)
+        _read_before_writing(name, config_dir)
     except AgentFileUnreadableError as exc:
         return (exc.path or spec.settings_path or spec.home), str(exc)
     except AgentNotInstalledError as exc:
         return spec.home, str(exc)
+    except OSError as exc:
+        # Fails open into a named refusal: the doctor and `agents list` ask this for every
+        # directory, and a traceback here cost them their whole output (review of #257).
+        where = Path(os.fsdecode(exc.filename)) if exc.filename else spec.home
+        return where, f"can't read {where}: {exc.strerror or exc}"
     return None
 
 

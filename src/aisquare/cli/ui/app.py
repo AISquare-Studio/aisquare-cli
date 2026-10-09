@@ -59,7 +59,7 @@ from aisquare.cli.ui.groups import (
     TogglePin,
     UndoLayout,
 )
-from aisquare.cli.ui.remote_control import SWITCHES, RemoteController
+from aisquare.cli.ui.remote_control import SWITCHES, RemoteController, ngrok_ends_with
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AddProject,
@@ -176,12 +176,14 @@ class FleetSnapshot:
 
 class RemoteNews(Message):
     """What the Remote controller says the human should hear (``RemoteController.on_news``),
-    posted from whichever thread learned it: ``post_message`` is safe from any thread."""
+    posted from whichever thread learned it: ``post_message`` is safe from any thread.
+    ``done``: what a control's write did (``RemoteController.on_done``), said in any case."""
 
-    def __init__(self, text: str, trouble: bool) -> None:
+    def __init__(self, text: str, trouble: bool, *, done: bool = False) -> None:
         super().__init__()
         self.text = text
         self.trouble = trouble
+        self.done = done
 
 
 class HelpScreen(ModalScreen[None]):
@@ -379,6 +381,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """Remote's two switches' saves, as the theme's (``autosave.py``)."""
         self.remote.save_switch = self._save_remote_switch
         self.remote.on_news = self._post_remote_news
+        self.remote.on_done = self._post_remote_done
+        # A start saves its switch here once its deadline is written on the controller's
+        # writer thread, in order with a turn-off's own save (post_message is thread-safe).
+        self.remote.call_back = self.call_later
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
         self._accounts = accounts
@@ -536,12 +542,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def _post_remote_news(self, text: str, trouble: bool) -> None:
         self.post_message(RemoteNews(text, trouble))
 
+    def _post_remote_done(self, text: str, trouble: bool) -> None:
+        self.post_message(RemoteNews(text, trouble, done=True))
+
     def on_remote_news(self, news: RemoteNews) -> None:
         """Toast what Remote says, unless the R panel is open, whose status line says it:
         a Remote that did not come back at start, a tunnel that did not come up, auto-off.
         Said only there, the human found out from the phone, away from the desk (sweep of
-        #243)."""
-        if isinstance(self.screen, RemotePanel):
+        #243). What a control's write did (a new passphrase, a revoke) is said in any case:
+        no line of the panel says it."""
+        if not news.done and isinstance(self.screen, RemotePanel):
             return
         severity: SeverityLevel = "warning" if news.trouble else "information"
         self.notify(news.text, title="Remote", severity=severity, timeout=10, markup=False)
@@ -1182,22 +1192,24 @@ def run_ui(**options: Any) -> None:
     running is what holds a stop up (uvicorn waits for the request), and raised out of
     here the Ctrl-C was Click's "Aborted!", after which Python's exit waited for the
     write all the same, silently. What the quit could not save is said before either
-    wait, so a quit at once keeps it.
+    wait, so a quit at once keeps it. A hangup or a SIGTERM ends the process as ever, its
+    ngrok first (``ngrok_ends_with``).
     """
     from aisquare.services import remote_server
 
     app = FleetApp(**options)
-    app.run()
-    for line in app.unsaved:
-        stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
-    try:
-        if not app.remote.wait_until_off(REMOTE_QUIT_QUIET_SECONDS):
-            stderr_console().print("stopping Remote (its server and ngrok)…", markup=False)
-            app.remote.wait_until_off()
-    except KeyboardInterrupt:
-        try:  # the thread that would stop ngrok ends with the process
-            app.remote.stop_tunnel_now()
-        finally:
-            remote_server._remote_quit_now()
-    # A phone's write still running would hold the exit as long as it runs: said, not silent.
-    remote_server.remote_wait_for_writes()
+    with ngrok_ends_with():
+        app.run()
+        for line in app.unsaved:
+            stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
+        try:
+            if not app.remote.wait_until_off(REMOTE_QUIT_QUIET_SECONDS):
+                stderr_console().print("stopping Remote (its server and ngrok)…", markup=False)
+                app.remote.wait_until_off()
+        except KeyboardInterrupt:
+            try:  # the thread that would stop ngrok ends with the process
+                app.remote.stop_tunnel_now()
+            finally:
+                remote_server._remote_quit_now()
+        # A phone's write still running would hold the exit as long as it runs: said, not silent.
+        remote_server.remote_wait_for_writes()

@@ -11,15 +11,19 @@ Every assertion reads what a widget SHOWS.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
+import signal
 import socket
+import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, TypeVar
 
 import pytest
@@ -164,6 +168,27 @@ async def open_panel(pilot: Pilot[None]) -> RemotePanel:
     return panel(pilot)
 
 
+async def written(pilot: Pilot[None]) -> None:
+    """Let the writes of ``remote.json`` the panel asked for land on the controller's writer
+    thread, what they hand back to Textual's thread run, and the panel paint them."""
+    app = pilot.app
+    assert isinstance(app, FleetApp)
+    await pilot.pause()  # the press's handler asks for its writes as it runs
+    for _ in range(500):
+        if app.remote.writes_done(0):
+            break
+        await asyncio.sleep(0.01)
+    assert app.remote.writes_done(0), "a write of remote.json never landed"
+    # What a write handed Textual's thread (a toast, a saved switch) went to the loop with
+    # call_soon_threadsafe before the write was done: one turn of the loop puts it in the
+    # app's queue ahead of the markers the pause queues, so the pause waits for it.
+    await asyncio.sleep(0)
+    await pilot.pause()
+    if isinstance(app.screen, RemotePanel):
+        app.screen.repaint()
+    await pilot.pause()
+
+
 def devices() -> list[dict[str, str]]:
     listed = remote_server.remote_server_status()["devices"]
     assert isinstance(listed, list)
@@ -229,7 +254,7 @@ def test_with_ngrok_absent_the_modal_shows_the_install_hint_and_the_local_link()
         assert isinstance(app, FleetApp)
         modal = await open_panel(pilot)
         modal.query_one("#remote-on", Switch).toggle()
-        await pilot.pause()
+        await written(pilot)
         assert app.remote.running  # locally on, no tunnel: PLAN §6 fallback, no crash
         status = shown(modal.query_one("#remote-status", Static))
         assert status == INSTALL_HINT
@@ -237,10 +262,48 @@ def test_with_ngrok_absent_the_modal_shows_the_install_hint_and_the_local_link()
         link = shown(modal.query_one("#remote-link", Static))
         info = app.remote.info
         assert info is not None
-        assert link == info.url_local == f"http://127.0.0.1:{app.remote._port}/r/{info.token}/"
+        local = f"http://127.0.0.1:{app.remote._port}/r/{info.token}/"
+        assert link == f"{info.url_local}\n{remote_view.LOCAL_ONLY}" and info.url_local == local
         assert "local only" in shown(modal.query_one("#remote-state", Static))
+        assert shown(modal.query_one("#remote-qr", Static)) == "", "no QR a phone cannot open"
 
     drive(go, tunnel=missing_ngrok)
+
+
+def test_no_qr_is_drawn_until_ngroks_link_is_up_nor_while_ngrok_restarts() -> None:
+    """With no tunnel up the panel drew a scannable QR of the 127.0.0.1 link: a phone that
+    scanned it got "cannot connect", leading to its own loopback, a first-time user without
+    ngrok most of all (sweep of #243). The QR is ngrok's link's only; the local link says
+    it is this machine's only."""
+    tunnels: list[FakeTunnel] = []
+
+    def late(port: int) -> NgrokTunnel:
+        tunnels.append(FakeTunnel(port, url=None, failure=None))
+        return tunnels[-1]
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await written(pilot)  # ngrok starts once the start's deadline is written
+        info = app.remote.info
+        assert info is not None
+        qr, link = modal.query_one("#remote-qr", Static), modal.query_one("#remote-link", Static)
+        assert shown(qr) == "", "starting ngrok: no QR of the local link"
+        assert shown(link).startswith(f"{info.url_local}\n")
+        tunnels[0].handle_line(json.dumps({"lvl": "info", "msg": "started tunnel", "url": PUBLIC}))
+        modal.repaint()
+        public = build_public_url(PUBLIC, info.token)
+        assert shown(qr) == qr_text(public) and shown(link) == public
+
+        app.remote.revive_tunnel_if_dead()  # a FakeTunnel never runs: it died
+        modal.repaint()
+        assert len(tunnels) == 2 and app.remote.public_url is None
+        assert shown(qr) == "", "restarting ngrok: no QR of the local link"
+        assert shown(link).startswith(f"{info.url_local}\n")
+
+    drive(go, tunnel=late)
 
 
 def test_a_link_ngrok_announces_after_the_wait_replaces_the_local_one_in_the_panel() -> None:
@@ -258,7 +321,7 @@ def test_a_link_ngrok_announces_after_the_wait_replaces_the_local_one_in_the_pan
         assert isinstance(app, FleetApp)
         modal = await open_panel(pilot)
         modal.query_one("#remote-on", Switch).toggle()
-        await pilot.pause()
+        await written(pilot)
         assert app.remote._waiter is not None
         app.remote._waiter.join(5)
         modal.repaint()
@@ -266,7 +329,8 @@ def test_a_link_ngrok_announces_after_the_wait_replaces_the_local_one_in_the_pan
         assert info is not None
         status = modal.query_one("#remote-status", Static)
         assert shown(status) == "ngrok did not announce a tunnel in time"
-        assert shown(modal.query_one("#remote-link", Static)) == info.url_local
+        assert shown(modal.query_one("#remote-link", Static)).startswith(f"{info.url_local}\n")
+        assert shown(modal.query_one("#remote-qr", Static)) == ""
 
         tunnels[0].handle_line(json.dumps({"lvl": "info", "msg": "started tunnel", "url": PUBLIC}))
         modal.repaint()
@@ -367,13 +431,13 @@ def counted(controller: RemoteController) -> list[str]:
         calls.append("on")
         turn_on(**kwargs)
 
-    def off(**kwargs: Any) -> None:
+    def off(**kwargs: Any) -> bool:
         calls.append("off")
-        turn_off(**kwargs)
+        return turn_off(**kwargs)
 
-    def write(enabled: bool) -> None:
+    def write(enabled: bool, **kwargs: Any) -> None:
         calls.append(f"write {enabled}")
-        set_allow_write(enabled)
+        set_allow_write(enabled, **kwargs)
 
     controller.turn_on = on  # type: ignore[method-assign]
     controller.turn_off = off  # type: ignore[method-assign]
@@ -476,7 +540,7 @@ def test_never_is_selectable_stops_the_timer_and_says_so() -> None:
         assert "auto-off at" in shown(modal.query_one("#remote-state", Static))
 
         modal.query_one("#remote-auto-off", Select).value = None
-        await pilot.pause()
+        await written(pilot)
 
         assert app.remote.state.auto_off_minutes is None
         assert app.remote.auto_off_at is None
@@ -608,7 +672,7 @@ def test_the_modal_state_survives_a_restart_of_the_tui() -> None:
         # The persisted token is the same one, so the link the phone kept still works.
         assert remote_server.runtime().token in shown(modal.query_one("#remote-link", Static))
         modal.query_one("#remote-allow-write", Switch).toggle()
-        await pilot.pause()
+        await written(pilot)
         assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
 
     drive(second, tunnel=missing_ngrok)
@@ -649,7 +713,7 @@ def test_devices_list_shows_devices_from_remote_json_and_revoke_drops_one() -> N
         table = modal.query_one("#remote-devices")
         assert table.row_count == 2  # type: ignore[attr-defined]
         modal.query_one("#remote-revoke").press()  # type: ignore[attr-defined]
-        await pilot.pause()
+        await written(pilot)
         left = devices()
         assert len(left) == 1 and left[0]["ua"] == "Firefox"  # the cursor was on the first row
         assert table.row_count == 1  # type: ignore[attr-defined]
@@ -746,7 +810,8 @@ def test_a_repaint_reads_the_status_once_and_draws_the_qr_only_for_a_new_link(
 ) -> None:
     """Every one-second repaint encoded the QR anew, about 4 ms of segno on Textual's own
     thread, and read ``remote_server_status()`` twice, each read three digests of
-    ``remote.json`` (r2 review of #243). The QR is drawn again when the link changes."""
+    ``remote.json`` (r2 review of #243). The QR is drawn again when the link changes, and
+    only for ngrok's link."""
     drawn: list[str] = []
     reads: list[None] = []
     status = remote_server.remote_server_status
@@ -769,16 +834,18 @@ def test_a_repaint_reads_the_status_once_and_draws_the_qr_only_for_a_new_link(
         modal.query_one("#remote-on", Switch).toggle()
         await pilot.pause()
         info = app.remote.info
-        assert info is not None and drawn[-1:] == [info.url_local]
-        qrs, statuses = len(drawn), len(reads)
+        assert info is not None and drawn == [], "no QR of the local link"
+        statuses = len(reads)
         modal.repaint()
         modal.repaint()
-        assert len(drawn) == qrs, "the same link: no QR drawn again"
         assert len(reads) == statuses + 2, "one status read a repaint"
 
         app.remote.public_url = build_public_url(PUBLIC, info.token)  # ngrok announced it
         modal.repaint()
-        assert drawn[qrs:] == [app.remote.public_url]
+        assert drawn == [app.remote.public_url]
+        modal.repaint()
+        modal.repaint()
+        assert drawn == [app.remote.public_url], "the same link: no QR drawn again"
         await pilot.pause()
         assert shown(modal.query_one("#remote-qr", Static)) == qr_text(app.remote.public_url)
         assert shown(modal.query_one("#remote-link", Static)) == app.remote.public_url
@@ -805,6 +872,10 @@ def test_the_qr_is_light_on_dark_in_every_theme(theme: str) -> None:
         app.theme = theme
         modal = await open_panel(pilot)
         modal.query_one("#remote-on", Switch).toggle()
+        await written(pilot)
+        assert app.remote._waiter is not None
+        app.remote._waiter.join(5)  # the QR is ngrok's link's: it comes with it
+        modal.repaint()
         await pilot.pause()
         qr = modal.query_one("#remote-qr", Static)
         region = qr.region
@@ -824,7 +895,7 @@ def test_the_qr_is_light_on_dark_in_every_theme(theme: str) -> None:
                 assert brightness(style.color) > brightness(style.bgcolor), (theme, style)
         assert glyphs > 10
 
-    drive(go, tunnel=missing_ngrok, size=(160, 100))
+    drive(go, tunnel=fake_tunnel_factory(url=PUBLIC), size=(160, 100))
 
 
 def test_qr_text_is_compact_half_block_art_of_the_url() -> None:
@@ -934,6 +1005,7 @@ def test_a_remote_json_that_will_not_write_leaves_the_ui_up_at_start_and_remote_
     async def go(pilot: Pilot[None]) -> None:
         app = pilot.app
         assert isinstance(app, FleetApp)
+        await written(pilot)
         assert not app.remote.running
         assert app.remote.wait_until_off(10), "the server it started stops on its own thread"
         assert remote_server.remote_server_status()["running"] is False
@@ -957,7 +1029,7 @@ def test_a_remote_json_that_will_not_write_is_a_sentence_for_each_control_of_the
         assert isinstance(app, FleetApp)
         modal = await open_panel(pilot)
         modal.query_one("#remote-on", Switch).toggle()
-        await pilot.pause()
+        await written(pilot)  # the start's deadline lands before remote.json refuses
         runtime = remote_server.runtime()
         assert runtime.unlock_device(runtime.password, "iPhone Safari") is not None
         modal.repaint()
@@ -968,17 +1040,17 @@ def test_a_remote_json_that_will_not_write_is_a_sentence_for_each_control_of_the
             return shown(modal.query_one("#remote-status", Static))
 
         modal.query_one("#remote-auto-off", Select).value = 30
-        await pilot.pause()
+        await written(pilot)
         assert "\nauto-off could not be saved to remote.json — [Errno 13]" in status()
         modal.query_one("#remote-revoke", Button).press()
-        await pilot.pause()
+        await written(pilot)
         assert "could not be revoked in remote.json" in status()
         assert not any(text.startswith("Revoked") for text in toasts(app)), "the revoke failed"
         modal.query_one("#remote-regen", Button).press()
-        await pilot.pause()
+        await written(pilot)
         assert "\nthe new password could not be saved to remote.json" in status()
         modal.query_one("#remote-allow-write", Switch).toggle()
-        await pilot.pause()
+        await written(pilot)
         assert "\nwrite actions could not be saved to remote.json — [Errno 13]" in status()
         assert modal.query_one("#remote-allow-write", Switch).value is True
         assert remote_server.remote_allow_write() is True, "the running server took it"
@@ -993,12 +1065,35 @@ def test_a_remote_json_that_will_not_write_is_a_sentence_for_each_control_of_the
         assert "devices could not be revoked" in status()
 
         modal.query_one("#remote-on", Switch).toggle()  # and on does not stay on without it
-        await pilot.pause()
+        await written(pilot)
         assert app.screen is modal and not app.remote.running
         assert modal.query_one("#remote-on", Switch).value is False
         assert status().startswith("Remote could not start — remote.json could not be written")
         assert app.remote.wait_until_off(10)
         assert remote_server.remote_server_status()["running"] is False
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def test_a_remote_json_that_cannot_be_read_is_a_sentence_in_the_panel_not_a_silence() -> None:
+    """A ``remote.json`` that is no JSON object (a hand edit's typo) showed as writes off and
+    no devices, and the panel said why only once Remote was switched on: a cause dropped, as
+    ngrok's own plain-text errors were (sweep of #243). The status line says it as the panel
+    paints, until the file can be read."""
+    paths.ensure_home()
+    paths.remote_state_path().write_text("[]")
+
+    async def go(pilot: Pilot[None]) -> None:
+        modal = await open_panel(pilot)
+        status = modal.query_one("#remote-status", Static)
+        said = shown(status)
+        assert said.startswith("remote.json could not be read — ")
+        assert "is not a JSON object" in said
+        assert modal.query_one("#remote-allow-write", Switch).value is False
+        paths.remote_state_path().unlink()  # moved aside: a new link and passphrase
+        modal.repaint()
+        await pilot.pause()
+        assert shown(status) == ""
 
     drive(go, tunnel=missing_ngrok)
 
@@ -1010,16 +1105,16 @@ def test_a_write_that_lands_takes_away_the_sentence_that_one_did_not_in_the_pane
     async def go(pilot: Pilot[None]) -> None:
         modal = await open_panel(pilot)
         modal.query_one("#remote-on", Switch).toggle()
-        await pilot.pause()
+        await written(pilot)  # the start's deadline lands before remote.json refuses
         status = modal.query_one("#remote-status", Static)
         writes = modal.query_one("#remote-allow-write", Switch)
         with pytest.MonkeyPatch.context() as home:
             refuse_remote_json(home)
             writes.toggle()
-            await pilot.pause()
+            await written(pilot)
             assert shown(status).startswith(f"{INSTALL_HINT}\nwrite actions could not be saved")
         writes.toggle()  # off again, and this write lands
-        await pilot.pause()
+        await written(pilot)
         assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
         modal.repaint()
         assert shown(status) == INSTALL_HINT, "what Remote is doing stays"
@@ -1033,7 +1128,7 @@ def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended() -> Non
         assert isinstance(app, FleetApp)
         modal = await open_panel(pilot)
         modal.query_one("#remote-on", Switch).toggle()
-        await pilot.pause()
+        await written(pilot)
         assert shown(modal.query_one("#remote-unlocks", Static)) == ""
         runtime = remote_server.runtime()
         budget = UnlockBudget(runtime)
@@ -1090,6 +1185,107 @@ def test_the_switches_save_off_textuals_thread_and_land_once_the_lock_is_free(
 
     drive(go, tunnel=missing_ngrok)
     assert read_state() == {"board_theme": "nord", "remote_enabled": True, "auto_off_minutes": 120}
+
+
+def test_the_panels_controls_never_wait_for_remote_jsons_lock_on_textuals_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every control of the panel wrote ``remote.json`` on Textual's thread, waiting for its
+    lock: with another process holding it (a ``^Z``'d ``asq remote revoke``, a lock on NFS)
+    each press froze the fleet UI for the lock's two seconds, nearly four behind the
+    server's own flush (sweep of #243). The presses return at once, the status line says a
+    write waits, and every write lands once the lock is let go."""
+    monkeypatch.setattr(remote_server, "STATE_LOCK_WAIT_SECONDS", 10.0)  # a holder that waits
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        runtime = remote_server.runtime()
+        assert runtime.unlock_device(runtime.password, "iPhone Safari") is not None
+        passphrase = runtime.password
+        fd = os.open(paths.remote_state_path().with_name("remote.json.lock"), os.O_RDWR)
+        lock_exclusive(fd)
+        try:
+            presses: list[Callable[[], object]] = [
+                lambda: modal.query_one("#remote-on", Switch).toggle(),
+                lambda: modal.query_one("#remote-allow-write", Switch).toggle(),
+                lambda: setattr(modal.query_one("#remote-auto-off", Select), "value", 120),
+                lambda: modal.query_one("#remote-regen", Button).press(),
+                lambda: modal.query_one("#remote-revoke", Button).press(),
+            ]
+            for press in presses:
+                started = time.monotonic()
+                press()
+                await pilot.pause()
+                assert time.monotonic() - started < 1.0, "a press waited for remote.json's lock"
+            assert app.remote.running
+            await asyncio.sleep(remote_control.SAVING_AFTER)
+            modal.repaint()
+            status = shown(modal.query_one("#remote-status", Static))
+            assert remote_control.SAVING in status.splitlines()
+            assert modal.query_one("#remote-allow-write", Switch).value is True
+        finally:
+            unlock(fd)
+            os.close(fd)
+        await written(pilot)
+        saved = json.loads(paths.remote_state_path().read_text())
+        assert saved["allow_write"] is True
+        assert saved["auto_off_at"] is not None
+        assert saved["password"] != passphrase and saved["devices"] == []
+        assert remote_control.SAVING not in shown(modal.query_one("#remote-status", Static))
+        assert "New password — every device has to unlock again" in toasts(app)
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def test_the_panel_says_remote_is_on_while_another_process_serves_this_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``asq remote serve`` (or another fleet UI) serving this home publicly, the panel
+    said "off", "turn Remote on for a link" and no passphrase, beside that Remote's phones
+    listed as signed in and a write switch that flipped its writes: a human checking whether
+    the fleet was exposed read that it was not (sweep of #243). It says another process
+    serves this home, and stops saying so, and why a start failed, once it does not."""
+    monkeypatch.setattr(remote_control, "ELSEWHERE_EVERY_SECONDS", 0.0)
+    paths.ensure_home()
+    serving = paths.remote_state_path().with_name(remote_server.SERVE_LOCK_NAME)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        passphrase = remote_server.runtime().password
+        fd = os.open(serving, os.O_RDWR | os.O_CREAT, 0o600)
+        lock_exclusive(fd)  # another process's Remote, on this home
+        try:
+            modal = await open_panel(pilot)
+            state = modal.query_one("#remote-state", Static)
+            for _ in range(100):
+                modal.repaint()
+                if shown(state) != "off":
+                    break
+                await asyncio.sleep(0.02)
+            assert shown(state) == remote_view.ELSEWHERE
+            assert shown(modal.query_one("#remote-link", Static)) == remote_view.ELSEWHERE_LINK
+            assert shown(modal.query_one("#remote-password", Static)) == passphrase
+            modal.query_one("#remote-on", Switch).toggle()
+            await written(pilot)
+            assert not app.remote.running
+            status = modal.query_one("#remote-status", Static)
+            assert shown(status) == remote_control.ALREADY_ON
+        finally:
+            unlock(fd)
+            os.close(fd)
+        for _ in range(100):
+            modal.repaint()
+            if shown(state) == "off":
+                break
+            await asyncio.sleep(0.02)
+        assert shown(state) == "off"
+        assert shown(status) == "", "the home is free: the start may be tried again"
+        assert shown(modal.query_one("#remote-link", Static)) == "turn Remote on for a link"
+
+    drive(go, tunnel=missing_ngrok)
 
 
 def test_a_switch_state_json_refuses_is_toasted_and_said_again_after_quit() -> None:
@@ -1161,7 +1357,7 @@ def test_the_switch_and_the_auto_off_timer_turn_remote_off_without_freezing_the_
         assert app.remote.running
         modal.query_one("#remote-on", Switch).toggle()
         await pilot.pause()
-        assert server.stopping.is_set() and server.running, "the switch waited for it to stop"
+        assert server.stopping.wait(5) and server.running, "the switch waited for it to stop"
         assert shown(modal.query_one("#remote-state", Static)) == "off"
         assert shown(modal.query_one("#remote-status", Static)) == remote_control.TURNING_OFF
         server.release.set()
@@ -1224,6 +1420,58 @@ def test_quitting_leaves_remote_stopping_and_run_ui_waits_for_it_with_the_termin
     assert "stopping Remote (its server and ngrok)…" in capsys.readouterr().err
 
 
+@contextlib.contextmanager
+def at_their_default(signums: Sequence[signal.Signals]) -> Iterator[None]:
+    """``signums`` at their default for a while, as a fleet UI started from a terminal has
+    them: a suite run under nohup has SIGHUP ignored, which ``ngrok_ends_with`` leaves as it
+    is, and every assertion about the hangup then failed."""
+    inherited = {signum: signal.getsignal(signum) for signum in signums}
+    for signum in signums:
+        signal.signal(signum, signal.SIG_DFL)
+    try:
+        yield
+    finally:
+        for signum, handler in inherited.items():
+            if handler is not None:
+                signal.signal(signum, handler)
+
+
+def test_run_ui_ends_its_ngrok_on_a_hangup_or_a_sigterm_and_puts_the_signals_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ngrok runs in a process group of its own, which a closed terminal's hangup does not
+    reach (``ngrok_ends_with``): for as long as the fleet UI runs, its ending signals end
+    its ngrok first, and once it is gone they are what they were."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("POSIX signals")
+    ending = [signal.SIGHUP, signal.SIGTERM]
+    ended: list[str] = []
+    during: dict[int, object] = {}
+
+    class Quit:
+        def __init__(self, **options: object) -> None:
+            self.unsaved: list[str] = []
+            self.remote = SimpleNamespace(wait_until_off=lambda timeout=None: True)
+
+        def run(self) -> None:
+            during.update({signum: signal.getsignal(signum) for signum in ending})
+
+    monkeypatch.setattr(app_mod, "FleetApp", Quit)
+    monkeypatch.setattr(remote_control, "end_every_tunnel_now", lambda: ended.append("ngrok"))
+    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda: None)
+    with at_their_default(ending):
+        app_mod.run_ui()
+        assert all(callable(handler) for handler in during.values()), during
+        assert all(signal.getsignal(signum) is signal.SIG_DFL for signum in ending)
+    hangup = during[signal.SIGHUP]
+    assert callable(hangup)
+    with pytest.MonkeyPatch.context() as dying:
+        dying.setattr(os, "kill", lambda pid, signum: ended.append(f"killed by {signum}"))
+        dying.setattr(signal, "signal", lambda signum, handler: None)
+        hangup(signal.SIGHUP, None)
+    assert ended == ["ngrok", f"killed by {signal.SIGHUP}"], "ngrok first, then the UI as ever"
+
+
 # --- what Remote says reaches the human with the panel closed (sweep of #243) ------------------
 
 
@@ -1261,6 +1509,7 @@ def test_a_tunnel_that_does_not_come_up_after_a_restore_is_toasted_from_its_thre
     async def go(pilot: Pilot[None]) -> None:
         app = pilot.app
         assert isinstance(app, FleetApp)
+        await written(pilot)
         assert app.remote.running and app.remote._waiter is not None
         app.remote._waiter.join(5)
         await pilot.pause()

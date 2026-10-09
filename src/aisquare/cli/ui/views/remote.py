@@ -11,7 +11,8 @@ from ngrok's log on a background thread. Opened like the theme picker
 The QR is segno's compact terminal rendering (half-block characters, ~18 rows
 for an ngrok URL) of exactly the text in the link row — one string feeds both,
 so what the phone scans is what the human reads — in colours of its own, never
-the theme's (:data:`QR_COLOURS`).
+the theme's (:data:`QR_COLOURS`). Only of ngrok's link: the local one, all the panel
+has while ngrok is missing, starting or restarting, leads a phone to its own loopback.
 """
 
 from __future__ import annotations
@@ -35,6 +36,14 @@ from aisquare.cli.ui.remote_control import (
 from aisquare.services.remote_server import _remote_instant
 
 QR_UNAVAILABLE = "QR unavailable — pip install segno"
+LOCAL_ONLY = (
+    "this machine only: a phone needs ngrok's link, which shows here, with its QR, once ngrok is up"
+)
+"""Under the local link, which the panel shows while ngrok is not up."""
+ELSEWHERE = "on in another process (asq remote serve, or another asq ui) — turn it off there"
+"""The state, while another process serves Remote from this home and this one does not."""
+ELSEWHERE_LINK = "its link is shown where it runs; asq remote status prints the local one"
+"""The link row, then: that Remote's link is the other process's to show."""
 LOCAL_ZONE: tzinfo | None = None
 """The zone the panel says its times in: ``None`` is this machine's own (a seam for tests)."""
 QR_COLOURS = "#ffffff on #000000"
@@ -95,8 +104,9 @@ class RemotePanel(ModalScreen[None]):
         self._device_rows: list[tuple[str, ...]] = []
         """The devices table's cells as last painted, a row per device, its id first."""
         self._device_columns: list[ColumnKey] = []
-        self._qr_url: str | None = ""
-        """The link the QR was last drawn for; ``""`` before the first paint."""
+        self._qr_url: tuple[str | None, bool] | None = None
+        """The link the QR was last drawn for, and whether another process served Remote
+        then; ``None`` before the first paint."""
         self._painted: dict[str, bool] = {}
         """What each switch was last painted to show, by id. A switch showing anything else
         was moved by the user since, and its ``Changed`` is still on its way."""
@@ -167,11 +177,12 @@ class RemotePanel(ModalScreen[None]):
         """
         controller = self.controller
         running = controller.running
+        elsewhere = not running and controller.served_elsewhere()
         writes = controller.write_actions_allowed()
         status = controller.remote_status()
         self._paint_switch("remote-on", running, heard)
         self._paint_switch("remote-allow-write", writes, heard)
-        self.query_one("#remote-state", Static).update(self._state_text())
+        self.query_one("#remote-state", Static).update(self._state_text(elsewhere=elsewhere))
         # Text, never a str, which is read as markup: the sentences carry exception text
         # and paths, where "[b]" was a tag and "[/b]" a MarkupError out of the repaint.
         self.query_one("#remote-status", Static).update(Text(controller.status_line()))
@@ -183,10 +194,14 @@ class RemotePanel(ModalScreen[None]):
         )
         self.query_one("#remote-unlocks", Static).update(self._unlocks_text(status))
         url = controller.link_url()
-        if url != self._qr_url:
-            self._qr_url = url
-            self.query_one("#remote-link", Static).update(Text(url or "turn Remote on for a link"))
-            self.query_one("#remote-qr", Static).update(qr_art(url) if url else "")
+        if (url, elsewhere) != self._qr_url:
+            self._qr_url = (url, elsewhere)
+            public = url is not None and url == controller.public_url
+            link = Text(ELSEWHERE_LINK) if elsewhere else _link_text(url, public=public)
+            self.query_one("#remote-link", Static).update(link)
+            # The local link's QR led a phone to its own loopback: "cannot connect", for a
+            # first-time user without ngrok most of all (sweep of #243).
+            self.query_one("#remote-qr", Static).update(qr_art(url) if url and public else "")
         self.query_one("#remote-regen", Button).disabled = not running
         self.query_one("#remote-copy", Button).disabled = url is None
         self._paint_devices(controller.devices(status))
@@ -209,10 +224,11 @@ class RemotePanel(ModalScreen[None]):
             switch.value = value
         self._painted[switch_id] = value
 
-    def _state_text(self) -> Text:
+    def _state_text(self, *, elsewhere: bool = False) -> Text:
+        """Whether Remote is on, and how; ``elsewhere``: another process serves this home."""
         controller = self.controller
         if not controller.running:
-            return Text("off", style="dim")
+            return Text(ELSEWHERE, style="bold yellow") if elsewhere else Text("off", style="dim")
         text = Text("on", style="bold green")
         if controller.public_url is None:
             text.append("  · local only — no tunnel yet", style="dim")
@@ -292,7 +308,9 @@ class RemotePanel(ModalScreen[None]):
             switch.id == "remote-allow-write"
             and event.value != self.controller.write_actions_allowed()
         ):
-            self.controller.set_allow_write(event.value)
+            # Written on a thread of its own, as every control's write of remote.json is: it
+            # waits for that file's lock (sweep of #243). The switch shows the press at once.
+            self.controller.set_allow_write(event.value, wait=False)
             if event.value:
                 self.notify("Write actions are ON for remote devices", severity="warning")
         self.repaint(heard=switch.id)
@@ -302,13 +320,14 @@ class RemotePanel(ModalScreen[None]):
             return
         if event.value == self.controller.state.auto_off_minutes:
             return  # the Select announcing its initial value at mount — not a change
-        self.controller.set_auto_off(event.value)
+        self.controller.set_auto_off(event.value, wait=False)
         self.repaint()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        """The buttons. A new passphrase and a revoke are written on the controller's writer
+        thread; the fleet UI says each once it is done (``RemoteController.on_done``)."""
         if event.button.id == "remote-regen":
-            if self.controller.regenerate_password() is not None:
-                self.notify("New password — every device has to unlock again")
+            self.controller.regenerate_password(wait=False)
         elif event.button.id == "remote-copy":
             url = self.controller.link_url()
             if url is not None:
@@ -324,11 +343,19 @@ class RemotePanel(ModalScreen[None]):
         if not 0 <= row < len(self._device_rows):
             return
         device_id = self._device_rows[row][0]
-        if self.controller.revoke_device(device_id):  # else the status line says why not
-            self.notify(f"Revoked {device_id}")
+        self.controller.revoke_device(device_id, wait=False)  # said once done, or why not
 
     def action_close_panel(self) -> None:
         self.dismiss(None)
+
+
+def _link_text(url: str | None, *, public: bool) -> Text:
+    """The link row: ngrok's link, or the local one and that a phone cannot open it."""
+    if url is None:
+        return Text("turn Remote on for a link")
+    if public:
+        return Text(url)
+    return Text.assemble(url, "\n", (LOCAL_ONLY, "dim"))
 
 
 def _auto_off_label(minutes: int | None) -> str:

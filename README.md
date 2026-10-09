@@ -547,7 +547,10 @@ aisquare remote allow-write on       # read-only until you say so
 ```
 
 Every ngrok account has one free static domain: with it the link survives a
-restart, and a notification opens its card rather than the feed.
+restart, and a notification opens its card rather than the feed. On a machine
+others use, also put `web_addr: false` in `ngrok.yml` (`ngrok config edit`): ngrok's
+local API asks no one for a password. The fleet UI's ngrok runs with it off where it
+can, and its panel says when it could not.
 
 **[The phone control guide](docs/remote.md)** covers unlocking, the needs-you
 cards and quick answers, notifications on iPhone, the security model, and a

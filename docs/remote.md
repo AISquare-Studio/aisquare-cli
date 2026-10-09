@@ -70,14 +70,15 @@ uses it for the links in notifications.
 **From the fleet UI.** Run `aisquare ui` and press `R`. Switch Remote on: the
 panel starts the server and ngrok, shows the link, a QR code and the passphrase,
 the write switch, the auto-off timer (30, 60 or 120 minutes, or Never) and the
-devices that have unlocked. Scan the QR code with the phone. If ngrok stops, the
-UI restarts it within half a minute, and a link ngrok announces late (a network
-still coming up) is shown, and used for notifications, as soon as it comes. With
-the panel closed, a notice says when a Remote that was on could not come back on
-as the UI started, when phones cannot reach it (ngrok missing or not up, and once
-it is up after all), when ngrok came back on a new link, and when auto-off turned
-Remote off. The panel serves on port 8750, or on the one an exported
-`AISQUARE_REMOTE_PORT` names, as `serve` does.
+devices that have unlocked. Scan the QR code with the phone; until ngrok is up
+the panel shows the local link alone, and no QR, since no phone can open that
+link. If ngrok stops, the UI restarts it within half a minute, and a link ngrok
+announces late (a network still coming up) is shown, and used for notifications,
+as soon as it comes. With the panel closed, a notice says when a Remote that was
+on could not come back on as the UI started, when phones cannot reach it (ngrok
+missing or not up, and once it is up after all), when ngrok came back on a new
+link, and when auto-off turned Remote off. The panel serves on port 8750, or on
+the one an exported `AISQUARE_REMOTE_PORT` names, as `serve` does.
 
 **From a shell**, for a machine without the UI open:
 
@@ -418,14 +419,23 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   extend it an hour at a time, up to 8 hours ahead.
 - **Origin**: every write and every live connection must come from the page's own
   origin, so another site cannot use your cookie.
-- **Where a notification leads** is only the address the panel's ngrok announced,
-  or `--public-url` named: never what a request or ngrok's local API says, since
-  anyone on the machine can answer on that API's port before your ngrok does.
-- **ngrok's inspector is off.** Left on, ngrok keeps every request and answer on
-  its local web interface (`127.0.0.1:4040`), which asks for no password: the
-  passphrase you unlock with, every device's cookie, the token and the
-  transcripts, readable by any user of the machine. The panel starts ngrok with
-  `--inspect=false`; start yours with it too.
+- **Where a notification leads** is only the address the panel's ngrok announced
+  for the tunnel the panel asked for, to Remote's own port, or `--public-url`
+  named: never what a request or ngrok's local API says, since anyone on the
+  machine can answer on that API's port before your ngrok does, or start a tunnel
+  of their own through it.
+- **ngrok's inspector and local API are off.** Left on, ngrok keeps every request
+  and answer on its local web interface (`127.0.0.1:4040`), which asks for no
+  password: the passphrase you unlock with, every device's cookie, the token and
+  the transcripts, readable by any user of the machine. The agent API on that
+  port asks for none either, and starts, stops and inspects tunnels. The panel
+  starts ngrok with `--inspect=false` and, in a config it merges over your own
+  `ngrok.yml`, `web_addr: false`. Where it cannot (no `ngrok.yml` where ngrok keeps
+  it, or an ngrok that says it cannot read that config, as a snap's may) ngrok starts
+  as before, and the panel says its API is on; an ngrok that stops for any other
+  reason is not started again without it. Start yours with `--inspect=false`, and
+  on a machine others use, put `web_addr: false` in `ngrok.yml` (`ngrok config
+  edit`; under `agent:` in a version 3 file).
 - **Keys**: the pad sends key names from a fixed list (no `;`, nothing that
   tmux reads as a command); typed text travels as literal text, never as keys.
   Typed text may hold no ASCII control character other than a tab or a
@@ -452,8 +462,9 @@ aisquare remote revoke --all
 aisquare remote regenerate-password --new-link
 ```
 
-`status` lists every device (`--json` too) and any lockout. `revoke --all` signs
-every device out but keeps Remote on. `regenerate-password` makes a new
+`status` says whether Remote is on for this home (served by the fleet UI or a
+`serve`), and lists every device (`--json` too) and any lockout. `revoke --all`
+signs every device out but keeps Remote on. `regenerate-password` makes a new
 passphrase and signs every device out; with `--new-link` it also makes a new
 token, so a leaked link stops working everywhere. The TUI shows the new link
 after Remote is turned off and on. The link `status` and `--new-link` print is
@@ -549,7 +560,8 @@ rewrote the `Host` header; ngrok's `--host-header=rewrite` does exactly that.
 Start ngrok without it (the R panel never uses it).
 
 **`serve`, or the R panel, says another Remote is on.** One `~/.aisquare` serves
-one Remote: the fleet UI's panel, or a `serve` in another shell, has it. Turn that
+one Remote: the fleet UI's panel, or a `serve` in another shell, has it. The panel
+says so whenever it is open, its state reading on in another process. Turn that
 one off, or use it. Two would share one link, one passphrase, one auto-off and
 one list of phones, and either going off would sign the other's phones out. One
 turned off while a phone's restart or switch was still running keeps the home

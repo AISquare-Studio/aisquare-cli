@@ -674,7 +674,9 @@ def test_a_pane_unsubscribed_while_it_is_captured_gets_no_frame(
 ) -> None:
     """The capture runs on the pool while the socket reads on, so an unsubscribe can land
     mid-capture. It wins: no frame is sent for the pane, and nothing is kept for it (a
-    frame kept for a label nobody watches is memory a client could pile up)."""
+    frame kept for a label nobody watches is memory a client could pile up). The tick is
+    long enough that the eight captures after it come back within one tick's wait, whose
+    frames follow the order the subscriptions came in."""
     started, release = threading.Event(), threading.Event()
 
     class SlowPanes(Panes):
@@ -684,7 +686,9 @@ def test_a_pane_unsubscribed_while_it_is_captured_gets_no_frame(
                 release.wait(10)
             return super().__call__(agent, project, history)
 
-    client = _socket_client(runtime, tmp_path, reads, SlowPanes())
+    sources = dataclasses.replace(reads.sources(), panes=SlowPanes())
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.5))
+    assert unlock(client, runtime).status_code == 200
     cap = remote_server.WS_PANE_SUBSCRIPTIONS_MAX
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
         ws.send_text(json.dumps({"subscribe": "slow"}))
@@ -780,8 +784,8 @@ def test_a_board_that_cannot_be_read_is_a_frame_that_says_why(
 
 
 def _captures(panes: Panes, pane: tuple[str, str | None], count: int) -> None:
-    """Wait for ``pane``'s ``count``-th capture: a tick each, and a tick reads its board,
-    when its socket wants one, before it captures any pane."""
+    """Wait for ``pane``'s ``count``-th capture: a tick each, and a tick starts its board's
+    read, when its socket wants one, before its captures, and waits for them all."""
     deadline = time.monotonic() + 10
     while panes.asked.count(pane) < count:
         assert time.monotonic() < deadline, f"{pane} captured {panes.asked.count(pane)} times"
@@ -860,12 +864,18 @@ def test_no_fleet_is_read_or_sent_until_the_socket_asks_and_none_once_it_stops(
     assert [frame for frame in later if frame["type"] == "fleet"] == []
 
 
+@pytest.mark.parametrize(
+    "tick", [0.02, 0.5], ids=["the read outlasts its tick's wait", "the read ends within it"]
+)
 def test_a_false_that_lands_while_a_board_is_read_sends_no_board_frame(
-    runtime: Runtime, tmp_path: Path
+    runtime: Runtime, tmp_path: Path, tick: float
 ) -> None:
     """A tick was reading the board when ``{"subscribe_board": false}`` came, and the board
     went out once the read was back: every session and task once more, to a page that had
-    left its Board tab. The tick looks at what the socket wants after the read too."""
+    left its Board tab. The tick looks at what the socket wants after the read too. A tick
+    waits a tick at most for its reads (sweep of #243, round 4): with a 0.5 s tick this
+    read comes back within its tick's wait, and with a 0.02 s one it still runs when the
+    next tick, which no longer wants it, lets it go."""
     reading, release = threading.Event(), threading.Event()
 
     def board(project: str | None) -> object:
@@ -874,7 +884,7 @@ def test_a_false_that_lands_while_a_board_is_read_sends_no_board_frame(
         return {"project": {"id": "p1"}, "sessions": [], "events": []}
 
     sources = dataclasses.replace(Reads().sources(), board=board, panes=Panes())
-    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=tick))
     assert unlock(client, runtime).status_code == 200
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
         ws.send_text(json.dumps({"subscribe_board": None}))
@@ -889,13 +899,17 @@ def test_a_false_that_lands_while_a_board_is_read_sends_no_board_frame(
     assert [frame["type"] for frame in frames if frame["type"] == "board"] == []
 
 
+@pytest.mark.parametrize(
+    "tick", [0.02, 0.5], ids=["the read outlasts its tick's wait", "the read ends within it"]
+)
 def test_a_board_switch_while_a_board_is_read_never_sends_the_old_projects_board(
-    runtime: Runtime, tmp_path: Path
+    runtime: Runtime, tmp_path: Path, tick: float
 ) -> None:
     """The board's twin of the next test, which only the fleet had: a tick reading the
     current project's board when ``{"subscribe_board": "prj_b"}`` landed would let that
     board out as prj_b's once the read was back. The tick sends a board only for the
-    project still asked for, as it sends a fleet."""
+    project still asked for, as it sends a fleet, whether the read came back within its
+    tick's wait or after it, as in the test before."""
     reading, release = threading.Event(), threading.Event()
     hold = [False]
 
@@ -906,7 +920,7 @@ def test_a_board_switch_while_a_board_is_read_never_sends_the_old_projects_board
         return {"project": project, "sessions": [], "events": []}
 
     sources = dataclasses.replace(Reads().sources(), board=board)
-    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=tick))
     assert unlock(client, runtime).status_code == 200
     is_board = lambda f: f["type"] == "board"  # noqa: E731
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
@@ -920,13 +934,17 @@ def test_a_board_switch_while_a_board_is_read_never_sends_the_old_projects_board
         assert _until(ws, is_board)["payload"]["project"] == "prj_b"
 
 
+@pytest.mark.parametrize(
+    "tick", [0.02, 0.5], ids=["the read outlasts its tick's wait", "the read ends within it"]
+)
 def test_a_switch_while_a_snapshot_is_read_never_sends_the_old_projects_frame(
-    runtime: Runtime, tmp_path: Path
+    runtime: Runtime, tmp_path: Path, tick: float
 ) -> None:
     """The tick read the current project's fleet, the switch landed meanwhile and dropped
     the last frame, and the old project's frame went out as if it were the new one's: the
     page showed it for a tick, and ``test_subscribe_board_picks_which_projects_board_frames_arrive``
-    failed about one run in six."""
+    failed about one run in six. The read comes back within its tick's wait or after it,
+    as above."""
     reading, release = threading.Event(), threading.Event()
     hold = [False]
 
@@ -937,7 +955,7 @@ def test_a_switch_while_a_snapshot_is_read_never_sends_the_old_projects_frame(
         return {"kind": "fleet", "project": project}
 
     sources = dataclasses.replace(Reads().sources(), fleet=fleet)
-    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=tick))
     assert unlock(client, runtime).status_code == 200
     is_fleet = lambda f: f["type"] == "fleet"  # noqa: E731
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:

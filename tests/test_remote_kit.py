@@ -983,6 +983,77 @@ def test_the_heartbeat_arrives_unchanged_or_not_and_carries_the_last_scan(
     )
 
 
+def test_a_snapshot_that_hangs_holds_back_its_own_frame_and_no_other(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """Sweep of #243, round 4: a tick read its snapshots in turn and awaited each, so a fleet
+    that took 8 s held the heartbeat, needs-you and every pane 8 s, and a tmux that stopped
+    answering held them its 30 s timeout: the page said Stale and held every button, for
+    agents of healthy projects too. A tick waits a tick at most now: while the fleet and
+    one pane hang, the heartbeat beats, the write switch shows and the other pane streams,
+    and once they answer, their frames follow."""
+    release = threading.Event()
+
+    def fleet(project: str | None) -> object:
+        release.wait(20)
+        return {"agents": [], "answered": True}
+
+    def panes(agent: str, project: str | None, history: int) -> dict[str, object]:
+        if agent == "stuck":
+            release.wait(20)
+        return {"rows": [agent], "width": 80, "height": 1}
+
+    sources = dataclasses.replace(_sources(), fleet=fleet, panes=panes)
+    _app, client = _stream_app(runtime, tmp_path, sources=sources, tick=0.05, heartbeat=0.15)
+    seen: list[dict[str, Any]] = []
+    try:
+        with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+            ws.send_text(json.dumps({"subscribe_fleet": None}))
+            ws.send_text(json.dumps({"subscribe": "stuck"}))
+            ws.send_text(json.dumps({"subscribe": "free"}))
+            started = time.monotonic()
+            while sum(frame["type"] == "heartbeat" for frame in seen) < 3:
+                seen.append(_frame_within(ws))
+            runtime.set_allow_write(True)
+            while not (seen[-1]["type"] == "remote" and seen[-1]["payload"]["allow_write"]):
+                seen.append(_frame_within(ws))
+            held = time.monotonic() - started
+            release.set()
+            after = [_frame_within(ws)]
+            while {"fleet", "stuck"} - {frame.get("agent", frame["type"]) for frame in after}:
+                after.append(_frame_within(ws))
+    finally:
+        release.set()
+    assert held < 5, f"the frames waited {held:.1f} s for the reads that hung"
+    assert [frame["agent"] for frame in seen if frame["type"] == "pane"] == ["free"]
+    assert [frame["type"] for frame in seen].count("fleet") == 0, "the fleet had not answered"
+    fleet_frame = next(frame for frame in after if frame["type"] == "fleet")
+    assert fleet_frame["payload"] == {"agents": [], "answered": True}
+
+
+def test_a_read_a_little_slower_than_the_tick_still_sends_its_frame(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """A read still running when its tick's wait ends is taken by a later tick, whatever it
+    came to: the socket holds the read, not the cache. A snapshot that comes back just after
+    the wait is older than the cache keeps one (0.9 of a tick) by the next tick, so asked of
+    the cache anew it would be read again, as long again, and a fleet that always takes a
+    little more than a tick would never reach the phone."""
+    reads: list[float] = []
+
+    def fleet(project: str | None) -> object:
+        reads.append(time.monotonic())
+        time.sleep(0.105)
+        return {"agents": [], "read": len(reads)}
+
+    sources = dataclasses.replace(_sources(), fleet=fleet)
+    _app, client = _stream_app(runtime, tmp_path, sources=sources, tick=0.1)
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_fleet": None}))
+        frame = _until(ws, "fleet")
+    assert frame["payload"] == {"agents": [], "read": 1}, "the first read, sent once it was back"
+
+
 def test_needs_frames_come_after_board_fleet_and_remote(
     runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -992,7 +1063,9 @@ def test_needs_frames_come_after_board_fleet_and_remote(
     monkeypatch.setattr(
         remote_needs, "needs_ws_frames", lambda kit: [("needs_you", {"tick": next(ticks)})]
     )
-    _app, client = _stream_app(runtime, tmp_path)
+    # A tick long enough that its board and fleet come back within its wait (a read still
+    # running after it sends its frame on a later tick, after that tick's needs frame).
+    _app, client = _stream_app(runtime, tmp_path, tick=0.25)
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
         first = _frames(ws, 2)
         ws.send_text(json.dumps({"subscribe_fleet": None, "subscribe_board": None}))  # one tick

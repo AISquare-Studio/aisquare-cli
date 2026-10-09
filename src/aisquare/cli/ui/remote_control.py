@@ -329,14 +329,18 @@ class RemoteController:
             self._last_news, self._unreachable_told = None, False
         if self._port_problem is not None:  # a sentence, never Remote on another port
             self.message = f"Remote could not start — {self._port_problem}"
+            if not restoring:
+                self._start_failed()
             return False
         try:
             info = self._server.start_remote_server(self._dist_dir, port=self._port)
         except Exception as exc:  # the remote extra is missing, or the port is taken
             # RemoteUnavailable / RemoteError carry the sentence to show; Remote stays
-            # off and the saved switch is not flipped, so a restart does not retry blindly.
+            # off and the saved switch is not flipped on, so a restart does not retry blindly.
             self.info = None
             self.message = f"Remote could not start — {exc}"
+            if not restoring:
+                self._start_failed()
             return False
         # The write switch is not touched: it is remote.json's, as the shell left it.
         self.info, self.message = info, STARTING
@@ -371,6 +375,8 @@ class RemoteController:
             )
             if stopped and restoring:
                 self._remote_news(self.message)
+            elif stopped:
+                self.call_back(self._start_failed)
             return
         with self._lock:
             if self.info is not info:
@@ -400,6 +406,19 @@ class RemoteController:
             target=self._await_url, args=(tunnel,), name="ngrok-url", daemon=True
         )
         self._waiter.start()
+
+    def _start_failed(self) -> None:
+        """A start the switch asked for failed: the saved switch is off too, as the panel shows
+        it, on the thread that drives the controller.
+
+        One that a TUI start could not bring back stayed on, and every start tried again and
+        warned again, while the panel's switch read off and a press of it failed before
+        any turn-off could save the off: nothing in the UI let a human who no longer wanted
+        Remote stop it (sweep 3 of #243). Not while another Remote is on for this home (a
+        ``serve``, another fleet UI): what it saved is its own, in the same ``state.json``.
+        """
+        if self.info is None and self.state.remote_enabled and self.message != ALREADY_ON:
+            self._set_state(remote_enabled=False)
 
     def _save_started(self, info: remote_server.RemoteInfo) -> None:
         """Save that Remote is on, on the thread that drives the controller, where a turn-off
@@ -615,7 +634,10 @@ class RemoteController:
         """At TUI start: a Remote that was on when the TUI last exited comes back on.
 
         What kept it off, or kept ngrok from starting, is news (:attr:`on_news`): this runs
-        as the human sits down, often just before leaving the desk with the phone.
+        as the human sits down, often just before leaving the desk with the phone. Another
+        process serving this home is no news: Remote is on, which is what the switch was
+        saved for, and the panel says where. "Could not start — turn it off first", at every
+        start of a second fleet UI, pointed at the Remote that worked (sweep 3 of #243).
 
         ``remote.json`` is read first, on the writer's thread (:meth:`_first_read`), and
         with ``wait=False`` the start follows on the thread that drives the controller
@@ -637,8 +659,12 @@ class RemoteController:
         switch turned off, meanwhile."""
         if not self.state.remote_enabled or self.running:
             return
-        if not self._turn_on(wait=wait, restoring=True):
-            self._remote_news(self.message)  # what came after the server is said as it ends
+        if self._turn_on(wait=wait, restoring=True):
+            return  # what came after the server is said as it ends
+        if self.message == ALREADY_ON:
+            self.message = None  # on elsewhere: the panel's state says so (served_elsewhere)
+            return
+        self._remote_news(self.message)
 
     def shutdown_for_exit(self, *, wait: bool = True) -> None:
         """At TUI exit: end the processes, keep the saved switches for ``restore``.

@@ -77,7 +77,10 @@ announces late (a network still coming up) is shown, and used for notifications,
 as soon as it comes. With the panel closed, a notice says when a Remote that was
 on could not come back on as the UI started, when phones cannot reach it (ngrok
 missing or not up, and once it is up after all), when ngrok came back on a new
-link, and when auto-off turned Remote off. The panel serves on port 8750, or on
+link, and when auto-off turned Remote off. A Remote another `serve` or fleet UI
+has on is not news: the panel says it is on in another process. One that cannot
+come back is tried at every start until a press of the switch fails as well;
+that leaves it off for the next start too. The panel serves on port 8750, or on
 the one an exported `AISQUARE_REMOTE_PORT` names, as `serve` does.
 
 **From a shell**, for a machine without the UI open:

@@ -1795,6 +1795,68 @@ def test_a_remote_that_does_not_come_back_at_start_is_news() -> None:
     assert back.running is False and heard == [], "a Remote back as it was, and turned off, is none"
 
 
+def test_a_remote_another_process_serves_is_no_news_at_start_and_keeps_the_saved_switch() -> None:
+    """A second fleet UI, or one started beside ``asq remote serve``, warned at every start
+    that Remote "could not start — turn it off first", pointing at the Remote that was on,
+    which is what the saved switch asks for (sweep 3 of #243)."""
+    server = fake_server()
+    server.fail_start = remote_server.RemoteAlreadyOn(remote_server.REMOTE_ALREADY_ON)
+    update_state("remote_enabled", True)
+    for _start in range(2):
+        second = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+        heard = heard_news(second)
+        second.restore()
+        assert heard == [] and second.message is None and not second.running
+    second.turn_on()  # pressed from the panel: that one stays on, and so does its switch
+    assert second.message == remote_control.ALREADY_ON
+    assert load_remote_state().remote_enabled is True
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        remote_server.RemoteUnavailable("the remote extra is not installed (uvicorn missing)"),
+        remote_server.RemoteError("the remote server did not come up — is the port in use?"),
+    ],
+    ids=["no extra", "port taken"],
+)
+def test_a_saved_on_that_cannot_come_back_is_left_off_by_a_press_that_fails_too(
+    failure: Exception,
+) -> None:
+    """A Remote that cannot start warned at every UI start, while the panel's switch read off
+    and a press of it failed before any turn-off could save the off: only installing the
+    extra or editing state.json stopped it (sweep 3 of #243). A press that fails leaves the
+    saved switch off, as the panel shows it, and the next start says nothing."""
+    server = fake_server()
+    server.fail_start = failure
+    update_state("remote_enabled", True)
+    for _start in range(2):  # what the human saved on is tried, and its failure told, each time
+        controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+        heard = heard_news(controller)
+        controller.restore()
+        assert heard == [(f"Remote could not start — {failure}", True)]
+    controller.turn_on()
+    assert controller.message == f"Remote could not start — {failure}"
+    assert load_remote_state().remote_enabled is False
+    after = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    heard = heard_news(after)
+    after.restore()
+    assert heard == [] and not after.running
+
+
+def test_a_press_whose_deadline_will_not_write_leaves_the_saved_switch_off_too() -> None:
+    server = fake_server()
+    server.unwritable = OSError(28, "No space left on device")
+    update_state("remote_enabled", True)
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    controller.turn_on()  # the server starts; its deadline will not write, so it stops again
+    assert not controller.running
+    assert controller.message is not None and "remote.json could not be written" in (
+        controller.message
+    )
+    assert load_remote_state().remote_enabled is False
+
+
 def test_a_tunnel_that_does_not_come_up_is_news_and_so_is_its_url_when_it_comes() -> None:
     server = fake_server()
     tunnels: list[FakeTunnel] = []

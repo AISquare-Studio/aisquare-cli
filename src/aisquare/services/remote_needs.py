@@ -1948,10 +1948,12 @@ def _needs_failed(what: str, exc: Exception, failing: MutableSet[_K] | None, key
     ``asq remote serve`` has no log handler, so a warning is the last-resort handler's
     lines on its terminal, traceback and all: a store that could not be read was 25 lines
     every 3 s, the link and the passphrase scrolled off (review of #243, sweep of round 4).
-    The first of a streak is a warning, with its traceback, and a damaged store's is the
-    store's own sentence, which says how to recover; the rest are debug lines.
+    The first of a streak is a warning, with its traceback; a store that cannot be opened
+    is told instead in the sentence the CLI prints for it (``damaged_store_message``),
+    which names the file and how to recover, since ``open_store``'s own exception carries
+    only SQLite's words ("file is not a database"). The rest are debug lines.
     """
-    from aisquare.core.store import StoreUnopenable
+    from aisquare.core.store import StoreUnopenable, damaged_store_message
 
     if failing is not None and key in failing:
         log.debug("remote: %s failed again", what, exc_info=True)
@@ -1959,7 +1961,7 @@ def _needs_failed(what: str, exc: Exception, failing: MutableSet[_K] | None, key
     if failing is not None:
         failing.add(key)
     if isinstance(exc, StoreUnopenable):
-        log.warning("remote: %s failed: %s", what, exc)
+        log.warning("remote: %s failed: %s", what, damaged_store_message(exc))
     else:
         log.warning("remote: %s failed", what, exc_info=True)
 

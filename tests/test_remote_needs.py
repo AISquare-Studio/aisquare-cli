@@ -3003,11 +3003,12 @@ def test_every_scan_reaches_every_listener_and_a_failing_one_costs_nothing(
 
 
 def _failing_store() -> NeedsSources:
-    """Sources over a store that cannot be opened, as ``open_store`` says it."""
-    from aisquare.core.store import StoreUnopenable, damaged_store_recovery
+    """Sources over a store that cannot be opened, as ``open_store`` says it: SQLite's
+    words alone, no file and no recovery."""
+    from aisquare.core.store import StoreUnopenable
 
     def unopenable() -> list[ProjectInfo]:
-        raise StoreUnopenable(f"the context store cannot be opened. {damaged_store_recovery()}")
+        raise StoreUnopenable("file is not a database")
 
     return replace(_sources(Fleet()), list_projects=unopenable)
 
@@ -3018,32 +3019,62 @@ def test_a_scan_that_keeps_failing_is_told_once_until_it_works_again(
     """``asq remote serve`` has no log handler, so each failed scan was the last-resort
     handler's 25-line traceback on its terminal, every 3 s while the store could not be
     read: 500 lines a minute, the link and the passphrase scrolled off. One warning a
-    streak, a damaged store's in the store's own words, with no traceback; debug lines
-    after; and one line once a scan works again."""
+    streak, a damaged store's in the sentence the CLI prints for it, with no traceback;
+    debug lines after; and one line once a scan works again."""
     from aisquare.core.store import damaged_store_recovery
 
     app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
     assert unlock(make_client(app), runtime).status_code == 200
     broken = threading.Event()
     broken.set()
-    watcher = RemoteNeedsWatcher(
-        app.kit,
-        sources=lambda: _failing_store() if broken.is_set() else _sources(Fleet()),
-        interval=0.01,
-    )
+    scans = 0
+
+    def counted() -> NeedsSources:
+        nonlocal scans
+        scans += 1
+        return _failing_store() if broken.is_set() else _sources(Fleet())
+
+    def told() -> list[logging.LogRecord]:
+        return [r for r in caplog.records if r.name == remote_needs.__name__]
+
+    watcher = RemoteNeedsWatcher(app.kit, sources=counted, interval=0.01)
     caplog.set_level(logging.INFO, logger=remote_needs.__name__)
     watcher.start_watching()
     try:
-        threading.Event().wait(0.3)
+        _until_true(lambda: scans >= 3)
         broken.clear()
-        _until_true(lambda: watcher.needs_scanned_at() is not None)
-        threading.Event().wait(0.05)
+        _until_true(lambda: any(r.levelname == "INFO" for r in told()))
+        _until_true(lambda: scans >= 6)
     finally:
         watcher.stop_watching()
+    records = told()
+    assert [r.levelname for r in records] == ["WARNING", "INFO"], [r.getMessage() for r in records]
+    assert damaged_store_recovery() in records[0].getMessage() and records[0].exc_info is None
+    assert records[1].getMessage() == "remote: the needs scan works again"
+
+
+def test_a_store_that_cannot_be_opened_is_told_by_its_file_and_its_recovery(
+    runtime: Runtime, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``open_store``'s exception carries only SQLite's words, so the warning over a real
+    corrupt ``context.db`` was "remote: the needs scan failed: file is not a database":
+    no file, no way back. It is the sentence the CLI prints for it, once a streak."""
+    from aisquare.core.paths import db_path
+    from aisquare.core.store import damaged_store_recovery
+
+    db_path().parent.mkdir(parents=True, exist_ok=True)
+    db_path().write_bytes(b"this is not a database\n" * 256)
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    watcher = RemoteNeedsWatcher(app.kit, sources=remote_needs.live_needs_sources)
+    caplog.set_level(logging.DEBUG, logger=remote_needs.__name__)
+    for _ in range(2):
+        watcher._needs_scan_told()
     told = [r for r in caplog.records if r.name == remote_needs.__name__]
-    assert [r.levelname for r in told] == ["WARNING", "INFO"], [r.getMessage() for r in told]
-    assert damaged_store_recovery() in told[0].getMessage() and told[0].exc_info is None
-    assert told[1].getMessage() == "remote: the needs scan works again"
+    assert [r.levelname for r in told] == ["WARNING", "DEBUG"], [r.getMessage() for r in told]
+    said = told[0].getMessage()
+    assert said.startswith("remote: the needs scan failed: the context store cannot be opened")
+    assert str(db_path()) in said and damaged_store_recovery() in said, said
+    assert told[0].exc_info is None
 
 
 def test_a_scan_that_fails_on_a_bug_is_told_once_with_its_traceback(

@@ -1214,46 +1214,33 @@ def _short_timeouts(
     return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
 
 
-#: The remedy for a refusal only the environment can change (``Refusal.kind``): asq and
-#: aisquare read CLAUDE_CONFIG_DIR when they start, so a change made in another shell
-#: never reaches the running one (review of #257).
-ENVIRONMENT_FIX = (
-    "point CLAUDE_CONFIG_DIR at a directory on this machine, or unset it, then start asq "
-    "or aisquare again from that shell"
-)
+#: What every remedy through CLAUDE_CONFIG_DIR ends with (``Refusal.restart_fix``): asq
+#: and aisquare read it when they start, so a change made in another shell never reaches
+#: the running one (review of #257).
+RESTART = "then start asq or aisquare again from that shell"
 
 
 def _refused_fix(
     directory: Path, refusal: agents_service.Refusal, *, also: str | None = None
 ) -> str:
-    """What changes ``refusal``, connect's for ``directory`` (``agents_service.access``), by
-    its kind: never a command that refuses, nor a file to fix where none can help. ``also``
-    is what to change instead where a settings.json that is read-only by design
-    (home-manager) is generated."""
-    path = refusal.path
+    """What changes ``refusal``, connect's for ``directory`` (``agents_service.access``):
+    the remedies it carries, made for the state of the path that blocks, so never a
+    command that refuses nor a step that cannot work. ``also`` is what to change instead
+    where a settings.json that is read-only by design (home-manager) is generated."""
     if refusal.kind == "gone":
         # A named directory that is not there and that connect makes no more of: this
         # home's record of it is all that is left.
         return _disconnect_fix(directory, "forget it: ")
-    if refusal.kind == "environment":
-        return ENVIRONMENT_FIX
-    if refusal.kind == "make":
-        # The directory a session from this shell reads, which connect would make.
-        if os.path.islink(path):
-            return f"remove the link at {path}, or make what it points to, then connect again"
-        return (
-            f"create {path} yourself, or point CLAUDE_CONFIG_DIR at a directory this user "
-            "can create, then connect again"
-        )
-    if os.path.islink(path) and not os.path.exists(path):
-        # A settings.json linked into a folder that is gone (a dotfiles target that moved).
-        return f"remove the link at {path}, or make the folder it points into, then connect again"
-    spec = agent_core.spec("claude-code", directory)
-    if spec is None or path != spec.settings_path:
-        # A context file connect imports (CLAUDE.md): the hooks need nothing else changed.
-        return f"make {path} UTF-8 text this user can read, then connect again"
-    fix = f"make {path} a JSON object this user can write, then connect again"
-    return fix if also is None else f"{fix}, or {also} where that file is generated"
+    fixes: list[str] = []
+    if refusal.fix is not None:
+        spec = agent_core.spec("claude-code", directory)
+        here = f"{refusal.fix}, then connect again"
+        if also is not None and spec is not None and refusal.path == spec.settings_path:
+            here = f"{here}, or {also} where that file is generated"
+        fixes.append(here)
+    if refusal.restart_fix is not None:
+        fixes.append(f"{refusal.restart_fix}, {RESTART}")
+    return "; or ".join(fixes)
 
 
 def _disconnect_fix(directory: Path, lead: str) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -263,6 +264,15 @@ class Refusal:
     or a parent this user may not write); ``environment``, a ``CLAUDE_CONFIG_DIR`` naming
     a home this machine does not have, which only that variable changes, in a shell
     started again."""
+    fix: str | None = None
+    """What changes it in place, by the state of the path that blocks (:func:`_remedy`):
+    the end state that makes connect write, so it holds whatever else is true there.
+    ``None`` where only the environment can change it, and for ``gone``, whose remedy is
+    the disconnect the doctor names."""
+    restart_fix: str | None = None
+    """What changes it through ``CLAUDE_CONFIG_DIR``. asq and aisquare read that variable
+    when they start, so every surface that says it adds "then start asq or aisquare
+    again from that shell", and never that it notices the change (review of #257)."""
 
 
 RefusalKind = Literal["file", "gone", "make", "environment"]
@@ -318,25 +328,79 @@ def _connect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
         # made, and that mkdir can refuse as well (:func:`_cannot_make`).
         where = _first_run_dir(name, config_dir)
         if where is not None:
-            cannot = _cannot_make(where)
-            if cannot is not None:
-                return Refusal(where, f"can't create {where}: {cannot}", "make")
+            blocked = _cannot_make(where)
+            if blocked is not None:
+                why, fix = blocked
+                # Named by the variable, the directory can also move: a restart's remedy.
+                repoint = _REPOINT if os.environ.get("CLAUDE_CONFIG_DIR", "").strip() else None
+                return Refusal(where, f"can't create {where}: {why}", "make", fix, repoint)
         elif config_dir is not None:
             _check_found(name, config_dir)
         _read_before_writing(name, config_dir)
     except AgentFileUnreadableError as exc:
         path = exc.path or spec.settings_path or spec.home
-        # Only the variable names that home: no file there can change it (_check_settings).
-        kind: RefusalKind = "environment" if paths.names_no_home(path) else "file"
-        return Refusal(path, str(exc), kind)
+        if paths.names_no_home(path):
+            # Only the variable names that home: no file there can change it.
+            return Refusal(path, str(exc), "environment", None, _UNSET_OR_REPOINT)
+        return Refusal(path, str(exc), "file", _remedy(path, spec))
     except AgentNotInstalledError as exc:
         return Refusal(spec.home, str(exc), "gone")
     except OSError as exc:
         # Fails open into a named refusal: the doctor and `agents list` ask this for every
         # directory, and a traceback here cost them their whole output (review of #257).
         where = Path(os.fsdecode(exc.filename)) if exc.filename else spec.home
-        return Refusal(where, f"can't read {where}: {exc.strerror or exc}")
+        return Refusal(
+            where, f"can't read {where}: {exc.strerror or exc}", "file", _remedy(where, spec)
+        )
     return None
+
+
+#: The remedies through CLAUDE_CONFIG_DIR (``Refusal.restart_fix``).
+_REPOINT = "point CLAUDE_CONFIG_DIR at a directory this user can write or create"
+_UNSET_OR_REPOINT = "point CLAUDE_CONFIG_DIR at a directory on this machine, or unset it"
+
+
+def _writable_dir(path: Path) -> bool:
+    """Whether ``path`` is a directory this user may create things in."""
+    return os.path.isdir(path) and os.access(path, os.W_OK | os.X_OK)
+
+
+def _loops(path: Path) -> bool:
+    """Whether ``path`` is a link that goes round in a loop."""
+    try:
+        os.stat(path)
+    except OSError as exc:
+        return exc.errno == errno.ELOOP
+    return False
+
+
+def _link_fix(link: Path, leads_to: str) -> str:
+    """The remedy for a link at ``link`` that leads nowhere: make it lead to ``leads_to``,
+    or, where its folder lets this user, remove it, so connect makes the real thing."""
+    fix = f"make the link at {link} lead to {leads_to}"
+    return f"{fix}, or remove it" if _writable_dir(link.parent) else fix
+
+
+def _remedy(path: Path, spec: agent_core.AgentSpec) -> str:
+    """The in-place remedy for ``path``, a file connect refuses (``Refusal.fix``), by the
+    state it is in: the end state in which connect writes, never a step that some other
+    fact about it defeats (a settings.json linked into a folder that exists but is
+    read-only was told to make that folder; a loop, to make the folder it is in)."""
+    if path == spec.settings_path:
+        if os.path.islink(path) and not agent_core.present(path):
+            if _loops(path):
+                return _link_fix(path, "a JSON object this user can write")
+            folder = Path(os.path.realpath(path)).parent
+            fix = (
+                f"make {folder} writable by this user"
+                if os.path.isdir(folder)
+                else f"make {folder} a directory this user can write"
+            )
+            return f"{fix}, or remove the link at {path}" if _writable_dir(path.parent) else fix
+        return f"make {path} a JSON object this user can write"
+    if path in spec.context_files:
+        return f"make {path} UTF-8 text this user can read"
+    return f"make {path} readable by this user"
 
 
 def _disconnect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
@@ -379,9 +443,16 @@ def settings_unwritable(path: Path) -> str | None:
             # A link that leads nowhere: the write lands where it points, or fails there,
             # after connect has saved CLAUDE.md and built ~/.aisquare (review of #257).
             folder = Path(os.path.realpath(path)).parent
-            if folder.is_dir() and os.access(folder, os.W_OK):
-                return None
-            return f"it is a link to {os.readlink(path)}, whose folder is missing or unwritable"
+            link = f"it is a link to {os.readlink(path)}, whose folder {folder}"
+            if not os.path.isdir(folder):
+                return (
+                    f"{link} is not a directory"
+                    if os.path.lexists(folder)
+                    else (f"{link} does not exist")
+                )
+            if not os.access(folder, os.W_OK):
+                return f"{link} this user may not write"
+            return None
         target = path if path.exists() else path.parent
         if not target.exists() or os.access(target, os.W_OK):
             return None
@@ -418,7 +489,7 @@ def _first_run_dir(name: str, config_dir: Path | None) -> Path | None:
     if name != "claude-code" or agent_core.claude_on_path() is None:
         return None
     where = agent_core.ambient_hook_dir(name)
-    if where is None or paths.names_no_home(where) or where.exists():
+    if where is None or paths.names_no_home(where) or agent_core.present(where):
         return None
     if config_dir is not None:
         try:
@@ -430,27 +501,39 @@ def _first_run_dir(name: str, config_dir: Path | None) -> Path | None:
     return where
 
 
-def _cannot_make(where: Path) -> str | None:
-    """Why :func:`_make_first_run_dir` cannot make ``where``, which is not there, or ``None``.
+def _cannot_make(where: Path) -> tuple[str, str] | None:
+    """Why :func:`_make_first_run_dir` cannot make ``where``, which is not there, and the
+    remedy, or ``None``. Asked by connect before its mkdir and by :func:`access` for it,
+    in the same words, so no Connect is offered that this first step refuses.
 
-    Asked by connect before its mkdir and by :func:`access` for it, in the same words, so
-    no Connect is offered that this first step refuses: a link where the directory should
-    be, that leads nowhere (a dotfiles target that moved, or a loop), and a parent this
-    user may not write, both failed the click with "can't create …" while the doctor and
-    Welcome offered it (review of #257).
+    The fact names the path that blocks and what it is: ``where`` itself, or the nearest
+    of its parents that is there, as a link that leads nowhere, a link in a loop,
+    something that is not a directory, or a directory this user may not write. "No
+    directory it can be made in" named none, and its "create it yourself" failed
+    (review of #257). The remedy is the end state in which ``mkdir -p`` succeeds.
     """
-    if os.path.lexists(where):  # it is not there (_first_run_dir), so a link leads nowhere
-        try:
-            target = os.readlink(where)
-        except OSError:
-            return "something that is not a directory is there"
-        return f"it is a link to {target}, which leads nowhere"
-    ancestor = next((p for p in where.parents if os.path.lexists(p)), None)
-    if ancestor is None or not os.path.isdir(ancestor):
-        return "no directory it can be made in"
-    if not os.access(ancestor, os.W_OK | os.X_OK):
-        return f"this user may not create it in {ancestor}"
-    return None
+    blocking = next((p for p in (where, *where.parents) if os.path.lexists(p)), None)
+    if blocking is None:
+        return None
+    if os.path.isdir(blocking):  # a directory, or a link to one: may this user write it?
+        if os.access(blocking, os.W_OK | os.X_OK):
+            return None
+        return (
+            f"this user may not create anything in {blocking}",
+            f"make {blocking} writable by this user",
+        )
+    if os.path.islink(blocking):
+        leads_to = "a directory this user can write"
+        if _loops(blocking):
+            return f"{blocking} is a link that goes round in a loop", _link_fix(blocking, leads_to)
+        target = os.readlink(blocking)
+        return f"{blocking} is a link to {target}, which does not exist", _link_fix(
+            blocking, leads_to
+        )
+    fix = f"make {blocking} a directory this user can write"
+    if _writable_dir(blocking.parent):
+        fix += ", or move it aside"
+    return f"{blocking} is not a directory", fix
 
 
 def _make_first_run_dir(name: str, config_dir: Path | None) -> None:
@@ -459,9 +542,9 @@ def _make_first_run_dir(name: str, config_dir: Path | None) -> None:
     where = _first_run_dir(name, config_dir)
     if where is None:
         return
-    cannot = _cannot_make(where)
-    if cannot is not None:
-        raise AgentFileUnreadableError(f"can't create {where}: {cannot}", where)
+    blocked = _cannot_make(where)
+    if blocked is not None:
+        raise AgentFileUnreadableError(f"can't create {where}: {blocked[0]}", where)
     try:
         where.mkdir(parents=True, exist_ok=True)
     except OSError as exc:

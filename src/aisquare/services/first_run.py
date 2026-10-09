@@ -128,10 +128,13 @@ class ClaudeState:
     that is not a JSON object or that this user may not write, or a CLAUDE.md it cannot
     read (``agents.connect_refusal``). Connect could only fail, so step 2 says why
     instead of offering it (review of #257)."""
-    refused_by_environment: bool = False
-    """The refusal is the environment's (``agents.Refusal.kind``): a ``CLAUDE_CONFIG_DIR``
-    naming a home this machine does not have. asq reads it when it starts, so step 2 says
-    to change it and start asq again, not that this page notices (review of #257)."""
+    refused_fix: str | None = None
+    """What changes the refusal in place (``agents.Refusal.fix``), which this page sees
+    on its next look; ``None`` where there is none."""
+    refused_restart_fix: str | None = None
+    """What changes it through ``CLAUDE_CONFIG_DIR`` (``agents.Refusal.restart_fix``), which
+    asq reads when it starts: step 2 says to start asq again, never that it notices a
+    change made in another shell (review of #257)."""
     signed_in: bool | None = None
     """``None`` when this probe did not look (the periodic one skips it)."""
     problem: str | None = None
@@ -251,15 +254,17 @@ def probe_claude(
         except Exception as exc:
             problems.append(f"could not read the hook settings: {_why(exc)}")
     refused: str | None = None
-    refused_by_environment = False
+    refused_fix: str | None = None
+    refused_restart_fix: str | None = None
     if not is_connected and switched_off is None:
         try:
             if refusal is not None:
                 refused = refusal()
-            else:  # connect's own refusal, with what would change it (agents.access)
+            else:  # connect's own refusal, with its remedies (agents.access)
                 found = agents_service.access("claude-code").connect
-                refused = found.why if found is not None else None
-                refused_by_environment = found is not None and found.kind == "environment"
+                if found is not None:
+                    refused, refused_fix = found.why, found.fix
+                    refused_restart_fix = found.restart_fix
         except Exception as exc:
             problems.append(f"could not read the hook settings: {_why(exc)}")
     signed: bool | None = None
@@ -277,7 +282,8 @@ def probe_claude(
         manager_only=manager_only,
         hooks_off=switched_off,
         refused=refused,
-        refused_by_environment=refused_by_environment,
+        refused_fix=refused_fix,
+        refused_restart_fix=refused_restart_fix,
         signed_in=signed,
         problem="; ".join(problems) or None,
     )

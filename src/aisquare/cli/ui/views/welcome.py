@@ -186,6 +186,20 @@ def candidate_detail(candidate: Candidate) -> Text:
     return text
 
 
+def _refusal_remedy(fix: str | None, restart_fix: str | None) -> str:
+    """Step 2's remedy for a refusal, from the remedies it carries (``agents.Refusal``):
+    this page notices a change in place on its next look, and asq reads CLAUDE_CONFIG_DIR
+    only when it starts, so a remedy through it says to start asq again."""
+    said: list[str] = []
+    if fix is not None:
+        said.append(f"{fix[:1].upper()}{fix[1:]}, and this page notices within a few seconds.")
+    if restart_fix is not None:
+        lead = "Or " if said else ""
+        start = restart_fix if said else f"{restart_fix[:1].upper()}{restart_fix[1:]}"
+        said.append(f"{lead}{start}, then start asq again from that shell.")
+    return " ".join(said) or "Fix it; this page notices within a few seconds."
+
+
 def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
     """Step 2's body: the agent, its sign-in and its hooks — or how to install it."""
     text = Text()
@@ -236,16 +250,8 @@ def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
     elif claude.refused is not None:
         text.append("\n✗ ", style="red")
         text.append(f"aisquare's hooks cannot be written: {claude.refused} — ")
-        if claude.refused_by_environment:
-            # asq read CLAUDE_CONFIG_DIR when it started: a change elsewhere never reaches it.
-            text.append(
-                "Connect cannot change that. Point CLAUDE_CONFIG_DIR at a directory on this "
-                "machine, or unset it, then start asq again from that shell."
-            )
-        else:
-            text.append(
-                "Connect cannot change that. Fix it; this page notices within a few seconds."
-            )
+        text.append("Connect cannot change that. ")
+        text.append(_refusal_remedy(claude.refused_fix, claude.refused_restart_fix))
     elif claude.manager_only:
         text.append("\n✗ ", style="red")
         # True either way: a repository that commits .claude/settings.json gives every

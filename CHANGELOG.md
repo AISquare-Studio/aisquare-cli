@@ -46,10 +46,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   question, a plan to approve, a board question or result, a crashed agent, a
   stopped manager, a usage limit, a lost pane, tmux not answering, a turn that
   ended with a question, an interruption. Each card carries what must be read
-  first (the full command, every question and its options, the plan) and the
-  quick answers it offers, checked against the agent as it is now before a key
-  is typed (`409 stale` otherwise). `GET api/needs`, a `needs_you` frame,
-  `POST api/needs/answer`, `POST api/needs/dismiss`, and `asq remote needs`.
+  first (the command, every question and its options, the plan, and what of
+  them it had to cut) and the quick answers it offers, checked against the
+  agent as it is now before a key is typed (`409 stale` otherwise).
+  `GET api/needs`, a `needs_you` frame, `POST api/needs/answer`,
+  `POST api/needs/dismiss`, and `asq remote needs`.
 - **Notifications (Web Push).** When an item has stood for two scans, the phone
   gets a notification that opens its card: encrypted to the browser
   (RFC 8291 and VAPID, through `cryptography`, now in the `remote` extra), built

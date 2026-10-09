@@ -463,6 +463,10 @@ class PendingTool:
     """The call's input, kept only when its JSON is at most :data:`TOOL_INPUT_MAX` bytes;
     ``{}`` otherwise (a ``Write`` of a whole file is not what a phone reads to decide)."""
     at: datetime | None
+    input_dropped: bool = False
+    """The call has an input that ``input`` leaves out: over :data:`TOOL_INPUT_MAX`, or on a
+    line too long to parse. Its card says so: showing nothing of it, it read as a call with
+    none, and a "1" on the phone approved it blind."""
 
 
 @dataclass(frozen=True)
@@ -681,6 +685,7 @@ def _tail_pending(block: dict[str, Any], at: datetime | None) -> PendingTool | N
     name = block.get("name")
     payload = block.get("input")
     kept: Mapping[str, object] = {}
+    size = 0
     if isinstance(payload, dict):
         try:
             size = len(json.dumps(payload, ensure_ascii=False).encode("utf-8", "replace"))
@@ -693,6 +698,7 @@ def _tail_pending(block: dict[str, Any], at: datetime | None) -> PendingTool | N
         summary=_summarise_tool(block),
         input=kept,
         at=at,
+        input_dropped=size > TOOL_INPUT_MAX,
     )
 
 
@@ -725,7 +731,14 @@ def _tail_unparsed(
         name = (match.group(2) or b"tool").decode("utf-8", "replace")
         if tool_use_id not in answered:
             pending.append(
-                PendingTool(tool_use_id=tool_use_id, name=name, summary=name, input={}, at=at)
+                PendingTool(
+                    tool_use_id=tool_use_id,
+                    name=name,
+                    summary=name,
+                    input={},
+                    at=at,
+                    input_dropped=True,
+                )
             )
     return "assistant_tool", pending
 

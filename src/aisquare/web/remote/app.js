@@ -459,6 +459,13 @@ function renderDetail(kind, detail, doc) {
     add(mk(doc, "pre", "text", d.text));
     text = d.text;
   }
+  // A command cut to fit read as the whole of it, and an input too long to send as none.
+  const cut = d.cut && typeof d.cut === "object" ? Object.keys(d.cut).slice(0, 20) : [];
+  if (d.dropped === true || cut.length) {
+    const what = cut.map((key) => "its " + plainText(key) + " (" + toInt(d.cut[key]) + " characters in all)");
+    add(mk(doc, "p", "cut", "Not all of it: " + (d.dropped === true ? "this was too long to send to the phone."
+      : "the card shows the start of " + what.join(", ") + ".") + " Open the agent to read it before you answer."));
+  }
   return { box: shown ? box : null, text, lead };
 }
 

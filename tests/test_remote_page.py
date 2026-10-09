@@ -22,6 +22,7 @@ pattern that matches nothing passes on any page.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import struct
@@ -937,7 +938,8 @@ _RGB = re.compile(r"rgb\((\d{1,3}), (\d{1,3}), (\d{1,3})\)")
 _BIDI = "؜‎‏‪‫‬‭‮⁦⁧⁨⁩"
 
 
-def _node_report(harness: Path) -> dict[str, Any]:
+def _node_report(harness: Path, cards: list[dict[str, object]] | None = None) -> dict[str, Any]:
+    """The harness's report; ``cards``, items the server built, go to it as ``ASQ_CARDS``."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not on PATH; the page's runtime checks need it")
@@ -949,6 +951,7 @@ def _node_report(harness: Path) -> dict[str, Any]:
         encoding="utf-8",
         timeout=120,
         check=False,
+        env=None if cards is None else {**os.environ, "ASQ_CARDS": json.dumps(cards)},
     )
     assert result.returncode == 0, result.stderr
     report: dict[str, Any] = json.loads(result.stdout)
@@ -1049,6 +1052,92 @@ def test_a_permission_whose_input_was_too_large_to_send_keeps_the_excerpt_naming
     shown = node_report["builtExcerpts"]
     assert shown["droppedWrite"] == ["Write(/home/me/app/src/big_module.py)"]
     assert shown["droppedHeredoc"] == ["Bash(cat > schema.sql <<'EOF')"]
+
+
+def _served(tmp_path: Path, tool: str, **payload: object) -> dict[str, object]:
+    """The item the scan builds for coder-1 waiting on one ``tool`` call, from a transcript
+    as the scan reads it, in the shape ``GET api/needs`` sends it."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession
+
+    now = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
+    project = ProjectInfo(id="prj_x", root=Path("/work/x"))
+    row = FleetAgent(
+        id="agt_1",
+        project_id=project.id,
+        label="coder-1",
+        role="coder",
+        pane_id="%1",
+        session_id="ses_1",
+        cwd=project.root,
+        created_at=now - timedelta(hours=1),
+    )
+    session = TeamSession(
+        id="ses_1",
+        project_id=project.id,
+        role="coder",
+        started_at=row.created_at,
+        last_seen_at=now - timedelta(minutes=3),
+        state="attention",
+    )
+    status = FleetAgentStatus.model_validate(
+        {"agent": row, "state": "attention", "detail": None, "session": session}
+    )
+    asked = {"role": "user", "content": "go on"}
+    call = {"type": "tool_use", "id": "toolu_1", "name": tool, "input": payload}
+    records = [
+        {"type": "user", "uuid": "u1", "timestamp": "2026-10-07T11:57:00Z", "message": asked},
+        {
+            "type": "assistant",
+            "uuid": "a1",
+            "timestamp": "2026-10-07T11:58:00Z",
+            "message": {"id": "m1", "role": "assistant", "content": [call], "stop_reason": None},
+        },
+    ]
+    path = tmp_path / f"t{len(list(tmp_path.iterdir()))}.jsonl"
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    tail = transcript.read_transcript_tail(path)
+    (item,) = remote_needs.needs_from_agent(status, tail, project=project, events=[], now=now)
+    return item.needs_item_json()
+
+
+def test_a_card_says_what_it_leaves_out_of_the_call_its_buttons_answer(tmp_path: Path) -> None:
+    """A permission's command was cut at 2 000 characters, and its detail fit to 4 KiB, marked
+    by a "…" in mid-text alone: a 3 549-character heredoc that ends in ``rm -rf`` showed as
+    ``print('step…`` and then ``description: Run the steps``, all of it to the eye, with 1
+    and 2 live. An input over 16 KiB never reaches the scan, and its card said ``tool:
+    Write`` and nothing more, as a call with no input would; a plan over 16 KiB, no plan at
+    all. Each card says what it leaves out now, from the transcript the scan reads to the
+    text the page draws; a call shown whole says nothing of the kind."""
+    steps = "python3 - <<'EOF'\n" + "print('step')\n" * 250 + "EOF\nrm -rf ~/projects/important"
+    big = "z" * (transcript.TOOL_INPUT_MAX + 1)
+    cards = [
+        _served(tmp_path, "Bash", command=steps, description="Run the steps"),
+        _served(tmp_path, "Write", file_path="/src/big.py", content=big),
+        _served(tmp_path, "ExitPlanMode", plan="1. a step\n" * 2_000),
+        _served(tmp_path, "Bash", command="pytest -q", description="Run the tests"),
+    ]
+    cut, write, plan, whole = (card["detail"] for card in cards)
+    assert isinstance(cut, dict) and cut["cut"] == {"command": len(steps)} and len(steps) > 2_000
+    assert len(json.dumps(cut, ensure_ascii=False, separators=(",", ":")).encode()) <= 4_096
+    assert write == {"tool": "Write", "input": {}, "dropped": True}
+    assert plan == {"plan": "", "dropped": True}
+    assert whole == {
+        "tool": "Bash",
+        "input": {"command": "pytest -q", "description": "Run the tests"},
+    }
+    said = [
+        [text for name, text in card if name == "cut"]
+        for card in _node_report(HARNESS, cards)["served"]
+    ]
+    tail = " Open the agent to read it before you answer."
+    assert said[0] == [
+        f"Not all of it: the card shows the start of its command ({len(steps)} characters in"
+        f" all).{tail}"
+    ]
+    assert said[1] == said[2] == [f"Not all of it: this was too long to send to the phone.{tail}"]
+    assert said[3] == []
 
 
 def test_the_page_names_a_tool_call_by_the_keys_the_server_summarises_it_by() -> None:

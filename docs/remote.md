@@ -241,10 +241,14 @@ aisquare --json remote needs
 | board_result | the manager (or a coder with no manager left) reports a result |
 | interrupted | you pressed Esc on an agent, or turned its prompt down, and it waits for you |
 
-A card holds what you must read before answering, in full: the exact command a
-permission is for, every question with its options, the plan, the text. Under a
-permission, a question or a plan, the bottom of the agent's live screen is shown
-too, so the real option labels are on screen next to the buttons.
+A card holds what you must read before answering: the exact command a
+permission is for, every question with its options, the plan, the text. What is
+too long for it is cut, a permission's command at 2,000 characters and all it
+shows at 4 KiB, and the card says so and how long the whole is; a call whose
+input is over 16 KiB never reaches the phone, and its card says that instead.
+Open the agent to read such a call before you answer it. Under a permission, a
+question or a plan, the bottom of the agent's live screen is shown too, so the
+real option labels are on screen next to the buttons.
 
 **Quick answers** are the card's buttons: `1`, `2` and No for a permission; one
 per option, and Cancel, for a single question; `1` to `3` and Keep planning for a

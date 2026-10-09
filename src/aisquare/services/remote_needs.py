@@ -926,7 +926,7 @@ def _needs_question_item(
         agent=agent,
         reason=f"{name} asks you a question",
         excerpt=excerpt,
-        detail=_needs_fit({"questions": questions}, _DETAIL_TEXT_MAX),
+        detail=_needs_tool_detail(tool, {"questions": questions}, _DETAIL_TEXT_MAX),
         since=since,
         push_after=since,
         answers=answers,
@@ -943,6 +943,7 @@ def _needs_plan_item(
         (line.strip().lstrip("#").strip() for line in plan.splitlines() if line.strip()), ""
     )
     since = tool.at or now
+    detail: dict[str, Any] = {"plan": plan}
     return _needs_item(
         "plan",
         tool.tool_use_id,
@@ -950,7 +951,7 @@ def _needs_plan_item(
         agent=agent,
         reason=f"{name} asks you to approve a plan",
         excerpt=first,
-        detail=_needs_fit({"plan": plan}, _DETAIL_PLAN_MAX),
+        detail=_needs_tool_detail(tool, detail, _DETAIL_PLAN_MAX, shown=detail),
         since=since,
         push_after=since,
         answers=(
@@ -1000,6 +1001,31 @@ def _needs_subagent_prompt(
     ]
 
 
+def _needs_tool_detail(
+    tool: PendingTool, detail: dict[str, Any], limit: int, *, shown: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """A pending tool's ``detail`` fit to ``limit``, saying what it leaves out of the call.
+
+    ``dropped``: the call's input never came (:attr:`PendingTool.input_dropped`). ``cut``:
+    each string of the input that ``shown``, where the detail holds the input's values,
+    holds only the start of, by the whole one's length in characters. A command cut to
+    2 000 characters, or fit to the card's 4 KiB, read as the whole of it beside the
+    buttons that approve it; ``cut`` is fit with the rest, so the detail keeps to ``limit``.
+    """
+    if tool.input_dropped:
+        detail["dropped"] = True
+    while True:
+        _needs_fit(detail, limit)
+        cut = {
+            key: len(whole)
+            for key, whole in tool.input.items()
+            if isinstance(whole, str) and shown is not None and key in shown and shown[key] != whole
+        }
+        if cut == detail.get("cut", {}):
+            return detail
+        detail["cut"] = cut
+
+
 def _needs_permission_item(
     tool: PendingTool,
     *,
@@ -1010,7 +1036,8 @@ def _needs_permission_item(
     subject: str | None = None,
     since: datetime | None = None,
 ) -> NeedsItem:
-    """A permission prompt: the full command or path in ``detail``, so nobody approves blind.
+    """A permission prompt: the command or path in ``detail``, and what of it the card cannot
+    hold (:func:`_needs_tool_detail`), so nobody approves blind.
 
     The buttons are the dialog's own digits and Esc; the card shows the live
     pane beside them, so the options' real text is on screen. A prompt under a
@@ -1032,6 +1059,7 @@ def _needs_permission_item(
         elif isinstance(value, bool | int) or (isinstance(value, float) and math.isfinite(value)):
             shown[key] = value
     since = since or tool.at or now
+    detail: dict[str, Any] = {"tool": _needs_cut(tool.name, 200), "input": shown}
     return _needs_item(
         "permission",
         subject or tool.tool_use_id,
@@ -1039,7 +1067,7 @@ def _needs_permission_item(
         agent=agent,
         reason=reason,
         excerpt=tool.summary,
-        detail=_needs_fit({"tool": _needs_cut(tool.name, 200), "input": shown}, _DETAIL_TOOL_MAX),
+        detail=_needs_tool_detail(tool, detail, _DETAIL_TOOL_MAX, shown=shown),
         since=since,
         push_after=since,
         answers=(

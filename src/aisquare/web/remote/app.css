@@ -149,6 +149,7 @@ body.kb .bottom { display: none; }
 .detail .q { margin: 2px 0 4px; }
 .detail .options { margin: 4px 0 8px; padding-left: 18px; }
 .flag { font-size: 12px; color: var(--warn); }
+.cut { font-size: 14px; color: var(--warn); margin: 6px 0 0; }
 pre.mono, pre.text {
   font: 13px/1.4 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0;
   padding: 8px 10px; background: var(--raise); border-radius: 8px; max-height: 60vh; overflow: auto;

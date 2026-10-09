@@ -793,7 +793,11 @@ short_circuit() {
     # for `--json doctor`. §3.8's own words: "a script that exits 0 onto a
     # broken machine is worse than one that never ran." An unanswerable doctor
     # is a reason to do the work, not to skip it.
-    _amber=$(doctor_amber 2>/dev/null) || return 1
+    #
+    # One payload for the verdict and for the rows it reads: whether a claude-code
+    # row is expected depends on what it says (is_expected_amber).
+    DOCTOR_RAW=$(doctor_json)
+    _amber=$(doctor_amber "$DOCTOR_RAW" 2>/dev/null) || return 1
     for _amber_check in $_amber; do
         is_expected_amber "$_amber_check" || return 1
     done
@@ -814,6 +818,12 @@ short_circuit() {
     _why=""
     case " $_amber " in
         *" brain "*) _why="gbrain is out of scope" ;;
+    esac
+    case " $_amber " in
+        *" claude-code "*)
+            [ -n "$_why" ] && _why="$_why; "
+            _why="${_why}Claude Code not connected (--no-agent)"
+            ;;
     esac
     case " $_amber " in
         *" snapshot "*)
@@ -875,10 +885,13 @@ banner() {
     fi
 
     if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
-        _plan="$_plan\n  register $PROJECT_DIR as a project, and connect claude-code's hooks"
+        _plan="$_plan\n  register $PROJECT_DIR as a project"
     else
         _plan="$_plan\n  set up   ~/.aisquare (no project registered)"
     fi
+    # Its own line: init connects the hooks with or without a project, and not
+    # at all under --no-agent.
+    [ "$WANT_AGENT" = 1 ] && _plan="$_plan\n  connect  claude-code's hooks"
 
     # shellcheck disable=SC2059  # the format string is ours, built above.
     printf "$_plan\n"
@@ -888,7 +901,9 @@ banner() {
     note "~/.local/bin/                     uv, aisquare, asq, claude"
     note "~/.local/share/uv/tools/          the $PYPI_PACKAGE tool environment"
     note "~/.aisquare/                      config.toml, context.db, projects/"
-    note "~/.claude/settings.json           MERGED — aisquare's hook groups only"
+    if [ "$WANT_AGENT" = 1 ]; then
+        note "~/.claude/settings.json           MERGED — aisquare's hook groups only"
+    fi
     say ""
 
     if [ "$DRY_RUN" = 1 ]; then
@@ -1646,6 +1661,13 @@ DOCTOR_AMBER=""
 expected_amber() {
     # Alphabetical, to read the same way as doctor_amber's sorted output.
     _exp="$EXPECTED_AMBER"
+    if [ "$WANT_AGENT" = 0 ]; then
+        # `--no-agent` asked for Claude Code to be left alone, so a Claude Code
+        # aisquare is not connected to is the requested state. Only that one:
+        # is_expected_amber reads the row, and any other amber claude-code row
+        # (hooks switched off, hooks running another aisquare) is still a surprise.
+        _exp="$_exp claude-code"
+    fi
     if [ "$WANT_SYSTEM_DEPS" = 0 ]; then
         # `--no-system-deps` ASKED for these to be missing, so their amber lines
         # are the requested state, not a surprise. Measured before this: a
@@ -1676,7 +1698,11 @@ expected_amber() {
 # functions, so the next one is caught rather than read.
 is_expected_amber() {
     for _want in $(expected_amber); do
-        [ "$1" = "$_want" ] && return 0
+        [ "$1" = "$_want" ] || continue
+        if [ "$1" = claude-code ] && ! _claude_code_unconnected; then
+            return 1
+        fi
+        return 0
     done
     return 1
 }
@@ -1693,13 +1719,15 @@ is_expected_amber() {
 # printed "claude-code hooks installed", wired nothing and exited 0, and a run
 # whose hooks could not be written listed nothing (review of #257). The other
 # rows stay this folder's: snapshot, brain and harness are about its project.
+# Under --no-agent the script wires nothing, so claude-code stays this folder's
+# too: the row `aisquare doctor` shows here.
 #
 # Empty when `/` gives no claude-code row though this folder did, which every
 # caller reads as "cannot verify", never as health.
 doctor_json() {
     _dj_here=$(aisquare --json doctor 2>/dev/null | tr '{' '\n' || true)
     _dj_row=$(printf '%s\n' "$_dj_here" | grep '"name": *"claude-code"' || true)
-    if [ -z "$_dj_row" ]; then
+    if [ -z "$_dj_row" ] || [ "$WANT_AGENT" = 0 ]; then
         printf '%s' "$_dj_here"
         return 0
     fi
@@ -1731,8 +1759,11 @@ doctor_json() {
 # every Mac perfectly healthy, never short-circuits, and can never surface an
 # unexpected check, which is exactly what §3.8 exists to prevent. Every
 # container cell in the matrix passed it, because none of them is a Mac.
+#
+# Of the payload $1 when one is given (the one its caller reads rows from), else
+# of a fresh doctor_json.
 doctor_amber() {
-    _raw=$(doctor_json)
+    _raw=${1-$(doctor_json)}
     [ -n "$_raw" ] || return 1
     # THE PAYLOAD IS CROSS-CHECKED HERE, not only in run_doctor. A `{` inside a
     # check's detail splits an object across two lines and loses it, so a count
@@ -1785,7 +1816,7 @@ run_doctor() {
         return 0
     fi
 
-    DOCTOR_AMBER=$(doctor_amber || true)
+    DOCTOR_AMBER=$(doctor_amber "$DOCTOR_RAW" || true)
     note "doctor: $_total checks, $(printf '%s' "$DOCTOR_AMBER" | wc -w | tr -d ' ') not ok"
 }
 
@@ -1804,12 +1835,37 @@ _doctor_detail() {
     _doctor_row "$1" | sed -n 's/.*"detail": *"\([^"\\]*\(\\.[^"\\]*\)*\)".*/\1/p'
 }
 
+# That check's "fix", the same way; empty when it has none.
+_doctor_fix() {
+    _doctor_row "$1" | sed -n 's/.*"fix": *"\([^"\\]*\(\\.[^"\\]*\)*\)".*/\1/p'
+}
+
+# A JSON string's body ($1) as text, for printing: \\ and \" as what they stand
+# for, and the dash the doctor writes as \u2014. Other \uXXXX are left as they are.
+_json_text() {
+    _jt_mark=$(printf '\001')
+    printf '%s\n' "$1" | sed \
+        -e 's/\\\\/'"$_jt_mark"'/g' \
+        -e 's/\\"/"/g' \
+        -e 's/\\u2014/—/g' \
+        -e 's/'"$_jt_mark"'/\\/g'
+}
+
+# True when the claude-code row says only that aisquare is not connected to Claude
+# Code: hooks missing, with no other problem beside it (the doctor joins a row's
+# problems with "; "). What --no-agent leaves, so the state it asked for.
+_claude_code_unconnected() {
+    case "$(_doctor_detail claude-code)" in
+        *"; "*) return 1 ;;
+        *"hooks are missing or outdated"* | *"hooks are missing in "*) return 0 ;;
+    esac
+    return 1
+}
+
 # Actionable by the user: a real credential step this script deliberately does
 # not take (§3.6). Each gets the one command that fixes it, and only for the row
 # text that command fixes: any other amber row of the same check gets none, so it
 # is listed as unexpected and sent to `aisquare doctor`.
-# shellcheck disable=SC2016  # the backticks are markdown for the reader, not
-# a command substitution — this string is printed, never evaluated.
 _actionable_fix() {
     case "$1" in
         gh)
@@ -1826,22 +1882,11 @@ _actionable_fix() {
                 printf 'install it: %s' "$(pkg_hint gh)"
             fi
             ;;
-        claude-code)
-            # The sign-in is for the row it was written for: hooks missing, and
-            # nothing else wrong. No other amber claude-code row is a sign-in to
-            # finish: hooks switched off ("disableAllHooks"), a settings.json
-            # `agents connect` refuses, settings.json hooks beside the plugin, hooks
-            # that run another aisquare, and whatever the doctor adds next. Nor is
-            # missing hooks beside one of those: the doctor joins a row's problems
-            # with "; ". Those get no fix here, so the row is listed as unexpected,
-            # the run exits 2, and `aisquare doctor` gives each its own fix (review
-            # of #257).
-            case "$(_doctor_detail claude-code)" in
-                *"; "*) printf '' ;;
-                *"hooks are missing or outdated"*) printf 'run `claude` once to authenticate it' ;;
-                *) printf '' ;;
-            esac
-            ;;
+        # NO claude-code. It used to be told "run `claude` once to authenticate
+        # it", and no claude-code row is fixed by that: signing in writes no hooks,
+        # and `agents connect` makes a never-started ~/.claude itself. Every amber
+        # claude-code row this script did not expect is unexpected, exits 2, and
+        # `summary` prints the doctor's own detail and fix for it (review of #257).
         snapshot)
             # A project with no snapshot yet. A snapshot packed too large before
             # 0.7.0 is reused by a plain onboard, so that advice never turned it
@@ -1916,6 +1961,14 @@ summary() {
                 ;;
         esac
         case " $_expected " in
+            *" claude-code "*)
+                # Asked in this folder under --no-agent (doctor_json), so the
+                # doctor run here shows the same row.
+                note "  claude-code — not connected: --no-agent left Claude Code alone."
+                note "             aisquare doctor names the command that connects it."
+                ;;
+        esac
+        case " $_expected " in
             *" snapshot "*)
                 # NOT "run project onboard": there is no project to onboard.
                 # Advice that cannot work is worse than no advice.
@@ -1948,15 +2001,36 @@ summary() {
         # The doctor's checks first, and the pointer to the doctor only under them:
         # for a Node that did not install, doctor's rows are all ok ("off", no fix),
         # so pointing there for "the full detail and a fix" sent people nowhere.
+        #
+        # claude-code is not sent there either: it comes with its own detail and
+        # fix, from the row this verdict read. That row is Claude Code's own config,
+        # asked from `/` (doctor_json), and inside a repository whose aisquare
+        # plugin is its route `aisquare doctor` answers for that repository, where
+        # it read green while the run said otherwise (review of #257).
         _from_doctor=""
+        _cc_detail=""
         for _check in $_unexpected; do
-            [ "$_check" = node ] || _from_doctor="$_from_doctor $_check"
+            case "$_check" in
+                node) ;;
+                claude-code)
+                    _cc_detail=$(_json_text "$(_doctor_detail claude-code)")
+                    [ -n "$_cc_detail" ] || _from_doctor="$_from_doctor $_check"
+                    ;;
+                *) _from_doctor="$_from_doctor $_check" ;;
+            esac
         done
         for _check in $_from_doctor; do
             printf '  %s\n' "$_check"
         done
         if [ -n "$_from_doctor" ]; then
             note "the full detail and a fix for each: aisquare doctor"
+        fi
+        if [ -n "$_cc_detail" ]; then
+            printf '  claude-code — %s\n' "$_cc_detail"
+            _cc_fix=$(_json_text "$(_doctor_fix claude-code)")
+            if [ -n "$_cc_fix" ]; then
+                printf '    → %s\n' "$_cc_fix"
+            fi
         fi
         case " $_unexpected " in
             # Its own line, with its own remedy: doctor only says snapshots are

@@ -1695,13 +1695,12 @@ def test_the_short_circuit_reason_names_only_the_checks_that_are_amber(
     assert "no project registered" in result.stdout, result.stdout
 
 
-def test_a_settings_json_connect_refuses_is_not_called_a_sign_in_to_finish(
-    tmp_path: Path,
-) -> None:
-    """The summary mapped every amber claude-code row to "run `claude` once", including a
-    settings.json `agents connect` refuses (not valid JSON, or read-only), where signing in
-    changes nothing (review of #257). That row has no fix here, so it is listed as
-    unexpected and the doctor names the file."""
+def test_no_claude_code_row_is_called_a_sign_in_to_finish(tmp_path: Path) -> None:
+    """The summary mapped amber claude-code rows to "run `claude` once to authenticate
+    it". No claude-code row is fixed by a sign-in: it writes no hooks, and `agents
+    connect` makes a never-started ~/.claude itself. Round 9 took the hint from a
+    settings.json `agents connect` refuses; the fix review found the one row it kept,
+    missing hooks, no better (review of #257). Neither gets a fix here."""
 
     def advice(detail: str) -> subprocess.CompletedProcess[str]:
         row = {"name": "claude-code", "status": "warn", "detail": detail, "fix": ""}
@@ -1720,7 +1719,7 @@ def test_a_settings_json_connect_refuses_is_not_called_a_sign_in_to_finish(
 
     assert refused.returncode == 0 and missing.returncode == 0, refused.stderr + missing.stderr
     assert refused.stdout.strip() == "", f"a refusal was given a fix: {refused.stdout!r}"
-    assert "authenticate" in missing.stdout, "control: a missing hook still gets the sign-in hint"
+    assert missing.stdout.strip() == "", f"missing hooks were given a fix: {missing.stdout!r}"
 
 
 # The rows below are the real check's, built in a temp home and printed as
@@ -1728,9 +1727,10 @@ def test_a_settings_json_connect_refuses_is_not_called_a_sign_in_to_finish(
 # installer will read it.
 
 
-def _claude_code_payload() -> str:
+def _claude_code_row() -> dict[str, Any]:
     """The claude-code row as `aisquare --json doctor` prints it (cli/common.py emit_doctor)."""
-    return json.dumps([diagnostics._check_claude_code().model_dump(mode="json")])
+    row: dict[str, Any] = diagnostics._check_claude_code().model_dump(mode="json")
+    return row
 
 
 def _connect_claude_code(config_dir: Path) -> None:
@@ -1780,31 +1780,15 @@ def _run_another_install(config_dir: Path, other: Path) -> None:
     _edit_settings(config_dir, rename)
 
 
-@pytest.mark.parametrize(
-    ("state", "row_says"),
-    [
-        ("switched off", 'hooks are switched off ("disableAllHooks": true)'),
-        ("plugin and hooks", "runs aisquare two ways"),
-        ("another install", "(0.7.0) — this install is"),
-        ("switched off beside missing hooks", "; hooks are missing or outdated"),
-    ],
-    ids=["switched-off", "plugin-and-hooks", "another-install", "switched-off-and-missing"],
-)
-def test_no_other_amber_claude_code_row_is_called_a_sign_in_to_finish(
-    tmp_path: Path,
-    isolated_agent_home: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    state: str,
-    row_says: str,
+def _claude_code_state(
+    state: str, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round 9 took the sign-in hint from the refusal row alone; every other amber
-    claude-code row still got "run `claude` once to authenticate it", counted as
-    actionable, and the run exited 0 (review of #257). Signing in fixes none of these: no
-    hook runs while they are switched off, the plugin and the hooks need one route chosen,
-    and hooks that run another aisquare need reconnecting. Each is now unexpected, exit 2,
-    with the doctor's own fix one command away. Missing hooks beside a switched-off
-    directory is no sign-in to finish either: the doctor joins the two with "; "."""
-    claude = isolated_agent_home / ".claude"
+    """Claude Code in `home` as `state` names it, from a ~/.claude `agents connect` made."""
+    claude = home / ".claude"
+    if state == "never connected":
+        claude.mkdir(parents=True)
+        (claude / "settings.json").write_text("{}", encoding="utf-8")
+        return
     _connect_claude_code(claude)
     if state == "switched off":
         _switch_hooks_off(claude)
@@ -1816,52 +1800,126 @@ def test_no_other_amber_claude_code_row_is_called_a_sign_in_to_finish(
         other.write_text("#!/bin/sh\n", encoding="utf-8")
         _run_another_install(claude, other)
         monkeypatch.setattr(agent_core, "hook_binary_version", lambda argv, **_kwargs: "0.7.0")
-    else:
-        work = isolated_agent_home / ".claude-work"
+    elif state == "switched off beside missing hooks":
+        work = home / ".claude-work"
         _connect_claude_code(work)
         _lose_the_stop_hook(work)
         _switch_hooks_off(claude)
-    payload = _claude_code_payload()
+    elif state == "missing hooks":
+        _lose_the_stop_hook(claude)
+    else:
+        assert state == "missing hooks in two directories", state
+        work = home / ".claude-work"
+        _connect_claude_code(work)
+        _lose_the_stop_hook(work)
+        _lose_the_stop_hook(claude)
+
+
+@pytest.mark.parametrize(
+    ("state", "row_says"),
+    [
+        ("switched off", 'hooks are switched off ("disableAllHooks": true)'),
+        ("plugin and hooks", "runs aisquare two ways"),
+        ("another install", "(0.7.0) — this install is"),
+        ("switched off beside missing hooks", "; hooks are missing or outdated"),
+        ("missing hooks", "hooks are missing or outdated"),
+        ("missing hooks in two directories", "hooks are missing or outdated"),
+    ],
+    ids=[
+        "switched-off",
+        "plugin-and-hooks",
+        "another-install",
+        "switched-off-and-missing",
+        "missing",
+        "missing-in-two-dirs",
+    ],
+)
+def test_an_amber_claude_code_row_is_unexpected_and_printed_in_the_doctors_words(
+    tmp_path: Path,
+    isolated_agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    row_says: str,
+) -> None:
+    """Every amber claude-code row after a run that wired the hooks got "run `claude`
+    once to authenticate it" and exit 0, and round 9 and its sweep kept that for missing
+    hooks, which a sign-in does not fix either (review of #257). Each is unexpected now,
+    exit 2, and the summary prints the row's own detail and fix: the row this verdict
+    read, which `aisquare doctor` run inside a repository whose plugin is its route does
+    not show. So claude-code is not sent to that doctor."""
+    _claude_code_state(state, isolated_agent_home, tmp_path, monkeypatch)
+    row = _claude_code_row()
 
     result = _summary_then_handoff(
         tmp_path,
         "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
         node=False,
-        env={"PAYLOAD": payload},
+        env={"PAYLOAD": json.dumps([row])},
     )
 
-    assert row_says in json.loads(payload)[0]["detail"], payload
+    assert row_says in row["detail"], row
     assert "authenticate" not in result.stdout, f"{state}: a sign-in to finish\n{result.stdout}"
-    assert "Not expected, and worth a look:\n  claude-code\n" in result.stdout, result.stdout
+    printed = (
+        f"Not expected, and worth a look:\n  claude-code — {row['detail']}\n    → {row['fix']}\n"
+    )
+    assert printed in result.stdout, result.stdout
+    assert "the full detail and a fix for each" not in result.stdout, result.stdout
     assert "UNEXPECTED=1" in result.stdout
     assert result.returncode == 2
 
 
-@pytest.mark.parametrize("directories", [1, 2])
-def test_missing_hooks_alone_keep_the_sign_in_hint(
-    tmp_path: Path, isolated_agent_home: Path, directories: int
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [("never connected", True), ("missing hooks", True), ("switched off", False)],
+    ids=["never-connected", "missing", "switched-off"],
+)
+def test_a_no_agent_run_expects_claude_code_only_while_it_is_not_connected(
+    tmp_path: Path,
+    isolated_agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    expected: bool,
 ) -> None:
-    """The control: the row the hint was written for. In two directories the doctor's
-    fix joins two commands with "; ", which is not a second problem: only the row's
-    detail is read for one."""
-    for name in (".claude", ".claude-work")[:directories]:
-        _connect_claude_code(isolated_agent_home / name)
-        _lose_the_stop_hook(isolated_agent_home / name)
-    payload = _claude_code_payload()
+    """`--no-agent` asked for Claude Code to be left alone, and its unconnected row was
+    told to sign in and called actionable (fix review of #257). A Claude Code aisquare
+    is not connected to is the state the flag asked for: expected, named as such, exit
+    0. Any other amber claude-code row is still a surprise, in the doctor's words."""
+    _claude_code_state(state, isolated_agent_home, tmp_path, monkeypatch)
+    row = _claude_code_row()
 
     result = _summary_then_handoff(
         tmp_path,
-        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        "WANT_AGENT=0; WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
         node=False,
-        env={"PAYLOAD": payload},
+        env={"PAYLOAD": json.dumps([row])},
     )
 
-    row = json.loads(payload)[0]
-    assert "hooks are missing or outdated" in row["detail"], row
-    assert ("; " in row["fix"]) is (directories == 2), row
-    assert "claude-code — run `claude` once to authenticate it" in result.stdout, result.stdout
-    assert "UNEXPECTED=0" in result.stdout
-    assert result.returncode == 0
+    assert row["status"] == "warn", row
+    assert "authenticate" not in result.stdout, result.stdout
+    assert ("expected: brain claude-code" in result.stdout) is expected, result.stdout
+    assert ("--no-agent left Claude Code alone" in result.stdout) is expected, result.stdout
+    assert (f"  claude-code — {row['detail']}\n" in result.stdout) is not expected
+    assert result.returncode == (0 if expected else 2)
+
+
+@pytest.mark.parametrize("want_agent", [1, 0])
+def test_the_banner_names_the_hooks_only_when_the_run_connects_them(
+    tmp_path: Path, want_agent: int
+) -> None:
+    """Under --no-agent the plan said "register DIR as a project, and connect
+    claude-code's hooks" and listed ~/.claude/settings.json as written; init is run
+    without --agent then, so neither is true (fix review of #257)."""
+    result = sh(
+        f"WANT_AGENT={want_agent}; WANT_PROJECT=1; PROJECT_DIR=/p; CLI_ACTION=current; "
+        "CLI_VERSION=0.8.0; UV_VERSION=0.12.3; CLAUDE_ACTION=update; CLAUDE_VERSION=2.1.294; "
+        "banner",
+        path=base_path(tmp_path),
+    )
+
+    connects = want_agent == 1
+    assert "register /p as a project" in result.stdout, result.stdout + result.stderr
+    assert ("claude-code's hooks" in result.stdout) is connects, result.stdout
+    assert ("~/.claude/settings.json" in result.stdout) is connects, result.stdout
 
 
 @pytest.mark.parametrize(
@@ -1996,7 +2054,9 @@ def test_a_run_from_that_repository_lists_hooks_it_could_not_write(
     """The closing doctor ran in the same folder. With a settings.json `agents connect`
     refuses, `init` only notes it and the plugin read as connected there, so the run
     listed nothing and exited 0 with no hooks wired. It is unexpected now, as anywhere
-    else, and the rows the summary reads are the ones its verdict came from."""
+    else. And `aisquare doctor` run there still reads green, so the summary prints the
+    row its verdict came from, Claude Code's own config's, rather than send the user to
+    a doctor that disagrees (fix review of #257)."""
     paths.ensure_home()
     with store_session():
         pass
@@ -2011,7 +2071,6 @@ def test_a_run_from_that_repository_lists_hooks_it_could_not_write(
     here = _claude_code_row_from(repo, cli, path, isolated_agent_home)
     result = sh(
         "DRY_RUN=0; WANT_SYSTEM_DEPS=0; PROJECT_DIR=$PWD; run_doctor >/dev/null; "
-        'printf "detail: %s\\n" "$(_doctor_detail claude-code)"; '
         'summary; echo "UNEXPECTED=$UNEXPECTED"; handoff',
         cwd=repo,
         env={"HOME": str(isolated_agent_home)},
@@ -2020,28 +2079,64 @@ def test_a_run_from_that_repository_lists_hooks_it_could_not_write(
     )
 
     assert here["status"] == "ok", here
-    assert "hooks cannot be written in" in result.stdout.split("detail: ", 1)[1], result.stdout
-    assert "Not expected, and worth a look:\n  claude-code\n" in result.stdout, result.stdout
+    said = result.stdout.split("Not expected, and worth a look:\n", 1)[-1]
+    assert said.startswith(f"  claude-code — Claude Code hooks cannot be written in {claude}"), (
+        result.stdout
+    )
+    assert f"    → make {claude / 'settings.json'} a JSON object" in said, result.stdout
+    assert "the full detail and a fix for each" not in result.stdout, result.stdout
     assert "UNEXPECTED=1" in result.stdout
     assert result.returncode == 2
 
 
-@pytest.mark.parametrize(("from_root", "fires"), [("warn", False), ("ok", True)])
-def test_the_short_circuit_takes_claude_code_from_outside_any_repository(
-    tmp_path: Path, from_root: str, fires: bool
+def _claude_code_doctor(status: str, detail: str) -> str:
+    """A doctor payload with an amber brain and this claude-code row."""
+    return json.dumps(
+        [
+            {"name": "brain", "status": "warn", "detail": "gbrain not found", "fix": "x"},
+            {"name": "claude-code", "status": status, "detail": detail, "fix": "y"},
+        ]
+    )
+
+
+_CONNECTED = _claude_code_doctor("ok", "Claude Code connected (all lifecycle hooks installed)")
+_MISSING = _claude_code_doctor(
+    "warn",
+    "Claude Code hooks are missing or outdated (older installs lack the "
+    "Stop/Notification/SessionEnd events) in: /h/.claude (found on disk, not connected in "
+    "this home)",
+)
+_SWITCHED_OFF = _claude_code_doctor(
+    "warn", 'Claude Code hooks are switched off ("disableAllHooks": true) in: /h/.claude'
+)
+
+
+@pytest.mark.parametrize(
+    ("want_agent", "here", "from_root", "says"),
+    [
+        (1, _CONNECTED, _MISSING, None),
+        (1, _CONNECTED, _CONNECTED, "claude-code hooks installed"),
+        # --no-agent wires nothing, so `/` is not asked: its row would refuse here.
+        (0, _CONNECTED, _SWITCHED_OFF, "(--no-agent: no agent hooks)"),
+        (0, _MISSING, _MISSING, "Claude Code not connected (--no-agent)"),
+        (0, _SWITCHED_OFF, _SWITCHED_OFF, None),
+    ],
+    ids=[
+        "agent-root-missing",
+        "agent-root-connected",
+        "no-agent-root-not-asked",
+        "no-agent-not-connected",
+        "no-agent-switched-off",
+    ],
+)
+def test_the_short_circuit_takes_claude_code_from_where_the_run_wires_it(
+    tmp_path: Path, want_agent: int, here: str, from_root: str, says: str | None
 ) -> None:
     """`short_circuit` printed "claude-code hooks installed" and did nothing whenever the
-    folder it ran in answered green. It goes by `/`'s answer now; the control is a
-    machine whose hooks are there, which still has nothing to do."""
-
-    def doctor(claude_code: str) -> str:
-        return json.dumps(
-            [
-                {"name": "brain", "status": "warn", "detail": "gbrain not found", "fix": "x"},
-                {"name": "claude-code", "status": claude_code, "detail": "d", "fix": None},
-            ]
-        )
-
+    folder it ran in answered green. With the agent wanted it goes by `/`'s answer, and
+    a machine whose hooks are there still has nothing to do. `--no-agent` wires nothing:
+    it reads this folder's row, the one `aisquare doctor` here shows, and a Claude Code
+    aisquare is not connected to is what it asked for (fix review of #257)."""
     versions = tmp_path / "v"
     versions.mkdir()
     for name, out in (
@@ -2072,19 +2167,16 @@ def test_the_short_circuit_takes_claude_code_from_outside_any_repository(
     repo.mkdir()
 
     result = sh(
-        "WANT_PROJECT=0; OFFLINE=1; survey >/dev/null 2>&1; resolve >/dev/null 2>&1; "
+        f"WANT_AGENT={want_agent}; WANT_PROJECT=0; OFFLINE=1; "
+        "survey >/dev/null 2>&1; resolve >/dev/null 2>&1; "
         "if short_circuit; then echo FIRED; else echo REFUSED; fi",
         cwd=repo,
-        env={
-            "AISQUARE_INSTALL_VERSION": "",
-            "HERE": doctor("ok"),
-            "FROM_ROOT": doctor(from_root),
-        },
+        env={"AISQUARE_INSTALL_VERSION": "", "HERE": here, "FROM_ROOT": from_root},
         path=f"{versions}:{cli}:{base_path(tmp_path)}",
     )
 
-    assert ("FIRED" in result.stdout) is fires, result.stdout + result.stderr
-    assert ("claude-code hooks installed" in result.stdout) is fires, result.stdout
+    assert ("FIRED" in result.stdout) is (says is not None), result.stdout + result.stderr
+    assert says is None or says in result.stdout, result.stdout
 
 
 def test_the_gh_advice_matches_whether_gh_exists(tmp_path: Path) -> None:

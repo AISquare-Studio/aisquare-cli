@@ -41,6 +41,7 @@ from aisquare.models import ClaudeAccount
 from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics
 from aisquare.services import team as team_service
+from tests.fsperms import can_deny_reads, can_symlink
 
 NOW = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
 
@@ -1084,3 +1085,28 @@ def test_launch_account_sets_the_slots_variables_over_the_binding(
     captured.clear()
     assert runner.invoke(app, ["launch", "coder", *bound]).exit_code == 0
     assert captured["env"][core.CONFIG_DIR_VAR] == "/elsewhere"
+
+
+def test_a_slot_this_user_cannot_enter_is_no_slot_and_raises_nothing(tmp_path: Path) -> None:
+    """``Path.is_dir`` and ``Path.is_file`` raised PermissionError on 3.11 to 3.13 for a slot
+    linked into a folder this user cannot enter, and for one it may list but not enter, so
+    every reader of the slots ended in a traceback, uninstall's plan among them (review of
+    #257). Neither is a slot; the slot beside them still is."""
+    if sys.platform == "win32" or not can_deny_reads() or not can_symlink():
+        pytest.skip("needs links and a folder this user cannot enter")
+    root = core.accounts_root()
+    for slot in (2, 4):
+        (root / str(slot)).mkdir(parents=True)
+        (root / str(slot) / core.MARKER).write_text(json.dumps({"slot": slot}), encoding="utf-8")
+    locked = tmp_path / "locked"
+    (locked / "x").mkdir(parents=True)
+    (root / "3").symlink_to(locked / "x", target_is_directory=True)
+    locked.chmod(0)
+    (root / "4").chmod(0o600)  # listed, never entered
+    try:
+        found = [account.slot for account in core.managed_accounts()]
+    finally:
+        locked.chmod(0o700)
+        (root / "4").chmod(0o700)
+
+    assert found == [2]

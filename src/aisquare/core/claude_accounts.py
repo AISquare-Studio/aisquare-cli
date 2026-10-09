@@ -143,16 +143,22 @@ def _managed(slot: int) -> ClaudeAccount:
 
 
 def managed_accounts() -> list[ClaudeAccount]:
-    """Every slot the CLI created, lowest first. Removed slots (renamed) are not slots."""
+    """Every slot the CLI created, lowest first. Removed slots (renamed) are not slots.
+
+    Asked with ``os.path.isdir`` and ``os.path.isfile``, which never raise: ``Path``'s
+    raised PermissionError on 3.11 to 3.13 for a slot linked into a folder this user
+    cannot enter, or one it may list but not enter, and every reader of the slots ended
+    in a traceback (uninstall's plan among them). Such a slot is not one of these.
+    """
     root = accounts_root()
-    if not root.is_dir():
+    if not os.path.isdir(root):
         return []
     found: list[ClaudeAccount] = []
     for child in root.iterdir():
-        if not child.is_dir() or not _SLOT_DIR.match(child.name):
+        if not _SLOT_DIR.match(child.name) or not os.path.isdir(child):
             continue
         slot = int(child.name)
-        if slot < FIRST_MANAGED_SLOT or not (child / MARKER).is_file():
+        if slot < FIRST_MANAGED_SLOT or not os.path.isfile(child / MARKER):
             continue
         found.append(_managed(slot))
     return sorted(found, key=lambda account: account.slot)

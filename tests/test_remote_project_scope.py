@@ -139,7 +139,9 @@ def two_projects(
     return current.id, other.id
 
 
-def _seed_agent(project_id: str, label: str, pane_id: str = "%9") -> None:
+def _seed_agent(
+    project_id: str, label: str, pane_id: str = "%9", *, ended_at: datetime | None = None
+) -> None:
     with store_session() as store:
         store.upsert_fleet_agent(
             FleetAgent(
@@ -150,6 +152,8 @@ def _seed_agent(project_id: str, label: str, pane_id: str = "%9") -> None:
                 pane_id=pane_id,
                 cwd=Path("/tmp/x"),
                 created_at=T0,
+                ended_at=ended_at,
+                exit_status=None if ended_at is None else 0,
             )
         )
 
@@ -179,7 +183,9 @@ class _FakeTmux:
         self.sent: list[tuple[str, tuple[str, ...]]] = []
 
     def pane_facts(self, pane_id: str) -> SimpleNamespace:
-        return SimpleNamespace(dead=False, current_command="claude")
+        return SimpleNamespace(
+            dead=False, current_command="claude", server_started=self.started_at()
+        )
 
     def started_at(self) -> datetime:
         return T0 - timedelta(hours=1)
@@ -461,6 +467,8 @@ def test_projects_rows_carry_agent_state_counts(
     two_projects: tuple[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     current, other = two_projects
+    _seed_agent(current, "a")
+    _seed_agent(other, "c", ended_at=datetime.now(tz=UTC) - timedelta(hours=1))
 
     def fake_list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         assert live_only is True, "the counts come from the same live_only listing"
@@ -486,6 +494,37 @@ def test_projects_rows_carry_agent_state_counts(
         "exited": 1,
         "lost": 0,
     }
+
+
+def test_a_project_with_no_agent_within_the_day_is_counted_without_reading_its_history(
+    two_projects: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``list_agents`` reads every row and session a project ever had, and the store deletes
+    none: the Projects screen paid that for every project on each read, a dormant one
+    included, whose listing is empty anyway. Listed now: a project with a live row, or one
+    that ended within the day, whose window may linger as an ``exited`` row (sweep of
+    #243, round 4)."""
+    current, other = two_projects
+    now = datetime.now(tz=UTC)
+    _seed_agent(current, "live")
+    _seed_agent(other, "old", ended_at=now - fleet_service.RECENTLY_ENDED - timedelta(hours=1))
+    listed: list[str] = []
+
+    def fake_list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        listed.append(project.id)
+        return [_status("a", "working")]
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake_list_agents)
+    rows = live_sources().projects()
+    assert isinstance(rows, list)
+    by_id = {row["id"]: row for row in rows}
+    assert listed == [current], "the dormant project's history was read"
+    assert by_id[other]["agents"] == _agent_state_counts([])
+    assert by_id[current]["agents"] == _agent_state_counts([_status("a", "working")])
+    _seed_agent(other, "recent", ended_at=now - timedelta(hours=1))
+    listed.clear()
+    live_sources().projects()
+    assert sorted(listed) == sorted([current, other]), "an ended row within the day is listed"
 
 
 def test_projects_rows_keep_every_field_the_json_command_prints(
@@ -604,6 +643,7 @@ def _frame(ws: Any, kind: str, *, limit: int = 20) -> dict[str, Any]:
 def test_ws_fleet_frames_follow_subscribe_fleet(runtime: Runtime, tmp_path: Path) -> None:
     client = _client(runtime, _sources(FLEETS), tmp_path, tick=0.02)
     with client.websocket_connect(f"/r/{runtime.token}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_fleet": None}))
         first = _frame(ws, "fleet")
         assert first["payload"] == {"name": "current", "agents": []}
         assert set(first) == {"type", "payload", "ts"}, "§4-D shape is unchanged"
@@ -622,9 +662,11 @@ def test_ws_survives_a_subscribe_fleet_for_a_project_that_is_gone(
     """A bad name costs that frame, not the socket — board and remote keep arriving."""
     client = _client(runtime, _sources(FLEETS), tmp_path, tick=0.02)
     with client.websocket_connect(f"/r/{runtime.token}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_fleet": ""}))
         _frame(ws, "fleet")
         ws.send_text(json.dumps({"subscribe_fleet": "nope"}))
-        assert _frame(ws, "remote")["payload"]["allow_write"] is False
+        runtime.set_allow_write(True)
+        assert _frame(ws, "remote")["payload"]["allow_write"] is True
         ws.send_text(json.dumps({"subscribe_fleet": "prj_other"}))
         assert _frame(ws, "fleet")["payload"] == {"name": "other", "agents": []}
 

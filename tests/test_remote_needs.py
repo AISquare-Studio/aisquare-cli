@@ -2041,13 +2041,14 @@ class FakeTmux:
         *,
         reference: datetime | None = None,
         command: str = "claude",
-        quiet_for: float = 60.0,
+        quiet_for: float | None = 60.0,
         gone: bool = False,
         started: datetime | None = None,
     ) -> None:
         self.reference = reference
         self.command = command
         self.quiet_for = quiet_for
+        """How long the pane has printed nothing; ``None`` is a time tmux does not say."""
         self.gone = gone
         self.started = started
         """When the server started; ``None`` is a start tmux does not report."""
@@ -2056,11 +2057,25 @@ class FakeTmux:
         """Every pane asked about, once per question."""
         self.typed: list[tuple[str, ...]] = []
 
+    def output_epoch(self) -> str:
+        """``#{window_activity}`` as tmux prints it: whole seconds, or nothing."""
+        if self.quiet_for is None:
+            return ""
+        now = self.reference.timestamp() if self.reference else time.time()
+        return str(int(now - self.quiet_for))
+
     def pane_facts(self, pane_id: str) -> SimpleNamespace | None:
         self.asked.append(pane_id)
         if self.gone:
             return None
-        return SimpleNamespace(dead=False, dead_status=None, current_command=self.command)
+        epoch = self.output_epoch()
+        return SimpleNamespace(
+            dead=False,
+            dead_status=None,
+            current_command=self.command,
+            server_started=self.started,
+            last_output=datetime.fromtimestamp(int(epoch), tz=UTC) if epoch else None,
+        )
 
     def started_at(self) -> datetime | None:
         return self.started
@@ -2073,8 +2088,7 @@ class FakeTmux:
             return ""  # the fleet listing's output times: none, so the board's state decides
         assert args[:3] == ("display-message", "-p", "-t") and args[-1] == "#{window_activity}"
         self.asked.append(args[3])
-        now = self.reference.timestamp() if self.reference else time.time()
-        return str(int(now - self.quiet_for))
+        return self.output_epoch()
 
     def send_keys(self, pane_id: str, *keys: str) -> None:
         if self.fail:
@@ -2335,16 +2349,11 @@ def test_at_the_prompt_takes_a_quiet_pane_tmux_vouches_for(monkeypatch: pytest.M
 
 
 def test_quiet_is_unknown_when_tmux_will_not_say(monkeypatch: pytest.MonkeyPatch) -> None:
-    class Silent(FakeTmux):
-        def run(self, *args: str, stdin: bytes | None = None) -> str:
-            from aisquare.core.tmux import TmuxError
-
-            raise TmuxError("no server")
-
-    snap = _now_of(_working(None, state="waiting"), Silent(reference=NOW), monkeypatch)
+    silent = FakeTmux(reference=NOW, quiet_for=None)
+    snap = _now_of(_working(None, state="waiting"), silent, monkeypatch)
     assert snap.pane_quiet is None
     assert not needs_at_input_prompt(snap), "only a pane tmux says is quiet is a prompt"
-    pending = _now_of(_working(_tail(_tool("toolu_a"))), Silent(reference=NOW), monkeypatch)
+    pending = _now_of(_working(_tail(_tool("toolu_a"))), silent, monkeypatch)
     assert needs_dialog_open(pending), "unknown counts as quiet for a dialog: a refusal is cheap"
 
 

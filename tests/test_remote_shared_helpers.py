@@ -3,11 +3,10 @@
 Review of #243, round 3 (13/13) found three kept twice: the audit trail's scrub
 (``action_audit_excerpt`` re-did ``_audit_clean``), the API's ISO stamp
 (``remote_push._push_iso`` was ``_iso_seconds`` line for line), and the stale-pane
-check (``send-keys`` put ``fleet._pane_is_the_agent`` and ``_remote_pane_outlived``
-together by hand, as ``remote_needs._needs_pane_is_the_agent`` did). They agreed on
-the day they were found; the next character class, or the next restart signal,
-would have reached one copy only. Each test teaches the shared rule something and
-checks that every user of it learned it.
+check (``send-keys`` put ``fleet._pane_is_the_agent`` and the server's start together
+by hand, as needs-you's own check did). They agreed on the day they were found; the
+next character class, or the next restart signal, would have reached one copy only.
+Each test teaches the shared rule something and checks that every user of it learned it.
 """
 
 from __future__ import annotations
@@ -76,7 +75,13 @@ class Tmux:
         return BORN - timedelta(hours=1)
 
     def pane_facts(self, pane_id: str) -> SimpleNamespace:
-        return SimpleNamespace(dead=False, dead_status=None, current_command="claude")
+        return SimpleNamespace(
+            dead=False,
+            dead_status=None,
+            current_command="claude",
+            server_started=self.started_at(),
+            last_output=BORN,
+        )
 
     def send_literal(self, pane_id: str, text: str) -> None:
         self.sent.append(("literal", pane_id, text))
@@ -115,23 +120,24 @@ def test_send_keys_and_needs_you_judge_the_rows_pane_by_one_rule(
     here a refusal the real checks would not make, is one both apply."""
     tmux = Tmux()
     server: Any = tmux
+    now = BORN + timedelta(minutes=5)
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
     send = live_writes().handlers["send-keys"]
     assert send({"agent": "coder-1", "keys": ["1"]})[0]["sent"] is True
-    assert remote_needs._needs_pane_is_the_agent(server, row) is True
+    assert remote_needs._needs_pane_now(server, row, now) == (True, True)
     asked: list[str] = []
 
-    def learned(server: object, agent: FleetAgent) -> str:
+    def learned(agent: FleetAgent, facts: object) -> str:
         asked.append(agent.id)
         return "{label}'s pane answers for a server that restarted in a new way"
 
-    monkeypatch.setattr(remote_server, "_remote_pane_refusal", learned)
+    monkeypatch.setattr(remote_server, "_remote_facts_refusal", learned)
     with pytest.raises(RequestError) as refused:
         send({"agent": "coder-1", "keys": ["1"]})
     assert (refused.value.status, refused.value.error) == (409, "not_agent")
     assert refused.value.message == (
         "coder-1's pane answers for a server that restarted in a new way — nothing was sent"
     )
-    assert remote_needs._needs_pane_is_the_agent(server, row) is False
+    assert remote_needs._needs_pane_now(server, row, now) == (False, None)
     assert asked == [row.id, row.id]
     assert tmux.sent == [("keys", "%2", "1")], "only the key sent before the rule changed"

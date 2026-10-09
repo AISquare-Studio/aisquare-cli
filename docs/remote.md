@@ -471,22 +471,34 @@ from `POST api/unlock`) except unlock itself; every non-GET request needs an
 | GET | `api/remote` | `{allow_write, auto_off_at, version}` |
 | POST | `api/remote/extend` | another hour before auto-off |
 | GET | `api/projects`, `api/fleet`, `api/board`, `api/tasks`, `api/memory` | what `aisquare --json` prints for each (the board with its newest 200 events, not 5), `?project=` for one project |
-| GET | `api/panes/<agent>`, `api/transcript/<agent>`, `api/explainability/<agent>` | one agent's screen, conversation (`?width=`, `?before=`) and card |
+| GET | `api/panes/<agent>`, `api/transcript/<agent>`, `api/explainability/<agent>` | one agent's screen (`?history=` adds that many lines of scrollback, 5 000 at most), conversation (`?limit=` turns, `?before=`, `?width=` 20 to 200 columns) and card; `?project=` for another project's agent, the current project's otherwise |
 | GET | `api/needs` | `{"items", "scanned_at"}` |
 | POST | `api/needs/answer`, `api/needs/dismiss` | a quick answer; hide a card |
 | GET, POST, DELETE | `api/push`, `api/push/subscribe`, `api/push/subscription`, `api/push/test` | notifications for this device |
 | GET, DELETE | `api/devices`, `api/devices/<id>` | the devices; sign out (own id), or revoke another (a write) |
 | GET | `api/actions/recent` | this device's recent writes and how they ended |
-| POST | `api/send-keys`, `api/note`, `api/agent/{tell,stop,restart,switch}`, `api/task/…`, `api/project/…` | the writes |
+| POST | `api/send-keys`, `api/note`, `api/agent/{tell,stop,restart,switch}`, `api/task/…`, `api/project/…` | the writes; keys, a note and an agent action take `"project"` in the body, as a read takes `?project=`, and without it go to the current project |
 | WS | `ws` | the live stream |
 
-The stream sends `{"type", "payload", "ts"}` frames: `fleet` and `remote` when they
-change, `board` too once asked for (`{"subscribe_board": "<id>"}`, `false` to stop;
-the board's events and the sessions they name), `needs_you`, `action` (this device's
-write results), a `heartbeat` every 10 seconds, and `pane` for each pane the page
-subscribed to (`{"subscribe": "<agent>", "project": "<id>"}`). It closes with 4401
-for a device that is no longer signed in, 4409 when the same device opened a fifth
-connection, and 4410 when Remote is turned off.
+The stream sends `{"type", "payload", "ts"}` frames, each kind when it changed:
+
+- `remote`, `needs_you` and `action` (this device's write results), and a
+  `heartbeat` every 10 seconds, changed or not.
+- `fleet` and `board` once asked for, with `{"subscribe_fleet": "<id>"}` and
+  `{"subscribe_board": "<id>"}` (`""` or `null` for the current project, `false`
+  to stop). A `board` frame is the board's events and the sessions they name, and
+  carries the `project` it was asked for: under `AISQUARE_TEAM_HUB` every
+  project's board is the hub's.
+- `pane` for each pane subscribed to with `{"subscribe": "<agent>", "project":
+  "<id>"}` (no `project` for the current project's agent), until the same with
+  `unsubscribe`. A pane frame carries `agent`, and `project` when the
+  subscription named one. A connection watches 8 panes at most; one more is
+  refused with an `error` frame, `{"error": "too_many_subscriptions", "message"}`.
+
+A pane or a board that could not be read is a frame whose `error` says why, and
+one still being read when a tick ends follows on a later tick. The connection
+closes with 4401 for a device that is no longer signed in, 4409 when the same
+device opened a fifth connection, and 4410 when Remote is turned off.
 
 With curl, unlock once and keep the cookie:
 
@@ -496,7 +508,8 @@ curl -c jar -H "Origin: http://127.0.0.1:8750" -H "content-type: application/jso
   -d '{"password": "amber-birch-cedar-delta"}' "$BASE/api/unlock"
 curl -b jar "$BASE/api/needs"
 curl -b jar -H "Origin: http://127.0.0.1:8750" -H "content-type: application/json" \
-  -d '{"agent": "coder-auth", "keys": ["Escape"], "request_id": "esc-1"}' "$BASE/api/send-keys"
+  -d '{"agent": "coder-auth", "project": "prj_8c1e", "keys": ["Escape"], "request_id": "esc-1"}' \
+  "$BASE/api/send-keys"
 ```
 
 A write's `request_id` is optional. Sent again with the same request within 15

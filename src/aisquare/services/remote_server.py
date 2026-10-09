@@ -32,11 +32,16 @@ instead of running twice. Each write that goes through appends one line to
 ``remote-audit.log``. :data:`NOT_WRITE_GATED` lists the few routes that change
 something without the gate, frozen.
 
-**The stream** sends ``fleet``, ``remote``, then ``needs_you`` and ``action``, each
-only when it changed, a ``heartbeat`` every :data:`HEARTBEAT_SECONDS` changed or not,
-then one ``pane`` frame per ``(project, label)`` subscription when its pane changed.
-A socket that asked with ``subscribe_board`` gets ``board`` frames too, ahead of the
-rest: the board's events and the sessions they name (:func:`remote_board_frame`).
+**The stream** sends ``remote``, then ``needs_you`` and ``action``, each only when it
+changed, a ``heartbeat`` every :data:`HEARTBEAT_SECONDS` changed or not, then one
+``pane`` frame per ``(project, label)`` subscription when its pane changed. A socket
+that asked with ``subscribe_fleet`` gets ``fleet`` frames too, a project's ``fleet
+ls``, and one that asked with ``subscribe_board`` gets ``board`` frames, both ahead of
+the rest: the board's events and the sessions they name (:func:`remote_board_frame`),
+or why the board could not be read (:func:`remote_board_unread`), each naming the
+project its subscription named, as a ``pane`` frame does. A tick waits a tick at most
+for the snapshots it reads: one still being read sends its frame on a later tick, and
+holds back no other.
 
 **The lanes** live in their own modules and plug in through :class:`RemoteKit`:
 ``remote_needs`` (what needs the human), ``remote_push`` (Web Push),
@@ -99,6 +104,7 @@ from aisquare.core.version import __version__
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TurnMetric
 
 if TYPE_CHECKING:
+    import asyncio
     import socket
     from concurrent.futures import Executor, Future, ThreadPoolExecutor
     from types import FrameType, TracebackType
@@ -109,7 +115,7 @@ if TYPE_CHECKING:
     from starlette.routing import Route
     from starlette.websockets import WebSocket
 
-    from aisquare.core.tmux import Capture, TmuxServer
+    from aisquare.core.tmux import Capture, PaneFacts, TmuxServer
     from aisquare.services.remote_actions import ActionLedger
     from aisquare.services.remote_needs import NeedsItem
 
@@ -1886,6 +1892,9 @@ class Sources:
     explainability: ExplainabilitySource = field(
         default=lambda label, project: _live_explainability(label, project)
     )
+    board_frame: ProjectSource | None = None
+    """What a ``board`` frame carries, read for that alone (:func:`remote_board_payload`'s
+    ``boards``); ``None``: :func:`remote_board_frame` of ``board``, as for a test's fakes."""
 
 
 @dataclass(frozen=True)
@@ -1912,7 +1921,7 @@ PANE_OUTLIVED = (
     "{label}'s pane is gone: tmux restarted after {label} started, "
     "and its pane id is another agent's now"
 )
-"""409 ``not_agent`` for a row that outlived its tmux server (:func:`_remote_pane_outlived`)."""
+"""409 ``not_agent`` for a row that outlived its tmux server (:func:`_remote_facts_refusal`)."""
 
 
 def _remote_live_row(target: ProjectInfo, label: str) -> FleetAgent:
@@ -1926,48 +1935,52 @@ def _remote_live_row(target: ProjectInfo, label: str) -> FleetAgent:
     return agent
 
 
-def _remote_pane_outlived(server: TmuxServer, agent: FleetAgent) -> bool:
-    """Whether the pane under the row's id is ANOTHER agent's: the server on its socket
-    started after the row was written (``fleet._outlived``, FLEET-1).
+PANE_NOT_AGENT = "{label}'s pane is not running the agent"
+"""409 ``not_agent`` for a row whose pane runs something else (:func:`_remote_facts_refusal`)."""
 
-    A reboot or a hand-run ``tmux -L asq kill-server`` leaves live rows behind (the
-    listing reads them ``lost`` and ends none of them), and the next server, started by
-    a spawn in any project, numbers its panes from ``%0`` again. Asked about by id, that
-    agent's pane answered for the row: the phone showed its screen under the row's label,
-    and a key from the pad answered its prompt. The listing, the TUI
-    (``views.agent.shown_pane``) and the agent actions (``remote_needs``) each refuse
-    that pane already. A start tmux will not give judges nothing, as in
-    ``fleet._pane_alive``.
-    """
+
+def _remote_pane_facts(server: TmuxServer, agent: FleetAgent) -> PaneFacts | None:
+    """The facts of the pane under the row's id, one ``display-message``; ``None`` when it is
+    gone, and when tmux cannot be asked: that is not a pane to type into either."""
     from aisquare.core.tmux import TmuxError
-    from aisquare.services import fleet as fleet_service
 
     try:
-        started = server.started_at()
+        return server.pane_facts(agent.pane_id)
     except TmuxError:
-        started = None
-    return fleet_service._outlived(agent, started)
-
-
-PANE_NOT_AGENT = "{label}'s pane is not running the agent"
-"""409 ``not_agent`` for a row whose pane runs something else (:func:`_remote_pane_refusal`)."""
+        return None
 
 
 def _remote_pane_refusal(server: TmuxServer, agent: FleetAgent) -> str | None:
     """Why nothing may be typed into the row's pane, a sentence about ``{label}``; ``None``
-    when the pane is the agent's own.
+    when the pane is the agent's own: :func:`_remote_facts_refusal` on its facts."""
+    return _remote_facts_refusal(agent, _remote_pane_facts(server, agent))
 
-    It must run the agent (``fleet._pane_is_the_agent``), and on the server the row was
-    recorded on (:func:`_remote_pane_outlived`), asked in that order. ``send-keys`` and
-    needs-you's snapshot, which the quick answers and the agent actions type on the
-    strength of, both ask here: the stale-pane rule in one place, where a second copy
-    would miss the next restart signal it learns.
+
+def _remote_facts_refusal(agent: FleetAgent, facts: PaneFacts | None) -> str | None:
+    """Why nothing may be typed into the pane these facts are of, as :func:`_remote_pane_refusal`
+    says it; ``None`` when it is the row's agent.
+
+    It must run the agent (``fleet._runs_the_agent``), on the server the row was recorded
+    on, asked in that order. A reboot or a hand-run ``tmux -L asq kill-server`` leaves live
+    rows behind (the listing reads them ``lost`` and ends none of them), and the next
+    server, started by a spawn in any project, numbers its panes from ``%0`` again: asked
+    about by id, that agent's pane answered for the row, the phone showed its screen under
+    the row's label, and a key from the pad answered its prompt. A server that started
+    after the row was written holds none of its panes (``fleet._outlived``, FLEET-1), and a
+    start tmux will not give judges nothing, as in ``fleet._pane_alive``.
+
+    ``send-keys`` and needs-you's snapshot, which the quick answers and the agent actions
+    type on the strength of, both judge here: the stale-pane rule in one place, where a
+    second copy would miss the next restart signal it learns. Both judge one answer, which
+    says when its server started (``PaneFacts.server_started``): the start was a second
+    ``display-message``, so every key tapped cost two tmux processes, and every poll of an
+    action three with needs-you's own for quietness (review of #243, round 4).
     """
     from aisquare.services import fleet as fleet_service
 
-    if not fleet_service._pane_is_the_agent(server, agent.pane_id):
+    if facts is None or not fleet_service._runs_the_agent(facts):
         return PANE_NOT_AGENT
-    if _remote_pane_outlived(server, agent):
+    if fleet_service._outlived(agent, facts.server_started):
         return PANE_OUTLIVED
     return None
 
@@ -2022,7 +2035,7 @@ def _live_panes(label: str, project: str | None = None, history: int = 0) -> dic
     are untouched — the history keys appear only when history was asked for.
 
     Never another agent's screen: a row whose pane id the next tmux server gave
-    away is 409 ``not_agent`` (:func:`_remote_pane_outlived`). The server says
+    away is 409 ``not_agent`` (``fleet._outlived``, FLEET-1). The server says
     when it started in the very command that took the frame
     (``PaneFacts.server_started``), so the frame is judged by the server it came
     from. Asked in a second process after the capture, it doubled the stream's
@@ -2111,7 +2124,7 @@ def _pane_width(agent: FleetAgent) -> int:
     Best effort by design: a dead pane, or a tmux that will not answer, costs a
     sensible 80 columns and never the page itself — the conversation is on disk
     and does not depend on the pane still being there. So does a pane id another
-    agent's pane holds now (:func:`_remote_pane_outlived`): its width is that agent's.
+    agent's pane holds now (``fleet._outlived``, FLEET-1): its width is that agent's.
     One tmux process, the pane's facts alone, which say when their server started:
     a capture of the whole screen, then a second process to ask that, read a width.
     """
@@ -2155,6 +2168,17 @@ def remote_board_frame(board: object) -> dict[str, object]:
     }
 
 
+def remote_board_unread(exc: Exception) -> dict[str, object]:
+    """The ``board`` frame of a board that could not be read: the frame's keys, empty, and
+    ``error``, the sentence that says why, as a ``pane`` frame says why it has no screen.
+
+    The stream skipped such a frame and logged it at debug level, and the page's Board tab
+    said "Loading…" for as long as it was open: under ``AISQUARE_TEAM=0``, for a project
+    removed meanwhile, or while the store stayed locked (review of #243, round 4).
+    """
+    return {"project": None, "sessions": [], "events": [], "error": str(exc)}
+
+
 def _agent_state_counts(agents: list[FleetAgentStatus]) -> dict[str, int]:
     """The Projects screen's per-project summary — one call's worth of ``fleet ls``, counted.
 
@@ -2180,7 +2204,13 @@ BOARD_EVENTS = 200
 Board tab draws. ``asq board --json`` prints five, a glance in a terminal."""
 
 
-def remote_board_payload(project: str | None = None) -> dict[str, object]:
+BoardProjects = dict[tuple[Path | None, str], ProjectInfo]
+"""The board project of each project root under each ``AISQUARE_TEAM_HUB``, resolved once."""
+
+
+def remote_board_payload(
+    project: str | None = None, *, boards: BoardProjects | None = None
+) -> dict[str, object]:
     """``GET api/board`` and the ``board`` frame — the ONE call into ``board_data``.
 
     The project's root as ``cwd`` is exactly what ``asq board --json`` prints when
@@ -2190,13 +2220,39 @@ def remote_board_payload(project: str | None = None) -> dict[str, object]:
     card sent the human to "reply on the board" to was gone from it once five
     newer lines were (review of #243, round 3).
 
+    Under ``AISQUARE_TEAM_HUB`` every project's board is the hub's, and it names the
+    hub's project, not the one asked for. So a ``board`` frame names the project its
+    subscription named, and the page draws a read for the project it asked about. The
+    page went by the board's own project id, dropped every frame and every read, and
+    said "Loading…" for as long as the tab was open (review of #243, round 4).
+
+    The frame passes ``boards``, and is read for what :func:`remote_board_frame` keeps
+    of it. It is read every second while a phone shows its Board tab, and each read
+    resolved the board through ``team_project``, a ``git rev-parse`` process, wrote the
+    store (``ensure_project``, a write transaction beside every hook's), and read every
+    session and task the project ever had, for the frame to drop all but a few (review
+    of #243, round 4). Now the board project of each root is resolved once and kept in
+    ``boards``, as the TUI's Board tab resolves its own once: neither the hub nor where
+    a checkout's repository lives changes under a running server. ``board_data`` then
+    reads the events and the sessions they name (``glance``). ``GET api/board`` still
+    reads the whole board, as ``asq board --json`` prints it.
+
     #240 fold: pass ``exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS`` here (one line).
     """
     from aisquare.cli.team import board_json
+    from aisquare.core import orchestrator
     from aisquare.services import team as team_service
 
     cwd = None if project is None else _resolve_project(project).root
-    return board_json(*team_service.board_data(cwd, events=BOARD_EVENTS))
+    board: ProjectInfo | None = None
+    if boards is not None:
+        key = (cwd, os.environ.get(orchestrator.TEAM_HUB_ENV_VAR, ""))
+        board = boards.get(key)
+        if board is None:
+            board = boards[key] = team_service.resolve_project(cwd)
+    return board_json(
+        *team_service.board_data(cwd, events=BOARD_EVENTS, project=board, glance=boards is not None)
+    )
 
 
 def live_sources() -> Sources:
@@ -2209,11 +2265,22 @@ def live_sources() -> Sources:
         from aisquare.services import project as project_service
 
         all_projects = project_service.list_projects()
+        # Listed: a project with a live row, or one that ended within the day (its window may
+        # linger, an ``exited`` row). Any other lists no agent, and ``list_agents`` read every
+        # row and session it ever had to say so, for each project, on every read (sweep of
+        # #243, round 4).
+        since = fleet_service._now() - fleet_service.RECENTLY_ENDED
         with store_session() as store:
             group_names = {g.id: g.name for g in store.project_groups()}
+            listed = {
+                one.id
+                for one in all_projects
+                if store.fleet_agents(one.id, live_only=True)
+                or store.fleet_agents_ended_since(one.id, since)
+            }
         rows = projects_json(all_projects, group_names=group_names)
         for row, one in zip(rows, all_projects, strict=True):
-            agents = fleet_service.list_agents(one, live_only=True)
+            agents = fleet_service.list_agents(one, live_only=True) if one.id in listed else []
             row["agents"] = _agent_state_counts(agents)
         return rows
 
@@ -2242,6 +2309,11 @@ def live_sources() -> Sources:
                 entries = store.entries(project_id=target.id)
         return [entry.model_dump(mode="json") for entry in entries]
 
+    boards: BoardProjects = {}
+
+    def board_frame_payload(project: str | None = None) -> object:
+        return remote_board_frame(remote_board_payload(project, boards=boards))
+
     return Sources(
         projects=projects_payload,
         fleet=fleet_payload,
@@ -2251,6 +2323,7 @@ def live_sources() -> Sources:
         panes=_live_panes,
         transcript=_live_transcript,
         explainability=_live_explainability,
+        board_frame=board_frame_payload,
     )
 
 
@@ -2972,6 +3045,49 @@ class _Cache:
         if not flight.done():
             await asyncio.wrap_future(flight)
         return _cache_answer(flight.result())
+
+
+_UNSENT = object()
+"""No frame of the kind has gone out on the socket yet (``stream``)."""
+
+
+_UNREAD = object()
+"""A snapshot a socket's tick is still reading (``stream``)."""
+
+
+def _read_outcome(read: asyncio.Future[object]) -> object:
+    """What a socket's finished read came to: its snapshot, or the exception it raised.
+    Anything rarer than an exception (``SystemExit``) is raised, as it was when the tick
+    awaited the read itself."""
+    failed = read.exception()
+    if failed is not None and not isinstance(failed, Exception):
+        raise failed
+    return read.result() if failed is None else failed
+
+
+def _let_read_go(read: asyncio.Future[object]) -> None:
+    """A socket's read that nothing will take: its wait ends, and its compute runs on for
+    whoever else waits on it (:class:`_Cache`). One that ended with an exception has it
+    taken, so asyncio does not log it as never retrieved."""
+    if not read.done():
+        read.cancel()
+    elif not read.cancelled():
+        read.exception()
+
+
+def _same_frame(sent: object, payload: object) -> bool:
+    """Whether ``payload`` says what the frame that sent ``sent`` said: the very object, as
+    the needs feed is for the three seconds between scans, or one equal to it.
+
+    The stream encoded each payload as JSON with ``sort_keys``, per socket, per tick and on
+    the event loop that serves every request, to compare the text with the last frame's:
+    a feed of 20 items is 100 to 300 KB to encode, and each watched pane 20 KB more
+    (review of #243, round 4). ``==`` builds no string: it takes a sub-object that is the
+    very one as equal at once, so the feed costs nothing, and walks an equal snapshot in
+    C. A payload is JSON built anew, never changed once made, whose values keep their
+    types from one tick to the next, so equal payloads are equal frames.
+    """
+    return sent is payload or sent == payload
 
 
 def _client_of(scope: Any) -> str:
@@ -3916,6 +4032,7 @@ def build_remote_app(
     from aisquare.services import remote_actions, remote_needs, remote_push
 
     reads = sources or live_sources()
+    board_frame = reads.board_frame or (lambda project: remote_board_frame(reads.board(project)))
     handlers = {
         name: _remote_write_tracked(name, handler)
         for name, handler in (writes or live_writes()).handlers.items()
@@ -4332,28 +4449,45 @@ def build_remote_app(
     async def stream(websocket: WebSocket) -> None:
         """``/ws``: every tick, each frame that changed (SPEC §1.6).
 
-        In order: ``board`` (only to a socket that sent ``subscribe_board``),
-        ``fleet``, ``remote``, then ``needs_you`` and ``action``, then the
-        ``heartbeat`` (every ``heartbeat`` seconds, changed or not, never on the
-        first tick), then one ``pane`` frame per subscription. Pane
+        In order: ``board`` and ``fleet`` (each only to a socket that asked, with
+        ``subscribe_board`` and ``subscribe_fleet``), ``remote``, then ``needs_you``
+        and ``action``, then the ``heartbeat`` (every ``heartbeat`` seconds, changed
+        or not, never on the first tick), then one ``pane`` frame per subscription. Pane
         subscriptions are ``(project, label)``: the same label in two projects is
-        two agents, and a frame names the project its subscription named. A lane
-        seam that raises skips its own frame for the tick; anything else that
-        fails ends the socket with 1011.
+        two agents, and a frame names the project its subscription named. A
+        ``board`` frame names its subscription's project too: the board it carries
+        may be another project's, since ``AISQUARE_TEAM_HUB`` makes every project's
+        board the hub's, and that board names the hub's project. A lane seam that
+        raises skips its own frame for the tick; anything else that fails ends the
+        socket with 1011.
+
+        A tick reads its snapshots (board, fleet, each pane) at once and waits a tick at
+        most for them. A snapshot still being read after that sends its frame on a later
+        tick, and the frames that need no read (``remote``, ``needs_you``, ``action``,
+        the heartbeat) and the snapshots that came back go out without it.
         """
         device = kit.kit_device(websocket)  # the gate refused a socket without one
         await websocket.accept()
         loop = asyncio.get_running_loop()
-        panes_wanted: dict[tuple[str, str], str | None] = {}
+        panes_wanted: dict[tuple[str, str], object] = {}
         """``(project ref, label)`` per pane subscription, oldest first (``""`` is the CURRENT
-        project), to the JSON of the last ``pane`` frame it was sent (``None`` before the
-        first). A dict for its order: frames follow the order subscriptions came in. The
-        last frame lives WITH its subscription, so unsubscribing forgets both: a socket
-        that cycles through labels holds what its 8 subscriptions hold, and no more."""
+        project), to the payload of the last ``pane`` frame it was sent (``None`` before the
+        first). A dict for its order: the frames of a tick follow the order subscriptions
+        came in, and a capture that took longer than the tick's wait sends its frame on a
+        later tick. The last frame lives WITH its subscription, so unsubscribing forgets
+        both: a socket that cycles through labels holds what its 8 subscriptions hold, and
+        no more."""
         fleet_project: str | None = None
         """``None`` = the CURRENT project; a ``{subscribe_fleet: "<project>"}`` text frame
         picks another one's ``fleet`` frames (``""``/``null`` returns). The frame shape
         does not change, only WHICH project's ``fleet ls`` payload fills it."""
+        fleet_wanted = False
+        """No ``fleet`` frame goes out until the socket asks with ``subscribe_fleet``, and
+        ``{subscribe_fleet: false}`` stops them. Each is a ``fleet ls``: tmux on the
+        project's socket, the store, and a write for a pane found dead. Every socket was
+        read one every tick from the moment it opened, a phone on the Needs screen too,
+        though only the page's project and agent screens draw it (review of #243, round
+        4)."""
         board_project: str | None = None
         """The same, for ``board`` frames and ``{subscribe_board: "<project>"}``."""
         board_wanted = False
@@ -4362,10 +4496,15 @@ def build_remote_app(
         project ever had, and it changes with every session's heartbeat: sent to every
         socket, it reached each phone several times a minute, whatever screen it showed,
         and only the page's Board tab draws it."""
-        last: dict[str, str] = {}
-        """The JSON of the last frame of every other kind, keyed by the kind alone and never by
-        a string the client sent, so it cannot grow with what a client sends. Switching
-        projects forgets that kind's frame, so the new project's goes out even if equal."""
+        last: dict[str, object] = {}
+        """The payload of the last frame of every other kind (:func:`_same_frame`), keyed by the
+        kind alone and never by a string the client sent, so it cannot grow with what a
+        client sends. Switching projects forgets that kind's frame, so the new project's
+        goes out even if equal."""
+        pending: dict[str, asyncio.Future[object]] = {}
+        """The snapshots this socket is reading, by their cache kind (:class:`_Cache`): one a
+        tick's wait did not see come back stays here, and a later tick takes what it came
+        to. At most the board, the fleet and the 8 panes the socket wants."""
         next_heartbeat = time.monotonic() + heartbeat
         first_tick = True
         lanes_failing: set[str] = set()
@@ -4390,11 +4529,12 @@ def build_remote_app(
                 frame["project"] = project
             await websocket.send_text(json.dumps(frame))
 
-        async def push_if_changed(kind: str, payload: object) -> None:
-            encoded = json.dumps(payload, sort_keys=True)
-            if last.get(kind) != encoded:
-                last[kind] = encoded
-                await send_frame(kind, payload)
+        async def push_if_changed(
+            kind: str, payload: object, *, project: str | None = None
+        ) -> None:
+            if not _same_frame(last.get(kind, _UNSENT), payload):
+                last[kind] = payload
+                await send_frame(kind, payload, project=project)
 
         def lane_frame_skipped(seam: str) -> None:
             """Called from an ``except``: a lane's bug costs its own frame, never the socket."""
@@ -4402,28 +4542,67 @@ def build_remote_app(
             lanes_failing.add(seam)
             log.log(level, "remote: %s failed; the stream goes on without it", seam, exc_info=True)
 
+        def remote_read(
+            kind: str, compute: Snapshot, pool: Executor | None = None
+        ) -> asyncio.Future[object]:
+            """``kind``'s snapshot as this socket reads it: the read an earlier tick began and
+            nothing has taken yet, or a new one, in a task of its own."""
+            began = pending.get(kind)
+            if began is None:
+                began = pending[kind] = asyncio.ensure_future(
+                    cache.cached_snapshot(kind, compute, pool)
+                )
+            return began
+
+        def remote_taken(kind: str | None) -> object:
+            """What ``kind``'s read came to (:func:`_read_outcome`), taken out of ``pending``;
+            :data:`_UNREAD` while it is still being read, and for no kind."""
+            began = None if kind is None else pending.get(kind)
+            if kind is None or began is None or not began.done():
+                return _UNREAD
+            del pending[kind]
+            return _read_outcome(began)
+
         async def tick_once() -> None:
             nonlocal next_heartbeat, first_tick
-            # A switch that lands while a snapshot is read must not let the old project's
-            # frame out after it: the page would show it as the new one's until next tick.
-            board_ref = board_project
-            try:
-                if board_wanted:
-                    payload = await snapshot(
-                        f"board-frame:{board_ref or ''}",
-                        lambda: remote_board_frame(reads.board(board_ref)),
-                    )
-                    if board_wanted and board_ref == board_project:
-                        await push_if_changed("board", payload)
-            except Exception as exc:
-                log.debug("remote: board frame skipped: %s", exc)
-            fleet_ref = fleet_project
-            try:
-                payload = await snapshot(f"fleet:{fleet_ref or ''}", lambda: reads.fleet(fleet_ref))
-                if fleet_ref == fleet_project:
-                    await push_if_changed("fleet", payload)
-            except Exception as exc:
-                log.debug("remote: fleet frame skipped: %s", exc)
+            # Every snapshot is read at once and waited for a tick at most. Read in turn and
+            # awaited, one that hung held every frame behind it: a tmux that stops answering
+            # waits out its 30 s, and the heartbeat, needs-you and every other pane waited
+            # too, so the page took a live link for a dead one and held every button (sweep
+            # of #243, round 4). What the socket wants is looked at again after the wait: a
+            # switch that landed meanwhile must not let the old project's frame out, which
+            # the page would show as the new one's.
+            board_ref, fleet_ref = board_project, fleet_project
+            board_kind = f"board-frame:{board_ref or ''}" if board_wanted else None
+            fleet_kind = f"fleet:{fleet_ref or ''}" if fleet_wanted else None
+            in_flight: list[asyncio.Future[object]] = []
+            if board_kind is not None:
+                in_flight.append(remote_read(board_kind, lambda: board_frame(board_ref)))
+            if fleet_kind is not None:
+                in_flight.append(remote_read(fleet_kind, lambda: reads.fleet(fleet_ref)))
+            # One capture per pane per tick however many sockets watch it, as for board and
+            # fleet, and on the pane pool (§2.10). The key is the pair as JSON: a ':' in a ref
+            # or a label must not make two pairs one kind.
+            pane_kinds = {wanted: "pane:" + json.dumps(list(wanted)) for wanted in panes_wanted}
+            for (project, label), kind in pane_kinds.items():
+                capture = functools.partial(remote_pane_frame, label, project)
+                in_flight.append(remote_read(kind, capture, kit.kit_pane_pool()))
+            wanted_kinds = {board_kind, fleet_kind, *pane_kinds.values()}
+            for kind in [kind for kind in pending if kind not in wanted_kinds]:
+                _let_read_go(pending.pop(kind))  # switched away from, or unsubscribed
+            if not all(began.done() for began in in_flight):
+                await asyncio.wait(in_flight, timeout=tick)
+            board = remote_taken(board_kind)
+            if board is not _UNREAD and board_wanted and board_ref == board_project:
+                if isinstance(board, Exception):  # said on the Board tab, not "Loading…" for good
+                    log.debug("remote: board frame unread: %s", board)
+                    board = remote_board_unread(board)
+                await push_if_changed("board", board, project=board_ref or None)
+            fleet = remote_taken(fleet_kind)
+            if isinstance(fleet, Exception):
+                log.debug("remote: fleet frame skipped: %s", fleet)
+            elif fleet is not _UNREAD and fleet_wanted and fleet_ref == fleet_project:
+                await push_if_changed("fleet", fleet)
             await push_if_changed("remote", runtime.remote_json())
             # The lanes' frames, each guarded as board and fleet are: one lane's bug,
             # raised here on every tick, would otherwise end every phone's live view.
@@ -4449,28 +4628,21 @@ def build_remote_app(
                     lane_frame_skipped("needs_scanned_iso")
                     scanned = None  # the beat says the LINK is alive: it goes out regardless
                 await send_frame("heartbeat", {"needs_scanned_at": scanned})
-            for wanted in list(panes_wanted):
-                project, label = wanted
-                try:
-                    # One capture per pane per tick however many sockets watch it, as for
-                    # board and fleet, and on the pane pool (§2.10). The key is the pair as
-                    # JSON: a ':' in a ref or a label must not make two pairs one kind.
-                    payload = await cache.cached_snapshot(
-                        "pane:" + json.dumps([project, label]),
-                        functools.partial(remote_pane_frame, label, project),
-                        kit.kit_pane_pool(),
-                    )
-                except Exception as exc:  # the pool, shut down under a socket still ticking
-                    payload = {"rows": [], "width": 0, "height": 0, "error": str(exc)}
-                encoded = json.dumps(payload, sort_keys=True)
+            for wanted, kind in pane_kinds.items():
+                payload = remote_taken(kind)
+                if payload is _UNREAD:
+                    continue  # still being captured: its frame goes out on a later tick
+                if isinstance(payload, Exception):  # the pool, shut down under a socket ticking
+                    payload = {"rows": [], "width": 0, "height": 0, "error": str(payload)}
                 # Not wanted any more: unsubscribed while the capture ran, so no frame,
                 # and nothing kept for it either.
-                if wanted in panes_wanted and panes_wanted[wanted] != encoded:
-                    panes_wanted[wanted] = encoded
+                if wanted in panes_wanted and not _same_frame(panes_wanted[wanted], payload):
+                    panes_wanted[wanted] = payload
+                    project, label = wanted
                     await send_frame("pane", payload, agent=label, project=project or None)
 
         async def reader() -> None:
-            nonlocal fleet_project, board_project, board_wanted
+            nonlocal fleet_project, fleet_wanted, board_project, board_wanted
             while True:
                 received = await websocket.receive()
                 if received["type"] == "websocket.disconnect":
@@ -4506,7 +4678,10 @@ def build_remote_app(
                     panes_wanted.pop((project, label), None)
                 target = message.get("subscribe_fleet", False)
                 if target is None or isinstance(target, str):
-                    fleet_project = target or None
+                    fleet_project, fleet_wanted = target or None, True
+                    last.pop("fleet", None)
+                elif target is False and "subscribe_fleet" in message:
+                    fleet_wanted = False  # sent false: no fleet frames from now on
                     last.pop("fleet", None)
                 target = message.get("subscribe_board", False)
                 if target is None or isinstance(target, str):
@@ -4543,6 +4718,8 @@ def build_remote_app(
         finally:
             kit.kit_socket_closed(device.id, closer)
             runtime.unregister_socket(device.id, closer)
+            for began in pending.values():
+                _let_read_go(began)
             reading.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await reading

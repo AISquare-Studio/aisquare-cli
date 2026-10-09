@@ -4234,15 +4234,29 @@ def test_buttons_are_x10_bytes_for_a_program_that_did_not_ask_for_sgr(
             await pilot.pause(0.1)
 
     run(drive_plain())
-    # ESC [ M, then 32 + button / column / row: press 0 at (3,2); drag 32 at (4,2); release 3.
+    pane.width = 200
+
+    async def drive_wide() -> None:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(140, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.mouse_down(widget, offset=(119, 1))  # column 120: 32 + 120 = 0x98
+            await pilot.mouse_up(widget, offset=(119, 1))
+            await pilot.pause(0.1)
+
+    run(drive_wide())
+    # ESC [ M, then 32 + button / column / row: press 0 at (3,2); drag 32 at (4,2); release 3;
+    # then a press and a release at column 120. Typed text rides ``-H`` too (send_literal),
+    # so below column 96 a string and the bytes look alike; past it a string is UTF-8 and
+    # its column byte arrives as two, c2 98, where the bytes keep the one byte, 98.
     assert _hex(fake) == [
         "1b", "5b", "4d", "20", "23", "22",
         "1b", "5b", "4d", "40", "24", "22",
         "1b", "5b", "4d", "23", "24", "22",
+        "1b", "5b", "4d", "20", "98", "22",
+        "1b", "5b", "4d", "23", "98", "22",
     ], _hex(fake)  # fmt: skip
-    # Typed text rides ``-H`` too now (send_literal), so the check is that no
-    # ``-l`` string carried any of it: a string cannot carry these bytes.
-    assert not any("-l" in call for call in fake.sent()), fake.sent()
 
 
 def test_nothing_is_forwarded_in_copy_mode_into_history_or_to_a_program_without_the_mouse(

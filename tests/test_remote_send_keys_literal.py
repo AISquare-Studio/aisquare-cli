@@ -84,7 +84,9 @@ def test_a_lone_space_is_no_longer_nothing_to_do() -> None:
 
     class _Tmux:
         def pane_facts(self, pane_id: str) -> SimpleNamespace:
-            return SimpleNamespace(dead=False, current_command="claude")
+            return SimpleNamespace(
+                dead=False, current_command="claude", server_started=self.started_at()
+            )
 
         def started_at(self) -> datetime:
             return _Agent.created_at - timedelta(hours=1)

@@ -957,6 +957,32 @@ async function boardOnItsTab() {
   return steps;
 }
 
+/* The fleet the socket asks for, screen by screen: none on the feed, its project's on a
+ * project's tabs and on an agent's screen, asked once, false once they are left, and none
+ * on the socket a wake opens there. */
+async function fleetOnItsScreens() {
+  const page = bootPage("#/", signedIn());
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const fleet = () => asked(page.sockets[0], "subscribe_fleet");
+  const go = async (hash) => {
+    page.run("pageGo(" + JSON.stringify(hash) + ")");
+    await settle();
+    return fleet();
+  };
+  const steps = { feed: fleet() };
+  steps.project = await go("#/p/" + PROJECT + "/fleet");
+  await go("#/p/" + PROJECT + "/board");
+  steps.agent = await go("#/p/" + PROJECT + "/a/coder-1/live");
+  steps.left = await go("#/devices");
+  fire(page, "document", "visibilitychange");
+  page.acceptSockets();
+  await settle();
+  steps.woken = asked(page.live(), "subscribe_fleet");
+  return steps;
+}
+
 /* The Board tab with a board frame on it, left for the Fleet tab and opened again, its read
  * held: what the tab shows meanwhile, the reads it made, and what it shows once answered. */
 async function boardReopened() {
@@ -966,7 +992,7 @@ async function boardReopened() {
   }));
   await settle();
   page.acceptSockets();
-  page.live().frame("board", { project: { id: PROJECT }, sessions: [], events: [note(1, "from before")] });
+  page.live().frame("board", { project: { id: PROJECT }, sessions: [], events: [note(1, "from before")] }, { project: PROJECT });
   await settle();
   reads[0].settle({ status: 200, json: { project: { id: PROJECT }, sessions: [], events: [note(1, "from before")] } });
   await settle();
@@ -983,6 +1009,50 @@ async function boardReopened() {
   reads[reads.length - 1].settle({ status: 200, json: { project: { id: PROJECT }, sessions: [], events: [note(1, "from before"), note(2, "since")] } });
   await settle();
   return { first, reopened, answered: shown() };
+}
+
+/* The Board tab where every project's board is AISQUARE_TEAM_HUB's, whose own project id is
+ * not the tab's: what it shows of a frame for another pid, and of a frame and of a read that
+ * carry the hub's board. Then a board that could not be read: a refused read, a frame that
+ * says why, and the board that came once it could be read. */
+async function boardAnswers() {
+  const hub = { project: { id: "prj_hub" }, sessions: [], events: [note(1, "on the hub")] };
+  const shown = (page) => page.main().querySelectorAll("div.events")[0].childNodes.map((one) => {
+    const text = find(one, (node) => node.className === "text");
+    return text ? text.textContent : one.textContent;
+  });
+  const opened = async () => {
+    const read = deferred();
+    const page = bootPage("#/p/" + PROJECT + "/board", signedIn({ "GET api/board": () => read.promise }));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    return { page, read };
+  };
+  const framed = await opened();
+  framed.page.live().frame("board", Object.assign({}, hub, { events: [note(2, "prj_y's")] }), { project: "prj_y" });
+  await settle();
+  const other = shown(framed.page);
+  framed.page.live().frame("board", hub, { project: PROJECT });
+  await settle();
+  const read = await opened();
+  read.read.settle({ status: 200, json: hub });
+  await settle();
+  const failed = await opened();
+  failed.read.settle({ status: 404, json: { error: "not_found", message: "no project matches 'prj_x'" } });
+  await settle();
+  const refused = shown(failed.page);
+  failed.page.live().frame("board", hub, { project: PROJECT });
+  await settle();
+  const unread = await opened();
+  unread.page.live().frame("board", { project: null, sessions: [], events: [], error: "the agent orchestrator is disabled" }, { project: PROJECT });
+  await settle();
+  unread.read.settle({ status: 503, json: { error: "unavailable", message: "the agent orchestrator is disabled" } });
+  await settle();
+  return {
+    other, frame: shown(framed.page), read: shown(read.page),
+    refused, readable: shown(failed.page), unread: shown(unread.page),
+  };
 }
 
 /* A transcript read on a phone in UTC-7 from a machine that sends each turn's time as UTC:
@@ -1065,7 +1135,7 @@ async function readsAfterFrames() {
     const one = bootPage("#/p/" + PROJECT + "/" + tab, signedIn({ ["GET api/" + tab]: () => read.promise }));
     await settle();
     one.acceptSockets();
-    if (frame) one.live().frame(tab, frame);
+    if (frame) one.live().frame(tab, frame, tab === "board" ? { project: PROJECT } : undefined);
     await settle();
     read.settle(answer);
     await settle();
@@ -2394,7 +2464,9 @@ async function main() {
     liveScroll: await liveScroll(),
     padScroll: await padScroll(),
     boardOnItsTab: await boardOnItsTab(),
+    fleetOnItsScreens: await fleetOnItsScreens(),
     boardReopened: await boardReopened(),
+    boardAnswers: await boardAnswers(),
     transcriptTimes: await transcriptTimes(),
     limitTimes: await limitTimes(),
     readsAfterFrames: await readsAfterFrames(),

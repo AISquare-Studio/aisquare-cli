@@ -1302,6 +1302,20 @@ def test_the_page_asks_for_a_board_only_while_its_board_tab_shows(
     assert steps["sockets"] == 2 and steps["woken"] == ["prj_x"], "a new socket asks again"
 
 
+def test_the_page_asks_for_a_fleet_only_on_a_projects_screens_and_an_agents(
+    boot_report: dict[str, Any],
+) -> None:
+    """r4 7/9: every socket was read the current project's fleet every second from the moment
+    it opened, a ``fleet ls`` on the machine each time, though only a project's screens and
+    an agent's draw it. The page asked for one on every new socket, wherever it was."""
+    steps = boot_report["fleetOnItsScreens"]
+    assert steps["feed"] == [], "the feed draws no fleet"
+    assert steps["project"] == ["prj_x"]
+    assert steps["agent"] == ["prj_x"], "its tabs and its agents ask once"
+    assert steps["left"] == ["prj_x", False], "leaving them says so"
+    assert steps["woken"] == [], "a new socket asks for none where none is drawn"
+
+
 def test_a_board_tab_opened_again_reads_its_board_anew_and_never_shows_the_last_one(
     boot_report: dict[str, Any],
 ) -> None:
@@ -1313,6 +1327,31 @@ def test_a_board_tab_opened_again_reads_its_board_anew_and_never_shows_the_last_
     assert board["first"] == ["from before"]
     assert board["reopened"] == {"shown": ["Loading…"], "reads": 2}
     assert board["answered"] == ["since", "from before"]
+
+
+def test_the_board_tab_draws_the_board_its_project_answers_with(
+    boot_report: dict[str, Any],
+) -> None:
+    """r4 2/9: under ``AISQUARE_TEAM_HUB`` every project's board is the hub's, and the tab drew
+    a board only when its own project id was the tab's: it dropped every frame and every read,
+    and said Loading… for as long as it was open. A frame names the pid it answers now, and a
+    read answers the pid it asked about."""
+    board = boot_report["boardAnswers"]
+    assert board["other"] == ["Loading…"], "a frame for another pid is not this tab's"
+    assert board["frame"] == ["on the hub"] and board["read"] == ["on the hub"]
+
+
+def test_a_board_that_cannot_be_read_says_why_on_the_board_tab(
+    boot_report: dict[str, Any],
+) -> None:
+    """r4 4/9: the Board tab's read acted only on an answer that was ok, and the stream sent
+    no frame for a board that raised, so the tab said Loading… for as long as it was open:
+    with the orchestrator off, the project removed, the store locked. A refused read and a
+    frame that says why are each said there now, and a board that comes after is drawn."""
+    board = boot_report["boardAnswers"]
+    assert board["refused"] == ["no project matches 'prj_x'"]
+    assert board["readable"] == ["on the hub"], "a board read since takes the refusal's place"
+    assert board["unread"] == ["the agent orchestrator is disabled"], "the read after it is no news"
 
 
 def test_a_transcript_tells_each_turns_time_by_the_phones_own_clock(

@@ -371,6 +371,128 @@ def test_the_board_tab_gets_the_newest_events_it_draws_not_the_clis_five(
     assert sorted(newest) == [f"line {n}" for n in range(2, 9)], "the newest, as many as asked"
 
 
+def test_under_a_hub_each_projects_board_frame_is_the_hubs_board_named_for_that_project(
+    two_projects: tuple[ProjectInfo, ProjectInfo],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """r4 2/9, on a real store: with ``AISQUARE_TEAM_HUB`` set, every project's board is the
+    hub's, as ``asq board`` reads it there, and the board names the hub's project. The page
+    went by that id and drew none of it. The frame names the project the socket asked for."""
+    _current, other = two_projects
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    team_service.add_note("on the hub's board", cwd=other.root)
+    board = remote_board_payload(other.id)
+    assert _board_project_id(board) not in (other.id, None), "the hub's project, not other's"
+    runtime = make_runtime()
+    client = make_client(build_app(runtime, sources=live_sources(), dist_dir=tmp_path, tick=0.05))
+    assert unlock(client, runtime).status_code == 200
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_board": other.id}))
+        frame = _until(ws, lambda f: f["type"] == "board")
+    assert frame["project"] == other.id
+    assert frame["payload"]["project"]["id"] == _board_project_id(board)
+    assert "on the hub's board" in _event_texts(frame["payload"])
+
+
+def _seed_board(project: ProjectInfo) -> None:
+    """Three sessions, two of which write on the board, a task, and three notes."""
+    with store_session() as store:
+        for n, seen in enumerate(("10:01", "10:03", "10:02")):
+            store.upsert_session(
+                TeamSession(
+                    id=f"ses_{project.id[-6:]}_{n}",
+                    project_id=project.id,
+                    role="coder",
+                    label=f"coder-{n}",
+                    started_at=T0,
+                    last_seen_at=datetime.fromisoformat(f"2026-10-07T{seen}:00+00:00"),
+                )
+            )
+    team_service.add_task("ship it", cwd=project.root)
+    team_service.add_note("from coder-0", session_ref=f"ses_{project.id[-6:]}_0", cwd=project.root)
+    team_service.add_note("from coder-1", session_ref=f"ses_{project.id[-6:]}_1", cwd=project.root)
+    team_service.add_note("from the desk", cwd=project.root)
+
+
+def test_the_board_frame_is_what_the_board_read_makes_of_it(
+    two_projects: tuple[ProjectInfo, ProjectInfo],
+) -> None:
+    """r4 5/9 reads the frame for what it carries; it must carry what it did, the events
+    and the sessions they name, newest seen first, for a named project and the current."""
+    current, other = two_projects
+    for project in (current, other):
+        _seed_board(project)
+    sources = live_sources()
+    assert sources.board_frame is not None
+    for ref in (other.id, None):
+        frame = sources.board_frame(ref)
+        assert frame == remote_server.remote_board_frame(remote_board_payload(ref))
+        assert isinstance(frame, dict)
+        assert [one["label"] for one in frame["sessions"]] == ["coder-1", "coder-0"]
+
+
+def test_a_board_frame_runs_no_git_writes_nothing_and_reads_no_session_it_drops(
+    two_projects: tuple[ProjectInfo, ProjectInfo],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """r4 5/9: a phone on the Board tab cost a ``git rev-parse`` and a store write
+    (``ensure_project``) every second, and every session and task the project ever had was
+    read for the frame to drop. Measured over the live stream: the board's project is
+    resolved once for the server, and a frame reads its events and the sessions they name."""
+    from aisquare.core import orchestrator, workspace
+    from aisquare.core.store import SqliteStore
+
+    _current, other = two_projects
+    _seed_board(other)
+    asked: list[tuple[str, object]] = []
+
+    def spy(name: str, real: Any, *, store: bool = True) -> Any:
+        def called(*args: Any, **kwargs: Any) -> Any:
+            asked.append((name, args[1] if store else args[0]))
+            return real(*args, **kwargs)
+
+        return called
+
+    for name in ("ensure_project", "team_sessions", "team_tasks", "recent_events"):
+        monkeypatch.setattr(SqliteStore, name, spy(name, getattr(SqliteStore, name)))
+    git = spy("git", workspace.git_common_root, store=False)
+    monkeypatch.setattr(orchestrator, "git_common_root", git)
+
+    def of_other(name: str) -> list[object]:
+        ids = (other.id, other.root, other.root.resolve())
+        return [
+            arg
+            for asked_name, arg in asked
+            if asked_name == name and (getattr(arg, "id", arg) in ids)
+        ]
+
+    runtime = make_runtime()
+    client = make_client(build_app(runtime, sources=live_sources(), dist_dir=tmp_path, tick=0.02))
+    assert unlock(client, runtime).status_code == 200
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_board": other.id}))
+        frame = _until(ws, lambda f: f["type"] == "board")
+        deadline = time.monotonic() + 10
+        while len(of_other("recent_events")) < 4:
+            assert time.monotonic() < deadline, "the board frame was read fewer than 4 times"
+            time.sleep(0.01)
+    assert [event["payload"]["text"] for event in frame["payload"]["events"]] == [
+        "ship it",
+        "from coder-0",
+        "from coder-1",
+        "from the desk",
+    ]
+    assert len(of_other("git")) <= 1, "its project resolved once, not once a frame"
+    assert of_other("ensure_project") == [], "a frame writes nothing"
+    assert of_other("team_sessions") == [] and of_other("team_tasks") == []
+    whole = client.get(f"{base(runtime)}/api/board", params={"project": other.id}).json()
+    assert len(whole["sessions"]) == 3 and len(whole["tasks"]) == 1, "the read is the whole board"
+
+
 def _json_of_board() -> dict[str, Any]:
     result = CliRunner().invoke(cli, ["--json", "board"])
     assert result.exit_code == 0, result.output
@@ -552,7 +674,9 @@ def test_a_pane_unsubscribed_while_it_is_captured_gets_no_frame(
 ) -> None:
     """The capture runs on the pool while the socket reads on, so an unsubscribe can land
     mid-capture. It wins: no frame is sent for the pane, and nothing is kept for it (a
-    frame kept for a label nobody watches is memory a client could pile up)."""
+    frame kept for a label nobody watches is memory a client could pile up). The tick is
+    long enough that the eight captures after it come back within one tick's wait, whose
+    frames follow the order the subscriptions came in."""
     started, release = threading.Event(), threading.Event()
 
     class SlowPanes(Panes):
@@ -562,7 +686,9 @@ def test_a_pane_unsubscribed_while_it_is_captured_gets_no_frame(
                 release.wait(10)
             return super().__call__(agent, project, history)
 
-    client = _socket_client(runtime, tmp_path, reads, SlowPanes())
+    sources = dataclasses.replace(reads.sources(), panes=SlowPanes())
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.5))
+    assert unlock(client, runtime).status_code == 200
     cap = remote_server.WS_PANE_SUBSCRIPTIONS_MAX
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
         ws.send_text(json.dumps({"subscribe": "slow"}))
@@ -598,9 +724,68 @@ def test_subscribe_board_picks_which_projects_board_frames_arrive(
         assert _until(ws, lambda f: f["type"] == "fleet")["payload"]["project"] is None
 
 
+def test_a_board_frame_names_the_project_its_subscription_named(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """r4 2/9: under ``AISQUARE_TEAM_HUB`` every project's board is the hub's, so the board a
+    frame carries names the hub's project, and the page, which went by that id, drew none.
+    The frame names the subscription's project, as a pane frame does: none for the current
+    project's, which no subscription named."""
+    hub = {"project": {"id": "prj_hub"}, "sessions": [], "events": []}
+    sources = dataclasses.replace(Reads().sources(), board=lambda project: hub)
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
+    assert unlock(client, runtime).status_code == 200
+    is_board = lambda f: f["type"] == "board"  # noqa: E731
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_board": "prj_b"}))
+        named = _until(ws, is_board)
+        ws.send_text(json.dumps({"subscribe_board": None}))
+        current = _until(ws, is_board)
+    assert named["project"] == "prj_b" and named["payload"] == hub
+    assert set(current) == {"type", "payload", "ts"} and current["payload"] == hub
+
+
+def test_a_board_that_cannot_be_read_is_a_frame_that_says_why(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """r4 4/9: a board snapshot that raised was skipped and logged at debug level, and the
+    page's Board tab said Loading… for as long as it was open: the orchestrator off, the
+    project removed, the store locked. The frame says why now, and the board replaces it
+    once it can be read again."""
+    failing = [True]
+
+    def board(project: str | None) -> object:
+        if project == "nope":
+            raise NoSuchProject("no project matches 'nope' (id prefix, name or codename)")
+        if failing[0]:
+            raise team_service.TeamDisabledError()
+        return {"project": {"id": "prj_b"}, "sessions": [], "events": []}
+
+    sources = dataclasses.replace(Reads().sources(), board=board)
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
+    assert unlock(client, runtime).status_code == 200
+    is_board = lambda f: f["type"] == "board"  # noqa: E731
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_board": "prj_b"}))
+        unread = _until(ws, is_board)
+        failing[0] = False
+        read = _until(ws, is_board)
+        ws.send_text(json.dumps({"subscribe_board": "nope"}))
+        gone = _until(ws, is_board)
+    assert unread["project"] == "prj_b"
+    assert unread["payload"] == {
+        "project": None,
+        "sessions": [],
+        "events": [],
+        "error": "the agent orchestrator is disabled (AISQUARE_TEAM=0)",
+    }
+    assert read["payload"]["project"] == {"id": "prj_b"} and "error" not in read["payload"]
+    assert gone["project"] == "nope" and "no project matches 'nope'" in gone["payload"]["error"]
+
+
 def _captures(panes: Panes, pane: tuple[str, str | None], count: int) -> None:
-    """Wait for ``pane``'s ``count``-th capture: a tick each, and a tick reads its board,
-    when its socket wants one, before it captures any pane."""
+    """Wait for ``pane``'s ``count``-th capture: a tick each, and a tick starts its board's
+    read, when its socket wants one, before its captures, and waits for them all."""
     deadline = time.monotonic() + 10
     while panes.asked.count(pane) < count:
         assert time.monotonic() < deadline, f"{pane} captured {panes.asked.count(pane)} times"
@@ -643,12 +828,54 @@ def test_no_board_is_read_or_sent_until_the_socket_asks_and_none_once_it_stops(
     assert [frame for frame in later if frame["type"] == "board"] == []
 
 
+def test_no_fleet_is_read_or_sent_until_the_socket_asks_and_none_once_it_stops(
+    runtime: Runtime, reads: Reads, tmp_path: Path
+) -> None:
+    """r4 7/9: every socket was read the current project's fleet every tick from the moment
+    it opened, a ``fleet ls`` each (tmux, the store, a write for a pane found dead), whatever
+    screen the phone showed, though only the page's project and agent screens draw it. Now
+    no fleet is read or sent until ``subscribe_fleet``, and ``{"subscribe_fleet": false}``
+    stops them again, as for the board."""
+    panes = Panes()
+    client = _socket_client(runtime, tmp_path, reads, panes)
+
+    def fleets() -> list[tuple[str, object]]:
+        return [call for call in reads.calls if call[0] == "fleet"]
+
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe": "first"}))
+        _captures(panes, ("first", None), 3)
+        unasked = fleets()
+        ws.send_text(json.dumps({"subscribe_fleet": "prj_b"}))
+        asked = _until(ws, lambda f: f["type"] == "fleet")
+        ws.send_text(json.dumps({"subscribe_fleet": False}))
+        ws.send_text(json.dumps({"subscribe": "second"}))
+        _until(ws, _pane("second"))  # read in order: every tick from the next one on stopped
+        reads.calls.clear()
+        _captures(panes, ("second", None), panes.asked.count(("second", None)) + 3)
+        stopped = fleets()
+        ws.send_text(json.dumps({"subscribe": "third"}))
+        later = [frame_within(ws)]
+        while not _pane("third")(later[-1]):
+            later.append(frame_within(ws))
+    assert unasked == [], "a socket that never asked was read a fleet on every tick"
+    assert asked["payload"]["project"] == "prj_b"
+    assert stopped == [], "a socket that said false was still read a fleet"
+    assert [frame for frame in later if frame["type"] == "fleet"] == []
+
+
+@pytest.mark.parametrize(
+    "tick", [0.02, 0.5], ids=["the read outlasts its tick's wait", "the read ends within it"]
+)
 def test_a_false_that_lands_while_a_board_is_read_sends_no_board_frame(
-    runtime: Runtime, tmp_path: Path
+    runtime: Runtime, tmp_path: Path, tick: float
 ) -> None:
     """A tick was reading the board when ``{"subscribe_board": false}`` came, and the board
     went out once the read was back: every session and task once more, to a page that had
-    left its Board tab. The tick looks at what the socket wants after the read too."""
+    left its Board tab. The tick looks at what the socket wants after the read too. A tick
+    waits a tick at most for its reads (sweep of #243, round 4): with a 0.5 s tick this
+    read comes back within its tick's wait, and with a 0.02 s one it still runs when the
+    next tick, which no longer wants it, lets it go."""
     reading, release = threading.Event(), threading.Event()
 
     def board(project: str | None) -> object:
@@ -657,7 +884,7 @@ def test_a_false_that_lands_while_a_board_is_read_sends_no_board_frame(
         return {"project": {"id": "p1"}, "sessions": [], "events": []}
 
     sources = dataclasses.replace(Reads().sources(), board=board, panes=Panes())
-    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=tick))
     assert unlock(client, runtime).status_code == 200
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
         ws.send_text(json.dumps({"subscribe_board": None}))
@@ -672,13 +899,17 @@ def test_a_false_that_lands_while_a_board_is_read_sends_no_board_frame(
     assert [frame["type"] for frame in frames if frame["type"] == "board"] == []
 
 
+@pytest.mark.parametrize(
+    "tick", [0.02, 0.5], ids=["the read outlasts its tick's wait", "the read ends within it"]
+)
 def test_a_board_switch_while_a_board_is_read_never_sends_the_old_projects_board(
-    runtime: Runtime, tmp_path: Path
+    runtime: Runtime, tmp_path: Path, tick: float
 ) -> None:
     """The board's twin of the next test, which only the fleet had: a tick reading the
     current project's board when ``{"subscribe_board": "prj_b"}`` landed would let that
     board out as prj_b's once the read was back. The tick sends a board only for the
-    project still asked for, as it sends a fleet."""
+    project still asked for, as it sends a fleet, whether the read came back within its
+    tick's wait or after it, as in the test before."""
     reading, release = threading.Event(), threading.Event()
     hold = [False]
 
@@ -689,7 +920,7 @@ def test_a_board_switch_while_a_board_is_read_never_sends_the_old_projects_board
         return {"project": project, "sessions": [], "events": []}
 
     sources = dataclasses.replace(Reads().sources(), board=board)
-    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=tick))
     assert unlock(client, runtime).status_code == 200
     is_board = lambda f: f["type"] == "board"  # noqa: E731
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
@@ -703,13 +934,17 @@ def test_a_board_switch_while_a_board_is_read_never_sends_the_old_projects_board
         assert _until(ws, is_board)["payload"]["project"] == "prj_b"
 
 
+@pytest.mark.parametrize(
+    "tick", [0.02, 0.5], ids=["the read outlasts its tick's wait", "the read ends within it"]
+)
 def test_a_switch_while_a_snapshot_is_read_never_sends_the_old_projects_frame(
-    runtime: Runtime, tmp_path: Path
+    runtime: Runtime, tmp_path: Path, tick: float
 ) -> None:
     """The tick read the current project's fleet, the switch landed meanwhile and dropped
     the last frame, and the old project's frame went out as if it were the new one's: the
     page showed it for a tick, and ``test_subscribe_board_picks_which_projects_board_frames_arrive``
-    failed about one run in six."""
+    failed about one run in six. The read comes back within its tick's wait or after it,
+    as above."""
     reading, release = threading.Event(), threading.Event()
     hold = [False]
 
@@ -720,10 +955,11 @@ def test_a_switch_while_a_snapshot_is_read_never_sends_the_old_projects_frame(
         return {"kind": "fleet", "project": project}
 
     sources = dataclasses.replace(Reads().sources(), fleet=fleet)
-    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=tick))
     assert unlock(client, runtime).status_code == 200
     is_fleet = lambda f: f["type"] == "fleet"  # noqa: E731
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_fleet": None}))
         assert _until(ws, is_fleet)["payload"]["project"] is None
         hold[0] = True
         assert reading.wait(5), "a tick is reading the current project's fleet"

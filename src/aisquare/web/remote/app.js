@@ -1048,7 +1048,7 @@ async function probe() {
 }
 
 function resubscribe() {
-  wsSend("subscribe_fleet", S.wantFleet);
+  if (S.wantFleet) wsSend("subscribe_fleet", S.wantFleet);
   if (S.wantBoard) wsSend("subscribe_board", S.wantBoard); // a new socket sends no board until asked
   for (const watcher of paneWatchers.values()) {
     watcher.fresh = false; // what it shows came before this socket: held until its next frame
@@ -1087,7 +1087,7 @@ function onFrame(text) {
     S.fleet = payload;
     noteName(payload);
     viewCall("fleet");
-  } else if (frame.type === "board") {
+  } else if (frame.type === "board" && frame.project === S.wantBoard) {
     S.board = payload;
     viewCall("board");
   } else if (frame.type === "pane" && typeof frame.agent === "string") {
@@ -1135,17 +1135,19 @@ function paneWatch(pid, label, fn) {
   };
 }
 
+/* Fleet frames only on a project's or an agent's screen (null stops them): no other draws one. */
 function wantProject(pid) {
   if (S.wantFleet !== pid) {
     S.wantFleet = pid;
     if (projectIdOf(S.fleet) !== pid) S.fleet = null;
-    wsSend("subscribe_fleet", pid);
+    wsSend("subscribe_fleet", pid || false);
   }
 }
 
 /* Board frames only while the Board tab shows (null stops them): a board is every session
  * and task of its project, sent again with every session's heartbeat, and no other screen
- * draws it. One kept from before is not shown again: no frame came while it was not asked. */
+ * draws it. One kept from before is not shown again: no frame came while it was not asked.
+ * A frame names the pid it answers, since under AISQUARE_TEAM_HUB its board is the hub's. */
 function wantBoard(pid) {
   if (S.wantBoard === pid) return;
   S.wantBoard = pid;
@@ -1455,6 +1457,7 @@ function renderRoute() {
   if (S.view && typeof S.view.cleanup === "function") S.view.cleanup();
   S.view = null;
   S.route = route;
+  if (route.name !== "project" && route.name !== "agent") wantProject(null);
   S.since.clear();
   closeSheet();
   clear(UI.main);
@@ -2171,10 +2174,12 @@ VIEWS.project = (route, main) => {
     const compose = noteComposer(pid);
     const list = el("div", "events");
     body.append(compose, list);
+    let failed = null; // a refused read, said here: dropped, it left "Loading…" for good
     const draw = () => {
-      const board = projectIdOf(S.board) === pid ? S.board : null;
+      const board = S.wantBoard === pid ? S.board : null;
       clear(list);
-      if (!board) return list.appendChild(el("p", "empty", "Loading…"));
+      if (!board) return list.appendChild(el("p", "empty", failed ? failText(failed) : "Loading…"));
+      if (isText(board.error)) return list.appendChild(el("p", "empty", plainText(board.error)));
       const authors = new Map();
       for (const session of Array.isArray(board.sessions) ? board.sessions : []) {
         if (session && typeof session.id === "string") authors.set(session.id, plainText(session.label || session.role || "an agent"));
@@ -2196,12 +2201,12 @@ VIEWS.project = (route, main) => {
     };
     view.board = draw;
     draw();
-    if (projectIdOf(S.board) !== pid) {
+    if (!S.board) {
       apiCall("GET", API.board, { query: { project: pid } }).then((res) => {
-        if (res.ok && S.wantBoard === pid && projectIdOf(res.data) === pid && projectIdOf(S.board) !== pid) {
-          S.board = res.data;
-          draw();
-        }
+        if (S.wantBoard !== pid || S.board) return; // the tab was left, or a frame came first
+        if (res.ok) S.board = res.data;
+        else failed = res;
+        draw();
       });
     }
   } else {

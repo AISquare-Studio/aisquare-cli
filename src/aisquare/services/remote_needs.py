@@ -2144,9 +2144,7 @@ def _needs_snapshot(
         and status.state not in _NEEDS_PANE_UNVOUCHED
     ):
         server = fleet_service.server_for(status.agent.tmux_socket)
-        pane_is_agent = _needs_pane_is_the_agent(server, status.agent)
-        if pane_is_agent:
-            pane_quiet = _needs_pane_quiet(server, status.agent.pane_id, now)
+        pane_is_agent, pane_quiet = _needs_pane_now(server, status.agent, now)
     return AgentNow(
         project=project,
         status=status,
@@ -2157,32 +2155,34 @@ def _needs_snapshot(
     )
 
 
-def _needs_pane_is_the_agent(server: TmuxServer, agent: FleetAgent) -> bool:
-    """Whether the row's pane runs the agent now, on the server the row was recorded on.
+def _needs_pane_now(
+    server: TmuxServer, agent: FleetAgent, now: datetime
+) -> tuple[bool, bool | None]:
+    """Whether the row's pane runs the agent now, on the server the row was recorded on, and
+    whether it is quiet, from one ``display-message`` (``PaneFacts``).
 
     The listing vouches for a pane only when it could ask tmux: a fresh board
     row derives its state without it. And a server that started after the row
     was written numbers its panes from ``%0`` again, so the pane under the row's
     id is another agent's (``fleet._outlived``). ``send-keys`` asks the same two
     questions before it types, so both ask them in one place:
-    ``remote_server._remote_pane_refusal``.
-    """
-    from aisquare.services import remote_server
+    ``remote_server._remote_facts_refusal``.
 
-    return remote_server._remote_pane_refusal(server, agent) is None
-
-
-def _needs_pane_quiet(server: TmuxServer, pane_id: str, now: datetime) -> bool | None:
-    """Whether the pane's window printed nothing for ``fleet.ACTIVITY_WINDOW``.
-
-    Claude Code animates its spinner while a tool runs, so a quiet pane with a
-    tool pending is a dialog waiting. One-second resolution, the fact
-    ``fleet._derive`` reads too; ``None`` when tmux would not say.
+    Quiet: the window printed nothing for ``fleet.ACTIVITY_WINDOW``. Claude Code
+    animates its spinner while a tool runs, so a quiet pane with a tool pending is
+    a dialog waiting. One-second resolution, the fact ``fleet._derive`` reads too;
+    ``None`` when tmux would not say, and for a pane that is not the agent's. It was
+    a process of its own after the two the refusal took, and an action polls this
+    every quarter second (review of #243, round 4).
     """
     from aisquare.services import fleet as fleet_service
+    from aisquare.services import remote_server
 
-    output = _needs_pane_output_at(server, pane_id)
-    return None if output is None else now - output > fleet_service.ACTIVITY_WINDOW
+    facts = remote_server._remote_pane_facts(server, agent)
+    if facts is None or remote_server._remote_facts_refusal(agent, facts) is not None:
+        return False, None
+    output = facts.last_output
+    return True, None if output is None else now - output > fleet_service.ACTIVITY_WINDOW
 
 
 def _needs_pane_output_at(server: TmuxServer, pane_id: str) -> datetime | None:

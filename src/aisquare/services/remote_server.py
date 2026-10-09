@@ -5436,7 +5436,10 @@ class _AutoOffTimer:
         self.fired = False
         """Whether the deadline passed and Remote was turned off."""
         self.failure: str | None = None
-        """What turning off could not do, as ``turn_off`` said it, for the way out to say."""
+        """What turning off could not do, as ``turn_off`` said it, for the way out to say
+        (:meth:`auto_off_outcome`)."""
+        self._settled = threading.Event()
+        """Set once ``turn_off`` has returned and :attr:`failure` holds what it said."""
 
     def auto_off_arm(self) -> None:
         """Wait toward the deadline ``remote.json`` holds now; none at all is never."""
@@ -5459,7 +5462,24 @@ class _AutoOffTimer:
             self.auto_off_arm()  # not yet, or extended from a phone meanwhile
             return
         self.fired = True
-        self.failure = self._turn_off()
+        try:
+            self.failure = self._turn_off()
+        finally:
+            self._settled.set()
+
+    def auto_off_outcome(self) -> str | None:
+        """What turning off could not do, once it is done; ``None`` when it did all of it,
+        or never fired.
+
+        Waits for the timer's thread when it fired: ``turn_off`` tells the server to stop
+        before it returns what it could not do, and the way out, read as soon as the
+        server stopped, found no failure yet when that thread had not run on, and ``serve``
+        said "Remote turned off" and exited 0 with the phones still signed in (review of
+        #243, round 4).
+        """
+        if self.fired:
+            self._settled.wait()
+        return self.failure
 
     def auto_off_cancel(self) -> None:
         with self._lock:
@@ -5617,9 +5637,10 @@ def run_foreground(
                 log.warning("remote: writing remote.json on the way out failed: %s", exc)
             except Exception:
                 log.warning("remote: writing remote.json on the way out failed", exc_info=True)
-        if timer.failure is not None:
+        failure = timer.auto_off_outcome()
+        if failure is not None:
             raise RemoteOffIncomplete(
-                f"Remote turned off — the auto-off timer ran out, but {timer.failure}"
+                f"Remote turned off — the auto-off timer ran out, but {failure}"
             )
         return timer.fired
     finally:

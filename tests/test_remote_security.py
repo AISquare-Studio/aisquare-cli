@@ -1502,6 +1502,48 @@ def test_serves_auto_off_on_a_full_disk_says_the_phones_were_not_signed_out(
     assert "No space left on device" in out[0].getMessage()
 
 
+def test_serves_way_out_waits_for_the_auto_off_to_say_what_it_could_not_do(
+    page: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The auto-off tells the server to stop before it returns what it could not do, and the
+    way out read that as soon as the server stopped: a timer's thread that had not run on
+    by then left nothing to read, and ``serve`` said "Remote turned off" and exited 0 with
+    every phone still signed in (review of #243, round 4). Here that thread lingers a
+    second after the stop, as a descheduled one would."""
+    import uvicorn
+
+    class StopsWhenTold:
+        def __init__(self, config: Any) -> None:
+            self.should_exit = False
+
+        def run(self, sockets: Any = None) -> None:
+            deadline = time.monotonic() + 10
+            while not self.should_exit and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+    def unwritable(reason: str) -> None:
+        raise OSError(errno.EROFS, "Read-only file system")
+
+    announce = remote_server._remote_writes_announced
+
+    def lingering(ctrl_c: str) -> bool:
+        threading.Event().wait(1.0)  # the server is told to stop; this thread runs on later
+        return announce(ctrl_c)
+
+    now = [datetime.now(UTC)]
+    monkeypatch.setattr(remote_server, "_remote_now", lambda: now[0])
+    monkeypatch.setattr(remote_server, "AUTO_OFF_CHECK_SECONDS", 0.05)
+    monkeypatch.setattr(remote_server, "revoke_every_remote_device", unwritable)
+    monkeypatch.setattr(remote_server, "_remote_writes_announced", lingering)
+    monkeypatch.setattr(uvicorn, "Server", StopsWhenTold)
+
+    def banner() -> None:
+        now[0] += timedelta(minutes=2)  # past the 1-minute deadline
+
+    with pytest.raises(remote_server.RemoteOffIncomplete, match="could not be revoked"):
+        remote_server.run_foreground(port=_free_port(), auto_off_minutes=1, ready=banner)
+
+
 def test_serve_says_so_when_the_timer_ended_it(page: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(remote_server, "run_foreground", lambda *a, ready: ready() or True)
     result = CliRunner().invoke(cli, ["remote", "serve"])

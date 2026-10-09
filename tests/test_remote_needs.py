@@ -11,6 +11,7 @@ store, transcript or tmux server.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import stat
 import sys
@@ -2814,14 +2815,100 @@ def test_every_scan_reaches_every_listener_and_a_failing_one_costs_nothing(
         raise RuntimeError("a listener's bug")
 
     app.kit.needs_listeners.extend([broken, lambda items, at: heard.append((items, at))])
+    caplog.set_level(logging.DEBUG, logger=remote_needs.__name__)
     first = watcher.scan_needs_now()
     second = watcher.scan_needs_now()
     assert [at for _items, at in heard] == [NOW, NOW + timedelta(seconds=3)]
     assert [items for items, _at in heard] == [first, second]
     assert [item.kind for item in first] == ["question"] and first == second
-    assert sum("needs listener failed" in r.getMessage() for r in caplog.records) == 2
+    told = [r.levelname for r in caplog.records if "needs listener failed" in r.getMessage()]
+    assert told == ["WARNING", "DEBUG"], "a listener that fails every scan is told once a streak"
     assert watcher.needs_items_now() == second
     assert watcher.needs_scanned_at() == NOW + timedelta(seconds=3)
+
+
+def _failing_store() -> NeedsSources:
+    """Sources over a store that cannot be opened, as ``open_store`` says it."""
+    from aisquare.core.store import StoreUnopenable, damaged_store_recovery
+
+    def unopenable() -> list[ProjectInfo]:
+        raise StoreUnopenable(f"the context store cannot be opened. {damaged_store_recovery()}")
+
+    return replace(_sources(Fleet()), list_projects=unopenable)
+
+
+def test_a_scan_that_keeps_failing_is_told_once_until_it_works_again(
+    runtime: Runtime, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``asq remote serve`` has no log handler, so each failed scan was the last-resort
+    handler's 25-line traceback on its terminal, every 3 s while the store could not be
+    read: 500 lines a minute, the link and the passphrase scrolled off. One warning a
+    streak, a damaged store's in the store's own words, with no traceback; debug lines
+    after; and one line once a scan works again."""
+    from aisquare.core.store import damaged_store_recovery
+
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    assert unlock(make_client(app), runtime).status_code == 200
+    broken = threading.Event()
+    broken.set()
+    watcher = RemoteNeedsWatcher(
+        app.kit,
+        sources=lambda: _failing_store() if broken.is_set() else _sources(Fleet()),
+        interval=0.01,
+    )
+    caplog.set_level(logging.INFO, logger=remote_needs.__name__)
+    watcher.start_watching()
+    try:
+        threading.Event().wait(0.3)
+        broken.clear()
+        _until_true(lambda: watcher.needs_scanned_at() is not None)
+        threading.Event().wait(0.05)
+    finally:
+        watcher.stop_watching()
+    told = [r for r in caplog.records if r.name == remote_needs.__name__]
+    assert [r.levelname for r in told] == ["WARNING", "INFO"], [r.getMessage() for r in told]
+    assert damaged_store_recovery() in told[0].getMessage() and told[0].exc_info is None
+    assert told[1].getMessage() == "remote: the needs scan works again"
+
+
+def test_a_scan_that_fails_on_a_bug_is_told_once_with_its_traceback(
+    runtime: Runtime, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+
+    def buggy() -> NeedsSources:
+        raise RuntimeError("a bug in the scan")
+
+    watcher = RemoteNeedsWatcher(app.kit, sources=buggy)
+    for _ in range(3):
+        watcher._needs_scan_told()
+        watcher._needs_rescan()
+    told = [r for r in caplog.records if r.name == remote_needs.__name__]
+    assert [r.levelname for r in told] == ["WARNING"]
+    assert told[0].exc_info is not None, "a bug's first failure keeps its traceback"
+
+
+def test_a_project_whose_scan_keeps_failing_is_told_once_a_streak(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    real = remote_needs._needs_scan_project
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("a query the store could not answer")
+
+    caplog.set_level(logging.INFO, logger=remote_needs.__name__)
+    failing: set[str] = set()
+    monkeypatch.setattr(remote_needs, "_needs_scan_project", broken)
+    for _ in range(3):
+        scan_needs_you(_sources(Fleet()), now=NOW, dismissed=(), failing=failing)
+    monkeypatch.setattr(remote_needs, "_needs_scan_project", real)
+    scan_needs_you(_sources(Fleet()), now=NOW, dismissed=(), failing=failing)
+    told = [(r.levelname, r.getMessage()) for r in caplog.records]
+    assert told == [
+        ("WARNING", "remote: the needs scan of prj_alpha failed"),
+        ("INFO", "remote: the needs scan of prj_alpha works again"),
+    ]
+    assert failing == set()
 
 
 def test_a_card_dismissed_while_a_scan_runs_stays_dismissed(

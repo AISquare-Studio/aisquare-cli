@@ -5069,6 +5069,40 @@ def remote_password() -> str:
     return runtime().password
 
 
+_flush_failing = False
+"""Whether the flusher's last write of ``remote.json`` failed (:func:`_remote_flush_seen`)."""
+
+
+def _remote_flush_seen() -> None:
+    """The flusher's one write of ``last_seen``, its failure told once a streak.
+
+    ``asq remote serve`` has no log handler, so a warning is the last-resort
+    handler's lines on its terminal, under the link and the passphrase: a
+    ``remote.json`` that could not be written was a traceback every 30 s, for
+    as long as it lasted (review of #243, sweep of round 4). The first failure
+    of a streak is a warning, one line for the file system's refusal and a
+    traceback for anything else; the rest are debug lines, and the first write
+    that works again says so.
+    """
+    global _flush_failing
+    if _runtime is None:
+        return
+    try:
+        _runtime.flush_last_seen()
+    except Exception as exc:  # one failed write must not end the flushing for good
+        if _flush_failing:
+            log.debug("remote: flushing remote.json failed again", exc_info=True)
+        elif isinstance(exc, OSError):
+            log.warning("remote: flushing remote.json failed: %s", exc)
+        else:
+            log.warning("remote: flushing remote.json failed", exc_info=True)
+        _flush_failing = True
+        return
+    if _flush_failing:
+        _flush_failing = False
+        log.info("remote: flushing remote.json works again")
+
+
 def _schedule_flush() -> None:
     """Persist ``last_seen`` and prune expired devices every 30 s while serving.
 
@@ -5080,11 +5114,7 @@ def _schedule_flush() -> None:
     def flush_and_rearm() -> None:
         with _lock:
             serving = (_server is not None and _server.running) or _foreground is not None
-        if _runtime is not None:
-            try:
-                _runtime.flush_last_seen()
-            except Exception:  # one failed write must not end the flushing for good
-                log.warning("remote: flushing remote.json failed", exc_info=True)
+        _remote_flush_seen()
         if serving:
             _schedule_flush()
 

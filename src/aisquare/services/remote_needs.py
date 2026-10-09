@@ -47,7 +47,7 @@ import math
 import os
 import re
 import threading
-from collections.abc import Callable, Collection, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Collection, Mapping, MutableMapping, MutableSet, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -1796,6 +1796,7 @@ def scan_needs_you(
     now: datetime,
     dismissed: Collection[str],
     first_seen: MutableMapping[str, datetime] | None = None,
+    failing: MutableSet[str] | None = None,
 ) -> list[NeedsItem]:
     """Every item across every project, dismissals dropped, ranked by kind then ``since``.
 
@@ -1803,7 +1804,9 @@ def scan_needs_you(
     fails outright costs only its own items. ``first_seen`` is the watcher's
     memory of when it first saw the items whose facts carry no date; without
     it, each scan is the first. What it holds for a project that could not be
-    looked at this time is kept for the next look.
+    looked at this time is kept for the next look. ``failing`` is the watcher's
+    memory of the projects whose scans fail: one warning a streak, not one every
+    3 s (:func:`_needs_failed`).
     """
     memory: MutableMapping[str, datetime] = {} if first_seen is None else first_seen
     seen: set[str] = set()
@@ -1830,14 +1833,43 @@ def scan_needs_you(
                 accounts=accounts,
                 answers=answers,
             )
-        except Exception:
-            log.warning("remote: the needs scan of %s failed", project.id, exc_info=True)
+        except Exception as exc:
+            _needs_failed(f"the needs scan of {project.id}", exc, failing, project.id)
             _needs_still_remembered(memory, seen, project)
             continue
+        if failing is not None and project.id in failing:
+            failing.discard(project.id)
+            log.info("remote: the needs scan of %s works again", project.id)
         items.extend(scanned.items)
     for key in [key for key in memory if key not in seen]:
         del memory[key]
     return _needs_ranked([item for item in items if item.id not in dismissed])
+
+
+_K = TypeVar("_K")
+
+
+def _needs_failed(what: str, exc: Exception, failing: MutableSet[_K] | None, key: _K) -> None:
+    """Tell that ``what`` failed, once a streak of ``key``'s failures (``failing``, the keys
+    failing since they last worked; ``None``: every one is the first).
+
+    ``asq remote serve`` has no log handler, so a warning is the last-resort handler's
+    lines on its terminal, traceback and all: a store that could not be read was 25 lines
+    every 3 s, the link and the passphrase scrolled off (review of #243, sweep of round 4).
+    The first of a streak is a warning, with its traceback, and a damaged store's is the
+    store's own sentence, which says how to recover; the rest are debug lines.
+    """
+    from aisquare.core.store import StoreUnopenable
+
+    if failing is not None and key in failing:
+        log.debug("remote: %s failed again", what, exc_info=True)
+        return
+    if failing is not None:
+        failing.add(key)
+    if isinstance(exc, StoreUnopenable):
+        log.warning("remote: %s failed: %s", what, exc)
+    else:
+        log.warning("remote: %s failed", what, exc_info=True)
 
 
 def _needs_has_live(sources: NeedsSources, project: ProjectInfo) -> bool:
@@ -2296,6 +2328,11 @@ class RemoteNeedsWatcher:
         self._first_seen: dict[str, datetime] = {}
         self._forgotten: set[str] = set()
         """Ids :meth:`needs_forget` dropped that no scan has read from the dismissals file yet."""
+        self._failing: set[object] = set()
+        """What has failed since it last worked, the scan itself (``"scan"``) or a listener,
+        and ``_failing_projects`` the projects whose part of it has: each streak is told once
+        (:func:`_needs_failed`)."""
+        self._failing_projects: set[str] = set()
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -2321,11 +2358,19 @@ class RemoteNeedsWatcher:
     def _needs_loop(self) -> None:
         while not self._stopping.is_set():
             if self._needs_devices():
-                try:
-                    self.scan_needs_now()
-                except Exception:
-                    log.warning("remote: the needs scan failed", exc_info=True)
+                self._needs_scan_told()
             self._stopping.wait(self._interval)
+
+    def _needs_scan_told(self) -> None:
+        """:meth:`scan_needs_now`, its failure told once a streak, and its recovery once."""
+        try:
+            self.scan_needs_now()
+        except Exception as exc:
+            _needs_failed("the needs scan", exc, self._failing, "scan")
+            return
+        if "scan" in self._failing:
+            self._failing.discard("scan")
+            log.info("remote: the needs scan works again")
 
     def _needs_devices(self) -> bool:
         """Whether any device is on record, signed in or not, and Remote is not past its
@@ -2357,6 +2402,7 @@ class RemoteNeedsWatcher:
                 now=now,
                 dismissed=dismissed,
                 first_seen=self._first_seen,
+                failing=self._failing_projects,
             )
             with self._lock:
                 items = [item for item in scanned if item.id not in self._forgotten]
@@ -2367,8 +2413,10 @@ class RemoteNeedsWatcher:
             for listener in list(self._kit.needs_listeners):
                 try:
                     listener(list(items), now)
-                except Exception:
-                    log.warning("remote: a needs listener failed", exc_info=True)
+                except Exception as exc:
+                    _needs_failed("a needs listener", exc, self._failing, listener)
+                else:
+                    self._failing.discard(listener)
         return items
 
     def needs_items_now(self) -> list[NeedsItem]:
@@ -2421,10 +2469,7 @@ class RemoteNeedsWatcher:
         timer.start()
 
     def _needs_rescan(self) -> None:
-        try:
-            self.scan_needs_now()
-        except Exception:
-            log.warning("remote: the needs scan after an answer failed", exc_info=True)
+        self._needs_scan_told()
 
 
 def _needs_watcher(kit: RemoteKit) -> RemoteNeedsWatcher:

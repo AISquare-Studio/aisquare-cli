@@ -183,7 +183,8 @@ def test_ngrok_command_is_the_documented_one() -> None:
     """``--inspect=false``: ngrok's inspector keeps every request and answer, the unlock's
     passphrase and every cookie included, on a local web interface that asks for nothing."""
     assert ngrok_command(8750) == [
-        "ngrok", "http", "8750", "--log=stdout", "--log-format=json", "--inspect=false"
+        "ngrok", "http", "8750", "--log=stdout", "--log-format=json", "--log-level=info",
+        "--inspect=false",
     ]  # fmt: skip
 
 
@@ -922,6 +923,57 @@ def panels_ngrok(port: int, own: Path, popen: Callable[..., subprocess.Popen[str
         api_off=True,
         configs=lambda: api_off_configs(own=own),
     )
+
+
+def level_minding_ngrok(tmp_path: Path) -> Callable[..., subprocess.Popen[str]]:
+    """A ``popen`` running a stand-in for ngrok that logs as ngrok does by level: its
+    "started tunnel" line is info, kept at ``--log-level`` when given, else at the last
+    ``log_level`` its ``--config`` files set, else at info."""
+    script = tmp_path / "level-ngrok.py"
+    script.write_text(
+        "import re, sys, time\n"
+        "level = None\n"
+        "for arg in sys.argv[1:]:\n"
+        "    if arg.startswith('--config='):\n"
+        "        for path in arg.split('=', 1)[1].split(','):\n"
+        "            found = re.findall(r'^\\s*log_level:\\s*(\\w+)', open(path).read(), re.M)\n"
+        "            level = found[-1] if found else level\n"
+        "for arg in sys.argv[1:]:\n"
+        "    if arg.startswith('--log-level='):\n"
+        "        level = arg.split('=', 1)[1]\n"
+        "if (level or 'info') in ('debug', 'info'):\n"
+        f"    print({json.dumps(json.dumps(OURS))}, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+
+    def popen(command: list[str], **kwargs: Any) -> subprocess.Popen[str]:
+        return subprocess.Popen([sys.executable, str(script), *command[1:]], **kwargs)
+
+    return popen
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'version: "2"\nauthtoken: tok_123\nlog_level: warn\n',
+        'version: "3"\nagent:\n  authtoken: tok_123\n  log_level: error\n',
+    ],
+    ids=["v2 warn", "v3 error"],
+)
+def test_a_log_level_in_the_humans_ngrok_yml_never_hides_the_tunnels_url(
+    tmp_path: Path, text: str
+) -> None:
+    """The URL comes only from ngrok's info-level "started tunnel" line, and ngrok merges our
+    config over the human's own: ``log_level: warn`` there hid it, and the panel said ngrok
+    did not announce a tunnel in time, with no link and no QR, while ngrok held the tunnel
+    (sweep 3 of #243)."""
+    own = write_ngrok_config(tmp_path, text)
+    tunnel = panels_ngrok(8750, own, level_minding_ngrok(tmp_path))
+    assert tunnel.start_tunnel() is None
+    try:
+        assert tunnel.wait_for_url(10) == OURS["url"]
+    finally:
+        tunnel.stop_tunnel()
 
 
 def test_the_panels_ngrok_runs_with_its_agent_api_off(tmp_path: Path) -> None:

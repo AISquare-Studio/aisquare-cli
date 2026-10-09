@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import dataclasses
 import errno
 import functools
 import hashlib
@@ -738,6 +739,7 @@ _UNRESTRICTED = (
     "remote: could not restrict %s to your account — other users on this machine "
     "may be able to read %s"
 )
+_UNCOUNTED = "remote: a wrong passphrase was counted in memory only: %s could not be written (%s)"
 _BLANK_STATE = b" \t\r\n\x00"
 """All an empty ``remote.json`` holds: whitespace, or the NULs a crash leaves when the size
 reached the disk and the data did not (``core.state_file`` reads its file the same way)."""
@@ -826,6 +828,8 @@ class Runtime:
         self._unpublished: bytes | None = None
         """What the read-modify-write in hand decided to write (:meth:`_write_state`), until
         its outermost :meth:`_state_file_lock` publishes it."""
+        self._unpublished_undo: list[Callable[[], None]] = []
+        """How to put memory back should that write fail (:meth:`_write_state`'s ``undo``)."""
         self._disk: bytes | None = None
         """Digest of the file's bytes as this process last wrote or read them.
 
@@ -914,8 +918,15 @@ class Runtime:
                             yield
                     finally:
                         body, self._unpublished = self._unpublished, None
+                        undo, self._unpublished_undo = self._unpublished_undo, []
                         if body is not None:
-                            self._publish_state(pending, unmade, body)
+                            try:
+                                self._publish_state(pending, unmade, body)
+                            except BaseException:
+                                with self._lock:
+                                    for step in reversed(undo):
+                                        step()
+                                raise
                 finally:
                     self._file_lock_depth = 0
                     self._writer = None
@@ -1072,13 +1083,24 @@ class Runtime:
             self._write_state(state)
             return state
 
-    def _write_state(self, state: _State) -> None:
+    def _write_state(self, state: _State, *, undo: Callable[[], None] | None = None) -> None:
         """Have ``remote.json`` replaced with ``state`` when the outermost
         :meth:`_state_file_lock` ends; callers hold it. The last state handed over in
-        one read-modify-write is the one written, once."""
+        one read-modify-write is the one written, once.
+
+        ``undo`` puts memory back should that write fail, still under the locks, so no
+        flush writes what it took back. Only for a change that is worse in memory alone
+        than not made: an unlock's device, whose secret no browser was handed, which
+        the panel and every Devices screen listed as signed in, and the next flush saved
+        (sweep 2 of #243); or a later deadline the phone was told nothing of. A change
+        that is safe in memory alone (a revoke, writes off) keeps none: the gate goes by
+        it, written or not (review of #243, round 2).
+        """
         if not self._file_lock_depth:
             raise RuntimeError("remote.json is written only under _state_file_lock")
         self._unpublished = _encoded_state(state)
+        if undo is not None:
+            self._unpublished_undo.append(undo)
 
     def _publish_state(
         self, pending: Replacement | None, unmade: OSError | None, body: bytes
@@ -1223,8 +1245,9 @@ class Runtime:
             extended = max(
                 deadline, min(max(deadline, now) + AUTO_OFF_EXTEND, now + AUTO_OFF_CEILING)
             )
-            self._state.auto_off_at = _iso_seconds(extended)
-            self._write_state(self._state)
+            state, before = self._state, self._state.auto_off_at
+            state.auto_off_at = _iso_seconds(extended)
+            self._write_state(state, undo=lambda: setattr(state, "auto_off_at", before))
             return extended
 
     def regenerate_password(self, *, new_link: bool = False) -> str:
@@ -1291,8 +1314,13 @@ class Runtime:
                 last_seen=_iso_seconds(now),
                 expires_at=_iso_seconds(now + DEVICE_LIFETIME),
             )
-            self._state.devices.append(device)
-            self._write_state(self._state)
+            state = self._state
+            state.devices.append(device)
+
+            def unmade() -> None:
+                state.devices = [kept for kept in state.devices if kept is not device]
+
+            self._write_state(state, undo=unmade)
             return secret, device
 
     def device_for_cookie(self, secret: str | None) -> Device | None:
@@ -1341,29 +1369,44 @@ class Runtime:
             if device is None or device.device_expired(now):
                 return None
             secret = secrets.token_urlsafe(32)
+            was = dataclasses.replace(device)
+
+            def unmade() -> None:  # the browser keeps its old cookie, so the device does too
+                device.secret_sha256, device.last_seen = was.secret_sha256, was.last_seen
+                device.failed_unlocks, device.ua = was.failed_unlocks, was.ua
+
             device.secret_sha256 = _secret_digest(secret)
             device.last_seen = _iso_seconds(now)
             device.failed_unlocks = 0
             if ua:
                 device.ua = _audit_clean(ua, DEVICE_UA_MAX)
-            self._write_state(self._state)
+            self._write_state(self._state, undo=unmade)
             return secret, device
 
     def known_device_failed(self, device_id: str) -> bool:
         """Count a wrong passphrase sent with this device's cookie; ``True`` when that
         was the :data:`KNOWN_DEVICE_FAILURES_MAX`-th and the device is revoked: a stolen
-        cookie buys at most that many guesses outside the global budget."""
-        with self._state_file_lock():
-            self.reload_if_changed()
-            device = self._find_device(device_id)
-            if device is None:
-                return False
-            device.failed_unlocks += 1
-            revoked = device.failed_unlocks >= KNOWN_DEVICE_FAILURES_MAX
-            if revoked:
-                self._drop(device_id, WS_CLOSE_UNAUTHORIZED)
-            self._write_state(self._state)
-            return revoked
+        cookie buys at most that many guesses outside the global budget.
+
+        Counted in memory when ``remote.json`` will not write, and said in the log: a
+        wrong guess is still a wrong guess, where the write's error made it a bare 500
+        that read as the machine's fault (sweep 2 of #243).
+        """
+        revoked = False
+        try:
+            with self._state_file_lock():
+                self.reload_if_changed()
+                device = self._find_device(device_id)
+                if device is None:
+                    return False
+                device.failed_unlocks += 1
+                revoked = device.failed_unlocks >= KNOWN_DEVICE_FAILURES_MAX
+                if revoked:
+                    self._drop(device_id, WS_CLOSE_UNAUTHORIZED)
+                self._write_state(self._state)
+        except OSError as exc:
+            log.warning(_UNCOUNTED, self._state_path, exc)
+        return revoked
 
     def device_is_live(self, device_id: str) -> bool:
         """Whether a socket's device may keep it open: there, signed in, not expired.
@@ -1534,11 +1577,15 @@ class UnlockBudget:
         """Count one wrong guess; ``True`` when it is the one that trips the budget."""
         runtime = self._runtime
         now = _remote_now()
-        with runtime._state_file_lock():
-            runtime.reload_if_changed()
-            recent = [*self._recent(now), now]
-            runtime._state.unlock_failures = [_iso_seconds(stamp) for stamp in recent]
-            runtime._write_state(runtime._state)
+        recent: list[datetime] = []
+        try:
+            with runtime._state_file_lock():
+                runtime.reload_if_changed()
+                recent = [*self._recent(now), now]
+                runtime._state.unlock_failures = [_iso_seconds(stamp) for stamp in recent]
+                runtime._write_state(runtime._state)
+        except OSError as exc:  # counted in memory all the same (Runtime.known_device_failed)
+            log.warning(_UNCOUNTED, runtime._state_path, exc)
         return len(recent) == UNLOCK_GLOBAL_FAILURES
 
     def clear_failed_unlocks(self) -> None:
@@ -2989,6 +3036,20 @@ WRONG_PASSWORD = "that is not the passphrase"
 """401 ``wrong_password``."""
 NOT_TEXT = "the body holds a lone surrogate (an unpaired \\ud800-\\udfff escape), which is not text"
 """400 ``invalid`` for a body string no UTF-8 can hold (:meth:`RemoteKit.kit_json_object`)."""
+STATE_UNWRITABLE = (
+    "the machine could not save that: its ~/.aisquare/remote.json would not write (a full disk, "
+    "or a home it may not write) — nothing was changed; fix that on the machine, then try again"
+)
+"""503 ``remote_state_unwritable``, as ``asq remote``'s own commands say it, but without the
+path or the error, which a phone that has not unlocked yet may read: the log has both."""
+REVOKE_UNSAVED = (
+    "revoked on the running Remote, but the machine's ~/.aisquare/remote.json would not write "
+    "(a full disk, or a home it may not write): this Remote saves it once that is fixed on "
+    "the machine, and a Remote turned on again before then would take the device back"
+)
+"""503 ``remote_state_unwritable`` for a revoke: it holds in memory, where the gate reads it, and
+the next flush that can write saves it (:meth:`Runtime.flush_last_seen` writes memory whenever
+it differs from the file)."""
 CRASHED = "the machine hit an error answering that"
 """500 ``internal_error``: what the ledger answers a retry of a request that crashed, in the
 words the page uses for a crash."""
@@ -3738,6 +3799,17 @@ def build_remote_app(
     """Unlocks are decided one at a time: the budget's check and its record are then one
     step, so guesses that arrive together cannot all get past a budget with one left."""
 
+    def unlock_audited(device_id: str, summary: str) -> None:
+        """An unlock's audit line, best effort: what it records was saved already, and an
+        audit log that would not write answered a bare 500 with no cookie, the device on
+        disk and signed in, a phantom on every Devices screen (sweep 2 of #243)."""
+        try:
+            runtime.audit(device_id, "unlock", summary)
+        except OSError as exc:
+            log.warning(
+                "remote: an unlock's audit line could not be written (%s): %s", exc, summary
+            )
+
     def unlock_decision(
         password: str, ua: str, cookie: str | None, direct: bool
     ) -> tuple[str, Device, bool] | datetime | None:
@@ -3775,12 +3847,12 @@ def build_remote_app(
                         f"{KNOWN_DEVICE_FAILURES_MAX} wrong passwords sent with its cookie"
                     )
                     log.warning("remote: %s", revoked)
-                    runtime.audit(known.id, "unlock", revoked)
+                    unlock_audited(known.id, revoked)
                 return None
             secret, device = unlocked
             reactivated = known is not None and device.id == known.id
             summary = f"device {device.id} " + ("reactivated" if reactivated else f"ua={ua[:60]}")
-            runtime.audit(device.id, "unlock", summary)
+            unlock_audited(device.id, summary)
             return secret, device, reactivated
 
     async def unlock_endpoint(request: Request) -> Response:
@@ -3811,13 +3883,17 @@ def build_remote_app(
         password = body.get("password")
         if not isinstance(password, str):
             return _json_error(400, "invalid", 'send {"password": "..."}')
-        decided = await asyncio.to_thread(
-            unlock_decision,
-            password,
-            request.headers.get("user-agent", ""),
-            request.cookies.get(COOKIE),
-            is_direct_loopback(request.scope),
-        )
+        try:
+            decided = await asyncio.to_thread(
+                unlock_decision,
+                password,
+                request.headers.get("user-agent", ""),
+                request.cookies.get(COOKIE),
+                is_direct_loopback(request.scope),
+            )
+        except OSError as exc:  # its device was taken back (Runtime._write_state's undo)
+            log.warning("remote: an unlock could not be saved: %s", exc)
+            return kit.kit_refuse(503, "remote_state_unwritable", STATE_UNWRITABLE)
         if isinstance(decided, datetime):
             wait = max(1, math.ceil((decided - _remote_now()).total_seconds()))
             return kit.kit_refuse(429, "locked_out", LOCKED_OUT, headers={"Retry-After": str(wait)})
@@ -3856,7 +3932,11 @@ def build_remote_app(
         (Never) has nothing to extend, 409 ``no_auto_off``. The TUI adopts the later
         deadline (``RemoteController.enforce_auto_off``) and ``serve``'s timer re-arms.
         """
-        extended = await asyncio.to_thread(runtime.extend_auto_off, _remote_now())
+        try:
+            extended = await asyncio.to_thread(runtime.extend_auto_off, _remote_now())
+        except OSError as exc:  # the deadline was put back (Runtime._write_state's undo)
+            log.warning("remote: an extend could not be saved: %s", exc)
+            return kit.kit_refuse(503, "remote_state_unwritable", STATE_UNWRITABLE)
         if extended is None:
             return kit.kit_refuse(409, "no_auto_off", "Remote has no auto-off deadline to extend")
         stamp = _iso_seconds(extended)
@@ -3887,7 +3967,12 @@ def build_remote_app(
             return kit.kit_refuse(404, "not_found", "no such device")
         if not own and not kit.kit_write_allowed():
             return kit.kit_refuse(403, "read_only", READ_ONLY_REASON)
-        if not await asyncio.to_thread(runtime.revoke_device, device_id):
+        try:
+            revoked = await asyncio.to_thread(runtime.revoke_device, device_id)
+        except OSError as exc:
+            log.warning("remote: a revoke could not be saved: %s", exc)
+            return kit.kit_refuse(503, "remote_state_unwritable", REVOKE_UNSAVED)
+        if not revoked:
             return kit.kit_refuse(404, "not_found", "no such device")
         await asyncio.to_thread(
             kit.kit_audit, device, "devices/revoke", "self" if own else device_id

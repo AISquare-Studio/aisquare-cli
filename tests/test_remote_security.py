@@ -759,6 +759,147 @@ def test_a_version_1_file_keeps_writes_on_only_for_a_json_true(isolated_home: Pa
     assert json.loads(remote_state_path().read_bytes())["allow_write"] is False
 
 
+class FullDisk:
+    """``remote.json`` that will not write, as on a full disk, until :meth:`fixed`: its temp
+    is made, and writing the bytes into it fails."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from aisquare.core.atomic import Replacement
+
+        self.full = True
+        real = Replacement.publish
+
+        def publish(replacement: Replacement, body: str | bytes) -> None:
+            if self.full:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            real(replacement, body)
+
+        monkeypatch.setattr(Replacement, "publish", publish)
+
+    def fixed(self) -> None:
+        self.full = False
+
+
+def _devices_on_disk() -> list[str]:
+    return [row["id"] for row in json.loads(remote_state_path().read_bytes())["devices"]]
+
+
+def test_an_unlock_that_cannot_be_saved_adds_no_device_and_says_why(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """The device was added in memory before its write, and the write's error answered a
+    bare 500 with no cookie: each try left a device the R panel, ``status`` and every
+    Devices screen listed as signed in, whose secret no browser held, and the next flush
+    saved them all (sweep 2 of #243)."""
+    disk = FullDisk(monkeypatch)
+    phone = make_client(app)
+    for _ in range(3):
+        refused = unlock(phone, runtime)
+        assert (refused.status_code, refused.json()["error"]) == (503, "remote_state_unwritable")
+        assert "set-cookie" not in refused.headers
+        assert str(isolated_home) not in refused.text, "no path for a phone not unlocked yet"
+    assert runtime.device_rows() == []
+    disk.fixed()
+    runtime.flush_last_seen()
+    assert _devices_on_disk() == [], "no phantom saved later either"
+    assert unlock(phone, runtime).status_code == 200
+    assert len(runtime.device_rows()) == 1
+
+
+def test_a_reactivation_that_cannot_be_saved_leaves_the_device_its_old_cookie(
+    app: Any, runtime: Runtime, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The new secret went into memory before the write: once that failed, the device held a
+    digest nobody had, and the phone's old cookie no longer named it, so its next unlock made
+    a second device and the stale one was saved (sweep 2 of #243)."""
+    phone = _from(app, "198.51.100.70")
+    device_id = unlock(phone, runtime).json()["device"]["id"]
+    old_secret = phone.cookies[COOKIE]
+    clock.advance(hours=25)  # idle: signed out, and a known device
+    disk = FullDisk(monkeypatch)
+    refused = unlock(phone, runtime)
+    assert (refused.status_code, refused.json()["error"]) == (503, "remote_state_unwritable")
+    known = runtime.known_device_for_cookie(old_secret)
+    assert known is not None and known.id == device_id, "the old cookie still names it"
+    disk.fixed()
+    again = unlock(phone, runtime)
+    assert again.status_code == 200 and again.json()["device"]["id"] == device_id
+    assert [row["id"] for row in runtime.device_rows()] == [device_id]
+
+
+def test_a_wrong_guess_on_a_full_disk_is_still_a_wrong_guess_and_still_counted(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Counting it wrote ``remote.json``, and the write's error made a typo a bare 500 that
+    read as the machine's fault (sweep 2 of #243). It is counted in memory, and logged."""
+    phone = _from(app, "198.51.100.71")
+    unlock(phone, runtime)
+    FullDisk(monkeypatch)
+    with caplog.at_level("WARNING", logger=remote_server.__name__):
+        stranger = _from(app, "198.51.100.72")
+        wrong = unlock(stranger, runtime, "wrong")
+        assert (wrong.status_code, wrong.json()["error"]) == (401, "wrong_password")
+        guesser = _from(app, "198.51.100.73")
+        guesser.cookies.set(COOKIE, phone.cookies[COOKIE])
+        assert unlock(guesser, runtime, "wrong").status_code == 401
+    assert UnlockBudget(runtime).budget_failures() == 1
+    assert runtime._state.devices[0].failed_unlocks == 1
+    assert "counted in memory only" in caplog.text
+
+
+def test_an_unlock_whose_audit_line_cannot_be_written_still_hands_over_its_cookie(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The device was saved, then the audit line raised: a bare 500, no cookie, and a device
+    on disk, signed in, that no browser could use (sweep 2 of #243). The line is best
+    effort for an unlock: what it records is saved already, and the log says it is missing."""
+
+    def unwritable(self: Runtime, device_id: str, endpoint: str, summary: str) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", str(remote_audit_path()))
+
+    monkeypatch.setattr(Runtime, "audit", unwritable)
+    phone = make_client(app)
+    with caplog.at_level("WARNING", logger=remote_server.__name__):
+        response = unlock(phone, runtime)
+    assert response.status_code == 200 and COOKIE in response.headers["set-cookie"]
+    assert phone.get(f"{base(runtime)}/api/devices").status_code == 200
+    assert "audit line could not be written" in caplog.text
+
+
+def test_an_extend_that_cannot_be_saved_moves_no_deadline_and_says_why(
+    app: Any, runtime: Runtime, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The later deadline went into memory before its write: once that failed, the gate and
+    the panel kept Remote public another hour while the phone was told the extend failed,
+    as a bare 500 (sweep 2 of #243, the unlock's class)."""
+    client = make_client(app)
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    deadline = clock.now + timedelta(minutes=10)
+    runtime.set_auto_off(deadline)
+    FullDisk(monkeypatch)
+    response = client.post(f"{base(runtime)}/api/remote/extend", json={})
+    assert (response.status_code, response.json()["error"]) == (503, "remote_state_unwritable")
+    assert runtime.auto_off_deadline() == deadline
+
+
+def test_a_revoke_that_cannot_be_saved_holds_here_and_says_it_was_not_saved(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A revoke holds in memory, where the gate reads it (review of #243, round 2), but the
+    write's error answered a bare 500 that said nothing of it (sweep 2 of #243)."""
+    mine, theirs = make_client(app), make_client(app)
+    unlock(mine, runtime)
+    other = unlock(theirs, runtime).json()["device"]["id"]
+    runtime.set_allow_write(True)
+    FullDisk(monkeypatch)
+    response = mine.delete(f"{base(runtime)}/api/devices/{other}")
+    assert (response.status_code, response.json()["error"]) == (503, "remote_state_unwritable")
+    assert "revoked on the running Remote" in response.json()["message"]
+    assert other not in runtime.device_ids()
+    assert theirs.get(f"{base(runtime)}/api/board").status_code == 401
+
+
 # --- (3) device ids that are not cookies ----------------------------------------------
 
 

@@ -503,6 +503,13 @@ switch can take 40 seconds.
 **`serve` says the port is in use.** Something else took 8750. Pass `--port` and
 give ngrok (and `status`) the same port.
 
+**Unlocking, extending or revoking fails with `remote_state_unwritable`** (503;
+the page says the machine could not answer). `~/.aisquare/remote.json` would not
+write: the disk is full, or the home is not writable, and the log says which.
+Nothing was changed but a revoke, which holds on the running Remote and is saved
+once the file can be written while it stays on. Free some space or fix the
+permissions, then try again.
+
 **ngrok says `--url` is an unknown flag.** That ngrok is too old for static
 domains; run `ngrok update`.
 

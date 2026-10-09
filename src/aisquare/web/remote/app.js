@@ -957,6 +957,7 @@ function connect() {
   if (S.off || S.locked) return;
   const old = S.sock;
   S.sock = null;
+  unconfirmPanes();
   if (old) {
     try {
       old.close(1000);
@@ -997,9 +998,17 @@ function connect() {
     if (S.sock !== sock) return;
     S.sock = null;
     S.sockState = "closed";
+    unconfirmPanes();
     drawStatus();
     onClose(event.code, opened);
   });
+}
+
+/* The panes' socket is gone: Live's keys wait for the next one's frame. Held only from its
+ * open, a "1" tapped before it was typed into whatever the agent showed by then. */
+function unconfirmPanes() {
+  for (const watcher of paneWatchers.values()) watcher.fresh = false;
+  gateButtons();
 }
 
 function scheduleReconnect() {
@@ -1036,11 +1045,7 @@ async function probe() {
 function resubscribe() {
   wsSend("subscribe_fleet", S.wantFleet);
   if (S.wantBoard) wsSend("subscribe_board", S.wantBoard); // a new socket sends no board until asked
-  for (const watcher of paneWatchers.values()) {
-    watcher.fresh = false; // what it shows came before this socket: held until its next frame
-    wsSend("subscribe", watcher.label, watcher.pid);
-  }
-  gateButtons();
+  for (const watcher of paneWatchers.values()) wsSend("subscribe", watcher.label, watcher.pid);
 }
 
 /* Whether this pane's last frame came on the socket open now. */

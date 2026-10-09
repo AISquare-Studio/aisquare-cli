@@ -1656,6 +1656,31 @@ async function staleAcrossAWake() {
   return steps;
 }
 
+/* The Live tab's keys between a socket lost and the next one's pane, its pane in before: a wake
+ * whose new socket has not opened yet, a drop (1006) before the reconnect, and another tab taking
+ * the socket (4409) until Reconnect here; in each, a tap on 1. Each gives [Send waits, 1 waits,
+ * the pane greyed as held] then and once the next socket's pane came, and the keys sent. */
+async function heldBetweenSockets() {
+  const lost = async (how) => {
+    const page = await agentView({ "POST api/send-keys": () => ({ status: 200, json: { sent: true } }) });
+    const state = () => [buttonNamed(page.main(), "Send").disabled, buttonNamed(page.main(), "1").disabled, page.run("document.body.classList.contains('held')")];
+    if (how === "wake") fire(page, "document", "visibilitychange");
+    else page.live().fire("close", { code: how });
+    await settle();
+    const held = state();
+    click(buttonNamed(page.main(), "1"));
+    await settle();
+    const sent = page.sent("api/send-keys").length;
+    if (how === 1006) page.fireTimer("connect");
+    if (how === 4409) click(buttonNamed(page.run("UI.banner"), "Reconnect here"));
+    page.acceptSockets();
+    paneCame(page);
+    await settle();
+    return { held, sent, after: state() };
+  };
+  return { wake: await lost("wake"), dropped: await lost(1006), taken: await lost(4409) };
+}
+
 /* The columns the Transcript asks the machine to wrap to, on 360, 390 and 412 px phones,
  * whose transcript box is 334, 364 and 386 px inside its border; and a 340 px box, exactly 45
  * columns inside its padding by clientWidth, which is whole pixels and may have rounded up. */
@@ -2424,6 +2449,7 @@ async function main() {
     keysInOrder: await keysInOrder(),
     padConfirms: await padConfirms(),
     staleAcrossAWake: await staleAcrossAWake(),
+    heldBetweenSockets: await heldBetweenSockets(),
     transcriptSend: await transcriptSend(),
     sheetFocus: await sheetFocus(),
     transcriptColumns: await transcriptColumns(),

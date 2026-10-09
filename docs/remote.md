@@ -147,8 +147,8 @@ writes are off (tap it for the reason), and "off in 23 min" with **Extend 1 h**
 when an auto-off is set. When nothing has arrived for 25 seconds, the page greys
 what it shows and holds every action until the next update: a phone that slept
 must not act on a screen that went stale. Waking the phone reconnects at once,
-and an agent's Live tab stays grey, its keys and Send held, until its pane has
-come through again.
+and from the moment a connection is lost an agent's Live tab stays grey, its
+keys and Send held, until its pane has come through again.
 If the machine stops checking what needs you while the link is fine, the feed
 greys and says when it last looked.
 

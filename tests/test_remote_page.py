@@ -1733,6 +1733,20 @@ def test_a_page_that_slept_holds_its_keys_until_the_machine_says_what_is_on_scre
     assert _css_value(_text("app.css"), "body.held pre.pane", "filter") == "grayscale(1)"
 
 
+def test_the_live_tabs_keys_wait_from_the_moment_its_socket_is_lost(
+    boot_report: dict[str, Any],
+) -> None:
+    """The Live tab's keys waited for the pane only once the next socket had opened. Between the
+    loss and that open, a wake's handshake, a reconnect's backoff after a drop, or for good
+    after another tab took the socket (4409), the pad and Send were live beside a pane from the
+    old socket: a "1" tapped there was typed into whatever the agent showed by then, a newer
+    prompt included (docs/remote.md: held "until its pane has come through again"). Each case
+    is held, nothing sent, and live again once the next socket's pane came."""
+    held = boot_report["heldBetweenSockets"]
+    for how in ("wake", "dropped", "taken"):
+        assert held[how] == {"held": [True] * 3, "sent": 0, "after": [False] * 3}, how
+
+
 def test_the_transcript_tabs_keys_never_wait_for_a_pane(boot_report: dict[str, Any]) -> None:
     """The Live tab's keys wait for its pane to come on the socket open now. The Transcript
     tab has the same input bar and watches no pane: were it held as Live is, Send and the

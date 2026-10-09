@@ -412,9 +412,10 @@ class WelcomeView(VerticalScroll):
         """Per label, what the last start said about the chosen project's agents."""
         self._standing: set[str] = set()
         """The rows the last start's refusals were about that a frame read after it still
-        held. A refusal whose row has left the frame since was reaped or replaced, and is
-        over. One whose row no such frame held was ended by the restart itself (a vanished
-        pane's row ends before its replacement starts), and its block still stands."""
+        held (:meth:`note_frame`, on every frame the shell reads). A refusal whose row has
+        left the frame since was reaped or replaced, and is over. One whose row no such
+        frame held was ended by the restart itself (a vanished pane's row ends before its
+        replacement starts), and its block still stands."""
         self._frame_at_start: object = _NO_START
         """The shell's frame when ``steps`` was last written. The shell reads its store and
         sets a new frame object on the UI thread, so any other frame was read after the
@@ -1224,8 +1225,6 @@ class WelcomeView(VerticalScroll):
                 refused = self._refusal_of(row)
                 if refused is not None:
                     lines.append(step_line(refused))
-                    if self._read_after_start():
-                        self._standing.add(row.agent.id)
                 continue
             agent = row.agent
             step = self.steps.get(label)
@@ -1255,6 +1254,21 @@ class WelcomeView(VerticalScroll):
                 line.append("\n    its last screen is on its row in the sidebar", style="dim")
                 lines.append(line)
         return lines
+
+    def note_frame(self) -> None:
+        """The shell read a new frame (``FleetApp.refresh_data``): note the rows the last
+        start's refusals were about that it still holds (:attr:`_standing`).
+
+        On every frame, shown or not. Noted only when the page painted, a row that stood
+        while the user was on another page and was reaped before they came back never
+        counted as standing, and its refusal stayed as if the restart had ended the row
+        itself (third delta review).
+        """
+        if not self._read_after_start():
+            return
+        for row in self._live().values():
+            if self._refusal_of(row) is not None:
+                self._standing.add(row.agent.id)
 
     def _refusal_of(self, row: _Live) -> FleetStep | None:
         """The last start's refusal about this very row (a lost coder's restart), if any.

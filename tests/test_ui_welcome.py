@@ -1914,6 +1914,76 @@ def test_a_refusal_goes_once_its_row_is_reaped(
     assert "✗ coder-1: demo-app already runs 2 agents" in capped, capped
 
 
+@dataclass
+class HeldRestart(Machine):
+    """A machine whose restart of coder-1 waits for ``release``: a start still in flight."""
+
+    release: threading.Event = field(default_factory=threading.Event)
+    entered: threading.Event = field(default_factory=threading.Event)
+
+    def restart(
+        self, project: ProjectInfo, label: str, *, agent_id: str | None = None
+    ) -> fleet_service.RestartReceipt:
+        if label == "coder-1":
+            self.entered.set()
+            self.release.wait(10)
+        return super().restart(project, label, agent_id=agent_id)
+
+
+@pytest.mark.parametrize("left", ["after-it-landed", "before-it-landed"])
+def test_a_refusal_goes_once_its_row_is_reaped_while_the_page_is_hidden(
+    captain: str | None,
+    scripted: Callable[[Machine], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    left: str,
+) -> None:
+    """Whether a refusal's row stood after the start was noted only when the page painted,
+    and a hidden page paints nothing. Left for another page once the start landed, or
+    while it ran, the user had coder-2 reaped there and came back to its refusal under no
+    row, as if the restart had ended the row itself (third delta review). It is noted on
+    every frame the shell reads, shown or not."""
+    project = ProjectInfo(id="prj_demo", root=tmp_path / "demo-app", onboarded_at=T0)
+    machine = HeldRestart(claude=[READY], found=Candidates(items=(here(project.root, project),)))
+    listed_by(machine, project, monkeypatch)
+    scripted(machine)
+    reason = "cannot restart 'coder-2': no Claude account in slot 3 — see: aisquare accounts"
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[Any]:
+        machine.release.set()  # not held while the fleet comes up
+        await press(pilot, page, "fleet-manager")
+        await press(pilot, page, "fleet-coders")
+        machine.refuse_restart = {"coder-2": reason}
+        machine.states.update({"coder-1": "lost", "coder-2": "lost"})  # a reboot
+        app.refresh_data()
+        page.paint()
+        if left == "after-it-landed":
+            await press(pilot, page, "fleet-coders")
+            app.action_add_project()  # `+`: another page, before the page's next tick
+            await settle_page(app)
+        else:
+            machine.release.clear()
+            page.query_one("#fleet-coders", Button).press()
+            # coder-1's restart is held on purpose: settle no worker group while it is.
+            await settle_until(app, machine.entered.is_set, group="held")
+            app.action_add_project()
+            await settle_page(app, group="held")
+            machine.release.set()  # the start lands while the page is hidden
+            await settle_page(app)
+        seen: list[Any] = [page.display, page.steps["coder-2"].outcome]
+        app.refresh_data()  # the shell's tick while the user is away
+        machine.live = [agent for agent in machine.live if agent.label != "coder-2"]  # reaped
+        app.refresh_data()
+        await app.action_welcome()  # `w`
+        await settle_page(app)
+        return [*seen, card(page, "fleet-status")]
+
+    shown, outcome, back = in_shell(machine, go)
+    assert not shown and outcome == "refused", "premise: refused, with the page hidden"
+    assert reason not in back, back
+    assert "✓ coder-1" in back and "coder-2" not in back, back
+
+
 def test_a_spawn_refusal_is_not_said_under_a_row_that_came_later(
     captain: str | None,
     scripted: Callable[[Machine], None],

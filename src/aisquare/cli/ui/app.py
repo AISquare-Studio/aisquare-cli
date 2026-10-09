@@ -662,6 +662,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         header that ages until the next read succeeds, while the sidebar carries
         the reason on the project's own card.
         """
+        for welcome in self.query(WelcomeView):
+            welcome.note_frame()  # shown or not: what step 3's refusals were about still stands
         for agent_view in self.query(AgentView):
             fresh = snapshot.agent(agent_view.status.agent.project_id, agent_view.status.agent.id)
             if fresh is not None and fresh != agent_view.status:

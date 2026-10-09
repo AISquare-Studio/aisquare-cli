@@ -1932,6 +1932,51 @@ def test_the_question_a_card_shows_is_the_last_one_in_prose() -> None:
     assert item.excerpt.startswith("Should I run `make check` before the push?"), item.excerpt
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The query binds the address:\n\n    SELECT * FROM users WHERE email = ?",
+        "Done:\n\n\tdef publishable?\n\t  !draft? && approved?\n\tend",
+        "    var email: String?\n\nThe field is optional now.",
+        "- added the predicate:\n\n        def publishable?",
+        "1. the binding:\n\n       WHERE email = ?\n\n2. the tests pass.",
+        "The model:\n\n```swift\nstruct User {}\n```\n    var email: String?",
+    ],
+)
+def test_an_indented_code_block_that_ends_in_a_question_mark_asks_nothing(text: str) -> None:
+    """Markdown's other code block, four columns deeper than its list item or the margin,
+    opened by the text, a blank line or a fence's close: ``    WHERE id = ?`` was still a
+    closing question once fenced blocks were not."""
+    assert not looks_like_a_question(text)
+    row = _row()
+    tail = _tail(newest="assistant_text", text=text)
+    assert _classify(_status(row, "waiting", _session(row, state="waiting")), tail) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1. Keep the cache.\n\n    Or should I drop it?",
+        "- the cache stays\n\n  - and the tests\n\n      should they move too?",
+        "Here is the plan, and one thing to settle first:\n    should I start with the cache?",
+        "    make check\n\nShould I push now?",
+    ],
+)
+def test_an_indented_line_that_is_no_code_block_still_asks(text: str) -> None:
+    """A list item's continuation, indented to its content, and a paragraph's next line,
+    which no code block can interrupt, are prose as markdown reads them."""
+    assert looks_like_a_question(text)
+
+
+def test_the_question_a_card_shows_is_not_an_indented_code_line() -> None:
+    text = "Should I bind the address like this?\n\n    SELECT * FROM users WHERE email = ?"
+    row = _row()
+    tail = _tail(newest="assistant_text", text=text)
+    item = _one(_classify(_status(row, "waiting", _session(row, state="waiting")), tail))
+    assert item.kind == "asked"
+    assert item.excerpt.startswith("Should I bind the address like this?"), item.excerpt
+
+
 # --- dismissals ---------------------------------------------------------------------------
 
 

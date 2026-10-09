@@ -469,8 +469,8 @@ def looks_like_a_question(text: str) -> bool:
     closing "Want me to commit this?" — which the push policy, not this test,
     keeps from crying wolf.
     """
-    body = text.strip()
-    lines = body.splitlines()
+    lines = _needs_lines(text)
+    body = "\n".join(lines)
     prose = _needs_prose(lines)
     blank = max(
         (index for index, line in enumerate(prose) if line is not None and not line.strip()),
@@ -507,17 +507,38 @@ an indent or a blockquote's marks."""
 _NEEDS_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`).+?(?<!`)\1(?!`)")
 """An inline code span: a run of backticks, to the next run of as many."""
 
+_NEEDS_LIST_ITEM = re.compile(r"( *)([-*+]|\d{1,9}[.)])( +|$)")
+"""A list item's first line: its marker, after an indent, and the spaces to its content."""
+
+
+def _needs_lines(text: str) -> list[str]:
+    """``text``'s lines, the blank ones around it dropped and its first line's indent kept:
+    an indented code block may open the text."""
+    lines = text.rstrip().splitlines()
+    while lines and not lines[0].strip():
+        del lines[0]
+    return lines
+
 
 def _needs_prose(lines: Sequence[str]) -> list[str | None]:
-    """Each line as the question test reads it: ``None`` inside a fenced code block, its
-    fences included, and otherwise the line without its inline code spans.
+    """Each line as the question test reads it: ``None`` inside a code block, fenced or
+    indented, a fence's own lines included, and otherwise the line without its inline code
+    spans.
 
     A fence closes on a line of the same character, at least as long, with nothing
-    after it; one that never closes runs to the end, as markdown reads it. Without
-    its spans, "Should I run `make check`?" still asks, and "now `String?`" does not.
+    after it; one that never closes runs to the end, as markdown reads it. An indented
+    block is markdown's too: lines four columns deeper than the list item they sit in
+    (none: the margin), opened by the first line, or after a blank line or a fence's
+    close, since one cannot interrupt a paragraph, and run until a line less deep. So
+    ``    WHERE id = ?`` after a blank line is code, while a list item's own continuation
+    paragraph, indented to its content, is prose and still asks. Without its spans,
+    "Should I run `make check`?" still asks, and "now `String?`" does not.
     """
     prose: list[str | None] = []
     fence: str | None = None
+    items: list[int] = []  # the content columns of the list items this line may sit in
+    opens = True  # this line starts a block, as the first does, and one after a blank line
+    indented = False
     for line in lines:
         marks = _NEEDS_FENCE.match(line)
         rest = "" if marks is None else line[marks.end() :]
@@ -530,10 +551,31 @@ def _needs_prose(lines: Sequence[str]) -> list[str | None]:
                 and not rest.strip()
             ):
                 fence = None
+                opens = True
+            continue
+        flat = line.expandtabs(4)
+        if not flat.strip():
+            prose.append("")
+            opens = True
+            continue
+        depth = len(flat) - len(flat.lstrip(" "))
+        if opens:  # otherwise a shallower line continues the item's paragraph
+            while items and depth < items[-1]:
+                items.pop()
+        indented = depth >= (items[-1] if items else 0) + 4 and (opens or indented)
+        opens = False
+        if indented:
+            prose.append(None)
         elif marks is not None and not (marks.group(1)[0] == "`" and "`" in rest):
             fence = marks.group(1)
             prose.append(None)
         else:
+            item = _NEEDS_LIST_ITEM.match(flat)
+            if item is not None:
+                while items and depth < items[-1]:
+                    items.pop()
+                gap = len(item.group(3))
+                items.append(item.end(2) + (gap if 1 <= gap <= 4 else 1))
             prose.append(_NEEDS_CODE_SPAN.sub("", line))
     return prose
 
@@ -544,12 +586,12 @@ def _needs_line_asks(line: str) -> bool:
 
 def _needs_asked_tail(text: str) -> str:
     """The question an assistant ended on: its last prose line ending in ``?``, to the end."""
-    lines = text.strip().splitlines()
+    lines = _needs_lines(text)
     prose = _needs_prose(lines)
     for index in range(len(lines) - 1, -1, -1):
         read = prose[index]
         if read is not None and _needs_line_asks(read):
-            return "\n".join(lines[index:])
+            return "\n".join(lines[index:]).lstrip()
     return text
 
 

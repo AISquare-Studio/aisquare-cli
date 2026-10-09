@@ -5070,6 +5070,13 @@ def runtime() -> Runtime:
         return _runtime
 
 
+def remote_state_loaded() -> bool:
+    """Whether this process has read ``remote.json`` (:func:`runtime`): its first read makes
+    the file when it is missing, and rewrites one older or edited by hand, under the file's
+    lock (:meth:`Runtime._load_state`); every later read only reads."""
+    return _runtime is not None
+
+
 def _remote_uvicorn_config(app: Any, port: int) -> uvicorn.Config:
     """uvicorn's settings for this server, in the TUI's thread and under ``serve`` alike.
 
@@ -6046,6 +6053,7 @@ __all__ = [
     "remote_gate_token",
     "remote_install_hint",
     "remote_server_status",
+    "remote_state_loaded",
     "remote_wait_for_writes",
     "remote_writes_running",
     "revoke_remote_device",

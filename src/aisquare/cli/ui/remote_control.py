@@ -23,7 +23,8 @@ timer, a new passphrase, a revoke, a start's deadline) runs on a thread of its o
 one at a time and in the order asked: each waits for ``remote.json.lock``, two
 seconds while another process holds it, and on Textual's thread that froze the
 fleet UI (sweep of #243). The panel shows what was asked at once, and what landed
-once it has.
+once it has. So does the process's first read of the file, which may write it
+(:meth:`RemoteController._first_read`).
 """
 
 from __future__ import annotations
@@ -254,6 +255,10 @@ class RemoteController:
         thread is joined at the interpreter's exit, so a write asked for before a quit
         lands."""
         self._writes_lock = threading.Lock()
+        self._reading: Future[None] | None = None
+        """The process's first read of ``remote.json`` on the writer's thread, once a paint or a
+        restore asked for it (:meth:`_first_read`)."""
+        self._reading_lock = threading.Lock()
         self._last_write: Future[None] | None = None
         self._writing_since: float | None = None
         """When the writes in hand began, while any is queued or running."""
@@ -611,7 +616,25 @@ class RemoteController:
 
         What kept it off, or kept ngrok from starting, is news (:attr:`on_news`): this runs
         as the human sits down, often just before leaving the desk with the phone.
+
+        ``remote.json`` is read first, on the writer's thread (:meth:`_first_read`), and
+        with ``wait=False`` the start follows on the thread that drives the controller
+        (:attr:`call_back`) once it has been, read or not: a file that could not be read is
+        the start's to say.
         """
+        if not self.state.remote_enabled or self.running:
+            return
+        reading = self._first_read()
+        if reading is not None and not wait:
+            reading.add_done_callback(lambda _read: self.call_back(self._restore_read))
+            return
+        if reading is not None:
+            wait_for_futures([reading])
+        self._restore_read(wait=wait)
+
+    def _restore_read(self, *, wait: bool = False) -> None:
+        """:meth:`restore`'s start, ``remote.json`` read; nothing for a Remote turned on, or its
+        switch turned off, meanwhile."""
         if not self.state.remote_enabled or self.running:
             return
         if not self._turn_on(wait=wait, restoring=True):
@@ -651,6 +674,8 @@ class RemoteController:
         wanted = self._write_switch_wanted
         if wanted is not None:
             return wanted
+        if self._first_read() is not None:
+            return False
         try:
             return bool(self._server.remote_allow_write())
         except Exception:  # a remote.json that cannot be read shows writes as off
@@ -744,8 +769,11 @@ class RemoteController:
 
     def remote_status(self) -> dict[str, Any]:
         """``remote_server_status()``; ``{}`` while ``remote.json`` cannot be read, which the
-        status line then says (:attr:`read_problem`). A paint reads it once and hands it to
-        :meth:`devices` and :meth:`unlock_failures`."""
+        status line then says (:attr:`read_problem`), or is being read for the first time
+        (:meth:`_first_read`). A paint reads it once and hands it to :meth:`devices` and
+        :meth:`unlock_failures`."""
+        if self._first_read() is not None:
+            return {}
         try:
             status = self._server.remote_server_status()
         except Exception as exc:  # the file costs the list and the switches, not the modal
@@ -788,6 +816,35 @@ class RemoteController:
         return bool(revoked)
 
     # --- the writes of remote.json ------------------------------------------------------------
+
+    def _first_read(self) -> Future[None] | None:
+        """``None`` once this process has read ``remote.json``, so that reading it only reads;
+        until then the read on the writer's thread, asked for now unless one is in flight.
+
+        The process's first read makes the file when it is missing and rewrites one that is
+        old or edited by hand, under ``remote.json.lock`` (``remote_server.runtime``): the R
+        panel's first paint did it on Textual's thread, and so did a Remote restored at the
+        UI's start, which froze for two seconds while another process held that lock (sweep
+        3 of #243). Meanwhile the panel paints what it paints for a file it cannot read: writes
+        off, no devices, no passphrase. A read that failed is asked for again at the next
+        paint, and why it failed is the status line's (:attr:`read_problem`).
+        """
+        if self._server.remote_state_loaded():
+            return None
+        with self._reading_lock:
+            reading = self._reading
+            if reading is None or reading.done():
+                reading = self._reading = self._remote_json_write(self._read_remote_json)
+            return reading
+
+    def _read_remote_json(self) -> None:
+        """The first read of ``remote.json``, on the writer's thread (:meth:`_first_read`)."""
+        try:
+            self._server.runtime()
+        except Exception as exc:  # the paints say why, as a read of theirs did
+            self.read_problem = f"remote.json could not be read — {exc}"
+        else:
+            self.read_problem = None
 
     def _remote_json_write(
         self, job: Callable[[], None], *, deadline: bool = False
@@ -924,6 +981,8 @@ class RemoteController:
         info = self.info
         if info is None and not self.elsewhere:
             return None
+        if self._first_read() is not None:
+            return None if info is None else info.password
         try:
             return str(self._server.remote_password())
         except Exception:  # unreadable for a moment: the one in hand beats a blank

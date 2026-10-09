@@ -694,6 +694,38 @@ def test_a_fresh_home_opens_with_write_actions_off() -> None:
     )
 
 
+def test_the_panels_first_paint_never_waits_for_another_processs_lock_on_remote_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The panel's first paint was the process's first read of ``remote.json``, which makes
+    a missing file under ``remote.json.lock``: on Textual's thread, the fleet UI froze for
+    the 2 s another process held it (sweep 3 of #243). It opens at once, and paints the file
+    once the writer's thread has read it."""
+    monkeypatch.setattr(remote_server, "STATE_LOCK_WAIT_SECONDS", 10.0)
+    state = paths.remote_state_path()
+    state.parent.mkdir(parents=True, exist_ok=True)
+    held = os.open(state.with_name(f"{state.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+
+    async def go(pilot: Pilot[None]) -> tuple[float, bool]:
+        lock_exclusive(held)  # another process, in the middle of its write
+        try:
+            started = time.monotonic()
+            modal = await open_panel(pilot)
+            took = time.monotonic() - started
+            made_meanwhile = state.exists()
+        finally:
+            unlock(held)
+            os.close(held)
+        await written(pilot)
+        assert modal.query_one("#remote-allow-write", Switch).value is False
+        assert modal.controller.read_problem is None
+        return took, made_meanwhile
+
+    took, made_meanwhile = drive(go, tunnel=missing_ngrok)
+    assert took < 1.5, f"the panel took {took:.1f} s to open"
+    assert not made_meanwhile and state.exists() and remote_server.remote_state_loaded()
+
+
 # --- devices -----------------------------------------------------------------------------------
 
 
@@ -1085,14 +1117,15 @@ def test_a_remote_json_that_cannot_be_read_is_a_sentence_in_the_panel_not_a_sile
 
     async def go(pilot: Pilot[None]) -> None:
         modal = await open_panel(pilot)
+        await written(pilot)  # the process's first read is the writer thread's
         status = modal.query_one("#remote-status", Static)
         said = shown(status)
         assert said.startswith("remote.json could not be read — ")
         assert "is not a JSON object" in said
         assert modal.query_one("#remote-allow-write", Switch).value is False
         paths.remote_state_path().unlink()  # moved aside: a new link and passphrase
-        modal.repaint()
-        await pilot.pause()
+        modal.repaint()  # asks the writer's thread to read it again
+        await written(pilot)
         assert shown(status) == ""
 
     drive(go, tunnel=missing_ngrok)

@@ -1160,6 +1160,8 @@ SERVER_CALLS = (
     "remote_allow_write",
     "remote_password",
     "remote_served_elsewhere",
+    "remote_state_loaded",
+    "runtime",
 )
 
 
@@ -1198,6 +1200,11 @@ class FakeServer(types.ModuleType):
         self.calls: list[str] = []
         self.served_elsewhere = False
         """What ``remote_served_elsewhere()`` answers: another process serves this home."""
+        self.state_loaded = True
+        """What ``remote_state_loaded()`` answers: ``remote.json`` was read in this process. A
+        test sets it ``False`` for a process that has not, whose first read ``runtime()`` is."""
+        self.reading: threading.Event | None = None
+        """When set, ``runtime()`` waits for it, as a first read waits for the file's lock."""
         self.DEFAULT_PORT = 8750
         self.RemoteInfo = remote_server.RemoteInfo
 
@@ -1269,6 +1276,14 @@ class FakeServer(types.ModuleType):
 
     def remote_served_elsewhere(self) -> bool:
         return self.served_elsewhere
+
+    def remote_state_loaded(self) -> bool:
+        return self.state_loaded
+
+    def runtime(self) -> None:
+        if self.reading is not None:
+            self.reading.wait(10)
+        self.state_loaded = True
 
 
 def _positional(function: Any) -> int:
@@ -1575,6 +1590,58 @@ def test_quitting_after_the_auto_off_time_came_turns_remote_off_as_auto_off() ->
     clock[0] += timedelta(minutes=59)
     leaving.shutdown_for_exit()
     assert in_time.revoked_every == [] and saved == {"remote_enabled": True}
+
+
+def test_the_first_read_of_remote_json_never_waits_for_its_lock_on_the_callers_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The process's first read makes ``remote.json`` when it is missing (and rewrites one
+    old or edited by hand) under ``remote.json.lock``: the R panel's first paint made it on
+    Textual's thread, which froze for the 2 s another process held that lock (sweep 3 of
+    #243). The paint gets what it gets for a file it cannot read; the read is the writer's."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "STATE_LOCK_WAIT_SECONDS", 10.0)
+    controller = RemoteController(tunnel_factory=fake_tunnel_factory(url="x"))
+    state = paths.remote_state_path()
+    state.parent.mkdir(parents=True, exist_ok=True)
+    held = os.open(state.with_name(f"{state.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    lock_exclusive(held)  # another process, in the middle of its write
+    try:
+        started = time.monotonic()
+        assert controller.write_actions_allowed() is False
+        assert controller.remote_status() == {} and controller.devices() == []
+        assert time.monotonic() - started < 1.0, "the caller waited for remote.json's lock"
+        assert not state.exists(), "made on the writer's thread, once the lock is free"
+    finally:
+        unlock(held)
+        os.close(held)
+    assert controller.writes_done(10)
+    assert state.exists() and remote_server.remote_state_loaded()
+    assert controller.remote_status()["devices"] == [] and controller.read_problem is None
+
+
+def test_a_restore_starts_remote_once_remote_json_is_read_on_the_writers_thread() -> None:
+    """``restore`` runs at the fleet UI's mount, and the start reads ``remote.json``: the
+    first read is the writer's, and the start follows on the thread that drives the
+    controller, once it is done."""
+    server = fake_server()
+    server.state_loaded, server.reading = False, threading.Event()
+    controller = RemoteController(
+        server=server,
+        tunnel_factory=fake_tunnel_factory(url="x"),
+        state=RemoteState(remote_enabled=True),
+    )
+    handed: list[Callable[[], None]] = []
+    controller.call_back = handed.append
+    controller.restore(wait=False)
+    assert not controller.running and not server.running and handed == []
+    server.reading.set()
+    assert controller.writes_done(5)
+    deadline = time.monotonic() + 5
+    while not handed and time.monotonic() < deadline:
+        time.sleep(0.01)
+    handed[0]()  # on the thread that drives the controller
+    assert controller.running and server.running
 
 
 def test_a_url_ngrok_announces_after_the_wait_is_the_link_and_the_push_origin_all_the_same(

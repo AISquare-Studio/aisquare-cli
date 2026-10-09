@@ -1837,6 +1837,46 @@ def test_text_typed_while_the_write_waits_is_kept_as_the_next_name(
     assert said == [("✓ slot 2 is now called work", "ok"), ("✓ slot 2 is now called works", "ok")]
 
 
+def test_rename_reopened_while_a_write_is_on_its_way_shows_that_name_and_enter_keeps_it(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rename prefilled from the frame, which predates a write still on its way: reopened
+    mid-write the field said the old name (none), stayed open when the write landed, and an
+    Enter taken as "confirm" cleared the name just saved (review of #258, round 3)."""
+    core.create_account()
+    entered, release = slow_set_alias(monkeypatch)
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[str, tuple[bool, str, str | None], bool, str | None, list[tuple[str, str]]]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        try:
+            await pilot.click("#account-rename-2")
+            await pilot.press(*"work", "enter")
+            assert await asyncio.to_thread(entered.wait, 5)  # the write is on its way…
+            await pilot.press("escape")
+            await pilot.click("#account-rename-2")  # …and Rename is opened again before it lands
+            await pilot.pause()
+            reopened = field(view, 2).value
+        finally:
+            release.set()
+        await settle(app)
+        await pilot.pause()
+        landed = (row(view, 2).renaming, field(view, 2).value, aliases()[2])
+        await pilot.press("enter")  # taken as "confirm"
+        await settle(app)
+        await pilot.pause()
+        return reopened, landed, row(view, 2).renaming, aliases()[2], said
+
+    reopened, landed, still_open, saved, said = drive_registry(go)
+    assert reopened == "work"  # the name on its way, not the frame's (none)
+    assert landed == (True, "work", "work")  # landed; the reopened field is the user's, and stays
+    assert not still_open and saved == "work"  # Enter kept the name rather than clearing it
+    assert said[-1] == ("✓ slot 2 is now called work", "ok")
+
+
 def test_a_slot_removed_while_its_field_is_open_is_said_and_its_row_leaves(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1868,9 +1908,31 @@ def test_a_rename_waits_its_turn_behind_an_arrange_write_still_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """*Rename* takes the same lock as *Default* and the arrows, so a rename pressed while an
-    arrangement is still writing writes after it, not beside it, and both report."""
+    arrangement is still writing writes after it, not beside it, and both report.
+
+    The negative half waits for the rename to ASK for the lock, not for a sleep to pass: after
+    200 ms a rename that took no lock and had not reached ``set_alias`` yet read the same as
+    one held at the lock (review of #258, round 3). Asked, it cannot write before ``release``.
+    """
     default_in, release = threading.Event(), threading.Event()
     order: list[str] = []
+
+    class SpyLock:
+        """``view._arranging``, counting each attempt to take it before it is taken."""
+
+        def __init__(self, lock: threading.Lock) -> None:
+            self.lock = lock
+            self.attempts = 0
+            self.second = threading.Event()  # the rename's, behind Default's
+
+        def __enter__(self) -> None:
+            self.attempts += 1
+            if self.attempts == 2:
+                self.second.set()
+            self.lock.acquire()
+
+        def __exit__(self, *exc: object) -> None:
+            self.lock.release()
 
     def set_default(ref: str | None, *, project: Any = None) -> None:
         order.append(f"default {ref}: start")
@@ -1886,25 +1948,28 @@ def test_a_rename_waits_its_turn_behind_an_arrange_write_still_running(
     monkeypatch.setattr(accounts_service, "set_alias", set_alias)
     overview = _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
 
-    async def go(pilot: Pilot[None]) -> tuple[list[str], list[tuple[str, str]]]:
+    async def go(pilot: Pilot[None]) -> tuple[bool, list[str], list[tuple[str, str]]]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         said = heard(view, monkeypatch)
+        spy = SpyLock(view._arranging)
+        monkeypatch.setattr(view, "_arranging", spy)
         try:
             await pilot.click("#account-default-2")
             assert await asyncio.to_thread(default_in.wait, 5)  # Default is writing…
             await pilot.click("#account-rename-2")
             await pilot.press(*"work", "enter")
-            await asyncio.sleep(0.2)  # …and the rename's thread has had its chance to start
+            asked = await asyncio.to_thread(spy.second.wait, 5)  # …and the rename asks for the lock
             waiting = list(order)
         finally:
             release.set()
         await settle(app)
         await pilot.pause()
-        return waiting, said
+        return asked, waiting, said
 
-    waiting, said = drive(go, overview=overview)
-    assert waiting == ["default 2: start"]  # the rename did not write while Default held it
+    asked, waiting, said = drive(go, overview=overview)
+    assert asked  # the rename went to the lock Default held…
+    assert waiting == ["default 2: start"]  # …and had not written when Default let go
     assert order == ["default 2: start", "default 2: end", "alias 2 work"]
     assert said == [
         ("✓ slot 2 is the machine default", "ok"),

@@ -557,6 +557,9 @@ def test_the_page_navigates_in_page_go_and_nowhere_else() -> None:
     inside, outside = _navigations_outside_page_go(_text("app.js"))
     assert inside == 2, "pageGo is THE place the page navigates: it pushes, or it replaces"
     assert outside == []
+    # A sheet's own history entry is this URL again (no URL argument), and its Back that one.
+    calls = re.findall(r"\bhistory\s*\.\s*(\w+)\s*\(([^)]*)\)", _text("app.js"))
+    assert calls == [("back", ""), ("pushState", '{ sheet: true }, ""')]
 
 
 def test_the_sink_checks_can_fail() -> None:
@@ -1861,6 +1864,53 @@ def test_focus_stays_on_what_a_redraw_puts_in_place_of_the_focused_control(
     assert kept["toggled"] == {"tag": "BUTTON", "text": "Turn on", **on}
     assert kept["hidden"] == {"tag": "MAIN", "text": kept["hidden"]["text"], **on}
     assert boot_report["transcriptLoads"]["lastFocus"] == "main", "Load older hid itself"
+
+
+def test_androids_back_closes_the_sheet_and_leaves_the_screen_under_it(
+    boot_report: dict[str, Any],
+) -> None:
+    """A sheet took no close request: Android's Back went back a screen behind it, and what was
+    typed in it went with the sheet; from the feed the app opens on, or a card a notification
+    opened, it left the app. A CloseWatcher takes Back for the sheet now, on the screen it
+    covers. Close lets the watcher go, and one sheet in another's place keeps a single one; a
+    busy sheet refuses the first Back, as it does Escape, and closes on the next."""
+    back = boot_report["backOverASheet"]
+    feed = {"sheet": None, "at": "#/", "cards": 1, "active": 0}
+    assert back["typed"] == {"did": "closed", **feed}
+    assert back["shut"] == 0
+    assert back["busy"] == [
+        {**feed, "did": "refused", "sheet": "Tell coder-1", "active": 1},
+        {**feed, "did": "closed"},
+    ]
+    assert back["replaced"] == {
+        "did": "closed",
+        "sheet": None,
+        "at": "#/p/prj_x/a/coder-1/live",
+        "made": 2,
+        "active": 0,
+    }
+
+
+def test_without_close_watcher_a_sheet_holds_a_history_entry_back_takes(
+    boot_report: dict[str, Any],
+) -> None:
+    """Safari has no CloseWatcher (nor Firefox before 149): there Back, iOS's swipe too, went
+    back a screen behind an open sheet, or out of the page from its first entry. The sheet
+    holds a history entry of its own now, which Back takes with it; closed by its Close, it
+    takes the entry off, so the next Back is not spent on nothing. A route asked for as a
+    sheet closes waits for that: pushed first, the Back undid it. A route a sheet leads to
+    takes the sheet's entry, and Back from there is the screen under the sheet."""
+    back = boot_report["backWithoutCloseWatcher"]
+    feed = {"sheet": None, "at": "#/", "cards": 1}
+    assert back["opened"] == {"at": 1, "length": 2}
+    assert back["typed"] == {"did": "back", **feed, "history": {"at": 0, "length": 2}}
+    assert back["shut"] == {"did": "close", **feed, "history": {"at": 0, "length": 2}}
+    projects = {"sheet": None, "at": "#/projects", "cards": 0, "history": {"at": 1, "length": 2}}
+    assert back["raced"] == {"did": "close, then go", **projects}
+    card = {"sheet": None, "at": "#/n/ny_0123456789abcdef", "cards": 0}
+    assert back["led"] == {"did": "card", **card, "history": {"at": 1, "length": 2}}
+    agent = {"sheet": None, "at": "#/p/prj_x/a/coder-1/live", "cards": 0}
+    assert back["back"] == {"did": "back", **agent, "history": {"at": 0, "length": 2}}
 
 
 def test_the_transcript_asks_for_lines_as_wide_as_fit_inside_its_padding(

@@ -1377,6 +1377,13 @@ function openSheet(title, build) {
   panel.append(body, status, bar);
   UI.sheet.appendChild(panel);
   UI.sheet.classList.add("open");
+  // Back closes the sheet: it left the screen under it, or the app. Busy, a watcher refuses once.
+  if (typeof CloseWatcher === "function") {
+    const watcher = new CloseWatcher();
+    watcher.addEventListener("cancel", (event) => { if (UI.sheet.classList.contains("busy")) event.preventDefault(); });
+    watcher.addEventListener("close", () => { if (UI.watcher === watcher) closeSheet(); });
+    UI.watcher = watcher;
+  } else sheetEntry();
   /* An answer can come after Back closed this sheet, or another took its place: it then
    * says what came of it in a toast that names it, and leaves the sheet on screen alone. */
   const sheet = {
@@ -1410,9 +1417,15 @@ function openSheet(title, build) {
 /* replaced: another sheet takes its place, and keeps the page inert and the first opener. */
 function closeSheet(replaced) {
   if (!sheetOpen()) return;
+  if (UI.watcher) UI.watcher.destroy();
+  UI.watcher = null;
   UI.sheet.classList.remove("open", "busy");
   clear(UI.sheet);
   if (replaced) return;
+  if (UI.entry === "on") {
+    UI.entry = "leaving"; // its entry goes with it, or the next Back would do nothing
+    history.back();
+  }
   for (const part of [UI.top, UI.banner, UI.main, UI.nav]) part.inert = false;
   const back = UI.opener && UI.opener.isConnected ? UI.opener : UI.main;
   UI.opener = null;
@@ -1421,6 +1434,27 @@ function closeSheet(replaced) {
 
 function sheetOpen() {
   return !!UI.sheet && UI.sheet.classList.contains("open");
+}
+
+/* No CloseWatcher (Safari; Firefox before 149): a sheet holds a history entry of its own, which
+ * Back, iOS's swipe too, takes with the sheet. A sheet closed otherwise takes it off ("leaving"),
+ * and a route asked for meanwhile waits for that (UI.then): pushed first, the Back undid it. */
+function sheetEntry() {
+  if (UI.entry || !window.history || typeof history.pushState !== "function") return;
+  history.pushState({ sheet: true }, "");
+  UI.entry = "on";
+}
+
+function onPopState() {
+  const was = UI.entry;
+  UI.entry = null;
+  if (was === "on") closeSheet();
+  else if (was === "leaving") {
+    if (sheetOpen()) sheetEntry();
+    const then = UI.then;
+    UI.then = null;
+    if (then) pageGo(then[0], then[1]);
+  }
 }
 
 /* Whether the page still shows this agent: an answer that comes later acts on it only then. */
@@ -1452,11 +1486,17 @@ function readOnlySheet(message) {
  * place of the entry it leaves: pushed, Back went to #/unlock, or to a gone agent's tab,
  * which sent the page on again, so Back never left it. */
 function pageGo(target, replace) {
+  if (UI.entry === "leaving") {
+    UI.then = [target, replace];
+    return;
+  }
   const route = typeof target === "string" ? parseRoute(target) : target;
   const hash = routeHash(route);
   if (location.hash === hash) renderRoute();
-  else if (replace) location.replace(hash);
-  else location.hash = hash;
+  else if (replace || UI.entry) {
+    UI.entry = null; // an open sheet's entry gives way to where it leads
+    location.replace(hash);
+  } else location.hash = hash;
 }
 
 const VIEWS = {};
@@ -3012,6 +3052,7 @@ function boot() {
   loadPending();
   trackViewport();
   window.addEventListener("hashchange", renderRoute);
+  window.addEventListener("popstate", onPopState);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") wake(S.sockState === "replaced");
   });

@@ -298,17 +298,30 @@ function bootPage(hash, answer, globals) {
   const win = { listeners: {} };
   let current = hash;
   /* The tab's history from the page's own load on: setting the hash pushes an entry, as a
-   * browser does, and replace() takes the place of the one it is at. */
+   * browser does, and replace() takes the place of the one it is at; each fires popstate at
+   * once, then hashchange. With `globals.history`, the page has pushState and back() too. */
   const entries = [hash];
+  const states = [null];
   let at = 0;
   const changed = () => setImmediate(() => { for (const fn of win.listeners.hashchange || []) fn({ type: "hashchange" }); });
+  const popped = () => { for (const fn of win.listeners.popstate || []) fn({ type: "popstate", state: states[at] }); };
   const go = (value, replace) => {
     const next = String(value).charAt(0) === "#" ? String(value) : "#" + value;
     if (next === current) return;
     current = next;
-    if (replace) entries[at] = next;
-    else entries.splice(++at, entries.length, next);
+    if (!replace) at++;
+    entries.splice(at, replace ? 1 : entries.length, next);
+    states.splice(at, replace ? 1 : states.length, null);
+    popped();
     changed();
+  };
+  const history = {
+    pushState(state) {
+      at++;
+      entries.splice(at, entries.length, current);
+      states.splice(at, states.length, state);
+    },
+    back: () => setImmediate(() => page.back()), // a traversal is queued, never done at once
   };
   const location = {
     protocol: "http:",
@@ -356,6 +369,7 @@ function bootPage(hash, answer, globals) {
     },
   });
   Object.assign(win, globals || {});
+  if (win.history === true) win.history = history;
   win.window = win;
   const context = vm.createContext(win);
   vm.runInContext(SOURCE, context, { filename: "app.js" });
@@ -386,10 +400,14 @@ function bootPage(hash, answer, globals) {
     /* The browser's Back: false once there is no entry of this page's before this one. */
     back() {
       if (at === 0) return false;
+      const was = current;
       current = entries[--at];
-      changed();
+      popped();
+      if (current !== was) changed();
       return true;
     },
+    /* Where the tab is in its history, and how many entries it has. */
+    history: () => ({ at, length: entries.length }),
   };
   return page;
 }
@@ -1784,6 +1802,119 @@ async function focusKept() {
   return { frame, poll, card, revoked, banner, toggled, hidden };
 }
 
+/* A browser with CloseWatcher, as Chrome on Android 126 on is: Back goes to the newest active
+ * watcher, if any, as a cancel the page may refuse (once, while the human has tapped since),
+ * then a close; with none, it goes back in the tab's history. */
+function closeWatchers() {
+  const made = [];
+  class CloseWatcher {
+    constructor() {
+      this.active = true;
+      this.listeners = { cancel: [], close: [] };
+      made.push(this);
+    }
+
+    addEventListener(type, fn) {
+      this.listeners[type].push(fn);
+    }
+
+    destroy() {
+      this.active = false;
+    }
+  }
+  const back = (page, cancelable) => {
+    const watcher = made.filter((one) => one.active).pop();
+    if (!watcher) return page.back() ? "back" : "left";
+    let refused = false;
+    const cancel = { type: "cancel", cancelable, preventDefault: () => { refused = cancelable; } };
+    for (const fn of watcher.listeners.cancel) if (cancelable) fn(cancel);
+    if (refused) return "refused";
+    watcher.active = false;
+    for (const fn of watcher.listeners.close) fn({ type: "close" });
+    return "closed";
+  };
+  return { made, back, globals: { CloseWatcher } };
+}
+
+/* Android's Back while a sheet is open: a card's Tell with words typed in it, on a feed opened
+ * as the app's first screen; the same sheet shut with Close, then Back; a Tell whose answer is
+ * held, Back twice; and on an agent's screen, Actions… then Stop… in its place, then Back. What
+ * each Back did, the sheet left, where the page is, and the watchers still active. */
+async function backOverASheet() {
+  const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell"] });
+  const told = deferred();
+  const watchers = closeWatchers();
+  const page = bootPage("#/", signedIn({
+    "GET api/needs": () => ({ status: 200, json: { items: [asked] } }),
+    "POST api/agent/tell": () => told.promise,
+  }), watchers.globals);
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const active = () => watchers.made.filter((one) => one.active).length;
+  const after = (did) => ({ did, sheet: sheetTitle(page), at: page.location.hash, cards: page.main().querySelectorAll("div.card").length, active: active() });
+  click(buttonNamed(page.main(), "Tell…"));
+  find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "yes, merge";
+  const typed = after(watchers.back(page, true));
+  click(buttonNamed(page.main(), "Tell…"));
+  click(buttonNamed(page.run("UI.sheet"), "Close"));
+  const shut = active();
+  click(buttonNamed(page.main(), "Tell…"));
+  find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "yes, merge";
+  click(buttonNamed(page.run("UI.sheet"), "Tell"));
+  await settle();
+  const busy = [after(watchers.back(page, true)), after(watchers.back(page, false))];
+  const agent = closeWatchers();
+  const one = bootPage("#/p/" + PROJECT + "/a/coder-1/live", signedIn(), agent.globals);
+  await settle();
+  one.acceptSockets();
+  await settle();
+  click(buttonNamed(one.main(), "Actions…"));
+  click(buttonNamed(one.run("UI.sheet"), "Stop…"));
+  const replaced = { did: agent.back(one, true), sheet: sheetTitle(one), at: one.location.hash, made: agent.made.length };
+  replaced.active = agent.made.filter((watcher) => watcher.active).length;
+  return { typed, shut, busy, replaced };
+}
+
+/* The same without CloseWatcher (Safari; Firefox before 149), the sheet holding a history entry
+ * of its own. On the feed, the tab's first entry: a card's Tell with words typed in it, then
+ * Back; Tell again, then Close, once its Back landed; Tell again, then a route asked for as the
+ * sheet closes; and on an agent's screen, Actions…, a notification's card while it is open,
+ * then Back. Where history stands after each, the sheet, and the screen. */
+async function backWithoutCloseWatcher() {
+  const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell"] });
+  const page = bootPage("#/", signedIn({ "GET api/needs": () => ({ status: 200, json: { items: [asked] } }) }), { history: true });
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const after = (one, did) => ({ did, sheet: sheetTitle(one), at: one.location.hash, cards: one.main().querySelectorAll("div.card").length, history: one.history() });
+  click(buttonNamed(page.main(), "Tell…"));
+  find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "yes, merge";
+  const opened = page.history();
+  const did = page.back() ? "back" : "left";
+  await settle();
+  const typed = after(page, did);
+  click(buttonNamed(page.main(), "Tell…"));
+  click(buttonNamed(page.run("UI.sheet"), "Close"));
+  await settle();
+  const shut = after(page, "close");
+  click(buttonNamed(page.main(), "Tell…"));
+  page.run("closeSheet(); pageGo('#/projects');");
+  await settle();
+  const raced = after(page, "close, then go");
+  const one = bootPage("#/p/" + PROJECT + "/a/coder-1/live", signedIn(), { history: true });
+  await settle();
+  one.acceptSockets();
+  await settle();
+  click(buttonNamed(one.main(), "Actions…"));
+  one.run("pageGo('#/n/" + NEEDS_ID + "')");
+  await settle();
+  const led = after(one, "card");
+  one.back();
+  await settle();
+  return { opened, typed, shut, raced, led, back: after(one, "back") };
+}
+
 /* The Live tab across a sleep, as [stale, Send disabled, pane greyed as held]: with its pane
  * in; after a minute with nothing heard; once a wake's socket opened and a second passed;
  * once that socket's first frame came, not the pane; and once the pane came. */
@@ -2700,6 +2831,8 @@ async function main() {
     sheetFocus: await sheetFocus(),
     focusLands: await focusLands(),
     focusKept: await focusKept(),
+    backOverASheet: await backOverASheet(),
+    backWithoutCloseWatcher: await backWithoutCloseWatcher(),
     transcriptColumns: await transcriptColumns(),
     transcriptLoads: await transcriptLoads(),
     buttonsInFlight: await buttonsInFlight(),

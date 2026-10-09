@@ -256,6 +256,76 @@ def test_the_coders_note_names_the_connect_for_its_own_config_dir(
 
 
 @posix_route
+def test_the_coders_note_never_names_a_connect_that_refuses(
+    runner: CliRunner, claude: Path, tmp_path: Path
+) -> None:
+    """A project-scope plugin is the natural route where ~/.claude/settings.json is
+    read-only (home-manager): the note named `aisquare agents connect claude-code`, which
+    refuses that file, while Welcome step 2 names the refusal and offers no Connect
+    (review of #257). The note names it too."""
+    repo = _repo_plugin(claude, tmp_path / "repo", "project")
+    settings = claude / "settings.json"
+    settings.write_text("{}", encoding="utf-8")
+    settings.chmod(0o444)
+    try:
+        if os.access(settings, os.W_OK):
+            pytest.skip("this user can write a read-only file (root)")
+        row = diagnostics._check_claude_code(cwd=repo)
+        step_two = first_run.probe_claude(
+            sign_in=False, which=lambda name: str(tmp_path / "claude"), cwd=repo
+        )
+    finally:
+        settings.chmod(0o644)
+    writable = diagnostics._check_claude_code(cwd=repo)
+
+    assert step_two.refused is not None and not step_two.connected, step_two
+    assert row.status is CheckStatus.ok, row
+    assert "so the fleet's coders may run without aisquare" in row.detail, row
+    assert f"connect cannot write the hooks in {claude}: {step_two.refused}" in row.detail, row
+    assert "aisquare agents connect" not in row.detail, "no Connect that refuses"
+    assert "may run without aisquare: aisquare agents connect claude-code runs it" in (
+        writable.detail
+    ), "control: where connect can write, the note names it"
+
+
+@posix_route
+@pytest.mark.parametrize("beside", ["hooks missing in another dir", "a short timeout in another"])
+def test_the_coders_note_is_said_on_an_amber_row_too(
+    runner: CliRunner, claude: Path, tmp_path: Path, beside: str
+) -> None:
+    """The note was added on a green row only: with another config dir amber (its hooks
+    gone, or a context hook's timeout short), the row dropped it while Welcome step 2
+    still said the coders may run without aisquare (review of #257)."""
+    repo = _repo_plugin(claude, tmp_path / "repo", "project")
+    other = claude.parent / ".claude-c2"
+    other.mkdir()
+    _connect(runner, other)
+    settings = other / "settings.json"
+    if beside == "hooks missing in another dir":
+        settings.write_text("{}", encoding="utf-8")
+    else:
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        for event in ("SessionStart", "UserPromptSubmit"):
+            for group in data["hooks"][event]:
+                for item in group["hooks"]:
+                    item.pop("timeout", None)
+        settings.write_text(json.dumps(data), encoding="utf-8")
+
+    row = diagnostics._check_claude_code(cwd=repo)
+    step_two = first_run.probe_claude(
+        sign_in=False, which=lambda name: str(tmp_path / "claude"), cwd=repo
+    )
+
+    assert row.status is CheckStatus.warn and str(other) in row.detail, row
+    assert step_two.manager_only, step_two
+    assert "so the fleet's coders may run without aisquare: aisquare agents connect" in (
+        row.detail
+    ), row.detail
+    buttons = [fix.argv for fix in fix_commands([row])]
+    assert _CONNECT in buttons, "the bare Connect step 2 offers is a button here too"
+
+
+@posix_route
 @pytest.mark.parametrize("asked_from", ["the repository", "elsewhere"])
 def test_partial_hooks_beside_a_repo_scope_plugin_are_judged_on_themselves(
     runner: CliRunner,

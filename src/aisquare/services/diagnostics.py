@@ -1001,6 +1001,18 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
         and runner_problem is None
         and unmade is None
     )
+    # A plugin enabled for this folder alone misses where the fleet's coders start, by
+    # Welcome step 2's own rule. Said on every branch of the row, as step 2 says it
+    # whatever else is wrong, and with connect's refusal where it has one, as step 2
+    # names it: the note named a Connect that refuses, and only a green row said it
+    # (review of #257).
+    coders = _coders_missed(
+        {
+            site.config_dir: agents_service.access("claude-code", site.config_dir).connect
+            for site in graded
+            if site.plugin is not None and _misses_the_coders(site.config_dir, site.plugin, cwd)
+        }
+    )
     if healthy and not switched_off:
         # Installed, firing, and running THIS install — but a context hook may
         # still carry a shorter timeout than the CI hook can wait for (a
@@ -1013,7 +1025,7 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
             if (shortfall := agent_core.hook_timeout_shortfall("claude-code", site.config_dir))
         }
         if short:
-            return _short_timeouts(product, short)
+            return _short_timeouts(product, short, coders)
         where = f" in {len(sites)} config dirs" if len(sites) > 1 else ""
         hooked = [site for site in sites if site.plugin is None]
         plugins = [(site.config_dir, site.plugin) for site in sites if site.plugin is not None]
@@ -1041,12 +1053,9 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
             routes.extend(f"through {_plugin_label(p)} in {d}" for d, p in plugins)
             if plugins:
                 routes.append(f"the plugin runs {runs}")
-        # Connected here, which is this row's verdict, as `agents list` says too; but a
-        # plugin enabled for this folder alone misses where the fleet's coders start, and
-        # Welcome step 2 says so and offers Connect. Said here as well (review of #257).
-        missed = [d for d, p in plugins if _misses_the_coders(d, p, cwd)]
-        if missed:
-            routes.append(_coders_missed(missed))
+        # Connected here, which is this row's verdict, as `agents list` says too.
+        if coders is not None:
+            routes.append(coders[0])
         return _ok("claude-code", f"{product} connected{where} ({'; '.join(routes)})")
 
     problems: list[str] = []
@@ -1115,25 +1124,46 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     )
     if runner_fix is not None:
         fixes.append(runner_fix)
+    if coders is not None:
+        problems.append(coders[0])
+        fixes.extend(coders[1])
     return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
 
 
-def _coders_missed(dirs: list[Path]) -> str:
-    """What the row adds for config dirs whose plugin misses the coders
-    (:func:`_misses_the_coders`), with the Connect that covers every folder for each."""
+def _coders_missed(
+    missed: dict[Path, agents_service.Refusal | None],
+) -> tuple[str, list[str]] | None:
+    """What the row says for config dirs whose plugin misses the coders
+    (:func:`_misses_the_coders`), each with connect's refusal or ``None``, and the fixes:
+    the Connect that covers every folder where connect would write the hooks, bare for
+    the directory a session from this shell reads; else that refusal's remedy, never a
+    Connect that refuses. ``None`` when no route misses them."""
+    if not missed:
+        return None
     ambient = agent_core.ambient_hook_dir("claude-code")
     here = agent_core.dir_identity(ambient) if ambient is not None else None
-    connects = " or ".join(
+    connects = [
         "aisquare agents connect claude-code"
         if agent_core.dir_identity(directory) == here
         else f"aisquare agents connect claude-code --config-dir {directory}"
-        for directory in dirs
+        for directory, refusal in missed.items()
+        if refusal is None
+    ]
+    clause = (
+        "a coder's git worktree loads the aisquare plugin installed for this repository only "
+        "where its own .claude/settings.json enables it, so the fleet's coders may run "
+        "without aisquare"
     )
-    return (
-        "a coder's git worktree loads that plugin only where its own .claude/settings.json "
-        f"enables it, so the fleet's coders may run without aisquare: {connects} runs it "
-        "in every folder"
+    if connects:
+        clause += f": {' or '.join(connects)} runs it in every folder"
+    refused = {d: refusal for d, refusal in missed.items() if refusal is not None}
+    clause += "".join(
+        f", and connect cannot write the hooks in {directory}: {refusal.why}"
+        for directory, refusal in refused.items()
     )
+    fixes = [*connects]
+    fixes.extend(_refused_fix(d, refusal.path) for d, refusal in refused.items())
+    return clause, fixes
 
 
 def _misses_the_coders(config_dir: Path, plugin: agent_core.ClaudePlugin, cwd: Path | None) -> bool:
@@ -1152,7 +1182,9 @@ def _misses_the_coders(config_dir: Path, plugin: agent_core.ClaudePlugin, cwd: P
     return coders != here and not agents_service.claude_code_connected(config_dir, cwd=coders)
 
 
-def _short_timeouts(product: str, short: dict[Path, list[str]]) -> DoctorCheck:
+def _short_timeouts(
+    product: str, short: dict[Path, list[str]], coders: tuple[str, list[str]] | None = None
+) -> DoctorCheck:
     """The row for hooks that run this install but give a context hook less time than the
     CI hook may wait: ``short`` maps each directory to those events.
 
@@ -1176,6 +1208,9 @@ def _short_timeouts(product: str, short: dict[Path, list[str]]) -> DoctorCheck:
         problems.append(f"hooks cannot be written in {directory}: {refusal.why}")
         timeout = f"give its {' and '.join(events)} hooks a timeout of at least {ceiling}"
         fixes.append(_refused_fix(directory, refusal.path, also=timeout))
+    if coders is not None:  # the coders' gap, said on this branch too (_coders_missed)
+        problems.append(coders[0])
+        fixes.extend(coders[1])
     return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
 
 

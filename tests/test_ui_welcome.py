@@ -133,6 +133,11 @@ class Machine:
     cap: int = 4
     """``max_agents_per_project``: ``spawn`` refuses at it, counting as ``fleet.spawn`` does."""
     restarted: list[str] = field(default_factory=list)
+    """Every label ``restart`` was asked for, refused or not."""
+    refuse_restart: dict[str, str] = field(default_factory=dict)
+    """Labels ``restart`` refuses, with the reason (``fleet.restart``'s FleetError)."""
+    ended: list[FleetAgent] = field(default_factory=list)
+    """Rows that ended and that the listing still shows, as 💤 (their window kept)."""
 
     def seams(self, platform: str = "linux") -> Seams:
         def claude(sign_in: bool, root: Path | None) -> ClaudeState:
@@ -196,9 +201,10 @@ class Machine:
         )
 
     def listing(self, project: ProjectInfo) -> list[FleetAgentStatus]:
+        """``first_run.live_agents``: the rows that have not ended."""
         if self.blind is not None:
             raise RuntimeError(self.blind)
-        return self.statuses(project)
+        return [status for status in self.statuses(project) if status.agent.ended_at is None]
 
     def statuses(self, project: ProjectInfo) -> list[FleetAgentStatus]:
         """``live`` as ``fleet.list_agents`` reports it for ``project``, each in its state."""
@@ -207,7 +213,17 @@ class Machine:
             if agent.project_id == project.id:
                 state = self.states.get(agent.label, "waiting")
                 rows.append(FleetAgentStatus(agent=agent, state=state, detail=DETAIL.get(state)))
+        for agent in self.ended:
+            if agent.project_id == project.id:
+                detail = f"exit {agent.exit_status}"
+                rows.append(FleetAgentStatus(agent=agent, state="exited", detail=detail))
         return rows
+
+    def exit(self, label: str, status: int) -> None:
+        """The agent's process ended by itself: its row ends, and its window is kept."""
+        agent = next(agent for agent in self.live if agent.label == label)
+        self.live.remove(agent)
+        self.ended.append(agent.model_copy(update={"ended_at": T0, "exit_status": status}))
 
     def spawn(self, project: ProjectInfo, role: str, **kwargs: Any) -> fleet_service.SpawnReceipt:
         assert kwargs.get("prompt") is None, "Welcome typed into an agent"
@@ -228,13 +244,15 @@ class Machine:
         self, project: ProjectInfo, label: str, *, agent_id: str | None = None
     ) -> fleet_service.RestartReceipt:
         """``fleet.restart``: the row ``agent_id`` names ends, and a new one takes its label."""
+        self.restarted.append(label)
         old = next(a for a in self.live if a.project_id == project.id and a.label == label)
         assert agent_id == old.id, f"Welcome restarted {label} by its label, not its row"
+        if label in self.refuse_restart:
+            raise fleet_service.FleetError(self.refuse_restart[label])
         new = old.model_copy(update={"id": f"{old.id}-again"})
         self.live.remove(old)
         self.live.append(new)
         self.states.pop(label, None)  # its window is back
-        self.restarted.append(label)
         return fleet_service.RestartReceipt(
             replaced=old, started=new, resumed=True, was_running=False, tmux_session="asq-demo"
         )
@@ -1701,6 +1719,77 @@ def test_coders_whose_windows_are_gone_are_not_counted_and_are_restarted(
     assert "✓ coder-1 — started" in restarted and "✓ coder-2 — started" in restarted, restarted
     assert "lost" not in restarted and FLEET_UP in restarted, restarted
     assert not offered_after
+
+
+def test_a_refused_restart_is_said_under_its_coder_with_the_way_out(
+    captain: str | None,
+    scripted: Callable[[Machine], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A lost coder's restart that ``fleet.restart`` refuses (its account slot removed, a
+    replay that cannot start) carries the lost row's own label, so the card left it out
+    behind "✗ coder-1 — lost": Start the coders stayed offered under the trust-question
+    line, and every press met the same refusal unseen (review of the sweep-2 fixes). The
+    reason is said under the coder, step 3 names the way out, and so does every press."""
+    machine, project = _ready_machine(tmp_path)
+    reason = "cannot restart 'coder-1': no Claude account in slot 3 — see: aisquare accounts"
+    machine.refuse_restart = {"coder-1": reason}
+    listed_by(machine, project, monkeypatch)
+    scripted(machine)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[Any]:
+        await press(pilot, page, "fleet-manager")
+        await press(pilot, page, "fleet-coders")
+        machine.states["coder-1"] = "lost"  # its window gone
+        app.refresh_data()
+        page.paint()  # what the page's refresh tick does
+        seen: list[Any] = []
+        for _ in range(2):
+            await press(pilot, page, "fleet-coders")
+            app.refresh_data()
+            page.paint()  # the next frame, as the page's refresh tick paints it
+            seen.append(card(page, "fleet-status"))
+        seen.append(visible(page, "fleet-coders"))
+        return seen
+
+    first, second, offered = in_shell(machine, go)
+    assert machine.restarted == ["coder-1", "coder-1"], "each press asked again"
+    for text in (first, second):
+        lines = text.splitlines()
+        lost = lines.index("✗ coder-1 — lost (pane gone)")
+        assert lines[lost + 1] == f"✗ coder-1: {reason}", text
+        assert "coder-1 could not be restarted: aisquare fleet reap --project" in text, text
+        assert "trusting this folder" not in text, text
+    assert offered, "a refusal that may pass (a hand-over in flight) can still be retried"
+
+
+def test_an_agent_the_page_started_that_exited_is_said(
+    captain: str | None,
+    scripted: Callable[[Machine], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An agent that exits as it starts (a binary that fails) leaves an ended row, which the
+    page leaves out: the card read as if Start manager had never been pressed, and every
+    press started one more manager that exited unseen. It says the agent exited, with its
+    exit status, and where its last screen is."""
+    machine, project = _ready_machine(tmp_path)
+    listed_by(machine, project, monkeypatch)
+    scripted(machine)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[Any]:
+        await press(pilot, page, "fleet-manager")
+        started = card(page, "fleet-status")
+        machine.exit("manager", 3)
+        app.refresh_data()
+        page.paint()  # the next frame, as the page's refresh tick paints it
+        return [started, card(page, "fleet-status"), visible(page, "fleet-manager")]
+
+    started, exited, offered = in_shell(machine, go)
+    assert "✓ manager — started" in started, "control: running, it is not called exited"
+    assert "✗ manager — exited (exit 3)" in exited and "last screen" in exited, exited
+    assert "✓ manager" not in exited and offered, exited
 
 
 @pytest.mark.parametrize("state", ["unknown", "lost"])

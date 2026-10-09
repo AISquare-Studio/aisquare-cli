@@ -1103,11 +1103,29 @@ class WelcomeView(VerticalScroll):
             if status.plain:
                 status.append("\n")
             status.append_text(line)
+        # A coder whose window is gone and whose restart was refused: pressing again meets
+        # the same refusal, and the agent view's Restart is the same restart.
+        stuck = next(
+            (
+                label
+                for label, step in self.steps.items()
+                if step.outcome == "refused" and label in live and live[label].state == "lost"
+            ),
+            None,
+        )
         if manager is not None and not manager_running:
             status.append("\nOpen the manager to restart it.", style="dim")
         elif manager is not None and not up:
             if "coders" in self.busy:
                 status.append("\nStarting the coders…", style="dim")
+            elif stuck is not None:
+                status.append(f"\n{stuck} could not be restarted: ", style="dim")
+                status.append(f"aisquare fleet reap --project {self._project_ref()}", style="bold")
+                status.append(
+                    " ends the rows of agents whose windows are gone, and Start the coders then "
+                    "starts new ones in their place.",
+                    style="dim",
+                )
             else:
                 status.append(
                     "\nOpen the manager and answer Claude Code's question about trusting this "
@@ -1148,10 +1166,12 @@ class WelcomeView(VerticalScroll):
         self._card("step-fleet", done=up, waiting=waiting, keep_keys=True)
 
     def _fleet_lines(self, live: dict[str, _Live]) -> list[Text]:
-        """One line per agent of the chosen project's fleet, then any refusal.
+        """One line per agent of the chosen project's fleet, then any refusal or exit.
 
         An agent the frame does not see running says what the frame says instead,
-        never "started" or "running" from what this page last heard.
+        never "started" or "running" from what this page last heard; the last start's
+        refusal under its label goes beneath it. An agent a start of this page reported
+        that the frame shows ended since (💤) says so.
         """
         lines: list[Text] = []
         shown: set[str] = set()
@@ -1163,16 +1183,54 @@ class WelcomeView(VerticalScroll):
             shown.add(label)
             if not row.running:
                 lines.append(state_line(label, row.state or "unknown", row.detail))
+                # The last start's refusal under this label is about this row (a lost
+                # coder's restart): left out, every press met the same refusal unseen.
+                refused = self.steps.get(label)
+                if refused is not None and refused.outcome == "refused":
+                    lines.append(step_line(refused))
                 continue
             agent = row.agent
             step = self.steps.get(label)
             if step is None or step.agent is None or step.agent.id != agent.id:
                 step = FleetStep(label, agent.role, "running", agent.id, agent)
             lines.append(step_line(step))
+        ended = self._ended_rows()
         for label, step in self.steps.items():
-            if step.outcome == "refused" and label not in shown:
+            if label in shown:
+                continue
+            if step.outcome == "refused":
                 lines.append(step_line(step))
+            elif step.agent is not None and step.agent.id in ended:
+                # Exited since this page started it. Left out, the card read as if nothing
+                # had been pressed, and each press started one more that exited unseen.
+                line = state_line(label, *ended[step.agent.id])
+                line.append("\n    its last screen is on its row in the sidebar", style="dim")
+                lines.append(line)
         return lines
+
+    def _ended_rows(self) -> dict[str, tuple[str, str | None]]:
+        """The chosen project's ended rows the shell's frame still lists (💤: the window is
+        kept for its last screen), as ``(state, detail)`` by agent id."""
+        frame = getattr(getattr(self.app, "snapshot", None), "agents", None)
+        if self.project is None or not isinstance(frame, dict):
+            return {}
+        ended: dict[str, tuple[str, str | None]] = {}
+        for status in frame.get(self.project.id, []):
+            agent = getattr(status, "agent", None)
+            if isinstance(agent, FleetAgent) and agent.ended_at is not None:
+                ended[agent.id] = (
+                    getattr(status, "state", "exited"),
+                    getattr(status, "detail", None),
+                )
+        return ended
+
+    def _project_ref(self) -> str:
+        """How a command names the chosen project: its codename once it has one, else its id."""
+        project = self.project
+        if project is None:
+            return ""
+        listed = next((p for p in _frame_projects(self.app) or [] if p.id == project.id), project)
+        return listed.codename or project.codename or project.id
 
     def _waiting_for(self) -> str:
         missing: list[str] = []

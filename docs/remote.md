@@ -170,10 +170,10 @@ The R panel's **Allow write actions** switch sets the same value. There is one
 write switch, the server's own, in `~/.aisquare/remote.json`: the shell and the
 panel both set it there, whether Remote is on or off, so they always agree and
 starting the TUI never changes it. The page's READ-ONLY sentence names both.
-Switching writes off, signing a phone out or turning Remote off also stops what
-that phone sent and the machine has not started yet: a write waiting behind a
-restart is refused, not run. One already running (a restart takes up to 40
-seconds) finishes.
+Switching writes off, signing a phone out, or turning Remote off in the panel or
+by auto-off, also stops what that phone sent and the machine has not started
+yet: a write waiting behind a restart is refused, not run. One already running
+(a restart takes up to 40 seconds) finishes.
 
 The writes, and the routes they use:
 
@@ -251,8 +251,8 @@ aisquare --json remote needs
 
 A card holds what you must read before answering: the exact command a
 permission is for, every question with its options, the plan, the text. What is
-too long for it is cut, a permission's command at 2,000 characters and all it
-shows at 4 KiB, and the card says so and how long the whole is; a call whose
+too long for a permission's card is cut, its command at 2,000 characters and all
+it shows at 4 KiB, and the card says so and how long the whole is; a call whose
 input is over 16 KiB never reaches the phone, and its card says that instead.
 Open the agent to read such a call before you answer it. Under a permission, a
 question or a plan, the bottom of the agent's live screen is shown too, so the
@@ -505,8 +505,8 @@ The stream sends `{"type", "payload", "ts"}` frames, each kind when it changed:
 - `fleet` and `board` once asked for, with `{"subscribe_fleet": "<id>"}` and
   `{"subscribe_board": "<id>"}` (`""` or `null` for the current project, `false`
   to stop). A `board` frame is the board's events and the sessions they name, and
-  carries the `project` it was asked for: under `AISQUARE_TEAM_HUB` every
-  project's board is the hub's.
+  carries the `project` it was asked for, when one was named: under
+  `AISQUARE_TEAM_HUB` every project's board is the hub's.
 - `pane` for each pane subscribed to with `{"subscribe": "<agent>", "project":
   "<id>"}` (no `project` for the current project's agent), until the same with
   `unsubscribe`. A pane frame carries `agent`, and `project` when the
@@ -535,8 +535,8 @@ minutes, it is answered with what the first one did instead of running twice;
 give every other write an id of its own, since for those 15 minutes an id sent
 with another endpoint or body is refused with `request_id_reused`. The server
 keeps the answers of a device's 50 newest writes and the ids of its 1000 newest:
-a retry of an older one is refused with `already_answered`, which says how it
-ended, and does not run again.
+a retry of one past the 50 but within the 1000 is refused with
+`already_answered`, which says how it ended, and does not run again.
 
 `send-keys` types into the pane whatever it shows, a prompt included. A script
 that cannot see the pane adds `"dialog_guard": true`, as the Transcript tab

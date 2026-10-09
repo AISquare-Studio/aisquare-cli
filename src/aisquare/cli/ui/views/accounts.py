@@ -107,6 +107,22 @@ class _RenameWrite(NamedTuple):
     opening: int
 
 
+class _Renamed(NamedTuple):
+    """What a *Rename* write reports: the account as the service stored it, and the notice."""
+
+    account: ClaudeAccount
+    said: str
+
+
+@dataclass
+class _Saved:
+    """A name this page saved that the frames may not show yet (``AccountsView._settle_saved``)."""
+
+    alias: str | None
+    outlived: bool = False
+    """A new frame has disagreed once: the read in flight when the write landed."""
+
+
 class SignOutOutcome(NamedTuple):
     """What *Sign out* did: the keys the CLI had minted (#142), then the session."""
 
@@ -609,6 +625,8 @@ class AccountsView(Vertical):
         self._arranging = threading.Lock()  # one registry write at a time (arrange_accounts)
         self._renames: dict[Worker[Any], _RenameWrite] = {}
         """*Rename* writes sent and not yet reported, by worker (``rename_account``)."""
+        self._saved: dict[int, _Saved] = {}
+        """Names *Rename* saved, by slot, until the frames have caught up (``_settle_saved``)."""
         self._on_screen = False
 
     # --- layout ------------------------------------------------------------------------
@@ -707,6 +725,8 @@ class AccountsView(Vertical):
         of ``usage``, so keying on answers would ask again every tick. Off screen
         this does nothing, and ``on_show`` reads as before.
         """
+        if overview is not self.overview:  # the shell re-hands its last frame on a click
+            self._settle_saved(overview)
         self.overview = overview
         previous, self.session = self.session, self._read_session()
         if not self.is_mounted:
@@ -743,13 +763,45 @@ class AccountsView(Vertical):
         sign_in.tooltip = hint
         sign_out.tooltip = hint
 
+    def _settle_saved(self, frame: AccountsOverview) -> None:
+        """Weigh a new frame against the names *Rename* saved that the frames have not shown.
+
+        A saved name is the service's answer (``set_alias`` returns the stored
+        account), and the row says it from the moment the write lands: the row
+        that kept the frame's older name prefilled *Rename* with it, and an
+        Enter taken as "confirm" put the old name back (review of #258, round 4).
+
+        One frame read BEFORE a write can still arrive AFTER it: the shell's
+        read in flight when the write landed (``FleetApp.refresh_accounts``
+        reads one at a time and owes one more). Every read after that one
+        starts after the write. So a saved name stands over the first new frame
+        that disagrees and yields to the next: by then the frame is the
+        registry's word, another terminal's rename included. A frame that
+        agrees, or that no longer has the slot, settles it at once.
+        """
+        aliases = {status.account.slot: status.account.alias for status in frame.accounts}
+        for slot, saved in list(self._saved.items()):
+            if slot not in aliases or aliases[slot] == saved.alias or saved.outlived:
+                del self._saved[slot]
+            else:
+                saved.outlived = True
+
+    def _as_saved(self, status: ClaudeAccountStatus) -> ClaudeAccountStatus:
+        """``status`` as the row shows it: with the name *Rename* saved, while one stands."""
+        saved = self._saved.get(status.account.slot)
+        if saved is None or saved.alias == status.account.alias:
+            return status
+        account = status.account.model_copy(update={"alias": saved.alias})
+        return status.model_copy(update={"account": account, "label": core.label(account)})
+
     def _paint_claude(self, overview: AccountsOverview) -> None:
         self.query_one("#claude-title", Static).update(claude_title_text(overview))
         self.query_one("#claude-add", Button).disabled = not overview.claude.installed
         holder = self.query_one("#claude-rows", Vertical)
         existing = {row.slot: row for row in holder.query(AccountRow)}
         count = len(overview.accounts)
-        for index, status in enumerate(overview.accounts):
+        for index, frame_status in enumerate(overview.accounts):
+            status = self._as_saved(frame_status)
             slot = status.account.slot
             row = existing.pop(slot, None)
             first, last = index == 0, index == count - 1
@@ -1118,8 +1170,10 @@ class AccountsView(Vertical):
         whether another slot has it — so nothing is checked here. A refusal is
         the worker's error: the notice says it and the field stays open with
         what was typed, to be corrected. The write takes the arranging lock, so
-        it waits its turn behind a *Default* or *↑* still writing, and the page
-        re-reads afterwards as an arrangement does: the label is the frame's.
+        it waits its turn behind a *Default* or *↑* still writing. On success
+        the row says the name the service stored at once, and the page re-reads
+        as an arrangement does; :meth:`_settle_saved` decides when the frames
+        have the last word again.
 
         The write is kept in :attr:`_renames` until it reports, with what the
         field said when it was sent and which opening of the field sent it. So
@@ -1132,12 +1186,12 @@ class AccountsView(Vertical):
         """
         alias = typed.strip() or None
 
-        def work() -> str:
+        def work() -> _Renamed:
             with self._arranging:
                 account = accounts_service.set_alias(str(slot), alias)
             if alias is None:
-                return f"✓ slot {account.slot}: alias cleared"
-            return f"✓ slot {account.slot} is now called {account.alias}"
+                return _Renamed(account, f"✓ slot {account.slot}: alias cleared")
+            return _Renamed(account, f"✓ slot {account.slot} is now called {account.alias}")
 
         worker = self.run_worker(
             work,
@@ -1152,8 +1206,12 @@ class AccountsView(Vertical):
 
     def _rename_finished(self, worker: Worker[Any], state: WorkerState) -> None:
         write = self._renames.pop(worker, None)
-        if state is WorkerState.SUCCESS and isinstance(worker.result, str):
-            self._notice(worker.result, "ok")
+        if state is WorkerState.SUCCESS and isinstance(worker.result, _Renamed):
+            stored = worker.result.account
+            self._notice(worker.result.said, "ok")
+            self._saved[stored.slot] = _Saved(stored.alias)
+            if self.overview is not None:
+                self._paint_claude(self.overview)  # the label and the next prefill say it now
             row = self.row_of(write.slot) if write is not None else None
             # Closed only if it is the opening that sent the write and still says what it
             # saved: anything typed since, or a field reopened since, is the next edit.

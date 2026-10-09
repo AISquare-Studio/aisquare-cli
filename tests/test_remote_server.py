@@ -626,6 +626,42 @@ def _frames_until(ws: Any, kind: str, *, limit: int = 12) -> list[dict[str, Any]
     raise AssertionError(f"no {kind} frame in {seen}")
 
 
+def test_the_reference_names_every_stream_message_and_frame_and_each_per_agent_query() -> None:
+    """Sweep of #243, round 4: the HTTP and WebSocket reference in docs/remote.md named no
+    ``unsubscribe``, no ``subscribe_fleet``, no ``error`` frame and no cap on watched panes,
+    and its per-agent reads no ``?project=``. A script built from it could not unsubscribe,
+    met an error it was never told of at its ninth pane, and without ``?project=`` read the
+    current project's agent of that label, which may be another agent than the one it
+    listed. The section names each message the page may send, each kind of frame the
+    stream sends, the cap, and every query the per-agent reads take."""
+    import re
+
+    root = Path(remote_server.__file__).resolve().parents[3]
+    docs = (root / "docs" / "remote.md").read_text("utf-8")
+    section = docs.split("## HTTP and WebSocket reference", 1)[1].split("\n## ", 1)[0]
+    script = (root / "src" / "aisquare" / "web" / "remote" / "app.js").read_text("utf-8")
+    listed = re.search(r"const SOCKET_MESSAGES = Object\.freeze\(\[([^\]]*)\]\)", script)
+    assert listed is not None
+    messages = re.findall(r'"(\w+)"', listed.group(1))
+    server = Path(remote_server.__file__).read_text("utf-8")
+    frames = set(re.findall(r'(?:send_frame|push_if_changed)\(\s*"(\w+)"', server))
+    assert {"subscribe", "unsubscribe", "subscribe_fleet", "subscribe_board"} <= set(messages)
+    assert {"fleet", "board", "pane", "error", "heartbeat"} <= frames, "the control"
+
+    def named(word: str) -> bool:
+        """A message's key as it is sent (``{"subscribe": ...``), or its name in backticks."""
+        return f'{{"{word}":' in section or f"`{word}`" in section
+
+    assert [word for word in messages if not named(word)] == []
+    assert [kind for kind in [*frames, "needs_you"] if f"`{kind}`" not in section] == []
+    assert '"too_many_subscriptions"' in section
+    cap = f"A connection watches {remote_server.WS_PANE_SUBSCRIPTIONS_MAX} panes at most"
+    assert cap in " ".join(section.split())
+    (row,) = [line for line in section.splitlines() if "`api/panes/<agent>`" in line]
+    for query in ("project", "history", "limit", "before", "width"):
+        assert f"`?{query}=`" in row, query
+
+
 def test_stream_sends_remote_and_once_asked_the_fleet_and_the_board_then_only_changes(
     client: TestClient, runtime: Runtime, fake: Fake
 ) -> None:

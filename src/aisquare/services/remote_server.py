@@ -5284,8 +5284,13 @@ def stop_remote_server() -> None:
                 name="asq-remote-wound-down",
                 daemon=True,
             ).start()
-    if _runtime is not None:  # the server is already down; only last_seen is lost
-        _remote_flush_logged(_runtime, "flushing remote.json as the server stopped failed")
+    if _runtime is not None:
+        try:
+            _runtime.flush_last_seen()
+        except OSError as exc:  # the server is already down; only last_seen is lost
+            log.warning("remote: flushing remote.json as the server stopped failed: %s", exc)
+        except Exception:
+            log.warning("remote: flushing remote.json as the server stopped failed", exc_info=True)
     _release_remote_home()
 
 
@@ -5372,22 +5377,6 @@ def remote_password() -> str:
     return runtime().password
 
 
-def _remote_flush_logged(state: Runtime, failed: str) -> None:
-    """``state.flush_last_seen()``, its failure logged as ``failed`` says it, never raised.
-
-    A ``remote.json`` that will not write (a full disk, a home it may not write) is one
-    line, not a traceback: the flusher logged a whole one every 30 s for as long as a
-    phone was in use (sweep 2 of #243, the rule ``asq remote``'s commands keep).
-    Anything else keeps its traceback, which is how a bug is found.
-    """
-    try:
-        state.flush_last_seen()
-    except OSError as exc:
-        log.warning("remote: %s: %s", failed, exc)
-    except Exception:
-        log.warning("remote: %s", failed, exc_info=True)
-
-
 def _schedule_flush() -> None:
     """Persist ``last_seen`` and prune expired devices every 30 s while serving.
 
@@ -5399,8 +5388,11 @@ def _schedule_flush() -> None:
     def flush_and_rearm() -> None:
         with _lock:
             serving = (_server is not None and _server.running) or _foreground is not None
-        if _runtime is not None:  # one failed write must not end the flushing for good
-            _remote_flush_logged(_runtime, "flushing remote.json failed")
+        if _runtime is not None:
+            try:
+                _runtime.flush_last_seen()
+            except Exception:  # one failed write must not end the flushing for good
+                log.warning("remote: flushing remote.json failed", exc_info=True)
         if serving:
             _schedule_flush()
 

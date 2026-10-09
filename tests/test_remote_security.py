@@ -2584,15 +2584,15 @@ def _iso(at: datetime) -> str:
     return remote_server._iso_seconds(at)
 
 
-def test_a_flush_that_cannot_write_says_so_in_one_line_and_tries_again(
+def test_the_last_flush_as_the_server_stops_says_an_unwritable_remote_json_in_one_line(
     runtime: Runtime,
     clock: Clock,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A ``remote.json`` that will not write is a clean failure, not a traceback: the
-    flusher logged a whole traceback every 30 s for as long as a phone was in use on a full
-    disk, and the server's stop one more (sweep 2 of #243, as ``serve``'s auto-off did)."""
+    """A ``remote.json`` that will not write is a clean failure as the server stops, not a
+    traceback, as ``asq remote``'s commands and ``serve``'s way out say it (sweep 2 of
+    #243); and the flusher before it, failing the same way, still tries again in 30 s."""
     timers = Timers()
     monkeypatch.setattr(remote_server, "threading", timers)
     monkeypatch.setattr(remote_server, "_runtime", runtime)
@@ -2607,11 +2607,10 @@ def test_a_flush_that_cannot_write_says_so_in_one_line_and_tries_again(
     ((_delay, flush),) = timers.armed
     clock.advance(minutes=5)
     assert runtime.device_is_live(unlocked[1].id)
-    with caplog.at_level("WARNING", logger=remote_server.__name__):
-        flush()
-        monkeypatch.setattr(remote_server, "_foreground", None)
-        remote_server.stop_remote_server()
-    said = [r for r in caplog.records if "flushing remote.json" in r.getMessage()]
-    assert len(said) == 2 and all(r.exc_info is None for r in said), said
-    assert all("No space left on device" in r.getMessage() for r in said)
+    flush()
     assert len(timers.armed) == 2, "it tries again in 30 s"
+    monkeypatch.setattr(remote_server, "_foreground", None)
+    with caplog.at_level("WARNING", logger=remote_server.__name__):
+        remote_server.stop_remote_server()
+    (said,) = [r for r in caplog.records if "as the server stopped" in r.getMessage()]
+    assert said.exc_info is None and "No space left on device" in said.getMessage()

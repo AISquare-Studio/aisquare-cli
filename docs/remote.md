@@ -394,8 +394,9 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   port asks for none either, and starts, stops and inspects tunnels. The panel
   starts ngrok with `--inspect=false` and, in a config it merges over your own
   `ngrok.yml`, `web_addr: false`. Where it cannot (no `ngrok.yml` where ngrok keeps
-  it, or an ngrok that will not start with that config) ngrok starts as before, and
-  the panel says its API is on. Start yours with `--inspect=false`, and
+  it, or an ngrok that says it cannot read that config, as a snap's may) ngrok starts
+  as before, and the panel says its API is on; an ngrok that stops for any other
+  reason is not started again without it. Start yours with `--inspect=false`, and
   on a machine others use, put `web_addr: false` in `ngrok.yml` (`ngrok config
   edit`; under `agent:` in a version 3 file).
 - **Keys**: the pad sends key names from a fixed list (no `;`, nothing that

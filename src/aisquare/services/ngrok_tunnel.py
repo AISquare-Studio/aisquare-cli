@@ -20,8 +20,10 @@ again with the inspector on. So the panel's ngrok runs with it off: ``web_addr:
 false``, in a config of ours that ngrok merges over the human's own
 (:func:`api_off_configs`). Where that cannot be done (no config of the human's where
 ngrok keeps it, one of a version not known here) ngrok starts as before, and so does
-one that will not start with ours (a snap that may not read it), started again; its
+one that says it cannot take ours (a snap that may not read it), started again; its
 log then says the API is on, which the panel says (:attr:`NgrokTunnel.api_warning`).
+One that ends for a reason of its own is not: started again, it would serve with its
+API on for no fault of our config.
 
 ngrok runs in a process group of its own, and stopping it stops the group: the
 ``ngrok`` on a PATH may be a launcher that runs the real binary as its child (pyngrok's
@@ -121,6 +123,10 @@ _API_OFF_HEADER = (
     "# aisquare's R panel starts ngrok with this merged over your own ngrok.yml, so that\n"
     "# ngrok's local web interface and agent API, which ask no one for a password, are off.\n"
 )
+_ERROR_LEVELS = frozenset({"eror", "error", "crit"})
+"""The levels of ngrok's JSON log that report an error."""
+_NO_ERROR = (None, "", "nil", "<nil>")
+"""What an ``err`` of ngrok's JSON log holds when there was none."""
 _CONFIG_VERSION = re.compile(r"""^version:\s*["']?(\d+)["']?\s*(?:#.*)?$""", re.MULTILINE)
 API_ON = (
     "ngrok's local API is on ({addr}): anyone on this machine can use it to change "
@@ -212,10 +218,25 @@ def parse_log_line(line: str) -> LogEvent:
         return LogEvent(url=record["url"], name=_text(record, "name"), addr=_text(record, "addr"))
     if isinstance(message, str) and "starting web service" in message:
         return LogEvent(web=_text(record, "addr") or "its default address")
-    if record.get("lvl") in ("eror", "error", "crit"):
+    if record.get("lvl") in _ERROR_LEVELS:
         err = record.get("err") or message or "ngrok reported an error"
         return LogEvent(error=_error_sentence(_one_line(str(err))))
     return LogEvent()
+
+
+def says_trouble_with(line: str, name: str) -> bool:
+    """Whether ``line`` of ngrok's output says the file ``name`` is why ngrok could not go on: a
+    line of plain text naming it (what ngrok prints of a config it cannot read, as it ends),
+    or one of its JSON log naming it with an error; never its note that it opened the file."""
+    if name not in line:
+        return False
+    try:
+        record: Any = json.loads(line)
+    except ValueError:
+        return True
+    if not isinstance(record, dict):
+        return False
+    return record.get("lvl") in _ERROR_LEVELS or record.get("err") not in _NO_ERROR
 
 
 def _text(record: dict[str, Any], key: str) -> str | None:
@@ -487,7 +508,12 @@ class NgrokTunnel:
         self.api_off = api_off
         self._configs = configs
         self._as_before: list[str] | None = None
-        """ngrok's command without our config, for an ngrok that will not start with it."""
+        """ngrok's command without our config, for an ngrok that cannot take it."""
+        self._ours: str | None = None
+        """The file name of our config, while ngrok runs with it."""
+        self._ours_refused = False
+        """Whether ngrok's output said our config is why it could not go on
+        (:func:`says_trouble_with`)."""
         self._process: subprocess.Popen[str] | None = None
         self._group: int | None = None
         """The process group ngrok leads, all that it started in it, until stopping has seen
@@ -531,7 +557,7 @@ class NgrokTunnel:
             command = ngrok_command(self.port, self.binary, url=self.static_host)
             configs = self._our_configs()
             if configs is not None:
-                self._as_before = command
+                self._as_before, self._ours = command, configs[-1].name
                 command = ngrok_command(
                     self.port, self.binary, url=self.static_host, configs=configs
                 )
@@ -631,10 +657,10 @@ class NgrokTunnel:
         """Hand each line of ngrok's log to :meth:`handle_line` until it ends, then say why
         no tunnel came, if none did, and wake whoever waits for one.
 
-        An ngrok started with its API off that ends before it announced a tunnel is started
-        again as before, once (:meth:`_start_as_before`), and its log read on: ngrok's
-        merging of our config into the human's own is ngrok's to judge, and a Remote with
-        its API on is better than none.
+        An ngrok started with its API off that ends before it announced a tunnel, saying our
+        config is why, is started again as before, once (:meth:`_start_as_before`), and its
+        log read on: ngrok's merging of our config into the human's own is ngrok's to judge,
+        and a Remote with its API on is better than none.
         """
         process = self._process
         while process is not None and process.stdout is not None:
@@ -688,13 +714,20 @@ class NgrokTunnel:
     def _start_as_before(
         self, ended: subprocess.Popen[str], code: int | None
     ) -> subprocess.Popen[str] | None:
-        """ngrok started again without our config, when ``ended`` was started with it and
-        this tunnel was not stopped meanwhile; ``None`` otherwise, or when it cannot start."""
+        """ngrok started again without our config, when ``ended`` was started with it, said
+        that config is why it could not go on, and this tunnel was not stopped meanwhile;
+        ``None`` otherwise, or when it cannot start.
+
+        Only for our config: an ngrok that ended for a reason of its own (no authtoken, the
+        static domain still held by the session a watchdog's restart replaces) was started
+        again all the same, and one that came up then served its API, which our config is
+        there to keep off, for the rest of its run.
+        """
         with self._lock:
             command = self._as_before
-            if command is None or self._process is not ended:
+            if command is None or self._process is not ended or not self._ours_refused:
                 return None
-            self._as_before = None
+            self._as_before, self._ours, self._ours_refused = None, None, False
             refused = self.error or self._exit_sentence(code)
             self.error, self._plain, self._plain_is_error = None, None, False
             self.api_addr = None
@@ -730,6 +763,10 @@ class NgrokTunnel:
 
     def handle_line(self, line: str) -> None:
         event = parse_log_line(line)
+        ours = self._ours
+        if ours is not None and says_trouble_with(line, ours):
+            with self._lock:
+                self._ours_refused = True
         if event.url is not None and not self._announces_this_tunnel(event):
             # Started through ngrok's agent API, which any user of the machine can use: its
             # URL is never the link, nor where a notification leads.

@@ -942,14 +942,29 @@ def test_the_panels_ngrok_runs_with_its_agent_api_off(tmp_path: Path) -> None:
         tunnel.stop_tunnel()
 
 
-def test_an_ngrok_that_will_not_take_our_config_runs_as_before_and_the_panel_says_its_api_is_on(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "refused",
+    [
+        f"ERROR:  open /home/u/.aisquare/{OUR_CONFIG}: permission denied",
+        json.dumps(
+            {
+                "lvl": "crit",
+                "msg": "failed to read configuration",
+                "path": f"C:\\Users\\u\\.aisquare\\{OUR_CONFIG}",
+                "err": "Access is denied.",
+            }
+        ),
+    ],
+    ids=["said in plain text", "said in its JSON log"],
+)
+def test_an_ngrok_that_cannot_read_our_config_runs_as_before_and_the_panel_says_its_api_is_on(
+    tmp_path: Path, refused: str
 ) -> None:
     """Merging is ngrok's to judge, and a Remote with ngrok's API on is better than none: an
-    ngrok that ends before it announces, run with our config, is run again without it, and
-    the status line says the API is on, and what to set."""
+    ngrok that ends before it announces, run with our config and saying that config is why
+    (a snap that may not read ~/.aisquare), is run again without it, and the status line
+    says the API is on, and what to set."""
     own = write_ngrok_config(tmp_path, 'version: "2"\nauthtoken: tok_123\n')
-    refused = f"ERROR:  open /home/u/.aisquare/{OUR_CONFIG}: permission denied"
     popen, runs = ngrok_binary(tmp_path, with_our_config=refused)
     server = fake_server()
     controller = RemoteController(
@@ -966,11 +981,67 @@ def test_an_ngrok_that_will_not_take_our_config_runs_as_before_and_the_panel_say
         )
         tunnel = controller.tunnel
         assert tunnel is not None
-        assert "permission denied" in (tunnel.api_refused or "")
+        assert tunnel.api_refused
         assert controller.message is None
         assert controller.status_line() == API_ON.format(addr="127.0.0.1:4040")
     finally:
         controller.turn_off()
+
+
+@pytest.mark.parametrize(
+    ("ended", "said"),
+    [
+        (
+            json.dumps(
+                {
+                    "lvl": "eror",
+                    "msg": "failed to start tunnel",
+                    "err": "The endpoint 'https://x.ngrok-free.app' is already online. "
+                    "ERR_NGROK_334",
+                }
+            ),
+            "The endpoint 'https://x.ngrok-free.app' is already online. ERR_NGROK_334",
+        ),
+        ("ERROR:  authentication failed: Usage of ngrok requires an authtoken.", AUTHTOKEN_HINT),
+    ],
+    ids=["its static domain still held", "no authtoken"],
+)
+def test_an_ngrok_that_ends_for_a_reason_of_its_own_is_never_run_again_with_its_api_on(
+    tmp_path: Path, ended: str, said: str
+) -> None:
+    """Any end of the first ngrok before it announced a tunnel ran it again without our config:
+    a watchdog's restart whose ngrok found the static domain still held by the session it
+    replaces (ERR_NGROK_334), started again a moment later, came up with its API on for
+    the rest of its run, which our config is there to keep off. Only an ngrok that says our
+    config is why is run without it; any other says why it ended, as ever."""
+    own = write_ngrok_config(tmp_path, 'version: "2"\nauthtoken: tok_123\n')
+    popen, runs = ngrok_binary(tmp_path, with_our_config=ended)
+    tunnel = panels_ngrok(8750, own, popen)
+    assert tunnel.start_tunnel() is None
+    try:
+        assert tunnel.wait_for_url(10) is None
+        assert len(runs) == 1, "run again without our config, its API on"
+        assert tunnel.error == said
+        assert tunnel.api_refused is None and tunnel.api_addr is None
+    finally:
+        tunnel.stop_tunnel()
+
+
+def test_only_a_line_that_names_our_config_with_an_error_says_ngrok_cannot_take_it() -> None:
+    path = f"/home/u/.aisquare/{OUR_CONFIG}"
+    opened = {"lvl": "info", "msg": "open config file", "path": path}
+    blames = ngrok_tunnel.says_trouble_with
+    assert blames(f"ERROR:  open {path}: permission denied", OUR_CONFIG)
+    assert blames(json.dumps({**opened, "err": "open: permission denied"}), OUR_CONFIG)
+    assert blames(json.dumps({"lvl": "crit", "msg": "bad config", "path": path}), OUR_CONFIG)
+    windows = f"C:\\Users\\u\\.aisquare\\{OUR_CONFIG}"  # escaped in the JSON: the name is not
+    assert blames(json.dumps({**opened, "path": windows, "err": "Access is denied."}), OUR_CONFIG)
+    for fine in (None, "", "<nil>"):
+        assert not blames(json.dumps({**opened, "err": fine}), OUR_CONFIG), "ngrok opened it"
+    assert not blames(json.dumps(opened), OUR_CONFIG)
+    assert not blames("ERROR:  authentication failed: ERR_NGROK_4018", OUR_CONFIG)
+    assert not blames(json.dumps({"lvl": "eror", "err": "ERR_NGROK_334"}), OUR_CONFIG)
+    assert not blames(json.dumps([path]), OUR_CONFIG)
 
 
 def test_the_panel_starts_its_ngrok_with_the_api_off() -> None:

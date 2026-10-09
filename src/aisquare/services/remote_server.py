@@ -366,6 +366,11 @@ class RemoteAlreadyOn(RemoteError):
     """Another process serves Remote from this home already (:func:`_claim_remote_home`)."""
 
 
+class RemoteOffIncomplete(RemoteError):
+    """``serve``'s auto-off turned Remote off, but could not do all of it: the devices still
+    signed in, or the deadline still in ``remote.json`` (:func:`run_foreground`)."""
+
+
 class RequestError(Exception):
     """A handler's refusal, carried to the client as ``{error, message}``.
 
@@ -5250,7 +5255,7 @@ class _AutoOffTimer:
     def __init__(
         self,
         state: Runtime,
-        turn_off: Callable[[], None],
+        turn_off: Callable[[], str | None],
         *,
         timer: Callable[[float, Callable[[], None]], Any] = threading.Timer,
     ) -> None:
@@ -5261,6 +5266,8 @@ class _AutoOffTimer:
         self._lock = threading.Lock()
         self.fired = False
         """Whether the deadline passed and Remote was turned off."""
+        self.failure: str | None = None
+        """What turning off could not do, as ``turn_off`` said it, for the way out to say."""
 
     def auto_off_arm(self) -> None:
         """Wait toward the deadline ``remote.json`` holds now; none at all is never."""
@@ -5283,7 +5290,7 @@ class _AutoOffTimer:
             self.auto_off_arm()  # not yet, or extended from a phone meanwhile
             return
         self.fired = True
-        self._turn_off()
+        self.failure = self._turn_off()
 
     def auto_off_cancel(self) -> None:
         with self._lock:
@@ -5292,20 +5299,41 @@ class _AutoOffTimer:
                 self._timer = None
 
 
-def _remote_serve_off(state: Runtime, server: Any) -> None:
+def _remote_serve_off(state: Runtime, server: Any) -> str | None:
     """``serve``'s auto-off firing: the farewell, every device revoked (4410), the deadline
     cleared, and the server told to stop, even when ``remote.json`` cannot be written.
+    What could not be done comes back as a sentence, for the way out to say
+    (:func:`run_foreground`); ``None`` when all of it was.
+
+    It raised instead, on the timer's thread: a traceback, the deadline left in place
+    since its clearing never ran, and then "Remote turned off" and exit 0, under
+    ``--json`` too, while the phones kept cookies the next Remote accepted (sweep 2 of
+    #243). The deadline is cleared on its own try, as the R panel does.
 
     Its way out waits for a phone's write still running, and says so: told to stop
     already, the server takes the next Ctrl-C as the second, which quits at once
     (:func:`_remote_serve_server`).
     """
+    failure: str | None = None
     try:
-        revoke_every_remote_device("auto-off")
-        state.set_auto_off(None)
+        try:
+            revoke_every_remote_device("auto-off")
+        except Exception as exc:
+            log.warning("remote: auto-off could not revoke the devices: %s", exc)
+            failure = (
+                f"its devices could not be revoked ({exc}), so their cookies would open the "
+                "next Remote: run `aisquare remote revoke --all` once ~/.aisquare/remote.json "
+                "can be written"
+            )
+        try:
+            state.set_auto_off(None)
+        except Exception as exc:
+            log.warning("remote: auto-off could not clear its deadline: %s", exc)
+            failure = failure or f"its deadline is still in ~/.aisquare/remote.json ({exc})"
     finally:
         server.should_exit = True
         _remote_writes_announced("Ctrl-C")
+    return failure
 
 
 class RemoteBindError(RemoteError):
@@ -5354,7 +5382,9 @@ def run_foreground(
 ) -> bool:
     """``asq remote serve``: serve in this thread until Ctrl-C or auto-off.
 
-    ``True`` when auto-off ended it. In order: this home is claimed
+    ``True`` when auto-off ended it, and :class:`RemoteOffIncomplete` once the server
+    is down when auto-off could not revoke the devices or clear the deadline
+    (:func:`_remote_serve_off`). In order: this home is claimed
     (:class:`RemoteAlreadyOn` while another process serves Remote from it,
     :func:`_claim_remote_home`) and the port bound (:class:`RemoteBindError` when
     another process holds it), both before ``ready`` prints anything; the deadline is
@@ -5414,8 +5444,14 @@ def run_foreground(
                 if minutes and not timer.fired:
                     state.set_auto_off(None)  # no server, no deadline: nothing stays on to end
                 state.flush_last_seen()
-            except Exception:  # the way out reports what ended the server, not this
+            except OSError as exc:  # the way out reports what ended the server, not this
+                log.warning("remote: writing remote.json on the way out failed: %s", exc)
+            except Exception:
                 log.warning("remote: writing remote.json on the way out failed", exc_info=True)
+        if timer.failure is not None:
+            raise RemoteOffIncomplete(
+                f"Remote turned off — the auto-off timer ran out, but {timer.failure}"
+            )
         return timer.fired
     finally:
         sock.close()
@@ -5443,6 +5479,7 @@ __all__ = [
     "RemoteBindError",
     "RemoteError",
     "RemoteInfo",
+    "RemoteOffIncomplete",
     "RemoteUnavailable",
     "RequestError",
     "Runtime",

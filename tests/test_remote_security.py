@@ -1398,16 +1398,74 @@ def test_serves_auto_off_stops_the_server_even_when_remote_json_cannot_be_writte
     runtime: Runtime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The deadline is the server's to keep: a revoke that cannot be written must not leave
-    ``serve`` running past it."""
+    ``serve`` running past it. Nor may it raise on the timer's thread, skipping the
+    deadline's clearing: what could not be done comes back, for the way out to say (sweep
+    2 of #243)."""
 
     def unwritable(reason: str) -> None:
         raise OSError("remote.json: read-only file system")
 
+    cleared: list[object] = []
     monkeypatch.setattr(remote_server, "revoke_every_remote_device", unwritable)
+    monkeypatch.setattr(runtime, "set_auto_off", cleared.append)
     server = SimpleNamespace(should_exit=False)
-    with pytest.raises(OSError, match="read-only"):
-        remote_server._remote_serve_off(runtime, server)
+    failure = remote_server._remote_serve_off(runtime, server)
     assert server.should_exit is True
+    assert cleared == [None], "the deadline is still cleared"
+    assert failure is not None and "could not be revoked (remote.json: read-only" in failure
+    assert "aisquare remote revoke --all" in failure
+    monkeypatch.setattr(remote_server, "revoke_every_remote_device", lambda reason: None)
+    assert remote_server._remote_serve_off(runtime, server) is None, "all of it done"
+
+
+def test_serves_auto_off_on_a_full_disk_says_the_phones_were_not_signed_out(
+    page: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Past the deadline on a home that would not write, ``serve`` printed a thread's
+    traceback, then "Remote turned off" and exit 0, under ``--json`` too, and the devices
+    stayed in ``remote.json``: the next Remote accepted their cookies with no passphrase
+    (sweep 2 of #243). The way out's own write, failing the same way, is one line too."""
+    import uvicorn
+
+    class StopsWhenTold:
+        def __init__(self, config: Any) -> None:
+            self.should_exit = False
+
+        def run(self, sockets: Any = None) -> None:
+            deadline = time.monotonic() + 10
+            while not self.should_exit and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+    state = remote_server.runtime()
+    state._state.password = PASSWORD
+    state._save_state()
+    unlocked = state.unlock_device(PASSWORD, "Pixel")
+    assert unlocked is not None
+    now = [datetime.now(UTC)]
+    monkeypatch.setattr(remote_server, "_remote_now", lambda: now[0])
+    monkeypatch.setattr(remote_server, "AUTO_OFF_CHECK_SECONDS", 0.05)
+    monkeypatch.setattr(uvicorn, "Server", StopsWhenTold)
+    disk = FullDisk(monkeypatch)
+    disk.fixed()  # serve writes its deadline before the disk fills up
+
+    def banner() -> None:
+        now[0] += timedelta(minutes=2)  # past the 1-minute deadline
+        disk.full = True
+
+    with (
+        caplog.at_level("WARNING", logger=remote_server.__name__),
+        pytest.raises(remote_server.RemoteOffIncomplete, match="could not be revoked") as off,
+    ):
+        remote_server.run_foreground(port=_free_port(), auto_off_minutes=1, ready=banner)
+    assert str(off.value).startswith("Remote turned off — the auto-off timer ran out, but")
+    assert "Traceback" not in capfd.readouterr().err
+    assert _devices_on_disk() == [unlocked[1].id], "what the phone must be told to revoke"
+    out = [r for r in caplog.records if "on the way out failed" in r.getMessage()]
+    assert len(out) == 1 and out[0].exc_info is None, out
+    assert "No space left on device" in out[0].getMessage()
 
 
 def test_serve_says_so_when_the_timer_ended_it(page: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1415,6 +1473,33 @@ def test_serve_says_so_when_the_timer_ended_it(page: Path, monkeypatch: pytest.M
     result = CliRunner().invoke(cli, ["remote", "serve"])
     assert result.exit_code == 0
     assert "Remote turned off — the auto-off timer ran out" in result.stderr
+
+
+def test_serve_fails_when_its_auto_off_could_not_sign_the_phones_out(
+    page: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It said "Remote turned off" and exited 0, and ``--json`` carried nothing past the
+    banner, while every phone it named kept a cookie the next Remote accepts (sweep 2 of
+    #243)."""
+    said = (
+        "Remote turned off — the auto-off timer ran out, but its devices could not be revoked "
+        "(disk full), so their cookies would open the next Remote: run `aisquare remote revoke "
+        "--all` once ~/.aisquare/remote.json can be written"
+    )
+
+    def unclean(*args: object, ready: Callable[[], None]) -> bool:
+        ready()
+        raise remote_server.RemoteOffIncomplete(said)
+
+    monkeypatch.setattr(remote_server, "run_foreground", unclean)
+    human = CliRunner().invoke(cli, ["remote", "serve"])
+    assert human.exit_code == 1
+    assert "aisquare remote revoke --all" in human.stderr
+    scripted = CliRunner().invoke(cli, ["--json", "remote", "serve"])
+    assert scripted.exit_code == 1
+    banner, ending = scripted.stdout.strip().splitlines()
+    assert "url_local" in json.loads(banner)
+    assert json.loads(ending) == {"error": "remote_state_unwritable", "detail": said}
 
 
 def test_a_public_url_that_is_not_https_on_a_dns_name_is_refused(page: Path) -> None:

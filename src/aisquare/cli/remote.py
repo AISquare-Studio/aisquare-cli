@@ -238,6 +238,8 @@ def serve_remote(
         timed_out = remote_server.run_foreground(dist, port, auto_off, public_url, ready=banner)
     except remote_server.RemoteBindError as exc:
         fail(str(exc), error="remote_bind_failed", detail=str(exc))
+    except remote_server.RemoteOffIncomplete as exc:  # auto-off ended it, not all of it done
+        fail(str(exc), error="remote_state_unwritable", detail=str(exc))
     except remote_server.RemoteError as exc:
         fail(str(exc), error="remote_failed", detail=str(exc))
     except OSError as exc:  # remote.json would not write, say: anything but the port

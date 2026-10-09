@@ -508,7 +508,9 @@ the page says the machine could not answer). `~/.aisquare/remote.json` would not
 write: the disk is full, or the home is not writable, and the log says which.
 Nothing was changed but a revoke, which holds on the running Remote and is saved
 once the file can be written while it stays on. Free some space or fix the
-permissions, then try again.
+permissions, then try again. `serve` reaching its auto-off on such a home says
+so too, and exits 1: the phones were not signed out, so run `aisquare remote
+revoke --all` once it can write.
 
 **ngrok says `--url` is an unknown flag.** That ngrok is too old for static
 domains; run `ngrok update`.

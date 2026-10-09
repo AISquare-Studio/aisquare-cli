@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import os
+import queue
 import re
 import sys
 import threading
@@ -1571,6 +1572,54 @@ def drive_registry(fn: Callable[[Pilot[None]], Awaitable[T]]) -> T:
     return asyncio.run(run())
 
 
+class HeldReads:
+    """The shell's accounts reader over the real registry, with reads a test can hold.
+
+    While ``holding``, a read takes its frame from the registry FIRST, as a read
+    that started then would see it, and then waits at a gate (one per read, queued
+    on ``gates``) until the test opens it, so that frame paints when the test says.
+    """
+
+    def __init__(self) -> None:
+        self.holding = False
+        self.gates: queue.Queue[threading.Event] = queue.Queue()
+        self.made: list[threading.Event] = []  # every gate, taken off the queue or not
+
+    def __call__(self) -> AccountsOverview:
+        frame = _registry_frame()
+        if self.holding:
+            gate = threading.Event()
+            self.made.append(gate)
+            self.gates.put(gate)
+            gate.wait(timeout=10)
+        return frame
+
+    async def next_held(self) -> threading.Event:
+        """The gate of the next read to start holding (``queue.Empty`` after 5 s)."""
+        return await asyncio.to_thread(self.gates.get, True, 5)
+
+    def open_all(self) -> None:
+        self.holding = False
+        for gate in self.made:
+            gate.set()
+
+
+def drive_held(reads: HeldReads, fn: Callable[[Pilot[None]], Awaitable[T]]) -> T:
+    """``drive_registry``, with ``reads`` as the shell's accounts reader."""
+
+    async def run() -> T:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reads)
+        async with app.run_test(size=SIZE) as pilot:
+            await settle(app)
+            try:
+                return await fn(pilot)
+            finally:
+                reads.open_all()
+                await settle(app)
+
+    return asyncio.run(run())
+
+
 def field(view: AccountsView, slot: int) -> accounts_view.AliasInput:
     return row(view, slot).query_one(f"#account-alias-{slot}", accounts_view.AliasInput)
 
@@ -1875,6 +1924,104 @@ def test_rename_reopened_while_a_write_is_on_its_way_shows_that_name_and_enter_k
     assert landed == (True, "work", "work")  # landed; the reopened field is the user's, and stays
     assert not still_open and saved == "work"  # Enter kept the name rather than clearing it
     assert said[-1] == ("✓ slot 2 is now called work", "ok")
+
+
+def test_rename_reopened_after_its_write_landed_but_before_the_next_frame_says_the_saved_name(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write had reported and the shell's re-read was still waiting (a busy store): the
+    row still had the frame from before the write, so Rename reopened prefilled with the old
+    name, and an Enter taken as "confirm" put it back (review of #258, round 4; the tester's
+    repro). The row now says what the service stored, from the moment the write lands."""
+    core.create_account()
+    core.create_account()
+    accounts_service.set_alias("3", "work")
+    reads = HeldReads()
+    calls: list[tuple[str, str | None]] = []
+    real_set_alias = accounts_service.set_alias
+
+    def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
+        calls.append((ref, alias))
+        return real_set_alias(ref, alias)
+
+    monkeypatch.setattr(accounts_service, "set_alias", set_alias)
+
+    async def go(pilot: Pilot[None]) -> tuple[tuple[str, str | None, str], str, str | None]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        await pilot.click("#account-rename-3")  # "work"
+        await pilot.press("end", *["backspace"] * 4, *"late")
+        reads.holding = True  # the re-read the write asks for waits, as on a busy store
+        await pilot.press("enter")
+        await settle_until(
+            app, lambda: said and not row(view, 3).renaming, group=accounts_view.RENAME_WORKER
+        )
+        await reads.next_held()  # the write landed; its frame has not painted
+        landed = (said[-1][0], aliases()[3], line(view, 3))
+        await pilot.click("#account-rename-3")
+        await pilot.pause()
+        reopened = field(view, 3).value
+        await pilot.press("enter")  # the user "confirms" what the field shows
+        await settle_until(
+            app, lambda: not row(view, 3).renaming, group=accounts_view.RENAME_WORKER
+        )
+        return landed, reopened, aliases()[3]
+
+    landed, reopened, after = drive_held(reads, go)
+    said, saved, label = landed
+    assert said == "✓ slot 3 is now called late" and saved == "late"
+    assert label.startswith("  3  late")  # the service's answer, before any frame says it
+    assert reopened == "late"  # not the frame's "work"
+    assert after == "late" and calls == [("3", "late"), ("3", "late")]  # Enter kept it
+
+
+def test_a_frame_read_before_the_write_and_painted_after_it_does_not_bring_the_old_name_back(
+    fake_home: Path,
+) -> None:
+    """The shell reads one frame at a time, so a tick's read can start before a rename's write
+    and paint after it, with the name from before. That frame must not put the old name back
+    on the row or in Rename's prefill — nor may the shell re-handing it on a click. The read
+    after it started after the write and has the last word, another terminal's rename
+    included (review of #258, round 4)."""
+    core.create_account()
+    core.create_account()
+    accounts_service.set_alias("3", "work")
+    reads = HeldReads()
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str, str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        reads.holding = True
+        app.refresh_accounts()  # a tick: its read takes the registry now ("work")…
+        stale = await reads.next_held()  # …and waits
+        await pilot.click("#account-rename-3")
+        await pilot.press("end", *["backspace"] * 4, *"late", "enter")
+        await settle_until(
+            app, lambda: not row(view, 3).renaming, group=accounts_view.RENAME_WORKER
+        )
+        accounts_service.set_alias("3", "other")  # then another terminal renames it
+        stale.set()  # the tick's frame, from before the write, paints…
+        fresh = await reads.next_held()  # …(the read owed after it starts once it has)
+        await pilot.pause()
+        after_stale = line(view, 3)
+        await pilot.click(app.query_one(AccountsSection))  # the shell re-hands that frame
+        await settle_until(app, lambda: True, group=accounts_view.RENAME_WORKER)
+        after_rehand = line(view, 3)
+        await pilot.click("#account-rename-3")
+        await pilot.pause()
+        prefill = field(view, 3).value
+        await pilot.press("escape")
+        reads.holding = False
+        fresh.set()  # the read that started after the write ("other") paints
+        await accounts_read(app)
+        return after_stale, after_rehand, prefill, line(view, 3), aliases()[3] or ""
+
+    after_stale, after_rehand, prefill, after_fresh, stored = drive_held(reads, go)
+    assert after_stale.startswith("  3  late")  # not the "work" the stale frame carried
+    assert after_rehand.startswith("  3  late")
+    assert prefill == "late"
+    assert stored == "other" and after_fresh.startswith("  3  other")  # the frames' word again
 
 
 def test_a_slot_removed_while_its_field_is_open_is_said_and_its_row_leaves(

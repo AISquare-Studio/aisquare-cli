@@ -1685,16 +1685,28 @@ def test_a_dismissal_is_written_owner_only(monkeypatch: pytest.MonkeyPatch) -> N
         assert stat.S_IMODE(remote_needs_path().stat().st_mode) == 0o600
 
 
-def test_old_dismissals_are_pruned_and_at_most_500_kept() -> None:
-    now = datetime.now(UTC)
-    seeded = {f"ny_old{n}": (now - timedelta(days=8)).isoformat() for n in range(3)}
-    seeded |= {f"ny_{n:016x}": (now - timedelta(minutes=n)).isoformat() for n in range(600)}
+def _seed_dismissals(seeded: dict[str, str]) -> None:
     remote_needs_path().parent.mkdir(parents=True, exist_ok=True)
     remote_needs_path().write_text(json.dumps({"dismissed": seeded}), encoding="utf-8")
+
+
+def test_a_dismissal_older_than_a_week_is_pruned() -> None:
+    """With fewer than 500 on file, the 7-day rule alone can drop one: seeded with 600, the
+    cap dropped the old ones by itself, and a test of the age held without the rule."""
+    now = datetime.now(UTC)
+    seeded = {f"ny_old{n}": (now - timedelta(days=8)).isoformat() for n in range(3)}
+    seeded |= {f"ny_{n:016x}": (now - timedelta(days=6, minutes=n)).isoformat() for n in range(10)}
+    _seed_dismissals(seeded)
+    record_needs_dismissal("ny_newest")
+    assert set(load_needs_dismissals()) == {"ny_newest", *(f"ny_{n:016x}" for n in range(10))}
+
+
+def test_at_most_the_newest_500_dismissals_are_kept() -> None:
+    now = datetime.now(UTC)
+    _seed_dismissals({f"ny_{n:016x}": (now - timedelta(minutes=n)).isoformat() for n in range(600)})
     record_needs_dismissal("ny_newest")
     kept = load_needs_dismissals()
     assert len(kept) == 500 and "ny_newest" in kept
-    assert not any(key.startswith("ny_old") for key in kept)
     assert f"ny_{599:016x}" not in kept and f"ny_{0:016x}" in kept, "the oldest go first"
 
 

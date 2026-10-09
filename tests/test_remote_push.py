@@ -543,6 +543,29 @@ def test_the_push_file_is_restricted_before_it_holds_the_key(
     assert keys.private_key in remote_push_path().read_text(encoding="utf-8")
 
 
+def test_what_was_pushed_is_kept_a_week() -> None:
+    """``pushed`` is what keeps a restart from pushing an item twice; past a week its id
+    will not come back, and the file would keep it for good."""
+    now = T0 + timedelta(days=30)
+    kept = remote_push._push_prune_pushed(
+        {
+            "ny_old": (now - timedelta(days=8)).isoformat(),
+            "ny_new": (now - timedelta(hours=1)).isoformat(),
+            "ny_unreadable": "not a time",
+        },
+        now,
+    )
+    assert set(kept) == {"ny_new"}
+
+
+def test_at_most_the_newest_1000_pushed_ids_are_kept() -> None:
+    now = T0 + timedelta(days=30)
+    pushed = {f"ny_{n:016x}": (now - timedelta(minutes=n)).isoformat() for n in range(1005)}
+    kept = remote_push._push_prune_pushed(pushed, now)
+    assert len(kept) == 1000
+    assert f"ny_{0:016x}" in kept and f"ny_{1004:016x}" not in kept, "the oldest go first"
+
+
 def test_the_vapid_keys_are_made_once_and_kept(isolated_home: Path) -> None:
     keys = load_or_create_vapid_keys()
     assert load_or_create_vapid_keys() == keys

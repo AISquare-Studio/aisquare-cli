@@ -25,7 +25,8 @@ the rest is here:
   refusal that needed none. No tell types into a dialog either. ``auto``,
   which is ``fleet tell``, files its text as a board note while one may be up,
   and ``send-keys`` with ``dialog_guard`` types nothing then
-  (:func:`action_keys_guard`).
+  (:func:`action_keys_guard`). A stop, restart or switch that fails after the
+  guard's Escape says that the Escape went.
 * **One action per agent at a time.** ``remote_server.remote_agent_lock`` is
   taken without waiting, and the needs card's quick answers take it too (409
   ``busy``).
@@ -395,9 +396,16 @@ def action_tell_summary(label: str, target: ProjectInfo, mode: str, text: str, h
     return f'tell {label}@{target.id} mode={mode} {how} text={len(text)}ch "{excerpt}"'
 
 
+_ESCAPE_SENT = "Escape had been sent first, answering its prompt No"
+"""What a refusal after the dialog guard's Escape adds to the fleet's sentence."""
+
+
 @contextlib.contextmanager
 def action_audited(
-    summary: Callable[[str], str], *, reached: Callable[[], bool] | None = None
+    summary: Callable[[str], str],
+    *,
+    reached: Callable[[], bool] | None = None,
+    escaped: Callable[[], bool] | None = None,
 ) -> Iterator[None]:
     """Audit a refusal raised inside as ``summary(<its error code>)``.
 
@@ -414,19 +422,30 @@ def action_audited(
     (:class:`ActionGuardLast`). A refusal raised while it says no changed
     nothing, so it stays off the trail, and the guard's own refusals keep the
     line the guard gave them.
+
+    ``escaped`` says whether the guard's Escape went to the agent before the step,
+    and a refusal after it says so too (:data:`_ESCAPE_SENT`). The fleet's sentence
+    cannot know: a stop that tmux failed said only that, and a label handed on
+    meanwhile is "nothing was done to either", with the agent's prompt answered No
+    (sweep of #243, round 4).
     """
     try:
         yield
     except RequestError as exc:
         if reached is None or reached():
             exc.audit = summary(exc.error)
+        if escaped is not None and escaped():
+            exc.message = f"{exc.message} — {_ESCAPE_SENT}"
         raise
     except Exception as exc:
+        message = str(exc)
+        if escaped is not None and escaped():
+            message = f"{message} — {_ESCAPE_SENT}"
         if reached is not None and not reached():
             log.warning("remote: an action failed before it reached the agent: %s", exc)
-            raise RequestError(400, "write_failed", str(exc)) from exc
+            raise RequestError(400, "write_failed", message) from exc
         log.warning("remote: an action failed after it reached the agent: %s", exc)
-        raise RequestError(400, "write_failed", str(exc), audit=summary("write_failed")) from exc
+        raise RequestError(400, "write_failed", message, audit=summary("write_failed")) from exc
 
 
 # --- the fleet's refusals ------------------------------------------------------------------
@@ -786,6 +805,10 @@ class ActionGuardLast:
         """Whether the fleet got as far as the guard: a refusal before it changed nothing."""
         return self.dismissed is not None
 
+    def action_guard_escaped(self) -> bool:
+        """Whether the guard sent its Escape, which answered a prompt No."""
+        return self.dismissed is True
+
 
 def action_prompt_up(label: str) -> RequestError:
     """409 ``dialog_open`` for text about to be typed while the agent shows a dialog."""
@@ -1063,7 +1086,8 @@ def action_stop(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         )
         # The /exit may already be typed when the stop fails (a kill tmux refused).
         with action_audited(
-            lambda error: f"{audit_start} dismissed={action_yes_no(dismissed)} failed={error}"
+            lambda error: f"{audit_start} dismissed={action_yes_no(dismissed)} failed={error}",
+            escaped=lambda: dismissed,
         ):
             receipt = action_fleet_call(
                 lambda: fleet_service.stop(target, label, force=force, agent_id=agent_id)
@@ -1118,6 +1142,7 @@ def action_restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
                 f"{audit_start} dismissed={action_yes_no(guard.dismissed is True)} failed={error}"
             ),
             reached=guard.action_guard_asked,
+            escaped=guard.action_guard_escaped,
         ):
             receipt = action_fleet_call(
                 lambda: fleet_service.restart(
@@ -1193,6 +1218,7 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
                 f"failed={error}{said}"
             ),
             reached=guard.action_guard_asked,
+            escaped=guard.action_guard_escaped,
         ):
             receipt = action_fleet_call(
                 lambda: fleet_service.switch(

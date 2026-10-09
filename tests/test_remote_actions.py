@@ -1399,11 +1399,16 @@ def test_a_fleet_call_that_fails_after_a_dismissal_records_both(
     project: ProjectInfo,
     name: str,
 ) -> None:
+    """The trail has both, and so does the phone: the fleet's sentence cannot know that the
+    agent's prompt was answered No before it failed (sweep of #243, round 4)."""
     _row(project)
     needs.dialog = True
     fleet.answers[name.removeprefix("agent/")] = fleet_service.FleetError("tmux went away")
     response = phone.post(name, **PINNED, dismiss_dialog=True)
-    assert response.status_code == 409 and response.json()["error"] == "fleet_error"
+    assert response.status_code == 409 and response.json() == {
+        "error": "fleet_error",
+        "message": "tmux went away — Escape had been sent first, answering its prompt No",
+    }
     assert pane.keys() == ["Escape"]
     assert phone.audit() == [(name, f"{_acted_on(name, project)} dismissed=yes failed=fleet_error")]
 

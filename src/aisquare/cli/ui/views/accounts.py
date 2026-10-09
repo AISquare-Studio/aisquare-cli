@@ -440,8 +440,9 @@ class AccountRow(Vertical):
     *Default* makes it the machine default (hidden once it is); *↑*/*↓* move it
     in the priority order (the end stops are disabled); *Disable*/*Enable*
     take it out of or back into automatic selection; *Rename* opens a field
-    beside the line to set or clear its alias, on every slot; *Sign in*
-    appears when it has no login; *Remove* when the CLI owns the directory.
+    on a line of its own, beneath the account line, to set or clear its alias,
+    on every slot; *Sign in* appears when it has no login; *Remove* when the
+    CLI owns the directory.
     Every button is a command (``aisquare accounts
     default|move|disable|enable|alias|run|remove``), and the row shows what the
     shell's next frame says rather than guessing — the field included: a
@@ -456,14 +457,17 @@ class AccountRow(Vertical):
     its border and padding). The page keeps its scrollbar's gutter, so the
     rows the field makes taller cannot narrow every line when the page starts
     to scroll. Every label fits in nine cells, the arrows in five: all seven
-    buttons take 61, inside a row's 63 at 100 columns.
+    buttons take 61, inside a row's 63 at 100 columns. Narrower than that — a
+    smaller terminal, or a sidebar the user has dragged wider — the button
+    line scrolls sideways rather than cut *Remove* off out of reach (review of
+    #258, round 5).
     """
 
     DEFAULT_CSS = """
     AccountRow { height: auto; margin: 0 0 1 0; }
     AccountRow .account-line { width: 1fr; height: auto; }
     AccountRow .account-alias { width: 48; max-width: 100%; }
-    AccountRow .account-buttons { width: 1fr; height: auto; }
+    AccountRow .account-buttons { width: 1fr; height: auto; overflow-x: auto; }
     AccountRow Button { min-width: 9; margin: 0 1 0 0; }
     AccountRow .arrow { min-width: 5; }
     """

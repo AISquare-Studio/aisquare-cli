@@ -1527,6 +1527,44 @@ def test_serves_auto_off_on_a_full_disk_says_the_phones_were_not_signed_out(
     assert "No space left on device" in out[0].getMessage()
 
 
+@pytest.mark.parametrize("past", [True, False], ids=["past the deadline", "before it"])
+def test_a_ctrl_c_of_serve_once_its_auto_off_time_came_is_auto_off(
+    page: Path, monkeypatch: pytest.MonkeyPatch, past: bool
+) -> None:
+    """``serve``'s timer counts the monotonic clock, so a machine that slept past the deadline
+    checks it up to half a minute after waking. A Ctrl-C then cleared the deadline and
+    signed no phone out, where one a moment later found them all signed out by auto-off.
+    Before the deadline, a Ctrl-C still revokes nothing (SPEC §2.4)."""
+    import uvicorn
+
+    class CtrlC:
+        def __init__(self, config: Any) -> None:
+            self.should_exit = False
+
+        def run(self, sockets: Any = None) -> None:
+            raise KeyboardInterrupt  # uvicorn re-raises the Ctrl-C it caught, once stopped
+
+    state = remote_server.runtime()
+    state._state.password = PASSWORD
+    state._save_state()
+    unlocked = state.unlock_device(PASSWORD, "Pixel")
+    assert unlocked is not None
+    now = [datetime.now(UTC)]
+    monkeypatch.setattr(remote_server, "_remote_now", lambda: now[0])
+    monkeypatch.setattr(remote_push, "push_farewell", lambda ids, reason: None)
+    monkeypatch.setattr(uvicorn, "Server", CtrlC)
+
+    def banner() -> None:
+        now[0] += timedelta(minutes=2 if past else 0.5)  # the deadline is a minute away
+
+    ended_by_auto_off = remote_server.run_foreground(
+        port=_free_port(), auto_off_minutes=1, ready=banner
+    )
+    assert ended_by_auto_off is past
+    assert _devices_on_disk() == ([] if past else [unlocked[1].id])
+    assert remote_server.remote_auto_off_at() is None, "no deadline left behind either way"
+
+
 def test_serves_way_out_waits_for_the_auto_off_to_say_what_it_could_not_do(
     page: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -5563,9 +5563,9 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
     (:func:`_claim_remote_home`): a ``serve``, or another fleet UI's panel. And
     :class:`RemoteWindingDown` while the server this process stopped last still
     finishes a phone's write or request (:data:`_winding_down`): its needs watcher and
-    push sender run until then, and a second server beside them, the home already this process's,
-    pushed every new item to the phone twice, each sender with its own record of what
-    it had pushed (sweep 2 of #243).
+    push sender run until then, and a second server beside them, the home already this
+    process's, pushed every new item to the phone twice, each sender with its own record
+    of what it had pushed (sweep 2 of #243).
     """
     global _server
     problem = _remote_dependency_error()
@@ -5963,7 +5963,8 @@ def run_foreground(
     deadline, or at the first check after the machine slept past it, and waits
     on while a phone keeps extending it, with the farewell push and every device
     revoked (4410); the flusher writes ``last_seen`` and prunes devices every
-    30 s. Ctrl-C revokes nothing (SPEC §2.4): the devices' own expiry bounds them.
+    30 s. Ctrl-C revokes nothing (SPEC §2.4): the devices' own expiry bounds them;
+    one that comes once the deadline has passed is auto-off, which does.
     """
     global _foreground, _flusher
     problem = _remote_dependency_error()
@@ -6005,6 +6006,12 @@ def run_foreground(
             raise RemoteError(f"the remote server stopped (exit {exc.code})") from None
         finally:
             timer.auto_off_cancel()
+            if minutes and not timer.fired and state.auto_off_passed(_remote_now()):
+                # Its time came before its check did, which counts the monotonic clock: a
+                # machine that slept past it. A Ctrl-C then is auto-off, which signs every
+                # phone out, as it would have half a minute later, not a Ctrl-C, which
+                # clears the deadline and signs none out (review of #243, round 5).
+                timer.auto_off_fire()
             with _lock:
                 _foreground = None
                 flusher, _flusher = _flusher, None

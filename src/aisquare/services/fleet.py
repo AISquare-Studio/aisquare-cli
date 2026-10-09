@@ -2401,7 +2401,14 @@ def manager_of(project: ProjectInfo) -> FleetAgent | None:
     return agent if agent is not None and agent.role == "manager" else None
 
 
-def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = None) -> TellResult:
+def tell(
+    project: ProjectInfo,
+    label: str,
+    text: str,
+    *,
+    sender: str | None = None,
+    agent_id: str | None = None,
+) -> TellResult:
     """Type ``text`` into a WAITING agent; otherwise file it as a board note to it.
 
     Typing into a working agent would interleave with its turn; into one that
@@ -2418,9 +2425,13 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     documents and refuses to cause. So the same readiness test decides here —
     the one :func:`nudge_manager` already applies — and a pane that is not the
     agent's gets the board note instead.
+
+    ``agent_id`` pins the row, as for :func:`stop`: the phone's tell means the
+    agent it showed, and a replacement that took the label since (a manager's
+    restart or switch, in another process) is refused, not typed into.
     """
     with store_session() as store:
-        agent = _live_agent(store, project, label)
+        agent = _live_agent(store, project, label, agent_id=agent_id)
     status = status_of(agent)
     if status.state == "waiting":
         srv = server_for(agent.tmux_socket)
@@ -3747,6 +3758,7 @@ def switch(
     reason: str | None = None,
     spawned_by: str = "user",
     automatic: bool = False,
+    agent_id: str | None = None,
 ) -> SwitchReceipt:
     """Move a running agent to another Claude account — the hand-over of #146.
 
@@ -3792,9 +3804,15 @@ def switch(
     (:func:`_refuse_a_replay_that_cannot_start`), the role, a task that is
     closed — is refused before the agent is stopped, as :func:`restart`
     refuses it.
+
+    ``agent_id`` pins the row, as for :func:`stop` and :func:`restart`: the
+    phone's Switch means the agent it showed, and a manager's switch or the
+    automatic hand-over runs in another process, which can hand the label to
+    a replacement between the phone's check and this read. By label, that
+    replacement was stopped and moved again (sweep of #243).
     """
     with store_session() as store:
-        agent = _live_agent(store, project, label)
+        agent = _live_agent(store, project, label, agent_id=agent_id)
         session = store.get_session(agent.session_id) if agent.session_id else None
         if _handed_over(agent, session, _now()):
             # The automatic path refuses a session already in flight

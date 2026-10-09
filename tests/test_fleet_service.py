@@ -7828,6 +7828,40 @@ def test_a_pinned_row_is_never_mistaken_for_the_agent_that_took_its_label(
     assert (new.pane_id, "literal", "/exit") in tmux.typed
 
 
+def test_a_pinned_switch_or_tell_never_reaches_the_agent_that_took_its_label(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The phone's Switch and Tell, as a sweep of #243 found them (round 4). The manager's
+    own ``fleet switch``, in another process, handed coder-1 on just after the phone had
+    checked its pin. By label, the phone's switch then stopped the replacement and moved
+    it to a third account, and its tell typed into it. Pinned (``agent_id``), as stop
+    and restart were, both refuse the replacement before anything is looked up, typed or
+    filed. Pinned to the row that is there, each goes on as before."""
+    old = _coder(project, label="coder-1")
+    tmux.die(old.pane_id, 1)
+    fleet_service.list_agents(project)
+    new = fleet_service.restart(project, "coder-1").started
+    _board_session(new, "waiting")
+    tmux.set_command(new.pane_id, "claude")
+    typed, killed, spawned = list(tmux.typed), list(tmux.killed), len(tmux.spawned)
+
+    replaced = rf"'coder-1' is another agent now \({new.id}\)"
+    with pytest.raises(NoSuchAgent, match=replaced):
+        fleet_service.switch(project, "coder-1", to="2", agent_id=old.id)
+    with pytest.raises(NoSuchAgent, match=replaced):
+        fleet_service.tell(project, "coder-1", "carry on", agent_id=old.id)
+    assert (tmux.typed, tmux.killed, len(tmux.spawned)) == (typed, killed, spawned)
+    assert _events(project, "note") == []
+
+    with pytest.raises(FleetError, match="no Claude account in slot 2"):
+        fleet_service.switch(project, "coder-1", to="2", agent_id=new.id)
+    assert fleet_service.tell(project, "coder-1", "carry on", agent_id=new.id).delivered
+    assert tmux.typed[len(typed) :] == [
+        (new.pane_id, "paste", "carry on"),
+        (new.pane_id, "key", "Enter"),
+    ]
+
+
 def test_a_refused_restart_of_a_death_no_listing_has_recorded_keeps_the_window(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

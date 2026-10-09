@@ -31,6 +31,7 @@ from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError
 from aisquare.core.workspace import find_project_root, project_id_for
 from aisquare.models import (
+    ClaudeAccount,
     FleetAgent,
     FleetAgentState,
     FleetAgentStatus,
@@ -39,8 +40,10 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
+from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_actions, remote_needs, remote_server
+from aisquare.services.claude_accounts import AccountChoice
 from aisquare.services.fleet import RestartReceipt, StopReceipt, SwitchReceipt, TellResult
 from aisquare.services.remote_actions import (
     ACTION_AUDIT_EXCERPT,
@@ -907,15 +910,23 @@ def test_restart_passes_fresh_the_pin_and_spawned_by_user(
     ]
 
 
-def test_switch_passes_to_fresh_and_reason_and_spawned_by_user(
+def test_switch_passes_to_fresh_reason_the_pin_and_spawned_by_user(
     phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
 ) -> None:
+    """The pin goes to the fleet too, as a stop's and a restart's do: the manager's switch runs
+    in another process, which the remote's lock does not hold back."""
     _row(project)
     response = phone.post("agent/switch", **PINNED, to="2", reason="session limit")
     assert response.status_code == 200, response.text
     ((name, args, kwargs),) = fleet.calls
     assert (name, args[0].id, args[1:]) == ("switch", project.id, (LABEL,))
-    assert kwargs == {"to": "2", "fresh": False, "reason": "session limit", "spawned_by": "user"}
+    assert kwargs == {
+        "to": "2",
+        "fresh": False,
+        "reason": "session limit",
+        "spawned_by": "user",
+        "agent_id": "agt_one",
+    }
     assert phone.audit() == [
         (
             "agent/switch",
@@ -1496,7 +1507,8 @@ def test_a_request_id_still_running_is_409_in_progress(
 def test_auto_is_fleet_tell_and_answers_what_the_cli_prints_plus_mode_and_project(
     phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
 ) -> None:
-    """``fleet tell``, once the agent was read for a dialog."""
+    """``fleet tell`` of the row the lock read, pinned: a manager's restart in another process
+    may hand the label on in between. The agent is read once first, for a dialog."""
     _row(project)
     printed = CliRunner().invoke(cli, ["--json", "fleet", "tell", LABEL, "ship it"])
     assert printed.exit_code == 0, printed.output
@@ -1508,7 +1520,7 @@ def test_auto_is_fleet_tell_and_answers_what_the_cli_prints_plus_mode_and_projec
         "tell",
         project.id,
         (LABEL, "ship it"),
-        {"sender": None},
+        {"sender": None, "agent_id": "agt_one"},
     )
     answered = response.json()
     assert (answered.pop("mode"), answered.pop("project")) == ("auto", project.id)
@@ -2441,3 +2453,66 @@ def test_send_keys_whose_label_was_handed_on_while_the_guard_looked_types_nothin
         "current": {"agent_id": "agt_new"},
     }
     assert pane.sent == []
+
+
+# --- the switch, as fleet.switch itself makes it -------------------------------------------------
+
+
+def _account(slot: int) -> ClaudeAccount:
+    return ClaudeAccount(slot=slot, config_dir=Path(f"/nonexistent/claude-{slot}"), managed=True)
+
+
+def _fleet_switch_itself(
+    monkeypatch: pytest.MonkeyPatch, choice: AccountChoice | None
+) -> list[str]:
+    """``fleet.switch`` as main has it, short of a second Claude login: ``choice`` is what the
+    account lookup answers (``None``: the lookup itself, over no accounts at all), a replay
+    can start, and ``fleet.stop`` writes down the row it was asked to stop, then fails, so
+    nothing is started. Returns what it wrote down."""
+    stopped: list[str] = []
+
+    def stop(project: ProjectInfo, label: str, **kwargs: object) -> StopReceipt:
+        stopped.append(str(kwargs["agent_id"]))
+        raise fleet_service.FleetError("tmux went away")
+
+    monkeypatch.setattr(fleet_service, "stop", stop)
+    monkeypatch.setattr(
+        fleet_service, "_refuse_a_replay_that_cannot_start", lambda agent, session: None
+    )
+    if choice is not None:
+        monkeypatch.setattr(
+            claude_accounts_service, "choose_for_handover", lambda *args, **kwargs: choice
+        )
+    return stopped
+
+
+def test_a_switch_leaves_alone_the_replacement_that_took_the_label_after_the_lock_checked(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sweep of #243, round 4: the manager's ``fleet switch``, in another process, had ended
+    agt_one and was recording its replacement while the phone's Switch, pinned to agt_one,
+    took the lock. The pin held there, against the ended row, and ``fleet.switch`` read the
+    label again: it sent the replacement ``/exit`` and moved it to a third account. The
+    pin goes with the call now, and the replacement is not touched."""
+    _row(project, ended=True)
+    stopped = _fleet_switch_itself(monkeypatch, AccountChoice(_account(3), "headroom", []))
+    newest_row = remote_actions.action_newest_row
+    reads: list[str | None] = []
+
+    def handed_on_after_the_locks_read(target: ProjectInfo, label: str) -> FleetAgent | None:
+        row = newest_row(target, label)
+        reads.append(None if row is None else row.id)
+        if len(reads) == 2:  # the read under the lock: the replacement is recorded just after
+            _row(project, "agt_new", minute=1)
+        return row
+
+    monkeypatch.setattr(remote_actions, "action_newest_row", handed_on_after_the_locks_read)
+    response = phone.post("agent/switch", **PINNED)
+    assert reads == ["agt_one", "agt_one"], "the pin held under the lock"
+    assert stopped == [] and pane.sent == [], "the replacement was not stopped"
+    assert (response.status_code, response.json()["error"]) == (404, "no_such_agent")
+    assert "'coder-1' is another agent now (agt_new)" in response.json()["message"]

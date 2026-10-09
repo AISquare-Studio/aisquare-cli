@@ -11,7 +11,10 @@ the rest is here:
   ``needs_id`` must still be one of the agent's items. Both are checked before
   anything reaches the fleet. A screen that went stale therefore never stops,
   restarts or moves the replacement a manager started meanwhile, and never
-  types into it either (409 ``stale``, with what is ``current``).
+  types into it either (409 ``stale``, with what is ``current``). The fleet's
+  own calls get the pin as well. A manager's switch, or the automatic
+  hand-over, runs in another process that the remote's lock does not hold
+  back, and it can hand the label on between the check and the call.
 * **A confirmation.** Stop, restart and switch carry ``confirm=<label>``.
 * **The dialog guard.** A stop types ``/exit`` and Enter, and restart and switch
   stop the agent the same way. With a dialog up, that Enter answers it: it can
@@ -521,8 +524,8 @@ def action_locked(target: ProjectInfo, label: str, agent_id: str | None) -> Iter
 
     The pin is checked under the lock, against the row read there. A second
     request that passed an earlier read while the first one replaced the row must
-    not act on the replacement. ``fleet.switch`` takes no ``agent_id``, so for a
-    switch this check is the only pin there is.
+    not act on the replacement. The lock is this process's alone, so the fleet
+    call that follows gets the pin too, for a label handed on in between.
     """
     if action_newest_row(target, label) is None:
         raise action_gone(target, label, agent_id)
@@ -887,7 +890,8 @@ def action_tell_auto(
     pin: str,
     trail: Callable[[str], str],
 ) -> tuple[bool, str]:
-    """``auto``: ``fleet tell``, or a board note while the agent may be showing a dialog.
+    """``auto``: ``fleet tell`` of the pinned row, or a board note while the agent may be
+    showing a dialog.
 
     ``fleet tell`` types into a row that derives ``waiting``, and a permission prompt
     left unanswered for 30 minutes derives it too. The session still says
@@ -916,7 +920,9 @@ def action_tell_auto(
         filed = action_fleet_call(lambda: fleet_service._file_note(target, label, text, None))
         return False, f"{why} — {filed}"
     with action_audited(lambda error: trail(f"delivered=no failed={error}")):
-        told = action_fleet_call(lambda: fleet_service.tell(target, label, text, sender=None))
+        told = action_fleet_call(
+            lambda: fleet_service.tell(target, label, text, sender=None, agent_id=pin)
+        )
     return told.delivered, told.how
 
 
@@ -1077,10 +1083,13 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     A usage limit parks an agent as ``limited`` until the reset. Short of waiting,
     the one way out is a hand-over to another account: the ``aisquare fleet switch
     <label>`` the manager is told to run. Headroom picks the account unless
-    ``to`` names one. ``fleet.switch`` takes no ``agent_id``, so the pin checked
-    under the lock is all that keeps a phone from moving a replacement that the
-    automatic hand-over or the manager already started. There is no ``force``
-    (SPEC §9.3).
+    ``to`` names one. There is no ``force`` (SPEC §9.3).
+
+    ``fleet.switch`` gets the pin (``agent_id``), as ``fleet.stop`` and
+    ``fleet.restart`` do. The manager's switch and the automatic hand-over run in
+    other processes, which the lock does not hold back, and one that handed the
+    label on just after the lock's check had its replacement stopped and moved
+    again (sweep of #243, round 4).
 
     A ``reason`` (:func:`action_switch_reason`) is typed into the replacement's
     prompt, so once the hand-over has been asked for, the audit line keeps how it
@@ -1116,7 +1125,13 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         ):
             receipt = action_fleet_call(
                 lambda: fleet_service.switch(
-                    target, label, to=to, fresh=fresh, reason=reason, spawned_by="user"
+                    target,
+                    label,
+                    to=to,
+                    fresh=fresh,
+                    reason=reason,
+                    spawned_by="user",
+                    agent_id=agent_id,
                 )
             )
     result: dict[str, object] = {

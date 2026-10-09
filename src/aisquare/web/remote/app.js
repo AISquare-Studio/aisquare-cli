@@ -2425,7 +2425,8 @@ VIEWS.agent = (route, main) => {
       older.disabled = false;
       if (!res.ok || !res.data || typeof res.data !== "object") {
         toast(failText(res));
-        return afterFailure(res, route);
+        // A /clear or a fresh restart since: the page before is another conversation's.
+        return before && res.error === "stale_cursor" ? load(null) : afterFailure(res, route);
       }
       const page = res.data;
       const stamps = page.stamps && typeof page.stamps === "object" ? page.stamps : {};

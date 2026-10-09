@@ -1572,6 +1572,20 @@ def test_the_transcript_draws_one_read_at_a_time_and_the_newest_wins(
     assert loads["spliced"] == {"asked": [None, "100", None], "shown": ["t5", "t6"], "older": True}
 
 
+def test_a_transcript_whose_conversation_changed_is_read_again_from_its_end(
+    boot_report: dict[str, Any],
+) -> None:
+    """After a ``/clear`` or a fresh restart, Load older read the new conversation from the old
+    one's offset and put it above the old turns as their past. The machine refuses a cursor
+    of another conversation (``stale_cursor``), and the page reads this one from its end."""
+    stale = boot_report["transcriptStale"]
+    assert stale == {
+        "asked": [None, "ses_1:100", None],
+        "shown": ["NEW 0", "NEW 1"],
+        "older": False,
+    }
+
+
 def test_extend_and_revoke_wait_for_their_answer_before_another_tap_goes(
     boot_report: dict[str, Any],
 ) -> None:

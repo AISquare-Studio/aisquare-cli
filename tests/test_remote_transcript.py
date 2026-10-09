@@ -27,11 +27,13 @@ from aisquare.core.paths import remote_audit_path, remote_state_path
 from aisquare.services import transcript as transcript_service
 from aisquare.services.remote_server import (
     NoSuchAgent,
+    RequestError,
     Runtime,
     Sources,
     _limit_param,
     build_app,
 )
+from aisquare.services.remote_server import _live_transcript as live_transcript
 from aisquare.services.transcript import EMPTY, SCAN_BUDGET, Page, read_page
 from tests.remote_kit_helpers import make_client
 
@@ -669,3 +671,74 @@ def test_limit_param_parsing() -> None:
         _limit_param("many")
     with pytest.raises(ValueError, match="negative"):
         _limit_param("-2")
+
+
+# --- a cursor is a place in one conversation ------------------------------------------------
+
+
+def _two_conversations(tmp_path: Path) -> None:
+    """coder-1 on session ``ses_1``, a long conversation, and ``ses_2``, the one a ``/clear``
+    starts: the store as the team's hooks leave it, the row still on ``ses_1``."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.core.store import store_session
+    from aisquare.models import FleetAgent, ProjectInfo, TeamSession
+
+    root = tmp_path / "alpha"
+    old = _write(tmp_path / "old.jsonl", [_user(f"OLD {n}", uuid=f"o{n}") for n in range(40)])
+    new = _write(tmp_path / "new.jsonl", [_user(f"NEW {n}", uuid=f"n{n}") for n in range(3)])
+    born = datetime.now(UTC) - timedelta(hours=1)
+    with store_session() as store:
+        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        for session_id, path in (("ses_1", old), ("ses_2", new)):
+            store.upsert_session(
+                TeamSession(
+                    id=session_id, project_id=project.id, role="coder", label="coder-1",
+                    started_at=born, last_seen_at=born, transcript_path=str(path),
+                )
+            )  # fmt: skip
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_1", project_id=project.id, label="coder-1", role="coder", pane_id="%1",
+                session_id="ses_1", cwd=root, created_at=born,
+            )
+        )  # fmt: skip
+
+
+def _page_lines(payload: dict[str, object]) -> list[str]:
+    lines = payload["lines"]
+    assert isinstance(lines, list)
+    return plain(lines)
+
+
+def test_a_cursor_reads_on_only_in_the_conversation_it_came_from(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """The cursor was a bare byte offset, read in whatever file the label's session names
+    now. After a ``/clear`` (the row moves to the new session), a fresh restart or a new
+    agent under a freed label, Load older read the new conversation from there, and the
+    page put it above the old one as its past. It names its conversation: another's, or a
+    bare offset, is a 409 ``stale_cursor``, and the page reads the new one from its end."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.core.store import store_session
+
+    _two_conversations(tmp_path)
+    first = live_transcript("coder-1", "prj_alpha", 10, None, 60)
+    cursor = first["cursor"]
+    assert isinstance(cursor, str) and cursor.startswith("ses_1:") and first["more"] is True
+    assert "  OLD 29" in _page_lines(live_transcript("coder-1", "prj_alpha", 10, cursor, 60))
+    with store_session() as store:
+        lease = datetime.now(UTC) + timedelta(minutes=30)
+        assert store.adopt_fleet_agent_session("agt_1", "ses_1", "ses_2", lease)  # a /clear
+    for stale in (cursor, cursor.split(":")[1], "ses_2:nonsense", "ses_2:0", "ses_2:\u00b2"):
+        with pytest.raises(RequestError) as refused:
+            live_transcript("coder-1", "prj_alpha", 10, stale, 60)
+        assert (refused.value.status, refused.value.error) == (409, "stale_cursor"), stale
+    assert _page_lines(live_transcript("coder-1", "prj_alpha", 10, None, 60))[1] == "  NEW 0"
+    client = _client(runtime, live_transcript, tmp_path)
+    response = client.get(
+        f"/r/{runtime.token}/api/transcript/coder-1",
+        params={"project": "prj_alpha", "before": cursor, "width": 60},
+    )
+    assert response.status_code == 409 and response.json()["error"] == "stale_cursor"

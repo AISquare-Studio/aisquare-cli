@@ -1952,6 +1952,13 @@ def _live_transcript(
     no scrollback for them. The board already records where the transcript is.
     ``width`` is the phone's own column count; without it the lines wrap at the
     agent's pane width, which a phone narrower than the pane re-wraps into a mess.
+
+    The cursor names its conversation, ``<session id>:<offset>``: an offset is a
+    place in one file, and the label reads another after a ``/clear``, a fresh
+    restart or a new agent under a freed label. A bare offset read the new file
+    from there, and Load older put the new conversation above the old one as its
+    past (review of #243, sweep of round 4). A cursor of another conversation, or
+    of none this server made, is a 409 ``stale_cursor``.
     """
     from aisquare.core.store import store_session
     from aisquare.services import transcript as transcript_service
@@ -1962,14 +1969,29 @@ def _live_transcript(
         if agent is None:
             raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
         session = store.get_session(agent.session_id) if agent.session_id else None
+    offset = None
+    if before is not None:
+        named, _, offset = before.rpartition(":")
+        if session is None or named != session.id or not _remote_offset(offset):
+            raise RequestError(
+                409, "stale_cursor", f"{label} is in another conversation since that page"
+            )
     path = session.transcript_path if session is not None else None
     page = transcript_service.read_page(
         path,
         limit=limit or transcript_service.DEFAULT_LIMIT,
-        before=before,
+        before=offset,
         width=width or _pane_width(agent),
     )
-    return page.page_json()
+    payload = page.page_json()
+    if page.cursor is not None and session is not None:
+        payload["cursor"] = f"{session.id}:{page.cursor}"
+    return payload
+
+
+def _remote_offset(text: str) -> bool:
+    """Whether ``text`` is a cursor's offset as the server writes it: a whole number past 0."""
+    return text.isascii() and text.isdigit() and int(text) > 0
 
 
 def _pane_width(agent: FleetAgent) -> int:
@@ -3881,6 +3903,8 @@ def build_remote_app(
             payload = await asyncio.to_thread(
                 reads.transcript, agent, project, limit, before, width
             )
+        except RequestError as exc:  # a cursor of another conversation: 409 stale_cursor
+            return JSONResponse(exc.request_error_body(), status_code=exc.status)
         except NoSuchAgent as exc:
             return _json_error(404, "no_such_agent", str(exc))
         except LookupError as exc:

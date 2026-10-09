@@ -1714,6 +1714,29 @@ function transcriptPage(lines, cursor, more) {
   return { status: 200, json: { lines, cursor, more, stamps: {} } };
 }
 
+/* The Transcript tab, its Load older answered stale_cursor (a /clear since its first page):
+ * the reads it made, what it shows, and whether Load older shows. */
+async function transcriptStale() {
+  const reads = [];
+  const page = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
+    "GET api/transcript/coder-1": () => (reads[reads.length] = deferred()).promise,
+  }));
+  await settle();
+  reads[0].settle(transcriptPage(["OLD 398", "OLD 399"], "ses_1:100", true));
+  await settle();
+  click(buttonNamed(page.main(), "Load older"));
+  await settle();
+  reads[1].settle({ status: 409, json: { error: "stale_cursor", message: "coder-1 is in another conversation since that page" } });
+  await settle();
+  if (reads[2]) reads[2].settle(transcriptPage(["NEW 0", "NEW 1"], null, false));
+  await settle();
+  return {
+    asked: page.requests.filter((one) => one.path === "api/transcript/coder-1").map((one) => new URLSearchParams(one.query).get("before")),
+    shown: page.main().querySelectorAll("pre.transcript")[0].childNodes.map((line) => line.textContent),
+    older: !buttonNamed(page.main(), "Load older").hidden,
+  };
+}
+
 const TWO_DEVICES = [
   { id: "dev_0a1b2c3d", current: true, signed_in: true, ua: "this phone", last_seen: null },
   { id: "dev_4e5f6a7b", current: false, signed_in: true, ua: "another", last_seen: null },
@@ -2338,6 +2361,7 @@ async function main() {
     sheetFocus: await sheetFocus(),
     transcriptColumns: await transcriptColumns(),
     transcriptLoads: await transcriptLoads(),
+    transcriptStale: await transcriptStale(),
     buttonsInFlight: await buttonsInFlight(),
     stripCap: await stripCap(),
     spoken: await spoken(),

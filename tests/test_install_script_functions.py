@@ -2018,6 +2018,33 @@ def test_a_no_agent_run_expects_claude_code_whatever_its_row_says(
     assert result.returncode == 0
 
 
+def test_a_no_agent_row_whose_detail_cannot_be_read_says_where_to_read_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `{` in a path the claude-code row names splits the payload this script reads,
+    so its detail cannot be extracted, and the --no-agent line ended at "aisquare doctor
+    here says:" with nothing under it (second delta review of #257). It names where the
+    state can be read in full instead."""
+    home = tmp_path / "ho{me}"
+    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
+    monkeypatch.setattr("aisquare.core.claude_accounts._home", lambda: home)
+    _claude_code_state("refused, never connected", home, tmp_path, monkeypatch)
+    row = _claude_code_row()
+
+    result = _summary_then_handoff(
+        tmp_path,
+        "WANT_AGENT=0; WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        node=False,
+        env={"PAYLOAD": json.dumps([row])},
+    )
+
+    assert "{" in row["detail"], row
+    said = "  claude-code — left alone by --no-agent; aisquare doctor here shows its state.\n"
+    assert said in result.stdout, result.stdout
+    assert "here says:" not in result.stdout, result.stdout
+    assert result.returncode == 0
+
+
 @pytest.mark.parametrize(
     ("machine", "want_agent", "bin_line", "tool_env", "hooks"),
     [
@@ -2025,8 +2052,10 @@ def test_a_no_agent_run_expects_claude_code_whatever_its_row_says(
         ("fresh", 0, "uv, aisquare, asq", True, False),
         ("current", 1, None, False, True),
         ("current", 0, None, False, False),
+        ("force", 1, "aisquare, asq", True, True),
+        ("upgrade-all", 1, None, False, True),
     ],
-    ids=["fresh", "fresh-no-agent", "current", "current-no-agent"],
+    ids=["fresh", "fresh-no-agent", "current", "current-no-agent", "force", "upgrade-all"],
 )
 def test_the_banner_lists_only_what_the_run_writes(
     tmp_path: Path,
@@ -2040,11 +2069,20 @@ def test_the_banner_lists_only_what_the_run_writes(
     claude-code's hooks" and listed ~/.claude/settings.json and `claude` as written;
     init runs without --agent then and no Claude Code is installed (fix and delta
     reviews of #257). And a current uv or aisquare-cli is left where it is, so
-    "Written to" names only what this run writes."""
+    "Written to" names only what this run writes; --force (an upgrade) rewrites the CLI,
+    and --upgrade-all's `uv self update` is named in the plan (second delta review)."""
     decided = {
         "fresh": 'UV_VERSION=""; CLI_ACTION=install; CLAUDE_ACTION=install; CLAUDE_VERSION=""',
         "current": (
             "UV_VERSION=0.12.3; CLI_ACTION=current; CLI_VERSION=0.8.0; "
+            "CLAUDE_ACTION=update; CLAUDE_VERSION=2.1.294"
+        ),
+        "force": (
+            "UV_VERSION=0.12.3; FORCE=1; CLI_ACTION=upgrade; CLI_VERSION=0.8.0; "
+            "CLAUDE_ACTION=update; CLAUDE_VERSION=2.1.294"
+        ),
+        "upgrade-all": (
+            "UV_VERSION=0.12.3; UPGRADE_ALL=1; CLI_ACTION=current; CLI_VERSION=0.8.0; "
             "CLAUDE_ACTION=update; CLAUDE_VERSION=2.1.294"
         ),
     }[machine]
@@ -2063,6 +2101,8 @@ def test_the_banner_lists_only_what_the_run_writes(
     assert ("~/.local/share/uv/tools/" in written) is tool_env, written
     assert ("claude-code's hooks" in result.stdout) is hooks, result.stdout
     assert ("~/.claude/settings.json" in written) is hooks, written
+    moves_uv = "  update   uv 0.12.3 (uv self update, --upgrade-all)\n"
+    assert (moves_uv in result.stdout) is (machine == "upgrade-all"), result.stdout
 
 
 @pytest.mark.parametrize(

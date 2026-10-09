@@ -793,11 +793,7 @@ short_circuit() {
     # for `--json doctor`. §3.8's own words: "a script that exits 0 onto a
     # broken machine is worse than one that never ran." An unanswerable doctor
     # is a reason to do the work, not to skip it.
-    #
-    # One payload for the verdict and for the rows it reads: whether a claude-code
-    # row is expected depends on what it says (is_expected_amber).
-    DOCTOR_RAW=$(doctor_json)
-    _amber=$(doctor_amber "$DOCTOR_RAW" 2>/dev/null) || return 1
+    _amber=$(doctor_amber 2>/dev/null) || return 1
     for _amber_check in $_amber; do
         is_expected_amber "$_amber_check" || return 1
     done
@@ -867,6 +863,9 @@ banner() {
     [ "$CLI_ACTION" = upgrade ] && _plan="$_plan\n  upgrade  $PYPI_PACKAGE $CLI_VERSION -> ${LATEST_VERSION:-latest}"
     [ "$CLI_ACTION" = current ] && _plan="$_plan\n  keep     $PYPI_PACKAGE $CLI_VERSION"
     [ -z "$UV_VERSION" ] && _plan="$_plan\n  install  uv (the bootstrap: a static binary that brings its own Python)"
+    # Named like Claude Code's own updater below: `uv self update` replaces uv
+    # wherever uv put itself, and refuses for a package manager's uv.
+    [ -n "$UV_VERSION" ] && [ "$UPGRADE_ALL" = 1 ] && _plan="$_plan\n  update   uv $UV_VERSION (uv self update, --upgrade-all)"
 
     if [ "$WANT_SYSTEM_DEPS" = 1 ]; then
         [ "$TMUX_ACTION" = install ] && _plan="$_plan\n  install  tmux (the fleet's substrate)"
@@ -896,9 +895,10 @@ banner() {
     # shellcheck disable=SC2059  # the format string is ours, built above.
     printf "$_plan\n"
 
-    # Only what THIS run writes, from the same decisions as the plan above: a
-    # current uv or aisquare-cli is left where it is, and --no-agent installs no
-    # Claude Code (`claude update` is its own updater's, at its own paths).
+    # Only what THIS run's own steps write, from the same decisions as the plan
+    # above: uv when it installs uv, aisquare and asq when it installs or upgrades
+    # the CLI, claude when it installs Claude Code. The updaters the plan names
+    # (`uv self update`, `claude update`) write at their own paths.
     _written=""
     [ -z "$UV_VERSION" ] && _written="uv"
     case "$CLI_ACTION" in
@@ -2043,10 +2043,14 @@ summary() {
                 # Claude Code is this run's to change, so the doctor's fix is not
                 # printed. Asked in this folder (doctor_json), so the doctor run
                 # here shows the same row.
-                note "  claude-code — left alone by --no-agent; aisquare doctor here says:"
                 _cc_said=$(_json_text "$(_doctor_detail claude-code)")
                 if [ -n "$_cc_said" ]; then
+                    note "  claude-code — left alone by --no-agent; aisquare doctor here says:"
                     note "             $_cc_said"
+                else
+                    # A detail that could not be read off the payload (a `{` in a
+                    # path splits it): named where it can be read in full.
+                    note "  claude-code — left alone by --no-agent; aisquare doctor here shows its state."
                 fi
                 ;;
         esac

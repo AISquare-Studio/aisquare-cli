@@ -1000,6 +1000,24 @@ def test_a_failed_hand_over_is_not_the_exit_of_a_later_row_of_its_session() -> N
     assert _scan(Fleet(ended=[first, again], events=[failed])) == []
 
 
+def test_another_sessions_events_say_nothing_of_this_agent() -> None:
+    """``needs_from_agent`` reads its own session's events alone: another agent's usage-limit
+    notice or failed turn, handed in with them, names nothing of this one's."""
+    row = _row()
+    other = _session(_row("coder-2"), state="attention")
+    paused = "Session paused — choose: continue on usage credits or switch models"
+    events = [
+        _event(9, "attention", paused, session=other),
+        _event(10, "turn_failed", LOGIN_EXPIRED, session=other, at=NOW - timedelta(minutes=1)),
+    ]
+    at_a_dialog = _status(row, "attention", _session(row, state="attention"))
+    assert [(item.kind, item.reason) for item in _classify(at_a_dialog, None, events)] == [
+        ("permission", "coder-1 shows a dialog that needs you")
+    ]
+    waiting = _status(row, "waiting", _session(row, state="waiting"))
+    assert _classify(waiting, None, events) == []
+
+
 def test_a_new_manager_ends_manager_down() -> None:
     old = _row("manager", role="manager", ended=NOW - timedelta(minutes=5), exit_status=3)
     new = _row("manager", role="manager", row_id="agt_new", created=NOW - timedelta(minutes=1))

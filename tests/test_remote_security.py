@@ -323,10 +323,24 @@ def test_text_holding_a_control_character_is_refused_and_names_the_key(
     assert pane.sent == []
 
 
-def test_tab_and_newline_are_still_text(pane: FakePane) -> None:
+def test_a_newline_is_still_text(pane: FakePane) -> None:
     send = live_writes().handlers["send-keys"]
-    send({"agent": "coder-1", "text": "a\tb\nc"})
-    assert pane.sent == [("literal", "a\tb\nc")]
+    send({"agent": "coder-1", "text": "a b\nc"})
+    assert pane.sent == [("literal", "a b\nc")]
+
+
+def test_a_tab_typed_is_the_tab_key_and_is_refused(pane: FakePane) -> None:
+    """``"\\t"`` is the Tab key's own byte, and Claude Code's prompt takes it as the key (an
+    open suggestion accepted), never as a tab of the message: a table row pasted into the
+    input bar arrived as other text than was sent (review of #243, round 5)."""
+    send = live_writes().handlers["send-keys"]
+    with pytest.raises(RequestError) as refused:
+        send({"agent": "coder-1", "text": "name\tvalue", "enter": True})
+    assert (refused.value.status, refused.value.error) == (400, "invalid")
+    assert refused.value.message == (
+        "'text' holds the control character U+0009 — send the pad's Tab key instead"
+    )
+    assert pane.sent == []
 
 
 @pytest.mark.parametrize("text", ["\r", "first line\r\nsecond line"], ids=repr)

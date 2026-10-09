@@ -337,16 +337,18 @@ REMOTE_KEY_VOCABULARY = (
     "Enter, Escape, Tab, BTab, BSpace, Space, Up, Down, Left, Right, Home, End, PageUp, "
     "PageDown, Delete, F1-F12, C-c, C-d, C-l, C-o, C-r, C-u, 0-9, y, n"
 )
-_TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
-"""What typed ``text`` may not hold: a C0 control other than tab and newline, or DEL
-(:func:`check_remote_text`). A carriage return is the Enter key, byte for byte."""
+_TEXT_CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
+"""What typed ``text`` may not hold: a C0 control other than newline, or DEL
+(:func:`check_remote_text`). A carriage return is the Enter key, byte for byte, and a tab
+the Tab key."""
 _PASTED_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 """What a paste (a tell, or a note an agent's fresh replacement is handed) may not hold: the
-same, but for the carriage return, which inside a bracketed paste is a line break of the
-message and submits nothing."""
+same, but for the tab and the carriage return, which inside a bracketed paste are a tab and
+a line break of the message and press nothing."""
 _TEXT_CONTROL_KEYS = {
     "\x03": "C-c",
     "\x04": "C-d",
+    "\t": "Tab",
     "\x0c": "C-l",
     "\r": "Enter",
     "\x0f": "C-o",
@@ -1745,9 +1747,9 @@ def check_remote_key_names(keys: object) -> list[str]:
 
 
 def check_remote_text(text: str, *, pasted: bool = False) -> None:
-    """Refuse typed ``text`` holding an ASCII control character (C0, or DEL) other than tab
-    and newline: 400 ``invalid``, naming the pad's key for it. A ``pasted`` text (a tell)
-    may also hold a carriage return.
+    """Refuse typed ``text`` holding an ASCII control character (C0, or DEL) other than
+    newline: 400 ``invalid``, naming the pad's key for it. A ``pasted`` text (a tell)
+    may also hold a tab and a carriage return.
 
     Text reaches the pane as hex, byte for byte, so a control character in it IS a
     keystroke: ``"\\x03"`` was a Ctrl-C past the double-press guard, ``"\\x1a"`` the
@@ -1756,8 +1758,10 @@ def check_remote_text(text: str, *, pasted: bool = False) -> None:
     the allowlist, the guard and the trail see them by name. A carriage return is the
     Enter key's own byte: ``{"text": "\\r"}`` took a dialog's highlighted option while
     the trail said ``enter=False``, and each line of a CRLF text was a prompt of its own
-    (review of #243, round 3). Inside a tell's bracketed paste it is a line break of
-    the message, as a newline is.
+    (review of #243, round 3). A tab is the Tab key's: Claude Code's prompt takes it as
+    a key (an open suggestion accepted), never as a tab of the message, so a pasted
+    table row arrived as other text than was sent (review of #243, round 5). Inside a
+    tell's bracketed paste both are the message's own, as a newline is.
     """
     found = (_PASTED_CONTROL if pasted else _TEXT_CONTROL).search(text)
     if found is None:

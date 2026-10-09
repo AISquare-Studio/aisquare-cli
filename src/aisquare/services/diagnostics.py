@@ -1026,6 +1026,12 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
             routes.extend(f"through {_plugin_label(p)} in {d}" for d, p in plugins)
             if plugins:
                 routes.append(f"the plugin runs {runs}")
+        # Connected here, which is this row's verdict, as `agents list` says too; but a
+        # plugin enabled for this folder alone misses where the fleet's coders start, and
+        # Welcome step 2 says so and offers Connect. Said here as well (review of #257).
+        missed = [d for d, p in plugins if _misses_the_coders(d, p, cwd)]
+        if missed:
+            routes.append(_coders_missed(missed))
         return _ok("claude-code", f"{product} connected{where} ({'; '.join(routes)})")
 
     problems: list[str] = []
@@ -1096,6 +1102,40 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     if runner_fix is not None:
         fixes.append(runner_fix)
     return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
+
+
+def _coders_missed(dirs: list[Path]) -> str:
+    """What the row adds for config dirs whose plugin misses the coders
+    (:func:`_misses_the_coders`), with the Connect that covers every folder for each."""
+    ambient = agent_core.ambient_hook_dir("claude-code")
+    here = agent_core.dir_identity(ambient) if ambient is not None else None
+    connects = " or ".join(
+        "aisquare agents connect claude-code"
+        if agent_core.dir_identity(directory) == here
+        else f"aisquare agents connect claude-code --config-dir {directory}"
+        for directory in dirs
+    )
+    return (
+        "a coder's git worktree loads that plugin only where its own .claude/settings.json "
+        f"enables it, so the fleet's coders may run without aisquare: {connects} runs it "
+        "in every folder"
+    )
+
+
+def _misses_the_coders(config_dir: Path, plugin: agent_core.ClaudePlugin, cwd: Path | None) -> bool:
+    """Whether ``plugin``, enabled for one repository and the route ``config_dir`` takes
+    here, misses the folder the fleet's coders start in: Welcome step 2's rule
+    (``first_run.coder_folder``), asked of the same shared check. Paths only."""
+    if plugin.project is None:
+        return False
+    from aisquare.services import first_run  # lazy: first_run imports this module
+
+    try:
+        here = cwd if cwd is not None else Path.cwd()
+    except OSError:  # the working directory was removed: no coders start there
+        return False
+    coders = first_run.coder_folder(here)
+    return coders != here and not agents_service.claude_code_connected(config_dir, cwd=coders)
 
 
 def _short_timeouts(product: str, short: dict[Path, list[str]]) -> DoctorCheck:

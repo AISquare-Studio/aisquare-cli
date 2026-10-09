@@ -193,6 +193,69 @@ def test_a_repo_scope_plugin_connects_the_sessions_that_load_it(
 
 
 @posix_route
+@pytest.mark.parametrize(
+    ("scope", "git", "missed"),
+    [("project", True, True), ("local", True, False), ("project", False, False)],
+    ids=["project-scope-in-git", "local-scope-in-git", "project-scope-not-git"],
+)
+def test_the_row_says_what_step_two_says_about_the_coders(
+    runner: CliRunner,
+    claude: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: str,
+    git: bool,
+    missed: bool,
+) -> None:
+    """Under a project-scope plugin, Welcome step 2 says the coders may run without aisquare
+    (their git worktrees load it only where their own settings enable it) and offers
+    Connect, while the doctor's row, which the sidebar now asks for that project, said
+    connected and nothing more (review of #257). The row keeps its verdict for the folder
+    it reports on, as `agents status` does, and says what step 2 says, by its rule."""
+    repo = _repo_plugin(claude, tmp_path / "repo", scope)
+    if not git:
+        (repo / ".git").rmdir()
+
+    row = diagnostics._check_claude_code(cwd=repo)
+    step_two = first_run.probe_claude(
+        sign_in=False, which=lambda name: str(tmp_path / "claude"), cwd=repo
+    )
+    monkeypatch.chdir(repo)
+    listed = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
+
+    assert row.status is CheckStatus.ok and _buttons(row) == [], row
+    assert f" connected (through the aisquare plugin 0.8.0 at {scope} scope in {repo}" in (
+        row.detail
+    )
+    said = "so the fleet's coders may run without aisquare: aisquare agents connect" in (row.detail)
+    assert (said, step_two.manager_only) == (missed, missed), (row.detail, step_two)
+    assert listed[0]["connected"] is True, "agents status keeps the same verdict"
+
+
+@posix_route
+def test_the_coders_note_names_the_connect_for_its_own_config_dir(
+    runner: CliRunner, claude: Path, tmp_path: Path
+) -> None:
+    """The plugin may be another config dir's route: bare, `agents connect` connects the one
+    a session from this shell reads, so the note names the --config-dir that covers it."""
+    _connect(runner)  # ~/.claude: its own hooks, every folder
+    other = claude.parent / ".claude-c2"
+    other.mkdir()
+    _connect(runner, other)
+    (other / "settings.json").write_text("{}", encoding="utf-8")  # its route: the plugin
+    repo = _repo_plugin(other, tmp_path / "repo", "project")
+
+    row = diagnostics._check_claude_code(cwd=repo)
+
+    assert row.status is CheckStatus.ok, row
+    assert f"through the aisquare plugin 0.8.0 at project scope in {repo} in {other}" in row.detail
+    assert (
+        f"may run without aisquare: aisquare agents connect claude-code --config-dir {other} "
+        "runs it in every folder"
+    ) in row.detail, row.detail
+
+
+@posix_route
 @pytest.mark.parametrize("asked_from", ["the repository", "elsewhere"])
 def test_partial_hooks_beside_a_repo_scope_plugin_are_judged_on_themselves(
     runner: CliRunner,

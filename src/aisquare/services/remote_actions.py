@@ -18,7 +18,9 @@ the rest is here:
   approve a Bash command or take a question's first option. So an open dialog
   refuses the action (409 ``dialog_open``), unless ``dismiss_dialog`` asks for one
   Escape (No) first. No tell types into a dialog either. ``auto``, which is
-  ``fleet tell``, files its text as a board note while one may be up.
+  ``fleet tell``, files its text as a board note while one may be up, and
+  ``send-keys`` with ``dialog_guard`` types nothing then
+  (:func:`action_keys_guard`).
 * **One action per agent at a time.** ``remote_server.remote_agent_lock`` is
   taken without waiting, and the needs card's quick answers take it too (409
   ``busy``).
@@ -723,6 +725,40 @@ def action_may_answer(snap: AgentNow) -> bool:
     return remote_needs.needs_dialog_open(snap) or remote_needs.needs_tool_pending(snap)
 
 
+def action_prompt_up(label: str) -> RequestError:
+    """409 ``dialog_open`` for text about to be typed while the agent shows a dialog."""
+    return RequestError(
+        409,
+        "dialog_open",
+        f"{label} is showing a prompt; typing now would answer it — answer it or dismiss it first",
+    )
+
+
+def action_keys_guard(target: ProjectInfo, label: str, pin: str) -> None:
+    """``send-keys`` with ``dialog_guard``: 409 ``dialog_open``, and nothing typed, while
+    anything typed into the agent's pane may answer a dialog (:func:`action_may_answer`).
+
+    For a sender that does not see the pane: the page's Transcript tab, whose Send
+    types its text and then Enter, ⏎ being on by default. Into a permission prompt
+    the text is keystrokes, a digit in it picks that option, and the Enter takes
+    the highlighted one: "1. Yes" to the command the text meant to refuse (sweep
+    of #243, round 4). The agent is read from its own facts
+    (``needs_single_agent_now``: its row, its pane, its tail), which must still be
+    of the row ``pin`` names, the one the keys were going to.
+    """
+    snap = action_fleet_call(lambda: remote_needs.needs_single_agent_now(target, label))
+    snap = action_still_pinned(target, label, pin, snap, escaped=False)
+    if remote_needs.needs_dialog_open(snap):
+        raise action_prompt_up(label)
+    if remote_needs.needs_tool_pending(snap):
+        raise RequestError(
+            409,
+            "dialog_open",
+            f"{label} has a tool pending, and a prompt for it may have just opened; typing "
+            "now could answer it — look at its pane first",
+        )
+
+
 # --- typing into the agent's prompt ------------------------------------------------------------
 
 
@@ -820,12 +856,7 @@ def action_type_now(
     """
     snap = snap if snap is not None else action_snapshot(target, label, pin)
     if remote_needs.needs_dialog_open(snap):
-        raise RequestError(
-            409,
-            "dialog_open",
-            f"{label} is showing a prompt; typing now would answer it — "
-            "answer it or dismiss it first",
-        )
+        raise action_prompt_up(label)
     action_pane_agent(snap, label)  # refused here, before the interrupt's Escape
     if not interrupt:
         if not remote_needs.needs_at_input_prompt(snap):
@@ -1153,6 +1184,7 @@ __all__ = [
     "LedgerEntry",
     "LedgerSeen",
     "action_handlers",
+    "action_keys_guard",
     "action_restart",
     "action_routes",
     "action_stop",

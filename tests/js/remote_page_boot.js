@@ -1613,6 +1613,31 @@ async function transcriptSend() {
   return { send, sent: page.sent("api/send-keys").map((body) => body.keys) };
 }
 
+/* Send on the Transcript tab, which shows no pane: refused once as dialog_open, as the
+ * machine refuses it while a prompt may be up, then sent. What each body said, the toast
+ * and the box after the refusal, and the box after the send. */
+async function transcriptSendGuarded() {
+  let answer = { status: 409, json: { error: "dialog_open", message: "coder-1 is showing a prompt" } };
+  const page = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
+    "GET api/transcript/coder-1": () => transcriptPage([], null, false),
+    "POST api/send-keys": () => answer,
+  }));
+  await settle();
+  page.acceptSockets();
+  page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  await settle();
+  const say = await typeAndSend(page, "no - run the tests instead");
+  const refused = { toast: page.toast(), typed: say.value };
+  answer = { status: 200, json: { sent: true } };
+  await typeAndSend(page, "run the tests");
+  const bodies = page.sent("api/send-keys").map((body) => {
+    const copy = Object.assign({}, body);
+    delete copy.request_id;
+    return copy;
+  });
+  return { bodies, refused, typed: say.value };
+}
+
 /* Where focus goes: a card's Tell… opens a sheet whose message box takes it; the next feed
  * frame draws the card anew, its button with it, and then Close. */
 async function sheetFocus() {
@@ -2335,6 +2360,7 @@ async function main() {
     padConfirms: await padConfirms(),
     staleAcrossAWake: await staleAcrossAWake(),
     transcriptSend: await transcriptSend(),
+    transcriptSendGuarded: await transcriptSendGuarded(),
     sheetFocus: await sheetFocus(),
     transcriptColumns: await transcriptColumns(),
     transcriptLoads: await transcriptLoads(),

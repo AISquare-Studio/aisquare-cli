@@ -616,9 +616,18 @@ class FakePane:
         self.sent.append((pane_id, "paste", text))
         self.log.append("paste")
 
+    def send_literal(self, pane_id: str, text: str) -> None:
+        """``send-keys``' text: keystrokes, not a paste."""
+        self.sent.append((pane_id, "literal", text))
+        self.log.append("literal")
+
     def pane_facts(self, pane_id: str) -> SimpleNamespace:
         """What ``fleet tell`` and ``send-keys`` ask before they type: the pane runs the agent."""
         return SimpleNamespace(dead=False, current_command="claude")
+
+    def started_at(self) -> datetime:
+        """The server started before every row here was written: no pane outlived its row."""
+        return T0 - timedelta(hours=1)
 
     def keys(self) -> list[str]:
         return [what for _pane, kind, what in self.sent if kind == "key"]
@@ -2250,10 +2259,10 @@ def test_prompt_types_into_a_quiet_waiting_agent_that_has_no_transcript(
     assert [kind for _pane, kind, _what in pane.sent] == ["paste", "key"]
 
 
-# --- auto's tell while a prompt may be up ----------------------------------------------------
+# --- what may answer a prompt: auto's tell, and send-keys with the guard -----------------------
 #
-# Review of #243, round 4: the menu's Tell reads the agent first, as the guard of stop,
-# restart and switch does (``action_may_answer``).
+# Review of #243, round 4: every path that types an Enter or a digit into an agent reads it
+# first, as the guard of stop, restart and switch does (``action_may_answer``).
 
 PROMPT_UP = "it is showing a prompt, which typing would answer"
 TOOL_PENDING = "it has a tool pending, and a prompt for it may have just opened"
@@ -2360,3 +2369,75 @@ def test_an_auto_tell_never_types_into_a_permission_prompt_left_for_half_an_hour
     assert typed.status_code == 200, typed.text
     assert typed.json()["delivered"] is True
     assert pane.sent == [("%7", "paste", "carry on"), ("%7", "key", "Enter")]
+
+
+@pytest.mark.parametrize(
+    ("setup", "message"),
+    [
+        (
+            {"dialog": True},
+            "coder-1 is showing a prompt; typing now would answer it — "
+            "answer it or dismiss it first",
+        ),
+        (
+            {"tail": _a_prompt_just_drawn(), "pane_quiet": False},
+            "coder-1 has a tool pending, and a prompt for it may have just opened; typing "
+            "now could answer it — look at its pane first",
+        ),
+    ],
+    ids=["a prompt", "a prompt too new to see"],
+)
+def test_send_keys_with_the_dialog_guard_types_nothing_while_a_prompt_may_be_up(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    setup: dict[str, object],
+    message: str,
+) -> None:
+    """Sweep of #243, round 4: the Transcript tab, which shows no pane, has the input bar
+    too, and its Send posted the text and Enter, ⏎ being on by default. Into a Bash
+    prompt the Enter took "1. Yes", and a digit in the text picked that option. With
+    ``dialog_guard`` nothing is typed while the agent may show one. The Live tab, which
+    shows the prompt, sends without it, and is typed as before."""
+    _row(project)
+    for attribute, value in setup.items():
+        setattr(needs, attribute, value)
+    body = {"agent": LABEL, "text": "no - run the tests instead", "enter": True}
+    refused = phone.post("send-keys", **body, dialog_guard=True)
+    assert refused.status_code == 409
+    assert refused.json() == {"error": "dialog_open", "message": message}
+    assert pane.sent == [] and phone.audit() == []
+    sent = phone.post("send-keys", **body)
+    assert sent.status_code == 200, sent.text
+    assert pane.sent == [("%7", "literal", body["text"]), ("%7", "key", "Enter")]
+
+
+def test_send_keys_with_the_dialog_guard_types_at_a_prompt_that_shows_none(
+    phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    """The guard reads the agent's own facts, once: never the project's scan, which keys
+    would wait on."""
+    _row(project)
+    needs.state = "waiting"
+    sent = phone.post("send-keys", agent=LABEL, text="carry on", enter=True, dialog_guard=True)
+    assert sent.status_code == 200, sent.text
+    assert pane.sent == [("%7", "literal", "carry on"), ("%7", "key", "Enter")]
+    assert (needs.scans, needs.reads) == (0, 1)
+
+
+def test_send_keys_whose_label_was_handed_on_while_the_guard_looked_types_nothing(
+    phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    """The keys were for the row read under the lock; the guard's read must be of it too."""
+    _row(project)
+    needs.state = "waiting"
+    needs.before_read = lambda: _replaced(project)
+    refused = phone.post("send-keys", agent=LABEL, text="1", enter=True, dialog_guard=True)
+    assert refused.status_code == 409
+    assert refused.json() == {
+        "error": "stale",
+        "message": "'coder-1' is another agent now (agt_new) — nothing was done",
+        "current": {"agent_id": "agt_new"},
+    }
+    assert pane.sent == []

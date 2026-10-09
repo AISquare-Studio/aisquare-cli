@@ -288,7 +288,9 @@ agent called has no result yet; there the Esc also stops a running tool. A
 card's Tell and Interrupt & tell refuse a dialog the same way. The menu's plain
 Tell types only into an agent waiting at its prompt: while the agent may be
 showing a prompt, even one left unanswered for hours, the message is left as a
-board note instead.
+board note instead. Send on the Transcript tab, which does not show the pane,
+types nothing while the agent may be showing a prompt, a tool with no result yet
+included; send from Live, where the pane shows what the keys would answer.
 
 Every action is pinned to the agent you looked at: if a manager restarted or
 switched it in the meantime, the action is refused as `stale` rather than
@@ -471,6 +473,11 @@ A write's `request_id` is optional. Sent again with the same request, it is
 answered with what the first one did instead of running twice; give every other
 write an id of its own, since for 15 minutes an id sent with another endpoint or
 body is refused with `request_id_reused`.
+
+`send-keys` types into the pane whatever it shows, a prompt included. A script
+that cannot see the pane adds `"dialog_guard": true`, as the Transcript tab
+does, and nothing is typed while the agent may be showing a prompt (409
+`dialog_open`).
 
 The code is `src/aisquare/services/remote_server.py` (the server and its gates)
 and `src/aisquare/services/remote_page.py` (the bundled page, whose files are in

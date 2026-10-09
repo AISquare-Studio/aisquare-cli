@@ -2456,7 +2456,7 @@ VIEWS.agent = (route, main) => {
       return undefined;
     });
   }
-  if (route.tab !== "card") main.appendChild(inputBar(pid, label, cleanups));
+  if (route.tab !== "card") main.appendChild(inputBar(pid, label, cleanups, route.tab !== "live"));
   drawState();
   const held = route.tab === "live" ? () => !paneFresh(pid, label) : null;
   return { fleet: drawState, needs: drawState, held, cleanup: () => { for (const fn of cleanups) fn(); } };
@@ -2482,8 +2482,9 @@ function drawExplainability(body, card) {
 
 /* The bar under the pane: a growing textarea, ⏎ on by default (text left in
  * Claude Code's input box holds back its next question), Send, and the key
- * pad, which the soft keyboard and it never share the screen with. */
-function inputBar(pid, label, cleanups) {
+ * pad, which the soft keyboard and it never share the screen with. blind: the
+ * tab shows no pane (Transcript), so Send types nothing while a prompt may be up. */
+function inputBar(pid, label, cleanups, blind) {
   const bar = el("div", "inputbar");
   const line = el("div", "row-inline");
   const text = el("textarea", "say");
@@ -2553,6 +2554,10 @@ function inputBar(pid, label, cleanups) {
       } else toast(label + ": the second " + which + " was not sent — it would exit Claude Code.");
       return false;
     }
+    if (res.status === 409 && res.error === "dialog_open") {
+      toast("Not sent — " + label + " may be showing a prompt that this would answer. Look at it on Live first.");
+      return false;
+    }
     toast(failText(res, TEXT_MAX.keys));
     afterFailure(res, { pid, label });
     return false;
@@ -2588,6 +2593,7 @@ function inputBar(pid, label, cleanups) {
       return;
     }
     const body = { text: value, enter: enter.box.checked };
+    if (blind) body.dialog_guard = true;
     send.classList.add("busy");
     gateButtons();
     const sent = await post(body, "Send");

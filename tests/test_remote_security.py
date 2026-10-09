@@ -2324,3 +2324,54 @@ def test_a_flush_with_nothing_new_to_write_writes_nothing(
     clock.advance(days=8)
     runtime.flush_last_seen()
     assert json.loads(remote_state_path().read_bytes())["devices"] == [], "and pruned"
+
+
+class Timers:
+    """``remote_server``'s ``threading`` with ``Timer`` recorded and never started, so a test
+    runs what was armed by hand; everything else is the real module."""
+
+    def __init__(self) -> None:
+        self.armed: list[tuple[float, Callable[[], None]]] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(threading, name)
+
+    def Timer(self, delay: float, run: Callable[[], None]) -> Any:
+        self.armed.append((delay, run))
+        return SimpleNamespace(daemon=False, start=lambda: None, cancel=lambda: None)
+
+
+@pytest.mark.parametrize("serving", ["serve", "the panel's server", "nothing"])
+def test_the_flusher_saves_last_seen_and_prunes_every_30_s_while_remote_serves(
+    runtime: Runtime, clock: Clock, monkeypatch: pytest.MonkeyPatch, serving: str
+) -> None:
+    """No test ran the flusher, so the regression it was fixed for came back green: armed
+    again only while the panel's server ran, ``serve`` kept ``last_seen`` in memory for its
+    whole run, ``asq remote status`` in another shell showing every phone at its unlock
+    time, and pruned no device until it exited (sweep 2 of #243)."""
+    timers = Timers()
+    monkeypatch.setattr(remote_server, "threading", timers)
+    monkeypatch.setattr(remote_server, "_runtime", runtime)
+    monkeypatch.setattr(remote_server, "_flusher", None)
+    monkeypatch.setattr(remote_server, "_foreground", object() if serving == "serve" else None)
+    panel = SimpleNamespace(running=True) if serving == "the panel's server" else None
+    monkeypatch.setattr(remote_server, "_server", panel)
+    first = runtime.unlock_device(PASSWORD, "Pixel")
+    clock.advance(days=8)  # the first is past its lifetime
+    second = runtime.unlock_device(PASSWORD, "iPhone")
+    assert first is not None and second is not None
+    remote_server._schedule_flush()
+    ((_delay, flush),) = timers.armed
+    clock.advance(minutes=5)
+    assert runtime.device_is_live(second[1].id)  # a request, in memory
+    flush()
+    (stored,) = json.loads(remote_state_path().read_bytes())["devices"]
+    assert (stored["id"], stored["last_seen"]) == (second[1].id, _iso(clock.now))
+    if serving == "nothing":
+        assert len(timers.armed) == 1, "nothing serves: the flusher stops"
+    else:
+        assert [delay for delay, _run in timers.armed] == [30.0, 30.0], "armed again"
+
+
+def _iso(at: datetime) -> str:
+    return remote_server._iso_seconds(at)

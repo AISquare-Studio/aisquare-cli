@@ -37,12 +37,7 @@ from aisquare.core.store import store_session
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import diagnostics, first_run
 from tests.test_claude_accounts import NOW
-from tests.test_claude_accounts import fake_home as _redirected_home
 from tests.test_usage_aware_accounts import _payload, _slot, _Usage
-
-#: The sibling file's redirected home, re-exported so pytest collects it here: the
-#: accounts test below writes Claude Code's files, and none may land in the developer's.
-fake_home = _redirected_home
 
 
 def _module_name(path: Path) -> str:

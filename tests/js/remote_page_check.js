@@ -121,6 +121,8 @@ const ITEM = {
 const DETAILS = [
   ["permission", { tool: "Bash " + EVIL, input: { command: "rm -rf / " + EVIL, nested: { x: EVIL }, n: 3, ok: true } }],
   ["permission", { text: "dialog " + EVIL }],
+  ["permission", { tool: "Bash", input: { command: "rm -rf …" }, cut: { ["command " + EVIL]: "9 " + EVIL, x: { y: EVIL } }, dropped: EVIL }],
+  ["plan", { plan: "", dropped: true, cut: [EVIL] }],
   ["question", { questions: [{ header: "<b>" + EVIL, question: "which? " + EVIL, multiSelect: true, options: [{ label: "javascript:alert(1)", description: EVIL }, "bad", null] }, null] }],
   ["plan", { plan: Array.from({ length: 30 }, (unused, n) => "step " + n + " " + EVIL).join("\n") }],
   ["asked", { text: "asked " + EVIL }],
@@ -237,6 +239,18 @@ report.notices = {
   needs: worker.pushNotice({ title: "api: coder-1 needs you", body: "coder-1 asks you a question", tag: "asq-needs", url: null }),
   bare: worker.pushNotice({}),
 };
+// Items the server built, handed over by tests/test_remote_page.py: the text of each node of
+// their cards, in order, as [class, text].
+const served = JSON.parse(process.env.ASQ_CARDS || "[]");
+report.served = served.map((item) => {
+  const shown = [];
+  const walk = (node) => {
+    if (typeof node.textContent === "string" && node.textContent) shown.push([node.className || "", node.textContent]);
+    for (const child of node.children || []) walk(child);
+  };
+  walk(page.renderNeedsCard(item, recorder().doc, { now, writable: true }));
+  return shown;
+});
 report.exports = Object.keys(page).sort();
 // What the script really holds, for the Python side to check its own parse of the tables against.
 report.api = page.API;

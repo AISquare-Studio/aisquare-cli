@@ -20,6 +20,7 @@ const vm = require("vm");
 
 const APP = path.join(__dirname, "..", "..", "src", "aisquare", "web", "remote", "app.js");
 const SOURCE = fs.readFileSync(APP, "utf8");
+const WORKER = fs.readFileSync(path.join(path.dirname(APP), "sw.js"), "utf8");
 const CSS = fs.readFileSync(path.join(path.dirname(APP), "app.css"), "utf8");
 /* The transcript box's padding, a side, as the stylesheet sets it. */
 const PRE_PADDING = /pre\.pane, pre\.transcript \{[^}]*padding: (\d+)px;/.exec(CSS)[1] + "px";
@@ -265,8 +266,10 @@ function deferred() {
 
 /* Boot app.js at `hash`, the machine answering every request through `answer`:
  * (method, path, body) -> {status, json}, or "network" for a request that never
- * arrives, or a promise of either. `globals` adds to the browser (fakePush). */
-function bootPage(hash, answer, globals) {
+ * arrives, or a promise of either. `globals` adds to the browser (fakePush); `base` is
+ * the page's own URL, the machine's at http by default. */
+function bootPage(hash, answer, globals, base) {
+  const address = base || BASE;
   const doc = {
     title: "",
     visibilityState: "visible",
@@ -291,27 +294,40 @@ function bootPage(hash, answer, globals) {
   const sockets = [];
   const timers = new Map();
   let lastTimer = 0;
-  const hold = (fn) => { // kept, and never fired but by a scenario
-    timers.set(++lastTimer, fn);
+  const hold = (fn, every) => { // kept, and never fired but by a scenario
+    timers.set(++lastTimer, { fn, every });
     return lastTimer;
   };
   const win = { listeners: {} };
   let current = hash;
   /* The tab's history from the page's own load on: setting the hash pushes an entry, as a
-   * browser does, and replace() takes the place of the one it is at. */
+   * browser does, and replace() takes the place of the one it is at; each fires popstate at
+   * once, then hashchange. With `globals.history`, the page has pushState and back() too. */
   const entries = [hash];
+  const states = [null];
   let at = 0;
   const changed = () => setImmediate(() => { for (const fn of win.listeners.hashchange || []) fn({ type: "hashchange" }); });
+  const popped = () => { for (const fn of win.listeners.popstate || []) fn({ type: "popstate", state: states[at] }); };
   const go = (value, replace) => {
     const next = String(value).charAt(0) === "#" ? String(value) : "#" + value;
     if (next === current) return;
     current = next;
-    if (replace) entries[at] = next;
-    else entries.splice(++at, entries.length, next);
+    if (!replace) at++;
+    entries.splice(at, replace ? 1 : entries.length, next);
+    states.splice(at, replace ? 1 : states.length, null);
+    popped();
     changed();
   };
+  const history = {
+    pushState(state) {
+      at++;
+      entries.splice(at, entries.length, current);
+      states.splice(at, states.length, state);
+    },
+    back: () => setImmediate(() => page.back()), // a traversal is queued, never done at once
+  };
   const location = {
-    protocol: "http:",
+    protocol: new URL(address).protocol,
     get hash() {
       return current;
     },
@@ -322,12 +338,13 @@ function bootPage(hash, answer, globals) {
       const value = String(url);
       go(value.slice(value.indexOf("#")), true);
     },
-    toString: () => BASE + current,
+    toString: () => address + current,
   };
   const fetch = async (url, init) => {
     const where = String(url).split("?")[0];
     const body = typeof init.body === "string" ? JSON.parse(init.body) : null;
-    requests.push({ method: init.method, path: where, body, query: String(url).split("?")[1] || "" });
+    const how = JSON.stringify({ credentials: init.credentials, cache: init.cache, headers: init.headers });
+    requests.push({ method: init.method, path: where, body, query: String(url).split("?")[1] || "", how });
     const reply = await answer(init.method, where, body);
     if (reply === "network") throw new TypeError("Failed to fetch");
     const text = JSON.stringify(reply.json);
@@ -340,15 +357,17 @@ function bootPage(hash, answer, globals) {
     sessionStorage: storage(),
     localStorage: storage(),
     fetch,
-    WebSocket: function WebSocket() {
-      return new FakeSocket(sockets);
+    WebSocket: function WebSocket(url) {
+      const sock = new FakeSocket(sockets);
+      sock.url = String(url);
+      return sock;
     },
     crypto: globalThis.crypto,
     URL,
     URLSearchParams,
     getComputedStyle: (node) => (node.tagName === "PRE" ? { paddingLeft: PRE_PADDING, paddingRight: PRE_PADDING } : {}),
-    setTimeout: hold,
-    setInterval: hold,
+    setTimeout: (fn) => hold(fn, false),
+    setInterval: (fn) => hold(fn, true),
     clearTimeout: (id) => timers.delete(id),
     clearInterval: (id) => timers.delete(id),
     addEventListener(type, fn) {
@@ -356,6 +375,7 @@ function bootPage(hash, answer, globals) {
     },
   });
   Object.assign(win, globals || {});
+  if (win.history === true) win.history = history;
   win.window = win;
   const context = vm.createContext(win);
   vm.runInContext(SOURCE, context, { filename: "app.js" });
@@ -372,22 +392,28 @@ function bootPage(hash, answer, globals) {
     live: () => sockets[sockets.length - 1],
     sent: (where) => requests.filter((one) => one.method === "POST" && one.path === where).map((one) => one.body),
     requests,
-    /* The names of the functions timers still hold, and one fired (and gone) by its name. */
-    timers: () => Array.from(timers.values(), (fn) => fn.name).filter(Boolean).sort(),
+    /* The names of the functions timeouts still hold (an interval is always held, so says
+     * nothing), and one fired by its name: a timeout is gone once fired, an interval stays, as
+     * a browser's do. */
+    timers: () => Array.from(timers.values()).filter((timer) => !timer.every).map((timer) => timer.fn.name).filter(Boolean).sort(),
     fireTimer(name) {
-      for (const [id, fn] of Array.from(timers)) { // what it fires may set another: not this time
-        if (fn.name !== name) continue;
-        timers.delete(id);
-        fn();
+      for (const [id, timer] of Array.from(timers)) { // what it fires may set another: not this time
+        if (timer.fn.name !== name) continue;
+        if (!timer.every) timers.delete(id);
+        timer.fn();
       }
     },
     /* The browser's Back: false once there is no entry of this page's before this one. */
     back() {
       if (at === 0) return false;
+      const was = current;
       current = entries[--at];
-      changed();
+      popped();
+      if (current !== was) changed();
       return true;
     },
+    /* Where the tab is in its history, and how many entries it has. */
+    history: () => ({ at, length: entries.length }),
   };
   return page;
 }
@@ -672,6 +698,54 @@ async function lostRead() {
   return { lost, phone, offline: page.run("S.offline"), bannerHidden: page.run("UI.banner.hidden") };
 }
 
+/* A Tell from the Actions menu whose request was lost, the phone offline so its new socket never
+ * opens: the sheet while it waits, once its 15 s are up, after Escape, and the writes that went
+ * once the phone is back; and a card's Reply, and a note on the Board tab, lost the same way,
+ * while they wait. */
+async function offlineSheet() {
+  const page = await agentView({ "POST api/agent/tell": () => "network" });
+  page.live().frame("fleet", FLEET);
+  await settle();
+  click(buttonNamed(page.main(), "Actions…"));
+  click(buttonNamed(page.run("UI.sheet"), "Tell…"));
+  find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "carry on";
+  click(buttonNamed(page.run("UI.sheet"), "Tell"));
+  await settle();
+  const sheet = (one) => {
+    const wrap = one.run("UI.sheet");
+    const close = buttonNamed(wrap, "Close");
+    const said = find(wrap, (node) => node.className === "status");
+    return { title: sheetTitle(one), busy: wrap.classList.contains("busy"), close: close ? close.disabled : null, said: said ? said.textContent : null };
+  };
+  const waiting = sheet(page);
+  page.run("Date.now = ((then) => () => then + 16000)(Date.now());");
+  page.fireTimer("tooLate");
+  await settle();
+  const late = sheet(page);
+  page.run("for (const fn of document.listeners.keydown || []) fn({ type: 'keydown', key: 'Escape' });");
+  const escaped = sheetTitle(page);
+  page.acceptSockets();
+  await settle();
+  const question = Object.assign({}, ITEM, { kind: "board_question", detail: { text: "Which store?", author: "lead-1" }, answers: [], actions: ["reply"] });
+  const feed = bootPage("#/", signedIn({ "GET api/needs": () => ({ status: 200, json: { items: [question] } }), "POST api/note": () => "network" }));
+  await settle();
+  feed.acceptSockets();
+  await settle();
+  click(buttonNamed(feed.main(), "Reply…"));
+  find(feed.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "Postgres";
+  click(buttonNamed(feed.run("UI.sheet"), "Post"));
+  await settle();
+  const board = bootPage("#/p/" + PROJECT + "/board", signedIn({ "POST api/note": () => "network" }));
+  await settle();
+  board.acceptSockets();
+  await settle();
+  find(board.main(), (node) => node.tagName === "TEXTAREA").value = "ship it";
+  click(buttonNamed(board.main(), "Post"));
+  await settle();
+  const noting = find(board.main(), (node) => node.className === "status").textContent;
+  return { waiting, late, escaped, told: page.sent("api/agent/tell").length, replying: sheet(feed), noting };
+}
+
 /* Two quick taps on a card's answers while the first is in flight. */
 async function quickAnswerTwice() {
   const held = deferred();
@@ -696,9 +770,11 @@ async function quickAnswerTwice() {
 }
 
 /* A browser that can take pushes and already holds a subscription made against
- * `key` (bytes); what it is asked to do is written down in `log`. */
+ * `key` (bytes); what it is asked to do is written down in `log`, and what the page listens
+ * for from its service worker in `heard`. */
 function fakePush(key) {
   const log = [];
+  const heard = {};
   const subscription = (name, bytes) => ({
     options: { applicationServerKey: Uint8Array.from(bytes).buffer },
     unsubscribe: async () => { log.push("unsubscribe " + name); return true; },
@@ -716,7 +792,8 @@ function fakePush(key) {
     },
   };
   const serviceWorker = {
-    getRegistration: async () => registration, register: async () => registration, ready: Promise.resolve(registration), addEventListener() {},
+    getRegistration: async () => registration, register: async () => registration, ready: Promise.resolve(registration),
+    addEventListener: (type, fn) => { (heard[type] = heard[type] || []).push(fn); },
   };
   const globals = {
     navigator: { serviceWorker, userAgent: "Mozilla/5.0 (Linux; Android 14)", platform: "Linux" },
@@ -725,7 +802,7 @@ function fakePush(key) {
     isSecureContext: true,
     atob: (text) => Buffer.from(text, "base64").toString("binary"),
   };
-  return { log, globals };
+  return { log, heard, globals };
 }
 
 const KEY_NOW = Array.from({ length: 65 }, (unused, n) => (n * 7 + 4) % 256);
@@ -1748,6 +1825,221 @@ async function sheetFocus() {
   return { typing, redrawn, closedOnto: page.run("document.activeElement === UI.main ? 'main' : document.activeElement.tagName") };
 }
 
+/* The focused element, as a screen reader follows it: its tag, its text, and whether it is on
+ * the page, in the screen, or in the nav. */
+function focusOf(page) {
+  return page.run("(() => { const at = document.activeElement; return { tag: at.tagName, text: at.textContent, "
+    + "connected: at.isConnected, main: UI.main.contains(at), nav: UI.nav.contains(at) }; })()");
+}
+
+/* A control focused and tapped, as a keyboard or a screen reader does, and where focus is then. */
+async function tapFocused(page, control) {
+  control.focus();
+  click(control);
+  await settle();
+  return focusOf(page);
+}
+
+/* Where focus lands when the route changes: on the page's first screen, left where a page's load
+ * leaves it; after a Projects row, then the Board tab; the bottom nav's Settings; a feed card's
+ * Open; and on an agent's screen with a sheet open, Back. */
+async function focusLands() {
+  const projects = bootPage("#/projects", signedIn({ "GET api/projects": () => ({ status: 200, json: [{ id: PROJECT, name: "x", agents: {} }] }) }));
+  await settle();
+  projects.acceptSockets();
+  await settle();
+  const loaded = focusOf(projects);
+  const row = await tapFocused(projects, find(projects.main(), (node) => node.tagName === "BUTTON" && node.className === "row"));
+  const tab = await tapFocused(projects, buttonNamed(projects.main(), "Board"));
+  const nav = await tapFocused(projects, buttonNamed(projects.run("UI.nav"), "Settings"));
+  const feed = bootPage("#/", signedIn({ "GET api/needs": () => ({ status: 200, json: { items: [ITEM] } }) }));
+  await settle();
+  feed.acceptSockets();
+  await settle();
+  const open = await tapFocused(feed, buttonNamed(feed.main(), "Open"));
+  const fleet = bootPage("#/p/" + PROJECT + "/fleet", signedIn());
+  await settle();
+  fleet.acceptSockets();
+  await settle();
+  await tapFocused(fleet, find(fleet.main(), (node) => node.tagName === "BUTTON" && node.className === "row"));
+  await tapFocused(fleet, buttonNamed(fleet.main(), "Actions…"));
+  fleet.back();
+  await settle();
+  return { loaded, row, tab, nav, open, back: focusOf(fleet) };
+}
+
+/* What was focused as it is drawn anew: a Fleet row by a fleet frame, a Projects row by the 15 s
+ * poll, a card's Open by a needs frame that changed the card, a Revoke once it went through,
+ * Reconnect here as the banner redraws, Settings' Turn on once its answer redrew the panel, and
+ * the feed's notifications line once Hide took it away. */
+async function focusKept() {
+  const fleet = bootPage("#/p/" + PROJECT + "/fleet", signedIn());
+  await settle();
+  fleet.acceptSockets();
+  await settle();
+  find(fleet.main(), (node) => node.tagName === "BUTTON" && node.className === "row").focus();
+  fleet.live().frame("fleet", Object.assign({}, FLEET, { agents: [Object.assign({}, FLEET.agents[0], { state: "working" })] }));
+  await settle();
+  const frame = focusOf(fleet);
+  const projects = bootPage("#/projects", signedIn({ "GET api/projects": () => ({ status: 200, json: [{ id: PROJECT, name: "x", agents: {} }] }) }));
+  await settle();
+  projects.acceptSockets();
+  await settle();
+  find(projects.main(), (node) => node.tagName === "BUTTON" && node.className === "row").focus();
+  projects.fireTimer("load");
+  await settle();
+  const poll = focusOf(projects);
+  const changed = bootPage("#/", signedIn({ "GET api/needs": () => ({ status: 200, json: { items: [ITEM] } }) }));
+  await settle();
+  changed.acceptSockets();
+  await settle();
+  buttonNamed(changed.main(), "Open").focus();
+  changed.live().frame("needs_you", { items: [Object.assign({}, ITEM, { reason: "coder-1 asks again" })] });
+  await settle();
+  const card = Object.assign(focusOf(changed), { redrawn: changed.main().textContent.indexOf("asks again") >= 0 });
+  let devices = TWO_DEVICES;
+  const revoking = bootPage("#/devices", signedIn({
+    "GET api/devices": () => ({ status: 200, json: devices }),
+    "DELETE api/devices/dev_4e5f6a7b": () => {
+      devices = TWO_DEVICES.slice(0, 1);
+      return { status: 200, json: { ok: true, id: "dev_4e5f6a7b", signed_out: false } };
+    },
+  }));
+  await settle();
+  revoking.acceptSockets();
+  await settle();
+  const revoked = await tapFocused(revoking, buttonNamed(revoking.main(), "Revoke"));
+  revoking.live().fire("close", { code: 4409 });
+  await settle();
+  buttonNamed(revoking.run("UI.banner"), "Reconnect here").focus();
+  fire(revoking, "window", "offline");
+  const banner = focusOf(revoking);
+  const settings = bootPage("#/settings", signedIn(pushRoutes([])), fakePush(KEY_NOW).globals);
+  await settle();
+  settings.acceptSockets();
+  await settle();
+  const toggled = await tapFocused(settings, buttonNamed(settings.main(), "Turn on"));
+  const feedNotice = bootPage("#/", signedIn(pushRoutes([])), fakePush(KEY_NOW).globals);
+  await settle();
+  feedNotice.acceptSockets();
+  await settle();
+  const hidden = await tapFocused(feedNotice, buttonNamed(feedNotice.main(), "Hide"));
+  return { frame, poll, card, revoked, banner, toggled, hidden };
+}
+
+/* A browser with CloseWatcher, as Chrome on Android 126 on is: Back goes to the newest active
+ * watcher, if any, as a cancel the page may refuse (once, while the human has tapped since),
+ * then a close; with none, it goes back in the tab's history. */
+function closeWatchers() {
+  const made = [];
+  class CloseWatcher {
+    constructor() {
+      this.active = true;
+      this.listeners = { cancel: [], close: [] };
+      made.push(this);
+    }
+
+    addEventListener(type, fn) {
+      this.listeners[type].push(fn);
+    }
+
+    destroy() {
+      this.active = false;
+    }
+  }
+  const back = (page, cancelable) => {
+    const watcher = made.filter((one) => one.active).pop();
+    if (!watcher) return page.back() ? "back" : "left";
+    let refused = false;
+    const cancel = { type: "cancel", cancelable, preventDefault: () => { refused = cancelable; } };
+    for (const fn of watcher.listeners.cancel) if (cancelable) fn(cancel);
+    if (refused) return "refused";
+    watcher.active = false;
+    for (const fn of watcher.listeners.close) fn({ type: "close" });
+    return "closed";
+  };
+  return { made, back, globals: { CloseWatcher } };
+}
+
+/* Android's Back while a sheet is open: a card's Tell with words typed in it, on a feed opened
+ * as the app's first screen; the same sheet shut with Close, then Back; a Tell whose answer is
+ * held, Back twice; and on an agent's screen, Actions… then Stop… in its place, then Back. What
+ * each Back did, the sheet left, where the page is, and the watchers still active. */
+async function backOverASheet() {
+  const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell"] });
+  const told = deferred();
+  const watchers = closeWatchers();
+  const page = bootPage("#/", signedIn({
+    "GET api/needs": () => ({ status: 200, json: { items: [asked] } }),
+    "POST api/agent/tell": () => told.promise,
+  }), watchers.globals);
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const active = () => watchers.made.filter((one) => one.active).length;
+  const after = (did) => ({ did, sheet: sheetTitle(page), at: page.location.hash, cards: page.main().querySelectorAll("div.card").length, active: active() });
+  click(buttonNamed(page.main(), "Tell…"));
+  find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "yes, merge";
+  const typed = after(watchers.back(page, true));
+  click(buttonNamed(page.main(), "Tell…"));
+  click(buttonNamed(page.run("UI.sheet"), "Close"));
+  const shut = active();
+  click(buttonNamed(page.main(), "Tell…"));
+  find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "yes, merge";
+  click(buttonNamed(page.run("UI.sheet"), "Tell"));
+  await settle();
+  const busy = [after(watchers.back(page, true)), after(watchers.back(page, false))];
+  const agent = closeWatchers();
+  const one = bootPage("#/p/" + PROJECT + "/a/coder-1/live", signedIn(), agent.globals);
+  await settle();
+  one.acceptSockets();
+  await settle();
+  click(buttonNamed(one.main(), "Actions…"));
+  click(buttonNamed(one.run("UI.sheet"), "Stop…"));
+  const replaced = { did: agent.back(one, true), sheet: sheetTitle(one), at: one.location.hash, made: agent.made.length };
+  replaced.active = agent.made.filter((watcher) => watcher.active).length;
+  return { typed, shut, busy, replaced };
+}
+
+/* The same without CloseWatcher (Safari; Firefox before 149), the sheet holding a history entry
+ * of its own. On the feed, the tab's first entry: a card's Tell with words typed in it, then
+ * Back; Tell again, then Close, once its Back landed; Tell again, then a route asked for as the
+ * sheet closes; and on an agent's screen, Actions…, a notification's card while it is open,
+ * then Back. Where history stands after each, the sheet, and the screen. */
+async function backWithoutCloseWatcher() {
+  const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell"] });
+  const page = bootPage("#/", signedIn({ "GET api/needs": () => ({ status: 200, json: { items: [asked] } }) }), { history: true });
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const after = (one, did) => ({ did, sheet: sheetTitle(one), at: one.location.hash, cards: one.main().querySelectorAll("div.card").length, history: one.history() });
+  click(buttonNamed(page.main(), "Tell…"));
+  find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "yes, merge";
+  const opened = page.history();
+  const did = page.back() ? "back" : "left";
+  await settle();
+  const typed = after(page, did);
+  click(buttonNamed(page.main(), "Tell…"));
+  click(buttonNamed(page.run("UI.sheet"), "Close"));
+  await settle();
+  const shut = after(page, "close");
+  click(buttonNamed(page.main(), "Tell…"));
+  page.run("closeSheet(); pageGo('#/projects');");
+  await settle();
+  const raced = after(page, "close, then go");
+  const one = bootPage("#/p/" + PROJECT + "/a/coder-1/live", signedIn(), { history: true });
+  await settle();
+  one.acceptSockets();
+  await settle();
+  click(buttonNamed(one.main(), "Actions…"));
+  one.run("pageGo('#/n/" + NEEDS_ID + "')");
+  await settle();
+  const led = after(one, "card");
+  one.back();
+  await settle();
+  return { opened, typed, shut, raced, led, back: after(one, "back") };
+}
+
 /* The Live tab across a sleep, as [stale, Send disabled, pane greyed as held]: with its pane
  * in; after a minute with nothing heard; once a wake's socket opened and a second passed;
  * once that socket's first frame came, not the pane; and once the pane came. */
@@ -1769,6 +2061,61 @@ async function staleAcrossAWake() {
   await settle();
   steps.push(state());
   return steps;
+}
+
+/* The Live tab's keys between a socket lost and the next one's pane, its pane in before: a wake
+ * whose new socket has not opened yet, a drop (1006) before the reconnect, and another tab taking
+ * the socket (4409) until Reconnect here; in each, a tap on 1. Each gives [Send waits, 1 waits,
+ * the pane greyed as held] then and once the next socket's pane came, and the keys sent. */
+async function heldBetweenSockets() {
+  const lost = async (how) => {
+    const page = await agentView({ "POST api/send-keys": () => ({ status: 200, json: { sent: true } }) });
+    const state = () => [buttonNamed(page.main(), "Send").disabled, buttonNamed(page.main(), "1").disabled, page.run("document.body.classList.contains('held')")];
+    if (how === "wake") fire(page, "document", "visibilitychange");
+    else page.live().fire("close", { code: how });
+    await settle();
+    const held = state();
+    click(buttonNamed(page.main(), "1"));
+    await settle();
+    const sent = page.sent("api/send-keys").length;
+    if (how === 1006) page.fireTimer("connect");
+    if (how === 4409) click(buttonNamed(page.run("UI.banner"), "Reconnect here"));
+    page.acceptSockets();
+    paneCame(page);
+    await settle();
+    return { held, sent, after: state() };
+  };
+  return { wake: await lost("wake"), dropped: await lost(1006), taken: await lost(4409) };
+}
+
+/* A socket that died with no close (Wi-Fi gave way to cellular, a NAT forgot it), as each second's
+ * tick finds it: on the Live tab, nothing heard for 30 s; the same second again; 26 s on, its
+ * replacement silent too; then that one's pane. And a page whose socket another tab took (4409),
+ * a minute stale. After each: the sockets opened, stale, and whether Send waits. */
+async function silentSocket() {
+  const page = await agentView();
+  const later = (ms) => page.run("Date.now = ((then) => () => then + " + ms + ")(Date.now());");
+  const state = () => ({ sockets: page.sockets.length, stale: page.run("S.stale"), send: buttonNamed(page.main(), "Send").disabled });
+  const tick = async () => {
+    page.fireTimer("onSecond");
+    await settle();
+    return state();
+  };
+  const steps = [state()];
+  later(30000);
+  steps.push(await tick(), await tick());
+  later(26000);
+  steps.push(await tick());
+  page.acceptSockets();
+  paneCame(page);
+  steps.push(await tick());
+  const taken = await agentView();
+  taken.live().fire("close", { code: 4409 });
+  await settle();
+  taken.run("Date.now = ((then) => () => then + 60000)(Date.now());");
+  taken.fireTimer("onSecond");
+  await settle();
+  return { steps, taken: { sockets: taken.sockets.length, stale: taken.run("S.stale"), state: taken.run("S.sockState") } };
 }
 
 /* The columns the Transcript asks the machine to wrap to, on 360, 390 and 412 px phones,
@@ -1807,7 +2154,7 @@ async function transcriptLoads() {
       shown: page.main().querySelectorAll("pre.transcript")[0].childNodes.map((line) => line.textContent),
       older: !buttonNamed(page.main(), "Load older").hidden,
     });
-    return { reads, tap, result };
+    return { page, reads, tap, result };
   };
   const twice = await opened();
   twice.tap("Load older");
@@ -1823,7 +2170,14 @@ async function transcriptLoads() {
   await settle();
   spliced.reads[1].settle(transcriptPage(["t1", "t2"], null, false));
   await settle();
-  return { twice: twice.result(), spliced: spliced.result() };
+  const last = await opened();
+  buttonNamed(last.page.main(), "Load older").focus();
+  last.tap("Load older");
+  await settle();
+  last.reads[1].settle(transcriptPage(["t1", "t2"], null, false));
+  await settle();
+  const focus = last.page.run("document.activeElement === UI.main ? 'main' : document.activeElement.textContent");
+  return { twice: twice.result(), spliced: spliced.result(), lastFocus: focus };
 }
 
 function transcriptPage(lines, cursor, more) {
@@ -2191,6 +2545,44 @@ async function socketCloses() {
   };
 }
 
+/* The strip at the top, writes off, an auto-off set and a card in the feed, before and after the
+ * socket closed 4410 (Remote went off), 4404 (the link changed) and 4401 (signed out), and a
+ * handshake whose probe the machine answered 404: whether the timer, Extend and the READ-ONLY
+ * pill show, what the dot says, and the tab's title. And the banner of a page whose socket
+ * another tab took (4409), before and after it had to unlock. */
+async function offStrip() {
+  const remote = { status: 200, json: { allow_write: false, auto_off_at: new Date(Date.now() + 30 * 60000).toISOString(), version: "test" } };
+  const strip = (page) => page.run("({ off: !UI.off.hidden, extend: !UI.extend.hidden, readOnly: !UI.ro.hidden, dot: UI.dot.attrs['aria-label'], title: document.title })");
+  const closed = async (code, opened, probe) => {
+    let reads = 0;
+    const page = bootPage("#/", signedIn({
+      "GET api/remote": () => (++reads > 1 && probe ? probe : remote),
+      "GET api/needs": () => ({ status: 200, json: { items: [ITEM] } }),
+    }));
+    await settle();
+    if (opened) page.acceptSockets();
+    const before = strip(page);
+    page.live().fire("close", { code });
+    await settle();
+    return { before, after: strip(page), at: page.location.hash };
+  };
+  const taken = bootPage("#/", signedIn());
+  await settle();
+  taken.acceptSockets();
+  taken.live().fire("close", { code: 4409 });
+  await settle();
+  const said = !taken.run("UI.banner.hidden");
+  taken.run("toUnlock()");
+  await settle();
+  return {
+    off: await closed(4410, true),
+    link: await closed(4404, true),
+    signedOut: await closed(4401, true),
+    probedGone: await closed(1006, false, { status: 404, json: { error: "not_found", message: "no such link" } }),
+    takenThenLocked: { said, after: !taken.run("UI.banner.hidden"), at: taken.location.hash },
+  };
+}
+
 /* The strip at the top and the bottom nav (SPEC §6.3): an auto-off 10 minutes away with writes
  * on and two cards in the feed; then a remote frame with the auto-off two hours away and
  * writes off; then the READ-ONLY pill tapped. */
@@ -2268,6 +2660,113 @@ async function screensListed() {
   };
 }
 
+/* The card screen, a push link's target, as its card clears, comes back (its pane printed, or a
+ * scan failed) before the cleared view's fleet read answered, and then clears and comes back
+ * twice more, each read answered at once. What the screen holds after each step, its card as
+ * "card". */
+async function cardFlicker() {
+  const prompt = Object.assign({}, ITEM, {
+    kind: "permission", detail: { tool: "Bash", input: { command: "rm -rf build" } }, answers: [{ label: "1", keys: ["1"] }],
+  });
+  const reads = [];
+  const page = bootPage("#/n/" + NEEDS_ID + "/p/" + PROJECT + "/a/coder-1", signedIn({
+    "GET api/needs": () => ({ status: 200, json: { items: [prompt] } }),
+    "GET api/fleet": () => (reads[reads.length] = deferred()).promise,
+  }));
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const shown = () => page.main().querySelectorAll("div.data")[0].childNodes.map((node) => (node.classList.contains("card") ? "card" : node.textContent));
+  const feed = async (items, answer) => {
+    page.live().frame("needs_you", { items });
+    await settle();
+    if (answer) for (const read of reads) read.settle({ status: 200, json: FLEET });
+    await settle();
+    return shown();
+  };
+  const steps = { first: await feed([]) };
+  await feed([prompt]);
+  for (const read of reads) read.settle({ status: 200, json: FLEET }); // answered under the card
+  await settle();
+  steps.readLate = shown();
+  return Object.assign(steps, { cleared: await feed([], true), back: await feed([prompt]), again: await feed([], true) });
+}
+
+/* Reads refused while the screen that made them stays open: a Fleet tab whose project the machine
+ * no longer has (404), then a needs frame, a heartbeat saying the scans fell behind, another
+ * project's fleet frame, and a wake; and the Projects screen answered 503, then two more polls
+ * answered the same, and a needs frame. What the screen shows after each. */
+async function failuresKept() {
+  const fleet = bootPage("#/p/prj_gone/fleet", signedIn({
+    "GET api/fleet": () => ({ status: 404, json: { error: "not_found", message: "no project matches 'prj_gone'" } }),
+  }));
+  await settle();
+  fleet.acceptSockets();
+  await settle();
+  const tab = () => textsOf(fleet.main().querySelectorAll("div.data")[0].childNodes);
+  const steps = [tab()];
+  fleet.live().frame("needs_you", { items: [] });
+  await settle();
+  steps.push(tab());
+  fleet.live().frame("heartbeat", { needs_scanned_at: "2026-10-07T10:00:00+00:00" }, { ts: "2026-10-07T10:01:00+00:00" });
+  fleet.live().frame("fleet", FLEET);
+  await settle();
+  steps.push(tab());
+  fire(fleet, "document", "visibilitychange");
+  fleet.acceptSockets();
+  await settle();
+  steps.push(tab());
+  const projects = bootPage("#/projects", signedIn({
+    "GET api/projects": () => ({ status: 503, json: { error: "unavailable", message: "tmux did not answer" } }),
+  }));
+  await settle();
+  projects.acceptSockets();
+  await settle();
+  const listed = () => textsOf(projects.main().querySelectorAll("div.data")[0].childNodes);
+  const polls = [listed()];
+  for (let n = 0; n < 2; n++) {
+    projects.fireTimer("load");
+    await settle();
+    polls.push(listed());
+  }
+  projects.live().frame("needs_you", { items: [] });
+  await settle();
+  polls.push(listed());
+  return { fleet: steps, projects: polls, reads: projects.requests.filter((one) => one.path === "api/projects").length };
+}
+
+/* The feed and a card screen whose read of the feed the machine refused (503), with no feed frame
+ * yet; then the feed once a frame brings it. What each shows. */
+async function needsRefused() {
+  const refused = { "GET api/needs": () => ({ status: 503, json: { error: "unavailable", message: "the scan failed" } }) };
+  const feed = bootPage("#/", signedIn(refused));
+  await settle();
+  feed.acceptSockets();
+  await settle();
+  const said = () => find(feed.main(), (node) => node.className === "empty");
+  const steps = [[said().hidden ? "" : said().textContent, feed.main().querySelectorAll("div.card").length]];
+  feed.live().frame("needs_you", { items: [ITEM] });
+  await settle();
+  steps.push([said().hidden ? "" : said().textContent, feed.main().querySelectorAll("div.card").length]);
+  const card = bootPage("#/n/" + NEEDS_ID, signedIn(refused));
+  await settle();
+  return { feed: steps, card: textsOf(card.main().querySelectorAll("div.data")[0].childNodes) };
+}
+
+/* The Tasks tab of a board whose tasks were all dropped, and of one with a dropped task among
+ * the rest: what it shows under its tabs. */
+async function droppedTasks() {
+  const shown = async (json) => {
+    const page = bootPage("#/p/" + PROJECT + "/tasks", signedIn({ "GET api/tasks": () => ({ status: 200, json }) }));
+    await settle();
+    return textsOf(page.main().querySelectorAll("div.data")[0].childNodes);
+  };
+  return {
+    all: await shown([{ title: "migrate the db", status: "dropped" }, { title: "old spike", status: "dropped" }]),
+    some: await shown([{ title: "ship it", status: "done" }, { title: "old spike", status: "dropped" }]),
+  };
+}
+
 /* Notifications where the page offers them (SPEC §6.3): the feed of a device the machine
  * sends nothing to yet; Settings with them on, and Send test answered not_subscribed; and
  * Settings in Safari on an iPhone, the page not on its Home Screen. */
@@ -2294,6 +2793,77 @@ async function pushScreens() {
     on: { said, test: on.toast() },
     iphone: find(iphone.main(), (node) => node.className === "muted").textContent,
   };
+}
+
+/* sw.js run as a worker of its scope, with the windows open in its browser at `open`: what it
+ * did, in order, for a push and for each notification tap, and what it posted to each window. */
+function workerAt(scope, open) {
+  const did = [];
+  const listeners = {};
+  const windows = open.map((url) => ({ url, posted: [] }));
+  const self = {
+    location: { origin: new URL(scope).origin },
+    registration: { scope, showNotification: async (title, options) => { did.push(["show", title, options.tag]); } },
+    clients: {
+      matchAll: async () => windows.map((one) => ({
+        url: one.url,
+        focus: async () => { did.push(["focus", one.url]); },
+        postMessage: (message) => { did.push(["post", one.url, message]); one.posted.push(message); },
+      })),
+      openWindow: async (url) => { did.push(["open", url]); },
+      claim: async () => undefined,
+    },
+    skipWaiting: () => undefined,
+    addEventListener: (type, fn) => { listeners[type] = fn; },
+  };
+  vm.runInContext(WORKER, vm.createContext({ self, URL }), { filename: "sw.js" });
+  const fire = async (type, event) => {
+    let waited = Promise.resolve();
+    listeners[type](Object.assign({ waitUntil: (promise) => { waited = promise; } }, event));
+    await waited;
+  };
+  const tap = (url) => fire("notificationclick", { notification: { close: () => did.push(["close"]), data: { url } } });
+  return { did, windows, fire, tap };
+}
+
+/* A notification tapped (SPEC §6.5): with the page open on Settings, the worker's message
+ * handed to the page; with no page open; with the link on another ngrok address (the domain
+ * changed) and the old page open; with a link no worker may open; and a push, shown. */
+async function notificationTap() {
+  const card = "#/n/" + NEEDS_ID + "/p/" + PROJECT + "/a/coder-1";
+  const scope = "https://x.ngrok-free.app/r/" + "t".repeat(32) + "/";
+  const open = workerAt(scope, [scope + "#/settings"]);
+  await open.tap(scope + card);
+  const push = fakePush(KEY_NOW);
+  const page = bootPage("#/settings", signedIn(pushRoutes([])), push.globals, scope);
+  await settle();
+  page.acceptSockets();
+  await settle();
+  for (const message of open.windows[0].posted) for (const fn of push.heard.message || []) fn({ data: message });
+  await settle();
+  const none = workerAt(scope, []);
+  await none.tap(scope + card);
+  const moved = workerAt(scope, [scope + "#/"]);
+  await moved.tap("https://y.ngrok-free.app/r/" + "t".repeat(32) + "/" + card);
+  const forged = workerAt(scope, [scope + "#/settings"]);
+  await forged.tap("https://evil.example/r/t/" + card);
+  const shown = workerAt(scope, []);
+  await shown.fire("push", { data: { json: () => ({ title: "x: coder-1 needs you", body: "coder-1 asks", tag: "asq-needs", url: scope + card }) } });
+  return { open: open.did, landed: page.location.hash, none: none.did, moved: moved.did, forged: forged.did, shown: shown.did };
+}
+
+/* The socket the page opens, on the machine itself under http and through ngrok under https;
+ * and how every request the page made on the way asked (credentials, cache, headers). */
+async function socketUrls() {
+  const asked = new Set();
+  const at = async (base) => {
+    const page = bootPage("#/", signedIn(), null, base);
+    await settle();
+    for (const one of page.requests) asked.add(one.how);
+    return page.sockets.map((sock) => sock.url);
+  };
+  const urls = { http: await at(BASE), https: await at("https://x.ngrok-free.app/r/" + "t".repeat(32) + "/") };
+  return Object.assign(urls, { asked: Array.from(asked, (one) => JSON.parse(one)) });
 }
 
 /* What each write carries (SPEC §6.3), as the machine received it, its request_id left out:
@@ -2447,6 +3017,7 @@ async function main() {
     lostKeyLongAgo: await lostKeyLongAgo(),
     lostThenSignedOut: await lostThenSignedOut(),
     lostRead: await lostRead(),
+    offlineSheet: await offlineSheet(),
     emptySend: await emptySend(),
     scansStopped: await scansStopped(),
     pushKeyChanged: await pushTurnedOn(KEY_BEFORE),
@@ -2476,9 +3047,15 @@ async function main() {
     keysInOrder: await keysInOrder(),
     padConfirms: await padConfirms(),
     staleAcrossAWake: await staleAcrossAWake(),
+    heldBetweenSockets: await heldBetweenSockets(),
+    silentSocket: await silentSocket(),
     transcriptSend: await transcriptSend(),
     transcriptSendGuarded: await transcriptSendGuarded(),
     sheetFocus: await sheetFocus(),
+    focusLands: await focusLands(),
+    focusKept: await focusKept(),
+    backOverASheet: await backOverASheet(),
+    backWithoutCloseWatcher: await backWithoutCloseWatcher(),
     transcriptColumns: await transcriptColumns(),
     transcriptLoads: await transcriptLoads(),
     transcriptStale: await transcriptStale(),
@@ -2493,8 +3070,15 @@ async function main() {
     socketCloses: await socketCloses(),
     unlockWait: await unlockAnswered(429, { error: "rate_limited", message: "too many tries" }),
     statusStrip: await statusStrip(),
+    offStrip: await offStrip(),
     screensListed: await screensListed(),
+    cardFlicker: await cardFlicker(),
+    failuresKept: await failuresKept(),
+    needsRefused: await needsRefused(),
+    droppedTasks: await droppedTasks(),
     pushScreens: await pushScreens(),
+    notificationTap: await notificationTap(),
+    socketUrls: await socketUrls(),
     writeBodies: await writeBodies(),
     padOrKeyboard: await padOrKeyboard(),
     staleCards: await staleCards(),

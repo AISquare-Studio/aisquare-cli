@@ -22,6 +22,7 @@ pattern that matches nothing passes on any page.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import struct
@@ -289,6 +290,82 @@ def test_the_content_types_are_a_closed_list() -> None:
         assert remote_page.page_content_type(name) is None, name
 
 
+def test_an_installed_build_is_typed_by_a_closed_list_never_the_machines_tables(
+    runtime: Runtime, built: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An installed build was served by ``FileResponse``, typed by ``mimetypes``, which reads
+    the machine's own tables: on Windows the registry, where ``.js`` can be ``text/plain``.
+    Served so beside ``nosniff``, every script of the page was refused and it never booted.
+    Here the machine's tables say what such a registry says, as CPython reads it on Windows.
+    A type the closed list does not hold comes from Python's own table, not the machine's."""
+    import mimetypes
+
+    tables = mimetypes.MimeTypes()
+    for suffix in (".js", ".css", ".pdf"):
+        tables.add_type("text/plain", suffix)
+    monkeypatch.setattr(mimetypes, "_db", tables)
+    assert mimetypes.guess_type("app.js")[0] == "text/plain", "the control: the tables say so"
+    names = ["index-DfFvQnFu.js", "legacy.js", "chunk.mjs", "app.css", "inter.woff2", "data.json"]
+    names.append("guide.pdf")
+    for name in [*names, "notes.xyz"]:
+        (built / "assets" / name).write_text("x")
+    remote_server.install_page(built)
+    client = make_client(build_app(runtime, sources=_sources()))
+
+    typed = {
+        name: client.get(f"{base(runtime)}/assets/{name}").headers["content-type"]
+        for name in [*names, "notes.xyz"]
+    }
+    index = client.get(f"{base(runtime)}/")
+
+    assert typed == {
+        "index-DfFvQnFu.js": "text/javascript; charset=utf-8",
+        "legacy.js": "text/javascript; charset=utf-8",
+        "chunk.mjs": "text/javascript; charset=utf-8",
+        "app.css": "text/css; charset=utf-8",
+        "inter.woff2": "font/woff2",
+        "data.json": "application/json",
+        "guide.pdf": "application/pdf",
+        "notes.xyz": "application/octet-stream",
+    }
+    assert index.headers["content-type"] == "text/html; charset=utf-8"
+    assert index.headers["x-content-type-options"] == "nosniff"
+
+
+def test_the_page_is_decided_and_read_off_the_event_loop(
+    runtime: Runtime, built: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Which page answers asks the disk (the installed index, a file's path resolved), and
+    the first answer reads the bundled page's files: all of it ran in the request's coroutine,
+    on the event loop that serves every request and socket. The bundled page, then an
+    installed build, each answered from a worker thread."""
+    import asyncio
+
+    ran: list[tuple[str, bool]] = []
+
+    def watched(name: str, real: Any) -> Any:
+        def call(*args: Any) -> Any:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                ran.append((name, False))
+            else:
+                ran.append((name, True))
+            return real(*args)
+
+        return call
+
+    for name in ("bundled_page_response", "build_content_type"):
+        monkeypatch.setattr(remote_page, name, watched(name, getattr(remote_page, name)))
+    client = make_client(build_app(runtime, sources=_sources()))
+
+    assert client.get(f"{base(runtime)}/app.js").status_code == 200
+    remote_server.install_page(built)
+    assert client.get(f"{base(runtime)}/assets/app.js").status_code == 200
+
+    assert ran == [("bundled_page_response", False), ("build_content_type", False)]
+
+
 def test_the_page_headers_keep_the_token_in_the_path_to_ourselves() -> None:
     assert remote_page.remote_page_headers() == {
         "x-content-type-options": "nosniff",
@@ -480,6 +557,9 @@ def test_the_page_navigates_in_page_go_and_nowhere_else() -> None:
     inside, outside = _navigations_outside_page_go(_text("app.js"))
     assert inside == 2, "pageGo is THE place the page navigates: it pushes, or it replaces"
     assert outside == []
+    # A sheet's own history entry is this URL again (no URL argument), and its Back that one.
+    calls = re.findall(r"\bhistory\s*\.\s*(\w+)\s*\(([^)]*)\)", _text("app.js"))
+    assert calls == [("back", ""), ("pushState", '{ sheet: true }, ""')]
 
 
 def test_the_sink_checks_can_fail() -> None:
@@ -619,8 +699,9 @@ BUDGETS = {
     "app.css": 16 * 1024,
     # SPEC §6.1 set 110 KB, and the page met it with 13 bytes to spare. The third review of
     # #243 found more for it to do: ask for a board only on its tab, keep keys in tap order,
-    # answer a late reply in its own sheet. This is their room; the page stays under 150 KB.
-    "app.js": 124 * 1024,
+    # answer a late reply in its own sheet. The fourth, and a sweep of the page in a real
+    # browser, found more again. This is their room; the page stays under 150 KB.
+    "app.js": 129 * 1024,
     "sw.js": 4 * 1024,
     "manifest.webmanifest": 1024,
 }
@@ -785,6 +866,57 @@ def test_fit_width_sizes_the_pane_inside_the_screens_side_insets() -> None:
     assert int(fixed.group(1)) >= sum(sides) + 2 * (pad + border)
 
 
+def _themes(css: str) -> dict[str, dict[str, str]]:
+    """Each theme's colour tokens: the dark one is ``:root``, the light one its media block."""
+    dark = re.search(r"\n:root \{([^}]*)\}", css)
+    light = re.search(r"prefers-color-scheme: light\) \{\s*:root \{([^}]*)\}", css)
+    assert dark is not None and light is not None
+    tokens = dict(re.findall(r"(--[a-z0-9-]+): (#[0-9a-f]{6})", dark.group(1)))
+    return {
+        "dark": tokens,
+        "light": {**tokens, **dict(re.findall(r"(--[a-z0-9-]+): (#[0-9a-f]{6})", light.group(1)))},
+    }
+
+
+def _contrast(ink: str, ground: str) -> float:
+    """WCAG 2's contrast ratio of two ``#rrggbb`` colours."""
+
+    def luminance(colour: str) -> float:
+        rgb = [int(colour[n : n + 2], 16) / 255 for n in (1, 3, 5)]
+        r, g, b = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    high, low = sorted((luminance(ink), luminance(ground)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def test_every_text_colour_reads_at_aa_contrast_in_both_themes() -> None:
+    """WCAG AA asks 4.5:1 of text this size. The filled badges were white on the dark
+    theme's --alarm and --ask, 2.5:1 and 2.2:1: Permission, Question, Plan, NEEDS YOU and the
+    Needs count, the page's most urgent words, were its hardest to read on the theme it
+    starts in. The light theme's accent (the primary button, a link, a waiting agent) and
+    warn (READ-ONLY, the auto-off, a usage limit) read at 3.3 to 4.2:1. Each ink the
+    stylesheet writes with, on each ground it is drawn on, in both themes."""
+    css = _text("app.css")
+    fills = (".k-urgent, .s-attention", ".k-ask", ".count:not(:empty)", "button.primary", ".toast")
+    inks = ("--fg", "--muted", "--accent", "--warn", "--alarm", "--ok")
+    for name, theme in _themes(css).items():
+
+        def colour(value: str, theme: dict[str, str] = theme) -> str:
+            token = re.fullmatch(r"var\((--[a-z0-9-]+)\)", value)
+            return theme[token.group(1)] if token else value
+
+        for rule in fills:
+            ink = colour(_css_value(css, rule, "color"))
+            ground = colour(_css_value(css, rule, "background"))
+            assert _contrast(ink, ground) >= 4.5, (name, rule, ink, ground)
+        for ink in inks:
+            for ground in ("--bg", "--panel", "--raise"):
+                assert _contrast(theme[ink], theme[ground]) >= 4.5, (name, ink, ground)
+        assert _contrast(theme["--fg"], theme["--pane"]) >= 4.5, name
+    assert _contrast("#ffffff", _themes(css)["dark"]["--alarm"]) < 3, "the control: white on it"
+
+
 # --- 10. the service worker -----------------------------------------------------------------
 
 NGROK_SUFFIXES = (".ngrok-free.app", ".ngrok.app", ".ngrok.io", ".ngrok-free.dev", ".ngrok.dev")
@@ -810,7 +942,8 @@ _RGB = re.compile(r"rgb\((\d{1,3}), (\d{1,3}), (\d{1,3})\)")
 _BIDI = "؜‎‏‪‫‬‭‮⁦⁧⁨⁩"
 
 
-def _node_report(harness: Path) -> dict[str, Any]:
+def _node_report(harness: Path, cards: list[dict[str, object]] | None = None) -> dict[str, Any]:
+    """The harness's report; ``cards``, items the server built, go to it as ``ASQ_CARDS``."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not on PATH; the page's runtime checks need it")
@@ -822,6 +955,7 @@ def _node_report(harness: Path) -> dict[str, Any]:
         encoding="utf-8",
         timeout=120,
         check=False,
+        env=None if cards is None else {**os.environ, "ASQ_CARDS": json.dumps(cards)},
     )
     assert result.returncode == 0, result.stderr
     report: dict[str, Any] = json.loads(result.stdout)
@@ -922,6 +1056,92 @@ def test_a_permission_whose_input_was_too_large_to_send_keeps_the_excerpt_naming
     shown = node_report["builtExcerpts"]
     assert shown["droppedWrite"] == ["Write(/home/me/app/src/big_module.py)"]
     assert shown["droppedHeredoc"] == ["Bash(cat > schema.sql <<'EOF')"]
+
+
+def _served(tmp_path: Path, tool: str, **payload: object) -> dict[str, object]:
+    """The item the scan builds for coder-1 waiting on one ``tool`` call, from a transcript
+    as the scan reads it, in the shape ``GET api/needs`` sends it."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession
+
+    now = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
+    project = ProjectInfo(id="prj_x", root=Path("/work/x"))
+    row = FleetAgent(
+        id="agt_1",
+        project_id=project.id,
+        label="coder-1",
+        role="coder",
+        pane_id="%1",
+        session_id="ses_1",
+        cwd=project.root,
+        created_at=now - timedelta(hours=1),
+    )
+    session = TeamSession(
+        id="ses_1",
+        project_id=project.id,
+        role="coder",
+        started_at=row.created_at,
+        last_seen_at=now - timedelta(minutes=3),
+        state="attention",
+    )
+    status = FleetAgentStatus.model_validate(
+        {"agent": row, "state": "attention", "detail": None, "session": session}
+    )
+    asked = {"role": "user", "content": "go on"}
+    call = {"type": "tool_use", "id": "toolu_1", "name": tool, "input": payload}
+    records = [
+        {"type": "user", "uuid": "u1", "timestamp": "2026-10-07T11:57:00Z", "message": asked},
+        {
+            "type": "assistant",
+            "uuid": "a1",
+            "timestamp": "2026-10-07T11:58:00Z",
+            "message": {"id": "m1", "role": "assistant", "content": [call], "stop_reason": None},
+        },
+    ]
+    path = tmp_path / f"t{len(list(tmp_path.iterdir()))}.jsonl"
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    tail = transcript.read_transcript_tail(path)
+    (item,) = remote_needs.needs_from_agent(status, tail, project=project, events=[], now=now)
+    return item.needs_item_json()
+
+
+def test_a_card_says_what_it_leaves_out_of_the_call_its_buttons_answer(tmp_path: Path) -> None:
+    """A permission's command was cut at 2 000 characters, and its detail fit to 4 KiB, marked
+    by a "…" in mid-text alone: a 3 549-character heredoc that ends in ``rm -rf`` showed as
+    ``print('step…`` and then ``description: Run the steps``, all of it to the eye, with 1
+    and 2 live. An input over 16 KiB never reaches the scan, and its card said ``tool:
+    Write`` and nothing more, as a call with no input would; a plan over 16 KiB, no plan at
+    all. Each card says what it leaves out now, from the transcript the scan reads to the
+    text the page draws; a call shown whole says nothing of the kind."""
+    steps = "python3 - <<'EOF'\n" + "print('step')\n" * 250 + "EOF\nrm -rf ~/projects/important"
+    big = "z" * (transcript.TOOL_INPUT_MAX + 1)
+    cards = [
+        _served(tmp_path, "Bash", command=steps, description="Run the steps"),
+        _served(tmp_path, "Write", file_path="/src/big.py", content=big),
+        _served(tmp_path, "ExitPlanMode", plan="1. a step\n" * 2_000),
+        _served(tmp_path, "Bash", command="pytest -q", description="Run the tests"),
+    ]
+    cut, write, plan, whole = (card["detail"] for card in cards)
+    assert isinstance(cut, dict) and cut["cut"] == {"command": len(steps)} and len(steps) > 2_000
+    assert len(json.dumps(cut, ensure_ascii=False, separators=(",", ":")).encode()) <= 4_096
+    assert write == {"tool": "Write", "input": {}, "dropped": True}
+    assert plan == {"plan": "", "dropped": True}
+    assert whole == {
+        "tool": "Bash",
+        "input": {"command": "pytest -q", "description": "Run the tests"},
+    }
+    said = [
+        [text for name, text in card if name == "cut"]
+        for card in _node_report(HARNESS, cards)["served"]
+    ]
+    tail = " Open the agent to read it before you answer."
+    assert said[0] == [
+        f"Not all of it: the card shows the start of its command ({len(steps)} characters in"
+        f" all).{tail}"
+    ]
+    assert said[1] == said[2] == [f"Not all of it: this was too long to send to the phone.{tail}"]
+    assert said[3] == []
 
 
 def test_the_page_names_a_tool_call_by_the_keys_the_server_summarises_it_by() -> None:
@@ -1112,6 +1332,33 @@ def test_a_write_lost_before_the_phone_had_to_unlock_is_not_sent_again(
     assert gone["hash"] == "#/unlock"
     assert gone["said"].startswith("Not sent again — the phone was signed out")
     assert len(gone["bodies"]) == 1 and gone["pending"] == 0
+
+
+def test_a_sheet_whose_write_was_lost_lets_go_once_the_write_would_not_go_again(
+    boot_report: dict[str, Any],
+) -> None:
+    """A lost write waited for the next socket to open, and its sheet with it: busy, Close
+    disabled, Escape and a tap beside it refused, the page behind inert. With the phone still
+    offline nothing ever settled it, while the sheet went on promising a retry "within 15
+    seconds" long after, and an installed app has no Back. Past those 15 s the write would not
+    go again anyway: the wait ends there, the sheet says so and can be closed, and nothing is
+    sent when the phone is back. A Reply, and a note on the Board tab, said nothing at all
+    while they waited."""
+    offline = boot_report["offlineSheet"]
+    waiting = "The phone lost the connection; this goes out again if it is back within 15 seconds."
+    tell = {"title": "Tell coder-1", "busy": True, "close": True, "said": waiting}
+    assert offline["waiting"] == tell
+    assert offline["late"] == {
+        **tell,
+        "busy": False,
+        "close": False,
+        "said": "Not sent again — the phone was away too long to be sure the agent still shows "
+        "what you saw. If the machine got it, its result shows here; if not, look, then send "
+        "it again.",
+    }
+    assert offline["escaped"] is None and offline["told"] == 1
+    assert offline["replying"] == {**tell, "title": "Reply on the board"}
+    assert offline["noting"] == waiting, "a note on the Board tab says it waits too"
 
 
 def test_send_with_nothing_typed_presses_no_enter(boot_report: dict[str, Any]) -> None:
@@ -1583,6 +1830,41 @@ def test_a_page_that_slept_holds_its_keys_until_the_machine_says_what_is_on_scre
     assert _css_value(_text("app.css"), "body.held pre.pane", "filter") == "grayscale(1)"
 
 
+def test_a_socket_that_died_without_a_close_is_replaced_once_the_page_goes_stale(
+    boot_report: dict[str, Any],
+) -> None:
+    """Only a close, a wake or a lost write opened a new socket. One that died with no close
+    (Wi-Fi gave way to cellular, a NAT or the tunnel's edge forgot it) fired none of them: the
+    page went stale after 25 s and stayed so, every button waiting, so no write could be lost
+    to reconnect it either, and an installed app has no reload. The tick that finds the page
+    stale replaces a socket still open or connecting, once a stale span; a page whose socket
+    another tab took waits for its own Reconnect, or the two would take it from each other.
+    Each step is the sockets opened, stale, and whether Send waits."""
+    silent = boot_report["silentSocket"]
+    assert silent["steps"] == [
+        {"sockets": 1, "stale": False, "send": False},
+        {"sockets": 2, "stale": True, "send": True},  # 30 s with nothing heard
+        {"sockets": 2, "stale": True, "send": True},  # the same second: no third
+        {"sockets": 3, "stale": True, "send": True},  # 26 s on, the new one silent too
+        {"sockets": 3, "stale": False, "send": False},  # its pane came
+    ]
+    assert silent["taken"] == {"sockets": 1, "stale": True, "state": "replaced"}
+
+
+def test_the_live_tabs_keys_wait_from_the_moment_its_socket_is_lost(
+    boot_report: dict[str, Any],
+) -> None:
+    """The Live tab's keys waited for the pane only once the next socket had opened. Between the
+    loss and that open, a wake's handshake, a reconnect's backoff after a drop, or for good
+    after another tab took the socket (4409), the pad and Send were live beside a pane from the
+    old socket: a "1" tapped there was typed into whatever the agent showed by then, a newer
+    prompt included (docs/remote.md: held "until its pane has come through again"). Each case
+    is held, nothing sent, and live again once the next socket's pane came."""
+    held = boot_report["heldBetweenSockets"]
+    for how in ("wake", "dropped", "taken"):
+        assert held[how] == {"held": [True] * 3, "sent": 0, "after": [False] * 3}, how
+
+
 def test_the_transcript_tabs_keys_never_wait_for_a_pane(boot_report: dict[str, Any]) -> None:
     """The Live tab's keys wait for its pane to come on the socket open now. The Transcript
     tab has the same input bar and watches no pane: were it held as Live is, Send and the
@@ -1624,6 +1906,99 @@ def test_a_sheet_keeps_focus_where_it_put_it_and_closes_onto_the_screen_once_its
     is gone: here the card's Tell…, drawn anew by the next feed frame."""
     focus = boot_report["sheetFocus"]
     assert focus == {"typing": "TEXTAREA", "redrawn": True, "closedOnto": "main"}
+
+
+def test_focus_lands_on_the_new_screen_when_the_route_changes(
+    boot_report: dict[str, Any],
+) -> None:
+    """A route change cleared the screen under the focused control and moved focus nowhere: it
+    fell to the page, so a screen reader lost its place and was never told the screen had
+    changed (a row, a tab, a card's Open, Back with a sheet open). Focus goes to the new
+    screen's heading now, or to the tab chosen on a tab switch, and stays where it was when
+    that is still on the page (the bottom nav). A page's first screen leaves it alone."""
+    lands = boot_report["focusLands"]
+    on = {"connected": True, "main": True, "nav": False}
+    assert lands["loaded"]["tag"] == "BODY", "a page's first screen leaves focus where loads do"
+    assert lands["row"] == {"tag": "H2", "text": "x", **on}
+    assert lands["tab"] == {"tag": "BUTTON", "text": "Board", **on}
+    assert lands["nav"] == {
+        "tag": "BUTTON",
+        "text": "Settings",
+        "connected": True,
+        "main": False,
+        "nav": True,
+    }
+    assert lands["open"] == {"tag": "H2", "text": "coder-1", **on}
+    assert lands["back"] == {"tag": "H2", "text": "x", **on}
+
+
+def test_focus_stays_on_what_a_redraw_puts_in_place_of_the_focused_control(
+    boot_report: dict[str, Any],
+) -> None:
+    """A redraw took the focused control away as a route change did, and focus fell to the
+    page: a row at every fleet frame and every 15 s poll on Projects, a card's button when a
+    needs frame changed the card, Reconnect here when the banner redrew, Settings' Turn on
+    when its answer redrew the panel. Focus stays on what took its place now, and goes to
+    the screen when nothing did: a revoke, the feed's notifications line hidden, Load older
+    hidden once the transcript's first page came."""
+    kept = boot_report["focusKept"]
+    on = {"connected": True, "main": True, "nav": False}
+    assert kept["frame"] == {"tag": "BUTTON", "text": "coder-1workingcoder", **on}
+    assert kept["poll"] == {"tag": "BUTTON", "text": "xno agents", **on}
+    assert kept["card"] == {"tag": "BUTTON", "text": "Open", **on, "redrawn": True}
+    assert kept["revoked"]["tag"] == "MAIN" and kept["revoked"]["connected"]
+    banner = {"tag": "BUTTON", "text": "Reconnect here", "connected": True, "main": False}
+    assert kept["banner"] == {**banner, "nav": False}
+    assert kept["toggled"] == {"tag": "BUTTON", "text": "Turn on", **on}
+    assert kept["hidden"] == {"tag": "MAIN", "text": kept["hidden"]["text"], **on}
+    assert boot_report["transcriptLoads"]["lastFocus"] == "main", "Load older hid itself"
+
+
+def test_androids_back_closes_the_sheet_and_leaves_the_screen_under_it(
+    boot_report: dict[str, Any],
+) -> None:
+    """A sheet took no close request: Android's Back went back a screen behind it, and what was
+    typed in it went with the sheet; from the feed the app opens on, or a card a notification
+    opened, it left the app. A CloseWatcher takes Back for the sheet now, on the screen it
+    covers. Close lets the watcher go, and one sheet in another's place keeps a single one; a
+    busy sheet refuses the first Back, as it does Escape, and closes on the next."""
+    back = boot_report["backOverASheet"]
+    feed = {"sheet": None, "at": "#/", "cards": 1, "active": 0}
+    assert back["typed"] == {"did": "closed", **feed}
+    assert back["shut"] == 0
+    assert back["busy"] == [
+        {**feed, "did": "refused", "sheet": "Tell coder-1", "active": 1},
+        {**feed, "did": "closed"},
+    ]
+    assert back["replaced"] == {
+        "did": "closed",
+        "sheet": None,
+        "at": "#/p/prj_x/a/coder-1/live",
+        "made": 2,
+        "active": 0,
+    }
+
+
+def test_without_close_watcher_a_sheet_holds_a_history_entry_back_takes(
+    boot_report: dict[str, Any],
+) -> None:
+    """Safari has no CloseWatcher (nor Firefox before 149): there Back, iOS's swipe too, went
+    back a screen behind an open sheet, or out of the page from its first entry. The sheet
+    holds a history entry of its own now, which Back takes with it; closed by its Close, it
+    takes the entry off, so the next Back is not spent on nothing. A route asked for as a
+    sheet closes waits for that: pushed first, the Back undid it. A route a sheet leads to
+    takes the sheet's entry, and Back from there is the screen under the sheet."""
+    back = boot_report["backWithoutCloseWatcher"]
+    feed = {"sheet": None, "at": "#/", "cards": 1}
+    assert back["opened"] == {"at": 1, "length": 2}
+    assert back["typed"] == {"did": "back", **feed, "history": {"at": 0, "length": 2}}
+    assert back["shut"] == {"did": "close", **feed, "history": {"at": 0, "length": 2}}
+    projects = {"sheet": None, "at": "#/projects", "cards": 0, "history": {"at": 1, "length": 2}}
+    assert back["raced"] == {"did": "close, then go", **projects}
+    card = {"sheet": None, "at": "#/n/ny_0123456789abcdef", "cards": 0}
+    assert back["led"] == {"did": "card", **card, "history": {"at": 1, "length": 2}}
+    agent = {"sheet": None, "at": "#/p/prj_x/a/coder-1/live", "cards": 0}
+    assert back["back"] == {"did": "back", **agent, "history": {"at": 0, "length": 2}}
 
 
 def test_the_transcript_asks_for_lines_as_wide_as_fit_inside_its_padding(
@@ -1835,6 +2210,34 @@ def test_each_close_code_and_a_failed_handshake_lead_where_the_spec_says(
     assert closes["dropped"] == {"shown": None, "probes": 0, "timers": ["connect"]}
 
 
+def test_a_page_that_cannot_go_on_keeps_no_timer_extend_or_connecting_dot(
+    boot_report: dict[str, Any],
+) -> None:
+    """The strip drew from the machine's last word whatever the screen: under "Remote is off on
+    the machine" it still said "off in 0 min", or counted down a deadline the machine had
+    dropped, beside a live Extend 1 h whose tap was refused, and a dot saying "Connecting"
+    though nothing would connect until Retry. Signed out, the dot said the same over the
+    unlock form, and the READ-ONLY pill offered a reason for a page that showed nothing; the
+    tab's title kept the feed's count from before; and a banner said another tab took the
+    live view, its Reconnect here doing nothing, over the unlock form."""
+    strip = boot_report["offStrip"]
+    gone = {
+        "off": False,
+        "extend": False,
+        "readOnly": False,
+        "dot": "Not connected",
+        "title": "aisquare remote",
+    }
+    for how in ("off", "link", "signedOut", "probedGone"):
+        assert strip[how]["before"]["off"] and strip[how]["before"]["extend"], how
+        assert strip[how]["before"]["readOnly"], how
+        assert strip[how]["before"]["title"] == "(1) aisquare remote", how
+        assert strip[how]["after"] == gone, how
+    assert strip["signedOut"]["at"] == "#/unlock" and strip["off"]["at"] == "#/"
+    taken = strip["takenThenLocked"]
+    assert taken == {"said": True, "after": False, "at": "#/unlock"}, "no Reconnect over a lock"
+
+
 def test_an_unlock_refused_for_too_many_tries_counts_down_to_the_next(
     boot_report: dict[str, Any],
 ) -> None:
@@ -1898,6 +2301,61 @@ def test_each_listing_screen_shows_what_the_spec_lists(boot_report: dict[str, An
     assert screens["card"].splitlines()[:2] == ["Explainability: on", "model: claude-x"]
 
 
+def test_a_board_whose_tasks_were_all_dropped_says_so_instead_of_drawing_nothing(
+    boot_report: dict[str, Any],
+) -> None:
+    """A dropped task has no group on the Tasks tab (SPEC §6.3 groups doing, review, blocked,
+    todo and done), yet the empty-state check counted it: a board of dropped tasks alone drew
+    nothing under its tabs, while ``asq task list`` listed them. The tab says it has none to
+    show, and how many it leaves out."""
+    tasks = boot_report["droppedTasks"]
+    assert tasks["all"] == ["No tasks on this board.", "Not shown: 2 dropped."]
+    assert tasks["some"] == ["done · 1", "ship it", "Not shown: 1 dropped."]
+
+
+def test_a_card_screen_says_its_card_cleared_every_time_it_clears(
+    boot_report: dict[str, Any],
+) -> None:
+    """The card screen, a push link's target, said "No longer needs you" only the first time
+    its card cleared. A permission card goes for a few seconds when its pane prints, or for a
+    scan that failed, and comes back: when it then cleared for good, the screen was blank, no
+    card, no sentence and no way back but the nav. And the cleared view's fleet read, answered
+    after the card came back, put "Back to the feed" under the live card."""
+    flicker = boot_report["cardFlicker"]
+    cleared = ["No longer needs you", "coder-1 is waiting at its prompt now."]
+    links = ["Open coder-1", "Back to the feed"]
+    assert flicker["first"] == ["No longer needs you", "Asking the machine about coder-1…", *links]
+    assert flicker["readLate"] == ["card"]
+    assert flicker["cleared"] == flicker["again"] == [*cleared, *links]
+    assert flicker["back"] == ["card"]
+
+
+def test_a_refused_read_stays_said_through_the_redraws_that_follow(
+    boot_report: dict[str, Any],
+) -> None:
+    """The Fleet tab put a refused read's sentence in its body, and the next redraw (any needs
+    frame, a heartbeat, a wake, another project's fleet) said "Loading…" in its place for as
+    long as the tab was open: a project the machine no longer has never said so. The Projects
+    screen added the sentence without clearing, so each 15 s poll that failed added a copy,
+    and a needs frame's redraw then left the screen blank."""
+    kept = boot_report["failuresKept"]
+    assert kept["fleet"] == [["no project matches 'prj_gone'"]] * 4
+    assert kept["projects"] == [["The machine could not answer — try again in a moment."]] * 4
+    assert kept["reads"] == 3, "the polls did run"
+
+
+def test_a_refused_read_of_the_feed_is_said_where_the_feed_would_be(
+    boot_report: dict[str, Any],
+) -> None:
+    """The feed and a card screen took a refused ``GET api/needs`` in silence and said
+    "Loading…" until a frame brought the feed, for good when none came: the class sweep of
+    the refused reads above. They say why now, until the feed comes."""
+    refused = boot_report["needsRefused"]
+    sentence = "The machine could not answer — try again in a moment."
+    assert refused["feed"] == [[sentence, 0], ["", 1]]
+    assert refused["card"] == [sentence]
+
+
 def test_notifications_say_where_they_stand_wherever_the_page_offers_them(
     boot_report: dict[str, Any],
 ) -> None:
@@ -1911,6 +2369,58 @@ def test_notifications_say_where_they_stand_wherever_the_page_offers_them(
         "test": "The machine has no subscription for this device — turn notifications on again.",
     }
     assert push["iphone"].startswith("On iPhone and iPad, notifications need the page on the")
+
+
+def test_a_tapped_notification_opens_its_card_in_the_page_already_open(
+    boot_report: dict[str, Any],
+) -> None:
+    """docs/remote.md: tapping a notification opens the card. With the page open, that is the
+    worker focusing it and posting it the card's hash, and the page going there; with none
+    open, or the link on another ngrok address after the domain changed, a new window. No
+    test ran either end (one grepped sw.js for "postMessage"): the message's type or hash,
+    the page's listener, or the worker's choice of window could each break, a tap then only
+    bringing the page up on its last screen, with every test green. A link the worker may not
+    open brings up the page itself, at its feed; and a push is shown under its tag."""
+    tap = boot_report["notificationTap"]
+    scope = "https://x.ngrok-free.app/r/" + "t" * 32 + "/"
+    card = "#/n/ny_0123456789abcdef/p/prj_x/a/coder-1"
+    assert tap["open"] == [
+        ["close"],
+        ["focus", f"{scope}#/settings"],
+        ["post", f"{scope}#/settings", {"type": "open", "hash": card}],
+    ]
+    assert tap["landed"] == card, "the page went where the worker's message said"
+    assert tap["none"] == [["close"], ["open", scope + card]]
+    moved = "https://y.ngrok-free.app/r/" + "t" * 32 + "/" + card
+    assert tap["moved"] == [["close"], ["open", moved]]
+    assert tap["forged"][-1] == ["post", f"{scope}#/settings", {"type": "open", "hash": ""}]
+    assert tap["shown"] == [["show", "x: coder-1 needs you", "asq-needs"]]
+
+
+def test_the_socket_opens_under_the_pages_own_path_and_scheme(
+    boot_report: dict[str, Any],
+) -> None:
+    """Everything is under ``/r/<token>/`` and the stream is its ``ws`` (above). A page under
+    https must open ``wss:``: a ``ws://`` from it is mixed content, blocked, and the live view
+    never connects through ngrok; one rooted at ``/ws`` is outside the token, a handshake the
+    server answers 404. The fake browser booted only under http and kept no socket's URL, so
+    either change passed every test."""
+    token = "t" * 32
+    urls = boot_report["socketUrls"]
+    assert {key: urls[key] for key in ("http", "https")} == {
+        "http": [f"ws://127.0.0.1:8750/r/{token}/ws"],
+        "https": [f"wss://x.ngrok-free.app/r/{token}/ws"],
+    }
+
+
+def test_every_request_asks_as_the_spec_says(boot_report: dict[str, Any]) -> None:
+    """SPEC §6.3: same-origin credentials (the session cookie), JSON, and the header that
+    skips ngrok's warning page, without which the free plan's tunnel answers its own HTML
+    and the page reads it as Remote being off. No test looked at how the page asked: the
+    fake browser kept only the path and body."""
+    headers = {"content-type": "application/json", "ngrok-skip-browser-warning": "1"}
+    asked = {"credentials": "same-origin", "cache": "no-store", "headers": headers}
+    assert boot_report["socketUrls"]["asked"] == [asked]
 
 
 def test_each_write_carries_what_the_spec_says_it_sends(boot_report: dict[str, Any]) -> None:

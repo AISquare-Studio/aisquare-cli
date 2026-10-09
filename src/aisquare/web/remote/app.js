@@ -72,6 +72,7 @@ const READ_ONLY = "writes are off — on the machine run `aisquare remote allow-
 const OFF_OR_MOVED = "Remote is off on the machine, or the link changed";
 const UNKEPT_SIGN_IN = "The machine took the passphrase, but this browser did not keep the sign-in — " +
   "allow cookies for this page, then unlock again.";
+const LOST_WAIT = "The phone lost the connection; this goes out again if it is back within 15 seconds.";
 
 // --- the pure core: escapes out, runs in, DOM out ---
 
@@ -460,6 +461,13 @@ function renderDetail(kind, detail, doc) {
     add(mk(doc, "pre", "text", d.text));
     text = d.text;
   }
+  // A command cut to fit read as the whole of it, and an input too long to send as none.
+  const cut = d.cut && typeof d.cut === "object" ? Object.keys(d.cut).slice(0, 20) : [];
+  if (d.dropped === true || cut.length) {
+    const what = cut.map((key) => "its " + plainText(key) + " (" + toInt(d.cut[key]) + " characters in all)");
+    add(mk(doc, "p", "cut", "Not all of it: " + (d.dropped === true ? "this was too long to send to the phone."
+      : "the card shows the start of " + what.join(", ") + ".") + " Open the agent to read it before you answer."));
+  }
   return { box: shown ? box : null, text, lead };
 }
 
@@ -599,7 +607,7 @@ function routeHash(route) {
 // --- the page (browser only from here) ---
 
 const S = {
-  remote: null, needs: null, actions: [], fleet: null, board: null,
+  remote: null, needs: null, needsFailed: null, actions: [], fleet: null, board: null,
   wantFleet: null, wantBoard: null, panes: new Map(), sock: null, sockState: "idle",
   opened: false, backoff: 0, retryTimer: 0, lastFrameAt: 0, stale: false, offline: false, away: null,
   off: null, locked: false, booting: false, view: null, route: null, pending: new Map(), orphans: new Map(),
@@ -787,6 +795,7 @@ async function apiWrite(path, body, verb, onWait, at) {
   let res = await apiCall("POST", path, { body: pending.body });
   if (res.network) {
     if (onWait) onWait();
+    let late = 0;
     res = await new Promise((resolve) => {
       pending.resolve = resolve;
       // The retry waits for a reconnect (flushRetries). A socket that still looks
@@ -794,7 +803,15 @@ async function apiWrite(path, body, verb, onWait, at) {
       // connection that lost this request: replace it now. Offline, the reconnect
       // backs off until the phone is back.
       wake(true);
+      // Offline, none may come, and past RETRY_WITHIN_MS it would not go again: the wait ends
+      // there. Its sheet stayed busy, and could not be closed, while the phone stayed offline.
+      late = setTimeout(function tooLate() {
+        if (pending.retried) return;
+        pending.retried = true;
+        finishPending(pending, notSentAgain("late"));
+      }, Math.max(0, pending.at + RETRY_WITHIN_MS - Date.now()));
     });
+    clearTimeout(late);
     if (res.network) res = Object.assign({}, res, { unconfirmed: true });
   }
   // A retry lost too may still have run on the machine, and a retry answered
@@ -971,6 +988,7 @@ function connect() {
   if (S.off || S.locked) return;
   const old = S.sock;
   S.sock = null;
+  unconfirmPanes();
   if (old) {
     try {
       old.close(1000);
@@ -1011,9 +1029,17 @@ function connect() {
     if (S.sock !== sock) return;
     S.sock = null;
     S.sockState = "closed";
+    unconfirmPanes();
     drawStatus();
     onClose(event.code, opened);
   });
+}
+
+/* The panes' socket is gone: Live's keys wait for the next one's frame. Held only from its
+ * open, a "1" tapped before it was typed into whatever the agent showed by then. */
+function unconfirmPanes() {
+  for (const watcher of paneWatchers.values()) watcher.fresh = false;
+  gateButtons();
 }
 
 function scheduleReconnect() {
@@ -1050,11 +1076,7 @@ async function probe() {
 function resubscribe() {
   if (S.wantFleet) wsSend("subscribe_fleet", S.wantFleet);
   if (S.wantBoard) wsSend("subscribe_board", S.wantBoard); // a new socket sends no board until asked
-  for (const watcher of paneWatchers.values()) {
-    watcher.fresh = false; // what it shows came before this socket: held until its next frame
-    wsSend("subscribe", watcher.label, watcher.pid);
-  }
-  gateButtons();
+  for (const watcher of paneWatchers.values()) wsSend("subscribe", watcher.label, watcher.pid);
 }
 
 /* Whether this pane's last frame came on the socket open now. */
@@ -1171,8 +1193,6 @@ function setRemote(payload) {
 function setNeeds(items) {
   if (!Array.isArray(items)) return;
   S.needs = items.filter((item) => item && typeof item === "object" && NEEDS_ID.test(item.id || ""));
-  const count = S.needs.length;
-  document.title = (count ? "(" + count + ") " : "") + "aisquare remote";
   drawNav();
   viewCall("needs");
 }
@@ -1186,6 +1206,11 @@ async function refreshNeeds() {
   if (S.heard.needs !== heard) return;
   if (res.ok && res.data && typeof res.data === "object") setNeeds(res.data.items);
   else if (res.status === 404 && !res.notJson && S.needs === null) setNeeds([]);
+  else if (S.needs === null && !res.notJson && res.status !== 401) {
+    // Said in the feed's place: it said "Loading…" for good.
+    S.needsFailed = res;
+    viewCall("needs");
+  }
 }
 
 async function refreshActions() {
@@ -1286,15 +1311,18 @@ function buildShell() {
   drawBanner();
 }
 
+/* Off or locked, nothing connects and the machine's last word is not this page's: the off
+ * screen said "off in 0 min" under "Remote is off", with Extend live and a Connecting dot. */
 function drawStatus() {
   if (!UI.dot) return;
   const live = S.sockState === "open" && !S.stale;
-  const state = S.offline ? "down" : live ? "live" : S.stale ? "stale" : "wait";
+  const shut = !!S.off || S.locked;
+  const state = S.offline || shut ? "down" : live ? "live" : S.stale ? "stale" : "wait";
   UI.dot.className = "dot " + state;
   UI.dot.setAttribute("aria-label", DOT_SAID[state]); // its colour alone said stale to sight only
-  UI.ro.hidden = !S.remote || writable();
+  UI.ro.hidden = !S.remote || writable() || shut;
   const at = S.remote && typeof S.remote.auto_off_at === "string" ? Date.parse(S.remote.auto_off_at) : NaN;
-  if (Number.isFinite(at) && !S.locked) {
+  if (Number.isFinite(at) && !shut) {
     const minutes = Math.max(0, Math.round((at - Date.now()) / 60000));
     UI.off.textContent = "off in " + (minutes >= 90 ? Math.round(minutes / 60) + " h" : minutes + " min");
     UI.off.classList.toggle("soon", minutes <= 15);
@@ -1307,7 +1335,10 @@ function drawStatus() {
 }
 
 function drawBanner() {
-  if (!UI.banner) return;
+  if (UI.banner) keepFocus(UI.banner, fillBanner);
+}
+
+function fillBanner() {
   clear(UI.banner);
   if (S.offline) {
     UI.banner.appendChild(el("p", null, S.away === "phone" ? "Offline — the page reconnects once the phone is back online."
@@ -1315,7 +1346,7 @@ function drawBanner() {
   }
   if (S.sockState === "replaced") {
     UI.banner.appendChild(el("p", null, "Another tab of this phone took over the live view."));
-    UI.banner.appendChild(button("ghost", "Reconnect here", () => wake(true)));
+    UI.banner.appendChild(button("ghost", "Reconnect here", () => wake(true))).rowKey = "reconnect";
   }
   UI.banner.hidden = !UI.banner.firstChild;
 }
@@ -1325,6 +1356,8 @@ function drawNav() {
   const name = S.route ? S.route.name : "";
   const count = (S.needs || []).length;
   UI.badge.textContent = count ? String(count) : "";
+  // Off or locked, the count is from before: the tab's title said it under "Remote is off".
+  document.title = (count && !S.off && !S.locked ? "(" + count + ") " : "") + "aisquare remote";
   const here = [
     [UI.navNeeds, name === "home" || name === "card"], [UI.navProjects, name === "projects" || name === "project" || name === "agent"],
     [UI.navDevices, name === "devices"], [UI.navSettings, name === "settings"],
@@ -1367,6 +1400,13 @@ function openSheet(title, build) {
   panel.append(body, status, bar);
   UI.sheet.appendChild(panel);
   UI.sheet.classList.add("open");
+  // Back closes the sheet: it left the screen under it, or the app. Busy, a watcher refuses once.
+  if (typeof CloseWatcher === "function") {
+    const watcher = new CloseWatcher();
+    watcher.addEventListener("cancel", (event) => { if (UI.sheet.classList.contains("busy")) event.preventDefault(); });
+    watcher.addEventListener("close", () => { if (UI.watcher === watcher) closeSheet(); });
+    UI.watcher = watcher;
+  } else sheetEntry();
   /* An answer can come after Back closed this sheet, or another took its place: it then
    * says what came of it in a toast that names it, and leaves the sheet on screen alone. */
   const sheet = {
@@ -1400,9 +1440,15 @@ function openSheet(title, build) {
 /* replaced: another sheet takes its place, and keeps the page inert and the first opener. */
 function closeSheet(replaced) {
   if (!sheetOpen()) return;
+  if (UI.watcher) UI.watcher.destroy();
+  UI.watcher = null;
   UI.sheet.classList.remove("open", "busy");
   clear(UI.sheet);
   if (replaced) return;
+  if (UI.entry === "on") {
+    UI.entry = "leaving"; // its entry goes with it, or the next Back would do nothing
+    history.back();
+  }
   for (const part of [UI.top, UI.banner, UI.main, UI.nav]) part.inert = false;
   const back = UI.opener && UI.opener.isConnected ? UI.opener : UI.main;
   UI.opener = null;
@@ -1411,6 +1457,27 @@ function closeSheet(replaced) {
 
 function sheetOpen() {
   return !!UI.sheet && UI.sheet.classList.contains("open");
+}
+
+/* No CloseWatcher (Safari; Firefox before 149): a sheet holds a history entry of its own, which
+ * Back, iOS's swipe too, takes with the sheet. A sheet closed otherwise takes it off ("leaving"),
+ * and a route asked for meanwhile waits for that (UI.then): pushed first, the Back undid it. */
+function sheetEntry() {
+  if (UI.entry || !window.history || typeof history.pushState !== "function") return;
+  history.pushState({ sheet: true }, "");
+  UI.entry = "on";
+}
+
+function onPopState() {
+  const was = UI.entry;
+  UI.entry = null;
+  if (was === "on") closeSheet();
+  else if (was === "leaving") {
+    if (sheetOpen()) sheetEntry();
+    const then = UI.then;
+    UI.then = null;
+    if (then) pageGo(then[0], then[1]);
+  }
 }
 
 /* Whether the page still shows this agent: an answer that comes later acts on it only then. */
@@ -1442,11 +1509,17 @@ function readOnlySheet(message) {
  * place of the entry it leaves: pushed, Back went to #/unlock, or to a gone agent's tab,
  * which sent the page on again, so Back never left it. */
 function pageGo(target, replace) {
+  if (UI.entry === "leaving") {
+    UI.then = [target, replace];
+    return;
+  }
   const route = typeof target === "string" ? parseRoute(target) : target;
   const hash = routeHash(route);
   if (location.hash === hash) renderRoute();
-  else if (replace) location.replace(hash);
-  else location.hash = hash;
+  else if (replace || UI.entry) {
+    UI.entry = null; // an open sheet's entry gives way to where it leads
+    location.replace(hash);
+  } else location.hash = hash;
 }
 
 const VIEWS = {};
@@ -1454,6 +1527,7 @@ const VIEWS = {};
 function renderRoute() {
   const route = parseRoute(location.hash);
   if (!route) return pageGo("#/", true);
+  const from = S.route;
   if (S.view && typeof S.view.cleanup === "function") S.view.cleanup();
   S.view = null;
   S.route = route;
@@ -1462,13 +1536,42 @@ function renderRoute() {
   closeSheet();
   clear(UI.main);
   drawNav();
-  if (S.off) return drawOff();
-  if (S.booting) return UI.main.appendChild(el("p", "empty", "Connecting to the machine…"));
-  if (route.name !== "unlock" && S.locked) return toUnlock();
-  if (route.name === "unlock" && !S.locked) return pageGo("#/", true);
-  S.view = VIEWS[route.name](route, UI.main) || {};
-  gateButtons();
-  return undefined;
+  drawStatus();
+  drawBanner();
+  if (S.off) drawOff();
+  else if (S.booting) return UI.main.appendChild(el("p", "empty", "Connecting to the machine…"));
+  else if (route.name !== "unlock" && S.locked) return toUnlock();
+  else if (route.name === "unlock" && !S.locked) return pageGo("#/", true);
+  else {
+    S.view = VIEWS[route.name](route, UI.main) || {};
+    gateButtons();
+  }
+  return landFocus(from, route);
+}
+
+/* Focus where it was, if still there; else the tab chosen, else the heading, else the screen.
+ * Left on what the screen took away, a screen reader lost its place and heard of no change.
+ * The page's first screen is left alone, as any page's is when it loads. */
+function landFocus(from, route) {
+  const now = document.activeElement;
+  const first = !UI.landed;
+  UI.landed = true;
+  if (first || sheetOpen() || (now && now !== document.body && now.isConnected)) return;
+  const tab = from && from.name === route.name && from.pid === route.pid && from.label === route.label;
+  const target = (tab && UI.main.querySelectorAll("button.tab.on")[0]) || UI.main.querySelectorAll("h2")[0] || UI.main;
+  if (target.tagName === "H2") target.tabIndex = -1;
+  target.focus({ preventScroll: true });
+}
+
+/* Drawn anew, box keeps focus on the button with the same rowKey, else the screen: it fell to
+ * the page at every fleet frame, poll, changed card, revoke and banner. */
+function keepFocus(box, fill) {
+  const had = document.activeElement;
+  const key = had && box.contains(had) ? had.rowKey : undefined;
+  fill();
+  if (key === undefined) return;
+  const again = Array.from(box.querySelectorAll("button")).find((one) => one.rowKey === key);
+  (again || UI.main).focus({ preventScroll: true });
 }
 
 function toUnlock() {
@@ -1684,6 +1787,8 @@ function cardEntry(item, withStrip) {
     now: Date.now(), writable: writable(), stale: S.stale, onAnswer: answerCard, onAction: actOnCard, onSince: trackSince,
     onStrip: withStrip ? (pre) => { unwatch = paneWatch(project.id, item.agent, (payload) => drawStrip(pre, payload)); } : null,
   });
+  // keepFocus finds a button by these when the card is drawn anew.
+  for (const one of node.querySelectorAll("button")) one.rowKey = item.id + " " + one.textContent;
   return {
     node, json: JSON.stringify(item), strip: withStrip,
     drop() {
@@ -1706,12 +1811,12 @@ VIEWS.home = (route, main) => {
   const empty = el("p", "empty", "Loading…");
   main.append(notice, behind, list, empty);
   const cards = new Map();
-  const draw = () => {
+  const fill = () => {
     const items = S.needs || [];
     behind.hidden = !S.scannedBehind;
     behind.textContent = S.scannedBehind ? "Last looked at " + clock(S.scannedBehind) + ": the machine has stopped checking, so this may be out of date." : "";
     list.classList.toggle("behind", !!S.scannedBehind);
-    empty.textContent = S.needs === null ? "Loading…" : "Nothing needs you.";
+    empty.textContent = S.needs !== null ? "Nothing needs you." : S.needsFailed ? failText(S.needsFailed) : "Loading…";
     empty.hidden = items.length > 0;
     // A strip for each of the first STRIPS_MAX cards that show one, in feed order, worked out
     // before a card is built: a kept card held its strip while new ones came above it, and
@@ -1750,6 +1855,7 @@ VIEWS.home = (route, main) => {
     }
     gateButtons();
   };
+  const draw = () => keepFocus(list, fill);
   pushBanner(notice);
   draw();
   if (S.needs === null) refreshNeeds();
@@ -1760,10 +1866,13 @@ VIEWS.card = (route, main) => {
   const box = el("div", "data");
   main.appendChild(box);
   let entry = null;
+  // Whether the cleared view is on screen now. Set once for good, a card that came back (its
+  // pane printed, a scan failed) left the screen blank when it cleared again.
   let goneShown = false;
-  const draw = () => {
+  const fill = () => {
     const item = (S.needs || []).find((one) => one.id === route.id);
     if (item) {
+      goneShown = false;
       if (!entry || entry.json !== JSON.stringify(item)) {
         if (entry) entry.drop();
         clear(box);
@@ -1774,7 +1883,8 @@ VIEWS.card = (route, main) => {
       return;
     }
     if (S.needs === null) {
-      if (!box.firstChild) box.appendChild(el("p", "empty", "Loading…"));
+      clear(box);
+      box.appendChild(el("p", "empty", S.needsFailed ? failText(S.needsFailed) : "Loading…"));
       return;
     }
     if (entry) entry.drop();
@@ -1789,16 +1899,18 @@ VIEWS.card = (route, main) => {
     box.appendChild(el("h2", null, "No longer needs you"));
     const what = el("p", "muted", route.label ? "Asking the machine about " + route.label + "…" : "It was answered, or it cleared by itself.");
     box.appendChild(what);
+    const back = button("ghost", "Back to the feed", () => pageGo("#/"));
     if (route.pid && route.label) {
-      box.appendChild(button("ghost", "Open " + route.label, () => pageGo({ name: "agent", pid: route.pid, label: route.label, tab: "live" })));
+      box.append(button("ghost", "Open " + route.label, () => pageGo({ name: "agent", pid: route.pid, label: route.label, tab: "live" })), back);
       const res = await apiCall("GET", API.fleet, { query: { project: route.pid } });
+      if (!what.isConnected) return; // the card came back meanwhile, in this view's place
       if (res.ok) {
         const row = findAgent(res.data, route.label);
         what.textContent = row ? route.label + " is " + stateSentence(row.state) + " now." : route.label + " is not in the fleet any more.";
       } else what.textContent = failText(res);
-    }
-    box.appendChild(button("ghost", "Back to the feed", () => pageGo("#/")));
+    } else box.appendChild(back);
   };
+  const draw = () => keepFocus(box, fill);
   draw();
   if (S.needs === null) refreshNeeds();
   return { needs: draw, cleanup: () => { if (entry) entry.drop(); } };
@@ -1890,7 +2002,7 @@ function tellSheet(ctx, mode) {
       sheet.busy(true);
       sheet.status.textContent = current === "interrupt" ? "Interrupting " + label + "…" : "Sending…";
       const res = await apiWrite(writePath("agent/tell"), body, "Tell " + label, () => {
-        sheet.status.textContent = "The phone lost the connection; this goes out again if it is back within 15 seconds.";
+        sheet.status.textContent = LOST_WAIT;
       });
       sheet.busy(false);
       if (res.ok) {
@@ -1943,7 +2055,7 @@ function replySheet(ctx) {
       const body = { text: text.value, kind: "note", project: ctx.pid };
       if (isText(author)) body.to = author;
       sheet.busy(true);
-      const res = await apiWrite(writePath("note"), body, "Reply");
+      const res = await apiWrite(writePath("note"), body, "Reply", () => { sheet.status.textContent = LOST_WAIT; });
       sheet.busy(false);
       if (res.ok) {
         sheet.close();
@@ -2065,14 +2177,18 @@ VIEWS.projects = (route, main) => {
   const list = el("div", "rows data");
   main.appendChild(list);
   let rows = null;
-  const draw = () => {
+  // A refusal of the first read is drawn here, with the rest: put in by the read, the next needs
+  // frame's redraw cleared it to a blank screen, and each 15 s poll that failed added a copy.
+  let failed = null;
+  const fill = () => {
     clear(list);
-    if (!rows) return;
+    if (!rows) return list.appendChild(el("p", "empty", failed ? failText(failed) : "Loading…"));
     if (!rows.length) list.appendChild(el("p", "empty", "No projects on this machine yet."));
     for (const row of rows) {
       if (!row || typeof row !== "object" || !REF.test(row.id || "")) continue;
       if (isText(row.name)) S.names.set(row.id, plainText(row.name));
       const line = button("row", null, () => pageGo({ name: "project", pid: row.id, tab: "fleet" }));
+      line.rowKey = row.id;
       const top = el("span", "row-top");
       top.appendChild(el("span", "name", (row.pinned === true ? "📌 " : "") + plainText(row.name || row.id)));
       const waiting = needsFor(row.id).length;
@@ -2084,13 +2200,18 @@ VIEWS.projects = (route, main) => {
       line.appendChild(el("span", "muted", sub.join(" — ")));
       list.appendChild(line);
     }
+    return undefined;
   };
+  const draw = () => keepFocus(list, fill);
   const load = async () => {
     const res = await apiCall("GET", API.projects);
     if (res.ok && Array.isArray(res.data)) {
       rows = res.data;
       draw();
-    } else if (!rows) list.appendChild(el("p", "empty", failText(res)));
+    } else if (!rows) {
+      failed = res;
+      draw();
+    }
   };
   load();
   const timer = setInterval(load, 15000);
@@ -2132,17 +2253,21 @@ VIEWS.project = (route, main) => {
   main.appendChild(body);
   const view = {};
   if (route.tab === "fleet") {
-    const draw = () => {
+    // A refusal of its read is drawn here too: put in by the read, the next frame's redraw (needs,
+    // a heartbeat, a wake) put "Loading…" in its place for as long as the tab was open.
+    let failed = null;
+    const fill = () => {
       const fleet = projectIdOf(S.fleet) === pid ? S.fleet : null;
       title.textContent = projectName(pid);
       clear(body);
-      if (!fleet) return body.appendChild(el("p", "empty", "Loading…"));
+      if (!fleet) return body.appendChild(el("p", "empty", failed ? failText(failed) : "Loading…"));
       const agents = agentsOf(fleet);
       if (!agents.length) body.appendChild(el("p", "empty", "No agents running in this project."));
       for (const row of agents) {
         const label = row.agent.label;
         if (!REF.test(label || "")) continue;
         const line = button("row", null, () => pageGo({ name: "agent", pid, label, tab: "live" }));
+        line.rowKey = label;
         const top = el("span", "row-top");
         top.append(el("span", "name", label), ...stateBadges(row.state, needsFor(pid, label).length > 0));
         line.appendChild(top);
@@ -2152,6 +2277,7 @@ VIEWS.project = (route, main) => {
       }
       return undefined;
     };
+    const draw = () => keepFocus(body, fill);
     view.fleet = draw;
     view.needs = draw;
     draw();
@@ -2163,8 +2289,8 @@ VIEWS.project = (route, main) => {
           noteName(res.data);
           draw();
         } else if (!res.ok) {
-          clear(body);
-          body.appendChild(el("p", "empty", failText(res)));
+          failed = res;
+          draw();
         }
       });
     }
@@ -2223,9 +2349,12 @@ VIEWS.project = (route, main) => {
   return view;
 };
 
+/* A dropped task has no group. Counted as one that shows, a board of dropped tasks alone drew
+ * nothing at all; now it says it has none to show, and how many it leaves out. */
 function drawTasks(body, rows) {
   const tasks = rows.filter((task) => task && typeof task === "object");
-  if (!tasks.length) body.appendChild(el("p", "empty", "No tasks on this board."));
+  const dropped = tasks.filter((task) => task.status === "dropped").length;
+  if (!tasks.some((task) => TASK_GROUPS.indexOf(task.status) >= 0)) body.appendChild(el("p", "empty", "No tasks on this board."));
   for (const status of TASK_GROUPS) {
     const group = tasks.filter((task) => task.status === status);
     if (!group.length) continue;
@@ -2238,6 +2367,7 @@ function drawTasks(body, rows) {
       body.appendChild(line);
     }
   }
+  if (dropped) body.appendChild(el("p", "muted", "Not shown: " + dropped + " dropped."));
 }
 
 function drawMemory(body, rows) {
@@ -2281,7 +2411,7 @@ function noteComposer(pid) {
     if (to.value.trim()) body.to = to.value.trim();
     post.classList.add("busy");
     gateButtons();
-    const res = await apiWrite(writePath("note"), body, "Note");
+    const res = await apiWrite(writePath("note"), body, "Note", () => say(LOST_WAIT));
     post.classList.remove("busy");
     gateButtons();
     if (res.ok) {
@@ -2468,6 +2598,7 @@ VIEWS.agent = (route, main) => {
       }
       cursor = typeof page.cursor === "string" ? page.cursor : null;
       older.hidden = !(page.more === true && cursor);
+      if (older.hidden && document.activeElement === older) UI.main.focus({ preventScroll: true }); // the last page came
       return undefined;
     };
     load(null);
@@ -2643,6 +2774,9 @@ VIEWS.devices = (route, main) => {
   main.appendChild(list);
   const load = async () => {
     const res = await apiCall("GET", API.devices);
+    keepFocus(list, () => fill(res));
+  };
+  const fill = (res) => {
     clear(list);
     if (!res.ok || !Array.isArray(res.data)) return list.appendChild(el("p", "empty", failText(res)));
     for (const device of res.data) {
@@ -2673,6 +2807,7 @@ VIEWS.devices = (route, main) => {
             afterFailure(out);
           }
         });
+        revoke.rowKey = id;
         line.appendChild(revoke);
         line.appendChild(el("p", "ro-note", "Revoking another device is a write: " + READ_ONLY + "."));
       }
@@ -2820,8 +2955,8 @@ function pushBanner(box) {
       } catch (error) {
         // shown again next time: harmless
       }
-      clear(box);
-    }));
+      keepFocus(box, () => clear(box));
+    })).rowKey = "hide";
     box.appendChild(line);
   });
 }
@@ -2834,8 +2969,14 @@ VIEWS.settings = (route, main) => {
   const controls = el("div", "row-inline");
   notes.append(said, controls);
   main.appendChild(notes);
+  // Turn on and Turn off take each other's place: focus goes to what is there now, not the page.
   const draw = async () => {
+    const had = controls.contains(document.activeElement);
     clear(controls);
+    await fill();
+    if (had && controls.isConnected) (controls.querySelectorAll("button")[0] || UI.main).focus({ preventScroll: true });
+  };
+  const fill = async () => {
     if (!pushCapable()) {
       if (isIos() && !isStandalone()) {
         said.textContent = "On iPhone and iPad, notifications need the page on the Home Screen: tap Share, then Add to Home Screen, then open aisquare from the Home Screen and unlock it there. The installed app keeps its own sign-in, so it unlocks once more and shows as a second device.";
@@ -2926,11 +3067,25 @@ function trackViewport() {
   update();
 }
 
+/* Each second. A socket that died with no close (a network switch) left the page stale for
+ * good, every button that could reconnect it waiting: replaced once a stale span, unless 4409. */
+function onSecond() {
+  checkStale();
+  if (S.stale && (S.sockState === "open" || S.sockState === "connecting") && Date.now() - S.lastWake > STALE_AFTER_MS) wake(true);
+  drawStatus();
+  const now = Date.now();
+  for (const pair of S.since) {
+    if (pair[0].isConnected) pair[0].textContent = ago(pair[1], now);
+    else S.since.delete(pair);
+  }
+}
+
 function boot() {
   buildShell();
   loadPending();
   trackViewport();
   window.addEventListener("hashchange", renderRoute);
+  window.addEventListener("popstate", onPopState);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") wake(S.sockState === "replaced");
   });
@@ -2944,15 +3099,7 @@ function boot() {
       if (data && data.type === "open" && typeof data.hash === "string") pageGo(data.hash);
     });
   }
-  setInterval(() => {
-    checkStale();
-    drawStatus();
-    const now = Date.now();
-    for (const pair of S.since) {
-      if (pair[0].isConnected) pair[0].textContent = ago(pair[1], now);
-      else S.since.delete(pair);
-    }
-  }, 1000);
+  setInterval(onSecond, 1000);
   start();
 }
 

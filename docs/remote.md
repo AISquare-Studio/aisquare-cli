@@ -146,9 +146,11 @@ The strip at the top shows the connection (green: live), **READ-ONLY** while
 writes are off (tap it for the reason), and "off in 23 min" with **Extend 1 h**
 when an auto-off is set. When nothing has arrived for 25 seconds, the page greys
 what it shows and holds every action until the next update: a phone that slept
-must not act on a screen that went stale. Waking the phone reconnects at once,
-and an agent's Live tab stays grey, its keys and Send held, until its pane has
-come through again.
+must not act on a screen that went stale. It then opens a new connection, as a
+connection can die without a word (Wi-Fi giving way to mobile data). Waking the
+phone reconnects at once, and from the moment a connection is lost an agent's
+Live tab stays grey, its keys and Send held, until its pane has come through
+again.
 If the machine stops checking what needs you while the link is fine, the feed
 greys and says when it last looked.
 
@@ -246,10 +248,14 @@ aisquare --json remote needs
 | board_result | the manager (or a coder with no manager left) reports a result |
 | interrupted | you pressed Esc on an agent, or turned its prompt down without saying what to do instead, and it waits for you |
 
-A card holds what you must read before answering, in full: the exact command a
-permission is for, every question with its options, the plan, the text. Under a
-permission, a question or a plan, the bottom of the agent's live screen is shown
-too, so the real option labels are on screen next to the buttons.
+A card holds what you must read before answering: the exact command a
+permission is for, every question with its options, the plan, the text. What is
+too long for it is cut, a permission's command at 2,000 characters and all it
+shows at 4 KiB, and the card says so and how long the whole is; a call whose
+input is over 16 KiB never reaches the phone, and its card says that instead.
+Open the agent to read such a call before you answer it. Under a permission, a
+question or a plan, the bottom of the agent's live screen is shown too, so the
+real option labels are on screen next to the buttons.
 
 **Quick answers** are the card's buttons: `1`, `2` and No for a tool's
 permission; one per option, and Cancel, for a single question with one answer to

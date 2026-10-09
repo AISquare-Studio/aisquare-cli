@@ -4418,7 +4418,15 @@ def build_remote_app(
         and removing what it installed hands back, without a restart. Every answer
         carries the page headers (no referrer: the token is in the path); only the
         bundled page also gets its CSP, since an installed build may need another.
+        Decided in a worker thread: it asks the disk (the installed index, the file's
+        path resolved), and the first answer reads the bundled page's files, which on
+        the event loop held up every request and socket it serves.
         """
+        return await asyncio.to_thread(page_answer, request)
+
+    def page_answer(request: Request) -> Response:
+        """:func:`static`'s answer. An installed build's file is typed by the page's own
+        closed list (:func:`remote_page.build_content_type`), not the machine's tables."""
         from aisquare.services import remote_page
 
         rel = request.path_params.get("path", "")
@@ -4433,14 +4441,22 @@ def build_remote_app(
             and (candidate := (dist / rel).resolve()).is_relative_to(dist)
             and candidate.is_file()
         ):
-            response = FileResponse(candidate, headers={"cache-control": _cache_control(rel)})
+            response = FileResponse(
+                candidate,
+                media_type=remote_page.build_content_type(candidate.name),
+                headers={"cache-control": _cache_control(rel)},
+            )
         elif rel and not _is_navigation(rel, request.headers.get("accept", "")):
             # A file was asked for and there is no such file. Saying so is the
             # whole point: the SPA document under a .js name is a boot failure
             # with no error, and the 200 hides which build is actually installed.
             response = _json_error(404, "not_found", f"no such file in the built page: {rel}")
         elif index.is_file():
-            response = FileResponse(index, headers={"cache-control": INDEX_CACHE_CONTROL})
+            response = FileResponse(
+                index,
+                media_type=remote_page.build_content_type(index.name),
+                headers={"cache-control": INDEX_CACHE_CONTROL},
+            )
         else:
             response = _json_error(404, "no_dist", f"no index.html in {dist}")
         response.headers.update(remote_page.remote_page_headers())

@@ -2135,6 +2135,122 @@ def test_a_config_dir_recorded_as_a_tilde_path_still_has_its_mcp_server_found(
     assert [(entry.name, entry.file) for entry in plan.mcp] == [("memory", held)]
 
 
+# --- one entry the scans cannot enter costs no other ------------------------------------------
+
+
+@pytest.fixture
+def unenterable(tmp_path: Path) -> Iterator[Path]:
+    """A directory inside a folder this user cannot enter (mode 000), as another user's home
+    is: ``Path.is_dir`` on a link to it raises PermissionError on 3.11 to 3.13."""
+    if sys.platform == "win32" or not can_deny_reads() or not can_symlink():
+        pytest.skip("needs links and a folder this user cannot enter")
+    folder = tmp_path / "locked"
+    (folder / "x").mkdir(parents=True)
+    folder.chmod(0)
+    try:
+        yield folder / "x"
+    finally:
+        folder.chmod(0o700)
+
+
+@pytest.mark.parametrize("purge", [False, True], ids=["plain", "purge"])
+def test_a_sibling_linked_where_this_user_cannot_enter_costs_no_other_sibling(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unenterable: Path,
+    purge: bool,
+) -> None:
+    """A ~/.claude* link into a folder this user cannot enter made ``Path.is_dir`` raise, and
+    one suppress around uninstall's sibling scan dropped every sibling. A ~/.claude-a whose
+    hooks only parse leniently and a ~/.claude-m MCP server went unnamed, so the package
+    went and --purge deleted the home under those hooks (review of #257). Only the link is
+    skipped, and the plan, the question and the run say what they say without it."""
+    _initialised(runner, tmp_path)
+    home = paths.aisquare_home()
+    clean = _hooked(isolated_agent_home / ".claude", tool.script)
+    broken = _broken_hooks(isolated_agent_home / ".claude-a", tool.script)
+    _mcp_server(isolated_agent_home / ".claude-m" / ".claude.json", "memory")
+    (isolated_agent_home / ".claude-z").symlink_to(unenterable, target_is_directory=True)
+    flags = ["--purge"] if purge else []
+    monkeypatch.setattr("aisquare.cli.install._stdin_is_a_terminal", lambda: True)
+    asked: list[str] = []
+
+    def answer_no(text: str, **_: object) -> bool:
+        asked.append(text)
+        return False
+
+    monkeypatch.setattr("aisquare.cli.install.typer.confirm", answer_no)
+
+    plan = _one_object(runner.invoke(app, ["--json", "uninstall", *flags]).stdout)
+    human = runner.invoke(app, ["uninstall", *flags, "--dry-run"]).stdout
+    runner.invoke(app, ["uninstall", *flags])
+    ran = runner.invoke(app, ["--json", "uninstall", *flags, "--yes"])
+
+    report = _one_object(ran.stdout)
+    stays = f"the package and {home} stay" if purge else "the package stays"
+    assert [(s["config_dir"], s["blocks"]) for s in plan["unreadable"]] == [(str(broken), True)]
+    assert [entry["name"] for entry in plan["mcp"]] == ["memory"], plan["mcp"]
+    assert (plan["home"]["action"], plan["package"]["runs"]) == ("keep", False), plan
+    assert "DELETE" not in human and f"then stop: {stays}" in human, human
+    assert asked == [
+        f"Remove aisquare's hooks from 1 directory ({stays}: "
+        "the hooks in 1 other directory cannot be taken out)?"
+    ]
+    assert ran.exit_code == 1, ran.output
+    assert {(hook["config_dir"], hook["removed"]) for hook in report["hooks"]} == {
+        (str(clean), True),
+        (str(broken), False),
+    }
+    assert report["home"]["deleted"] is False and home.is_dir() and world.execs == []
+
+
+@pytest.mark.parametrize("purge", [False, True], ids=["plain", "purge"])
+def test_a_slot_linked_where_this_user_cannot_enter_costs_no_other_slot(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    tmp_path: Path,
+    unenterable: Path,
+    purge: bool,
+) -> None:
+    """The same link among the account slots: ``Path.is_dir`` raised in the slots' reader,
+    and the plan ended in a traceback, and inside the slot scan's one ``except`` it cost
+    every slot, so a slot linked out of the home, whose hooks outlive a purge, went unnamed
+    (review of #257). Only the link is skipped: that slot holds the purge up, and the login
+    in slot 2 is still named."""
+    _initialised(runner, tmp_path)
+    home = paths.aisquare_home()
+    outside = _broken_hooks(tmp_path / "elsewhere" / "claude-old", tool.script)
+    accounts = paths.claude_accounts_dir()
+    (accounts / "2").mkdir(parents=True)
+    (accounts / "2" / accounts_core.MARKER).write_text('{"slot": 2}', encoding="utf-8")
+    (accounts / "3").symlink_to(outside, target_is_directory=True)
+    (accounts / "4").symlink_to(unenterable, target_is_directory=True)
+    flags = ["--purge"] if purge else []
+
+    plan = _one_object(runner.invoke(app, ["--json", "uninstall", *flags]).stdout)
+    ran = runner.invoke(app, ["--json", "uninstall", *flags, "--yes"])
+
+    report = _one_object(ran.stdout)
+    blocks = [(site["config_dir"], site["blocks"]) for site in plan["unreadable"]]
+    assert blocks == [(str(accounts / "3"), True)], plan["unreadable"]
+    assert plan["home"]["accounts"] == ["slot 2: not signed in"], plan["home"]
+    assert (plan["home"]["action"], plan["package"]["runs"]) == ("keep", False), plan
+    assert ran.exit_code == 1, ran.output
+    assert [(hook["config_dir"], hook["removed"]) for hook in report["hooks"]] == [
+        (str(accounts / "3"), False)
+    ]
+    assert report["home"]["deleted"] is False and home.is_dir() and world.execs == []
+
+
 _REPO = Path(__file__).resolve().parents[1]
 
 #: When `aisquare uninstall` removes the package itself, as CHANGELOG.md and docs/install.md

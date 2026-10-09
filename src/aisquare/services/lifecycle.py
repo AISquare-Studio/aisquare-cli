@@ -12,7 +12,6 @@ subprocess.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import re
@@ -1145,12 +1144,22 @@ def purge_refusal(home: Path, *, custom: bool) -> str | None:
 
 
 def _account_dirs() -> list[Path]:
-    """Every directory under the managed account root: the slots and the removed ones."""
+    """Every directory under the managed account root: the slots and the removed ones.
+
+    Asked one entry at a time with ``os.path.isdir``, which never raises. ``Path.is_dir``
+    raised PermissionError on 3.11 to 3.13 for a slot linked into a folder this user
+    cannot enter, and inside one ``except`` that cost the plan every slot, a linked-out
+    one whose hooks hold the purge up included. That slot is skipped, as agent_core's
+    scan skips such a directory: no session of this user can read hooks there.
+    """
     root = paths.claude_accounts_dir()
+    if not os.path.isdir(root):
+        return []
     try:
-        return sorted(child for child in root.iterdir() if child.is_dir()) if root.is_dir() else []
+        children = sorted(root.iterdir())
     except OSError:
         return []
+    return [child for child in children if os.path.isdir(child)]
 
 
 def _accounts_kept() -> tuple[str, ...]:
@@ -1268,14 +1277,20 @@ def _claude_dirs_for_mcp() -> list[Path]:
     ``~/.claude``, whether or not that directory carries hooks; reading a few
     small files is cheap next to telling nobody about a server that will fail to
     start once the package is gone.
+
+    Each sibling is asked with ``os.path.isdir``, which never raises, as
+    agent_core's ``_claude_dirs_on_disk`` asks it. ``Path.is_dir`` raised
+    PermissionError on 3.11 to 3.13 for a link into a folder this user cannot
+    enter, and inside one ``suppress`` that dropped every sibling: their hooks and
+    MCP servers went unnamed, and --purge deleted the home under them (review of
+    #257). Such a sibling is skipped; only the listing itself is guarded.
     """
     default = accounts_core.home_config_dir()
-    found = [default]
-    with contextlib.suppress(OSError):
-        found.extend(
-            sorted(p for p in default.parent.glob(".claude*") if p.is_dir() and p != default)
-        )
-    return found
+    try:
+        siblings = sorted(default.parent.glob(".claude*"))
+    except OSError:
+        siblings = []
+    return [default, *(p for p in siblings if p != default and os.path.isdir(p))]
 
 
 _LIVE_ROWS = (

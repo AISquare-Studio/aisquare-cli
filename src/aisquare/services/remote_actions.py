@@ -20,11 +20,12 @@ the rest is here:
   stop the agent the same way. With a dialog up, that Enter answers it: it can
   approve a Bash command or take a question's first option. So an open dialog
   refuses the action (409 ``dialog_open``), unless ``dismiss_dialog`` asks for one
-  Escape (No) first. A switch asks it last, after the fleet's own refusals
-  (:class:`ActionGuardLast`), so its Escape never comes before a refusal that
-  needed none. No tell types into a dialog either. ``auto``, which is ``fleet
-  tell``, files its text as a board note while one may be up, and ``send-keys``
-  with ``dialog_guard`` types nothing then (:func:`action_keys_guard`).
+  Escape (No) first. A restart or a switch asks it last, after the fleet's own
+  refusals (:class:`ActionGuardLast`), so its Escape never comes before a
+  refusal that needed none. No tell types into a dialog either. ``auto``,
+  which is ``fleet tell``, files its text as a board note while one may be up,
+  and ``send-keys`` with ``dialog_guard`` types nothing then
+  (:func:`action_keys_guard`).
 * **One action per agent at a time.** ``remote_server.remote_agent_lock`` is
   taken without waiting, and the needs card's quick answers take it too (409
   ``busy``).
@@ -745,16 +746,17 @@ def action_may_answer(snap: AgentNow) -> bool:
 @dataclass
 class ActionGuardLast:
     """The dialog guard as the fleet's last check before it stops the agent: the
-    ``before_stop`` of ``fleet.switch``, asked once every refusal the fleet makes up
-    front has passed.
+    ``before_stop`` of ``fleet.switch`` and ``fleet.restart``, asked once every
+    refusal the fleet makes up front has passed.
 
     Asked before the fleet call, the guard sent ``dismiss_dialog``'s Escape, which
     answers a prompt "No", and the fleet then refused what it could have refused
-    first: a ``to`` that names no account, the account the agent is on, none with
-    room (sweep of #243, round 4). Asked last, it comes after the fleet's account
-    lookup, which can read every account's usage over the network, so it reads the
-    agent anew rather than going by a card's read from before (:func:`action_dialog_guard`
-    with no snapshot).
+    first: for a switch a ``to`` that names no account, the account the agent is
+    on, none with room (sweep of #243, round 4); for a restart a closed task, a
+    hand-over already moving the agent, a launch that cannot start. Asked last, it
+    comes after the fleet's account lookup, which can read every account's usage
+    over the network, so it reads the agent anew rather than going by a card's
+    read from before (:func:`action_dialog_guard` with no snapshot).
     """
 
     target: ProjectInfo
@@ -763,11 +765,14 @@ class ActionGuardLast:
     dismiss: bool
     doing: str
     audit_start: str
+    live: bool = True
+    """``False`` for a row that had ended under the lock: it shows no dialog, and a
+    restart of it stops nothing, so there is nothing to ask."""
     dismissed: bool | None = None
     """Whether the guard sent its Escape; ``None`` until the fleet asked it."""
 
     def __call__(self) -> None:
-        self.dismissed = action_dialog_guard(
+        self.dismissed = self.live and action_dialog_guard(
             self.target,
             self.label,
             self.pin,
@@ -1080,8 +1085,11 @@ def action_restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     It works on an exited, a lost or a running agent. A running one is handed
     over, so its claims wait for the replacement. While the row has not ended,
     the action is behind the dialog guard, because a running agent is first
-    stopped with ``/exit``. The service gets ``agent_id`` as well, and refuses a
-    row that was replaced after the pin was checked.
+    stopped with ``/exit``. The guard is the restart's last check before that
+    stop (:class:`ActionGuardLast`): what the restart refuses up front, such as a
+    task that was closed, it refuses before any Escape. The service gets
+    ``agent_id`` as well, and refuses a row that was replaced after the pin was
+    checked.
     """
     from aisquare.services import fleet as fleet_service
 
@@ -1093,24 +1101,32 @@ def action_restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     # A refused restart's line names the row it acted on: it has no started= to go by.
     audit_start = f"restart {label}@{target.id} agent={agent_id} fresh={action_yes_no(fresh)}"
     with action_locked(target, label, agent_id) as row:
-        snap = action_check_needs(target, label, row.id, needs_id)
-        dismissed = row.ended_at is None and action_dialog_guard(
+        action_check_needs(target, label, row.id, needs_id)
+        guard = ActionGuardLast(
             target,
             label,
-            row.id,
-            snap,
+            agent_id,
             dismiss=dismiss,
             doing="restarting",
             audit_start=audit_start,
+            live=row.ended_at is None,
         )
         # A running agent is stopped before its replacement starts, and a start that
         # fails then leaves it stopped.
         with action_audited(
-            lambda error: f"{audit_start} dismissed={action_yes_no(dismissed)} failed={error}"
+            lambda error: (
+                f"{audit_start} dismissed={action_yes_no(guard.dismissed is True)} failed={error}"
+            ),
+            reached=guard.action_guard_asked,
         ):
             receipt = action_fleet_call(
                 lambda: fleet_service.restart(
-                    target, label, fresh=fresh, spawned_by="user", agent_id=agent_id
+                    target,
+                    label,
+                    fresh=fresh,
+                    spawned_by="user",
+                    agent_id=agent_id,
+                    before_stop=guard,
                 )
             )
     result: dict[str, object] = {
@@ -1125,8 +1141,8 @@ def action_restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     }
     summary = (
         f"restart {label}@{target.id} fresh={action_yes_no(fresh)} "
-        f"dismissed={action_yes_no(dismissed)} resumed={action_yes_no(receipt.resumed)} "
-        f"started={receipt.started.id}"
+        f"dismissed={action_yes_no(guard.dismissed is True)} "
+        f"resumed={action_yes_no(receipt.resumed)} started={receipt.started.id}"
     )
     return result, summary
 

@@ -561,9 +561,9 @@ class FleetCalls:
     answered with what the test gave for it, a receipt or an error to raise.
 
     A ``before_stop`` (the dialog guard, as the fleet's last check) runs first, as
-    ``fleet.switch`` runs it once its own refusals have passed. A call it refuses is not
-    written down: the fleet did nothing then. The answer, an error included, is what came
-    after it."""
+    ``fleet.switch`` and ``fleet.restart`` run it once their own refusals have passed. A
+    call it refuses is not written down: the fleet did nothing then. The answer, an error
+    included, is what came after it."""
 
     def __init__(self, log: list[str]) -> None:
         self.log = log
@@ -903,11 +903,13 @@ def test_a_stop_whose_claims_were_not_released_is_still_a_200_that_says_so(
 def test_restart_passes_fresh_the_pin_and_spawned_by_user(
     phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
 ) -> None:
+    """The dialog guard goes as the restart's last check before the stop."""
     _row(project)
     response = phone.post("agent/restart", **PINNED, fresh=True)
     assert response.status_code == 200, response.text
     ((name, args, kwargs),) = fleet.calls
     assert (name, args[0].id, args[1:]) == ("restart", project.id, (LABEL,))
+    assert isinstance(kwargs.pop("before_stop"), remote_actions.ActionGuardLast)
     assert kwargs == {"fresh": True, "spawned_by": "user", "agent_id": "agt_one"}
     assert phone.audit() == [
         (
@@ -1105,32 +1107,32 @@ def test_a_card_whose_item_is_gone_is_409_stale_with_the_agents_items_now(
     assert fleet.calls == []
 
 
-@pytest.mark.parametrize("name", ["agent/stop", "agent/restart"])
 def test_a_card_whose_item_is_still_current_goes_through_with_one_read(
-    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo, name: str
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
 ) -> None:
     """A parked agent's card: the row reads ``limited``, so its item is no dialog."""
+    _row(project)
+    needs.state = "limited"
+    needs.items = (_item(project, "ny_limit"),)
+    response = phone.post("agent/stop", **PINNED, needs_id="ny_limit")
+    assert response.status_code == 200, response.text
+    assert fleet.names() == ["stop"]
+    assert needs.reads == 1, "the card's read serves the dialog guard too"
+
+
+@pytest.mark.parametrize("name", ["agent/restart", "agent/switch"])
+def test_a_restart_or_switch_from_a_card_reads_the_agent_again_right_before_the_stop(
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo, name: str
+) -> None:
+    """Their guard is their last check, after the account lookup, which can read every
+    account's usage over the network: the card's read is seconds old by then, and a prompt
+    that opened meanwhile would take the stop's Enter."""
     _row(project)
     needs.state = "limited"
     needs.items = (_item(project, "ny_limit"),)
     response = phone.post(name, **PINNED, needs_id="ny_limit")
     assert response.status_code == 200, response.text
     assert fleet.names() == [name.removeprefix("agent/")]
-    assert needs.reads == 1, "the card's read serves the dialog guard too"
-
-
-def test_a_switch_from_a_card_reads_the_agent_again_right_before_the_stop(
-    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
-) -> None:
-    """The switch's guard is its last check, after the account lookup, which can read every
-    account's usage over the network: the card's read is seconds old by then, and a prompt
-    that opened meanwhile would take the stop's Enter."""
-    _row(project)
-    needs.state = "limited"
-    needs.items = (_item(project, "ny_limit"),)
-    response = phone.post("agent/switch", **PINNED, needs_id="ny_limit")
-    assert response.status_code == 200, response.text
-    assert fleet.names() == ["switch"]
     assert (needs.scans, needs.reads) == (2, 2), "the card's read, then the guard's own"
 
 
@@ -2600,3 +2602,41 @@ def test_a_switch_the_fleet_takes_sends_its_escape_last_and_then_stops_the_agent
     assert phone.audit() == [
         ("agent/switch", f"{_acted_on('agent/switch', project)} dismissed=yes failed=fleet_error")
     ]
+
+
+def test_a_restart_the_fleet_refuses_up_front_sends_no_escape_first(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The switch's case, in a restart: with a prompt up, a restart of coder-1, whose task
+    was closed meanwhile, was refused ``dialog_open``, and its retry with ``dismiss_dialog``
+    answered the prompt "No" before ``fleet.restart`` refused the closed task. The guard is
+    the restart's last check too: what it refuses up front, it refuses with nothing sent."""
+    done = TeamTask(
+        id="tsk_1",
+        project_id=project.id,
+        key="k",
+        title="ship",
+        status="done",
+        created_at=T0,
+        updated_at=T0,
+    )
+    with store_session() as store:
+        store.upsert_task(done)
+        store.upsert_fleet_agent(_agent(project).model_copy(update={"task_id": done.id}))
+    needs.dialog = True
+    stopped: list[str] = []
+
+    def stop(project: ProjectInfo, label: str, **kwargs: object) -> StopReceipt:
+        stopped.append(str(kwargs["agent_id"]))
+        raise fleet_service.FleetError("tmux went away")
+
+    monkeypatch.setattr(fleet_service, "stop", stop)
+    response = phone.post("agent/restart", **PINNED, dismiss_dialog=True)
+    assert (response.status_code, response.json()["error"]) == (409, "fleet_error")
+    assert "cannot restart 'coder-1': task tsk_1 is done" in response.json()["message"]
+    assert pane.sent == [] and stopped == []
+    assert phone.audit() == [], "nothing reached the agent"

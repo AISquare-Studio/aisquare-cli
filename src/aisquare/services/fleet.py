@@ -4132,6 +4132,7 @@ def restart(
     spawned_by: str = "user",
     agent_id: str | None = None,
     permission_mode: str | None = None,
+    before_stop: Callable[[], None] | None = None,
 ) -> RestartReceipt:
     """Start an agent again under its own label — the **Restart** of #138.
 
@@ -4176,6 +4177,9 @@ def restart(
     flag). The replacement records it, so a typo was replayed by every later
     restart, switch and hand-over, and it stopped a running agent for a
     replacement that could not start (review of #169, round 1).
+    ``before_stop`` is the caller's last check, as for :func:`switch`: asked
+    once every refusal above has passed, before anything is stopped or
+    recorded, and it raises to refuse.
     """
     if permission_mode is not None and permission_mode not in ("", *CLAUDE_PERMISSION_MODES):
         raise FleetError(
@@ -4230,6 +4234,8 @@ def restart(
     # The ladder's notes travel with the slot it chose; with none chosen, `spawn`
     # asks the same ladder and gives them itself.
     notes = [f"accounts: {note}" for note in choice.notes] if account is not None else []
+    if before_stop is not None:
+        before_stop()
     was_running = False
     handed_over: StopReceipt | None = None
     # Set when THIS restart ended a dead or vanished pane's row with the manager's

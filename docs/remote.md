@@ -285,14 +285,15 @@ when the agent shows a prompt, stop, restart and switch are refused with
 prompt and then goes on. For its first few seconds a permission prompt cannot be
 told from a tool at work, so they are refused the same way while any tool the
 agent called has no result yet; there the Esc also stops a running tool. A
-switch checks the account first, so one it cannot make (an account that does not
-exist, the one the agent is on, none with room) is refused before any Esc. A
-card's Tell and Interrupt & tell refuse a dialog the same way. The menu's plain
-Tell types only into an agent waiting at its prompt: while the agent may be
-showing a prompt, even one left unanswered for hours, the message is left as a
-board note instead. Send on the Transcript tab, which does not show the pane,
-types nothing while the agent may be showing a prompt, a tool with no result yet
-included; send from Live, where the pane shows what the keys would answer.
+restart or a switch checks first what it can, so what it would refuse anyway (a
+task closed meanwhile; for a switch, an account that does not exist, the one the
+agent is on, none with room) is refused before any Esc. A card's Tell and
+Interrupt & tell refuse a dialog the same way. The menu's plain Tell types only
+into an agent waiting at its prompt: while the agent may be showing a prompt,
+even one left unanswered for hours, the message is left as a board note instead.
+Send on the Transcript tab, which does not show the pane, types nothing while
+the agent may be showing a prompt, a tool with no result yet included; send from
+Live, where the pane shows what the keys would answer.
 
 Every action is pinned to the agent you looked at: if a manager restarted or
 switched it in the meantime, the action is refused as `stale` rather than

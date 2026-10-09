@@ -7899,6 +7899,43 @@ def test_a_switchs_last_check_comes_after_its_own_refusals_and_before_anything_i
     assert receipt.to_slot == 3 and agent.pane_id in tmux.killed
 
 
+def test_a_restarts_last_check_comes_after_its_own_refusals_and_before_anything_is_stopped(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """As a switch's (sweep of #243, round 4): ``before_stop`` is the phone's dialog guard,
+    whose Escape answers a prompt "No". It is asked after the restart's own refusals, a
+    task closed meanwhile here, and before ``/exit`` is typed. A check that refuses leaves
+    the running agent as it was, and one that passes is asked once."""
+    task = _add_task(project, "Ship auth")
+    closed = _coder(project, label="coder-closed", task_id=task.id)
+    with store_session() as store:
+        store.set_task_status(task.id, "done")
+    agent = _coder(project)
+    before = (len(tmux.typed), len(tmux.killed))
+    asked: list[tuple[int, int]] = []
+
+    def check() -> None:
+        asked.append((len(tmux.typed), len(tmux.killed)))
+
+    with pytest.raises(FleetError, match="is done"):
+        fleet_service.restart(project, closed.label, before_stop=check)
+    assert asked == [], "the restart's own refusals come first"
+
+    def refuse() -> None:
+        check()
+        raise RuntimeError("the dialog guard said no")
+
+    with pytest.raises(RuntimeError, match="the dialog guard said no"):
+        fleet_service.restart(project, agent.label, before_stop=refuse)
+    assert asked == [before] and (len(tmux.typed), len(tmux.killed)) == before
+    with store_session() as store:
+        assert store.fleet_agent_by_label(project.id, agent.label) is not None  # still live
+
+    receipt = fleet_service.restart(project, agent.label, before_stop=check)
+    assert asked == [before, before], "asked once, before /exit was typed"
+    assert receipt.was_running and agent.pane_id in tmux.killed
+
+
 def test_a_refused_restart_of_a_death_no_listing_has_recorded_keeps_the_window(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

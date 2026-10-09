@@ -1477,22 +1477,43 @@ def test_a_hook_naming_a_home_this_machine_lacks_counts_as_gone(
     assert agent_core.hook_binary(f"{program} hook stop") is not None
 
 
-@pytest.mark.parametrize("shape", ["symlink-loop", "another-users-home"])
-def test_a_recorded_dir_pathlib_raises_on_is_left_and_the_rest_still_run(
-    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path, shape: str
-) -> None:
-    """pathlib raises RuntimeError, not OSError, for a symlink loop on 3.11 and 3.12 and for
-    a ``~olduser`` naming no user here: a recorded ~/.claude-old linked to itself, or one a
-    hand-edited agents.json spells ``~olduser/.claude``, ended upgrade, --check and asq's
-    Update in a traceback, and the good directory after it was never reached (sweep of
-    #257)."""
+#: A home no machine running this suite has: pathlib raises RuntimeError expanding it.
+_NO_SUCH_HOME = "~aisquare-no-such-user"
+
+
+def _dir_pathlib_raises_on(shape: str, tmp_path: Path) -> Path:
+    """A Claude Code directory pathlib raises RuntimeError on, not OSError: a symlink loop
+    (on 3.11 and 3.12), or one spelled ``~olduser/.claude`` for a user this machine lacks."""
     if sys.platform == "win32":
         pytest.skip("NTFS reports a link loop differently, and Windows guesses a user's home")
     if shape == "symlink-loop":
-        bad = tmp_path / "claude-old"
-        bad.symlink_to(bad)
-    else:
-        bad = Path("~aisquare-no-such-user") / ".claude"
+        loop = tmp_path / "claude-old"
+        loop.symlink_to(loop)
+        return loop
+    return Path(_NO_SUCH_HOME) / ".claude"
+
+
+def _json_document(result: Any) -> Any:
+    """The one JSON document a --json command printed (an object or a list), raised past
+    nothing: an exception other than the command's own exit fails the test."""
+    assert result.exception is None or isinstance(result.exception, SystemExit), repr(
+        result.exception
+    )
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1, f"--json must print exactly one document, got: {result.stdout!r}"
+    return json.loads(lines[0])
+
+
+@pytest.mark.parametrize("shape", ["symlink-loop", "another-users-home"])
+def test_a_recorded_dir_pathlib_raises_on_does_not_stop_upgrade_reading_the_rest(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path, shape: str
+) -> None:
+    """A recorded ~/.claude-old linked to itself, or one a hand-edited agents.json spells
+    ``~olduser/.claude``, ended upgrade, --check and asq's Update in a traceback, and the
+    good directory after it was never reached (sweep of #257). The loop is left with its
+    reason; the ``~olduser`` one is a directory this machine does not have, read as a
+    removed one is: nothing to rewrite there."""
+    bad = _dir_pathlib_raises_on(shape, tmp_path)
     good = _hooked(tmp_path / "claude", tool.script)
     _record(bad, good)
 
@@ -1501,8 +1522,95 @@ def test_a_recorded_dir_pathlib_raises_on_is_left_and_the_rest_still_run(
     assert result.exit_code == 0, result.output
     plan = _one_object(result.stdout)
     assert plan["refresh_hooks"] == [str(good)], plan
-    assert [entry["config_dir"] for entry in plan["hooks_left"]] == [str(bad)], plan
-    assert "its settings.json could not be read" in plan["hooks_left"][0]["reason"], plan
+    left = [entry["config_dir"] for entry in plan["hooks_left"]]
+    assert left == ([str(bad)] if shape == "symlink-loop" else []), plan
+    assert all("its settings.json could not be read" in e["reason"] for e in plan["hooks_left"])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [["uninstall", "--dry-run"], ["doctor"], ["status"], ["agents", "list"]],
+    ids=["uninstall", "doctor", "status", "agents-list"],
+)
+@pytest.mark.parametrize("shape", ["symlink-loop", "another-users-home"])
+def test_a_recorded_dir_pathlib_raises_on_does_not_end_the_commands_that_read_it(
+    runner: CliRunner, tool: Tool, tmp_path: Path, shape: str, command: list[str]
+) -> None:
+    """The ``~olduser/.claude`` shape still ended uninstall, doctor (asq's Doctor page,
+    where Update is), status and agents list in a traceback, with nothing on stdout under
+    --json: `_claude_home` expanded it unguarded (review of #257's fixes). It now reads as
+    a directory that does not exist, and the good one beside it is still read."""
+    bad = _dir_pathlib_raises_on(shape, tmp_path)
+    good = _hooked(tmp_path / "claude", tmp_path / "gone" / "aisquare")
+    _record(bad, good)
+
+    document = _json_document(runner.invoke(app, ["--json", *command]))
+
+    assert document, document
+    if command == ["agents", "list"]:
+        [claude] = [agent for agent in document if agent["name"] == "claude-code"]
+        sites = {site["config_dir"]: site for site in claude["sites"]}
+        assert set(sites) == {str(bad), str(good)}, sites
+        if shape == "another-users-home":
+            assert sites[str(bad)]["refused"] == f"{bad} does not exist", sites
+
+
+def test_a_hook_program_that_is_a_symlink_loop_beside_this_one_is_another_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The doctor compares a hook's program with this install by resolving both when they
+    share a directory, and resolve() raises RuntimeError on a loop on 3.11 and 3.12."""
+    if sys.platform == "win32":
+        pytest.skip("NTFS reports a link loop differently, and making one needs a privilege")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    loop = bin_dir / "aisquare-old"
+    loop.symlink_to(loop)
+    monkeypatch.setattr(agent_core, "current_install", lambda: bin_dir / "aisquare")
+
+    assert agent_core._same_install(agent_core.HookBinary(loop)) is False
+
+
+@pytest.mark.parametrize("shape", ["symlink-loop", "another-users-home"])
+def test_a_claude_config_dir_pathlib_raises_on_is_read_as_absent_and_never_made(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    """An exported ``CLAUDE_CONFIG_DIR=~olduser/.claude`` (quoted, so the shell left it), or
+    one that is a symlink loop on 3.11/3.12, ended doctor, status, agents list, accounts list,
+    uninstall and upgrade --check in a traceback. Read as written, the ``~olduser`` one is a
+    directory that does not exist, and nothing may make it: with ``claude`` on PATH,
+    `agents connect` took it for a Claude Code that has never started and wrote hooks into
+    ``./~olduser/.claude`` in the cwd (sweep of #257)."""
+    exported = _dir_pathlib_raises_on(shape, tmp_path)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(exported))
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/usr/bin/claude")
+    _record(_hooked(tmp_path / "claude", tmp_path / "gone" / "aisquare"))
+    reads = [
+        ["uninstall", "--dry-run"],
+        ["doctor"],
+        ["status"],
+        ["agents", "list"],
+        ["accounts", "list"],
+        ["upgrade", "--check"],
+    ]
+
+    documents = [_json_document(runner.invoke(app, ["--json", *argv])) for argv in reads]
+    connect = runner.invoke(app, ["agents", "connect", "claude-code"])
+
+    assert all(documents), documents
+    assert connect.exit_code == 1, connect.output
+    assert connect.exception is None or isinstance(connect.exception, SystemExit), connect
+    if shape == "another-users-home":
+        assert "no such home on this machine" in connect.stderr, connect.stderr
+    assert list(cwd.iterdir()) == [], "nothing is made in the cwd"
 
 
 #: What the new install's own process wrote to a pipe, laid out by Rich at 80 columns.

@@ -120,7 +120,7 @@ def default_config_dir() -> Path:
     """
     env = plain_environment().get(CONFIG_DIR_VAR, "").strip()
     if env:
-        return Path(env).expanduser()
+        return paths.expand_user(Path(env))  # a `~olduser/…` reads as written (sweep of #257)
     return home_config_dir()
 
 
@@ -172,7 +172,7 @@ def managed_slot(config_dir: Path | str) -> int | None:
     path = Path(config_dir)
     try:
         relative = path.resolve().relative_to(accounts_root().resolve())
-    except (ValueError, OSError):
+    except (ValueError, OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11/3.12
         return None
     parts = relative.parts
     if len(parts) != 1 or not _SLOT_DIR.match(parts[0]):
@@ -649,7 +649,7 @@ def plain_environment(environ: Mapping[str, str] | None = None) -> dict[str, str
     source = os.environ if environ is None else environ
     own = {var: source[var] for var in LAUNCH_VARS if source.get(var, "").strip()}
     config_dir = own.get(CONFIG_DIR_VAR)
-    if config_dir is None or managed_slot(Path(config_dir.strip()).expanduser()) is None:
+    if config_dir is None or managed_slot(paths.expand_user(Path(config_dir.strip()))) is None:
         return own
     return {var: source[kept] for var, kept in PLAIN_VARS.items() if source.get(kept, "").strip()}
 

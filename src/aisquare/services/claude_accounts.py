@@ -361,7 +361,7 @@ def slot_of(config_dir: str | Path) -> int | None:
     try:
         if Path(config_dir).resolve() == core.default_config_dir().resolve():
             return core.DEFAULT_SLOT
-    except OSError:
+    except (OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11 and 3.12
         return None
     return None
 

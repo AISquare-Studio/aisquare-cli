@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from aisquare.core import agents as agent_core
+from aisquare.core import paths
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
 from aisquare.models import AgentConnection, AgentInfo
@@ -316,12 +317,14 @@ def _first_run_dir(name: str, config_dir: Path | None) -> Path | None:
     made, as that first start would make it, however it is named: the doctor names a
     recorded ``~/.claude`` that was removed with ``--config-dir``, and that Connect
     refused it as not installed while the bare one made it. Any other ``--config-dir``
-    is never made: a typo must not get hooks.
+    is never made: a typo must not get hooks. Nor is a ``CLAUDE_CONFIG_DIR`` of
+    ``~olduser/…`` for a user this machine does not have: read as written
+    (``paths.expand_user``), it would be made in the cwd (sweep of #257).
     """
     if name != "claude-code" or agent_core.claude_on_path() is None:
         return None
     where = agent_core.ambient_hook_dir(name)
-    if where is None or where.exists():
+    if where is None or paths.names_no_home(where) or where.exists():
         return None
     if config_dir is not None:
         try:

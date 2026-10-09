@@ -8,7 +8,7 @@ known context file) exists. The set of connected agents is persisted in
 
 from __future__ import annotations
 
-import contextlib
+import errno
 import json
 import os
 import re
@@ -101,10 +101,10 @@ def _claude_home(config_dir: Path | None = None) -> Path:
     then ``CLAUDE_CONFIG_DIR``, then ``~/.claude``.
     """
     if config_dir is not None:
-        return config_dir.expanduser()
+        return paths.expand_user(config_dir)
     env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     if env:
-        return Path(env).expanduser()
+        return paths.expand_user(Path(env))
     return _home() / ".claude"
 
 
@@ -360,6 +360,12 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
         kept.append({"hooks": [entry]})
         hooks[event] = kept
     settings["hooks"] = hooks
+    if paths.names_no_home(spec.settings_path):
+        # A `~olduser/.claude` read as written (paths.expand_user): made, it landed in the
+        # cwd, and connect said ✓ (sweep of #257).
+        raise FileNotFoundError(
+            errno.ENOENT, "no such home on this machine", str(spec.settings_path)
+        )
     spec.settings_path.parent.mkdir(parents=True, exist_ok=True)
     _write_settings(spec.settings_path, settings)
     return True
@@ -1237,7 +1243,7 @@ def _same_install(binary: HookBinary) -> bool:
         return False
     try:
         return program.resolve() == this.resolve()
-    except OSError:
+    except (OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11 and 3.12
         return False
 
 
@@ -1361,7 +1367,7 @@ def _claude_dirs_on_disk() -> list[Path]:
     candidates: list[Path] = []
     env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     if env:
-        candidates.append(Path(env).expanduser())
+        candidates.append(paths.expand_user(Path(env)))
     home = _home()
     candidates.append(home / ".claude")
     if home.is_dir():
@@ -1387,12 +1393,13 @@ def _claude_dirs_on_disk() -> list[Path]:
 def _dir_key(path: Path) -> Path:
     """One identity for the several spellings of a directory (``~``, symlinks).
 
-    pathlib raises RuntimeError, not OSError, for a symlink loop on 3.11 and 3.12 and
-    for a ``~olduser`` naming no user here: a recorded directory that was either ended
-    upgrade, its ``--check``, uninstall and doctor in a traceback (sweep of #257).
+    pathlib raises RuntimeError, not OSError, for a symlink loop on 3.11 and 3.12, and
+    for a ``~olduser`` naming no user here (``paths.expand_user`` keeps that as written).
+    A recorded directory of either kind ended upgrade and uninstall in a traceback
+    here, and the ``~olduser`` one doctor, status and ``agents list`` in
+    :func:`_claude_home` (sweep of #257).
     """
-    with contextlib.suppress(RuntimeError):
-        path = path.expanduser()
+    path = paths.expand_user(path)
     try:
         return path.resolve()
     except (OSError, RuntimeError):

@@ -347,6 +347,29 @@ def _dacl_sddl(path: Path) -> str | None:
         local_free(descriptor)
 
 
+def expand_user(path: Path) -> Path:
+    """``path`` with a leading ``~`` expanded, or as written when pathlib cannot expand it.
+
+    ``Path.expanduser`` raises RuntimeError, on every Python, for a ``~olduser`` naming
+    a user this machine does not have: a recorded or exported ``~olduser/.claude`` ended
+    doctor, status, ``agents list``, ``accounts list`` and uninstall in a traceback
+    (sweep of #257). Read as written it names a directory that does not exist, and
+    :func:`names_no_home` lets anything that would MAKE it refuse instead. Not for
+    :func:`aisquare_home`: a home read as written would be made in the cwd.
+    """
+    try:
+        return path.expanduser()
+    except RuntimeError:
+        return path
+
+
+def names_no_home(path: Path) -> bool:
+    """Whether ``path`` still starts with a ``~user`` that :func:`expand_user` could not
+    expand: a home this machine does not have, where nothing may be made (relative, it
+    would land in the cwd)."""
+    return bool(path.parts) and path.parts[0].startswith("~") and not path.is_absolute()
+
+
 def aisquare_home() -> Path:
     """Return the aisquare home directory (without creating it).
 

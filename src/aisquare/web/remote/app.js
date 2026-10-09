@@ -1456,6 +1456,7 @@ const VIEWS = {};
 function renderRoute() {
   const route = parseRoute(location.hash);
   if (!route) return pageGo("#/", true);
+  const from = S.route;
   if (S.view && typeof S.view.cleanup === "function") S.view.cleanup();
   S.view = null;
   S.route = route;
@@ -1465,13 +1466,29 @@ function renderRoute() {
   drawNav();
   drawStatus();
   drawBanner();
-  if (S.off) return drawOff();
-  if (S.booting) return UI.main.appendChild(el("p", "empty", "Connecting to the machine…"));
-  if (route.name !== "unlock" && S.locked) return toUnlock();
-  if (route.name === "unlock" && !S.locked) return pageGo("#/", true);
-  S.view = VIEWS[route.name](route, UI.main) || {};
-  gateButtons();
-  return undefined;
+  if (S.off) drawOff();
+  else if (S.booting) return UI.main.appendChild(el("p", "empty", "Connecting to the machine…"));
+  else if (route.name !== "unlock" && S.locked) return toUnlock();
+  else if (route.name === "unlock" && !S.locked) return pageGo("#/", true);
+  else {
+    S.view = VIEWS[route.name](route, UI.main) || {};
+    gateButtons();
+  }
+  return landFocus(from, route);
+}
+
+/* Focus where it was, if still there; else the tab chosen, else the heading, else the screen.
+ * Left on what the screen took away, a screen reader lost its place and heard of no change.
+ * The page's first screen is left alone, as any page's is when it loads. */
+function landFocus(from, route) {
+  const now = document.activeElement;
+  const first = !UI.landed;
+  UI.landed = true;
+  if (first || sheetOpen() || (now && now !== document.body && now.isConnected)) return;
+  const tab = from && from.name === route.name && from.pid === route.pid && from.label === route.label;
+  const target = (tab && UI.main.querySelectorAll("button.tab.on")[0]) || UI.main.querySelectorAll("h2")[0] || UI.main;
+  if (target.tagName === "H2") target.tabIndex = -1;
+  target.focus({ preventScroll: true });
 }
 
 function toUnlock() {

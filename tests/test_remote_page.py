@@ -696,8 +696,9 @@ BUDGETS = {
     "app.css": 16 * 1024,
     # SPEC §6.1 set 110 KB, and the page met it with 13 bytes to spare. The third review of
     # #243 found more for it to do: ask for a board only on its tab, keep keys in tap order,
-    # answer a late reply in its own sheet. This is their room; the page stays under 150 KB.
-    "app.js": 124 * 1024,
+    # answer a late reply in its own sheet. The fourth, and a sweep of the page in a real
+    # browser, found more again. This is their room; the page stays under 150 KB.
+    "app.js": 129 * 1024,
     "sw.js": 4 * 1024,
     "manifest.webmanifest": 1024,
 }
@@ -1814,6 +1815,30 @@ def test_a_sheet_keeps_focus_where_it_put_it_and_closes_onto_the_screen_once_its
     is gone: here the card's Tell…, drawn anew by the next feed frame."""
     focus = boot_report["sheetFocus"]
     assert focus == {"typing": "TEXTAREA", "redrawn": True, "closedOnto": "main"}
+
+
+def test_focus_lands_on_the_new_screen_when_the_route_changes(
+    boot_report: dict[str, Any],
+) -> None:
+    """A route change cleared the screen under the focused control and moved focus nowhere: it
+    fell to the page, so a screen reader lost its place and was never told the screen had
+    changed (a row, a tab, a card's Open, Back with a sheet open). Focus goes to the new
+    screen's heading now, or to the tab chosen on a tab switch, and stays where it was when
+    that is still on the page (the bottom nav). A page's first screen leaves it alone."""
+    lands = boot_report["focusLands"]
+    on = {"connected": True, "main": True, "nav": False}
+    assert lands["loaded"]["tag"] == "BODY", "a page's first screen leaves focus where loads do"
+    assert lands["row"] == {"tag": "H2", "text": "x", **on}
+    assert lands["tab"] == {"tag": "BUTTON", "text": "Board", **on}
+    assert lands["nav"] == {
+        "tag": "BUTTON",
+        "text": "Settings",
+        "connected": True,
+        "main": False,
+        "nav": True,
+    }
+    assert lands["open"] == {"tag": "H2", "text": "coder-1", **on}
+    assert lands["back"] == {"tag": "H2", "text": "x", **on}
 
 
 def test_the_transcript_asks_for_lines_as_wide_as_fit_inside_its_padding(

@@ -1682,6 +1682,49 @@ async function sheetFocus() {
   return { typing, redrawn, closedOnto: page.run("document.activeElement === UI.main ? 'main' : document.activeElement.tagName") };
 }
 
+/* The focused element, as a screen reader follows it: its tag, its text, and whether it is on
+ * the page, in the screen, or in the nav. */
+function focusOf(page) {
+  return page.run("(() => { const at = document.activeElement; return { tag: at.tagName, text: at.textContent, "
+    + "connected: at.isConnected, main: UI.main.contains(at), nav: UI.nav.contains(at) }; })()");
+}
+
+/* A control focused and tapped, as a keyboard or a screen reader does, and where focus is then. */
+async function tapFocused(page, control) {
+  control.focus();
+  click(control);
+  await settle();
+  return focusOf(page);
+}
+
+/* Where focus lands when the route changes: on the page's first screen, left where a page's load
+ * leaves it; after a Projects row, then the Board tab; the bottom nav's Settings; a feed card's
+ * Open; and on an agent's screen with a sheet open, Back. */
+async function focusLands() {
+  const projects = bootPage("#/projects", signedIn({ "GET api/projects": () => ({ status: 200, json: [{ id: PROJECT, name: "x", agents: {} }] }) }));
+  await settle();
+  projects.acceptSockets();
+  await settle();
+  const loaded = focusOf(projects);
+  const row = await tapFocused(projects, find(projects.main(), (node) => node.tagName === "BUTTON" && node.className === "row"));
+  const tab = await tapFocused(projects, buttonNamed(projects.main(), "Board"));
+  const nav = await tapFocused(projects, buttonNamed(projects.run("UI.nav"), "Settings"));
+  const feed = bootPage("#/", signedIn({ "GET api/needs": () => ({ status: 200, json: { items: [ITEM] } }) }));
+  await settle();
+  feed.acceptSockets();
+  await settle();
+  const open = await tapFocused(feed, buttonNamed(feed.main(), "Open"));
+  const fleet = bootPage("#/p/" + PROJECT + "/fleet", signedIn());
+  await settle();
+  fleet.acceptSockets();
+  await settle();
+  await tapFocused(fleet, find(fleet.main(), (node) => node.tagName === "BUTTON" && node.className === "row"));
+  await tapFocused(fleet, buttonNamed(fleet.main(), "Actions…"));
+  fleet.back();
+  await settle();
+  return { loaded, row, tab, nav, open, back: focusOf(fleet) };
+}
+
 /* The Live tab across a sleep, as [stale, Send disabled, pane greyed as held]: with its pane
  * in; after a minute with nothing heard; once a wake's socket opened and a second passed;
  * once that socket's first frame came, not the pane; and once the pane came. */
@@ -2571,6 +2614,7 @@ async function main() {
     silentSocket: await silentSocket(),
     transcriptSend: await transcriptSend(),
     sheetFocus: await sheetFocus(),
+    focusLands: await focusLands(),
     transcriptColumns: await transcriptColumns(),
     transcriptLoads: await transcriptLoads(),
     buttonsInFlight: await buttonsInFlight(),

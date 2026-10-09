@@ -951,17 +951,26 @@ def test_a_settings_json_linked_nowhere_is_refused_first_with_a_remedy_that_work
 _NOT_A_DIRECTORY_TO_READ = [
     pytest.param("Claude Code's state file", id="state file"),
     pytest.param("Claude Code's state file, beside a connected ~/.claude", id="state file beside"),
+    pytest.param(
+        "Claude Code's state file, beside a connected ~/.claude, no claude on PATH",
+        id="state file beside, no claude",
+    ),
     pytest.param("in a folder this user cannot enter", id="unenterable", marks=_NEEDS_DENIED_READS),
     pytest.param(
         "in a folder this user cannot enter, beside a connected ~/.claude",
         id="unenterable beside",
         marks=_NEEDS_DENIED_READS,
     ),
+    pytest.param(
+        "in a folder this user cannot enter, beside a connected ~/.claude, no claude on PATH",
+        id="unenterable beside, no claude",
+        marks=_NEEDS_DENIED_READS,
+    ),
 ]
 
 
 @pytest.mark.parametrize("shape", _NOT_A_DIRECTORY_TO_READ)
-def test_a_config_dir_variable_naming_no_directory_to_read_is_named_with_two_remedies(
+def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
     runner: CliRunner,
     isolated_agent_home: Path,
     tmp_path: Path,
@@ -971,10 +980,11 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_with_two_rem
     """`CLAUDE_CONFIG_DIR=~/.claude.json`, a slip for ~/.claude that names Claude Code's own
     state file, or a directory in a folder this user cannot enter: the only remedy printed
     was to make a settings.json inside it, with no word of the variable; beside a connected
-    ~/.claude the row was green. In the folder this user cannot enter, `doctor --json`
-    printed nothing and `uninstall --dry-run` ended in a traceback (review of #257). Named
-    with the operating system's answer, and each remedy, done as worded, lets connect write
-    and clears the row: repairing it, or the variable in a shell started again."""
+    ~/.claude the row was green, and with no `claude` on the doctor's PATH it still was. In
+    the folder this user cannot enter, `doctor --json` printed nothing and `uninstall
+    --dry-run` ended in a traceback (review of #257). Named with the operating system's
+    answer on any PATH, and each remedy, done as worded, lets connect write and clears the
+    row: repairing it, or the variable in a shell started again."""
     on_path = None if "no claude" in shape else "/opt/homebrew/bin/claude"
     monkeypatch.setattr(agent_core, "claude_on_path", lambda: on_path)
     home = isolated_agent_home

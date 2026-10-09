@@ -860,16 +860,16 @@ def _plugin_runner(pin: str | None) -> tuple[str, str | None, str | None]:
 
 
 def _unmade_ambient_dir(sites: list[agent_core.HookSiteHealth]) -> Path | None:
-    """The config dir sessions from this shell read, when Claude Code is on PATH and it is
-    not a directory to grade (not made yet, or something else is there, or in a folder
-    this user cannot enter), and no graded site is that dir; else ``None``.
-
-    Paths only, like the rest of the row: ``claude_on_path`` reads PATH and starts
-    nothing, and nothing is made here (``agents connect`` makes it).
+    """The config dir sessions from this shell read, when no graded site is that dir and it
+    is not a directory to grade: something else is there, or it is in a folder this user
+    cannot enter, or it is not made yet and Claude Code is on PATH to make it. Paths only,
+    like the rest of the row: nothing is started or made here (``agents connect`` makes it).
     """
     ambient = agent_core.ambient_hook_dir("claude-code")
-    if ambient is None or os.path.isdir(ambient) or agent_core.claude_on_path() is None:
+    if ambient is None or os.path.isdir(ambient):
         return None
+    if not (agent_core.present(ambient) or agent_core.claude_on_path()):
+        return None  # nothing there, and no Claude Code on PATH to make it
     key = agent_core.dir_identity(ambient)
     if any(agent_core.dir_identity(site.config_dir) == key for site in sites):
         return None

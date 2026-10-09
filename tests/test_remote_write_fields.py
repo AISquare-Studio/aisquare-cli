@@ -61,7 +61,7 @@ class FakePane:
         self.projects: list[str | None] = []
 
     def pane_facts(self, pane_id: str) -> SimpleNamespace:
-        return SimpleNamespace(dead=False, current_command="claude")
+        return SimpleNamespace(dead=False, current_command="claude", server_started=self.STARTED)
 
     def started_at(self) -> datetime:
         return self.STARTED

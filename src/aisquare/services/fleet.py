@@ -56,6 +56,7 @@ from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
 from aisquare.core.tmux import (
     DEFAULT_WINDOW_HEIGHT,
     DEFAULT_WINDOW_WIDTH,
+    PaneFacts,
     TmuxError,
     TmuxServer,
     TmuxUnavailable,
@@ -2452,6 +2453,11 @@ def _pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
         facts = srv.pane_facts(pane_id)
     except TmuxError:
         return False
+    return _runs_the_agent(facts)
+
+
+def _runs_the_agent(facts: PaneFacts | None) -> bool:
+    """:func:`_pane_is_the_agent`'s answer, for a caller that holds the pane's facts already."""
     return facts is not None and not facts.dead and _agent_running(facts.current_command)
 
 

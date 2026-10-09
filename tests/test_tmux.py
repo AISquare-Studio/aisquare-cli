@@ -106,6 +106,7 @@ def _facts_line(**overrides: str) -> str:
         "mouse_button_flag": "0",
         "mouse_all_flag": "0",
         "start_time": "1790343472",
+        "window_activity": "1790350000",
         "pane_title": "fedora",
     }
     values.update(overrides)
@@ -736,7 +737,18 @@ def test_pane_facts_parses_a_live_pane(fake_bin: Path, conf: Path) -> None:
         current_command="claude",
         title="fedora",
         server_started=datetime(2026, 9, 25, 13, 37, 52, tzinfo=UTC),
+        last_output=datetime(2026, 9, 25, 15, 26, 40, tzinfo=UTC),
     )
+
+
+def test_the_facts_say_when_their_pane_last_printed_or_nothing() -> None:
+    """``#{window_activity}`` rides in the facts too: the remote's needs-you asked for it in a
+    third process, after the facts and the server's start, on every quarter-second poll of
+    an agent action. A tmux that does not say prints nothing, which is ``None``."""
+    printed = tmux_module._facts(_facts_line(window_activity="1790350000")).last_output
+    assert printed == datetime.fromtimestamp(1790350000, tz=UTC)
+    for silent in ("", "soon", "-1"):
+        assert tmux_module._facts(_facts_line(window_activity=silent)).last_output is None
 
 
 def test_the_facts_say_when_their_server_started_or_nothing(fake_bin: Path, conf: Path) -> None:

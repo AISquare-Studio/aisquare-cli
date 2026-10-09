@@ -179,7 +179,9 @@ class _FakeTmux:
         self.sent: list[tuple[str, tuple[str, ...]]] = []
 
     def pane_facts(self, pane_id: str) -> SimpleNamespace:
-        return SimpleNamespace(dead=False, current_command="claude")
+        return SimpleNamespace(
+            dead=False, current_command="claude", server_started=self.started_at()
+        )
 
     def started_at(self) -> datetime:
         return T0 - timedelta(hours=1)

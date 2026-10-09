@@ -108,7 +108,7 @@ if TYPE_CHECKING:
     from starlette.routing import Route
     from starlette.websockets import WebSocket
 
-    from aisquare.core.tmux import Capture, TmuxServer
+    from aisquare.core.tmux import Capture, PaneFacts, TmuxServer
     from aisquare.services.remote_actions import ActionLedger
     from aisquare.services.remote_needs import NeedsItem
 
@@ -1801,7 +1801,7 @@ PANE_OUTLIVED = (
     "{label}'s pane is gone: tmux restarted after {label} started, "
     "and its pane id is another agent's now"
 )
-"""409 ``not_agent`` for a row that outlived its tmux server (:func:`_remote_pane_outlived`)."""
+"""409 ``not_agent`` for a row that outlived its tmux server (:func:`_remote_facts_refusal`)."""
 
 
 def _remote_live_row(target: ProjectInfo, label: str) -> FleetAgent:
@@ -1815,48 +1815,52 @@ def _remote_live_row(target: ProjectInfo, label: str) -> FleetAgent:
     return agent
 
 
-def _remote_pane_outlived(server: TmuxServer, agent: FleetAgent) -> bool:
-    """Whether the pane under the row's id is ANOTHER agent's: the server on its socket
-    started after the row was written (``fleet._outlived``, FLEET-1).
+PANE_NOT_AGENT = "{label}'s pane is not running the agent"
+"""409 ``not_agent`` for a row whose pane runs something else (:func:`_remote_facts_refusal`)."""
 
-    A reboot or a hand-run ``tmux -L asq kill-server`` leaves live rows behind (the
-    listing reads them ``lost`` and ends none of them), and the next server, started by
-    a spawn in any project, numbers its panes from ``%0`` again. Asked about by id, that
-    agent's pane answered for the row: the phone showed its screen under the row's label,
-    and a key from the pad answered its prompt. The listing, the TUI
-    (``views.agent.shown_pane``) and the agent actions (``remote_needs``) each refuse
-    that pane already. A start tmux will not give judges nothing, as in
-    ``fleet._pane_alive``.
-    """
+
+def _remote_pane_facts(server: TmuxServer, agent: FleetAgent) -> PaneFacts | None:
+    """The facts of the pane under the row's id, one ``display-message``; ``None`` when it is
+    gone, and when tmux cannot be asked: that is not a pane to type into either."""
     from aisquare.core.tmux import TmuxError
-    from aisquare.services import fleet as fleet_service
 
     try:
-        started = server.started_at()
+        return server.pane_facts(agent.pane_id)
     except TmuxError:
-        started = None
-    return fleet_service._outlived(agent, started)
-
-
-PANE_NOT_AGENT = "{label}'s pane is not running the agent"
-"""409 ``not_agent`` for a row whose pane runs something else (:func:`_remote_pane_refusal`)."""
+        return None
 
 
 def _remote_pane_refusal(server: TmuxServer, agent: FleetAgent) -> str | None:
     """Why nothing may be typed into the row's pane, a sentence about ``{label}``; ``None``
-    when the pane is the agent's own.
+    when the pane is the agent's own: :func:`_remote_facts_refusal` on its facts."""
+    return _remote_facts_refusal(agent, _remote_pane_facts(server, agent))
 
-    It must run the agent (``fleet._pane_is_the_agent``), and on the server the row was
-    recorded on (:func:`_remote_pane_outlived`), asked in that order. ``send-keys`` and
-    needs-you's snapshot, which the quick answers and the agent actions type on the
-    strength of, both ask here: the stale-pane rule in one place, where a second copy
-    would miss the next restart signal it learns.
+
+def _remote_facts_refusal(agent: FleetAgent, facts: PaneFacts | None) -> str | None:
+    """Why nothing may be typed into the pane these facts are of, as :func:`_remote_pane_refusal`
+    says it; ``None`` when it is the row's agent.
+
+    It must run the agent (``fleet._runs_the_agent``), on the server the row was recorded
+    on, asked in that order. A reboot or a hand-run ``tmux -L asq kill-server`` leaves live
+    rows behind (the listing reads them ``lost`` and ends none of them), and the next
+    server, started by a spawn in any project, numbers its panes from ``%0`` again: asked
+    about by id, that agent's pane answered for the row, the phone showed its screen under
+    the row's label, and a key from the pad answered its prompt. A server that started
+    after the row was written holds none of its panes (``fleet._outlived``, FLEET-1), and a
+    start tmux will not give judges nothing, as in ``fleet._pane_alive``.
+
+    ``send-keys`` and needs-you's snapshot, which the quick answers and the agent actions
+    type on the strength of, both judge here: the stale-pane rule in one place, where a
+    second copy would miss the next restart signal it learns. Both judge one answer, which
+    says when its server started (``PaneFacts.server_started``): the start was a second
+    ``display-message``, so every key tapped cost two tmux processes, and every poll of an
+    action three with needs-you's own for quietness (review of #243, round 4).
     """
     from aisquare.services import fleet as fleet_service
 
-    if not fleet_service._pane_is_the_agent(server, agent.pane_id):
+    if facts is None or not fleet_service._runs_the_agent(facts):
         return PANE_NOT_AGENT
-    if _remote_pane_outlived(server, agent):
+    if fleet_service._outlived(agent, facts.server_started):
         return PANE_OUTLIVED
     return None
 
@@ -1911,7 +1915,7 @@ def _live_panes(label: str, project: str | None = None, history: int = 0) -> dic
     are untouched — the history keys appear only when history was asked for.
 
     Never another agent's screen: a row whose pane id the next tmux server gave
-    away is 409 ``not_agent`` (:func:`_remote_pane_outlived`). The server says
+    away is 409 ``not_agent`` (``fleet._outlived``, FLEET-1). The server says
     when it started in the very command that took the frame
     (``PaneFacts.server_started``), so the frame is judged by the server it came
     from. Asked in a second process after the capture, it doubled the stream's
@@ -1978,7 +1982,7 @@ def _pane_width(agent: FleetAgent) -> int:
     Best effort by design: a dead pane, or a tmux that will not answer, costs a
     sensible 80 columns and never the page itself — the conversation is on disk
     and does not depend on the pane still being there. So does a pane id another
-    agent's pane holds now (:func:`_remote_pane_outlived`): its width is that agent's.
+    agent's pane holds now (``fleet._outlived``, FLEET-1): its width is that agent's.
     One tmux process, the pane's facts alone, which say when their server started:
     a capture of the whole screen, then a second process to ask that, read a width.
     """

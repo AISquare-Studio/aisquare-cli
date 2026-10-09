@@ -211,6 +211,7 @@ _FACTS_FIELDS = (
     "mouse_button_flag",
     "mouse_all_flag",
     "start_time",
+    "window_activity",
     "pane_title",
 )
 _FACTS_FORMAT = _SEP.join(f"#{{{name}}}" for name in _FACTS_FIELDS)
@@ -363,6 +364,11 @@ class PaneFacts:
     Asked in the same command as the rest, so a frame says which server's
     lifetime its pane id belongs to without a second process: the remote's live
     stream asked separately, once per watched pane per tick."""
+    last_output: datetime | None = None
+    """When the pane's window last printed (``#{window_activity}``), to the second rounded
+    down; ``None`` when tmux does not say. Asked with the rest for the same reason: the
+    remote's needs-you asked whether a pane was quiet in a third process, after two for
+    the facts and the start, on every quarter-second poll of an agent action."""
 
 
 @dataclass(frozen=True)
@@ -426,9 +432,10 @@ def _optional_int(value: str) -> int | None:
         return None
 
 
-def _started(epoch: str) -> datetime | None:
-    """``#{start_time}`` as tmux prints it, whole seconds since the epoch; ``None`` for
-    anything else, a tmux too old to know the variable (an empty answer) included."""
+def _epoch(epoch: str) -> datetime | None:
+    """A time as tmux prints one (``#{start_time}``, ``#{window_activity}``), whole seconds
+    since the epoch; ``None`` for anything else, a tmux too old to know the variable (an
+    empty answer) included."""
     epoch = epoch.strip()
     return datetime.fromtimestamp(int(epoch), tz=UTC) if epoch.isdigit() else None
 
@@ -456,7 +463,8 @@ def _facts(line: str) -> PaneFacts:
         mouse_on=values["mouse_any_flag"] == "1",
         mouse_sgr=values["mouse_sgr_flag"] == "1",
         mouse_drag=values["mouse_button_flag"] == "1" or values["mouse_all_flag"] == "1",
-        server_started=_started(values["start_time"]),
+        server_started=_epoch(values["start_time"]),
+        last_output=_epoch(values["window_activity"]),
     )
 
 
@@ -869,7 +877,7 @@ class TmuxServer:
             if _ABSENT.search(completed.stderr):
                 return None
             raise TmuxError(completed.stderr.strip() or "tmux display-message could not be reached")
-        return _started(completed.stdout)
+        return _epoch(completed.stdout)
 
     def spawn_window(
         self,

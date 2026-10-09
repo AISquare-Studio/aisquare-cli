@@ -36,9 +36,9 @@ from aisquare.cli.app import app as cli
 from aisquare.core import tmux as tmux_module
 from aisquare.core.store import store_session
 from aisquare.core.tmux import _SEP, CHECK_SOCKET_SUFFIX, Completed, TmuxError, TmuxServer
-from aisquare.models import FleetAgent, ProjectInfo
+from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
-from aisquare.services import remote_server
+from aisquare.services import remote_needs, remote_server
 from aisquare.services.remote_server import (
     NoSuchAgent,
     RequestError,
@@ -269,6 +269,7 @@ def _scripted_tmux(started: datetime, calls: list[list[str]], tmp_path: Path) ->
         epoch = str(int(started.timestamp()))
         facts = dict.fromkeys(tmux_module._FACTS_FIELDS, "")
         facts.update(pane_id="%2", pane_width="132", pane_height="1", start_time=epoch)
+        facts.update(pane_current_command="claude", window_activity=epoch)
         line = _SEP.join(facts.values())
         if "capture-pane" in argv:
             return Completed(0, f"the screen of %2\n{line}\n", "")
@@ -310,6 +311,39 @@ def test_a_live_frame_and_a_transcripts_width_each_cost_one_tmux_process(
     assert row is not None
     assert remote_server._pane_width(row) == width
     assert len(calls) == 1, [argv[5:7] for argv in calls]
+
+
+@pytest.mark.parametrize("started", [OLDER, YOUNGER], ids=["its own server", "a younger one"])
+def test_a_key_and_a_poll_of_an_action_each_ask_tmux_once_about_the_pane(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, started: datetime
+) -> None:
+    """Whether a pane is the row's agent was two processes, its facts and then when its server
+    started, though the facts say that too: every key tapped paid both before it was sent.
+    Needs-you's snapshot, which an action polls every quarter second while its Escape lands,
+    asked a third, for when the pane last printed (review of #243, round 4)."""
+    calls: list[list[str]] = []
+    server = _scripted_tmux(started, calls, tmp_path)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: server)
+    send = live_writes().handlers["send-keys"]
+    if started == OLDER:
+        assert send({"agent": "coder-1", "keys": ["1"]})[0]["sent"] is True
+    else:
+        with pytest.raises(RequestError) as refused:
+            send({"agent": "coder-1", "keys": ["1"]})
+        assert refused.value.error == "not_agent"
+    assert [argv[5] for argv in calls] == (
+        ["display-message", "send-keys"] if started == OLDER else ["display-message"]
+    ), [argv[5:7] for argv in calls]
+    calls.clear()
+    with store_session() as store:
+        row = store.fleet_agent_by_label(project.id, "coder-1", live_only=True)
+    assert row is not None
+    snap = remote_needs._needs_snapshot(
+        project, FleetAgentStatus(agent=row, state="working"), None, (), BORN
+    )
+    assert len(calls) == 1, [argv[5:7] for argv in calls]
+    expected = (True, True) if started == OLDER else (False, None)
+    assert (snap.pane_is_agent, snap.pane_quiet) == expected, "printed last when it started"
 
 
 def test_over_http_and_on_the_stream_such_a_row_is_not_agent_and_an_error_frame(

@@ -82,8 +82,9 @@ class AgentHookSite(BaseModel):
     refused: str | None = None
     """Why ``agents connect`` would refuse the directory, in its words, when its hooks are
     not installed and it would: a settings.json that is not a JSON object or that this
-    user may not write, or a CLAUDE.md it cannot read. Connect can only fail there, as the
-    doctor and Welcome say. ``None`` otherwise."""
+    user may not write, a CLAUDE.md it cannot read, or a recorded directory that no
+    longer exists and that connect would not make ("<dir> does not exist"). Connect can
+    only fail there, as the doctor and Welcome say. ``None`` otherwise."""
 
 
 class AgentInfo(BaseModel):

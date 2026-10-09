@@ -539,6 +539,8 @@ def test_a_recorded_dir_connect_cannot_make_is_named_gone_with_the_way_to_forget
     with a --config-dir Connect that could only say not installed, and `agents status`
     called it missing (review of #257). Named as gone, with the disconnect that forgets
     it, everywhere."""
+    from aisquare.cli.common import _hook_sites
+
     monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
     claude = isolated_agent_home / ".claude"
     claude.mkdir(parents=True)
@@ -559,6 +561,7 @@ def test_a_recorded_dir_connect_cannot_make_is_named_gone_with_the_way_to_forget
     buttons = [fix.argv for fix in fix_commands([row])]
     status = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
     sites = {site["config_dir"]: site for site in status[0]["sites"]}
+    cell = _hook_sites(agents_service.status("claude-code")[0])
     clicked = runner.invoke(app, ["agents", "connect", "claude-code", "--config-dir", str(gone)])
     forget = runner.invoke(app, ["agents", "disconnect", "claude-code", "--config-dir", str(gone)])
     after = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
@@ -571,6 +574,7 @@ def test_a_recorded_dir_connect_cannot_make_is_named_gone_with_the_way_to_forget
     assert (*connect, str(gone)) not in buttons, buttons
     assert (*connect, str(kept)) in buttons, "control: a recorded dir still there keeps Connect"
     assert (sites[str(gone)]["refused"], sites[str(kept)]["refused"]) == (reason, None), sites
+    assert f"cannot be written in {gone}: {reason}" in cell, cell
     assert clicked.exit_code == 1 and clicked.output.strip() == f"✗ {reason}", clicked.output
     assert forget.exit_code == 0 and "no aisquare hooks found" not in forget.output, forget.output
     assert str(gone) not in {site["config_dir"] for site in after[0]["sites"]}, "forgotten"
@@ -968,6 +972,8 @@ def test_a_claude_md_that_cannot_be_stated_is_a_named_refusal_not_a_traceback(
     raises PermissionError there on 3.11 to 3.13, and `doctor --json`, `agents
     list/status/scan`, connect and init ended in a traceback with nothing on stdout
     (review of #257). Such a file is there to read, and the read names it."""
+    from aisquare.cli.common import _hook_sites
+
     if os.name == "nt":
         pytest.skip("a link into a directory denied to this user is a POSIX shape")
     _connect(runner)
@@ -989,6 +995,7 @@ def test_a_claude_md_that_cannot_be_stated_is_a_named_refusal_not_a_traceback(
         argv = ["--json", "agents", "connect", "claude-code", "--config-dir", str(target)]
         clicked = runner.invoke(app, argv)
         welcome = first_run.probe_claude(sign_in=False, which=lambda _name: None)
+        cell = _hook_sites(agents_service.status("claude-code")[0])
     finally:
         locked.chmod(0o755)
     readable = agents_service.connect_refusal("claude-code", target)
@@ -1002,6 +1009,7 @@ def test_a_claude_md_that_cannot_be_stated_is_a_named_refusal_not_a_traceback(
     assert listed.exit_code == 0, listed.output
     sites = {site["config_dir"]: site for site in json.loads(listed.stdout)[0]["sites"]}
     assert sites[str(target)]["refused"] == reason, sites
+    assert f"cannot be written in {target}: {reason}" in cell, "the table names the file too"
     assert clicked.exit_code == 1 and json.loads(clicked.stdout)["detail"] == reason, clicked
     if where == "the ambient dir":
         assert (welcome.connected, welcome.refused) == (False, reason), welcome
@@ -1093,7 +1101,7 @@ def test_agents_status_names_a_directory_connect_refuses_as_the_doctor_does(
             "refused": refusal,
         }
     ], damaged
-    assert cell == f"0/1 ok — cannot be written in {claude_home}", cell
+    assert cell == f"0/1 ok — cannot be written in {claude_home}: {refusal}", cell
     assert f"hooks cannot be written in {claude_home}: {refusal}" in row.detail, row
     assert plain[0]["sites"][0]["refused"] is None, "control: a file connect can write"
     assert missing == f"0/1 ok — missing in {claude_home}", missing

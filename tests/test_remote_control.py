@@ -1548,6 +1548,35 @@ def test_turning_remote_off_revokes_every_device_before_the_server_stops() -> No
     ]
 
 
+def test_quitting_after_the_auto_off_time_came_turns_remote_off_as_auto_off() -> None:
+    """The check runs every 30 s. A quit in between left the deadline to the exit, which
+    revoked nothing: every phone stayed signed in on the Remote the next start brought back,
+    where a quit half a minute later found them all signed out."""
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
+    server = fake_server()
+    saved: dict[str, object] = {}
+    controller = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    controller.save_switch = saved.__setitem__
+    controller.turn_on()
+    assert saved == {"remote_enabled": True}
+    clock[0] += timedelta(minutes=61)  # past the hour; the 30 s check has not run yet
+    controller.shutdown_for_exit()
+    assert server.revoked_every == ["auto-off"]
+    assert saved == {"remote_enabled": False}, "the next start brings back no Remote"
+    assert not controller.running and "stop_remote_server" in server.calls
+    in_time = fake_server()
+    leaving = RemoteController(
+        server=in_time, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    leaving.save_switch = saved.__setitem__
+    leaving.turn_on()
+    clock[0] += timedelta(minutes=59)
+    leaving.shutdown_for_exit()
+    assert in_time.revoked_every == [] and saved == {"remote_enabled": True}
+
+
 def test_a_url_ngrok_announces_after_the_wait_is_the_link_and_the_push_origin_all_the_same(
     tmp_path: Path,
 ) -> None:

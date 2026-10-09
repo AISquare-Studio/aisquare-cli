@@ -627,7 +627,16 @@ class RemoteController:
         deadline is written (:meth:`_save_started`), on the thread that drives the
         controller, and a fleet UI that quit before then took no more steps, so a Remote
         turned on and left at once did not come back at the next start.
+
+        A Remote whose auto-off time has come is turned off as auto-off turns it off, its
+        phones signed out and its switch saved off. The check runs every 30 s, and a quit
+        in between left the deadline to the exit's stopping: it cleared it before the
+        server stopped, which let unlocks in again past it, and revoked nothing, so every
+        phone stayed signed in on the Remote the next start brought back (review of #243,
+        round 5).
         """
+        if self.enforce_auto_off(wait=wait):
+            return
         with self._lock:
             starting = self.info is not None and not self.state.remote_enabled
         if starting:

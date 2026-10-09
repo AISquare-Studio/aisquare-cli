@@ -414,7 +414,7 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   signs every phone out (after a goodbye notification), and from that moment
   every request is a 404 and no unlock goes through, while the server is still
   stopping. Closing the UI or stopping `serve` with Ctrl-C does not; expiry
-  bounds them.
+  bounds them. Closing the UI once the auto-off time has come is auto-off.
 - **Auto-off** is enforced by the server itself: past the deadline every request
   is a 404, and within half a minute Remote turns off, phones signed out, even
   on a machine that slept through the deadline. With writes on, a phone can

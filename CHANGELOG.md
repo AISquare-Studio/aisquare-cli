@@ -110,11 +110,16 @@ and an aisquare that upgrades and uninstalls itself.**
 - A Claude Code config dir this home connected with `--config-dir`, and that
   was since removed or became a symlink loop, reads as gone in the doctor,
   with the `aisquare agents disconnect claude-code --config-dir` that forgets
-  it, and `agents list` says it does not exist. The one sessions from this
-  shell read is remade by Connect when it was removed (with `claude` on PATH),
-  as on a first start. Turned into a link that leads nowhere, or under one, it
-  is named with the path that blocks and how to repair it, instead of a
-  Connect that would fail.
+  it, and `agents list` names it with the system's own error. The one sessions
+  from this shell read is remade by Connect when it was removed (with `claude`
+  on PATH), as on a first start. Turned into a link that leads nowhere, or
+  under one, it is named with the path that blocks, and the doctor and Welcome
+  offer pointing `CLAUDE_CONFIG_DIR` at a directory you can write and starting
+  asq again, instead of a Connect that would fail.
+- `aisquare doctor`, `agents list`, `uninstall --dry-run` and
+  `upgrade --check` answer when `CLAUDE_CONFIG_DIR` is in a folder you cannot
+  enter or names a file, instead of ending in a traceback with nothing on
+  stdout under `--json`.
 - The one-line installer no longer tells you to sign in to Claude Code for a
   hooks problem signing in cannot fix: an unexpected Claude Code state exits 2
   and prints the doctor's own detail and fix. With `--no-agent`, it leaves

@@ -2773,6 +2773,32 @@ def test_the_watcher_scans_only_while_a_device_exists(runtime: Runtime, tmp_path
     assert not watcher.needs_watching()
 
 
+def test_the_watcher_scans_nothing_past_the_auto_off_deadline(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """From the deadline on every request is a 404 and every socket closed, whatever turns
+    Remote off has yet to run, the TUI's check every 30 s: no scan feeds a phone, or the push
+    sender, meanwhile. A deadline moved later scans again."""
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    assert unlock(make_client(app), runtime).status_code == 200
+    runtime.set_auto_off(datetime.now(UTC) - timedelta(seconds=1))
+    made: list[NeedsSources] = []
+
+    def counted() -> NeedsSources:
+        made.append(_sources(Fleet()))
+        return made[-1]
+
+    watcher = RemoteNeedsWatcher(app.kit, sources=counted, interval=0.01)
+    watcher.start_watching()
+    try:
+        threading.Event().wait(0.2)
+        assert made == [] and watcher.needs_scanned_at() is None
+        runtime.set_auto_off(datetime.now(UTC) + timedelta(hours=1))
+        _until_true(lambda: watcher.needs_scanned_at() is not None)
+    finally:
+        watcher.stop_watching()
+
+
 def test_every_scan_reaches_every_listener_and_a_failing_one_costs_nothing(
     runtime: Runtime, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

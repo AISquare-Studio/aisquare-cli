@@ -2328,9 +2328,12 @@ class RemoteNeedsWatcher:
             self._stopping.wait(self._interval)
 
     def _needs_devices(self) -> bool:
-        """Whether any device is on record, signed in or not: nobody to show it to, no scan."""
+        """Whether any device is on record, signed in or not, and Remote is not past its
+        auto-off deadline: nobody to show it to, no scan. Past the deadline every request is
+        a 404 and every socket closed, whatever turns Remote off has yet to run."""
         try:
-            return bool(self._kit.runtime.device_ids())
+            runtime = self._kit.runtime
+            return bool(runtime.device_ids()) and not runtime.auto_off_passed(self._clock())
         except Exception:
             return False
 

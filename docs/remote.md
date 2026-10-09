@@ -337,7 +337,8 @@ subscribed from.
 The machine also sends: a warning 10 minutes before auto-off ("open to extend
 it" while writes are on; with writes off, that the phone cannot extend it), a
 goodbye when Remote is turned off, an alert when someone is guessing the
-passphrase, and a warning a day before a phone's 7-day sign-in ends.
+passphrase, and a warning a day before a phone's 7-day sign-in ends. Once the
+auto-off time has come, nothing goes out but the goodbye.
 
 **What a notification holds.** A title and a line built from fixed sentences
 (`coder-auth asks you a question`), with every name cut to 40 plain characters,

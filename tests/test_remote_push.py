@@ -1150,6 +1150,52 @@ def test_a_deadline_written_in_local_time_is_read_as_local_time(world: World) ->
     assert world.titles() == every_device(auto_off_title(5))
 
 
+def test_nothing_is_pushed_past_the_auto_off_deadline(world: World) -> None:
+    """From the deadline on every request is a 404 and every socket closes, but the TUI turns
+    Remote off at its next 30 s check, and only then is the farewell sent: a question that
+    became pushable in between went out, "coder-auth needs you", its link a 404, after the
+    page said Remote is off and before the farewell that promised no more. What was gathered
+    is let go unmarked, so a deadline moved later pushes it then."""
+    world.kit.runtime.set_auto_off(T0 + timedelta(seconds=6))
+    item = needs_item(1)
+    world.scan(item)
+    world.later(3)
+    world.scan(item)  # pushable: its window closes at T0 + 8 s, past the deadline
+    world.later(5)
+    world.later(30)
+    assert world.transport.sent == []
+    assert item.id not in load_push_state().pushed
+    world.kit.runtime.set_auto_off(world.clock.now + timedelta(hours=1))
+    world.scan(item)
+    world.later(5)
+    assert world.titles() == every_device("aisquare-cli: coder-auth needs you")
+
+
+def test_what_a_throttle_held_is_not_pushed_past_the_auto_off_deadline(world: World) -> None:
+    first, second = needs_item(1), needs_item(2)
+    world.scan(first)
+    world.scan(first)
+    world.later(5)  # T0 + 5 s: pushed, each device's throttle running to T0 + 25 s
+    world.kit.runtime.set_auto_off(T0 + timedelta(seconds=15))
+    world.scan(first, second)
+    world.later(3)
+    world.scan(first, second)
+    world.later(5)  # T0 + 13 s: the second is owed to both devices, held by the throttle
+    world.later(20)  # T0 + 33 s: the throttle is over, and so is Remote
+    assert world.titles() == every_device("aisquare-cli: coder-auth needs you")
+    assert second.id not in load_push_state().pushed
+
+
+def test_no_warning_goes_out_past_the_auto_off_deadline(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = [{"id": DEVICES[0], "expires_at": (T0 + timedelta(hours=23)).isoformat()}]
+    monkeypatch.setattr(world.kit.runtime, "device_rows", lambda: rows)
+    world.kit.runtime.set_auto_off(T0 + timedelta(seconds=10))
+    world.later(30)
+    assert world.transport.sent == [], "the expiry warning of a Remote that is off"
+
+
 def test_a_system_push_skips_the_throttle(world: World) -> None:
     item = needs_item(1)
     world.later(19)  # the system check is due at T0 + 30 s

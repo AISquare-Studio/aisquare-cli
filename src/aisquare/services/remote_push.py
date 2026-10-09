@@ -1137,8 +1137,20 @@ class RemotePushSender:
             self._window_closes = self._clock() + timedelta(seconds=PUSH_COALESCE_SECONDS)
 
     def push_run_due(self) -> float:
-        """Do what is due now; the seconds until the next thing will be."""
+        """Do what is due now; the seconds until the next thing will be.
+
+        Nothing is due past the auto-off deadline: from then on every request is a 404
+        and every socket is closed (``remote_server.remote_gate_auto_off``), whether or
+        not whatever turns Remote off has run yet, and the TUI looks only every 30 s.
+        A needs push in that time said "coder-1 needs you" with a link that answered
+        404, after the page had said Remote is off, and before the farewell that
+        promised no more (review of #243, sweep of round 4). What was gathered is let
+        go unmarked: an extension that comes after pushes it then.
+        """
         now = self._clock()
+        if self._kit.runtime.auto_off_passed(now):
+            self._window, self._window_closes, self._owed = set(), None, {}
+            return PUSH_SYSTEM_CHECK_SECONDS
         if self._window_closes is not None and now >= self._window_closes:
             self._push_close_window(now)
         if self._owed:

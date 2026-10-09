@@ -1785,9 +1785,14 @@ def _claude_code_state(
 ) -> None:
     """Claude Code in `home` as `state` names it, from a ~/.claude `agents connect` made."""
     claude = home / ".claude"
-    if state == "never connected":
+    never = {
+        "never connected": "{}",
+        "switched off, never connected": '{"disableAllHooks": true}',
+        "refused, never connected": '{"broken": \n',
+    }
+    if state in never:
         claude.mkdir(parents=True)
-        (claude / "settings.json").write_text("{}", encoding="utf-8")
+        (claude / "settings.json").write_text(never[state], encoding="utf-8")
         return
     _connect_claude_code(claude)
     if state == "switched off":
@@ -1964,21 +1969,36 @@ def test_a_home_with_a_non_ascii_name_is_printed_exactly(
 
 
 @pytest.mark.parametrize(
-    ("state", "expected"),
-    [("never connected", True), ("missing hooks", True), ("switched off", False)],
-    ids=["never-connected", "missing", "switched-off"],
+    "state",
+    [
+        "never connected",
+        "missing hooks",
+        "switched off",
+        "switched off, never connected",
+        "refused, never connected",
+        "another install",
+    ],
+    ids=[
+        "never-connected",
+        "missing",
+        "switched-off",
+        "switched-off-never-connected",
+        "refused-never-connected",
+        "another-install",
+    ],
 )
-def test_a_no_agent_run_expects_claude_code_only_while_it_is_not_connected(
+def test_a_no_agent_run_expects_claude_code_whatever_its_row_says(
     tmp_path: Path,
     isolated_agent_home: Path,
     monkeypatch: pytest.MonkeyPatch,
     state: str,
-    expected: bool,
 ) -> None:
-    """`--no-agent` asked for Claude Code to be left alone, and its unconnected row was
-    told to sign in and called actionable (fix review of #257). A Claude Code aisquare
-    is not connected to is the state the flag asked for: expected, named as such, exit
-    0. Any other amber claude-code row is still a surprise, in the doctor's words."""
+    """`--no-agent` asked for Claude Code to be left alone, and the run touches none of
+    it. Its unconnected row was told to sign in (fix review of #257), and then a
+    settings.json `agents connect` refuses, or hooks switched off, were "Not expected":
+    exit 2 on every run, never a short-circuit, and told to "connect again" (delta
+    review). No claude-code state is this run's to change, so each is expected, exit 0,
+    and named in the doctor's words as information, without its fix."""
     _claude_code_state(state, isolated_agent_home, tmp_path, monkeypatch)
     row = _claude_code_row()
 
@@ -1989,32 +2009,60 @@ def test_a_no_agent_run_expects_claude_code_only_while_it_is_not_connected(
         env={"PAYLOAD": json.dumps([row])},
     )
 
-    assert row["status"] == "warn", row
-    assert "authenticate" not in result.stdout, result.stdout
-    assert ("expected: brain claude-code" in result.stdout) is expected, result.stdout
-    assert ("--no-agent left Claude Code alone" in result.stdout) is expected, result.stdout
-    assert (f"  claude-code — {row['detail']}\n" in result.stdout) is not expected
-    assert result.returncode == (0 if expected else 2)
+    assert row["status"] == "warn" and row["fix"], row
+    assert "expected: brain claude-code" in result.stdout, result.stdout
+    told = "  claude-code — left alone by --no-agent; aisquare doctor here says:\n"
+    assert f"{told}               {row['detail']}\n" in result.stdout, result.stdout
+    assert row["fix"] not in result.stdout, result.stdout
+    assert "Not expected" not in result.stdout and "authenticate" not in result.stdout
+    assert result.returncode == 0
 
 
-@pytest.mark.parametrize("want_agent", [1, 0])
-def test_the_banner_names_the_hooks_only_when_the_run_connects_them(
-    tmp_path: Path, want_agent: int
+@pytest.mark.parametrize(
+    ("machine", "want_agent", "bin_line", "tool_env", "hooks"),
+    [
+        ("fresh", 1, "uv, aisquare, asq, claude", True, True),
+        ("fresh", 0, "uv, aisquare, asq", True, False),
+        ("current", 1, None, False, True),
+        ("current", 0, None, False, False),
+    ],
+    ids=["fresh", "fresh-no-agent", "current", "current-no-agent"],
+)
+def test_the_banner_lists_only_what_the_run_writes(
+    tmp_path: Path,
+    machine: str,
+    want_agent: int,
+    bin_line: str | None,
+    tool_env: bool,
+    hooks: bool,
 ) -> None:
     """Under --no-agent the plan said "register DIR as a project, and connect
-    claude-code's hooks" and listed ~/.claude/settings.json as written; init is run
-    without --agent then, so neither is true (fix review of #257)."""
+    claude-code's hooks" and listed ~/.claude/settings.json and `claude` as written;
+    init runs without --agent then and no Claude Code is installed (fix and delta
+    reviews of #257). And a current uv or aisquare-cli is left where it is, so
+    "Written to" names only what this run writes."""
+    decided = {
+        "fresh": 'UV_VERSION=""; CLI_ACTION=install; CLAUDE_ACTION=install; CLAUDE_VERSION=""',
+        "current": (
+            "UV_VERSION=0.12.3; CLI_ACTION=current; CLI_VERSION=0.8.0; "
+            "CLAUDE_ACTION=update; CLAUDE_VERSION=2.1.294"
+        ),
+    }[machine]
     result = sh(
-        f"WANT_AGENT={want_agent}; WANT_PROJECT=1; PROJECT_DIR=/p; CLI_ACTION=current; "
-        "CLI_VERSION=0.8.0; UV_VERSION=0.12.3; CLAUDE_ACTION=update; CLAUDE_VERSION=2.1.294; "
-        "banner",
+        f"WANT_AGENT={want_agent}; WANT_PROJECT=1; PROJECT_DIR=/p; {decided}; banner",
         path=base_path(tmp_path),
     )
 
-    connects = want_agent == 1
+    written = result.stdout.split("Written to:\n", 1)[1]
     assert "register /p as a project" in result.stdout, result.stdout + result.stderr
-    assert ("claude-code's hooks" in result.stdout) is connects, result.stdout
-    assert ("~/.claude/settings.json" in result.stdout) is connects, result.stdout
+    assert "  ~/.aisquare/  " in written, written
+    if bin_line is None:
+        assert "~/.local/bin/" not in written, written
+    else:
+        assert f"  ~/.local/bin/                     {bin_line}\n" in written, written
+    assert ("~/.local/share/uv/tools/" in written) is tool_env, written
+    assert ("claude-code's hooks" in result.stdout) is hooks, result.stdout
+    assert ("~/.claude/settings.json" in written) is hooks, written
 
 
 @pytest.mark.parametrize(
@@ -2204,17 +2252,28 @@ _MISSING = _claude_code_doctor(
 _SWITCHED_OFF = _claude_code_doctor(
     "warn", 'Claude Code hooks are switched off ("disableAllHooks": true) in: /h/.claude'
 )
+_REFUSED = _claude_code_doctor(
+    "warn",
+    "Claude Code hooks cannot be written in /h/.claude: can't read /h/.claude/settings.json: "
+    "it is not valid JSON",
+)
+_LEFT_ALONE = (
+    "doctor: everything ok except brain claude-code "
+    "(gbrain is out of scope; Claude Code left alone (--no-agent))"
+)
+_ONLY_BRAIN = "doctor: everything ok except brain (gbrain is out of scope)"
 
 
 @pytest.mark.parametrize(
-    ("want_agent", "here", "from_root", "says"),
+    ("want_agent", "here", "from_root", "doctor_line"),
     [
         (1, _CONNECTED, _MISSING, None),
-        (1, _CONNECTED, _CONNECTED, "claude-code hooks installed"),
-        # --no-agent wires nothing, so `/` is not asked: its row would refuse here.
-        (0, _CONNECTED, _SWITCHED_OFF, "(--no-agent: no agent hooks)"),
-        (0, _MISSING, _MISSING, "Claude Code not connected (--no-agent)"),
-        (0, _SWITCHED_OFF, _SWITCHED_OFF, None),
+        (1, _CONNECTED, _CONNECTED, _ONLY_BRAIN),
+        # --no-agent wires nothing, so `/` is not asked: its row would be listed here.
+        (0, _CONNECTED, _SWITCHED_OFF, _ONLY_BRAIN),
+        (0, _MISSING, _MISSING, _LEFT_ALONE),
+        (0, _SWITCHED_OFF, _SWITCHED_OFF, _LEFT_ALONE),
+        (0, _REFUSED, _REFUSED, _LEFT_ALONE),
     ],
     ids=[
         "agent-root-missing",
@@ -2222,16 +2281,17 @@ _SWITCHED_OFF = _claude_code_doctor(
         "no-agent-root-not-asked",
         "no-agent-not-connected",
         "no-agent-switched-off",
+        "no-agent-refused",
     ],
 )
 def test_the_short_circuit_takes_claude_code_from_where_the_run_wires_it(
-    tmp_path: Path, want_agent: int, here: str, from_root: str, says: str | None
+    tmp_path: Path, want_agent: int, here: str, from_root: str, doctor_line: str | None
 ) -> None:
     """`short_circuit` printed "claude-code hooks installed" and did nothing whenever the
     folder it ran in answered green. With the agent wanted it goes by `/`'s answer, and
     a machine whose hooks are there still has nothing to do. `--no-agent` wires nothing:
-    it reads this folder's row, the one `aisquare doctor` here shows, and a Claude Code
-    aisquare is not connected to is what it asked for (fix review of #257)."""
+    it reads this folder's row, the one `aisquare doctor` here shows, and leaves every
+    claude-code state alone, so none of them stops it (fix and delta reviews of #257)."""
     versions = tmp_path / "v"
     versions.mkdir()
     for name, out in (
@@ -2270,8 +2330,11 @@ def test_the_short_circuit_takes_claude_code_from_where_the_run_wires_it(
         path=f"{versions}:{cli}:{base_path(tmp_path)}",
     )
 
-    assert ("FIRED" in result.stdout) is (says is not None), result.stdout + result.stderr
-    assert says is None or says in result.stdout, result.stdout
+    fired = doctor_line is not None
+    assert ("FIRED" in result.stdout) is fired, result.stdout + result.stderr
+    assert not fired or f"  {doctor_line}\n" in result.stdout, result.stdout
+    hooks = "claude-code hooks installed" if want_agent else "(--no-agent: no agent hooks)"
+    assert not fired or hooks in result.stdout, result.stdout
 
 
 def test_the_gh_advice_matches_whether_gh_exists(tmp_path: Path) -> None:

@@ -822,7 +822,7 @@ short_circuit() {
     case " $_amber " in
         *" claude-code "*)
             [ -n "$_why" ] && _why="$_why; "
-            _why="${_why}Claude Code not connected (--no-agent)"
+            _why="${_why}Claude Code left alone (--no-agent)"
             ;;
     esac
     case " $_amber " in
@@ -896,10 +896,21 @@ banner() {
     # shellcheck disable=SC2059  # the format string is ours, built above.
     printf "$_plan\n"
 
+    # Only what THIS run writes, from the same decisions as the plan above: a
+    # current uv or aisquare-cli is left where it is, and --no-agent installs no
+    # Claude Code (`claude update` is its own updater's, at its own paths).
+    _written=""
+    [ -z "$UV_VERSION" ] && _written="uv"
+    case "$CLI_ACTION" in
+        install | upgrade) _written="${_written:+$_written, }aisquare, asq" ;;
+    esac
+    [ "$WANT_AGENT" = 1 ] && [ "$CLAUDE_ACTION" = install ] && _written="${_written:+$_written, }claude"
     say ""
     say "Written to:"
-    note "~/.local/bin/                     uv, aisquare, asq, claude"
-    note "~/.local/share/uv/tools/          the $PYPI_PACKAGE tool environment"
+    [ -n "$_written" ] && note "~/.local/bin/                     $_written"
+    case "$CLI_ACTION" in
+        install | upgrade) note "~/.local/share/uv/tools/          the $PYPI_PACKAGE tool environment" ;;
+    esac
     note "~/.aisquare/                      config.toml, context.db, projects/"
     if [ "$WANT_AGENT" = 1 ]; then
         note "~/.claude/settings.json           MERGED — aisquare's hook groups only"
@@ -1662,10 +1673,11 @@ expected_amber() {
     # Alphabetical, to read the same way as doctor_amber's sorted output.
     _exp="$EXPECTED_AMBER"
     if [ "$WANT_AGENT" = 0 ]; then
-        # `--no-agent` asked for Claude Code to be left alone, so a Claude Code
-        # aisquare is not connected to is the requested state. Only that one:
-        # is_expected_amber reads the row, and any other amber claude-code row
-        # (hooks switched off, hooks running another aisquare) is still a surprise.
+        # `--no-agent` asked for Claude Code to be left alone, and the run touches
+        # none of it, so no claude-code state is one this run caused or could
+        # change: not connected, a settings.json `agents connect` refuses, hooks
+        # switched off, hooks running another aisquare. Each is the requested
+        # state; `summary` names it in the doctor's words, as information.
         _exp="$_exp claude-code"
     fi
     if [ "$WANT_SYSTEM_DEPS" = 0 ]; then
@@ -1698,11 +1710,7 @@ expected_amber() {
 # functions, so the next one is caught rather than read.
 is_expected_amber() {
     for _want in $(expected_amber); do
-        [ "$1" = "$_want" ] || continue
-        if [ "$1" = claude-code ] && ! _claude_code_unconnected; then
-            return 1
-        fi
-        return 0
+        [ "$1" = "$_want" ] && return 0
     done
     return 1
 }
@@ -1931,17 +1939,6 @@ _utf8() {
     fi
 }
 
-# True when the claude-code row says only that aisquare is not connected to Claude
-# Code: hooks missing, with no other problem beside it (the doctor joins a row's
-# problems with "; "). What --no-agent leaves, so the state it asked for.
-_claude_code_unconnected() {
-    case "$(_doctor_detail claude-code)" in
-        *"; "*) return 1 ;;
-        *"hooks are missing or outdated"* | *"hooks are missing in "*) return 0 ;;
-    esac
-    return 1
-}
-
 # Actionable by the user: a real credential step this script deliberately does
 # not take (§3.6). Each gets the one command that fixes it, and only for the row
 # text that command fixes: any other amber row of the same check gets none, so it
@@ -2042,10 +2039,15 @@ summary() {
         esac
         case " $_expected " in
             *" claude-code "*)
-                # Asked in this folder under --no-agent (doctor_json), so the
-                # doctor run here shows the same row.
-                note "  claude-code — not connected: --no-agent left Claude Code alone."
-                note "             aisquare doctor names the command that connects it."
+                # Information, not an instruction: under --no-agent no state of
+                # Claude Code is this run's to change, so the doctor's fix is not
+                # printed. Asked in this folder (doctor_json), so the doctor run
+                # here shows the same row.
+                note "  claude-code — left alone by --no-agent; aisquare doctor here says:"
+                _cc_said=$(_json_text "$(_doctor_detail claude-code)")
+                if [ -n "$_cc_said" ]; then
+                    note "             $_cc_said"
+                fi
                 ;;
         esac
         case " $_expected " in

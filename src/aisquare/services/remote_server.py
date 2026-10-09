@@ -381,8 +381,8 @@ class RemoteAlreadyOn(RemoteError):
 
 
 class RemoteWindingDown(RemoteError):
-    """The Remote this process turned off last still finishes a phone's write
-    (:func:`start_remote_server`)."""
+    """The Remote this process turned off last still finishes a phone's write, or answers a
+    request (:func:`start_remote_server`)."""
 
 
 class RemoteOffIncomplete(RemoteError):
@@ -5358,9 +5358,27 @@ REMOTE_ALREADY_ON = (
     "one auto-off and one list of phones"
 )
 REMOTE_WINDING_DOWN = (
-    "the Remote turned off last is still finishing a phone's restart or switch, which can "
-    "take 40 s; turn it on again once that is done"
+    "the Remote turned off last is still answering what phones asked before it went off (a "
+    "read waits as long as tmux takes to answer); turn it on again in a moment"
 )
+"""Why a start waits for the server turned off last, while no phone's write is running
+(:func:`_remote_winding_down`)."""
+
+
+def _remote_winding_down() -> str:
+    """Why a start waits for the server turned off last (:class:`RemoteWindingDown`): the
+    phone's writes it is still finishing, by name, or else the requests it still answers.
+
+    It blamed "a phone's restart or switch" whatever held it up, while a phone's read waiting
+    on a tmux that answers late holds it as long with no write running at all, and seemed
+    to say someone was driving the fleet (sweep 3 of #243)."""
+    running = remote_writes_running()
+    if running:
+        return (
+            f"the Remote turned off last is still finishing {', '.join(running)} (a restart or "
+            "switch can take 40 s); turn it on again once that is done"
+        )
+    return REMOTE_WINDING_DOWN
 
 
 def _claim_remote_home(state: Runtime) -> bool:
@@ -5544,8 +5562,8 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
     :class:`RemoteAlreadyOn` while another process serves Remote from this home
     (:func:`_claim_remote_home`): a ``serve``, or another fleet UI's panel. And
     :class:`RemoteWindingDown` while the server this process stopped last still
-    finishes a phone's write (:data:`_winding_down`): its needs watcher and push sender
-    run until then, and a second server beside them, the home already this process's,
+    finishes a phone's write or request (:data:`_winding_down`): its needs watcher and
+    push sender run until then, and a second server beside them, the home already this process's,
     pushed every new item to the phone twice, each sender with its own record of what
     it had pushed (sweep 2 of #243).
     """
@@ -5563,7 +5581,7 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
             if _server is not None and _server.running:
                 return state.connection_info(_server.port)
             if any(stopped.winding_down for stopped in _winding_down):
-                raise RemoteWindingDown(REMOTE_WINDING_DOWN)
+                raise RemoteWindingDown(_remote_winding_down())
             claimed = _claim_remote_home(state)
             state.remote_coming_on()
             app = build_remote_app(state, dist_dir=dist_dir)

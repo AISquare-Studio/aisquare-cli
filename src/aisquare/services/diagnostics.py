@@ -926,6 +926,17 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
         site for site in sites if agent_core.hooks_disabled("claude-code", site.config_dir)
     ]
     if not sites:
+        # Connect makes the directory a session from this shell reads, unless it refuses it
+        # (agents_service.access): an exported CLAUDE_CONFIG_DIR naming a ~user this machine
+        # does not have was offered a Connect that could only fail (review of #257).
+        ambient = agent_core.ambient_hook_dir("claude-code")
+        refusal = agents_service.access("claude-code").connect
+        if ambient is not None and refusal is not None:
+            return _warn(
+                "claude-code",
+                f"{product} hooks cannot be written in {ambient}: {refusal.why}",
+                _refused_fix(ambient, refusal.path),
+            )
         return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
     graded = [site for site in sites if site not in switched_off]
     # The directory sessions from this shell read, when Claude Code is on PATH and has
@@ -969,6 +980,10 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
         if (refusal := agents_service.access("claude-code", site.config_dir).connect) is not None
     }
     unhooked = [site for site in unhooked if site.config_dir not in refused]
+    if unmade is not None and (refusal := agents_service.access("claude-code").connect):
+        # Not made yet, and connect would not make it either: named, with no Connect.
+        refused[unmade] = refusal
+        unmade = None
     # Where the plugin is the route that runs, what it runs is graded like a hook.
     plugin_runs = [site for site in graded if site.plugin is not None and site not in doubled]
     plugin_runs += dead
@@ -1173,6 +1188,13 @@ def _refused_fix(directory: Path, path: Path, *, also: str | None = None) -> str
         # The directory itself is gone, and connect makes no --config-dir but the one a
         # session from this shell reads: this home's record of it is all that is left.
         return _disconnect_fix(directory, "forget it: ")
+    if paths.names_no_home(path):
+        # The directory a session from this shell reads (CLAUDE_CONFIG_DIR), under a ~user
+        # this machine does not have: nothing may be made there, and no file can change it.
+        return (
+            f"point CLAUDE_CONFIG_DIR at a directory on this machine: {directory} is in the "
+            "home of a user it does not have"
+        )
     if spec is None or path != spec.settings_path:
         # A context file connect imports (CLAUDE.md): the hooks need nothing else changed.
         return f"make {path} UTF-8 text this user can read, then connect again"

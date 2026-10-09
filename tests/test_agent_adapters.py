@@ -610,6 +610,45 @@ def test_a_recorded_dir_that_became_a_symlink_loop_is_gone_to_every_reader(
     assert [str(p) for p in agent_core.connected_dirs("claude-code")] == [str(claude_home)]
 
 
+@pytest.mark.parametrize("shape", ["no other site", "beside a connected ~/.claude"])
+def test_an_exported_config_dir_in_a_home_this_machine_lacks_is_never_offered_connect(
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    """`CLAUDE_CONFIG_DIR='~olduser/.claude'` exported for a user this machine does not have,
+    with `claude` on PATH: the doctor offered the bare Connect for a directory "Claude Code
+    has not made yet", Welcome showed Connect, and the click refused only after building
+    ~/.aisquare (review of #257). Named everywhere, before anything is written."""
+    if os.name == "nt":
+        pytest.skip("Windows guesses a ~user's home instead of failing to expand it")
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    if shape == "beside a connected ~/.claude":
+        (isolated_agent_home / ".claude").mkdir(parents=True)
+        _connect(runner)
+    built = paths.aisquare_home().exists()
+    homeless = "~aisquare-no-such-user/.claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", homeless)
+
+    row = diagnostics._check_claude_code()
+    welcome = first_run.probe_claude(sign_in=False, which=lambda _name: None)
+    clicked = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+
+    reason = f"can't write {homeless}/settings.json: no such home on this machine"
+    assert f"hooks cannot be written in {homeless}: {reason}" in row.detail, row
+    assert [f.argv for f in fix_commands([row]) if f.argv[:2] == ("agents", "connect")] == []
+    assert "point CLAUDE_CONFIG_DIR at a directory on this machine" in str(row.fix), row.fix
+    assert welcome.refused == reason, welcome
+    assert json.loads(clicked.stdout)["detail"] == reason, clicked.stdout
+    assert paths.aisquare_home().exists() == built, "a refusal builds no aisquare home"
+    assert list(work.iterdir()) == [], "nothing is made in the cwd"
+
+
 @pytest.mark.parametrize("shape", ["new-profile", "never-started"])
 def test_a_config_dir_claude_code_has_not_made_is_offered_connect_beside_other_sites(
     runner: CliRunner, isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch, shape: str

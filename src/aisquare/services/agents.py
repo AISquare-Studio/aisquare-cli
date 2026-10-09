@@ -203,6 +203,10 @@ def _read_agent_file(path: Path) -> str | None:
         raise AgentFileUnreadableError(f"can't read {path}: {exc.strerror or exc}", path) from exc
 
 
+#: Why nothing may be made under a ``~user`` this machine does not have (``paths.names_no_home``).
+_NO_HOME = "no such home on this machine"
+
+
 def _check_settings(path: Path) -> None:
     """Refuse, naming it, a settings file the hooks cannot be written into: before any write.
 
@@ -210,8 +214,12 @@ def _check_settings(path: Path) -> None:
     for text that is not a JSON object rather than replace it, and a file this user
     may not write (mode 444, or a link into a read-only ``/nix/store``) ended in a
     traceback after the context was ingested (review of #257). Asked here first, so
-    a refusal comes before the context is ingested.
+    a refusal comes before the context is ingested. A settings.json under a ``~user``
+    this machine does not have is refused before it is read, which would look it up in
+    the cwd: the refusal came from ``install_hooks``, after ``~/.aisquare`` was built.
     """
+    if paths.names_no_home(path):
+        raise AgentFileUnreadableError(f"can't write {path}: {_NO_HOME}", path)
     _read_agent_file(path)
     try:
         agent_core.read_settings(path)
@@ -342,6 +350,8 @@ def settings_unwritable(path: Path) -> str | None:
     the directory it will be made in. access(2) follows a link and reports a
     read-only file system as well.
     """
+    if paths.names_no_home(path):
+        return _NO_HOME  # read as written it would land in the cwd (paths.expand_user)
     try:
         target = path if path.exists() else path.parent
         if not target.exists() or os.access(target, os.W_OK):

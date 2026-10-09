@@ -17,9 +17,8 @@ the rest is here:
   stop the agent the same way. With a dialog up, that Enter answers it: it can
   approve a Bash command or take a question's first option. So an open dialog
   refuses the action (409 ``dialog_open``), unless ``dismiss_dialog`` asks for one
-  Escape (No) first. A ``prompt`` or ``interrupt`` tell does not type into a
-  dialog either. ``auto`` is ``fleet tell`` unchanged, which types into any row
-  that reads waiting, a stale dialog's included (SPEC §10 leaves that to main).
+  Escape (No) first. No tell types into a dialog either. ``auto``, which is
+  ``fleet tell``, files its text as a board note while one may be up.
 * **One action per agent at a time.** ``remote_server.remote_agent_lock`` is
   taken without waiting, and the needs card's quick answers take it too (409
   ``busy``).
@@ -36,8 +35,9 @@ the rest is here:
   keeps it.
 
 ``agent/tell`` has three modes. ``auto`` is ``fleet tell``: it types into an agent
-that reads as waiting, and files a board note for any other, which the agent reads
-at its next prompt. ``prompt`` types now, into an agent idle at its input prompt.
+that reads as waiting and shows no dialog, and files a board note for any other,
+which the agent reads at its next prompt. ``prompt`` types now, into an agent idle
+at its input prompt.
 After an Escape no Stop hook fires, so the row reads ``working`` for up to 30
 minutes while the agent sits at its prompt, and ``auto`` would only file a note
 the agent never wakes for. ``interrupt`` sends one Escape, then types once the
@@ -847,6 +847,48 @@ def action_type_now(
         return action_paste(snap, label, text, interrupted=True)
 
 
+def action_tell_auto(
+    target: ProjectInfo,
+    label: str,
+    text: str,
+    snap: AgentNow | None,
+    *,
+    pin: str,
+    trail: Callable[[str], str],
+) -> tuple[bool, str]:
+    """``auto``: ``fleet tell``, or a board note while the agent may be showing a dialog.
+
+    ``fleet tell`` types into a row that derives ``waiting``, and a permission prompt
+    left unanswered for 30 minutes derives it too. The session still says
+    ``attention``, but the board's word goes stale then (``team._STALE_AFTER``), and the
+    quiet pane reads as an agent at its prompt. The paste and its Enter took the
+    prompt's highlighted option: "1. Yes" to the command the message meant to stop
+    (review of #243, round 4). So the agent is read first, as ``prompt`` reads it.
+    While an Enter may answer a dialog (:func:`action_may_answer`), the text becomes
+    the board note ``fleet tell`` files for any agent it does not type into, and the
+    pane gets nothing. An agent at work with a tool pending is the common case of
+    that, and ``how`` says of it what ``fleet tell`` says ("it is working"). ``fleet
+    tell`` pastes before it presses Enter, and files a note when that fails, so it can
+    fail with the text already in the pane: on the trail.
+    """
+    from aisquare.services import fleet as fleet_service
+
+    snap = snap if snap is not None else action_snapshot(target, label, pin)
+    if action_may_answer(snap):
+        state = action_state(snap)
+        if remote_needs.needs_dialog_open(snap):
+            why = "it is showing a prompt, which typing would answer"
+        elif state != "waiting":
+            why = f"it is {state}"
+        else:
+            why = "it has a tool pending, and a prompt for it may have just opened"
+        filed = action_fleet_call(lambda: fleet_service._file_note(target, label, text, None))
+        return False, f"{why} — {filed}"
+    with action_audited(lambda error: trail(f"delivered=no failed={error}")):
+        told = action_fleet_call(lambda: fleet_service.tell(target, label, text, sender=None))
+    return told.delivered, told.how
+
+
 # --- the actions ---------------------------------------------------------------------------
 
 
@@ -854,7 +896,8 @@ def action_tell(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     """``POST api/agent/tell``: say ``text`` to one agent, in ``auto``, ``prompt`` or
     ``interrupt`` mode.
 
-    ``auto`` is ``fleet tell``, unchanged. The other two modes type now
+    ``auto`` is ``fleet tell``, except that it files a note while the agent may be
+    showing a dialog (:func:`action_tell_auto`). The other two modes type now
     (:func:`action_type_now`). ``agent_id`` and a card's ``needs_id`` are
     optional here: with either one, the tell reaches only the agent it names.
     Without one it still reaches only the row that held the label when the lock
@@ -862,8 +905,6 @@ def action_tell(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     to the replacement. The audit line keeps how the text began, since a tell
     typed into a pane leaves no trace on the board.
     """
-    from aisquare.services import fleet as fleet_service
-
     label = action_required(body, "agent")
     text = action_tell_text(body)
     mode = action_tell_mode(body)
@@ -874,13 +915,7 @@ def action_tell(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     with action_locked(target, label, agent_id) as row:
         snap = action_check_needs(target, label, row.id, needs_id)
         if mode == "auto":
-            # fleet tell pastes before it presses Enter, and files a note when that
-            # fails, so it can fail with the text already in the pane.
-            with action_audited(lambda error: trail(f"delivered=no failed={error}")):
-                told = action_fleet_call(
-                    lambda: fleet_service.tell(target, label, text, sender=None)
-                )
-            delivered, how = told.delivered, told.how
+            delivered, how = action_tell_auto(target, label, text, snap, pin=row.id, trail=trail)
         else:
             delivered, how = action_type_now(
                 target,

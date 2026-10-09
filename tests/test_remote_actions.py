@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -29,7 +30,15 @@ from aisquare.core.paths import remote_audit_path
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError
 from aisquare.core.workspace import find_project_root, project_id_for
-from aisquare.models import FleetAgent, FleetAgentState, FleetAgentStatus, ProjectInfo, TeamTask
+from aisquare.models import (
+    FleetAgent,
+    FleetAgentState,
+    FleetAgentStatus,
+    ProjectInfo,
+    TeamEvent,
+    TeamSession,
+    TeamTask,
+)
 from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_actions, remote_needs, remote_server
 from aisquare.services.fleet import RestartReceipt, StopReceipt, SwitchReceipt, TellResult
@@ -607,6 +616,10 @@ class FakePane:
         self.sent.append((pane_id, "paste", text))
         self.log.append("paste")
 
+    def pane_facts(self, pane_id: str) -> SimpleNamespace:
+        """What ``fleet tell`` and ``send-keys`` ask before they type: the pane runs the agent."""
+        return SimpleNamespace(dead=False, current_command="claude")
+
     def keys(self) -> list[str]:
         return [what for _pane, kind, what in self.sent if kind == "key"]
 
@@ -659,6 +672,8 @@ class FakeNeeds:
         self.lag = 1
         self.items: tuple[NeedsItem, ...] = ()
         self.tail: TranscriptTail | None = None
+        self.session: TeamSession | None = None
+        """The row's board session, for the predicates that read it."""
         self.pane_quiet: bool | None = True
         self.before_read: Callable[[], None] | None = None
         self.reads = 0
@@ -684,7 +699,11 @@ class FakeNeeds:
             row = store.fleet_agent_by_label(project.id, label, live_only=False)
         if row is None:
             raise fleet_service.NoSuchAgent(f"no agent {label!r}")
-        status = None if self.window_gone else FleetAgentStatus(agent=row, state=self.state)
+        status = (
+            None
+            if self.window_gone
+            else FleetAgentStatus(agent=row, state=self.state, session=self.session)
+        )
         snap = AgentNow(
             project=project,
             status=status,
@@ -1468,6 +1487,7 @@ def test_a_request_id_still_running_is_409_in_progress(
 def test_auto_is_fleet_tell_and_answers_what_the_cli_prints_plus_mode_and_project(
     phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
 ) -> None:
+    """``fleet tell``, once the agent was read for a dialog."""
     _row(project)
     printed = CliRunner().invoke(cli, ["--json", "fleet", "tell", LABEL, "ship it"])
     assert printed.exit_code == 0, printed.output
@@ -1484,7 +1504,7 @@ def test_auto_is_fleet_tell_and_answers_what_the_cli_prints_plus_mode_and_projec
     answered = response.json()
     assert (answered.pop("mode"), answered.pop("project")) == ("auto", project.id)
     assert answered == json.loads(printed.stdout)
-    assert needs.reads == 0, "auto is fleet tell itself, which reads the agent on its own"
+    assert (needs.scans, needs.reads) == (1, 1), "one read, for a dialog; fleet tell reads its own"
     assert phone.audit() == [
         ("agent/tell", f'tell coder-1@{project.id} mode=auto delivered=no text=7ch "ship it"')
     ]
@@ -2228,3 +2248,115 @@ def test_prompt_types_into_a_quiet_waiting_agent_that_has_no_transcript(
     response = phone.post("agent/tell", agent=LABEL, text="hi", mode="prompt")
     assert response.status_code == 200, response.text
     assert [kind for _pane, kind, _what in pane.sent] == ["paste", "key"]
+
+
+# --- auto's tell while a prompt may be up ----------------------------------------------------
+#
+# Review of #243, round 4: the menu's Tell reads the agent first, as the guard of stop,
+# restart and switch does (``action_may_answer``).
+
+PROMPT_UP = "it is showing a prompt, which typing would answer"
+TOOL_PENDING = "it has a tool pending, and a prompt for it may have just opened"
+
+
+def _notes(project: ProjectInfo) -> list[TeamEvent]:
+    """The project's board notes, oldest first."""
+    with store_session() as store:
+        events = store.recent_events(project.id, limit=50)
+    return sorted((event for event in events if event.kind == "note"), key=lambda e: e.seq)
+
+
+@pytest.mark.parametrize(
+    ("setup", "why"),
+    [
+        ({"dialog": True}, PROMPT_UP),
+        ({"tail": _a_prompt_just_drawn(), "pane_quiet": False}, TOOL_PENDING),
+        (
+            {"tail": _a_prompt_just_drawn(), "pane_quiet": False, "state": "working"},
+            "it is working",
+        ),
+    ],
+    ids=["a prompt", "a prompt too new to see", "a tool at work"],
+)
+def test_an_auto_tell_while_a_prompt_may_be_up_is_a_board_note_and_never_fleet_tell(
+    phone: Phone,
+    fleet: FleetCalls,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    setup: dict[str, object],
+    why: str,
+) -> None:
+    """``fleet tell`` types into a row that reads ``waiting``, whatever its pane shows. Auto
+    files the note fleet tell files for an agent it does not type into, says why, and the
+    pane gets nothing. A prompt in its first seconds, a tool use whose pane still prints,
+    cannot be told from a tool at work, so it counts. A row that reads ``working`` is told
+    what ``fleet tell`` tells it: the note is what that would have filed too."""
+    _row(project)
+    needs.state = "waiting"
+    for attribute, value in setup.items():
+        setattr(needs, attribute, value)
+    response = phone.post("agent/tell", agent=LABEL, agent_id="agt_one", text="use the test DB")
+    assert response.status_code == 200, response.text
+    (note,) = _notes(project)
+    assert (note.to_role, note.text) == (LABEL, "use the test DB")
+    assert response.json() == {
+        "label": LABEL,
+        "delivered": False,
+        "how": f"{why} — filed as board note #{note.seq} to coder-1",
+        "mode": "auto",
+        "project": project.id,
+    }
+    assert fleet.calls == [] and pane.sent == []
+    assert phone.audit() == [
+        (
+            "agent/tell",
+            f'tell coder-1@{project.id} mode=auto delivered=no text=15ch "use the test DB"',
+        )
+    ]
+
+
+def test_an_auto_tell_never_types_into_a_permission_prompt_left_for_half_an_hour(
+    phone: Phone,
+    own_predicates: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #243, round 4: coder-1 stopped at a Bash prompt overnight, and in the
+    morning the menu's Tell said "don't run that, use the test DB". The session still
+    says ``attention``, but the board's word goes stale after 30 minutes, and
+    ``fleet._derive`` reads the quiet pane as ``waiting``. ``fleet tell`` typed into
+    it, and its Enter took "1. Yes": the command the message meant to refuse ran.
+    Needs-you's own predicate reads that row as a prompt, so auto files the note
+    instead. The control: once the session says ``waiting``, the same tell is typed."""
+    _row(project)
+    asked = T0 - timedelta(hours=8)
+    own_predicates.state = "waiting"
+    own_predicates.session = TeamSession(
+        id="ses_one",
+        project_id=project.id,
+        role="coder",
+        started_at=asked,
+        last_seen_at=asked,
+        state="attention",
+    )
+
+    def status_of(agent: FleetAgent) -> FleetAgentStatus:
+        """``fleet tell``'s own read of the row, as ``_derive`` words a stale attention."""
+        return FleetAgentStatus(agent=agent, state="waiting", session=own_predicates.session)
+
+    monkeypatch.setattr(fleet_service, "status_of", status_of)
+    text = "don't run that, use the test DB"
+    response = phone.post("agent/tell", agent=LABEL, text=text)
+    assert response.status_code == 200, response.text
+    assert response.json()["delivered"] is False
+    assert response.json()["how"].startswith(PROMPT_UP)
+    assert pane.sent == [], "neither the text nor its Enter reached the prompt"
+    assert [(note.to_role, note.text) for note in _notes(project)] == [(LABEL, text)]
+
+    own_predicates.session = own_predicates.session.model_copy(update={"state": "waiting"})
+    typed = phone.post("agent/tell", agent=LABEL, text="carry on")
+    assert typed.status_code == 200, typed.text
+    assert typed.json()["delivered"] is True
+    assert pane.sent == [("%7", "paste", "carry on"), ("%7", "key", "Enter")]

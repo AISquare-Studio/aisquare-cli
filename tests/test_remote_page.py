@@ -1307,6 +1307,18 @@ def test_a_board_tab_opened_again_reads_its_board_anew_and_never_shows_the_last_
     assert board["answered"] == ["since", "from before"]
 
 
+def test_the_board_tab_draws_the_board_its_project_answers_with(
+    boot_report: dict[str, Any],
+) -> None:
+    """r4 2/9: under ``AISQUARE_TEAM_HUB`` every project's board is the hub's, and the tab drew
+    a board only when its own project id was the tab's: it dropped every frame and every read,
+    and said Loading… for as long as it was open. A frame names the pid it answers now, and a
+    read answers the pid it asked about."""
+    board = boot_report["boardAnswers"]
+    assert board["other"] == ["Loading…"], "a frame for another pid is not this tab's"
+    assert board["frame"] == ["on the hub"] and board["read"] == ["on the hub"]
+
+
 def test_a_transcript_tells_each_turns_time_by_the_phones_own_clock(
     boot_report: dict[str, Any],
 ) -> None:

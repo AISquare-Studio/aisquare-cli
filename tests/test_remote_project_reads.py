@@ -371,6 +371,32 @@ def test_the_board_tab_gets_the_newest_events_it_draws_not_the_clis_five(
     assert sorted(newest) == [f"line {n}" for n in range(2, 9)], "the newest, as many as asked"
 
 
+def test_under_a_hub_each_projects_board_frame_is_the_hubs_board_named_for_that_project(
+    two_projects: tuple[ProjectInfo, ProjectInfo],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """r4 2/9, on a real store: with ``AISQUARE_TEAM_HUB`` set, every project's board is the
+    hub's, as ``asq board`` reads it there, and the board names the hub's project. The page
+    went by that id and drew none of it. The frame names the project the socket asked for."""
+    _current, other = two_projects
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    team_service.add_note("on the hub's board", cwd=other.root)
+    board = remote_board_payload(other.id)
+    assert _board_project_id(board) not in (other.id, None), "the hub's project, not other's"
+    runtime = make_runtime()
+    client = make_client(build_app(runtime, sources=live_sources(), dist_dir=tmp_path, tick=0.05))
+    assert unlock(client, runtime).status_code == 200
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_board": other.id}))
+        frame = _until(ws, lambda f: f["type"] == "board")
+    assert frame["project"] == other.id
+    assert frame["payload"]["project"]["id"] == _board_project_id(board)
+    assert "on the hub's board" in _event_texts(frame["payload"])
+
+
 def _json_of_board() -> dict[str, Any]:
     result = CliRunner().invoke(cli, ["--json", "board"])
     assert result.exit_code == 0, result.output
@@ -596,6 +622,27 @@ def test_subscribe_board_picks_which_projects_board_frames_arrive(
         assert _until(ws, lambda f: f["type"] == "fleet")["payload"]["project"] == "prj_b"
         ws.send_text(json.dumps({"subscribe_fleet": None}))
         assert _until(ws, lambda f: f["type"] == "fleet")["payload"]["project"] is None
+
+
+def test_a_board_frame_names_the_project_its_subscription_named(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """r4 2/9: under ``AISQUARE_TEAM_HUB`` every project's board is the hub's, so the board a
+    frame carries names the hub's project, and the page, which went by that id, drew none.
+    The frame names the subscription's project, as a pane frame does: none for the current
+    project's, which no subscription named."""
+    hub = {"project": {"id": "prj_hub"}, "sessions": [], "events": []}
+    sources = dataclasses.replace(Reads().sources(), board=lambda project: hub)
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
+    assert unlock(client, runtime).status_code == 200
+    is_board = lambda f: f["type"] == "board"  # noqa: E731
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_board": "prj_b"}))
+        named = _until(ws, is_board)
+        ws.send_text(json.dumps({"subscribe_board": None}))
+        current = _until(ws, is_board)
+    assert named["project"] == "prj_b" and named["payload"] == hub
+    assert set(current) == {"type", "payload", "ts"} and current["payload"] == hub
 
 
 def _captures(panes: Panes, pane: tuple[str, str | None], count: int) -> None:

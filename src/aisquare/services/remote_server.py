@@ -36,7 +36,8 @@ something without the gate, frozen.
 only when it changed, a ``heartbeat`` every :data:`HEARTBEAT_SECONDS` changed or not,
 then one ``pane`` frame per ``(project, label)`` subscription when its pane changed.
 A socket that asked with ``subscribe_board`` gets ``board`` frames too, ahead of the
-rest: the board's events and the sessions they name (:func:`remote_board_frame`).
+rest: the board's events and the sessions they name (:func:`remote_board_frame`), each
+naming the project its subscription named, as a ``pane`` frame does.
 
 **The lanes** live in their own modules and plug in through :class:`RemoteKit`:
 ``remote_needs`` (what needs the human), ``remote_push`` (Web Push),
@@ -2061,6 +2062,12 @@ def remote_board_payload(project: str | None = None) -> dict[str, object]:
     card sent the human to "reply on the board" to was gone from it once five
     newer lines were (review of #243, round 3).
 
+    Under ``AISQUARE_TEAM_HUB`` every project's board is the hub's, and it names the
+    hub's project, not the one asked for. So a ``board`` frame names the project its
+    subscription named, and the page draws a read for the project it asked about. The
+    page went by the board's own project id, dropped every frame and every read, and
+    said "Loading…" for as long as the tab was open (review of #243, round 4).
+
     #240 fold: pass ``exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS`` here (one line).
     """
     from aisquare.cli.team import board_json
@@ -4026,9 +4033,12 @@ def build_remote_app(
         ``heartbeat`` (every ``heartbeat`` seconds, changed or not, never on the
         first tick), then one ``pane`` frame per subscription. Pane
         subscriptions are ``(project, label)``: the same label in two projects is
-        two agents, and a frame names the project its subscription named. A lane
-        seam that raises skips its own frame for the tick; anything else that
-        fails ends the socket with 1011.
+        two agents, and a frame names the project its subscription named. A
+        ``board`` frame names its subscription's project too: the board it carries
+        may be another project's, since ``AISQUARE_TEAM_HUB`` makes every project's
+        board the hub's, and that board names the hub's project. A lane seam that
+        raises skips its own frame for the tick; anything else that fails ends the
+        socket with 1011.
         """
         device = kit.kit_device(websocket)  # the gate refused a socket without one
         await websocket.accept()
@@ -4079,11 +4089,13 @@ def build_remote_app(
                 frame["project"] = project
             await websocket.send_text(json.dumps(frame))
 
-        async def push_if_changed(kind: str, payload: object) -> None:
+        async def push_if_changed(
+            kind: str, payload: object, *, project: str | None = None
+        ) -> None:
             encoded = json.dumps(payload, sort_keys=True)
             if last.get(kind) != encoded:
                 last[kind] = encoded
-                await send_frame(kind, payload)
+                await send_frame(kind, payload, project=project)
 
         def lane_frame_skipped(seam: str) -> None:
             """Called from an ``except``: a lane's bug costs its own frame, never the socket."""
@@ -4103,7 +4115,7 @@ def build_remote_app(
                         lambda: remote_board_frame(reads.board(board_ref)),
                     )
                     if board_wanted and board_ref == board_project:
-                        await push_if_changed("board", payload)
+                        await push_if_changed("board", payload, project=board_ref or None)
             except Exception as exc:
                 log.debug("remote: board frame skipped: %s", exc)
             fleet_ref = fleet_project

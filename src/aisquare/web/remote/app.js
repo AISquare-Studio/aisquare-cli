@@ -1066,7 +1066,7 @@ function onFrame(text) {
     S.fleet = payload;
     noteName(payload);
     viewCall("fleet");
-  } else if (frame.type === "board") {
+  } else if (frame.type === "board" && frame.project === S.wantBoard) {
     S.board = payload;
     viewCall("board");
   } else if (frame.type === "pane" && typeof frame.agent === "string") {
@@ -1124,7 +1124,8 @@ function wantProject(pid) {
 
 /* Board frames only while the Board tab shows (null stops them): a board is every session
  * and task of its project, sent again with every session's heartbeat, and no other screen
- * draws it. One kept from before is not shown again: no frame came while it was not asked. */
+ * draws it. One kept from before is not shown again: no frame came while it was not asked.
+ * A frame names the pid it answers, since under AISQUARE_TEAM_HUB its board is the hub's. */
 function wantBoard(pid) {
   if (S.wantBoard === pid) return;
   S.wantBoard = pid;
@@ -2151,7 +2152,7 @@ VIEWS.project = (route, main) => {
     const list = el("div", "events");
     body.append(compose, list);
     const draw = () => {
-      const board = projectIdOf(S.board) === pid ? S.board : null;
+      const board = S.wantBoard === pid ? S.board : null;
       clear(list);
       if (!board) return list.appendChild(el("p", "empty", "Loading…"));
       const authors = new Map();
@@ -2175,9 +2176,10 @@ VIEWS.project = (route, main) => {
     };
     view.board = draw;
     draw();
-    if (projectIdOf(S.board) !== pid) {
+    if (!S.board) {
       apiCall("GET", API.board, { query: { project: pid } }).then((res) => {
-        if (res.ok && S.wantBoard === pid && projectIdOf(res.data) === pid && projectIdOf(S.board) !== pid) {
+        if (S.wantBoard !== pid || S.board) return; // the tab was left, or a frame came first
+        if (res.ok) {
           S.board = res.data;
           draw();
         }

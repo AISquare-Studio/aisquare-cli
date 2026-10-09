@@ -966,7 +966,7 @@ async function boardReopened() {
   }));
   await settle();
   page.acceptSockets();
-  page.live().frame("board", { project: { id: PROJECT }, sessions: [], events: [note(1, "from before")] });
+  page.live().frame("board", { project: { id: PROJECT }, sessions: [], events: [note(1, "from before")] }, { project: PROJECT });
   await settle();
   reads[0].settle({ status: 200, json: { project: { id: PROJECT }, sessions: [], events: [note(1, "from before")] } });
   await settle();
@@ -983,6 +983,35 @@ async function boardReopened() {
   reads[reads.length - 1].settle({ status: 200, json: { project: { id: PROJECT }, sessions: [], events: [note(1, "from before"), note(2, "since")] } });
   await settle();
   return { first, reopened, answered: shown() };
+}
+
+/* The Board tab where every project's board is AISQUARE_TEAM_HUB's, whose own project id is
+ * not the tab's: what it shows of a frame for another pid, and of a frame and of a read that
+ * carry the hub's board. */
+async function boardAnswers() {
+  const hub = { project: { id: "prj_hub" }, sessions: [], events: [note(1, "on the hub")] };
+  const shown = (page) => page.main().querySelectorAll("div.events")[0].childNodes.map((one) => {
+    const text = find(one, (node) => node.className === "text");
+    return text ? text.textContent : one.textContent;
+  });
+  const opened = async () => {
+    const read = deferred();
+    const page = bootPage("#/p/" + PROJECT + "/board", signedIn({ "GET api/board": () => read.promise }));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    return { page, read };
+  };
+  const framed = await opened();
+  framed.page.live().frame("board", Object.assign({}, hub, { events: [note(2, "prj_y's")] }), { project: "prj_y" });
+  await settle();
+  const other = shown(framed.page);
+  framed.page.live().frame("board", hub, { project: PROJECT });
+  await settle();
+  const read = await opened();
+  read.read.settle({ status: 200, json: hub });
+  await settle();
+  return { other, frame: shown(framed.page), read: shown(read.page) };
 }
 
 /* A transcript read on a phone in UTC-7 from a machine that sends each turn's time as UTC:
@@ -1044,7 +1073,7 @@ async function readsAfterFrames() {
     const one = bootPage("#/p/" + PROJECT + "/" + tab, signedIn({ ["GET api/" + tab]: () => read.promise }));
     await settle();
     one.acceptSockets();
-    if (frame) one.live().frame(tab, frame);
+    if (frame) one.live().frame(tab, frame, tab === "board" ? { project: PROJECT } : undefined);
     await settle();
     read.settle(answer);
     await settle();
@@ -2326,6 +2355,7 @@ async function main() {
     padScroll: await padScroll(),
     boardOnItsTab: await boardOnItsTab(),
     boardReopened: await boardReopened(),
+    boardAnswers: await boardAnswers(),
     transcriptTimes: await transcriptTimes(),
     readsAfterFrames: await readsAfterFrames(),
     backLeaves: await backLeaves(),

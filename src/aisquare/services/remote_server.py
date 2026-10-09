@@ -2858,6 +2858,25 @@ class _Cache:
         return _cache_answer(flight.result())
 
 
+_UNSENT = object()
+"""No frame of the kind has gone out on the socket yet (``stream``)."""
+
+
+def _same_frame(sent: object, payload: object) -> bool:
+    """Whether ``payload`` says what the frame that sent ``sent`` said: the very object, as
+    the needs feed is for the three seconds between scans, or one equal to it.
+
+    The stream encoded each payload as JSON with ``sort_keys``, per socket, per tick and on
+    the event loop that serves every request, to compare the text with the last frame's:
+    a feed of 20 items is 100 to 300 KB to encode, and each watched pane 20 KB more
+    (review of #243, round 4). ``==`` builds no string: it takes a sub-object that is the
+    very one as equal at once, so the feed costs nothing, and walks an equal snapshot in
+    C. A payload is JSON built anew, never changed once made, whose values keep their
+    types from one tick to the next, so equal payloads are equal frames.
+    """
+    return sent is payload or sent == payload
+
+
 def _client_of(scope: Any) -> str:
     """The client's address as uvicorn resolved it; never a header the sender writes.
 
@@ -4092,9 +4111,9 @@ def build_remote_app(
         device = kit.kit_device(websocket)  # the gate refused a socket without one
         await websocket.accept()
         loop = asyncio.get_running_loop()
-        panes_wanted: dict[tuple[str, str], str | None] = {}
+        panes_wanted: dict[tuple[str, str], object] = {}
         """``(project ref, label)`` per pane subscription, oldest first (``""`` is the CURRENT
-        project), to the JSON of the last ``pane`` frame it was sent (``None`` before the
+        project), to the payload of the last ``pane`` frame it was sent (``None`` before the
         first). A dict for its order: frames follow the order subscriptions came in. The
         last frame lives WITH its subscription, so unsubscribing forgets both: a socket
         that cycles through labels holds what its 8 subscriptions hold, and no more."""
@@ -4117,10 +4136,11 @@ def build_remote_app(
         project ever had, and it changes with every session's heartbeat: sent to every
         socket, it reached each phone several times a minute, whatever screen it showed,
         and only the page's Board tab draws it."""
-        last: dict[str, str] = {}
-        """The JSON of the last frame of every other kind, keyed by the kind alone and never by
-        a string the client sent, so it cannot grow with what a client sends. Switching
-        projects forgets that kind's frame, so the new project's goes out even if equal."""
+        last: dict[str, object] = {}
+        """The payload of the last frame of every other kind (:func:`_same_frame`), keyed by the
+        kind alone and never by a string the client sent, so it cannot grow with what a
+        client sends. Switching projects forgets that kind's frame, so the new project's
+        goes out even if equal."""
         next_heartbeat = time.monotonic() + heartbeat
         first_tick = True
         lanes_failing: set[str] = set()
@@ -4148,9 +4168,8 @@ def build_remote_app(
         async def push_if_changed(
             kind: str, payload: object, *, project: str | None = None
         ) -> None:
-            encoded = json.dumps(payload, sort_keys=True)
-            if last.get(kind) != encoded:
-                last[kind] = encoded
+            if not _same_frame(last.get(kind, _UNSENT), payload):
+                last[kind] = payload
                 await send_frame(kind, payload, project=project)
 
         def lane_frame_skipped(seam: str) -> None:
@@ -4222,11 +4241,10 @@ def build_remote_app(
                     )
                 except Exception as exc:  # the pool, shut down under a socket still ticking
                     payload = {"rows": [], "width": 0, "height": 0, "error": str(exc)}
-                encoded = json.dumps(payload, sort_keys=True)
                 # Not wanted any more: unsubscribed while the capture ran, so no frame,
                 # and nothing kept for it either.
-                if wanted in panes_wanted and panes_wanted[wanted] != encoded:
-                    panes_wanted[wanted] = encoded
+                if wanted in panes_wanted and not _same_frame(panes_wanted[wanted], payload):
+                    panes_wanted[wanted] = payload
                     await send_frame("pane", payload, agent=label, project=project or None)
 
         async def reader() -> None:

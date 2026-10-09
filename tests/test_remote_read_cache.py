@@ -541,3 +541,62 @@ def test_a_shared_capture_is_still_one_projects_pane(isolated_home: Path, tmp_pa
             frame = _until(ws, "pane")
             seen[(frame["project"], frame["agent"])] = frame["payload"]["rows"]
     assert seen == {(project, label): [f"{project}/{label}"] for project, label in wanted}
+
+
+# --- the stream's change detection ---------------------------------------------------------------
+
+
+def test_a_payload_that_did_not_change_is_not_encoded_again_to_find_that_out(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """r4 8/9: a frame goes out only when its payload changed, and to find out every socket
+    encoded every payload on every tick, with ``sort_keys`` and on the event loop: the needs
+    feed is one list for the three seconds between scans, 100 to 300 KB to encode, and the
+    fleet one snapshot every socket shares within a tick. Three sockets, a beat on every
+    tick: each encodes the feed and the fleet once, to send them, and a feed that changed
+    goes out."""
+    from types import SimpleNamespace
+
+    from aisquare.services import remote_needs
+
+    items = [{"id": "ny_1", "detail": {"text": "x" * 4_000}}]
+    feed = [items]
+    encoded: list[str] = []
+
+    def dumps(obj: Any, **kwargs: Any) -> str:
+        payload = obj.get("payload", obj) if isinstance(obj, dict) else obj
+        if isinstance(payload, dict) and payload.get("items") is items:
+            encoded.append("needs")
+        elif isinstance(payload, dict) and payload.get("project") == {"id": "prj_x"}:
+            encoded.append("fleet")
+        return json.dumps(obj, **kwargs)
+
+    monkeypatch.setattr(remote_server, "json", SimpleNamespace(dumps=dumps, loads=json.loads))
+    monkeypatch.setattr(
+        remote_needs, "needs_ws_frames", lambda kit: [("needs_you", {"items": feed[0]})]
+    )
+
+    def fleet(project: str | None) -> object:
+        return {"project": {"id": "prj_x"}, "agents": []}  # an equal snapshot, made anew
+
+    runtime = make_runtime()
+    app = build_app(
+        runtime, sources=_sources(fleet=fleet), dist_dir=tmp_path, tick=0.02, heartbeat=0
+    )
+    client = make_client(app)
+    assert unlock(client, runtime).status_code == 200
+    url = f"{base(runtime)}/ws"
+    with contextlib.ExitStack() as sockets:
+        opened = [sockets.enter_context(client.websocket_connect(url)) for _ in range(3)]
+        for ws in opened:
+            ws.send_text(json.dumps({"subscribe_fleet": None}))
+        for ws in opened:
+            beats = 0
+            while beats < 6:
+                beats += frame_within(ws)["type"] == "heartbeat"
+        unchanged = list(encoded)
+        feed[0] = [{"id": "ny_2", "detail": {"text": "y"}}]
+        changed = [_until(ws, "needs_you")["payload"]["items"][0]["id"] for ws in opened]
+    assert unchanged.count("needs") == 3, unchanged.count("needs")
+    assert unchanged.count("fleet") == 3, unchanged.count("fleet")
+    assert changed == ["ny_2"] * 3

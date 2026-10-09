@@ -2192,6 +2192,18 @@ def test_a_refused_read_stays_said_through_the_redraws_that_follow(
     assert kept["reads"] == 3, "the polls did run"
 
 
+def test_a_refused_read_of_the_feed_is_said_where_the_feed_would_be(
+    boot_report: dict[str, Any],
+) -> None:
+    """The feed and a card screen took a refused ``GET api/needs`` in silence and said
+    "Loading…" until a frame brought the feed, for good when none came: the class sweep of
+    the refused reads above. They say why now, until the feed comes."""
+    refused = boot_report["needsRefused"]
+    sentence = "The machine could not answer — try again in a moment."
+    assert refused["feed"] == [[sentence, 0], ["", 1]]
+    assert refused["card"] == [sentence]
+
+
 def test_notifications_say_where_they_stand_wherever_the_page_offers_them(
     boot_report: dict[str, Any],
 ) -> None:

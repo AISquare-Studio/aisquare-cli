@@ -2456,6 +2456,24 @@ async function failuresKept() {
   return { fleet: steps, projects: polls, reads: projects.requests.filter((one) => one.path === "api/projects").length };
 }
 
+/* The feed and a card screen whose read of the feed the machine refused (503), with no feed frame
+ * yet; then the feed once a frame brings it. What each shows. */
+async function needsRefused() {
+  const refused = { "GET api/needs": () => ({ status: 503, json: { error: "unavailable", message: "the scan failed" } }) };
+  const feed = bootPage("#/", signedIn(refused));
+  await settle();
+  feed.acceptSockets();
+  await settle();
+  const said = () => find(feed.main(), (node) => node.className === "empty");
+  const steps = [[said().hidden ? "" : said().textContent, feed.main().querySelectorAll("div.card").length]];
+  feed.live().frame("needs_you", { items: [ITEM] });
+  await settle();
+  steps.push([said().hidden ? "" : said().textContent, feed.main().querySelectorAll("div.card").length]);
+  const card = bootPage("#/n/" + NEEDS_ID, signedIn(refused));
+  await settle();
+  return { feed: steps, card: textsOf(card.main().querySelectorAll("div.data")[0].childNodes) };
+}
+
 /* The Tasks tab of a board whose tasks were all dropped, and of one with a dropped task among
  * the rest: what it shows under its tabs. */
 async function droppedTasks() {
@@ -2699,6 +2717,7 @@ async function main() {
     screensListed: await screensListed(),
     cardFlicker: await cardFlicker(),
     failuresKept: await failuresKept(),
+    needsRefused: await needsRefused(),
     droppedTasks: await droppedTasks(),
     pushScreens: await pushScreens(),
     writeBodies: await writeBodies(),

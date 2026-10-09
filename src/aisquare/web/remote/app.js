@@ -603,7 +603,7 @@ function routeHash(route) {
 // --- the page (browser only from here) ---
 
 const S = {
-  remote: null, needs: null, actions: [], fleet: null, board: null,
+  remote: null, needs: null, needsFailed: null, actions: [], fleet: null, board: null,
   wantFleet: null, wantBoard: null, panes: new Map(), sock: null, sockState: "idle",
   opened: false, backoff: 0, retryTimer: 0, lastFrameAt: 0, stale: false, offline: false, away: null,
   off: null, locked: false, booting: false, view: null, route: null, pending: new Map(), orphans: new Map(),
@@ -1183,6 +1183,11 @@ async function refreshNeeds() {
   if (S.heard.needs !== heard) return;
   if (res.ok && res.data && typeof res.data === "object") setNeeds(res.data.items);
   else if (res.status === 404 && !res.notJson && S.needs === null) setNeeds([]);
+  else if (S.needs === null && !res.notJson && res.status !== 401) {
+    // Said in the feed's place: it said "Loading…" for good.
+    S.needsFailed = res;
+    viewCall("needs");
+  }
 }
 
 async function refreshActions() {
@@ -1747,7 +1752,7 @@ VIEWS.home = (route, main) => {
     behind.hidden = !S.scannedBehind;
     behind.textContent = S.scannedBehind ? "Last looked at " + clock(S.scannedBehind) + ": the machine has stopped checking, so this may be out of date." : "";
     list.classList.toggle("behind", !!S.scannedBehind);
-    empty.textContent = S.needs === null ? "Loading…" : "Nothing needs you.";
+    empty.textContent = S.needs !== null ? "Nothing needs you." : S.needsFailed ? failText(S.needsFailed) : "Loading…";
     empty.hidden = items.length > 0;
     // A strip for each of the first STRIPS_MAX cards that show one, in feed order, worked out
     // before a card is built: a kept card held its strip while new ones came above it, and
@@ -1814,7 +1819,8 @@ VIEWS.card = (route, main) => {
       return;
     }
     if (S.needs === null) {
-      if (!box.firstChild) box.appendChild(el("p", "empty", "Loading…"));
+      clear(box);
+      box.appendChild(el("p", "empty", S.needsFailed ? failText(S.needsFailed) : "Loading…"));
       return;
     }
     if (entry) entry.drop();

@@ -1725,6 +1725,65 @@ async function focusLands() {
   return { loaded, row, tab, nav, open, back: focusOf(fleet) };
 }
 
+/* What was focused as it is drawn anew: a Fleet row by a fleet frame, a Projects row by the 15 s
+ * poll, a card's Open by a needs frame that changed the card, a Revoke once it went through,
+ * Reconnect here as the banner redraws, Settings' Turn on once its answer redrew the panel, and
+ * the feed's notifications line once Hide took it away. */
+async function focusKept() {
+  const fleet = bootPage("#/p/" + PROJECT + "/fleet", signedIn());
+  await settle();
+  fleet.acceptSockets();
+  await settle();
+  find(fleet.main(), (node) => node.tagName === "BUTTON" && node.className === "row").focus();
+  fleet.live().frame("fleet", Object.assign({}, FLEET, { agents: [Object.assign({}, FLEET.agents[0], { state: "working" })] }));
+  await settle();
+  const frame = focusOf(fleet);
+  const projects = bootPage("#/projects", signedIn({ "GET api/projects": () => ({ status: 200, json: [{ id: PROJECT, name: "x", agents: {} }] }) }));
+  await settle();
+  projects.acceptSockets();
+  await settle();
+  find(projects.main(), (node) => node.tagName === "BUTTON" && node.className === "row").focus();
+  projects.fireTimer("load");
+  await settle();
+  const poll = focusOf(projects);
+  const changed = bootPage("#/", signedIn({ "GET api/needs": () => ({ status: 200, json: { items: [ITEM] } }) }));
+  await settle();
+  changed.acceptSockets();
+  await settle();
+  buttonNamed(changed.main(), "Open").focus();
+  changed.live().frame("needs_you", { items: [Object.assign({}, ITEM, { reason: "coder-1 asks again" })] });
+  await settle();
+  const card = Object.assign(focusOf(changed), { redrawn: changed.main().textContent.indexOf("asks again") >= 0 });
+  let devices = TWO_DEVICES;
+  const revoking = bootPage("#/devices", signedIn({
+    "GET api/devices": () => ({ status: 200, json: devices }),
+    "DELETE api/devices/dev_4e5f6a7b": () => {
+      devices = TWO_DEVICES.slice(0, 1);
+      return { status: 200, json: { ok: true, id: "dev_4e5f6a7b", signed_out: false } };
+    },
+  }));
+  await settle();
+  revoking.acceptSockets();
+  await settle();
+  const revoked = await tapFocused(revoking, buttonNamed(revoking.main(), "Revoke"));
+  revoking.live().fire("close", { code: 4409 });
+  await settle();
+  buttonNamed(revoking.run("UI.banner"), "Reconnect here").focus();
+  fire(revoking, "window", "offline");
+  const banner = focusOf(revoking);
+  const settings = bootPage("#/settings", signedIn(pushRoutes([])), fakePush(KEY_NOW).globals);
+  await settle();
+  settings.acceptSockets();
+  await settle();
+  const toggled = await tapFocused(settings, buttonNamed(settings.main(), "Turn on"));
+  const feedNotice = bootPage("#/", signedIn(pushRoutes([])), fakePush(KEY_NOW).globals);
+  await settle();
+  feedNotice.acceptSockets();
+  await settle();
+  const hidden = await tapFocused(feedNotice, buttonNamed(feedNotice.main(), "Hide"));
+  return { frame, poll, card, revoked, banner, toggled, hidden };
+}
+
 /* The Live tab across a sleep, as [stale, Send disabled, pane greyed as held]: with its pane
  * in; after a minute with nothing heard; once a wake's socket opened and a second passed;
  * once that socket's first frame came, not the pane; and once the pane came. */
@@ -1839,7 +1898,7 @@ async function transcriptLoads() {
       shown: page.main().querySelectorAll("pre.transcript")[0].childNodes.map((line) => line.textContent),
       older: !buttonNamed(page.main(), "Load older").hidden,
     });
-    return { reads, tap, result };
+    return { page, reads, tap, result };
   };
   const twice = await opened();
   twice.tap("Load older");
@@ -1855,7 +1914,14 @@ async function transcriptLoads() {
   await settle();
   spliced.reads[1].settle(transcriptPage(["t1", "t2"], null, false));
   await settle();
-  return { twice: twice.result(), spliced: spliced.result() };
+  const last = await opened();
+  buttonNamed(last.page.main(), "Load older").focus();
+  last.tap("Load older");
+  await settle();
+  last.reads[1].settle(transcriptPage(["t1", "t2"], null, false));
+  await settle();
+  const focus = last.page.run("document.activeElement === UI.main ? 'main' : document.activeElement.textContent");
+  return { twice: twice.result(), spliced: spliced.result(), lastFocus: focus };
 }
 
 function transcriptPage(lines, cursor, more) {
@@ -2615,6 +2681,7 @@ async function main() {
     transcriptSend: await transcriptSend(),
     sheetFocus: await sheetFocus(),
     focusLands: await focusLands(),
+    focusKept: await focusKept(),
     transcriptColumns: await transcriptColumns(),
     transcriptLoads: await transcriptLoads(),
     buttonsInFlight: await buttonsInFlight(),

@@ -1841,6 +1841,28 @@ def test_focus_lands_on_the_new_screen_when_the_route_changes(
     assert lands["back"] == {"tag": "H2", "text": "x", **on}
 
 
+def test_focus_stays_on_what_a_redraw_puts_in_place_of_the_focused_control(
+    boot_report: dict[str, Any],
+) -> None:
+    """A redraw took the focused control away as a route change did, and focus fell to the
+    page: a row at every fleet frame and every 15 s poll on Projects, a card's button when a
+    needs frame changed the card, Reconnect here when the banner redrew, Settings' Turn on
+    when its answer redrew the panel. Focus stays on what took its place now, and goes to
+    the screen when nothing did: a revoke, the feed's notifications line hidden, Load older
+    hidden once the transcript's first page came."""
+    kept = boot_report["focusKept"]
+    on = {"connected": True, "main": True, "nav": False}
+    assert kept["frame"] == {"tag": "BUTTON", "text": "coder-1workingcoder", **on}
+    assert kept["poll"] == {"tag": "BUTTON", "text": "xno agents", **on}
+    assert kept["card"] == {"tag": "BUTTON", "text": "Open", **on, "redrawn": True}
+    assert kept["revoked"]["tag"] == "MAIN" and kept["revoked"]["connected"]
+    banner = {"tag": "BUTTON", "text": "Reconnect here", "connected": True, "main": False}
+    assert kept["banner"] == {**banner, "nav": False}
+    assert kept["toggled"] == {"tag": "BUTTON", "text": "Turn on", **on}
+    assert kept["hidden"] == {"tag": "MAIN", "text": kept["hidden"]["text"], **on}
+    assert boot_report["transcriptLoads"]["lastFocus"] == "main", "Load older hid itself"
+
+
 def test_the_transcript_asks_for_lines_as_wide_as_fit_inside_its_padding(
     boot_report: dict[str, Any],
 ) -> None:

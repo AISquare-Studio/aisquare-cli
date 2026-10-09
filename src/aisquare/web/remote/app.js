@@ -1307,7 +1307,10 @@ function drawStatus() {
 }
 
 function drawBanner() {
-  if (!UI.banner) return;
+  if (UI.banner) keepFocus(UI.banner, fillBanner);
+}
+
+function fillBanner() {
   clear(UI.banner);
   if (S.offline) {
     UI.banner.appendChild(el("p", null, S.away === "phone" ? "Offline — the page reconnects once the phone is back online."
@@ -1315,7 +1318,7 @@ function drawBanner() {
   }
   if (S.sockState === "replaced") {
     UI.banner.appendChild(el("p", null, "Another tab of this phone took over the live view."));
-    UI.banner.appendChild(button("ghost", "Reconnect here", () => wake(true)));
+    UI.banner.appendChild(button("ghost", "Reconnect here", () => wake(true))).rowKey = "reconnect";
   }
   UI.banner.hidden = !UI.banner.firstChild;
 }
@@ -1489,6 +1492,17 @@ function landFocus(from, route) {
   const target = (tab && UI.main.querySelectorAll("button.tab.on")[0]) || UI.main.querySelectorAll("h2")[0] || UI.main;
   if (target.tagName === "H2") target.tabIndex = -1;
   target.focus({ preventScroll: true });
+}
+
+/* Drawn anew, box keeps focus on the button with the same rowKey, else the screen: it fell to
+ * the page at every fleet frame, poll, changed card, revoke and banner. */
+function keepFocus(box, fill) {
+  const had = document.activeElement;
+  const key = had && box.contains(had) ? had.rowKey : undefined;
+  fill();
+  if (key === undefined) return;
+  const again = Array.from(box.querySelectorAll("button")).find((one) => one.rowKey === key);
+  (again || UI.main).focus({ preventScroll: true });
 }
 
 function toUnlock() {
@@ -1704,6 +1718,8 @@ function cardEntry(item, withStrip) {
     now: Date.now(), writable: writable(), stale: S.stale, onAnswer: answerCard, onAction: actOnCard, onSince: trackSince,
     onStrip: withStrip ? (pre) => { unwatch = paneWatch(project.id, item.agent, (payload) => drawStrip(pre, payload)); } : null,
   });
+  // keepFocus finds a button by these when the card is drawn anew.
+  for (const one of node.querySelectorAll("button")) one.rowKey = item.id + " " + one.textContent;
   return {
     node, json: JSON.stringify(item), strip: withStrip,
     drop() {
@@ -1726,7 +1742,7 @@ VIEWS.home = (route, main) => {
   const empty = el("p", "empty", "Loading…");
   main.append(notice, behind, list, empty);
   const cards = new Map();
-  const draw = () => {
+  const fill = () => {
     const items = S.needs || [];
     behind.hidden = !S.scannedBehind;
     behind.textContent = S.scannedBehind ? "Last looked at " + clock(S.scannedBehind) + ": the machine has stopped checking, so this may be out of date." : "";
@@ -1770,6 +1786,7 @@ VIEWS.home = (route, main) => {
     }
     gateButtons();
   };
+  const draw = () => keepFocus(list, fill);
   pushBanner(notice);
   draw();
   if (S.needs === null) refreshNeeds();
@@ -1783,7 +1800,7 @@ VIEWS.card = (route, main) => {
   // Whether the cleared view is on screen now. Set once for good, a card that came back (its
   // pane printed, a scan failed) left the screen blank when it cleared again.
   let goneShown = false;
-  const draw = () => {
+  const fill = () => {
     const item = (S.needs || []).find((one) => one.id === route.id);
     if (item) {
       goneShown = false;
@@ -1823,6 +1840,7 @@ VIEWS.card = (route, main) => {
       } else what.textContent = failText(res);
     } else box.appendChild(back);
   };
+  const draw = () => keepFocus(box, fill);
   draw();
   if (S.needs === null) refreshNeeds();
   return { needs: draw, cleanup: () => { if (entry) entry.drop(); } };
@@ -2092,7 +2110,7 @@ VIEWS.projects = (route, main) => {
   // A refusal of the first read is drawn here, with the rest: put in by the read, the next needs
   // frame's redraw cleared it to a blank screen, and each 15 s poll that failed added a copy.
   let failed = null;
-  const draw = () => {
+  const fill = () => {
     clear(list);
     if (!rows) return list.appendChild(el("p", "empty", failed ? failText(failed) : "Loading…"));
     if (!rows.length) list.appendChild(el("p", "empty", "No projects on this machine yet."));
@@ -2100,6 +2118,7 @@ VIEWS.projects = (route, main) => {
       if (!row || typeof row !== "object" || !REF.test(row.id || "")) continue;
       if (isText(row.name)) S.names.set(row.id, plainText(row.name));
       const line = button("row", null, () => pageGo({ name: "project", pid: row.id, tab: "fleet" }));
+      line.rowKey = row.id;
       const top = el("span", "row-top");
       top.appendChild(el("span", "name", (row.pinned === true ? "📌 " : "") + plainText(row.name || row.id)));
       const waiting = needsFor(row.id).length;
@@ -2113,6 +2132,7 @@ VIEWS.projects = (route, main) => {
     }
     return undefined;
   };
+  const draw = () => keepFocus(list, fill);
   const load = async () => {
     const res = await apiCall("GET", API.projects);
     if (res.ok && Array.isArray(res.data)) {
@@ -2166,7 +2186,7 @@ VIEWS.project = (route, main) => {
     // A refusal of its read is drawn here too: put in by the read, the next frame's redraw (needs,
     // a heartbeat, a wake) put "Loading…" in its place for as long as the tab was open.
     let failed = null;
-    const draw = () => {
+    const fill = () => {
       const fleet = projectIdOf(S.fleet) === pid ? S.fleet : null;
       title.textContent = projectName(pid);
       clear(body);
@@ -2177,6 +2197,7 @@ VIEWS.project = (route, main) => {
         const label = row.agent.label;
         if (!REF.test(label || "")) continue;
         const line = button("row", null, () => pageGo({ name: "agent", pid, label, tab: "live" }));
+        line.rowKey = label;
         const top = el("span", "row-top");
         top.append(el("span", "name", label), ...stateBadges(row.state, needsFor(pid, label).length > 0));
         line.appendChild(top);
@@ -2186,6 +2207,7 @@ VIEWS.project = (route, main) => {
       }
       return undefined;
     };
+    const draw = () => keepFocus(body, fill);
     view.fleet = draw;
     view.needs = draw;
     draw();
@@ -2503,6 +2525,7 @@ VIEWS.agent = (route, main) => {
       }
       cursor = typeof page.cursor === "string" ? page.cursor : null;
       older.hidden = !(page.more === true && cursor);
+      if (older.hidden && document.activeElement === older) UI.main.focus({ preventScroll: true }); // the last page came
       return undefined;
     };
     load(null);
@@ -2672,6 +2695,9 @@ VIEWS.devices = (route, main) => {
   main.appendChild(list);
   const load = async () => {
     const res = await apiCall("GET", API.devices);
+    keepFocus(list, () => fill(res));
+  };
+  const fill = (res) => {
     clear(list);
     if (!res.ok || !Array.isArray(res.data)) return list.appendChild(el("p", "empty", failText(res)));
     for (const device of res.data) {
@@ -2702,6 +2728,7 @@ VIEWS.devices = (route, main) => {
             afterFailure(out);
           }
         });
+        revoke.rowKey = id;
         line.appendChild(revoke);
         line.appendChild(el("p", "ro-note", "Revoking another device is a write: " + READ_ONLY + "."));
       }
@@ -2849,8 +2876,8 @@ function pushBanner(box) {
       } catch (error) {
         // shown again next time: harmless
       }
-      clear(box);
-    }));
+      keepFocus(box, () => clear(box));
+    })).rowKey = "hide";
     box.appendChild(line);
   });
 }
@@ -2863,8 +2890,14 @@ VIEWS.settings = (route, main) => {
   const controls = el("div", "row-inline");
   notes.append(said, controls);
   main.appendChild(notes);
+  // Turn on and Turn off take each other's place: focus goes to what is there now, not the page.
   const draw = async () => {
+    const had = controls.contains(document.activeElement);
     clear(controls);
+    await fill();
+    if (had && controls.isConnected) (controls.querySelectorAll("button")[0] || UI.main).focus({ preventScroll: true });
+  };
+  const fill = async () => {
     if (!pushCapable()) {
       if (isIos() && !isStandalone()) {
         said.textContent = "On iPhone and iPad, notifications need the page on the Home Screen: tap Share, then Add to Home Screen, then open aisquare from the Home Screen and unlock it there. The installed app keeps its own sign-in, so it unlocks once more and shows as a second device.";

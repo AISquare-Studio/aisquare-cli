@@ -656,8 +656,7 @@ function clock(iso) {
   return new Date(when).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-/* When a limit lifts, by the phone's clock (and weekday, if not today): the machine sends the
- * instant, not its own clock's time, which a phone in UTC-7 read as 13:10 for 06:10. */
+/* When a limit lifts, by the phone's clock (and weekday, if not today), from the instant sent. */
 function resetClock(iso, now) {
   const at = new Date(typeof iso === "string" ? Date.parse(iso) : NaN);
   if (!Number.isFinite(at.getTime())) return "";
@@ -803,8 +802,7 @@ async function apiWrite(path, body, verb, onWait, at) {
       // connection that lost this request: replace it now. Offline, the reconnect
       // backs off until the phone is back.
       wake(true);
-      // Offline, none may come, and past RETRY_WITHIN_MS it would not go again: the wait ends
-      // there. Its sheet stayed busy, and could not be closed, while the phone stayed offline.
+      // Offline, none may come, and past RETRY_WITHIN_MS it would not go again: the wait ends there.
       late = setTimeout(function tooLate() {
         if (pending.retried) return;
         pending.retried = true;
@@ -1035,8 +1033,7 @@ function connect() {
   });
 }
 
-/* The panes' socket is gone: Live's keys wait for the next one's frame. Held only from its
- * open, a "1" tapped before it was typed into whatever the agent showed by then. */
+/* The panes' socket is gone: Live's keys wait for the next one's frame, not just its open. */
 function unconfirmPanes() {
   for (const watcher of paneWatchers.values()) watcher.fresh = false;
   gateButtons();
@@ -1225,8 +1222,7 @@ async function refreshRemote() {
 }
 
 /* Whether the browser says this phone has no network. Only then is the phone the one
- * away: with serve stopped or the tunnel down the phone is online, and the banner that
- * told it to get back online blamed the wrong end. */
+ * away: with serve stopped or the tunnel down the phone is online. */
 function phoneOffline() {
   return navigator.onLine === false;
 }
@@ -1254,8 +1250,7 @@ function checkStale() {
  * write, "a" an action that is not one. Sign out is neither: it is always there
  * (SPEC §6.3), and a plain DELETE that needs no live socket. "pk" keys and Send act on
  * the pane the Live tab shows: they also wait until that pane came on this socket, and the
- * pane is greyed until then, as it may be the one from before: keys that waited beside a
- * pane that looked live said nothing of why. */
+ * pane is greyed until then, as it may be the one from before. */
 function gateButtons() {
   const shut = !writable() || S.stale;
   const held = !!(S.view && S.view.held && S.view.held());
@@ -1311,8 +1306,7 @@ function buildShell() {
   drawBanner();
 }
 
-/* Off or locked, nothing connects and the machine's last word is not this page's: the off
- * screen said "off in 0 min" under "Remote is off", with Extend live and a Connecting dot. */
+/* Off or locked, nothing connects: no timer, no READ-ONLY pill, and the dot says down. */
 function drawStatus() {
   if (!UI.dot) return;
   const live = S.sockState === "open" && !S.stale;
@@ -1356,7 +1350,7 @@ function drawNav() {
   const name = S.route ? S.route.name : "";
   const count = (S.needs || []).length;
   UI.badge.textContent = count ? String(count) : "";
-  // Off or locked, the count is from before: the tab's title said it under "Remote is off".
+  // Off or locked, the count is from before.
   document.title = (count && !S.off && !S.locked ? "(" + count + ") " : "") + "aisquare remote";
   const here = [
     [UI.navNeeds, name === "home" || name === "card"], [UI.navProjects, name === "projects" || name === "project" || name === "agent"],
@@ -1381,7 +1375,7 @@ function toast(text) {
 
 /* A modal sheet, as a screen reader is told it too: named by its heading, the page behind
  * it inert, focus in it, and back on what opened it (the first, when one sheet takes the
- * place of another) once it closes. It was an unnamed dialog that left focus behind it. */
+ * place of another) once it closes. */
 function openSheet(title, build) {
   if (!sheetOpen()) UI.opener = document.activeElement;
   closeSheet(true);
@@ -1563,8 +1557,7 @@ function landFocus(from, route) {
   target.focus({ preventScroll: true });
 }
 
-/* Drawn anew, box keeps focus on the button with the same rowKey, else the screen: it fell to
- * the page at every fleet frame, poll, changed card, revoke and banner. */
+/* Drawn anew, box keeps focus on the button with the same rowKey, else the screen. */
 function keepFocus(box, fill) {
   const had = document.activeElement;
   const key = had && box.contains(had) ? had.rowKey : undefined;
@@ -1866,8 +1859,7 @@ VIEWS.card = (route, main) => {
   const box = el("div", "data");
   main.appendChild(box);
   let entry = null;
-  // Whether the cleared view is on screen now. Set once for good, a card that came back (its
-  // pane printed, a scan failed) left the screen blank when it cleared again.
+  // Whether the cleared view is on screen now: a card may come back, and clear again.
   let goneShown = false;
   const fill = () => {
     const item = (S.needs || []).find((one) => one.id === route.id);
@@ -2177,8 +2169,7 @@ VIEWS.projects = (route, main) => {
   const list = el("div", "rows data");
   main.appendChild(list);
   let rows = null;
-  // A refusal of the first read is drawn here, with the rest: put in by the read, the next needs
-  // frame's redraw cleared it to a blank screen, and each 15 s poll that failed added a copy.
+  // A refusal of the first read is drawn with the rest, once, and a redraw keeps it.
   let failed = null;
   const fill = () => {
     clear(list);
@@ -2253,8 +2244,7 @@ VIEWS.project = (route, main) => {
   main.appendChild(body);
   const view = {};
   if (route.tab === "fleet") {
-    // A refusal of its read is drawn here too: put in by the read, the next frame's redraw (needs,
-    // a heartbeat, a wake) put "Loading…" in its place for as long as the tab was open.
+    // A refusal of its read is drawn here too, so a redraw keeps it.
     let failed = null;
     const fill = () => {
       const fleet = projectIdOf(S.fleet) === pid ? S.fleet : null;
@@ -2300,7 +2290,7 @@ VIEWS.project = (route, main) => {
     const compose = noteComposer(pid);
     const list = el("div", "events");
     body.append(compose, list);
-    let failed = null; // a refused read, said here: dropped, it left "Loading…" for good
+    let failed = null; // a refused read, said until a board comes
     const draw = () => {
       const board = S.wantBoard === pid ? S.board : null;
       clear(list);
@@ -2349,8 +2339,7 @@ VIEWS.project = (route, main) => {
   return view;
 };
 
-/* A dropped task has no group. Counted as one that shows, a board of dropped tasks alone drew
- * nothing at all; now it says it has none to show, and how many it leaves out. */
+/* A dropped task has no group: the board says how many it leaves out. */
 function drawTasks(body, rows) {
   const tasks = rows.filter((task) => task && typeof task === "object");
   const dropped = tasks.filter((task) => task.status === "dropped").length;
@@ -3067,8 +3056,8 @@ function trackViewport() {
   update();
 }
 
-/* Each second. A socket that died with no close (a network switch) left the page stale for
- * good, every button that could reconnect it waiting: replaced once a stale span, unless 4409. */
+/* Each second. A socket that died with no close (a network switch) never closes: once the page
+ * is stale it is replaced, at most once a stale span, and never after 4409. */
 function onSecond() {
   checkStale();
   if (S.stale && (S.sockState === "open" || S.sockState === "connecting") && Date.now() - S.lastWake > STALE_AFTER_MS) wake(true);

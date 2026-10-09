@@ -366,6 +366,11 @@ class RemoteAlreadyOn(RemoteError):
     """Another process serves Remote from this home already (:func:`_claim_remote_home`)."""
 
 
+class RemoteWindingDown(RemoteError):
+    """The Remote this process turned off last still finishes a phone's write
+    (:func:`start_remote_server`)."""
+
+
 class RemoteOffIncomplete(RemoteError):
     """``serve``'s auto-off turned Remote off, but could not do all of it: the devices still
     signed in, or the deadline still in ``remote.json`` (:func:`run_foreground`)."""
@@ -4755,8 +4760,9 @@ class _Server:
 
 _winding_down: list[_Server] = []
 """Servers :func:`stop_remote_server` stopped that were still finishing what was asked of them,
-for :func:`remote_wait_for_writes` to see out, and for the home's claim to outlast
-(:func:`_release_remote_home`)."""
+from the moment they were told to stop: for :func:`remote_wait_for_writes` to see out, for the
+home's claim to outlast (:func:`_release_remote_home`), and for no new server of this process
+to start beside (:func:`start_remote_server`)."""
 
 REMOTE_WINDING_DOWN_SECONDS = 5.0
 """How long :func:`remote_wait_for_writes` gives a stopped server once its writes are done: the
@@ -4945,6 +4951,10 @@ REMOTE_ALREADY_ON = (
     "serve` in another shell) — turn it off first: two would share one link, one passphrase, "
     "one auto-off and one list of phones"
 )
+REMOTE_WINDING_DOWN = (
+    "the Remote turned off last is still finishing a phone's restart or switch, which can "
+    "take 40 s; turn it on again once that is done"
+)
 
 
 def _claim_remote_home(state: Runtime) -> bool:
@@ -5084,7 +5094,12 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
     """Serve in the background; idempotent while running. ``allow_write`` is left as persisted.
 
     :class:`RemoteAlreadyOn` while another process serves Remote from this home
-    (:func:`_claim_remote_home`): a ``serve``, or another fleet UI's panel.
+    (:func:`_claim_remote_home`): a ``serve``, or another fleet UI's panel. And
+    :class:`RemoteWindingDown` while the server this process stopped last still
+    finishes a phone's write (:data:`_winding_down`): its needs watcher and push sender
+    run until then, and a second server beside them, the home already this process's,
+    pushed every new item to the phone twice, each sender with its own record of what
+    it had pushed (sweep 2 of #243).
     """
     global _server
     problem = _remote_dependency_error()
@@ -5099,6 +5114,8 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
         with _lock:
             if _server is not None and _server.running:
                 return state.connection_info(_server.port)
+            if any(stopped.winding_down for stopped in _winding_down):
+                raise RemoteWindingDown(REMOTE_WINDING_DOWN)
             claimed = _claim_remote_home(state)
             app = build_remote_app(state, dist_dir=dist_dir)
             server = _Server(app, port)
@@ -5126,13 +5143,18 @@ def stop_remote_server() -> None:
     with _lock:
         server, _server = _server, None
         flusher, _flusher = _flusher, None
+        if server is not None:
+            # Told to stop, and among the servers winding down, before the lock goes: a
+            # start meanwhile sees it (start_remote_server), as does a stop of an earlier
+            # server ending on another thread (_release_remote_home).
+            server.stop_serving(0)
+            _winding_down.append(server)
     if flusher is not None:
         flusher.cancel()
     if server is not None:
         server.stop_serving()
         with _lock:
-            kept = [*_winding_down, server]
-            _winding_down[:] = [stopped for stopped in kept if stopped.winding_down]
+            _winding_down[:] = [stopped for stopped in _winding_down if stopped.winding_down]
             parked = server in _winding_down
         if parked:  # the home stays claimed until it is done (_release_remote_home)
             threading.Thread(
@@ -5515,6 +5537,7 @@ __all__ = [
     "RemoteInfo",
     "RemoteOffIncomplete",
     "RemoteUnavailable",
+    "RemoteWindingDown",
     "RequestError",
     "Runtime",
     "Sources",

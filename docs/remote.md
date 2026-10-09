@@ -498,7 +498,9 @@ one off, or use it. Two would share one link, one passphrase, one auto-off and
 one list of phones, and either going off would sign the other's phones out. One
 turned off while a phone's restart or switch was still running keeps the home
 until that is done, since its notifications go on until then; a restart or
-switch can take 40 seconds.
+switch can take 40 seconds. Switched on again in the same fleet UI meanwhile,
+the panel says the last Remote is still finishing, rather than start a second
+one beside it.
 
 **`serve` says the port is in use.** Something else took 8750. Pass `--port` and
 give ngrok (and `status`) the same port.

@@ -1019,6 +1019,84 @@ def test_a_stopped_server_still_finishing_a_write_keeps_the_home_until_it_is_don
         time.sleep(0.05)
 
 
+def test_remote_on_again_while_the_last_one_still_finishes_a_write_is_refused_until_it_is_done(
+    isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turned off during a phone's restart, the stopped server goes on until the restart is
+    done, its needs watcher and push sender with it. Turned on again meanwhile in the same
+    process, which held the home already, a second server started beside it: two watchers
+    and two push senders, each with its own record of what it pushed, and every new item
+    came to the phone twice (sweep 2 of #243). A start is refused until the last one is
+    done, as early as while its stop still waits, and it then turns on as ever."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    monkeypatch.setattr(remote_server, "_winding_down", [])
+    started, release = threading.Event(), threading.Event()
+
+    def restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        started.set()
+        release.wait(timeout=20)
+        return {"restarted": True}, "agent/restart coder-1"
+
+    monkeypatch.setattr(remote_server, "live_writes", lambda: Writes({"agent/restart": restart}))
+    stop_serving = remote_server._Server.stop_serving
+    stopping = threading.Event()
+
+    def stop_serving_slowly(self: remote_server._Server, timeout: float = 5.0) -> None:
+        if timeout:
+            stopping.set()  # the stop has parked the server and waits on it
+        stop_serving(self, min(timeout, 0.5))
+
+    monkeypatch.setattr(remote_server._Server, "stop_serving", stop_serving_slowly)
+    state = remote_server.runtime()
+    state._state.password = PASSWORD
+    state._save_state()
+    state.set_allow_write(True)
+    port = _free_port()
+    info = remote_server.start_remote_server(dist, port=port)
+    url = info.url_local.rstrip("/")
+    answers: list[int] = []
+    with httpx.Client(trust_env=False, headers={"origin": f"http://127.0.0.1:{port}"}) as phone:
+        assert phone.post(f"{url}/api/unlock", json={"password": PASSWORD}).status_code == 200
+
+        def ask() -> None:
+            answer = phone.post(f"{url}/api/agent/restart", json={"agent": "coder-1"}, timeout=30)
+            answers.append(answer.status_code)
+
+        asking = threading.Thread(target=ask)
+        asking.start()
+        try:
+            assert started.wait(timeout=10)
+            stopper = threading.Thread(target=remote_server.stop_remote_server)
+            stopper.start()
+            assert stopping.wait(timeout=10)
+            with pytest.raises(remote_server.RemoteError, match="still finishing") as refused:
+                remote_server.start_remote_server(dist, port=_free_port())
+            assert isinstance(refused.value, remote_server.RemoteWindingDown)
+            stopper.join(10)
+            with pytest.raises(remote_server.RemoteError, match="still finishing"):
+                remote_server.start_remote_server(dist, port=_free_port())
+            assert remote_server._server is None
+            needs = [t for t in threading.enumerate() if t.name.startswith("asq-remote-needs")]
+            assert len(needs) <= 1, "one needs watcher, the stopped server's"
+        finally:
+            release.set()
+            asking.join(10)
+    assert answers == [200], "the restart's answer still went out"
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            remote_server.start_remote_server(dist, port=_free_port())
+            break
+        except remote_server.RemoteWindingDown:
+            assert time.monotonic() < deadline, "Remote never turned on once the write was done"
+            time.sleep(0.05)
+    try:
+        assert remote_server.remote_server_status()["running"] is True
+    finally:
+        remote_server.stop_remote_server()
+
+
 def test_a_remote_whose_process_ended_holds_the_home_no_more(
     isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -874,6 +874,9 @@ class Runtime:
         self._said_unrestricted = False
         self._public_origin: str | None = None
         """Where phones reach this server, as :func:`check_public_origin` passed it; memory only."""
+        self._going_off = False
+        """Remote is turning off, from the revoke on (:meth:`remote_going_off`), until it is
+        started again (:meth:`remote_coming_on`); memory only."""
         self._state = self._load_state()
 
     # -- persistence --
@@ -1247,9 +1250,39 @@ class Runtime:
             return _remote_instant(self._state.auto_off_at, naive_is_local=True)
 
     def auto_off_passed(self, now: datetime) -> bool:
-        """Whether Remote's deadline is behind ``now``: then every request is a 404."""
+        """Whether Remote's deadline is behind ``now``, or Remote is turning off
+        (:meth:`remote_going_off`): then every request is a 404."""
+        if self._going_off:
+            return True
         deadline = self.auto_off_deadline()
         return deadline is not None and now >= deadline
+
+    def remote_going_off(self) -> None:
+        """Remote is turning off, by its switch or auto-off: until :meth:`remote_coming_on`,
+        every request is answered and every socket closed as past the deadline, and no
+        unlock makes or renews a device (:meth:`unlock_device`).
+
+        Turning off revokes every device, clears the deadline, and only then stops the
+        server, which uvicorn sees at its next tick, and both writes may wait for
+        ``remote.json.lock``. An unlock in between made a device the revoke never saw, which
+        the flush on the way out saved, its cookie good on the next Remote for 7 days; and
+        past the deadline, its clearing opened the gate again for that while (review of
+        #243, round 5). Set before the revoke, which takes the file lock after it: an unlock
+        that held that lock first made a device the revoke then drops.
+        """
+        with self._lock:
+            self._going_off = True
+
+    def remote_coming_on(self) -> None:
+        """A server is starting over this state: what :meth:`remote_going_off` closed opens."""
+        with self._lock:
+            self._going_off = False
+
+    def _refuse_while_going_off(self) -> None:
+        """Under the file lock, as a device is made or renewed: a 404, as the gate answers,
+        once Remote is turning off (:meth:`remote_going_off`)."""
+        if self._going_off:
+            raise RequestError(404, "not_found", LINK_GONE)
 
     def extend_auto_off(self, now: datetime) -> datetime | None:
         """Move the deadline :data:`AUTO_OFF_EXTEND` later; ``None`` when there is none.
@@ -1319,6 +1352,7 @@ class Runtime:
         if not self.password_matches(password):
             return None
         with self._state_file_lock():
+            self._refuse_while_going_off()
             if not self.password_matches(password):
                 return None
             now = _remote_now()
@@ -1385,6 +1419,7 @@ class Runtime:
 
         now = _remote_now()
         with self._state_file_lock():
+            self._refuse_while_going_off()
             self.reload_if_changed()
             device = self._find_device(device_id)
             if device is None or device.device_expired(now):
@@ -4179,6 +4214,8 @@ def build_remote_app(
                 request.cookies.get(COOKIE),
                 is_direct_loopback(request.scope),
             )
+        except RequestError as exc:  # Remote went off as this unlock waited its turn
+            return JSONResponse(exc.request_error_body(), status_code=exc.status)
         except OSError as exc:  # its device was taken back (Runtime._write_state's undo)
             log.warning("remote: an unlock could not be saved: %s", exc)
             return kit.kit_refuse(503, "remote_state_unwritable", STATE_UNWRITABLE)
@@ -5521,6 +5558,7 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
             if any(stopped.winding_down for stopped in _winding_down):
                 raise RemoteWindingDown(REMOTE_WINDING_DOWN)
             claimed = _claim_remote_home(state)
+            state.remote_coming_on()
             app = build_remote_app(state, dist_dir=dist_dir)
             server = _Server(app, port)
             server.start_serving()
@@ -5605,14 +5643,18 @@ def revoke_remote_device(device_id: str) -> bool:
 def revoke_every_remote_device(reason: str) -> None:
     """Remote is going off: tell the phones, then revoke every device with 4410 (SPEC §2.4).
 
-    The farewell push goes first, to the devices about to be revoked, since a
-    revoked device's subscription is dropped; it is sent from a daemon thread and
-    never waits on the network here. The TUI's switch and both auto-offs come
-    here; ``asq remote revoke --all`` does not (Remote stays on, phones unlock again).
+    From here on until the next start, the gate answers every request as past the
+    deadline and no unlock makes a device (:meth:`Runtime.remote_going_off`), so none
+    is made after the revoke, nor let in once the deadline is cleared. The farewell
+    push goes first, to the devices about to be revoked, since a revoked device's
+    subscription is dropped; it is sent from a daemon thread and never waits on the
+    network here. The TUI's switch and both auto-offs come here; ``asq remote revoke
+    --all`` does not (Remote stays on, phones unlock again).
     """
     from aisquare.services import remote_push
 
     state = runtime()
+    state.remote_going_off()
     try:
         remote_push.push_farewell(state.device_ids(), reason)
     except Exception:  # a push that cannot be queued must not keep Remote on
@@ -5909,6 +5951,7 @@ def run_foreground(
     state = runtime()
     with _lock:
         claimed = _claim_remote_home(state)  # before anything is bound or printed
+    state.remote_coming_on()
     try:
         sock = _bind_remote_socket(port)
     except BaseException:

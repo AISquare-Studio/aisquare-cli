@@ -411,8 +411,10 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   24 hours unused and removed after 7 days. A phone whose sign-in lapsed unlocks
   back into the same device, so its notifications carry on.
 - **Remote off revokes every device**: turning it off in the panel, or auto-off,
-  signs every phone out (after a goodbye notification). Closing the UI or
-  stopping `serve` with Ctrl-C does not; expiry bounds them.
+  signs every phone out (after a goodbye notification), and from that moment
+  every request is a 404 and no unlock goes through, while the server is still
+  stopping. Closing the UI or stopping `serve` with Ctrl-C does not; expiry
+  bounds them.
 - **Auto-off** is enforced by the server itself: past the deadline every request
   is a 404, and within half a minute Remote turns off, phones signed out, even
   on a machine that slept through the deadline. With writes on, a phone can

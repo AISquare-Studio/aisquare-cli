@@ -1632,6 +1632,56 @@ def test_remote_off_says_farewell_then_revokes_every_device_with_4410(
     assert runtime.device_rows() == []
 
 
+def test_once_remote_turns_off_no_unlock_gets_in_while_its_server_stops(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turning off revokes every device, clears the deadline, then stops the server, which
+    uvicorn sees at its next tick: an unlock in between made a device the revoke never saw,
+    saved on the way out, its cookie good on the next Remote for 7 days, and past the
+    deadline the clearing opened the gate again (review of #243, round 5)."""
+    monkeypatch.setattr(remote_server, "_runtime", runtime)
+    monkeypatch.setattr(remote_push, "push_farewell", lambda ids, reason: None)
+    client = make_client(app)
+    runtime.set_auto_off(remote_server._remote_now() - timedelta(minutes=1))
+    assert unlock(client, runtime).status_code == 404, "past the deadline"
+    remote_server.revoke_every_remote_device("auto-off")
+    runtime.set_auto_off(None)  # as the panel and serve clear it, before the server stops
+    refused = unlock(client, runtime)
+    assert (refused.status_code, refused.json()) == (
+        404,
+        {"error": "not_found", "message": LINK_GONE},
+    )
+    assert client.get(f"{base(runtime)}/api/remote").status_code == 404
+    runtime.flush_last_seen()  # the flush on the way out
+    assert Runtime(remote_state_path(), remote_audit_path()).device_rows() == []
+    runtime.remote_coming_on()  # what the next start does
+    assert unlock(client, runtime).status_code == 200
+
+
+def test_an_unlock_already_past_the_gate_as_remote_turns_off_makes_no_device(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One the gate let in before, still waiting for its turn or for remote.json's lock while
+    the revoke held it, is answered as the gate answers now: no device, new or renewed, and
+    no wrong guess counted against the budget or the device."""
+    client = make_client(app)
+    known = unlock(client, runtime)
+    assert known.status_code == 200
+    secret = client.cookies.get(COOKIE)
+    assert secret is not None
+    monkeypatch.setattr(remote_server, "remote_gate_auto_off", lambda runtime, scope: True)
+    runtime.remote_going_off()
+    cookies: dict[str, str]
+    for cookies in ({}, {COOKIE: secret}):  # a new phone, then the known one again
+        client.cookies.clear()
+        client.cookies.update(cookies)
+        response = unlock(client, runtime)
+        assert (response.status_code, response.json()["error"]) == (404, "not_found")
+    assert [row["id"] for row in runtime.device_rows()] == [known.json()["device"]["id"]]
+    assert runtime.device_for_cookie(secret) is not None, "the known cookie was not replaced"
+    assert UnlockBudget(runtime).budget_failures() == 0
+
+
 def test_a_farewell_that_cannot_be_queued_still_turns_remote_off(
     app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
 ) -> None:

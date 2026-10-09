@@ -543,6 +543,29 @@ def test_the_push_file_is_restricted_before_it_holds_the_key(
     assert keys.private_key in remote_push_path().read_text(encoding="utf-8")
 
 
+def test_what_was_pushed_is_kept_a_week() -> None:
+    """``pushed`` is what keeps a restart from pushing an item twice; past a week its id
+    will not come back, and the file would keep it for good."""
+    now = T0 + timedelta(days=30)
+    kept = remote_push._push_prune_pushed(
+        {
+            "ny_old": (now - timedelta(days=8)).isoformat(),
+            "ny_new": (now - timedelta(hours=1)).isoformat(),
+            "ny_unreadable": "not a time",
+        },
+        now,
+    )
+    assert set(kept) == {"ny_new"}
+
+
+def test_at_most_the_newest_1000_pushed_ids_are_kept() -> None:
+    now = T0 + timedelta(days=30)
+    pushed = {f"ny_{n:016x}": (now - timedelta(minutes=n)).isoformat() for n in range(1005)}
+    kept = remote_push._push_prune_pushed(pushed, now)
+    assert len(kept) == 1000
+    assert f"ny_{0:016x}" in kept and f"ny_{1004:016x}" not in kept, "the oldest go first"
+
+
 def test_the_vapid_keys_are_made_once_and_kept(isolated_home: Path) -> None:
     keys = load_or_create_vapid_keys()
     assert load_or_create_vapid_keys() == keys
@@ -875,6 +898,13 @@ def test_the_title_counts_what_is_open_beyond_the_push(world: World) -> None:
     assert world.titles() == every_device("aisquare-cli: coder-auth needs you · 3 open")
 
 
+def test_a_notification_names_at_most_50_items(world: World) -> None:
+    """A fleet on fire is one notification, its payload in budget: the page reads the feed."""
+    items = [needs_item(n) for n in range(60)]
+    message = remote_push.push_needs_message(items, total=60, base_url=None)
+    assert message["ids"] == [item.id for item in items[:50]]
+
+
 def test_a_project_level_item_is_titled_by_its_project(world: World) -> None:
     item = needs_item(1, kind="fleet_down", agent=None, reason="tmux is not answering")
     world.scan(item)
@@ -1118,6 +1148,52 @@ def test_a_deadline_written_in_local_time_is_read_as_local_time(world: World) ->
     )
     world.later(30)
     assert world.titles() == every_device(auto_off_title(5))
+
+
+def test_nothing_is_pushed_past_the_auto_off_deadline(world: World) -> None:
+    """From the deadline on every request is a 404 and every socket closes, but the TUI turns
+    Remote off at its next 30 s check, and only then is the farewell sent: a question that
+    became pushable in between went out, "coder-auth needs you", its link a 404, after the
+    page said Remote is off and before the farewell that promised no more. What was gathered
+    is let go unmarked, so a deadline moved later pushes it then."""
+    world.kit.runtime.set_auto_off(T0 + timedelta(seconds=6))
+    item = needs_item(1)
+    world.scan(item)
+    world.later(3)
+    world.scan(item)  # pushable: its window closes at T0 + 8 s, past the deadline
+    world.later(5)
+    world.later(30)
+    assert world.transport.sent == []
+    assert item.id not in load_push_state().pushed
+    world.kit.runtime.set_auto_off(world.clock.now + timedelta(hours=1))
+    world.scan(item)
+    world.later(5)
+    assert world.titles() == every_device("aisquare-cli: coder-auth needs you")
+
+
+def test_what_a_throttle_held_is_not_pushed_past_the_auto_off_deadline(world: World) -> None:
+    first, second = needs_item(1), needs_item(2)
+    world.scan(first)
+    world.scan(first)
+    world.later(5)  # T0 + 5 s: pushed, each device's throttle running to T0 + 25 s
+    world.kit.runtime.set_auto_off(T0 + timedelta(seconds=15))
+    world.scan(first, second)
+    world.later(3)
+    world.scan(first, second)
+    world.later(5)  # T0 + 13 s: the second is owed to both devices, held by the throttle
+    world.later(20)  # T0 + 33 s: the throttle is over, and so is Remote
+    assert world.titles() == every_device("aisquare-cli: coder-auth needs you")
+    assert second.id not in load_push_state().pushed
+
+
+def test_no_warning_goes_out_past_the_auto_off_deadline(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = [{"id": DEVICES[0], "expires_at": (T0 + timedelta(hours=23)).isoformat()}]
+    monkeypatch.setattr(world.kit.runtime, "device_rows", lambda: rows)
+    world.kit.runtime.set_auto_off(T0 + timedelta(seconds=10))
+    world.later(30)
+    assert world.transport.sent == [], "the expiry warning of a Remote that is off"
 
 
 def test_a_system_push_skips_the_throttle(world: World) -> None:

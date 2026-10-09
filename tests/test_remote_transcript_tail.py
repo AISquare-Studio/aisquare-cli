@@ -414,6 +414,45 @@ def test_a_rejected_tool_use_is_an_interruption(tmp_path: Path) -> None:
     assert marker is not None and (marker.newest, marker.marker_key) == ("interrupted", "esc")
 
 
+REJECTED_WITH_WORDS = (
+    "The user doesn't want to proceed with this tool use. The tool use was rejected "
+    "(eg. if it was a file edit, the new_string was NOT written to the file). To tell you "
+    "how to proceed, the user said:\ndo not delete the cache, run the tests instead"
+)
+"""Claude Code 2.1.295's result for "No, and tell Claude what to do differently"."""
+
+
+def rejected_with_words(*, then: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A Bash call the human turned down with words for the agent, and ``then``."""
+    return [
+        _prompt("clean up", uuid="u1"),
+        _said(
+            _tool("toolu_rm", "Bash", command="rm -rf .cache"), uuid="a1", message="m1", second=2
+        ),
+        _result("toolu_rm", REJECTED_WITH_WORDS, uuid="r1", second=9, is_error=True),
+        *then,
+    ]
+
+
+def test_a_rejection_with_words_for_the_agent_is_a_result_it_goes_on_from(tmp_path: Path) -> None:
+    """A tool use turned down with "No, and tell Claude what to do differently" is written as
+    the rejection with the human's words after "To tell you how to proceed, the user said:",
+    and Claude Code does not stop the turn then: the agent works on them, thinking first.
+    Read as an interruption, the feed said it "was interrupted and waits for you" all the
+    while, and the card's Tell offered Interrupt & tell, whose Esc cut short the work the
+    words had started."""
+    thinking = _said(
+        {"type": "thinking", "thinking": "Run the tests, then."},
+        uuid="a2",
+        message="m2",
+        second=11,
+    )
+    for then in ([], [thinking]):
+        tail = read_transcript_tail(_write(tmp_path / "t.jsonl", rejected_with_words(then=then)))
+        assert tail is not None and tail.pending == ()
+        assert (tail.newest, tail.newest_at, tail.marker_key) == ("tool_result", _at(9), "r1")
+
+
 def test_an_error_result_that_is_not_a_rejection_is_a_result(tmp_path: Path) -> None:
     path = _write(
         tmp_path / "t.jsonl",
@@ -421,6 +460,28 @@ def test_an_error_result_that_is_not_a_rejection_is_a_result(tmp_path: Path) -> 
             _prompt("build", uuid="u1"),
             _said(_tool("toolu_b", "Bash", command="make"), uuid="a1", message="m1", second=2),
             _result("toolu_b", "make: *** [all] Error 2", uuid="r1", second=3, is_error=True),
+        ],
+    )
+    tail = read_transcript_tail(path)
+    assert tail is not None and tail.newest == "tool_result"
+
+
+def test_a_failed_tool_whose_output_quotes_a_rejection_is_a_result(tmp_path: Path) -> None:
+    """The rejection's sentence is matched where Claude Code writes it, at the start of the
+    result. Anywhere in it, a test run of this very module that failed, its output quoting
+    the sentence, read as the human turning the tool down: an "interrupted" card, its push
+    ten minutes later, for an agent at work on the failure."""
+    output = (
+        "FAILED tests/test_remote_transcript_tail.py::test_a_rejected_tool_use\n"
+        "E   assert 'tool_result' == 'interrupted'\n"
+        'E     rejection = "The user doesn\'t want to proceed with this tool use."'
+    )
+    path = _write(
+        tmp_path / "t.jsonl",
+        [
+            _prompt("run the tests", uuid="u1"),
+            _said(_tool("toolu_t", "Bash", command="pytest -q"), uuid="a1", message="m1", second=2),
+            _result("toolu_t", output, uuid="r1", second=30, is_error=True),
         ],
     )
     tail = read_transcript_tail(path)

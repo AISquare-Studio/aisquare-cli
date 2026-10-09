@@ -27,11 +27,13 @@ from aisquare.core.paths import remote_audit_path, remote_state_path
 from aisquare.services import transcript as transcript_service
 from aisquare.services.remote_server import (
     NoSuchAgent,
+    RequestError,
     Runtime,
     Sources,
     _limit_param,
     build_app,
 )
+from aisquare.services.remote_server import _live_transcript as live_transcript
 from aisquare.services.transcript import EMPTY, SCAN_BUDGET, Page, read_page
 from tests.remote_kit_helpers import make_client
 
@@ -251,6 +253,92 @@ def test_a_compaction_summary_is_one_line_saying_so_never_the_persons_words(
     assert not any("being continued" in line or "Summary of the" in line for line in text)
     assert text.count("  ⎿ conversation compacted") == 2
     assert "  Picking up the cache work." in text
+
+
+def test_claude_codes_own_records_are_never_the_persons_words(tmp_path: Path) -> None:
+    """Claude Code writes a "user" record of its own, with no ``isMeta``, when a background
+    task ends (``origin`` ``task-notification``, ``promptSource`` "system", its notice and
+    often a sub-agent's whole report as the text) and for the output of a slash command
+    (``<local-command-stdout>``). Each rendered under ``> you``, the human's words: on this
+    machine 812 notices, one of them 1 453 lines. A notice is one dim line, its summary (or
+    its first line, in no tag); an output one dim line, its first; a reminder nothing."""
+    notice = {
+        **_user(
+            "<task-notification>\n<task-id>bq1</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n"
+            "<output-file>/tmp/bq1.output</output-file>\n<status>completed</status>\n"
+            '<summary>Background command "make build" completed (exit code 0)</summary>\n'
+            "<result>" + "the sub-agent's report, line after line\n" * 300 + "</result>\n"
+            "</task-notification>",
+            uuid="n1",
+        ),
+        "origin": {"kind": "task-notification"},
+        "promptSource": "system",
+    }
+    untagged = {
+        **_user("A background task you started has finished.", uuid="n2"),
+        "origin": {"kind": "task-notification"},
+    }
+    path = _write(
+        tmp_path / "own.jsonl",
+        [
+            _user("build it in the background", uuid="u1"),
+            notice,
+            untagged,
+            _user("<local-command-stdout>Set model to Opus</local-command-stdout>", uuid="o1"),
+            _user("<local-command-stdout></local-command-stdout>", uuid="o2"),
+            _user("<system-reminder>The date changed.</system-reminder>", uuid="r1"),
+            _user("ship it", uuid="u2"),
+        ],
+    )
+    text = plain(read_page(path, width=80).lines)
+    assert text == [
+        "> you",
+        "  build it in the background",
+        "",
+        '  ⎿ Background command "make build" completed (exit code 0)',
+        "",
+        "  ⎿ A background task you started has finished.",
+        "",
+        "  ⎿ Set model to Opus",
+        "",
+        "> you",
+        "  ship it",
+        "",
+    ]
+
+
+def test_the_persons_own_commands_are_theirs_without_the_tags(tmp_path: Path) -> None:
+    """A slash command and a ``!`` command are the human's, recorded in Claude Code's tags:
+    ``> you``, the command as typed. Words a person typed that only start like a tag, never
+    closing it, are theirs as typed."""
+    path = _write(
+        tmp_path / "commands.jsonl",
+        [
+            _user(
+                "<command-message>model</command-message>\n<command-name>/model</command-name>\n"
+                "<command-args>opus</command-args>",
+                uuid="c1",
+            ),
+            _user("<bash-input>git status</bash-input>", uuid="b1"),
+            _user(
+                "<bash-stdout>On branch main</bash-stdout><bash-stderr></bash-stderr>", uuid="b2"
+            ),
+            _user("<command-name> is the tag the parser misses: fix it", uuid="u1"),
+        ],
+    )
+    assert plain(read_page(path, width=80).lines) == [
+        "> you",
+        "  /model opus",
+        "",
+        "> you",
+        "  ! git status",
+        "",
+        "  ⎿ On branch main",
+        "",
+        "> you",
+        "  <command-name> is the tag the parser misses: fix it",
+        "",
+    ]
 
 
 def test_metadata_records_are_skipped(tmp_path: Path) -> None:
@@ -583,3 +671,74 @@ def test_limit_param_parsing() -> None:
         _limit_param("many")
     with pytest.raises(ValueError, match="negative"):
         _limit_param("-2")
+
+
+# --- a cursor is a place in one conversation ------------------------------------------------
+
+
+def _two_conversations(tmp_path: Path) -> None:
+    """coder-1 on session ``ses_1``, a long conversation, and ``ses_2``, the one a ``/clear``
+    starts: the store as the team's hooks leave it, the row still on ``ses_1``."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.core.store import store_session
+    from aisquare.models import FleetAgent, ProjectInfo, TeamSession
+
+    root = tmp_path / "alpha"
+    old = _write(tmp_path / "old.jsonl", [_user(f"OLD {n}", uuid=f"o{n}") for n in range(40)])
+    new = _write(tmp_path / "new.jsonl", [_user(f"NEW {n}", uuid=f"n{n}") for n in range(3)])
+    born = datetime.now(UTC) - timedelta(hours=1)
+    with store_session() as store:
+        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        for session_id, path in (("ses_1", old), ("ses_2", new)):
+            store.upsert_session(
+                TeamSession(
+                    id=session_id, project_id=project.id, role="coder", label="coder-1",
+                    started_at=born, last_seen_at=born, transcript_path=str(path),
+                )
+            )  # fmt: skip
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_1", project_id=project.id, label="coder-1", role="coder", pane_id="%1",
+                session_id="ses_1", cwd=root, created_at=born,
+            )
+        )  # fmt: skip
+
+
+def _page_lines(payload: dict[str, object]) -> list[str]:
+    lines = payload["lines"]
+    assert isinstance(lines, list)
+    return plain(lines)
+
+
+def test_a_cursor_reads_on_only_in_the_conversation_it_came_from(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """The cursor was a bare byte offset, read in whatever file the label's session names
+    now. After a ``/clear`` (the row moves to the new session), a fresh restart or a new
+    agent under a freed label, Load older read the new conversation from there, and the
+    page put it above the old one as its past. It names its conversation: another's, or a
+    bare offset, is a 409 ``stale_cursor``, and the page reads the new one from its end."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.core.store import store_session
+
+    _two_conversations(tmp_path)
+    first = live_transcript("coder-1", "prj_alpha", 10, None, 60)
+    cursor = first["cursor"]
+    assert isinstance(cursor, str) and cursor.startswith("ses_1:") and first["more"] is True
+    assert "  OLD 29" in _page_lines(live_transcript("coder-1", "prj_alpha", 10, cursor, 60))
+    with store_session() as store:
+        lease = datetime.now(UTC) + timedelta(minutes=30)
+        assert store.adopt_fleet_agent_session("agt_1", "ses_1", "ses_2", lease)  # a /clear
+    for stale in (cursor, cursor.split(":")[1], "ses_2:nonsense", "ses_2:0", "ses_2:\u00b2"):
+        with pytest.raises(RequestError) as refused:
+            live_transcript("coder-1", "prj_alpha", 10, stale, 60)
+        assert (refused.value.status, refused.value.error) == (409, "stale_cursor"), stale
+    assert _page_lines(live_transcript("coder-1", "prj_alpha", 10, None, 60))[1] == "  NEW 0"
+    client = _client(runtime, live_transcript, tmp_path)
+    response = client.get(
+        f"/r/{runtime.token}/api/transcript/coder-1",
+        params={"project": "prj_alpha", "before": cursor, "width": 60},
+    )
+    assert response.status_code == 409 and response.json()["error"] == "stale_cursor"

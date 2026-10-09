@@ -47,7 +47,7 @@ import math
 import os
 import re
 import threading
-from collections.abc import Callable, Collection, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Collection, Mapping, MutableMapping, MutableSet, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -81,6 +81,7 @@ NEEDS_KINDS = (
     "manager_down",
     "crashed",
     "limited",
+    "failed",
     "lost",
     "fleet_down",
     "asked",
@@ -139,6 +140,11 @@ on from one (any of the three, later), in :func:`needs_from_board`."""
 _NEEDS_REPLIED = ("note", "decision", "result")
 """The human's board events (no session) that answer an item addressed to its author."""
 
+_NEEDS_DAY_KINDS = (*_NEEDS_ASKED, "agent_exited", "turn_failed")
+"""The kinds of its agents' events the scan reads of a project's day (``board_since``): what
+opens a board item or moves on from one, the exits the fleet announces, and the turns that
+died on an API error."""
+
 _NEEDS_ACTIONS: dict[str, tuple[str, ...]] = {
     "permission": ("answer", "open", "dismiss"),
     "question": ("answer", "open", "dismiss"),
@@ -148,6 +154,7 @@ _NEEDS_ACTIONS: dict[str, tuple[str, ...]] = {
     "board_question": ("reply", "dismiss"),
     "board_result": ("reply", "dismiss"),
     "limited": ("switch", "open", "dismiss"),
+    "failed": ("tell", "switch", "open", "dismiss"),
     "lost": ("restart", "stop", "dismiss"),
     "crashed": ("restart", "dismiss"),
     "manager_down": ("restart", "dismiss"),
@@ -173,6 +180,10 @@ _MANAGER_FRESH = timedelta(minutes=30)
 
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,40}")
 """A tool name a reason may carry; anything else is left out of the sentence."""
+
+_FAILURE_KIND = re.compile(r"[A-Za-z0-9_.-]{1,40}")
+"""The error a failed turn's reason may name (``authentication_failed``, ``billing_error``,
+``server_error``): Claude Code's word for it, or nothing."""
 
 _SUBAGENT_TOOLS = frozenset({"Task", "Agent"})
 """The tools a sub-agent runs inside: a prompt pending under one is the sub-agent's."""
@@ -341,10 +352,11 @@ class NeedsSources:
     board_since: Callable[[str, datetime], list[TeamEvent]]
     """The project's events written at or after the given time that open a board item or
     close one: its agents' questions, results and decisions (:data:`_NEEDS_ASKED`), and
-    the human's notes, decisions and results (:data:`_NEEDS_REPLIED`); and the exits the
-    fleet announces (``agent_exited``), which say how a row ended. An item lives for
-    :data:`QUESTION_HORIZON` however busy the board is, so it is read by time, not from a
-    window of the newest events that 300 notes push it out of."""
+    the human's notes, decisions and results (:data:`_NEEDS_REPLIED`); the exits the
+    fleet announces (``agent_exited``), which say how a row ended; and the turns that
+    ended on an API error (``turn_failed``). An item lives for :data:`QUESTION_HORIZON`
+    however busy the board is, so it is read by time, not from a window of the newest
+    events that 300 notes push it out of."""
     board_sessions: Callable[[str, datetime, Collection[str]], list[TeamSession]]
     """The project's sessions seen at or after the given time, and those with the given ids:
     the ones a live manager may be, and the authors of the board's open questions."""
@@ -446,17 +458,25 @@ def _needs_fit(detail: dict[str, Any], limit: int) -> dict[str, Any]:
 def looks_like_a_question(text: str) -> bool:
     """Whether an assistant's last words ask the human something.
 
-    Each line is read without its markdown (``*_`>#``) and trailing quotes,
-    brackets and spaces. The text asks when a line ending in ``?`` lies in its
-    last paragraph (after its last blank line), or among its last 12 non-empty
-    lines and within its last 600 characters. So "Which approach? 1. … 2. …"
-    asks, and so does a coder's closing "Want me to commit this?" — which the
-    push policy, not this test, keeps from crying wolf.
+    Only prose is read (:func:`_needs_prose`): code ends in ``?`` all the time
+    (Swift's ``String?``, SQL's ``WHERE id = ?``, Ruby's ``admin?``, a lazy
+    ``(.*?)``), and a closing summary that showed some was an ``asked`` card,
+    pushed again every turn. Each line is read without its markdown (``*_`>#``)
+    and trailing quotes, brackets and spaces. The text asks when a line ending in
+    ``?`` lies in its last paragraph (after its last blank line outside a code
+    block), or among its last 12 non-empty lines and within its last 600
+    characters. So "Which approach? 1. … 2. …" asks, and so does a coder's
+    closing "Want me to commit this?" — which the push policy, not this test,
+    keeps from crying wolf.
     """
-    body = text.strip()
-    lines = body.splitlines()
-    blank = max((index for index, line in enumerate(lines) if not line.strip()), default=-1)
-    if any(_needs_line_asks(line) for line in lines[blank + 1 :]):
+    lines = _needs_lines(text)
+    body = "\n".join(lines)
+    prose = _needs_prose(lines)
+    blank = max(
+        (index for index, line in enumerate(prose) if line is not None and not line.strip()),
+        default=-1,
+    )
+    if any(line is not None and _needs_line_asks(line) for line in prose[blank + 1 :]):
         return True
     ends: list[int] = []
     position = 0
@@ -466,13 +486,13 @@ def looks_like_a_question(text: str) -> bool:
         position += 1
     window = len(body) - 600
     counted = 0
-    for line, end in zip(reversed(lines), reversed(ends), strict=True):
+    for line, read, end in zip(reversed(lines), reversed(prose), reversed(ends), strict=True):
         if not line.strip():
             continue
         counted += 1
         if counted > 12 or end < window:
             return False
-        if _needs_line_asks(line):
+        if read is not None and _needs_line_asks(read):
             return True
     return False
 
@@ -480,17 +500,98 @@ def looks_like_a_question(text: str) -> bool:
 _NEEDS_TRAILING = " \t*_`>#\"'\u201d\u2019\u00bb)]}"
 """What a line may end with after its question mark: markdown, closing quotes and brackets."""
 
+_NEEDS_FENCE = re.compile(r"[ \t>]*(`{3,}|~{3,})")
+"""A line that opens or closes a fenced code block: three backticks or tildes or more, after
+an indent or a blockquote's marks."""
+
+_NEEDS_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`).+?(?<!`)\1(?!`)")
+"""An inline code span: a run of backticks, to the next run of as many."""
+
+_NEEDS_LIST_ITEM = re.compile(r"( *)([-*+]|\d{1,9}[.)])( +|$)")
+"""A list item's first line: its marker, after an indent, and the spaces to its content."""
+
+
+def _needs_lines(text: str) -> list[str]:
+    """``text``'s lines, the blank ones around it dropped and its first line's indent kept:
+    an indented code block may open the text."""
+    lines = text.rstrip().splitlines()
+    while lines and not lines[0].strip():
+        del lines[0]
+    return lines
+
+
+def _needs_prose(lines: Sequence[str]) -> list[str | None]:
+    """Each line as the question test reads it: ``None`` inside a code block, fenced or
+    indented, a fence's own lines included, and otherwise the line without its inline code
+    spans.
+
+    A fence closes on a line of the same character, at least as long, with nothing
+    after it; one that never closes runs to the end, as markdown reads it. An indented
+    block is markdown's too: lines four columns deeper than the list item they sit in
+    (none: the margin), opened by the first line, or after a blank line or a fence's
+    close, since one cannot interrupt a paragraph, and run until a line less deep. So
+    ``    WHERE id = ?`` after a blank line is code, while a list item's own continuation
+    paragraph, indented to its content, is prose and still asks. Without its spans,
+    "Should I run `make check`?" still asks, and "now `String?`" does not.
+    """
+    prose: list[str | None] = []
+    fence: str | None = None
+    items: list[int] = []  # the content columns of the list items this line may sit in
+    opens = True  # this line starts a block, as the first does, and one after a blank line
+    indented = False
+    for line in lines:
+        marks = _NEEDS_FENCE.match(line)
+        rest = "" if marks is None else line[marks.end() :]
+        if fence is not None:
+            prose.append(None)
+            if (
+                marks is not None
+                and marks.group(1)[0] == fence[0]
+                and len(marks.group(1)) >= len(fence)
+                and not rest.strip()
+            ):
+                fence = None
+                opens = True
+            continue
+        flat = line.expandtabs(4)
+        if not flat.strip():
+            prose.append("")
+            opens = True
+            continue
+        depth = len(flat) - len(flat.lstrip(" "))
+        if opens:  # otherwise a shallower line continues the item's paragraph
+            while items and depth < items[-1]:
+                items.pop()
+        indented = depth >= (items[-1] if items else 0) + 4 and (opens or indented)
+        opens = False
+        if indented:
+            prose.append(None)
+        elif marks is not None and not (marks.group(1)[0] == "`" and "`" in rest):
+            fence = marks.group(1)
+            prose.append(None)
+        else:
+            item = _NEEDS_LIST_ITEM.match(flat)
+            if item is not None:
+                while items and depth < items[-1]:
+                    items.pop()
+                gap = len(item.group(3))
+                items.append(item.end(2) + (gap if 1 <= gap <= 4 else 1))
+            prose.append(_NEEDS_CODE_SPAN.sub("", line))
+    return prose
+
 
 def _needs_line_asks(line: str) -> bool:
     return line.rstrip(_NEEDS_TRAILING).endswith("?")
 
 
 def _needs_asked_tail(text: str) -> str:
-    """The question an assistant ended on: its last line ending in ``?``, to the end."""
-    lines = text.strip().splitlines()
+    """The question an assistant ended on: its last prose line ending in ``?``, to the end."""
+    lines = _needs_lines(text)
+    prose = _needs_prose(lines)
     for index in range(len(lines) - 1, -1, -1):
-        if _needs_line_asks(lines[index]):
-            return "\n".join(lines[index:])
+        read = prose[index]
+        if read is not None and _needs_line_asks(read):
+            return "\n".join(lines[index:]).lstrip()
     return text
 
 
@@ -576,7 +677,9 @@ def needs_from_agent(
        prompt still reads ``attention`` and an interrupted turn ``working``);
     7. attention, and its notification is the usage-limit dialog → ``limited``;
     8. attention → ``permission``, the dialog form: an MCP elicitation, Claude Code's own;
-    9. ``waiting`` on its own words, which end on a question → ``asked``.
+    9. ``waiting`` on its own words, which end on a question → ``asked``;
+    10. ``waiting`` since its turn ended on an API error (the session's ``turn_failed``
+        event, no hook since) → ``failed``.
 
     Rules 7 and 8 read the notification from the session's newest ``attention`` event
     only while it still names the dialog on screen (:func:`_needs_notice`); after it a
@@ -605,6 +708,7 @@ def needs_from_agent(
     own = [e for e in events if session is not None and e.session_id == session.id]
     attention_event = max((e for e in own if e.kind == "attention"), key=_needs_seq, default=None)
     limited_event = max((e for e in own if e.kind == "limited"), key=_needs_seq, default=None)
+    failed_event = max((e for e in own if e.kind == "turn_failed"), key=_needs_seq, default=None)
     if status.state == "lost":
         return [
             _needs_item(
@@ -710,6 +814,14 @@ def needs_from_agent(
                 push_after=since if prompt_now else since + _ASKED_PUSH_DELAY,
             )
         ]
+    if (
+        status.state == "waiting"
+        and session is not None
+        and session.state == "waiting"
+        and failed_event is not None
+        and failed_event.created_at >= max(agent.created_at, session.last_seen_at)
+    ):
+        return [_needs_failed_item(failed_event, project=project, agent=agent, name=name)]
     return []
 
 
@@ -808,7 +920,18 @@ def _needs_limited_item(
     manager_live: bool,
     accounts: AccountsSettings | None,
 ) -> NeedsItem:
-    """A row parked on a usage limit: the subject is its newest ``limited`` event."""
+    """A row parked on a usage limit: the subject is its newest ``limited`` event.
+
+    When the limit lifts is said as a distance, and its instant goes in ``detail``
+    as ``resets_at``, for the page to tell by the phone's clock. The machine's
+    clock time (``format_reset``'s ``(13:10)``) read as the phone's own on a card,
+    a lock screen and the Fleet tab: 06:10 there, for a phone in UTC-7 (review of
+    #243, sweep of round 4). The board's line keeps it for the machine's terminal;
+    the card shows that line without its reset, as of when the hook ran.
+    """
+    from aisquare.core import claude_accounts as claude_accounts_core
+    from aisquare.services.remote_server import _iso_seconds
+
     agent, session = status.agent, status.session
     resets = session.limit_resets_at if session is not None else None
     if event is not None and event.kind == "limited":
@@ -817,22 +940,40 @@ def _needs_limited_item(
         subject = f"{agent.id}:{resets.isoformat() if resets is not None else '-'}"
         since = session.last_seen_at if session is not None else now
     reason = f"{name} hit its usage limit"
-    if status.detail and status.detail != "usage limit":
-        reason += f" · {status.detail}"
-    text = "" if event is None else event.text
+    detail: dict[str, Any] = {"text": "" if event is None else _needs_without_reset(event.text)}
+    lifts = "usage limit"
+    if resets is not None:
+        lifts = f"limit resets {claude_accounts_core.format_reset(resets, now=now, clock=False)}"
+        reason += f" · {lifts}"
+        detail["resets_at"] = _iso_seconds(resets)
     return _needs_item(
         "limited",
         subject,
         project=project,
         agent=agent,
         reason=reason,
-        excerpt=text or status.detail,
-        detail=_needs_fit({"text": text}, _DETAIL_TEXT_MAX),
+        excerpt=detail["text"] or lifts,
+        detail=_needs_fit(detail, _DETAIL_TEXT_MAX),
         since=since,
         push_after=_needs_limited_push(
             since, resets, now=now, manager_live=manager_live, accounts=accounts
         ),
     )
+
+
+_NEEDS_RESET_SAID = re.compile(r" · resets (?:now|in \d+[dhm](?: \d+[hm])?)(?: \([^()]*\))?")
+"""How a ``limited`` line of the board says when the limit lifts (``team._limited_text``,
+through ``format_reset``): `` · resets in 3h 10m (13:10)``, a distance as of when the hook
+ran and a clock time in the machine's zone."""
+
+
+def _needs_without_reset(text: str) -> str:
+    """A ``limited`` event's text without what it says of the reset (:data:`_NEEDS_RESET_SAID`).
+
+    Claude Code's own words, which a line quotes when it could not read the reset, are left
+    as they are: they name their zone.
+    """
+    return _NEEDS_RESET_SAID.sub("", text)
 
 
 def _needs_limited_push(
@@ -1047,6 +1188,34 @@ def _needs_permission_item(
             QuickAnswer("2", ("2",)),
             QuickAnswer("No", ("Escape",)),
         ),
+    )
+
+
+def _needs_failed_item(
+    event: TeamEvent, *, project: ProjectInfo, agent: FleetAgent, name: str
+) -> NeedsItem:
+    """A turn that ended on an API error, its agent at its prompt since: no hook has fired.
+
+    ``team.hook_stop_failure`` marks the session ``waiting``, as a Stop would, and writes
+    ``turn_failed`` (``<error>: <message>``): a login that expired, credit run out, the API
+    overloaded past Claude Code's own retries. Nothing else tells anyone, no manager is
+    nudged, and nothing retries: the agent sits there, its claim held, until someone logs
+    it in, switches its account or tells it to go on. The next prompt, or any hook, moves
+    ``last_seen_at`` past the event and ends the item; a hand-over's own failures are the
+    hand-over's (the session reads ``switching`` then, not ``waiting``).
+    """
+    error = event.text.split(":", 1)[0].strip()
+    said = f" ({error})" if _FAILURE_KIND.fullmatch(error) else ""
+    return _needs_item(
+        "failed",
+        str(event.seq),
+        project=project,
+        agent=agent,
+        reason=f"{name}'s turn failed{said}",
+        excerpt=event.text,
+        detail=_needs_fit({"text": event.text}, _DETAIL_TEXT_MAX),
+        since=event.created_at,
+        push_after=event.created_at,
     )
 
 
@@ -1301,7 +1470,10 @@ def _needs_scan_project(
                 status,
                 tail,
                 project=project,
-                events=_needs_own_events(sources, project, status, window),
+                events=[
+                    *_needs_own_events(sources, project, status, window),
+                    *_needs_failures(board, status),
+                ],
                 now=now,
                 manager_live=live,
                 accounts=accounts,
@@ -1380,6 +1552,15 @@ def _needs_own_events(
             own.append(found)
             break
     return own
+
+
+def _needs_failures(board: Sequence[TeamEvent], status: FleetAgentStatus) -> list[TeamEvent]:
+    """The ``turn_failed`` events of the agent's session in the board's day, which rule 10 of
+    :func:`needs_from_agent` reads: the day is read every scan anyway, for all its kinds."""
+    session = status.session
+    if session is None:
+        return []
+    return [e for e in board if e.kind == "turn_failed" and e.session_id == session.id]
 
 
 def _needs_output_of(sources: NeedsSources, agent: FleetAgent) -> Callable[[], datetime | None]:
@@ -1749,6 +1930,7 @@ def scan_needs_you(
     now: datetime,
     dismissed: Collection[str],
     first_seen: MutableMapping[str, datetime] | None = None,
+    failing: MutableSet[str] | None = None,
 ) -> list[NeedsItem]:
     """Every item across every project, dismissals dropped, ranked by kind then ``since``.
 
@@ -1756,7 +1938,9 @@ def scan_needs_you(
     fails outright costs only its own items. ``first_seen`` is the watcher's
     memory of when it first saw the items whose facts carry no date; without
     it, each scan is the first. What it holds for a project that could not be
-    looked at this time is kept for the next look.
+    looked at this time is kept for the next look. ``failing`` is the watcher's
+    memory of the projects whose scans fail: one warning a streak, not one every
+    3 s (:func:`_needs_failed`).
     """
     memory: MutableMapping[str, datetime] = {} if first_seen is None else first_seen
     seen: set[str] = set()
@@ -1783,14 +1967,45 @@ def scan_needs_you(
                 accounts=accounts,
                 answers=answers,
             )
-        except Exception:
-            log.warning("remote: the needs scan of %s failed", project.id, exc_info=True)
+        except Exception as exc:
+            _needs_failed(f"the needs scan of {project.id}", exc, failing, project.id)
             _needs_still_remembered(memory, seen, project)
             continue
+        if failing is not None and project.id in failing:
+            failing.discard(project.id)
+            log.info("remote: the needs scan of %s works again", project.id)
         items.extend(scanned.items)
     for key in [key for key in memory if key not in seen]:
         del memory[key]
     return _needs_ranked([item for item in items if item.id not in dismissed])
+
+
+_K = TypeVar("_K")
+
+
+def _needs_failed(what: str, exc: Exception, failing: MutableSet[_K] | None, key: _K) -> None:
+    """Tell that ``what`` failed, once a streak of ``key``'s failures (``failing``, the keys
+    failing since they last worked; ``None``: every one is the first).
+
+    ``asq remote serve`` has no log handler, so a warning is the last-resort handler's
+    lines on its terminal, traceback and all: a store that could not be read was 25 lines
+    every 3 s, the link and the passphrase scrolled off (review of #243, sweep of round 4).
+    The first of a streak is a warning, with its traceback; a store that cannot be opened
+    is told instead in the sentence the CLI prints for it (``damaged_store_message``),
+    which names the file and how to recover, since ``open_store``'s own exception carries
+    only SQLite's words ("file is not a database"). The rest are debug lines.
+    """
+    from aisquare.core.store import StoreUnopenable, damaged_store_message
+
+    if failing is not None and key in failing:
+        log.debug("remote: %s failed again", what, exc_info=True)
+        return
+    if failing is not None:
+        failing.add(key)
+    if isinstance(exc, StoreUnopenable):
+        log.warning("remote: %s failed: %s", what, damaged_store_message(exc))
+    else:
+        log.warning("remote: %s failed", what, exc_info=True)
 
 
 def _needs_has_live(sources: NeedsSources, project: ProjectInfo) -> bool:
@@ -2085,7 +2300,7 @@ def live_needs_sources() -> NeedsSources:
     def needs_board_since(project_id: str, since: datetime) -> list[TeamEvent]:
         with store_session() as store:
             return store.team_events_since(
-                project_id, since, kinds=(*_NEEDS_ASKED, "agent_exited"), human_kinds=_NEEDS_REPLIED
+                project_id, since, kinds=_NEEDS_DAY_KINDS, human_kinds=_NEEDS_REPLIED
             )
 
     def needs_board_sessions(
@@ -2249,6 +2464,11 @@ class RemoteNeedsWatcher:
         self._first_seen: dict[str, datetime] = {}
         self._forgotten: set[str] = set()
         """Ids :meth:`needs_forget` dropped that no scan has read from the dismissals file yet."""
+        self._failing: set[object] = set()
+        """What has failed since it last worked, the scan itself (``"scan"``) or a listener,
+        and ``_failing_projects`` the projects whose part of it has: each streak is told once
+        (:func:`_needs_failed`)."""
+        self._failing_projects: set[str] = set()
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -2274,16 +2494,27 @@ class RemoteNeedsWatcher:
     def _needs_loop(self) -> None:
         while not self._stopping.is_set():
             if self._needs_devices():
-                try:
-                    self.scan_needs_now()
-                except Exception:
-                    log.warning("remote: the needs scan failed", exc_info=True)
+                self._needs_scan_told()
             self._stopping.wait(self._interval)
 
-    def _needs_devices(self) -> bool:
-        """Whether any device is on record, signed in or not: nobody to show it to, no scan."""
+    def _needs_scan_told(self) -> None:
+        """:meth:`scan_needs_now`, its failure told once a streak, and its recovery once."""
         try:
-            return bool(self._kit.runtime.device_ids())
+            self.scan_needs_now()
+        except Exception as exc:
+            _needs_failed("the needs scan", exc, self._failing, "scan")
+            return
+        if "scan" in self._failing:
+            self._failing.discard("scan")
+            log.info("remote: the needs scan works again")
+
+    def _needs_devices(self) -> bool:
+        """Whether any device is on record, signed in or not, and Remote is not past its
+        auto-off deadline: nobody to show it to, no scan. Past the deadline every request is
+        a 404 and every socket closed, whatever turns Remote off has yet to run."""
+        try:
+            runtime = self._kit.runtime
+            return bool(runtime.device_ids()) and not runtime.auto_off_passed(self._clock())
         except Exception:
             return False
 
@@ -2307,6 +2538,7 @@ class RemoteNeedsWatcher:
                 now=now,
                 dismissed=dismissed,
                 first_seen=self._first_seen,
+                failing=self._failing_projects,
             )
             with self._lock:
                 items = [item for item in scanned if item.id not in self._forgotten]
@@ -2317,8 +2549,10 @@ class RemoteNeedsWatcher:
             for listener in list(self._kit.needs_listeners):
                 try:
                     listener(list(items), now)
-                except Exception:
-                    log.warning("remote: a needs listener failed", exc_info=True)
+                except Exception as exc:
+                    _needs_failed("a needs listener", exc, self._failing, listener)
+                else:
+                    self._failing.discard(listener)
         return items
 
     def needs_items_now(self) -> list[NeedsItem]:
@@ -2371,10 +2605,7 @@ class RemoteNeedsWatcher:
         timer.start()
 
     def _needs_rescan(self) -> None:
-        try:
-            self.scan_needs_now()
-        except Exception:
-            log.warning("remote: the needs scan after an answer failed", exc_info=True)
+        self._needs_scan_told()
 
 
 def _needs_watcher(kit: RemoteKit) -> RemoteNeedsWatcher:

@@ -11,6 +11,7 @@ store, transcript or tmux server.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import stat
 import sys
@@ -27,6 +28,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli
+from aisquare.core.claude_accounts import LimitNotice, format_reset
 from aisquare.core.config import AccountsSettings
 from aisquare.core.paths import remote_audit_path, remote_needs_path
 from aisquare.core.store import store_session
@@ -247,8 +249,11 @@ def test_rule_2_a_limited_row_is_limited_about_its_newest_limit_event() -> None:
     item = _one(_classify(status, _tail(_tool("toolu_q", "AskUserQuestion", **QUESTION)), events))
     assert item.kind == "limited"
     assert item.id == needs_item_id(PROJECT.id, "limited", "7")
-    assert item.reason == "coder-1 hit its usage limit · limit resets in 2h (14:00)"
-    assert item.detail == {"text": "coder-1 hit its five-hour limit · resets 2pm"}
+    assert item.reason == "coder-1 hit its usage limit · limit resets in 2h"
+    assert item.detail == {
+        "text": "coder-1 hit its five-hour limit · resets 2pm",
+        "resets_at": "2026-10-07T14:00:00+00:00",
+    }
     assert item.since == events[1].created_at
     assert item.actions == ("switch", "open", "dismiss")
 
@@ -409,6 +414,51 @@ def test_an_interruption_from_before_the_last_hook_is_history() -> None:
     assert item.kind == "permission" and item.answers == ()
 
 
+def _turned_down(path: Path, said: str) -> TranscriptTail:
+    """coder-1's transcript: a Bash call it asked to run, turned down with ``said``, and its
+    next message begun, thinking only. Read as the scan reads it."""
+
+    def record(kind: str, uuid: str, seconds: int, content: object, **message: str) -> str:
+        at = (NOW - timedelta(seconds=seconds)).isoformat()
+        body = {"role": kind, "content": content, **message}
+        return json.dumps({"type": kind, "uuid": uuid, "timestamp": at, "message": body}) + "\n"
+
+    call = {"type": "tool_use", "id": "toolu_rm", "name": "Bash", "input": {"command": "rm -rf x"}}
+    result = {"type": "tool_result", "tool_use_id": "toolu_rm", "content": said, "is_error": True}
+    thinking = {"type": "thinking", "thinking": "Tests, then."}
+    path.write_text(
+        record("user", "u1", 300, "go")
+        + record("assistant", "a1", 240, [call], id="m1")
+        + record("user", "r1", 60, [result])
+        + record("assistant", "a2", 50, [thinking], id="m2"),
+        encoding="utf-8",
+    )
+    tail = read_transcript_tail(path)
+    assert tail is not None
+    return tail
+
+
+def test_a_prompt_turned_down_with_words_for_the_agent_is_no_interruption(tmp_path: Path) -> None:
+    """Turned down with "No, and tell Claude what to do differently", Claude Code does not stop
+    the turn, and the agent works on the words. Its card said it "was interrupted and waits
+    for you" until its next message wrote more than thinking, and the card's Tell offered
+    Interrupt & tell, whose Esc would cut short the very work the words had started. Turned
+    down and left at that, it is the interruption it always was."""
+    row = _row()
+    status = _status(
+        row, "working", _session(row, state="attention", seen=NOW - timedelta(minutes=3))
+    )
+    stop = (
+        "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if "
+        "it was a file edit, the new_string was NOT written to the file). STOP what you are "
+        "doing and wait for the user to tell you how to proceed."
+    )
+    words = stop.split(" STOP ")[0] + " To tell you how to proceed, the user said:\nrun the tests"
+    assert _classify(status, _turned_down(tmp_path / "words.jsonl", words)) == []
+    item = _one(_classify(status, _turned_down(tmp_path / "stop.jsonl", stop)))
+    assert (item.kind, item.since) == ("interrupted", NOW - timedelta(seconds=60))
+
+
 def test_rule_7_the_session_paused_dialog_reads_as_limited() -> None:
     row = _row()
     session = _session(row, state="attention")
@@ -522,6 +572,67 @@ def test_without_a_tail_only_the_dialog_forms_remain() -> None:
     assert _classify(_status(row, "waiting", _session(row, state="waiting")), None) == []
 
 
+LOGIN_EXPIRED = "authentication_failed: Login expired · Please run /login"
+
+
+def _turn_failed(
+    *,
+    row: FleetAgent | None = None,
+    state: str = "waiting",
+    marked: str = "waiting",
+    seen: datetime = NOW - timedelta(minutes=2),
+    at: datetime = NOW - timedelta(minutes=2),
+    text: str = LOGIN_EXPIRED,
+) -> tuple[FleetAgentStatus, TranscriptTail, list[TeamEvent]]:
+    """coder-1 after ``team.hook_stop_failure``: its session marked ``waiting`` at ``seen``,
+    the ``turn_failed`` event written at ``at``, its transcript ending on Claude Code's own
+    ``API Error`` text."""
+    row = row or _row()
+    session = _session(row, state=marked, seen=seen)
+    tail = _tail(newest="assistant_text", at=at, text="API Error: 401 · Please run /login")
+    events = [_event(12, "turn_failed", text, session=session, at=at)]
+    return _status(row, state, session), tail, events
+
+
+def test_rule_10_a_turn_that_ended_on_an_api_error_is_failed() -> None:
+    """A login that expired, credit run out, the API overloaded past Claude Code's retries:
+    ``StopFailure`` marks the session ``waiting``, as a Stop would, and writes
+    ``turn_failed``. The row read idle, no manager was nudged, nothing retried, and the feed
+    stayed empty while the agent sat at its prompt holding its claim."""
+    item = _one(_classify(*_turn_failed()))
+    assert (item.kind, item.agent) == ("failed", "coder-1")
+    assert item.id == needs_item_id(PROJECT.id, "failed", "12")
+    assert item.reason == "coder-1's turn failed (authentication_failed)"
+    assert (item.excerpt, item.detail) == (LOGIN_EXPIRED, {"text": LOGIN_EXPIRED})
+    assert item.since == item.push_after == NOW - timedelta(minutes=2)
+    assert item.actions == ("tell", "switch", "open", "dismiss")
+
+
+@pytest.mark.parametrize(
+    "facts",
+    [
+        pytest.param({"seen": NOW - timedelta(seconds=30)}, id="a hook fired since"),
+        pytest.param({"state": "working"}, id="at work again"),
+        pytest.param({"marked": "switching"}, id="a hand-over's own"),
+        pytest.param({"row": _row(created=NOW - timedelta(minutes=1))}, id="the process before"),
+    ],
+)
+def test_a_failed_turn_needs_nobody_once_the_agent_moved_on(facts: dict[str, Any]) -> None:
+    assert _classify(*_turn_failed(**facts)) == []
+
+
+def test_a_failed_turns_reason_names_an_error_only_a_lock_screen_can_show() -> None:
+    item = _one(_classify(*_turn_failed(text="\x1b[31mred alert\x1b[0m: the API said no")))
+    assert item.reason == "coder-1's turn failed"
+
+
+def test_a_failed_turn_is_read_from_the_boards_day() -> None:
+    status, tail, events = _turn_failed()
+    fleet = Fleet(agents=[status], events=events, tails={"/transcripts/coder-1.jsonl": tail})
+    assert [(item.kind, item.agent) for item in _scan(fleet)] == [("failed", "coder-1")]
+    assert fleet.windows == 0, "the day is read every scan anyway: no window for it"
+
+
 # --- a project, over fake sources ---------------------------------------------------------
 
 
@@ -571,7 +682,7 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
             for event in fleet.events
             if event.created_at >= since
             and (
-                event.kind in (*remote_needs._NEEDS_ASKED, "agent_exited")
+                event.kind in remote_needs._NEEDS_DAY_KINDS
                 or (event.session_id is None and event.kind in remote_needs._NEEDS_REPLIED)
             )
         ]
@@ -797,6 +908,114 @@ def test_a_coder_whose_hand_over_never_started_its_replacement_is_reported() -> 
     ]
     assert _one(_scan(fleet)).reason == item.reason, "its /exit not in time, so it was killed"
     assert _scan(_with_live_manager(fleet)) == [], "a live manager was nudged on it"
+
+
+def test_an_exit_is_its_own_rows_not_another_sessions_announced_later() -> None:
+    """``_needs_exit_of`` reads the exit announced under the row's own session: the manager
+    stopped cleanly, and a coder's hand-over failed after, is no manager down (its newest
+    exit on the board is the coder's), and the coder's card is the coder's alone. Read off
+    any session, the manager's clean stop read as a failed hand-over, and the reverse order
+    hid the coder's real card under the manager's newer exit."""
+    from aisquare.services.fleet import HANDOVER_FAILED
+
+    stopped, failed = NOW - timedelta(minutes=20), NOW - timedelta(minutes=10)
+    manager = _row("manager", role="manager", ended=stopped, exit_status=0)
+    coder = _row("coder-1", ended=failed, exit_status=0)
+    working = _row("coder-2")
+    fleet = Fleet(
+        ended=[manager, coder],
+        agents=[_status(working, "working", _session(working))],
+        sessions=[_session(manager, ended=stopped), _session(coder, ended=failed)],
+    )
+    managing, coding = fleet.sessions
+    fleet.events = [
+        _event(7, "agent_exited", "manager exited (0)", session=managing, at=stopped),
+        _event(
+            9, "agent_exited", f"coder-1 exited (0): {HANDOVER_FAILED}", session=coding, at=failed
+        ),
+    ]
+    assert [(item.kind, item.agent) for item in _scan(fleet)] == [("crashed", "coder-1")]
+    fleet.events = [
+        _event(
+            7, "agent_exited", f"coder-1 exited (0): {HANDOVER_FAILED}", session=coding, at=stopped
+        ),
+        _event(9, "agent_exited", "manager exited (0)", session=managing, at=failed),
+    ]
+    fleet.ended = [
+        manager.model_copy(update={"ended_at": failed}),
+        coder.model_copy(update={"ended_at": stopped}),
+    ]
+    assert [(item.kind, item.agent) for item in _scan(fleet)] == [("crashed", "coder-1")]
+
+
+def test_a_clean_exit_is_no_failed_hand_over_another_agent_announced_later() -> None:
+    from aisquare.services.fleet import HANDOVER_FAILED
+
+    done, failed = NOW - timedelta(minutes=20), NOW - timedelta(minutes=10)
+    one = _row("coder-1", ended=done, exit_status=0)
+    two = _row("coder-2", ended=failed, exit_status=0)
+    fleet = Fleet(
+        ended=[one, two],
+        events=[
+            _event(7, "agent_exited", "coder-1 exited (0)", session=_session(one), at=done),
+            _event(
+                9,
+                "agent_exited",
+                f"coder-2 exited (0): {HANDOVER_FAILED}",
+                session=_session(two),
+                at=failed,
+            ),
+        ],
+    )
+    assert [(item.kind, item.agent) for item in _scan(fleet)] == [("crashed", "coder-2")]
+
+
+def test_a_failed_hand_over_is_not_the_exit_of_a_later_row_of_its_session() -> None:
+    """A restart resumes the session, so a later row of the label has the session id of the
+    one whose hand-over failed. Reaped as lost, that row has no exit status and announces
+    nothing: the earlier row's failed exit, announced before it was created, is not its."""
+    from aisquare.services.fleet import HANDOVER_FAILED
+
+    first = _row(
+        "coder-1",
+        created=NOW - timedelta(minutes=55),
+        ended=NOW - timedelta(minutes=50),
+        exit_status=0,
+    )
+    again = first.model_copy(
+        update={
+            "id": "agt_again",
+            "created_at": NOW - timedelta(minutes=40),
+            "ended_at": NOW - timedelta(minutes=10),
+            "exit_status": None,
+        }
+    )
+    failed = _event(
+        7,
+        "agent_exited",
+        f"coder-1 exited (0): {HANDOVER_FAILED}",
+        session=_session(first),
+        at=NOW - timedelta(minutes=50),
+    )
+    assert _scan(Fleet(ended=[first, again], events=[failed])) == []
+
+
+def test_another_sessions_events_say_nothing_of_this_agent() -> None:
+    """``needs_from_agent`` reads its own session's events alone: another agent's usage-limit
+    notice or failed turn, handed in with them, names nothing of this one's."""
+    row = _row()
+    other = _session(_row("coder-2"), state="attention")
+    paused = "Session paused — choose: continue on usage credits or switch models"
+    events = [
+        _event(9, "attention", paused, session=other),
+        _event(10, "turn_failed", LOGIN_EXPIRED, session=other, at=NOW - timedelta(minutes=1)),
+    ]
+    at_a_dialog = _status(row, "attention", _session(row, state="attention"))
+    assert [(item.kind, item.reason) for item in _classify(at_a_dialog, None, events)] == [
+        ("permission", "coder-1 shows a dialog that needs you")
+    ]
+    waiting = _status(row, "waiting", _session(row, state="waiting"))
+    assert _classify(waiting, None, events) == []
 
 
 def test_a_new_manager_ends_manager_down() -> None:
@@ -1502,6 +1721,26 @@ def test_a_question_offers_digits_only_for_one_simple_choice(
         assert answer.keys == (str(number),)
 
 
+def test_the_guide_gives_quick_answers_only_to_the_cards_that_carry_them() -> None:
+    """docs/remote.md gave ``1``, ``2`` and No to every permission and a button an option to
+    every single question: one of Claude Code's own dialogs carries none, nor does a question
+    with several answers to pick, or more than nine options. Each is the key pad's."""
+    guide = Path(__file__).resolve().parents[1] / "docs" / "remote.md"
+    prose = " ".join(guide.read_text(encoding="utf-8").split())
+    assert "`1`, `2` and No for a tool's permission" in prose
+    assert "for a single question with one answer to pick from at most nine" in prose
+    assert "(one of Claude Code's own dialogs, a question of several answers)" in prose
+    row = _row()
+    dialog = _one(_classify(_status(row, "attention", _session(row, state="attention")), None))
+    assert (dialog.kind, dialog.answers) == ("permission", ())
+    tool = _tail(_tool("toolu_b", "Bash", command="make check"))
+    allow = _one(_classify(_status(row, "attention", _session(row, state="attention")), tool))
+    assert [answer.label for answer in allow.answers] == ["1", "2", "No"]
+    several = [{**QUESTION["questions"][0], "multiSelect": True}]
+    asking = _tail(_tool("toolu_q", "AskUserQuestion", questions=several))
+    assert _one(_classify(_status(row, "working", _session(row)), asking)).answers == ()
+
+
 # --- when a push may go out (C decides; D sends) ------------------------------------------
 
 
@@ -1528,7 +1767,57 @@ def test_a_limit_pushes_never_near_its_reset_and_later_when_someone_is_on_it(
     item = _one(_classify(_limited(resets), manager_live=manager_live, accounts=accounts))
     expected = None if delay is None else item.since + timedelta(seconds=delay)
     assert item.push_after == expected
-    assert item.reason == "coder-1 hit its usage limit"
+    lifts = (
+        "" if resets is None else f" · limit resets {format_reset(resets, now=NOW, clock=False)}"
+    )
+    assert item.reason == "coder-1 hit its usage limit" + lifts
+
+
+def test_a_limits_reset_reaches_the_phone_as_an_instant_never_the_machines_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The card's reason, its push and the board's line in its detail said the reset by the
+    machine's clock: "(18:40)" from a machine in India, which a phone in UTC-7 read as its
+    own, for a reset at 06:10 there. The reason and the push say how far it is; the instant
+    goes to the page as ``resets_at``; the board's line comes without its reset, which it
+    said as of when the hook ran."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is POSIX-only: the process zone cannot be switched for the test")
+    from aisquare.services import remote_push
+    from aisquare.services import team as team_service
+
+    now = datetime(2026, 10, 7, 10, 0, 7, tzinfo=UTC)
+    resets = datetime(2026, 10, 7, 13, 10, tzinfo=UTC)
+    with monkeypatch.context() as local:
+        local.setenv("TZ", "Asia/Kolkata")
+        time.tzset()
+        try:
+            monkeypatch.setattr(team_service, "_now", lambda: now - timedelta(minutes=1))
+            line = team_service._limited_text(
+                "coder-1", "raw", LimitNotice("five-hour", resets), fleet=True
+            )
+            row = _row()
+            session = _session(row, state="limited", resets=resets)
+            event = _event(7, "limited", line, session=session, at=now - timedelta(minutes=1))
+            status = _status(row, "limited", session, fleet_service._limit_detail(resets, now))
+            item = _one(needs_from_agent(status, None, project=PROJECT, events=[event], now=now))
+            push = remote_push.push_needs_message([item], total=1, base_url=None)
+        finally:
+            local.undo()
+            time.tzset()
+    assert "(18:40)" in line and "(18:40)" in str(status.detail), (
+        "the control: the machine's own clock"
+    )
+    assert item.reason == "coder-1 hit its usage limit · limit resets in 3h 09m"
+    assert push["body"] == item.reason
+    assert item.detail == {
+        "text": "coder-1 hit its five-hour limit — `aisquare fleet switch coder-1` moves it to the "
+        "account with the most headroom (or wait for the reset)",
+        "resets_at": "2026-10-07T13:10:00+00:00",
+    }
+    assert item.excerpt == item.detail["text"]
+    clock = re.compile(r"\b\d{1,2}:\d{2}\b")
+    assert not clock.search(item.reason + item.excerpt + str(item.detail["text"]) + push["body"])
 
 
 @pytest.mark.parametrize(
@@ -1549,6 +1838,30 @@ def test_a_closing_question_waits_for_the_manager_to_answer_it_first(
     assert item.push_after == item.since + timedelta(minutes=minutes)
 
 
+def test_the_guide_says_when_each_kind_is_pushed_as_the_scan_decides_it() -> None:
+    """docs/remote.md gave the delays of a crash and a lost pane only, and said every other
+    item went out after two scans: a usage limit near its reset never does, a question of an
+    agent the manager runs waits five minutes for it, an interruption ten. Each delay the guide
+    gives is the scan's own."""
+    guide = Path(__file__).resolve().parents[1] / "docs" / "remote.md"
+    prose = " ".join(guide.read_text(encoding="utf-8").split())
+    delays = remote_needs._NEEDS_PUSH_DELAY
+    said: list[tuple[str, object, object]] = [
+        ("a crash: after 30 seconds", delays["crashed"], timedelta(seconds=30)),
+        ("a lost pane, a stopped manager, or tmux not answering: after a minute",
+         {delays["lost"], delays["manager_down"], delays["fleet_down"]}, {timedelta(minutes=1)}),
+        ("a usage limit: never when it lifts within `[accounts] wait_if_reset_within_minutes`"
+         " (15 by default)", AccountsSettings().wait_if_reset_within_minutes, 15),
+        ('after 90 seconds when `on_limit = "switch"` or a live manager is on it',
+         remote_needs._LIMITED_PUSH_DELAY, timedelta(seconds=90)),
+        ("a turn that ended with a question: after 5 minutes while a manager is live",
+         remote_needs._ASKED_PUSH_DELAY, timedelta(minutes=5)),
+        ("an interruption: after 10 minutes", delays["interrupted"], timedelta(minutes=10)),
+    ]  # fmt: skip
+    assert [sentence for sentence, _code, _guide in said if sentence not in prose] == []
+    assert [sentence for sentence, code, guide in said if code != guide] == []
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -1558,6 +1871,10 @@ def test_a_closing_question_waits_for_the_manager_to_answer_it_first(
         '> "Is this the right file?"',
         "Shall I open the PR?\n\n- it adds the cache\n- it adds the tests",
         "All green.\n\nOne thing:\n\nship it now or wait for review?",
+        "```swift\nvar email: String?\n```\n\nShould I make `Account.email` optional too?",
+        "Should I run `make check`?",
+        "Is `String?` the right type for `email`?",
+        "Which of these should the cache use?\n```\nRedis\n\nSQLite\n```",
     ],
 )
 def test_text_that_asks(text: str) -> None:
@@ -1576,6 +1893,88 @@ def test_text_that_asks(text: str) -> None:
 )
 def test_text_that_does_not(text: str) -> None:
     assert not looks_like_a_question(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Added the field.\n\n```swift\nstruct User {\n    var email: String?\n}\n```\n\n"
+        "All 42 tests pass; committed as a1b2c3d.",
+        "The repository is now:\n\n```kotlin\ninterface Users {\n    fun find(id: Long): User?\n}"
+        "\n```",
+        "Done:\n\n```ruby\ndef publishable?\n  !draft? && approved?\nend\n```",
+        "Fixed:\n\n```rust\nOk(toml::from_str(&fs::read_to_string(path)?)?)\n```",
+        "The query binds the address:\n\n```sql\nSELECT * FROM users WHERE email = ?\n```",
+        "Done.\n\n~~~python\nwho = user.name if user else None  # was it set?\n~~~",
+        "Here it is:\n\n```sh\nmake check\nstatus=$?",
+        "- the tag parser now uses `<(.*?)>`",
+        "- `User.email` is now `String?`",
+    ],
+)
+def test_code_that_ends_in_a_question_mark_asks_nothing(text: str) -> None:
+    """A closing summary that showed code ending in ``?`` was an ``asked`` card, "coder-1
+    ended its turn with a question", pushed again every turn it did so: a Swift optional, a
+    Kotlin return type, a Ruby predicate, Rust's ``?``, a SQL placeholder, a comment in a
+    block, a lazy regex in an inline span. Only prose asks: no line inside a fenced block
+    (one never closed runs to the end), and no ``?`` inside an inline span."""
+    assert not looks_like_a_question(text)
+    row = _row()
+    tail = _tail(newest="assistant_text", text=text)
+    assert _classify(_status(row, "waiting", _session(row, state="waiting")), tail) == []
+
+
+def test_the_question_a_card_shows_is_the_last_one_in_prose() -> None:
+    text = "Should I run `make check` before the push?\n\n```sh\nmake check\nstatus=$?\n```"
+    row = _row()
+    tail = _tail(newest="assistant_text", text=text)
+    item = _one(_classify(_status(row, "waiting", _session(row, state="waiting")), tail))
+    assert item.kind == "asked"
+    assert item.excerpt.startswith("Should I run `make check` before the push?"), item.excerpt
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The query binds the address:\n\n    SELECT * FROM users WHERE email = ?",
+        "Done:\n\n\tdef publishable?\n\t  !draft? && approved?\n\tend",
+        "    var email: String?\n\nThe field is optional now.",
+        "- added the predicate:\n\n        def publishable?",
+        "1. the binding:\n\n       WHERE email = ?\n\n2. the tests pass.",
+        "The model:\n\n```swift\nstruct User {}\n```\n    var email: String?",
+    ],
+)
+def test_an_indented_code_block_that_ends_in_a_question_mark_asks_nothing(text: str) -> None:
+    """Markdown's other code block, four columns deeper than its list item or the margin,
+    opened by the text, a blank line or a fence's close: ``    WHERE id = ?`` was still a
+    closing question once fenced blocks were not."""
+    assert not looks_like_a_question(text)
+    row = _row()
+    tail = _tail(newest="assistant_text", text=text)
+    assert _classify(_status(row, "waiting", _session(row, state="waiting")), tail) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1. Keep the cache.\n\n    Or should I drop it?",
+        "- the cache stays\n\n  - and the tests\n\n      should they move too?",
+        "Here is the plan, and one thing to settle first:\n    should I start with the cache?",
+        "    make check\n\nShould I push now?",
+    ],
+)
+def test_an_indented_line_that_is_no_code_block_still_asks(text: str) -> None:
+    """A list item's continuation, indented to its content, and a paragraph's next line,
+    which no code block can interrupt, are prose as markdown reads them."""
+    assert looks_like_a_question(text)
+
+
+def test_the_question_a_card_shows_is_not_an_indented_code_line() -> None:
+    text = "Should I bind the address like this?\n\n    SELECT * FROM users WHERE email = ?"
+    row = _row()
+    tail = _tail(newest="assistant_text", text=text)
+    item = _one(_classify(_status(row, "waiting", _session(row, state="waiting")), tail))
+    assert item.kind == "asked"
+    assert item.excerpt.startswith("Should I bind the address like this?"), item.excerpt
 
 
 # --- dismissals ---------------------------------------------------------------------------
@@ -1599,16 +1998,28 @@ def test_a_dismissal_is_written_owner_only(monkeypatch: pytest.MonkeyPatch) -> N
         assert stat.S_IMODE(remote_needs_path().stat().st_mode) == 0o600
 
 
-def test_old_dismissals_are_pruned_and_at_most_500_kept() -> None:
-    now = datetime.now(UTC)
-    seeded = {f"ny_old{n}": (now - timedelta(days=8)).isoformat() for n in range(3)}
-    seeded |= {f"ny_{n:016x}": (now - timedelta(minutes=n)).isoformat() for n in range(600)}
+def _seed_dismissals(seeded: dict[str, str]) -> None:
     remote_needs_path().parent.mkdir(parents=True, exist_ok=True)
     remote_needs_path().write_text(json.dumps({"dismissed": seeded}), encoding="utf-8")
+
+
+def test_a_dismissal_older_than_a_week_is_pruned() -> None:
+    """With fewer than 500 on file, the 7-day rule alone can drop one: seeded with 600, the
+    cap dropped the old ones by itself, and a test of the age held without the rule."""
+    now = datetime.now(UTC)
+    seeded = {f"ny_old{n}": (now - timedelta(days=8)).isoformat() for n in range(3)}
+    seeded |= {f"ny_{n:016x}": (now - timedelta(days=6, minutes=n)).isoformat() for n in range(10)}
+    _seed_dismissals(seeded)
+    record_needs_dismissal("ny_newest")
+    assert set(load_needs_dismissals()) == {"ny_newest", *(f"ny_{n:016x}" for n in range(10))}
+
+
+def test_at_most_the_newest_500_dismissals_are_kept() -> None:
+    now = datetime.now(UTC)
+    _seed_dismissals({f"ny_{n:016x}": (now - timedelta(minutes=n)).isoformat() for n in range(600)})
     record_needs_dismissal("ny_newest")
     kept = load_needs_dismissals()
     assert len(kept) == 500 and "ny_newest" in kept
-    assert not any(key.startswith("ny_old") for key in kept)
     assert f"ny_{599:016x}" not in kept and f"ny_{0:016x}" in kept, "the oldest go first"
 
 
@@ -2317,6 +2728,22 @@ def test_the_live_sources_read_an_unchanged_transcript_once(
     assert len(reads) == 2 and again is not None and again.pending == (), "it grew: read again"
 
 
+def test_the_cache_of_tails_keeps_the_newest_it_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One entry a transcript path, for every agent a long-running server ever scanned: past
+    its bound the oldest read goes first."""
+    monkeypatch.setattr(remote_needs, "_tails", {})
+    monkeypatch.setattr(remote_needs, "_TAILS_KEPT", 3)
+    paths = [tmp_path / f"coder-{n}.jsonl" for n in range(5)]
+    for path in paths:
+        path.write_text(json.dumps(_asking_record(NOW)) + "\n", encoding="utf-8")
+    tail_of = remote_needs.live_needs_sources().transcript_tail
+    for path in paths:
+        assert tail_of(str(path)) is not None
+    assert list(remote_needs._tails) == [str(path) for path in paths[2:]]
+
+
 def test_a_scan_builds_none_of_a_projects_history_it_cannot_use(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2476,6 +2903,48 @@ def test_the_live_sources_take_a_manager_stopped_after_its_result_for_done(
     assert [item.kind for item in items] == ["board_result"]
 
 
+def test_the_live_sources_take_a_turn_that_died_on_an_api_error_for_one_that_needs_you(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the team's own hook (``hook_stop_failure``) and the store: an expired login
+    is a ``failed`` card, and the agent's next prompt ends it."""
+    from aisquare.services import team as team_service
+
+    hour_ago = datetime.now(UTC) - timedelta(hours=1)
+    root = tmp_path / "alpha"
+    with store_session() as store:
+        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        store.upsert_session(
+            TeamSession(
+                id="ses_c", project_id=project.id, role="coder", started_at=hour_ago,
+                last_seen_at=hour_ago, state="working",
+            )
+        )  # fmt: skip
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_c", project_id=project.id, label="coder-1", role="coder", pane_id="%1",
+                session_id="ses_c", cwd=root, created_at=hour_ago,
+            )
+        )  # fmt: skip
+    team_service.hook_stop_failure(
+        "ses_c",
+        error="authentication_failed",
+        message="Login expired · Please run /login",
+        details=None,
+    )
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=())
+    assert [(item.kind, item.reason) for item in items] == [
+        ("failed", "coder-1's turn failed (authentication_failed)")
+    ]
+    with store_session() as store:
+        store.touch_session("ses_c", state="working")  # its next prompt
+    assert (
+        scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=()) == []
+    )
+
+
 # --- the watcher --------------------------------------------------------------------------
 
 
@@ -2525,6 +2994,32 @@ def test_the_watcher_scans_only_while_a_device_exists(runtime: Runtime, tmp_path
     assert not watcher.needs_watching()
 
 
+def test_the_watcher_scans_nothing_past_the_auto_off_deadline(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """From the deadline on every request is a 404 and every socket closed, whatever turns
+    Remote off has yet to run, the TUI's check every 30 s: no scan feeds a phone, or the push
+    sender, meanwhile. A deadline moved later scans again."""
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    assert unlock(make_client(app), runtime).status_code == 200
+    runtime.set_auto_off(datetime.now(UTC) - timedelta(seconds=1))
+    made: list[NeedsSources] = []
+
+    def counted() -> NeedsSources:
+        made.append(_sources(Fleet()))
+        return made[-1]
+
+    watcher = RemoteNeedsWatcher(app.kit, sources=counted, interval=0.01)
+    watcher.start_watching()
+    try:
+        threading.Event().wait(0.2)
+        assert made == [] and watcher.needs_scanned_at() is None
+        runtime.set_auto_off(datetime.now(UTC) + timedelta(hours=1))
+        _until_true(lambda: watcher.needs_scanned_at() is not None)
+    finally:
+        watcher.stop_watching()
+
+
 def test_every_scan_reaches_every_listener_and_a_failing_one_costs_nothing(
     runtime: Runtime, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -2540,14 +3035,131 @@ def test_every_scan_reaches_every_listener_and_a_failing_one_costs_nothing(
         raise RuntimeError("a listener's bug")
 
     app.kit.needs_listeners.extend([broken, lambda items, at: heard.append((items, at))])
+    caplog.set_level(logging.DEBUG, logger=remote_needs.__name__)
     first = watcher.scan_needs_now()
     second = watcher.scan_needs_now()
     assert [at for _items, at in heard] == [NOW, NOW + timedelta(seconds=3)]
     assert [items for items, _at in heard] == [first, second]
     assert [item.kind for item in first] == ["question"] and first == second
-    assert sum("needs listener failed" in r.getMessage() for r in caplog.records) == 2
+    told = [r.levelname for r in caplog.records if "needs listener failed" in r.getMessage()]
+    assert told == ["WARNING", "DEBUG"], "a listener that fails every scan is told once a streak"
     assert watcher.needs_items_now() == second
     assert watcher.needs_scanned_at() == NOW + timedelta(seconds=3)
+
+
+def _failing_store() -> NeedsSources:
+    """Sources over a store that cannot be opened, as ``open_store`` says it: SQLite's
+    words alone, no file and no recovery."""
+    from aisquare.core.store import StoreUnopenable
+
+    def unopenable() -> list[ProjectInfo]:
+        raise StoreUnopenable("file is not a database")
+
+    return replace(_sources(Fleet()), list_projects=unopenable)
+
+
+def test_a_scan_that_keeps_failing_is_told_once_until_it_works_again(
+    runtime: Runtime, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``asq remote serve`` has no log handler, so each failed scan was the last-resort
+    handler's 25-line traceback on its terminal, every 3 s while the store could not be
+    read: 500 lines a minute, the link and the passphrase scrolled off. One warning a
+    streak, a damaged store's in the sentence the CLI prints for it, with no traceback;
+    debug lines after; and one line once a scan works again."""
+    from aisquare.core.store import damaged_store_recovery
+
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    assert unlock(make_client(app), runtime).status_code == 200
+    broken = threading.Event()
+    broken.set()
+    scans = 0
+
+    def counted() -> NeedsSources:
+        nonlocal scans
+        scans += 1
+        return _failing_store() if broken.is_set() else _sources(Fleet())
+
+    def told() -> list[logging.LogRecord]:
+        return [r for r in caplog.records if r.name == remote_needs.__name__]
+
+    watcher = RemoteNeedsWatcher(app.kit, sources=counted, interval=0.01)
+    caplog.set_level(logging.INFO, logger=remote_needs.__name__)
+    watcher.start_watching()
+    try:
+        _until_true(lambda: scans >= 3)
+        broken.clear()
+        _until_true(lambda: any(r.levelname == "INFO" for r in told()))
+        _until_true(lambda: scans >= 6)
+    finally:
+        watcher.stop_watching()
+    records = told()
+    assert [r.levelname for r in records] == ["WARNING", "INFO"], [r.getMessage() for r in records]
+    assert damaged_store_recovery() in records[0].getMessage() and records[0].exc_info is None
+    assert records[1].getMessage() == "remote: the needs scan works again"
+
+
+def test_a_store_that_cannot_be_opened_is_told_by_its_file_and_its_recovery(
+    runtime: Runtime, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``open_store``'s exception carries only SQLite's words, so the warning over a real
+    corrupt ``context.db`` was "remote: the needs scan failed: file is not a database":
+    no file, no way back. It is the sentence the CLI prints for it, once a streak."""
+    from aisquare.core.paths import db_path
+    from aisquare.core.store import damaged_store_recovery
+
+    db_path().parent.mkdir(parents=True, exist_ok=True)
+    db_path().write_bytes(b"this is not a database\n" * 256)
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    watcher = RemoteNeedsWatcher(app.kit, sources=remote_needs.live_needs_sources)
+    caplog.set_level(logging.DEBUG, logger=remote_needs.__name__)
+    for _ in range(2):
+        watcher._needs_scan_told()
+    told = [r for r in caplog.records if r.name == remote_needs.__name__]
+    assert [r.levelname for r in told] == ["WARNING", "DEBUG"], [r.getMessage() for r in told]
+    said = told[0].getMessage()
+    assert said.startswith("remote: the needs scan failed: the context store cannot be opened")
+    assert str(db_path()) in said and damaged_store_recovery() in said, said
+    assert told[0].exc_info is None
+
+
+def test_a_scan_that_fails_on_a_bug_is_told_once_with_its_traceback(
+    runtime: Runtime, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+
+    def buggy() -> NeedsSources:
+        raise RuntimeError("a bug in the scan")
+
+    watcher = RemoteNeedsWatcher(app.kit, sources=buggy)
+    for _ in range(3):
+        watcher._needs_scan_told()
+        watcher._needs_rescan()
+    told = [r for r in caplog.records if r.name == remote_needs.__name__]
+    assert [r.levelname for r in told] == ["WARNING"]
+    assert told[0].exc_info is not None, "a bug's first failure keeps its traceback"
+
+
+def test_a_project_whose_scan_keeps_failing_is_told_once_a_streak(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    real = remote_needs._needs_scan_project
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("a query the store could not answer")
+
+    caplog.set_level(logging.INFO, logger=remote_needs.__name__)
+    failing: set[str] = set()
+    monkeypatch.setattr(remote_needs, "_needs_scan_project", broken)
+    for _ in range(3):
+        scan_needs_you(_sources(Fleet()), now=NOW, dismissed=(), failing=failing)
+    monkeypatch.setattr(remote_needs, "_needs_scan_project", real)
+    scan_needs_you(_sources(Fleet()), now=NOW, dismissed=(), failing=failing)
+    told = [(r.levelname, r.getMessage()) for r in caplog.records]
+    assert told == [
+        ("WARNING", "remote: the needs scan of prj_alpha failed"),
+        ("INFO", "remote: the needs scan of prj_alpha works again"),
+    ]
+    assert failing == set()
 
 
 def test_a_card_dismissed_while_a_scan_runs_stays_dismissed(
@@ -2586,6 +3198,23 @@ def test_a_card_dismissed_while_a_scan_runs_stays_dismissed(
     assert watcher.needs_items_now() == [] and watcher.needs_items_json() == []
     assert heard == [[card.id], []], "the push sender heard it gone too"
     assert watcher.scan_needs_now() == [] and heard[-1] == [], "and every scan after"
+
+
+def test_a_dismissal_is_held_apart_only_until_a_scan_has_read_it(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """A card dismissed while a scan runs is dropped from what that scan publishes, until a
+    scan that read the dismissal from the file has published: no longer, or the watcher kept
+    every id ever dismissed for as long as the server ran."""
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    fleet = _working(_tail(_tool("toolu_q", "AskUserQuestion", **QUESTION)))
+    watcher = RemoteNeedsWatcher(app.kit, sources=lambda: _sources(fleet))
+    (card,) = watcher.scan_needs_now()
+    record_needs_dismissal(card.id)
+    watcher.needs_forget(card.id)
+    assert watcher._forgotten == {card.id}
+    assert watcher.scan_needs_now() == []
+    assert watcher._forgotten == set(), "the file says it now"
 
 
 def test_the_stream_and_the_heartbeat_read_the_watchers_snapshot(

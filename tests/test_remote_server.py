@@ -215,6 +215,52 @@ def test_a_restriction_that_fails_is_said_once_not_at_every_flush(
     assert json.loads(remote_state_path().read_bytes())["allow_write"] is True
 
 
+def test_a_flush_that_keeps_failing_is_told_once_until_it_works_again(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``asq remote serve`` has no log handler, so every warning was the last-resort
+    handler's traceback on its terminal, under the link and the passphrase: one every 30 s
+    for as long as ``remote.json`` could not be written. One line a streak, the file
+    system's own words; debug lines after; and one line once a write works again."""
+    monkeypatch.setattr(remote_server, "_runtime", runtime)
+    monkeypatch.setattr(remote_server, "_flush_failing", False)
+    written = runtime.flush_last_seen
+
+    def unwritable() -> None:
+        raise PermissionError(13, "Permission denied", str(remote_state_path()))
+
+    caplog.set_level(logging.DEBUG, logger=remote_server.__name__)
+    monkeypatch.setattr(runtime, "flush_last_seen", unwritable)
+    for _ in range(3):
+        remote_server._remote_flush_seen()
+    monkeypatch.setattr(runtime, "flush_last_seen", written)
+    remote_server._remote_flush_seen()
+    told = [r for r in caplog.records if "flushing remote.json" in r.getMessage()]
+    assert [(r.levelname, r.exc_info is not None) for r in told] == [
+        ("WARNING", False),
+        ("DEBUG", True),
+        ("DEBUG", True),
+        ("INFO", False),
+    ]
+    assert "Permission denied" in told[0].getMessage()
+
+
+def test_a_flush_that_fails_on_a_bug_keeps_its_traceback_once(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def buggy() -> None:
+        raise RuntimeError("a bug in the flush")
+
+    monkeypatch.setattr(remote_server, "_runtime", runtime)
+    monkeypatch.setattr(remote_server, "_flush_failing", False)
+    monkeypatch.setattr(runtime, "flush_last_seen", buggy)
+    with caplog.at_level(logging.WARNING, logger=remote_server.__name__):
+        for _ in range(3):
+            remote_server._remote_flush_seen()
+    told = [r for r in caplog.records if "flushing remote.json" in r.getMessage()]
+    assert len(told) == 1 and told[0].exc_info is not None
+
+
 def test_state_survives_a_reload(runtime: Runtime) -> None:
     runtime.set_allow_write(True)
     again = Runtime(remote_state_path(), remote_audit_path())

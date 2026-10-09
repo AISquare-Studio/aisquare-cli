@@ -937,6 +937,14 @@ def test_the_page_names_a_tool_call_by_the_keys_the_server_summarises_it_by() ->
     assert set(keys) <= set(remote_needs._DETAIL_INPUT_KEYS)
 
 
+def test_the_page_has_a_badge_for_every_kind_the_feed_has() -> None:
+    """A kind the page has no badge for is a card that says only "Needs you": every kind of
+    ``remote_needs.NEEDS_KINDS`` is in the page's own table, and nothing else is."""
+    table = re.search(r"\nconst KINDS = \{(.*?)\};", _text("app.js"), re.S)
+    assert table is not None, "the KINDS table is not where the page declares it"
+    assert re.findall(r"(\w+): \[", table.group(1)) == list(remote_needs.NEEDS_KINDS)
+
+
 def test_routes_are_built_only_from_ids_that_validate(node_report: dict[str, Any]) -> None:
     routes = node_report["routes"]
     assert routes["#/n/ny_0123456789abcdef/p/prj_x/a/coder-1"] == {
@@ -1319,6 +1327,25 @@ def test_a_transcript_tells_each_turns_time_by_the_phones_own_clock(
     assert (lines[1], lines[4]) == ("  commit it", "  done")
 
 
+def test_a_usage_limits_reset_is_told_by_the_phones_own_clock(
+    node_report: dict[str, Any], boot_report: dict[str, Any]
+) -> None:
+    """The limited card, its push and the Fleet tab said when a limit lifts by the machine's
+    clock, ``(13:10)`` on a phone in UTC-7 where it lifts at 06:10, beside a page that tells
+    every other time by the phone's. The machine sends the instant (a card's
+    ``detail.resets_at``, a row's ``session.limit_resets_at``) and the page tells it, with
+    the weekday when it is not today."""
+    times = node_report["limitTimes"]
+    (today,) = times["today"]
+    assert today.startswith("Resets at ") and "06:10" in today and "13:10" not in today
+    assert re.fullmatch(r"Resets at \S+ 06:10.*", times["later"][0]), times["later"]
+    assert times["none"] == []
+    rows = boot_report["limitTimes"]
+    assert rows[0] == "coder", "a row that is not limited keeps the detail it was sent"
+    assert rows[1].startswith("coder · limit resets in 3 h (") and "06:10" in rows[1]
+    assert "13:10" not in rows[1]
+
+
 def test_a_read_answered_after_a_newer_frame_of_its_kind_is_dropped(
     boot_report: dict[str, Any],
 ) -> None:
@@ -1570,6 +1597,20 @@ def test_the_transcript_draws_one_read_at_a_time_and_the_newest_wins(
         "older": False,
     }
     assert loads["spliced"] == {"asked": [None, "100", None], "shown": ["t5", "t6"], "older": True}
+
+
+def test_a_transcript_whose_conversation_changed_is_read_again_from_its_end(
+    boot_report: dict[str, Any],
+) -> None:
+    """After a ``/clear`` or a fresh restart, Load older read the new conversation from the old
+    one's offset and put it above the old turns as their past. The machine refuses a cursor
+    of another conversation (``stale_cursor``), and the page reads this one from its end."""
+    stale = boot_report["transcriptStale"]
+    assert stale == {
+        "asked": [None, "ses_1:100", None],
+        "shown": ["NEW 0", "NEW 1"],
+        "older": False,
+    }
 
 
 def test_extend_and_revoke_wait_for_their_answer_before_another_tap_goes(

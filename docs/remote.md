@@ -238,28 +238,32 @@ aisquare --json remote needs
 | board_question | the manager asks on the board, or a coder asks you (no `--to`, or `--to user`, `human`, `owner`, `all` or `everyone`), or asks a manager that is not there to answer (stopped, or parked on its usage limit) |
 | manager_down | the manager crashed; or, while agents still work and before it reported a result, it was killed or lost (no exit status), or a switch or a restart could not start its replacement. A manager that exits cleanly (`fleet stop`, the phone's Stop, its own `/exit`) is taken to be done |
 | crashed | an agent exited with an error in the last hour, or was stopped for a switch or a restart that could not start its replacement, its task unfinished, while no manager runs to handle it (one parked on its usage limit does not count) |
-| limited | an agent hit its usage limit |
+| limited | an agent hit its usage limit; when the limit named its reset, the card tells it by the phone's clock |
+| failed | an agent's turn ended on an API error (a login that expired, credit that ran out, the API overloaded past Claude Code's own retries), and it waits at its prompt |
 | lost | an agent's pane is gone |
 | fleet_down | tmux is not answering for a project |
 | asked | an agent ended its turn with a question in plain text |
 | board_result | the manager (or a coder with no manager left) reports a result |
-| interrupted | you pressed Esc on an agent, or turned its prompt down, and it waits for you |
+| interrupted | you pressed Esc on an agent, or turned its prompt down without saying what to do instead, and it waits for you |
 
 A card holds what you must read before answering, in full: the exact command a
 permission is for, every question with its options, the plan, the text. Under a
 permission, a question or a plan, the bottom of the agent's live screen is shown
 too, so the real option labels are on screen next to the buttons.
 
-**Quick answers** are the card's buttons: `1`, `2` and No for a permission; one
-per option, and Cancel, for a single question; `1` to `3` and Keep planning for a
-plan. A quick answer is checked against the agent **as it is now**: if the
-prompt has already gone, the card says "No longer needs you" and nothing is
-typed. Anything else is answered from the agent's key pad.
+**Quick answers** are the card's buttons: `1`, `2` and No for a tool's
+permission; one per option, and Cancel, for a single question with one answer to
+pick from at most nine; `1` to `3` and Keep planning for a plan. A quick answer
+is checked against the agent **as it is now**: if the prompt has already gone,
+the card says "No longer needs you" and nothing is typed. Anything else (one of
+Claude Code's own dialogs, a question of several answers) is answered from the
+agent's key pad.
 
 The other buttons follow the kind: **Tell** for a question asked in text,
-**Reply** on the board, **Switch account** for a usage limit, **Restart** for a
-crash. **Dismiss** hides a card for good. A tell or a reply dismisses its card
-itself once it was delivered.
+**Reply** on the board, **Switch account** for a usage limit, **Tell** (to go on)
+or **Switch account** for a failed turn, **Restart** for a crash. **Dismiss**
+hides a card for good. A tell or a reply dismisses its card itself once it was
+delivered.
 
 ---
 
@@ -314,18 +318,33 @@ than 15 seconds, is not sent, and the page says so.
 
 Settings → **Turn on** asks the browser for permission, subscribes, and tells
 the machine. **Send test** checks the whole path. A notification goes out when an
-item has been there for two scans in a row, with a delay for kinds that often
-clear by themselves (a crash: 30 seconds; a lost pane or a stopped manager: a
-minute, since they flash during a restart). Several at once come as one
-notification, at most one every 20 seconds per phone; a new one takes the place
-of the one still shown and sounds all the same. Tapping it opens the card, at
-the address the panel's ngrok announced or `serve --public-url` named; a
-`serve` told neither opens the page the phone subscribed from.
+item has been there for two scans in a row: at once for a permission, a
+question, a plan, a board question or result and a failed turn, and later for
+the kinds that often clear by themselves, or that someone else is already on:
+
+- a crash: after 30 seconds;
+- a lost pane, a stopped manager, or tmux not answering: after a minute, since
+  they flash during a restart;
+- a usage limit: never when it lifts within
+  `[accounts] wait_if_reset_within_minutes` (15 by default), since Claude Code
+  carries on by itself at the reset; after 90 seconds when `on_limit = "switch"`
+  or a live manager is on it; at once otherwise;
+- a turn that ended with a question: after 5 minutes while a manager is live,
+  for an agent that is neither the manager nor one you started yourself, since
+  the manager is to answer it first; at once otherwise;
+- an interruption: after 10 minutes, since it follows your own Esc.
+
+Several at once come as one notification, at most one every 20 seconds per
+phone; a new one takes the place of the one still shown and sounds all the
+same. Tapping it opens the card, at the address the panel's ngrok announced or
+`serve --public-url` named; a `serve` told neither opens the page the phone
+subscribed from.
 
 The machine also sends: a warning 10 minutes before auto-off ("open to extend
 it" while writes are on; with writes off, that the phone cannot extend it), a
 goodbye when Remote is turned off, an alert when someone is guessing the
-passphrase, and a warning a day before a phone's 7-day sign-in ends.
+passphrase, and a warning a day before a phone's 7-day sign-in ends. Once the
+auto-off time has come, nothing goes out but the goodbye.
 
 **What a notification holds.** A title and a line built from fixed sentences
 (`coder-auth asks you a question`), with every name cut to 40 plain characters,

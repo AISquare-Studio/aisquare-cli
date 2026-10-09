@@ -127,6 +127,7 @@ const DETAILS = [
   ["board_question", { text: "board " + EVIL, author: "coder-2 " + EVIL, seq: 4 }],
   ["crashed", { exit_status: 1, task_id: "tsk_" + EVIL }],
   ["limited", { text: "limited " + EVIL }],
+  ["limited", { text: "limited", resets_at: EVIL }],
   ["lost", {}],
   ["<script>alert(1)</script>", { text: "an unknown kind " + EVIL }],
 ];
@@ -194,6 +195,22 @@ report.builtExcerpts = {
   droppedWrite: excerptsOf("permission", "Write(/home/me/app/src/big_module.py)", { tool: "Write", input: {} }),
   droppedHeredoc: excerptsOf("permission", "Bash(cat > schema.sql <<'EOF')", { tool: "Bash", input: {} }),
 };
+
+// A usage limit's reset on a phone in UTC-7, from a machine that sends the instant: the line
+// the card adds under its reason, today, another day, and with no instant at all.
+const zone = process.env.TZ;
+process.env.TZ = "America/Los_Angeles";
+const resetLines = (resets) => {
+  const item = Object.assign({}, ITEM, { kind: "limited", detail: { text: "", resets_at: resets } });
+  return page.renderNeedsCard(item, cards.doc, { now }).children.filter((node) => node.className === "muted").map((node) => node.textContent);
+};
+report.limitTimes = {
+  today: resetLines("2026-10-07T13:10:00+00:00"),
+  later: resetLines("2026-10-09T13:10:00+00:00"),
+  none: resetLines(null),
+};
+if (zone === undefined) delete process.env.TZ;
+else process.env.TZ = zone;
 
 for (const hash of [
   "", "#/", "#/unlock", "#/projects", "#/n/ny_0123456789abcdef", "#/n/ny_0123456789abcdef/p/prj_x/a/coder-1",

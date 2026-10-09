@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from starlette.requests import Request
@@ -36,11 +36,13 @@ from aisquare.services.fleet import RestartReceipt, StopReceipt, SwitchReceipt, 
 from aisquare.services.remote_actions import (
     ACTION_AUDIT_EXCERPT,
     ACTION_ENDPOINTS,
+    ACTION_LEDGER_IDS,
     ACTION_LEDGER_SIZE,
     ACTION_LEDGER_TTL,
     TELL_MODES,
     TELL_TEXT_MAX,
     ActionLedger,
+    LedgerSeen,
     action_audit_excerpt,
     action_handlers,
     action_interrupt_wait,
@@ -230,16 +232,16 @@ def _finished(
 
 def test_a_finished_request_is_replayed_and_one_still_running_cannot_begin_twice() -> None:
     ledger = ActionLedger(clock=Clock())
-    assert ledger.ledger_replay("dev_a", "r1") is None, "nothing finished yet"
+    assert ledger.ledger_seen("dev_a", "r1") is None, "nothing sent yet"
     assert ledger.ledger_begin("dev_a", "r1", "agent/restart")
+    assert ledger.ledger_seen("dev_a", "r1") == LedgerSeen(None, True), "running"
     assert not ledger.ledger_begin("dev_a", "r1", "agent/restart"), "still running"
     assert ledger.ledger_begin("dev_b", "r1", "agent/restart"), "another device's id is its own"
     ledger.ledger_finish("dev_a", "r1", 409, {"error": "stale", "current": {"agent_id": "a2"}})
-    assert ledger.ledger_replay("dev_a", "r1") == (
-        409,
-        {"error": "stale", "current": {"agent_id": "a2"}},
+    assert ledger.ledger_seen("dev_a", "r1") == LedgerSeen(
+        (409, {"error": "stale", "current": {"agent_id": "a2"}}), True
     ), "a refusal is replayed as the refusal it was"
-    assert ledger.ledger_replay("dev_b", "r1") is None, "dev_b's run has not finished"
+    assert ledger.ledger_seen("dev_b", "r1") == LedgerSeen(None, True), "dev_b's still runs"
 
 
 def test_the_ledger_shows_a_device_its_own_requests_newest_first() -> None:
@@ -281,10 +283,10 @@ def test_entries_expire_after_the_ttl() -> None:
     ledger = ActionLedger(clock=clock)
     _finished(ledger, "dev_a", "r1")
     clock.now = T0 + ACTION_LEDGER_TTL - timedelta(seconds=1)
-    assert ledger.ledger_replay("dev_a", "r1") == (200, {})
+    assert ledger.ledger_seen("dev_a", "r1") == LedgerSeen((200, {}), True)
     assert len(ledger.ledger_recent("dev_a")) == 1
     clock.now = T0 + ACTION_LEDGER_TTL
-    assert ledger.ledger_replay("dev_a", "r1") is None, "a retry this late runs anew"
+    assert ledger.ledger_seen("dev_a", "r1") is None, "a retry this late runs anew"
     assert ledger.ledger_recent("dev_a") == []
 
 
@@ -303,23 +305,88 @@ def test_expiry_reaches_a_device_that_never_asks_again() -> None:
     stops: any device's call drops what expired for every device."""
     clock = Clock()
     ledger = ActionLedger(clock=clock)
-    _finished(ledger, "dev_gone", "r1")
-    assert ledger.ledger_begin("dev_gone", "r2", "agent/stop")
+    for n in range(ACTION_LEDGER_SIZE + 1):
+        _finished(ledger, "dev_gone", f"r{n}")
+    assert ledger.ledger_begin("dev_gone", "running", "agent/stop")
     clock.now = T0 + ACTION_LEDGER_TTL
     ledger.ledger_recent("dev_other")
-    assert ledger._finished == {} and ledger._running == {}
+    assert ledger._finished == {} and ledger._running == {} and ledger._spent == {}
 
 
-def test_the_ledger_keeps_the_newest_fifty_per_device() -> None:
+def test_expiry_drops_the_old_and_keeps_the_young_in_the_order_they_came() -> None:
+    clock = Clock()
+    ledger = ActionLedger(clock=clock)
+    for n in range(ACTION_LEDGER_SIZE + 10):
+        clock.now = T0 + timedelta(seconds=n)
+        _finished(ledger, "dev_a", f"r{n}")
+    clock.now = T0 + ACTION_LEDGER_TTL + timedelta(seconds=4.5)  # r0..r4 are past it
+    assert [ledger.ledger_seen("dev_a", f"r{n}") for n in range(5)] == [None] * 5
+    assert ledger.ledger_seen("dev_a", "r5") == LedgerSeen(None, True, spent=200)
+    assert list(ledger._spent["dev_a"]) == [f"r{n}" for n in range(5, 10)]
+    assert len(ledger.ledger_recent("dev_a")) == ACTION_LEDGER_SIZE
+
+
+def test_dropping_what_expired_looks_only_at_what_it_drops() -> None:
+    """Every socket's every tick drops what expired, for every device, and a device keeps a
+    thousand ids: a pass that looked at every record and rebuilt each device's table cost
+    each tick what the whole ledger held (sweep 2 of #243). Records are oldest first, so a
+    pass stops at the first one young enough."""
+    looked: list[datetime] = []
+
+    class Now:
+        def __sub__(self, when: datetime) -> timedelta:
+            looked.append(when)
+            return T0 + ACTION_LEDGER_TTL - when
+
+    book = {
+        f"dev_{d}": {f"r{n}": ("held", T0 + timedelta(seconds=n)) for n in range(1_000)}
+        for d in range(3)
+    }
+    remote_actions._ledger_drop_expired(book, cast(datetime, Now()))  # r0 is past the TTL
+    assert [len(held) for held in book.values()] == [999] * 3
+    assert len(looked) == 6, "per device, the one it dropped and the first it kept"
+
+
+def test_the_ledger_keeps_the_answers_of_the_newest_fifty_per_device() -> None:
     ledger = ActionLedger(clock=Clock())
     for n in range(ACTION_LEDGER_SIZE + 5):
-        _finished(ledger, "dev_a", f"r{n}")
+        _finished(ledger, "dev_a", f"r{n}", 200 if n else 409)
     _finished(ledger, "dev_b", "kept")
     recent = [entry["request_id"] for entry in ledger.ledger_recent("dev_a")]
     assert len(recent) == ACTION_LEDGER_SIZE
     assert recent[0] == f"r{ACTION_LEDGER_SIZE + 4}" and recent[-1] == "r5"
-    assert ledger.ledger_replay("dev_a", "r4") is None, "the oldest went first"
+    assert ledger.ledger_seen("dev_a", "r4") == LedgerSeen(None, True, spent=200), (
+        "the oldest answer went first, and its id stayed"
+    )
+    assert ledger.ledger_seen("dev_a", "r0") == LedgerSeen(None, True, spent=409)
+    assert ledger.ledger_seen("dev_a", "r0", "another") == LedgerSeen(None, False, spent=409)
     assert ledger.ledger_recent("dev_b")[0]["request_id"] == "kept"
+
+
+def test_the_ledger_remembers_a_thousand_ids_per_device_for_the_ttl() -> None:
+    """An id is kept as long as an answer would be, but not past the newest thousand: a
+    device that writes without end must not grow the ledger without end."""
+    clock = Clock()
+    ledger = ActionLedger(clock=clock)
+    for n in range(ACTION_LEDGER_IDS + 3):
+        _finished(ledger, "dev_a", f"r{n}")
+    assert [ledger.ledger_seen("dev_a", f"r{n}") for n in range(3)] == [None] * 3
+    assert ledger.ledger_seen("dev_a", "r3") == LedgerSeen(None, True, spent=200)
+    assert len(ledger._spent["dev_a"]) + len(ledger._finished["dev_a"]) == ACTION_LEDGER_IDS
+    clock.now = T0 + ACTION_LEDGER_TTL - timedelta(seconds=1)
+    assert ledger.ledger_seen("dev_a", "r3") == LedgerSeen(None, True, spent=200)
+    clock.now = T0 + ACTION_LEDGER_TTL
+    assert ledger.ledger_seen("dev_a", "r3") is None, "a retry this late runs anew"
+
+
+def test_an_id_whose_answer_went_is_answered_anew_when_it_finishes_again() -> None:
+    ledger = ActionLedger(clock=Clock())
+    for n in range(ACTION_LEDGER_SIZE + 1):
+        _finished(ledger, "dev_a", f"r{n}")
+    assert ledger.ledger_seen("dev_a", "r0") == LedgerSeen(None, True, spent=200)
+    _finished(ledger, "dev_a", "r0", 409, error="busy")
+    assert ledger.ledger_seen("dev_a", "r0") == LedgerSeen((409, {"error": "busy"}), True)
+    assert "r0" not in ledger._spent["dev_a"], "one record per id"
 
 
 def test_a_request_id_that_finishes_again_is_shown_once_as_the_newest() -> None:
@@ -378,6 +445,31 @@ def test_a_retried_request_id_is_answered_from_the_real_ledger(
         }
     )
     assert len(ran) == 2, "each request id ran once"
+
+
+def test_a_retry_after_fifty_newer_writes_is_still_never_run_twice(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """The ledger dropped a request's id with its answer at 50 per device, and a retry sent
+    after 50 newer writes from that device ran again: a tell typed twice, an hour more of
+    auto-off, minutes inside the 15 the docs promise (sweep 2 of #243)."""
+    ran: list[dict[str, Any]] = []
+    app = build_app(runtime, sources=_sources(), writes=_noting(ran), dist_dir=tmp_path)
+    runtime.set_allow_write(True)
+    client = _unlocked(app, runtime)
+    url = f"{base(runtime)}/api/note"
+    assert client.post(url, json={"text": "ship it", "request_id": "tell-1"}).status_code == 200
+    for n in range(ACTION_LEDGER_SIZE):
+        assert client.post(url, json={"text": f"n{n}", "request_id": f"n{n}"}).status_code == 200
+    retry = client.post(url, json={"text": "ship it", "request_id": "tell-1"})
+    assert (retry.status_code, retry.json()["error"]) == (409, "already_answered"), retry.text
+    assert "200" in retry.json()["message"], "it says how the first one ended"
+    assert len(ran) == ACTION_LEDGER_SIZE + 1, "the retry did not run"
+    reused = client.post(url, json={"text": "another", "request_id": "tell-1"})
+    assert (reused.status_code, reused.json()["error"]) == (409, "request_id_reused")
+    assert len(ran) == ACTION_LEDGER_SIZE + 1
+    recent = client.get(f"{base(runtime)}/api/actions/recent").json()["actions"]
+    assert len(recent) == ACTION_LEDGER_SIZE, "only the newest answers are shown"
 
 
 def test_get_actions_recent_shows_only_the_asking_devices_requests(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -314,11 +315,21 @@ def test_a_request_checks_the_file_once_for_its_gates_and_its_route(
     """The token, the deadline and the cookie's device at the gate, then the route's own
     read (``remote_json``, the write gate): ``GET api/remote`` read and digested the file
     four times on the event loop, ``api/fleet`` and ``POST api/note`` three (review of
-    #243, round 3)."""
+    #243, round 3). A write is checked once more, off the loop, in the thread that runs
+    it: what let it in may have changed while it waited for that thread (sweep 2 of #243)."""
     runtime.set_allow_write(True)
-    checks = _counting_checks(monkeypatch)
+    where: list[str] = []
+    read = Runtime._signature
+
+    def counted(self: Runtime) -> tuple[bytes, bytes] | None:
+        where.append(threading.current_thread().name)
+        return read(self)
+
+    monkeypatch.setattr(Runtime, "_signature", counted)
     client.request(method, f"{base(runtime)}/api/{path}", json=body)
-    assert checks == [1]
+    in_a_write = [name for name in where if name.startswith("asq-remote-write")]
+    assert len(where) - len(in_a_write) == 1, where
+    assert len(in_a_write) == (1 if path == "note" else 0), where
 
 
 def test_a_socket_checks_the_file_once_a_tick(

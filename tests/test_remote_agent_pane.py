@@ -530,10 +530,10 @@ def test_keys_queued_behind_actions_holding_every_write_thread_are_not_typed_as_
     queued: list[float] = []
     run_write = app.kit.kit_run_write
 
-    async def watched(handler: Any, body: dict[str, Any], arrived: float) -> Any:
+    async def watched(handler: Any, body: dict[str, Any], arrived: float, *rest: Any) -> Any:
         if handler is not restart:
             queued.append(arrived)
-        return await run_write(handler, body, arrived)
+        return await run_write(handler, body, arrived, *rest)
 
     monkeypatch.setattr(app.kit, "kit_run_write", watched)
     answers: dict[str, int] = {}

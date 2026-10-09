@@ -105,7 +105,17 @@ ACTION_POLL_SECONDS = 0.25
 """How often an action reads the agent again while it waits for its Escape to land."""
 
 ACTION_LEDGER_SIZE = 50
-"""Finished requests the ledger keeps per device; the oldest goes first."""
+"""Finished requests whose answers the ledger keeps per device, for a retry, ``GET
+api/actions/recent`` and the ``action`` frame; the oldest answer goes first, its id stays
+(:data:`ACTION_LEDGER_IDS`)."""
+
+ACTION_LEDGER_IDS = 1_000
+"""Request ids the ledger remembers per device for :data:`ACTION_LEDGER_TTL`, their answers
+kept or not, so a retry never runs twice in that time. Forgotten with its answer, a retried
+tell ran again once its device had made 50 newer writes, minutes inside the 15 the docs
+promise (sweep 2 of #243). An id costs a few dozen bytes where an answer may hold a needs
+item's 16 KiB detail, so ids are kept far longer than answers; past this many, the oldest
+goes."""
 
 ACTION_LEDGER_TTL = timedelta(minutes=15)
 """How long a finished request can be replayed or shown. Far longer than a phone sleeps
@@ -127,9 +137,13 @@ class LedgerSeen(NamedTuple):
     """What the ledger knows of a request id it has (:meth:`ActionLedger.ledger_seen`)."""
 
     answer: tuple[int, dict[str, object]] | None
-    """How the request ended, ``(status, body)``; ``None`` while it still runs."""
+    """How the request ended, ``(status, body)``; ``None`` while it still runs, and once its
+    answer is no longer kept (:attr:`spent`)."""
     same: bool = True
     """Whether it was the request asking now: the id names one request, never another."""
+    spent: int | None = None
+    """The status a request ended with whose answer went to make room for newer ones
+    (:data:`ACTION_LEDGER_SIZE`): it ran, and is not run again."""
 
 
 _Record = TypeVar("_Record")
@@ -142,16 +156,23 @@ def _ledger_now() -> datetime:
 def _ledger_drop_expired(
     book: dict[str, dict[str, tuple[_Record, datetime]]], now: datetime
 ) -> None:
-    """Forget every record of ``book`` (device → request id → (record, when)) past the TTL."""
+    """Forget every record of ``book`` (device → request id → (record, when)) past the TTL.
+
+    Each device's records are oldest first, every one added as it happens and a repeat
+    moved to the end, so the walk stops at the first one young enough: a pass costs what
+    it drops, not what is kept. Every socket's every tick makes one (the ``action``
+    frame), and a device's ids are kept by the thousand (:data:`ACTION_LEDGER_IDS`).
+    """
     for device_id in list(book):
-        kept = {
-            request_id: held
-            for request_id, held in book[device_id].items()
-            if now - held[1] < ACTION_LEDGER_TTL
-        }
-        if kept:
-            book[device_id] = kept
-        else:
+        held = book[device_id]
+        expired: list[str] = []
+        for request_id, (_record, when) in held.items():
+            if now - when < ACTION_LEDGER_TTL:
+                break
+            expired.append(request_id)
+        for request_id in expired:
+            del held[request_id]
+        if not held:
             del book[device_id]
 
 
@@ -160,8 +181,9 @@ class ActionLedger:
 
     In memory only, one per app. A server that restarts forgets it, and a retry
     then runs again, as every retry did before there was a ledger. Per device it
-    keeps at most :data:`ACTION_LEDGER_SIZE` finished requests younger than
-    :data:`ACTION_LEDGER_TTL`, and the ids still running. A running id is
+    keeps, for :data:`ACTION_LEDGER_TTL`, the answers of its newest
+    :data:`ACTION_LEDGER_SIZE` finished requests, the ids of its newest
+    :data:`ACTION_LEDGER_IDS`, and the ids still running. A running id is
     forgotten after the TTL too, so a request whose ending was never recorded
     cannot answer ``in_progress`` for the life of the server. Every pass drops
     what expired for EVERY device: a phone that never comes back must not keep
@@ -180,21 +202,16 @@ class ActionLedger:
         A request is what :meth:`ledger_begin` was told the id stands for."""
         self._running: dict[str, dict[str, tuple[tuple[str, str], datetime]]] = {}
         """device id → request id → ((its endpoint, its request), when it began)."""
+        self._spent: dict[str, dict[str, tuple[tuple[int, str], datetime]]] = {}
+        """device id → request id → ((its status, its request), when it ended); oldest first:
+        the finished requests whose answers went to make room for newer ones."""
 
     def _ledger_forget_expired(self) -> datetime:
         now = self._clock()
         _ledger_drop_expired(self._finished, now)
         _ledger_drop_expired(self._running, now)
+        _ledger_drop_expired(self._spent, now)
         return now
-
-    def ledger_replay(
-        self, device_id: str, request_id: str
-    ) -> tuple[int, dict[str, object]] | None:
-        """The stored ``(status, body)`` of a finished request; ``None``: not finished here."""
-        with self._lock:
-            self._ledger_forget_expired()
-            held = self._finished.get(device_id, {}).get(request_id)
-        return None if held is None else (held[0][0]["status"], held[0][0]["body"])
 
     def ledger_seen(self, device_id: str, request_id: str, request: str = "") -> LedgerSeen | None:
         """How this device's request with this id ended, or that it still runs, and whether
@@ -207,6 +224,10 @@ class ActionLedger:
         docs/remote.md's ``esc-1``, for a stop within the TTL was answered 200 with the
         keys' stored result, and the stop never ran (sweep of #243). ``request`` is what
         the id stood for when it began (the server's digest of the endpoint and body).
+
+        The ledger's one lookup. A second one keyed on the id alone outlived its last
+        caller, kept alive by the tests that checked expiry through it, so expiry on this
+        one went untested (sweep 2 of #243).
         """
         with self._lock:
             self._ledger_forget_expired()
@@ -218,6 +239,10 @@ class ActionLedger:
             if running is not None:
                 (_endpoint, began_as), _began = running
                 return LedgerSeen(None, began_as == request)
+            spent = self._spent.get(device_id, {}).get(request_id)
+            if spent is not None:
+                (status, began_as), _ended = spent
+                return LedgerSeen(None, began_as == request, spent=status)
         return None
 
     def ledger_begin(
@@ -252,9 +277,17 @@ class ActionLedger:
             }
             finished = self._finished.setdefault(device_id, {})
             finished.pop(request_id, None)  # a repeat ends up newest, not where it first was
+            spent = self._spent.setdefault(device_id, {})
+            spent.pop(request_id, None)
             finished[request_id] = ((entry, request), now)
-            while len(finished) > ACTION_LEDGER_SIZE:
-                del finished[next(iter(finished))]
+            while len(finished) > ACTION_LEDGER_SIZE:  # the answer goes, the id stays
+                oldest = next(iter(finished))
+                (gone, began_as), ended = finished.pop(oldest)
+                spent[oldest] = ((gone["status"], began_as), ended)
+            while len(spent) > ACTION_LEDGER_IDS - ACTION_LEDGER_SIZE:
+                del spent[next(iter(spent))]
+            if not spent:
+                del self._spent[device_id]
 
     def ledger_recent(self, device_id: str) -> list[LedgerEntry]:
         """This device's finished requests, newest first."""
@@ -1108,6 +1141,7 @@ __all__ = [
     "ACTION_AUDIT_EXCERPT",
     "ACTION_ENDPOINTS",
     "ACTION_FIELD_MAX",
+    "ACTION_LEDGER_IDS",
     "ACTION_LEDGER_SIZE",
     "ACTION_LEDGER_TTL",
     "ACTION_NEEDS_ID_MAX",

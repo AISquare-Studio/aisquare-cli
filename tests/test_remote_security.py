@@ -51,6 +51,8 @@ from aisquare.services.remote_server import (
     SEND_KEYS_KEYS_MAX,
     SEND_KEYS_TEXT_MAX,
     UNLOCK_GLOBAL_FAILURES,
+    UNLOCK_LIMIT,
+    UNLOCK_WINDOW_SECONDS,
     WS_CLOSE_REMOTE_OFF,
     WS_CLOSE_UNAUTHORIZED,
     RequestError,
@@ -394,10 +396,11 @@ def test_the_limiter_forgets_a_client_whose_minute_is_over() -> None:
     """Keyed on invented addresses, the table grew by one entry per request, forever."""
     now = [0.0]
     limiter = _RateLimiter(lambda: now[0])
+    rule = (UNLOCK_LIMIT, UNLOCK_WINDOW_SECONDS)
     for n in range(500):
-        assert limiter.limiter_retry_after(f"198.51.{n // 250}.{n % 250}") is None
+        assert limiter.limiter_retry_after(f"198.51.{n // 250}.{n % 250}", *rule) is None
     now[0] += 61
-    assert limiter.limiter_retry_after("203.0.113.5") is None
+    assert limiter.limiter_retry_after("203.0.113.5", *rule) is None
     assert list(limiter._attempts) == ["203.0.113.5"]
 
 
@@ -756,6 +759,171 @@ def test_a_version_1_file_keeps_writes_on_only_for_a_json_true(isolated_home: Pa
     assert json.loads(remote_state_path().read_bytes())["allow_write"] is False
 
 
+class FullDisk:
+    """``remote.json`` that will not write, as on a full disk, until :meth:`fixed`: its temp
+    is made, and writing the bytes into it fails."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from aisquare.core.atomic import Replacement
+
+        self.full = True
+        real = Replacement.publish
+
+        def publish(replacement: Replacement, body: str | bytes) -> None:
+            if self.full:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            real(replacement, body)
+
+        monkeypatch.setattr(Replacement, "publish", publish)
+
+    def fixed(self) -> None:
+        self.full = False
+
+
+def _devices_on_disk() -> list[str]:
+    return [row["id"] for row in json.loads(remote_state_path().read_bytes())["devices"]]
+
+
+def test_an_unlock_that_cannot_be_saved_adds_no_device_and_says_why(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """The device was added in memory before its write, and the write's error answered a
+    bare 500 with no cookie: each try left a device the R panel, ``status`` and every
+    Devices screen listed as signed in, whose secret no browser held, and the next flush
+    saved them all (sweep 2 of #243)."""
+    disk = FullDisk(monkeypatch)
+    phone = make_client(app)
+    for _ in range(3):
+        refused = unlock(phone, runtime)
+        assert (refused.status_code, refused.json()["error"]) == (503, "remote_state_unwritable")
+        assert "set-cookie" not in refused.headers
+        assert str(isolated_home) not in refused.text, "no path for a phone not unlocked yet"
+    assert runtime.device_rows() == []
+    disk.fixed()
+    runtime.flush_last_seen()
+    assert _devices_on_disk() == [], "no phantom saved later either"
+    assert unlock(phone, runtime).status_code == 200
+    assert len(runtime.device_rows()) == 1
+
+
+def test_a_reactivation_that_cannot_be_saved_leaves_the_device_its_old_cookie(
+    app: Any, runtime: Runtime, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The new secret went into memory before the write: once that failed, the device held a
+    digest nobody had, and the phone's old cookie no longer named it, so its next unlock made
+    a second device and the stale one was saved (sweep 2 of #243)."""
+    phone = _from(app, "198.51.100.70")
+    device_id = unlock(phone, runtime).json()["device"]["id"]
+    old_secret = phone.cookies[COOKIE]
+    clock.advance(hours=25)  # idle: signed out, and a known device
+    disk = FullDisk(monkeypatch)
+    refused = unlock(phone, runtime)
+    assert (refused.status_code, refused.json()["error"]) == (503, "remote_state_unwritable")
+    known = runtime.known_device_for_cookie(old_secret)
+    assert known is not None and known.id == device_id, "the old cookie still names it"
+    disk.fixed()
+    again = unlock(phone, runtime)
+    assert again.status_code == 200 and again.json()["device"]["id"] == device_id
+    assert [row["id"] for row in runtime.device_rows()] == [device_id]
+
+
+def test_a_wrong_guess_on_a_full_disk_is_still_a_wrong_guess_and_still_counted(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Counting it wrote ``remote.json``, and the write's error made a typo a bare 500 that
+    read as the machine's fault (sweep 2 of #243). It is counted in memory, and logged."""
+    phone = _from(app, "198.51.100.71")
+    unlock(phone, runtime)
+    FullDisk(monkeypatch)
+    with caplog.at_level("WARNING", logger=remote_server.__name__):
+        stranger = _from(app, "198.51.100.72")
+        wrong = unlock(stranger, runtime, "wrong")
+        assert (wrong.status_code, wrong.json()["error"]) == (401, "wrong_password")
+        guesser = _from(app, "198.51.100.73")
+        guesser.cookies.set(COOKIE, phone.cookies[COOKIE])
+        assert unlock(guesser, runtime, "wrong").status_code == 401
+    assert UnlockBudget(runtime).budget_failures() == 1
+    assert runtime._state.devices[0].failed_unlocks == 1
+    assert "counted in memory only" in caplog.text
+
+
+def test_an_unlock_whose_audit_line_cannot_be_written_still_hands_over_its_cookie(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The device was saved, then the audit line raised: a bare 500, no cookie, and a device
+    on disk, signed in, that no browser could use (sweep 2 of #243). The line is best
+    effort for an unlock: what it records is saved already, and the log says it is missing."""
+
+    def unwritable(self: Runtime, device_id: str, endpoint: str, summary: str) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", str(remote_audit_path()))
+
+    monkeypatch.setattr(Runtime, "audit", unwritable)
+    phone = make_client(app)
+    with caplog.at_level("WARNING", logger=remote_server.__name__):
+        response = unlock(phone, runtime)
+    assert response.status_code == 200 and COOKIE in response.headers["set-cookie"]
+    assert phone.get(f"{base(runtime)}/api/devices").status_code == 200
+    assert "audit line could not be written" in caplog.text
+
+
+def test_an_extend_that_cannot_be_saved_moves_no_deadline_and_says_why(
+    app: Any, runtime: Runtime, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The later deadline went into memory before its write: once that failed, the gate and
+    the panel kept Remote public another hour while the phone was told the extend failed,
+    as a bare 500 (sweep 2 of #243, the unlock's class)."""
+    client = make_client(app)
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    deadline = clock.now + timedelta(minutes=10)
+    runtime.set_auto_off(deadline)
+    FullDisk(monkeypatch)
+    response = client.post(f"{base(runtime)}/api/remote/extend", json={})
+    assert (response.status_code, response.json()["error"]) == (503, "remote_state_unwritable")
+    assert runtime.auto_off_deadline() == deadline
+
+
+def test_a_revoke_that_cannot_be_saved_holds_here_and_says_it_was_not_saved(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A revoke holds in memory, where the gate reads it (review of #243, round 2), but the
+    write's error answered a bare 500 that said nothing of it (sweep 2 of #243). It took
+    effect, so the audit trail records it, as not saved: it had no line at all (review of
+    #243, round 4)."""
+    mine, theirs = make_client(app), make_client(app)
+    unlock(mine, runtime)
+    other = unlock(theirs, runtime).json()["device"]["id"]
+    runtime.set_allow_write(True)
+    FullDisk(monkeypatch)
+    response = mine.delete(f"{base(runtime)}/api/devices/{other}")
+    assert (response.status_code, response.json()["error"]) == (503, "remote_state_unwritable")
+    assert "revoked on the running Remote" in response.json()["message"]
+    assert other not in runtime.device_ids()
+    assert theirs.get(f"{base(runtime)}/api/board").status_code == 401
+    assert _audit_lines()[-1][2:] == ["devices/revoke", f"{other} unsaved"]
+
+
+def test_a_revoke_that_can_be_neither_saved_nor_audited_still_says_it_was_not_saved(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The audit line of a revoke that could not be saved is best effort, as an unlock's is:
+    a home that refuses ``remote.json`` may refuse its audit log too, and that must not turn
+    the answer into a bare 500."""
+    mine = make_client(app)
+    device_id = unlock(mine, runtime).json()["device"]["id"]
+    FullDisk(monkeypatch)
+
+    def unwritable(self: Runtime, device_id: str, endpoint: str, summary: str) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", str(remote_audit_path()))
+
+    monkeypatch.setattr(Runtime, "audit", unwritable)
+    with caplog.at_level("WARNING", logger=remote_server.__name__):
+        response = mine.delete(f"{base(runtime)}/api/devices/{device_id}")
+    assert (response.status_code, response.json()["error"]) == (503, "remote_state_unwritable")
+    assert device_id not in runtime.device_ids()
+    assert "devices/revoke audit line could not be written" in caplog.text
+
+
 # --- (3) device ids that are not cookies ----------------------------------------------
 
 
@@ -818,6 +986,22 @@ def test_revoking_another_device_needs_writes_and_closes_its_socket(
         assert response.json() == {"ok": True, "id": other, "signed_out": False}
         assert _closed_with(ws) == WS_CLOSE_UNAUTHORIZED
     assert _audit_lines()[-1][2:] == ["devices/revoke", other]
+
+
+def test_revoking_another_device_asks_the_gates_again_in_the_thread_that_revokes(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Writes were on when the request arrived, and off by the time a thread of the shared
+    pool revoked: as a queued write did, the revoke went ahead, the owner's own phone
+    signed out by a device whose writes were just switched off (sweep 2 of #243)."""
+    mine, theirs = make_client(app), make_client(app)
+    unlock(mine, runtime)
+    other = unlock(theirs, runtime).json()["device"]["id"]
+    monkeypatch.setattr(app.kit, "kit_write_allowed", lambda: True)  # on when it arrived
+    response = mine.delete(f"{base(runtime)}/api/devices/{other}")
+    assert (response.status_code, response.json()["error"]) == (403, "read_only")
+    assert other in runtime.device_ids()
+    assert [line for line in _audit_lines() if line[2] == "devices/revoke"] == []
 
 
 def _closed_with(ws: Any) -> int:
@@ -1001,6 +1185,24 @@ def test_extend_adds_an_hour_up_to_eight_hours_ahead(
         client.post(url, json={})
     capped = client.get(f"{base(runtime)}/api/remote").json()["auto_off_at"]
     assert capped == (clock.now + timedelta(hours=8)).isoformat()
+
+
+def test_an_extend_asks_the_gates_again_in_the_thread_that_extends(
+    app: Any, runtime: Runtime, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The switch is read when the request arrives, and the extend runs later, in a thread
+    of the pool every read and socket snapshot shares: as a write queued for its thread
+    did, an extend whose writes were switched off meanwhile still gave Remote another
+    public hour (sweep 2 of #243)."""
+    client = make_client(app)
+    unlock(client, runtime)
+    deadline = clock.now + timedelta(minutes=10)
+    runtime.set_auto_off(deadline)
+    monkeypatch.setattr(app.kit, "kit_write_allowed", lambda: True)  # on when it arrived
+    response = client.post(f"{base(runtime)}/api/remote/extend", json={})
+    assert (response.status_code, response.json()["error"]) == (403, "read_only")
+    assert runtime.auto_off_deadline() == deadline
+    assert [line for line in _audit_lines() if line[2] == "remote/extend"] == []
 
 
 def test_extend_never_brings_a_far_deadline_closer(runtime: Runtime, clock: Clock) -> None:
@@ -1254,16 +1456,116 @@ def test_serves_auto_off_stops_the_server_even_when_remote_json_cannot_be_writte
     runtime: Runtime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The deadline is the server's to keep: a revoke that cannot be written must not leave
-    ``serve`` running past it."""
+    ``serve`` running past it. Nor may it raise on the timer's thread, skipping the
+    deadline's clearing: what could not be done comes back, for the way out to say (sweep
+    2 of #243)."""
 
     def unwritable(reason: str) -> None:
         raise OSError("remote.json: read-only file system")
 
+    cleared: list[object] = []
     monkeypatch.setattr(remote_server, "revoke_every_remote_device", unwritable)
+    monkeypatch.setattr(runtime, "set_auto_off", cleared.append)
     server = SimpleNamespace(should_exit=False)
-    with pytest.raises(OSError, match="read-only"):
-        remote_server._remote_serve_off(runtime, server)
+    failure = remote_server._remote_serve_off(runtime, server)
     assert server.should_exit is True
+    assert cleared == [None], "the deadline is still cleared"
+    assert failure is not None and "could not be revoked (remote.json: read-only" in failure
+    assert "aisquare remote revoke --all" in failure
+    monkeypatch.setattr(remote_server, "revoke_every_remote_device", lambda reason: None)
+    assert remote_server._remote_serve_off(runtime, server) is None, "all of it done"
+
+
+def test_serves_auto_off_on_a_full_disk_says_the_phones_were_not_signed_out(
+    page: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Past the deadline on a home that would not write, ``serve`` printed a thread's
+    traceback, then "Remote turned off" and exit 0, under ``--json`` too, and the devices
+    stayed in ``remote.json``: the next Remote accepted their cookies with no passphrase
+    (sweep 2 of #243). The way out's own write, failing the same way, is one line too."""
+    import uvicorn
+
+    class StopsWhenTold:
+        def __init__(self, config: Any) -> None:
+            self.should_exit = False
+
+        def run(self, sockets: Any = None) -> None:
+            deadline = time.monotonic() + 10
+            while not self.should_exit and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+    state = remote_server.runtime()
+    state._state.password = PASSWORD
+    state._save_state()
+    unlocked = state.unlock_device(PASSWORD, "Pixel")
+    assert unlocked is not None
+    now = [datetime.now(UTC)]
+    monkeypatch.setattr(remote_server, "_remote_now", lambda: now[0])
+    monkeypatch.setattr(remote_server, "AUTO_OFF_CHECK_SECONDS", 0.05)
+    monkeypatch.setattr(uvicorn, "Server", StopsWhenTold)
+    disk = FullDisk(monkeypatch)
+    disk.fixed()  # serve writes its deadline before the disk fills up
+
+    def banner() -> None:
+        now[0] += timedelta(minutes=2)  # past the 1-minute deadline
+        disk.full = True
+
+    with (
+        caplog.at_level("WARNING", logger=remote_server.__name__),
+        pytest.raises(remote_server.RemoteOffIncomplete, match="could not be revoked") as off,
+    ):
+        remote_server.run_foreground(port=_free_port(), auto_off_minutes=1, ready=banner)
+    assert str(off.value).startswith("Remote turned off — the auto-off timer ran out, but")
+    assert "Traceback" not in capfd.readouterr().err
+    assert _devices_on_disk() == [unlocked[1].id], "what the phone must be told to revoke"
+    out = [r for r in caplog.records if "on the way out failed" in r.getMessage()]
+    assert len(out) == 1 and out[0].exc_info is None, out
+    assert "No space left on device" in out[0].getMessage()
+
+
+def test_serves_way_out_waits_for_the_auto_off_to_say_what_it_could_not_do(
+    page: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The auto-off tells the server to stop before it returns what it could not do, and the
+    way out read that as soon as the server stopped: a timer's thread that had not run on
+    by then left nothing to read, and ``serve`` said "Remote turned off" and exited 0 with
+    every phone still signed in (review of #243, round 4). Here that thread lingers a
+    second after the stop, as a descheduled one would."""
+    import uvicorn
+
+    class StopsWhenTold:
+        def __init__(self, config: Any) -> None:
+            self.should_exit = False
+
+        def run(self, sockets: Any = None) -> None:
+            deadline = time.monotonic() + 10
+            while not self.should_exit and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+    def unwritable(reason: str) -> None:
+        raise OSError(errno.EROFS, "Read-only file system")
+
+    announce = remote_server._remote_writes_announced
+
+    def lingering(ctrl_c: str) -> bool:
+        threading.Event().wait(1.0)  # the server is told to stop; this thread runs on later
+        return announce(ctrl_c)
+
+    now = [datetime.now(UTC)]
+    monkeypatch.setattr(remote_server, "_remote_now", lambda: now[0])
+    monkeypatch.setattr(remote_server, "AUTO_OFF_CHECK_SECONDS", 0.05)
+    monkeypatch.setattr(remote_server, "revoke_every_remote_device", unwritable)
+    monkeypatch.setattr(remote_server, "_remote_writes_announced", lingering)
+    monkeypatch.setattr(uvicorn, "Server", StopsWhenTold)
+
+    def banner() -> None:
+        now[0] += timedelta(minutes=2)  # past the 1-minute deadline
+
+    with pytest.raises(remote_server.RemoteOffIncomplete, match="could not be revoked"):
+        remote_server.run_foreground(port=_free_port(), auto_off_minutes=1, ready=banner)
 
 
 def test_serve_says_so_when_the_timer_ended_it(page: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1271,6 +1573,33 @@ def test_serve_says_so_when_the_timer_ended_it(page: Path, monkeypatch: pytest.M
     result = CliRunner().invoke(cli, ["remote", "serve"])
     assert result.exit_code == 0
     assert "Remote turned off — the auto-off timer ran out" in result.stderr
+
+
+def test_serve_fails_when_its_auto_off_could_not_sign_the_phones_out(
+    page: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It said "Remote turned off" and exited 0, and ``--json`` carried nothing past the
+    banner, while every phone it named kept a cookie the next Remote accepts (sweep 2 of
+    #243)."""
+    said = (
+        "Remote turned off — the auto-off timer ran out, but its devices could not be revoked "
+        "(disk full), so their cookies would open the next Remote: run `aisquare remote revoke "
+        "--all` once ~/.aisquare/remote.json can be written"
+    )
+
+    def unclean(*args: object, ready: Callable[[], None]) -> bool:
+        ready()
+        raise remote_server.RemoteOffIncomplete(said)
+
+    monkeypatch.setattr(remote_server, "run_foreground", unclean)
+    human = CliRunner().invoke(cli, ["remote", "serve"])
+    assert human.exit_code == 1
+    assert "aisquare remote revoke --all" in human.stderr
+    scripted = CliRunner().invoke(cli, ["--json", "remote", "serve"])
+    assert scripted.exit_code == 1
+    banner, ending = scripted.stdout.strip().splitlines()
+    assert "url_local" in json.loads(banner)
+    assert json.loads(ending) == {"error": "remote_state_unwritable", "detail": said}
 
 
 def test_a_public_url_that_is_not_https_on_a_dns_name_is_refused(page: Path) -> None:
@@ -1495,6 +1824,53 @@ def test_a_note_holding_a_control_character_is_refused_before_anything_is_writte
     assert team.notes == [] and team.finished == [] and _audit_lines() == before
 
 
+@pytest.mark.parametrize(
+    ("to", "char"),
+    [
+        ("manager\x1b]52;c;cHduZWQ=\x07", "U+001B"),
+        ("manager\x07", "U+0007"),
+        ("coder\n1", "U+000A"),
+        ("coder\t1", "U+0009"),
+        ("x\x9b31m", "U+009B"),
+        ("ma\u202enager", "U+202E"),
+        ("coder\u20281", "U+2028"),
+    ],
+    ids=["osc-52", "bel", "newline", "tab", "c1-csi", "bidi-override", "line-separator"],
+)
+def test_a_notes_to_holding_a_character_that_does_not_print_is_refused(
+    runtime: Runtime, team: FakeTeam, tmp_path: Path, to: str, char: str
+) -> None:
+    """``to`` is a role or a label, and the board keeps it with the event as it came:
+    ``asq board`` printed ``manager`` and the OSC 52 after it, which set the owner's
+    clipboard from the terminal it ran in, and every agent's team delta repeated it. The
+    note's text was refused those bytes; its ``to`` was not (review of #243, round 4)."""
+    client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    before = _audit_lines()
+    response = client.post(f"{base(runtime)}/api/note", json={"text": "hi", "to": to})
+    assert (response.status_code, response.json()) == (
+        400,
+        {
+            "error": "invalid",
+            "message": f"'to' holds {char}, which does not print — 'to' names a role or a label",
+        },
+    )
+    assert team.notes == [] and _audit_lines() == before
+
+
+def test_a_notes_to_may_be_any_role_or_label_that_prints(team: FakeTeam) -> None:
+    handlers = live_writes().handlers
+    for to in ("manager", "coder 2", "équipe-données", "レビュー"):
+        handlers["note"]({"text": "x", "to": to})
+    assert [note["to_role"] for note in team.notes] == [
+        "manager",
+        "coder 2",
+        "équipe-données",
+        "レビュー",
+    ]
+
+
 def test_a_note_keeps_its_tabs_and_line_breaks(team: FakeTeam) -> None:
     """They are a note's own lines, inside the hand-off's paste too, as in a tell's."""
     handlers = live_writes().handlers
@@ -1623,6 +1999,179 @@ def test_adding_a_directory_that_is_not_listed_lists_it(home: Path, before: str)
     assert answer["added"] is True
     assert [listed.root for listed in project_service.list_projects()] == [root]
     assert summary == f"added {project.id} {root}"
+
+
+def _projects(home: Path, *roots: str) -> list[ProjectInfo]:
+    """Repositories under ``home``, added on purpose as ``project add`` adds them."""
+    with store_session() as store:
+        return [
+            store.onboard_project(ProjectInfo(id=project_id_for(root), root=root, linked_repos=[]))
+            for root in (_repo(home / where) for where in roots)
+        ]
+
+
+def _project_writes(runtime: Runtime, tmp_path: Path) -> TestClient:
+    """A phone with writes on, over the real project services and store."""
+    sources = remote_server.live_sources()
+    app = build_app(runtime, sources=sources, writes=live_writes(), dist_dir=tmp_path)
+    client = make_client(app)
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    return client
+
+
+def test_a_switch_from_the_phone_pins_the_project_every_command_resolves(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``project/switch`` moves the machine-wide pin that every CLI command and hook
+    resolves, and no test ran it: a switch that pinned nothing answered 200 green (sweep 2
+    of #243)."""
+    alpha, beta = _projects(home, "code/alpha", "code/beta")
+    monkeypatch.chdir(beta.root)
+    assert project_service.info().id == beta.id
+    client = _project_writes(runtime, tmp_path)
+    switched = client.post(f"{base(runtime)}/api/project/switch", json={"name": "alpha"})
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["project"]["id"] == alpha.id
+    assert project_service.info().id == alpha.id, "pinned over the directory it runs in"
+    assert _audit_lines()[-1][2:] == ["project/switch", f"switched to {alpha.id}"]
+
+
+def test_a_remove_from_the_phone_forgets_the_registration(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``project/remove`` forgets a registration, and no test ran it either (sweep 2 of
+    #243)."""
+    alpha, beta = _projects(home, "code/alpha", "code/beta")
+    monkeypatch.chdir(alpha.root)
+    client = _project_writes(runtime, tmp_path)
+    removed = client.post(f"{base(runtime)}/api/project/remove", json={"ref": "beta"})
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["report"]["project"]["id"] == beta.id
+    assert [project.id for project in project_service.list_projects()] == [alpha.id]
+    assert _audit_lines()[-1][2:] == ["project/remove", "removed beta"]
+
+
+def test_a_project_with_live_agents_is_not_removed_and_the_phone_hears_why(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``project forget`` refuses it as ``project_busy``; from the phone the refusal fell to
+    400 ``write_failed``, "the write failed", where nothing had failed (sweep 2 of #243)."""
+    from aisquare.core.ids import new_agent_id
+    from aisquare.models import FleetAgent
+
+    (alpha,) = _projects(home, "code/alpha")
+    monkeypatch.chdir(alpha.root)
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=new_agent_id(),
+                project_id=alpha.id,
+                label="coder1",
+                role="coder",
+                pane_id="%1",
+                cwd=alpha.root,
+                created_at=datetime.now(UTC),
+            )
+        )
+    client = _project_writes(runtime, tmp_path)
+    before = _audit_lines()
+    refused = client.post(f"{base(runtime)}/api/project/remove", json={"ref": "alpha"})
+    assert (refused.status_code, refused.json()["error"]) == (409, "project_busy")
+    assert "coder1" in refused.json()["message"]
+    assert [project.id for project in project_service.list_projects()] == [alpha.id]
+    assert _audit_lines() == before
+
+
+@pytest.mark.parametrize(
+    ("route", "body", "status", "error"),
+    [
+        ("switch", {"name": "ghost"}, 404, "not_found"),
+        ("switch", {"name": "app"}, 400, "ambiguous_project"),
+        ("switch", {"name": 5}, 400, "invalid"),
+        ("switch", {"ref": "alpha"}, 400, "invalid"),
+        ("remove", {"ref": "ghost"}, 404, "not_found"),
+        ("remove", {"ref": "app"}, 400, "ambiguous_project"),
+        ("remove", {"ref": ["alpha"]}, 400, "invalid"),
+        ("remove", {"name": "alpha"}, 400, "invalid"),
+    ],
+)
+def test_a_switch_or_a_remove_that_names_no_one_project_changes_nothing(
+    home: Path,
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+    body: dict[str, object],
+    status: int,
+    error: str,
+) -> None:
+    alpha, *_apps = _projects(home, "code/alpha", "work/app", "play/app")
+    monkeypatch.chdir(alpha.root)
+    client = _project_writes(runtime, tmp_path)
+    before = _audit_lines()
+    refused = client.post(f"{base(runtime)}/api/project/{route}", json=body)
+    assert (refused.status_code, refused.json()["error"]) == (status, error), refused.text
+    assert len(project_service.list_projects()) == 3
+    assert project_service.info().id == alpha.id
+    assert _audit_lines() == before
+
+
+def test_a_task_another_session_holds_is_refused_claim_lost(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``asq task claim`` refuses it as ``claim_lost``; from the phone it fell to 400
+    ``write_failed``, as ``project/remove``'s busy refusal did (sweep 2 of #243)."""
+    from aisquare.services import team as team_service
+
+    (alpha,) = _projects(home, "code/alpha")
+    monkeypatch.chdir(alpha.root)
+    task, _added = team_service.add_task("ship it")
+    client = _project_writes(runtime, tmp_path)
+    url = f"{base(runtime)}/api/task/claim"
+    assert client.post(url, json={"ref": task.id}).status_code == 200
+    again = client.post(url, json={"ref": task.id})
+    assert (again.status_code, again.json()["error"]) == (409, "claim_lost"), again.text
+    assert task.id in again.json()["message"]
+
+
+def test_a_task_ref_that_names_two_tasks_is_refused_ambiguous_id(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``asq task`` refuses it as ``ambiguous_id``; from the phone it was 404 ``not_found``,
+    a task that is not there, where two are (sweep 2 of #243, project/remove's class)."""
+    from aisquare.services import team as team_service
+
+    (alpha,) = _projects(home, "code/alpha")
+    monkeypatch.chdir(alpha.root)
+    first, _added = team_service.add_task("one")
+    team_service.add_task("two")
+    client = _project_writes(runtime, tmp_path)
+    for route in ("task/claim", "task/done"):
+        refused = client.post(f"{base(runtime)}/api/{route}", json={"ref": "tsk_"})
+        assert (refused.status_code, refused.json()["error"]) == (400, "ambiguous_id"), route
+    assert client.post(f"{base(runtime)}/api/task/claim", json={"ref": first.id}).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("route", "body"),
+    [("task/claim", {"ref": "tsk_1"}), ("task/done", {"ref": "tsk_1"}), ("note", {"text": "hi"})],
+)
+def test_the_board_writes_are_refused_team_disabled_with_the_orchestrator_off(
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+    body: dict[str, str],
+) -> None:
+    """``AISQUARE_TEAM=0``: ``asq`` refuses the board's writes as ``team_disabled``, and so
+    do the agent actions, 409; these fell to 400 ``write_failed`` (sweep 2 of #243)."""
+    monkeypatch.setenv("AISQUARE_TEAM", "0")
+    client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    refused = client.post(f"{base(runtime)}/api/{route}", json=body)
+    assert (refused.status_code, refused.json()["error"]) == (409, "team_disabled")
 
 
 # --- (8) the Origin of a write or a socket ------------------------------------------------
@@ -1931,6 +2480,9 @@ def test_a_slow_restriction_of_the_temp_holds_no_lock_and_loses_no_revoke(
     unlocked = runtime.unlock_device(PASSWORD, "Pixel")
     assert unlocked is not None
     device_id = unlocked[1].id
+    later = remote_server._remote_now() + timedelta(seconds=5)
+    monkeypatch.setattr(remote_server, "_remote_now", lambda: later)
+    assert runtime.device_is_live(device_id)  # a request: the flush has a last_seen to write
     restricting, done = threading.Event(), threading.Event()
     real = paths.restrict_to_owner
 
@@ -2001,3 +2553,130 @@ def test_a_v1_file_written_under_a_running_server_is_not_adopted(runtime: Runtim
     assert runtime.password == PASSWORD
     runtime.flush_last_seen()
     assert json.loads(path.read_bytes())["version"] == 2
+
+
+def test_a_flush_with_nothing_new_to_write_writes_nothing(
+    runtime: Runtime, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every 30 s while Remote was on, with no phone even open, the flush made an
+    owner-only temp (an ``icacls`` run on Windows, with ``_writing`` held), wrote the same
+    bytes into it, fsynced it, renamed it over ``remote.json`` and fsynced the directory
+    (sweep 2 of #243). What it is for still happens: a device a request touched is
+    written, and one past its lifetime is pruned."""
+    from aisquare.core import paths
+    from aisquare.core.atomic import Replacement
+
+    unlocked = runtime.unlock_device(PASSWORD, "Pixel")
+    assert unlocked is not None
+    device_id = unlocked[1].id
+    written: list[bytes] = []
+    restricted: list[str] = []
+    publish, restrict = Replacement.publish, paths.restrict_to_owner
+
+    def counted_publish(replacement: Replacement, body: str | bytes) -> None:
+        written.append(body if isinstance(body, bytes) else body.encode())
+        publish(replacement, body)
+
+    def counted_restrict(path: Path) -> bool:
+        restricted.append(path.name)
+        return restrict(path)
+
+    monkeypatch.setattr(Replacement, "publish", counted_publish)
+    monkeypatch.setattr(paths, "restrict_to_owner", counted_restrict)
+    before = remote_state_path().read_bytes()
+    runtime.flush_last_seen()
+    runtime.flush_last_seen()
+    assert (written, restricted) == ([], []), "no temp, no write, no rename"
+    assert remote_state_path().read_bytes() == before
+    clock.advance(seconds=5)
+    assert runtime.device_is_live(device_id)  # what a request or a socket's tick does
+    runtime.flush_last_seen()
+    assert len(written) == 1, "a touched device is written"
+    (stored,) = json.loads(remote_state_path().read_bytes())["devices"]
+    assert stored["last_seen"] == remote_server._iso_seconds(clock.now)
+    clock.advance(days=8)
+    runtime.flush_last_seen()
+    assert json.loads(remote_state_path().read_bytes())["devices"] == [], "and pruned"
+
+
+class Timers:
+    """``remote_server``'s ``threading`` with ``Timer`` recorded and never started, so a test
+    runs what was armed by hand; everything else is the real module."""
+
+    def __init__(self) -> None:
+        self.armed: list[tuple[float, Callable[[], None]]] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(threading, name)
+
+    def Timer(self, delay: float, run: Callable[[], None]) -> Any:
+        self.armed.append((delay, run))
+        return SimpleNamespace(daemon=False, start=lambda: None, cancel=lambda: None)
+
+
+@pytest.mark.parametrize("serving", ["serve", "the panel's server", "nothing"])
+def test_the_flusher_saves_last_seen_and_prunes_every_30_s_while_remote_serves(
+    runtime: Runtime, clock: Clock, monkeypatch: pytest.MonkeyPatch, serving: str
+) -> None:
+    """No test ran the flusher, so the regression it was fixed for came back green: armed
+    again only while the panel's server ran, ``serve`` kept ``last_seen`` in memory for its
+    whole run, ``asq remote status`` in another shell showing every phone at its unlock
+    time, and pruned no device until it exited (sweep 2 of #243)."""
+    timers = Timers()
+    monkeypatch.setattr(remote_server, "threading", timers)
+    monkeypatch.setattr(remote_server, "_runtime", runtime)
+    monkeypatch.setattr(remote_server, "_flusher", None)
+    monkeypatch.setattr(remote_server, "_foreground", object() if serving == "serve" else None)
+    panel = SimpleNamespace(running=True) if serving == "the panel's server" else None
+    monkeypatch.setattr(remote_server, "_server", panel)
+    first = runtime.unlock_device(PASSWORD, "Pixel")
+    clock.advance(days=8)  # the first is past its lifetime
+    second = runtime.unlock_device(PASSWORD, "iPhone")
+    assert first is not None and second is not None
+    remote_server._schedule_flush()
+    ((_delay, flush),) = timers.armed
+    clock.advance(minutes=5)
+    assert runtime.device_is_live(second[1].id)  # a request, in memory
+    flush()
+    (stored,) = json.loads(remote_state_path().read_bytes())["devices"]
+    assert (stored["id"], stored["last_seen"]) == (second[1].id, _iso(clock.now))
+    if serving == "nothing":
+        assert len(timers.armed) == 1, "nothing serves: the flusher stops"
+    else:
+        assert [delay for delay, _run in timers.armed] == [30.0, 30.0], "armed again"
+
+
+def _iso(at: datetime) -> str:
+    return remote_server._iso_seconds(at)
+
+
+def test_the_last_flush_as_the_server_stops_says_an_unwritable_remote_json_in_one_line(
+    runtime: Runtime,
+    clock: Clock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A ``remote.json`` that will not write is a clean failure as the server stops, not a
+    traceback, as ``asq remote``'s commands and ``serve``'s way out say it (sweep 2 of
+    #243); and the flusher before it, failing the same way, still tries again in 30 s."""
+    timers = Timers()
+    monkeypatch.setattr(remote_server, "threading", timers)
+    monkeypatch.setattr(remote_server, "_runtime", runtime)
+    monkeypatch.setattr(remote_server, "_flusher", None)
+    monkeypatch.setattr(remote_server, "_foreground", object())
+    monkeypatch.setattr(remote_server, "_server", None)
+    monkeypatch.setattr(remote_server, "_home_claim", None)
+    unlocked = runtime.unlock_device(PASSWORD, "Pixel")
+    assert unlocked is not None
+    FullDisk(monkeypatch)
+    remote_server._schedule_flush()
+    ((_delay, flush),) = timers.armed
+    clock.advance(minutes=5)
+    assert runtime.device_is_live(unlocked[1].id)
+    flush()
+    assert len(timers.armed) == 2, "it tries again in 30 s"
+    monkeypatch.setattr(remote_server, "_foreground", None)
+    with caplog.at_level("WARNING", logger=remote_server.__name__):
+        remote_server.stop_remote_server()
+    (said,) = [r for r in caplog.records if "as the server stopped" in r.getMessage()]
+    assert said.exc_info is None and "No space left on device" in said.getMessage()

@@ -167,6 +167,10 @@ The R panel's **Allow write actions** switch sets the same value. There is one
 write switch, the server's own, in `~/.aisquare/remote.json`: the shell and the
 panel both set it there, whether Remote is on or off, so they always agree and
 starting the TUI never changes it. The page's READ-ONLY sentence names both.
+Switching writes off, signing a phone out or turning Remote off also stops what
+that phone sent and the machine has not started yet: a write waiting behind a
+restart is refused, not run. One already running (a restart takes up to 40
+seconds) finishes.
 
 The writes, and the routes they use:
 
@@ -394,11 +398,14 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   Typed text may hold no ASCII control character other than a tab or a
   newline; a tell and a note, which reach a pane only inside a paste, a carriage
   return as well (a finished task's note is a note, and an agent's fresh
-  replacement is handed its newest notes); and a switch's `reason` is one line
-  with no control character at all. The pad sends Esc, Ctrl-C, Enter and its
-  other control keys by name (a carriage return typed is the Enter key itself).
+  replacement is handed its newest notes); a switch's `reason` is one line
+  with no control character at all; and whom a note is `to`, a role or a label
+  that `aisquare board` prints, holds only characters that print. The pad sends
+  Esc, Ctrl-C, Enter and its other control keys by name (a carriage return typed
+  is the Enter key itself).
 - **Caps**: 64 KiB per request, 2 048 characters per keystroke message, 8 000
-  per note or tell and 200 for whom a note is to, 4 live connections per device.
+  per note or tell and 200 for whom a note is to, 4 live connections per device,
+  64 writes per device waiting for the machine (`busy` past that).
   A device turns its notifications on or off at most 6 times a minute and sends
   one test every 10 seconds; a subscription sent again unchanged, or an
   unsubscribe with nothing to remove, writes no audit line.
@@ -465,10 +472,13 @@ curl -b jar -H "Origin: http://127.0.0.1:8750" -H "content-type: application/jso
   -d '{"agent": "coder-auth", "keys": ["Escape"], "request_id": "esc-1"}' "$BASE/api/send-keys"
 ```
 
-A write's `request_id` is optional. Sent again with the same request, it is
-answered with what the first one did instead of running twice; give every other
-write an id of its own, since for 15 minutes an id sent with another endpoint or
-body is refused with `request_id_reused`.
+A write's `request_id` is optional. Sent again with the same request within 15
+minutes, it is answered with what the first one did instead of running twice;
+give every other write an id of its own, since for those 15 minutes an id sent
+with another endpoint or body is refused with `request_id_reused`. The server
+keeps the answers of a device's 50 newest writes and the ids of its 1000 newest:
+a retry of an older one is refused with `already_answered`, which says how it
+ended, and does not run again.
 
 The code is `src/aisquare/services/remote_server.py` (the server and its gates)
 and `src/aisquare/services/remote_page.py` (the bundled page, whose files are in
@@ -493,10 +503,21 @@ one off, or use it. Two would share one link, one passphrase, one auto-off and
 one list of phones, and either going off would sign the other's phones out. One
 turned off while a phone's restart or switch was still running keeps the home
 until that is done, since its notifications go on until then; a restart or
-switch can take 40 seconds.
+switch can take 40 seconds. Switched on again in the same fleet UI meanwhile,
+the panel says the last Remote is still finishing, rather than start a second
+one beside it.
 
 **`serve` says the port is in use.** Something else took 8750. Pass `--port` and
 give ngrok (and `status`) the same port.
+
+**Unlocking, extending or revoking fails with `remote_state_unwritable`** (503;
+the page says the machine could not answer). `~/.aisquare/remote.json` would not
+write: the disk is full, or the home is not writable, and the log says which.
+Nothing was changed but a revoke, which holds on the running Remote and is saved
+once the file can be written while it stays on; its audit line ends in `unsaved`.
+Free some space or fix the permissions, then try again. `serve` reaching its
+auto-off on such a home says so too, and exits 1: the phones were not signed
+out, so run `aisquare remote revoke --all` once it can write.
 
 **ngrok says `--url` is an unknown flag.** That ngrok is too old for static
 domains; run `ngrok update`.

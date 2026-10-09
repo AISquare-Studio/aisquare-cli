@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import dataclasses
 import errno
 import functools
 import hashlib
@@ -175,6 +176,14 @@ PANE_CAPTURE_WORKERS = 4
 WRITE_WORKERS = 8
 """Threads in the pool every write handler runs on (:meth:`RemoteKit.kit_write_pool`): keys
 waiting out an action's lock, and the actions themselves, which take seconds."""
+WRITE_WAITING_PER_DEVICE = 64
+"""Writes one device may have waiting for a thread of the write pool; one more is 409
+``busy`` (:meth:`RemoteKit.kit_run_write`). A restart or a switch holds a thread
+for 20 to 40 s, and the pool's queue had no end: a device could bank writes behind them by
+the hundred, to run long after it sent them, ahead of every other device's (sweep 2 of
+#243). The page sends one agent's keys one at a time, and an action holds its agent's
+lock, so a phone never comes near this; a burst of taps at a busy agent's pad does not
+either (they are refused 409 ``busy`` within 2 s)."""
 HEARTBEAT_SECONDS = 10.0
 """How often a socket gets a ``heartbeat`` frame, changed or not, so the page can tell a quiet
 fleet from a dead link (the default of ``build_app(heartbeat=)``)."""
@@ -363,6 +372,16 @@ class NoRemotePage(RemoteError):
 
 class RemoteAlreadyOn(RemoteError):
     """Another process serves Remote from this home already (:func:`_claim_remote_home`)."""
+
+
+class RemoteWindingDown(RemoteError):
+    """The Remote this process turned off last still finishes a phone's write
+    (:func:`start_remote_server`)."""
+
+
+class RemoteOffIncomplete(RemoteError):
+    """``serve``'s auto-off turned Remote off, but could not do all of it: the devices still
+    signed in, or the deadline still in ``remote.json`` (:func:`run_foreground`)."""
 
 
 class RequestError(Exception):
@@ -738,6 +757,7 @@ _UNRESTRICTED = (
     "remote: could not restrict %s to your account — other users on this machine "
     "may be able to read %s"
 )
+_UNCOUNTED = "remote: a wrong passphrase was counted in memory only: %s could not be written (%s)"
 _BLANK_STATE = b" \t\r\n\x00"
 """All an empty ``remote.json`` holds: whitespace, or the NULs a crash leaves when the size
 reached the disk and the data did not (``core.state_file`` reads its file the same way)."""
@@ -826,6 +846,8 @@ class Runtime:
         self._unpublished: bytes | None = None
         """What the read-modify-write in hand decided to write (:meth:`_write_state`), until
         its outermost :meth:`_state_file_lock` publishes it."""
+        self._unpublished_undo: list[Callable[[], None]] = []
+        """How to put memory back should that write fail (:meth:`_write_state`'s ``undo``)."""
         self._disk: bytes | None = None
         """Digest of the file's bytes as this process last wrote or read them.
 
@@ -914,8 +936,15 @@ class Runtime:
                             yield
                     finally:
                         body, self._unpublished = self._unpublished, None
+                        undo, self._unpublished_undo = self._unpublished_undo, []
                         if body is not None:
-                            self._publish_state(pending, unmade, body)
+                            try:
+                                self._publish_state(pending, unmade, body)
+                            except BaseException:
+                                with self._lock:
+                                    for step in reversed(undo):
+                                        step()
+                                raise
                 finally:
                     self._file_lock_depth = 0
                     self._writer = None
@@ -1072,13 +1101,24 @@ class Runtime:
             self._write_state(state)
             return state
 
-    def _write_state(self, state: _State) -> None:
+    def _write_state(self, state: _State, *, undo: Callable[[], None] | None = None) -> None:
         """Have ``remote.json`` replaced with ``state`` when the outermost
         :meth:`_state_file_lock` ends; callers hold it. The last state handed over in
-        one read-modify-write is the one written, once."""
+        one read-modify-write is the one written, once.
+
+        ``undo`` puts memory back should that write fail, still under the locks, so no
+        flush writes what it took back. Only for a change that is worse in memory alone
+        than not made: an unlock's device, whose secret no browser was handed, which
+        the panel and every Devices screen listed as signed in, and the next flush saved
+        (sweep 2 of #243); or a later deadline the phone was told nothing of. A change
+        that is safe in memory alone (a revoke, writes off) keeps none: the gate goes by
+        it, written or not (review of #243, round 2).
+        """
         if not self._file_lock_depth:
             raise RuntimeError("remote.json is written only under _state_file_lock")
         self._unpublished = _encoded_state(state)
+        if undo is not None:
+            self._unpublished_undo.append(undo)
 
     def _publish_state(
         self, pending: Replacement | None, unmade: OSError | None, body: bytes
@@ -1105,7 +1145,7 @@ class Runtime:
             self._disk = self._state_digest(body)
             self._disk_moves += 1
         if not pending.restricted and not self._said_unrestricted:
-            self._said_unrestricted = True  # once: the flush rewrites the file every 30 s
+            self._said_unrestricted = True  # once: the flush may rewrite the file every 30 s
             log.warning(_UNRESTRICTED, self._state_path, "the password and the link token")
 
     def _save_state(self) -> None:
@@ -1223,8 +1263,9 @@ class Runtime:
             extended = max(
                 deadline, min(max(deadline, now) + AUTO_OFF_EXTEND, now + AUTO_OFF_CEILING)
             )
-            self._state.auto_off_at = _iso_seconds(extended)
-            self._write_state(self._state)
+            state, before = self._state, self._state.auto_off_at
+            state.auto_off_at = _iso_seconds(extended)
+            self._write_state(state, undo=lambda: setattr(state, "auto_off_at", before))
             return extended
 
     def regenerate_password(self, *, new_link: bool = False) -> str:
@@ -1291,8 +1332,13 @@ class Runtime:
                 last_seen=_iso_seconds(now),
                 expires_at=_iso_seconds(now + DEVICE_LIFETIME),
             )
-            self._state.devices.append(device)
-            self._write_state(self._state)
+            state = self._state
+            state.devices.append(device)
+
+            def unmade() -> None:
+                state.devices = [kept for kept in state.devices if kept is not device]
+
+            self._write_state(state, undo=unmade)
             return secret, device
 
     def device_for_cookie(self, secret: str | None) -> Device | None:
@@ -1341,29 +1387,44 @@ class Runtime:
             if device is None or device.device_expired(now):
                 return None
             secret = secrets.token_urlsafe(32)
+            was = dataclasses.replace(device)
+
+            def unmade() -> None:  # the browser keeps its old cookie, so the device does too
+                device.secret_sha256, device.last_seen = was.secret_sha256, was.last_seen
+                device.failed_unlocks, device.ua = was.failed_unlocks, was.ua
+
             device.secret_sha256 = _secret_digest(secret)
             device.last_seen = _iso_seconds(now)
             device.failed_unlocks = 0
             if ua:
                 device.ua = _audit_clean(ua, DEVICE_UA_MAX)
-            self._write_state(self._state)
+            self._write_state(self._state, undo=unmade)
             return secret, device
 
     def known_device_failed(self, device_id: str) -> bool:
         """Count a wrong passphrase sent with this device's cookie; ``True`` when that
         was the :data:`KNOWN_DEVICE_FAILURES_MAX`-th and the device is revoked: a stolen
-        cookie buys at most that many guesses outside the global budget."""
-        with self._state_file_lock():
-            self.reload_if_changed()
-            device = self._find_device(device_id)
-            if device is None:
-                return False
-            device.failed_unlocks += 1
-            revoked = device.failed_unlocks >= KNOWN_DEVICE_FAILURES_MAX
-            if revoked:
-                self._drop(device_id, WS_CLOSE_UNAUTHORIZED)
-            self._write_state(self._state)
-            return revoked
+        cookie buys at most that many guesses outside the global budget.
+
+        Counted in memory when ``remote.json`` will not write, and said in the log: a
+        wrong guess is still a wrong guess, where the write's error made it a bare 500
+        that read as the machine's fault (sweep 2 of #243).
+        """
+        revoked = False
+        try:
+            with self._state_file_lock():
+                self.reload_if_changed()
+                device = self._find_device(device_id)
+                if device is None:
+                    return False
+                device.failed_unlocks += 1
+                revoked = device.failed_unlocks >= KNOWN_DEVICE_FAILURES_MAX
+                if revoked:
+                    self._drop(device_id, WS_CLOSE_UNAUTHORIZED)
+                self._write_state(self._state)
+        except OSError as exc:
+            log.warning(_UNCOUNTED, self._state_path, exc)
+        return revoked
 
     def device_is_live(self, device_id: str) -> bool:
         """Whether a socket's device may keep it open: there, signed in, not expired.
@@ -1447,11 +1508,35 @@ class Runtime:
 
         Another process's change lands first: a flush that wrote memory over a
         fresher file would undo the very ``allow-write on`` this is about.
+
+        A flush with nothing new writes nothing. It wrote every time, every 30 s
+        while Remote was on with no phone even open: an owner-only temp (an
+        ``icacls`` run on Windows, ``_writing`` held through it), the same bytes,
+        two fsyncs and a rename (sweep 2 of #243). Nothing new is the file's own
+        bytes being what memory would write, and no device past its lifetime.
+        Compared with the file, not with what this process last wrote or read
+        (:attr:`_disk`): a version-1 file written under a running server is never
+        adopted, so that digest still matched memory, and the flush must write
+        version 2 back over it.
         """
+        if self._flush_needless(self._signature()):
+            return
         with self._state_file_lock():
             self.reload_if_changed()
             self.prune_expired_devices(_remote_now())
-            self._write_state(self._state)
+            if not self._flush_needless(self._signature()):
+                self._write_state(self._state)
+
+    def _flush_needless(self, on_disk: tuple[bytes, bytes] | None) -> bool:
+        """Whether the file's bytes (:meth:`_signature`) are what memory would write, with no
+        device left for a flush to prune."""
+        now = _remote_now()
+        with self._lock:
+            return (
+                on_disk is not None
+                and on_disk[1] == _encoded_state(self._state)
+                and not any(device.device_expired(now) for device in self._state.devices)
+            )
 
     def register_socket(self, device_id: str, close: Callable[[int], None]) -> None:
         with self._lock:
@@ -1534,11 +1619,15 @@ class UnlockBudget:
         """Count one wrong guess; ``True`` when it is the one that trips the budget."""
         runtime = self._runtime
         now = _remote_now()
-        with runtime._state_file_lock():
-            runtime.reload_if_changed()
-            recent = [*self._recent(now), now]
-            runtime._state.unlock_failures = [_iso_seconds(stamp) for stamp in recent]
-            runtime._write_state(runtime._state)
+        recent: list[datetime] = []
+        try:
+            with runtime._state_file_lock():
+                runtime.reload_if_changed()
+                recent = [*self._recent(now), now]
+                runtime._state.unlock_failures = [_iso_seconds(stamp) for stamp in recent]
+                runtime._write_state(runtime._state)
+        except OSError as exc:  # counted in memory all the same (Runtime.known_device_failed)
+            log.warning(_UNCOUNTED, runtime._state_path, exc)
         return len(recent) == UNLOCK_GLOBAL_FAILURES
 
     def clear_failed_unlocks(self) -> None:
@@ -1704,6 +1793,28 @@ def check_note_text(text: str, field: str) -> None:
             f"{field!r} holds the control character U+{ord(found.group()):04X} — a note may "
             "hold tabs and line breaks, and no other ASCII control character",
         )
+
+
+def check_note_to(to: str) -> None:
+    """A note's ``to`` as a phone may post it: a role or a label, every character one that
+    prints (400 ``invalid``).
+
+    The board keeps it with the event as it came, and ``team.event_line`` puts it on
+    the line ``asq board`` prints and every agent's team delta repeats: ``manager``
+    and an OSC 52 after it set the owner's clipboard from the terminal ``asq board``
+    ran in, past Rich, which strips only BEL, BS, VT, FF and CR. The note's text was
+    refused the same bytes (review of #243, round 4). A name has no use for a tab, a
+    line break, a C1 control or a bidi override, so none is kept, where a text keeps
+    its tabs and line breaks (:func:`check_note_text`).
+    """
+    for char in to:
+        if not char.isprintable():
+            raise RequestError(
+                400,
+                "invalid",
+                f"'to' holds U+{ord(char):04X}, which does not print — 'to' names a role or a "
+                "label",
+            )
 
 
 def check_project_add_root(raw: object) -> Path:
@@ -2399,6 +2510,28 @@ class _ExitKeyGuard:
             return True
 
 
+@contextlib.contextmanager
+def _remote_board_refusals() -> Iterator[None]:
+    """The board's refusals as ``asq`` gives them, as a write's: 409 ``team_disabled`` with
+    the orchestrator off (``AISQUARE_TEAM=0``), as the agent actions answer it too, 409
+    ``claim_lost`` for a task another session holds, and 400 ``ambiguous_id`` for a ref
+    that names two tasks or sessions. They fell to 400 ``write_failed``, "the write
+    failed", where nothing had, and to 404 ``not_found`` where two were found (sweep 2 of
+    #243)."""
+    from aisquare.core.store import AmbiguousIdError
+    from aisquare.services import team as team_service
+
+    try:
+        yield
+    except team_service.TeamDisabledError as exc:
+        raise RequestError(409, "team_disabled", str(exc)) from None
+    except team_service.ClaimLostError as exc:
+        raise RequestError(409, "claim_lost", str(exc)) from None
+    except AmbiguousIdError as exc:
+        said = f"{exc.ref!r} is ambiguous — use more characters"
+        raise RequestError(400, "ambiguous_id", said) from None
+
+
 def live_writes() -> Writes:
     """The write endpoints over the services the CLI commands call, then the agent actions."""
     from aisquare.services import remote_actions
@@ -2409,7 +2542,8 @@ def live_writes() -> Writes:
         from aisquare.services import team as team_service
 
         author = _optional_ref(body, "as")
-        task = team_service.claim_task(_required(body, "ref"), session_ref=author)
+        with _remote_board_refusals():
+            task = team_service.claim_task(_required(body, "ref"), session_ref=author)
         return {"task": task.model_dump(mode="json")}, f"claimed {task.id} as={author or '-'}"
 
     def task_done(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -2420,7 +2554,8 @@ def live_writes() -> Writes:
         note = _optional_ref(body, "note")
         if note is not None:
             check_note_text(note, "note")
-        task = team_service.finish_task(ref, note=note, session_ref=author)
+        with _remote_board_refusals():
+            task = team_service.finish_task(ref, note=note, session_ref=author)
         return {"task": task.model_dump(mode="json")}, f"done {task.id} as={author or '-'}"
 
     def write_note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -2436,7 +2571,8 @@ def live_writes() -> Writes:
         order, and ``to`` quoted: it is whatever the body says, and written before
         ``as=`` and bare, ``"to": "coder-1 as=manager"`` read as a note posted as
         the manager, and 300 characters of it cut the real ``as=`` off the line
-        (sweep of #243). ``as`` must name a session, or the note is refused.
+        (sweep of #243). ``to`` holds only characters that print
+        (:func:`check_note_to`). ``as`` must name a session, or the note is refused.
         """
         from aisquare.services import team as team_service
 
@@ -2448,14 +2584,17 @@ def live_writes() -> Writes:
             kinds = ", ".join(sorted(NOTE_KINDS))
             raise RequestError(400, "invalid", f"'kind' must be one of {kinds}")
         author, to = _optional_ref(body, "as"), _optional_ref(body, "to", limit=NOTE_TO_MAX)
-        event = team_service.add_note(
-            text,
-            session_ref=author,
-            task_ref=_optional_ref(body, "task"),
-            to_role=to,
-            kind=kind,
-            cwd=None if project is None else _resolve_project(project).root,
-        )
+        if to is not None:
+            check_note_to(to)
+        with _remote_board_refusals():
+            event = team_service.add_note(
+                text,
+                session_ref=author,
+                task_ref=_optional_ref(body, "task"),
+                to_role=to,
+                kind=kind,
+                cwd=None if project is None else _resolve_project(project).root,
+            )
         addressed = "-" if to is None else json.dumps(to)
         summary = f"{event.kind} seq={event.seq} as={author or '-'} to={addressed}"
         return {"event": event.as_envelope().model_dump(mode="json")}, summary
@@ -2496,6 +2635,9 @@ def live_writes() -> Writes:
         return payload, f"added {project.id} {root}"
 
     def project_remove(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        """Forget a registration, as ``project forget`` does, refusals and their codes
+        included: one with live fleet agents is 409 ``project_busy``, where it fell to
+        400 ``write_failed`` as if the write had failed (sweep 2 of #243)."""
         from aisquare.services import project as project_service
 
         ref = _required(body, "ref")
@@ -2505,6 +2647,8 @@ def live_writes() -> Writes:
             raise RequestError(404, "not_found", f"no project matches {ref!r}") from None
         except ValueError as exc:
             raise RequestError(400, "ambiguous_project", str(exc)) from None
+        except project_service.ProjectBusyError as exc:
+            raise RequestError(409, "project_busy", str(exc)) from None
         return {"report": _as_json(report)}, f"removed {ref}"
 
     def write_send_keys(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -2604,32 +2748,43 @@ def _as_json(value: object) -> object:
 
 
 class _RateLimiter:
-    """``UNLOCK_LIMIT`` attempts per ``UNLOCK_WINDOW_SECONDS`` per client, then 429.
+    """At most ``limit`` calls per ``window`` seconds per key, then a wait: the one sliding
+    window every throttle of the server counts with, one instance per rule.
 
-    The client is uvicorn's resolved peer (:func:`_client_of`), never a header the
-    sender writes. A client whose window has emptied is forgotten on the next
-    attempt by anyone, so the table holds the addresses of the last minute and no
-    more: keyed on a header, a fresh invented address per request grew it forever.
+    Unlock attempts per client (:data:`UNLOCK_LIMIT` per :data:`UNLOCK_WINDOW_SECONDS`),
+    the client being uvicorn's resolved peer (:func:`_client_of`), never a header the
+    sender writes; and the push routes' calls per device (``remote_push.push_routes``),
+    which kept a copy of this that a fix to one would have missed (review of #243,
+    round 4). A key whose window has emptied is forgotten on the next call by anyone,
+    so the table holds the keys of the last window and no more: keyed on a header, a
+    fresh invented address per request grew it forever. Called on the event loop alone,
+    with no ``await`` between a route's check and its count, so it takes no lock.
     """
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._attempts: dict[str, deque[float]] = {}
 
-    def limiter_retry_after(self, client: str) -> float | None:
-        """Count an attempt by ``client``: ``None`` when it may go ahead, else the seconds
-        until it may (and nothing is counted)."""
+    def limiter_retry_after(self, key: str, limit: int, window: float) -> float | None:
+        """Count a call by ``key``: ``None`` when it may go ahead, else the seconds until
+        it may (and nothing is counted)."""
         now = self._clock()
-        for known, window in list(self._attempts.items()):
-            while window and now - window[0] >= UNLOCK_WINDOW_SECONDS:
-                window.popleft()
-            if not window:
+        for known, held in list(self._attempts.items()):
+            while held and now - held[0] >= window:
+                held.popleft()
+            if not held:
                 del self._attempts[known]
-        window = self._attempts.setdefault(client, deque())
-        if len(window) >= UNLOCK_LIMIT:
-            return UNLOCK_WINDOW_SECONDS - (now - window[0])
-        window.append(now)
+        held = self._attempts.setdefault(key, deque())
+        if len(held) >= limit:
+            return window - (now - held[0])
+        held.append(now)
         return None
+
+    def limiter_wait_seconds(self, key: str, limit: int, window: float) -> int | None:
+        """:meth:`limiter_retry_after` as a ``Retry-After`` says it: whole seconds, rounded up,
+        never 0."""
+        retry = self.limiter_retry_after(key, limit, window)
+        return None if retry is None else max(1, math.ceil(retry))
 
 
 @dataclass(frozen=True, eq=False)
@@ -2953,6 +3108,20 @@ WRONG_PASSWORD = "that is not the passphrase"
 """401 ``wrong_password``."""
 NOT_TEXT = "the body holds a lone surrogate (an unpaired \\ud800-\\udfff escape), which is not text"
 """400 ``invalid`` for a body string no UTF-8 can hold (:meth:`RemoteKit.kit_json_object`)."""
+STATE_UNWRITABLE = (
+    "the machine could not save that: its ~/.aisquare/remote.json would not write (a full disk, "
+    "or a home it may not write) — nothing was changed; fix that on the machine, then try again"
+)
+"""503 ``remote_state_unwritable``, as ``asq remote``'s own commands say it, but without the
+path or the error, which a phone that has not unlocked yet may read: the log has both."""
+REVOKE_UNSAVED = (
+    "revoked on the running Remote, but the machine's ~/.aisquare/remote.json would not write "
+    "(a full disk, or a home it may not write): this Remote saves it once that is fixed on "
+    "the machine, and a Remote turned on again before then would take the device back"
+)
+"""503 ``remote_state_unwritable`` for a revoke: it holds in memory, where the gate reads it, and
+the next flush that can write saves it (:meth:`Runtime.flush_last_seen` writes memory whenever
+it differs from the file)."""
 CRASHED = "the machine hit an error answering that"
 """500 ``internal_error``: what the ledger answers a retry of a request that crashed, in the
 words the page uses for a crash."""
@@ -3216,6 +3385,12 @@ REQUEST_ID_REUSED = (
     "its own, and send one again only with the request it was first sent with"
 )
 """409 ``request_id_reused``: an id the ledger holds, with another endpoint or body."""
+ALREADY_ANSWERED = (
+    "request_id {request_id} was answered {status} already, and that answer is no longer "
+    "kept — it is not run again; send it with a new request_id to run it again"
+)
+"""409 ``already_answered``: a retry of a request that ran, whose answer went to make room for
+the device's newer ones (``remote_actions.ACTION_LEDGER_SIZE``)."""
 
 
 def _new_action_ledger() -> ActionLedger:
@@ -3284,6 +3459,8 @@ class RemoteKit:
     """Each device's live sockets, oldest first, as closers that take a close code."""
     lane_state: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _write_waiting: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    """Per device id, its writes waiting for a thread of the write pool (:meth:`kit_run_write`)."""
 
     def kit_device(self, request: HTTPConnection) -> Device:
         """The device gate 4 found for this request; the cookie is never looked up twice."""
@@ -3355,6 +3532,33 @@ class RemoteKit:
         """Whether writes are on right now (``remote.json``, re-read when it changes)."""
         return self.runtime.allow_write
 
+    def kit_write_still_allowed(self, device: Device) -> None:
+        """Refuse a write that waited while what let it in changed: 404 ``not_found`` once
+        auto-off passed, 401 ``unauthorized`` once its device is gone or signed out, 403
+        ``read_only`` once writes are off. Called in the thread that runs the write, right
+        before it does.
+
+        The gates read all three when the request arrived, and a write then waited for a
+        thread of the write pool, behind restarts that hold one for 20 to 40 s: one sent
+        just before ``allow-write off``, a revoke, auto-off or Remote off (which revokes
+        every device) still ran once a thread came free, the audit naming a device revoked
+        minutes before (sweep 2 of #243). So ``remote.json`` is read afresh here, whatever
+        the request's own check (:meth:`Runtime.remote_state_checked`) found back then. A
+        write that has started is left to finish.
+        """
+        runtime = self.runtime
+        checked = _STATE_CHECKED.set(None)
+        try:
+            with runtime.remote_state_checked():
+                if runtime.auto_off_passed(_remote_now()):
+                    raise RequestError(404, "not_found", LINK_GONE)
+                if not runtime.device_is_live(device.id):
+                    raise RequestError(401, "unauthorized", NOT_UNLOCKED)
+                if not runtime.allow_write:
+                    raise RequestError(403, "read_only", READ_ONLY_REASON)
+        finally:
+            _STATE_CHECKED.reset(checked)
+
     def kit_public_url(self) -> str | None:
         """``https://<host>/r/<token>/`` for a push link, or ``None`` when no origin is known.
 
@@ -3401,16 +3605,53 @@ class RemoteKit:
             return self.write_pool
 
     async def kit_run_write(
-        self, handler: WriteHandler, body: dict[str, Any], arrived: float
+        self, handler: WriteHandler, body: dict[str, Any], arrived: float, device: Device
     ) -> tuple[dict[str, object], str]:
-        """``handler(body)`` on the write pool, told when its request reached the server
-        (``arrived``, ``time.monotonic``), and in this request's context otherwise."""
+        """``handler(body)`` on the write pool for ``device``, told when its request reached
+        the server (``arrived``, ``time.monotonic``), and in this request's context otherwise.
+
+        The thread asks the gates again first (:meth:`kit_write_still_allowed`), since the
+        write may have waited for it. A device may have :data:`WRITE_WAITING_PER_DEVICE`
+        writes waiting at once, and one more is 409 ``busy``: the machine is still busy with
+        what that device sent, and no wait it could name in a ``Retry-After`` is known.
+        """
         import asyncio
 
-        context = contextvars.copy_context()
-        context.run(_WRITE_ARRIVED.set, arrived)
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self.kit_write_pool(), context.run, handler, body)
+        waiting = [device.id]
+        """Counted among the device's writes waiting for a thread, until it is not."""
+
+        def stop_waiting() -> None:
+            with self._lock:
+                if waiting:
+                    waiting.clear()
+                    left = self._write_waiting.get(device.id, 1) - 1
+                    if left > 0:
+                        self._write_waiting[device.id] = left
+                    else:
+                        self._write_waiting.pop(device.id, None)
+
+        def write_now() -> tuple[dict[str, object], str]:
+            stop_waiting()
+            self.kit_write_still_allowed(device)
+            return handler(body)
+
+        with self._lock:
+            queued = self._write_waiting.get(device.id, 0)
+            if queued >= WRITE_WAITING_PER_DEVICE:
+                raise RequestError(
+                    409,
+                    "busy",
+                    f"this device has {queued} writes waiting for the machine already — "
+                    "send this once they are done",
+                )
+            self._write_waiting[device.id] = queued + 1
+        try:
+            context = contextvars.copy_context()
+            context.run(_WRITE_ARRIVED.set, arrived)
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(self.kit_write_pool(), context.run, write_now)
+        finally:
+            stop_waiting()  # it never ran: cancelled, or its pool shut down first
 
     def kit_socket_opened(self, device_id: str, closer: Callable[[int], None]) -> None:
         """Count a device's new socket; past :data:`WS_SOCKETS_PER_DEVICE`, close its oldest."""
@@ -3455,7 +3696,9 @@ class RemoteKit:
         body the ledger cannot answer is a 403 whatever else is wrong with it. Past the
         gate, an id the ledger holds for another request is 409 ``request_id_reused``,
         not that request's answer: replayed, a stop sent with a send-keys' id was
-        answered 200 and never ran (sweep of #243).
+        answered 200 and never ran (sweep of #243). A retry of a request whose answer
+        the ledger no longer keeps, though it still knows the id, is 409
+        ``already_answered``, saying how it ended, and never runs again.
         """
         from starlette.responses import JSONResponse
 
@@ -3470,6 +3713,9 @@ class RemoteKit:
             return JSONResponse(exc.request_error_body(), status_code=exc.status)
         seen = None if request_id is None else self.ledger.ledger_seen(device.id, request_id, asked)
         if seen is not None and seen.same:
+            if seen.spent is not None:
+                answered = ALREADY_ANSWERED.format(request_id=request_id, status=seen.spent)
+                return self.kit_refuse(409, "already_answered", answered)
             if seen.answer is None:
                 return self.kit_refuse(409, "in_progress", IN_PROGRESS)
             status, payload = seen.answer
@@ -3691,6 +3937,19 @@ def build_remote_app(
     """Unlocks are decided one at a time: the budget's check and its record are then one
     step, so guesses that arrive together cannot all get past a budget with one left."""
 
+    def audited(device_id: str, endpoint: str, summary: str) -> None:
+        """An audit line for what has happened already, best effort, the log told when it
+        would not write: an unlock's audit log that would not write answered a bare 500
+        with no cookie, the device on disk and signed in, a phantom on every Devices
+        screen (sweep 2 of #243). A revoke that took effect but could not be saved is
+        recorded here too, before its 503 says so."""
+        try:
+            runtime.audit(device_id, endpoint, summary)
+        except OSError as exc:
+            log.warning(
+                "remote: a %s audit line could not be written (%s): %s", endpoint, exc, summary
+            )
+
     def unlock_decision(
         password: str, ua: str, cookie: str | None, direct: bool
     ) -> tuple[str, Device, bool] | datetime | None:
@@ -3728,12 +3987,12 @@ def build_remote_app(
                         f"{KNOWN_DEVICE_FAILURES_MAX} wrong passwords sent with its cookie"
                     )
                     log.warning("remote: %s", revoked)
-                    runtime.audit(known.id, "unlock", revoked)
+                    audited(known.id, "unlock", revoked)
                 return None
             secret, device = unlocked
             reactivated = known is not None and device.id == known.id
             summary = f"device {device.id} " + ("reactivated" if reactivated else f"ua={ua[:60]}")
-            runtime.audit(device.id, "unlock", summary)
+            audited(device.id, "unlock", summary)
             return secret, device, reactivated
 
     async def unlock_endpoint(request: Request) -> Response:
@@ -3747,13 +4006,15 @@ def build_remote_app(
         never does). A right one reactivates the known device under its old id, or
         makes a new one. Everything after the body is :func:`unlock_decision`'s.
         """
-        retry = limiter.limiter_retry_after(_client_of(request.scope))
+        retry = limiter.limiter_wait_seconds(
+            _client_of(request.scope), UNLOCK_LIMIT, UNLOCK_WINDOW_SECONDS
+        )
         if retry is not None:
             return kit.kit_refuse(
                 429,
                 "too_many_attempts",
                 f"{UNLOCK_LIMIT} attempts a minute — wait",
-                headers={"Retry-After": str(max(1, math.ceil(retry)))},
+                headers={"Retry-After": str(retry)},
             )
         try:
             body = await kit.kit_json_object(request)
@@ -3762,13 +4023,17 @@ def build_remote_app(
         password = body.get("password")
         if not isinstance(password, str):
             return _json_error(400, "invalid", 'send {"password": "..."}')
-        decided = await asyncio.to_thread(
-            unlock_decision,
-            password,
-            request.headers.get("user-agent", ""),
-            request.cookies.get(COOKIE),
-            is_direct_loopback(request.scope),
-        )
+        try:
+            decided = await asyncio.to_thread(
+                unlock_decision,
+                password,
+                request.headers.get("user-agent", ""),
+                request.cookies.get(COOKIE),
+                is_direct_loopback(request.scope),
+            )
+        except OSError as exc:  # its device was taken back (Runtime._write_state's undo)
+            log.warning("remote: an unlock could not be saved: %s", exc)
+            return kit.kit_refuse(503, "remote_state_unwritable", STATE_UNWRITABLE)
         if isinstance(decided, datetime):
             wait = max(1, math.ceil((decided - _remote_now()).total_seconds()))
             return kit.kit_refuse(429, "locked_out", LOCKED_OUT, headers={"Retry-After": str(wait)})
@@ -3806,8 +4071,19 @@ def build_remote_app(
         Never more than :data:`AUTO_OFF_CEILING` ahead; a Remote with no deadline
         (Never) has nothing to extend, 409 ``no_auto_off``. The TUI adopts the later
         deadline (``RemoteController.enforce_auto_off``) and ``serve``'s timer re-arms.
+        The thread that extends asks the gates again first
+        (:meth:`RemoteKit.kit_write_still_allowed`): it may have waited for the pool.
         """
-        extended = await asyncio.to_thread(runtime.extend_auto_off, _remote_now())
+
+        def extend_now() -> datetime | None:
+            kit.kit_write_still_allowed(device)
+            return runtime.extend_auto_off(_remote_now())
+
+        try:
+            extended = await asyncio.to_thread(extend_now)
+        except OSError as exc:  # the deadline was put back (Runtime._write_state's undo)
+            log.warning("remote: an extend could not be saved: %s", exc)
+            return kit.kit_refuse(503, "remote_state_unwritable", STATE_UNWRITABLE)
         if extended is None:
             return kit.kit_refuse(409, "no_auto_off", "Remote has no auto-off deadline to extend")
         stamp = _iso_seconds(extended)
@@ -3829,7 +4105,9 @@ def build_remote_app(
         the write switch says. Another id is a change to who can reach the fleet,
         so a read-only phone cannot sign every other phone out, the owner's
         included. An id that is not a device's shape, or no device's, is a 404.
-        The revoke writes ``remote.json`` in a worker thread, as an unlock does.
+        The revoke writes ``remote.json`` in a worker thread, as an unlock does, and
+        that thread asks the gates again first for another device's
+        (:meth:`RemoteKit.kit_write_still_allowed`): it may have waited for the pool.
         """
         device = kit.kit_device(request)
         device_id = request.path_params["device_id"]
@@ -3838,7 +4116,22 @@ def build_remote_app(
             return kit.kit_refuse(404, "not_found", "no such device")
         if not own and not kit.kit_write_allowed():
             return kit.kit_refuse(403, "read_only", READ_ONLY_REASON)
-        if not await asyncio.to_thread(runtime.revoke_device, device_id):
+
+        def revoke_now() -> bool:
+            if not own:
+                kit.kit_write_still_allowed(device)
+            return runtime.revoke_device(device_id)
+
+        try:
+            revoked = await asyncio.to_thread(revoke_now)
+        except RequestError as exc:
+            return JSONResponse(exc.request_error_body(), status_code=exc.status)
+        except OSError as exc:  # it holds in memory, where the gate reads it: recorded
+            log.warning("remote: a revoke could not be saved: %s", exc)
+            target = "self" if own else device_id
+            await asyncio.to_thread(audited, device.id, "devices/revoke", f"{target} unsaved")
+            return kit.kit_refuse(503, "remote_state_unwritable", REVOKE_UNSAVED)
+        if not revoked:
             return kit.kit_refuse(404, "not_found", "no such device")
         await asyncio.to_thread(
             kit.kit_audit, device, "devices/revoke", "self" if own else device_id
@@ -3925,7 +4218,7 @@ def build_remote_app(
         async def dispatched(body: dict[str, Any]) -> Response:
             nonlocal summary
             try:
-                result, summary = await kit.kit_run_write(handler, body, arrived)
+                result, summary = await kit.kit_run_write(handler, body, arrived, device)
                 status, payload = 200, result
             except RequestError as exc:
                 status, payload = exc.status, exc.request_error_body()
@@ -4592,8 +4885,9 @@ class _Server:
 
 _winding_down: list[_Server] = []
 """Servers :func:`stop_remote_server` stopped that were still finishing what was asked of them,
-for :func:`remote_wait_for_writes` to see out, and for the home's claim to outlast
-(:func:`_release_remote_home`)."""
+from the moment they were told to stop: for :func:`remote_wait_for_writes` to see out, for the
+home's claim to outlast (:func:`_release_remote_home`), and for no new server of this process
+to start beside (:func:`start_remote_server`)."""
 
 REMOTE_WINDING_DOWN_SECONDS = 5.0
 """How long :func:`remote_wait_for_writes` gives a stopped server once its writes are done: the
@@ -4782,6 +5076,10 @@ REMOTE_ALREADY_ON = (
     "serve` in another shell) — turn it off first: two would share one link, one passphrase, "
     "one auto-off and one list of phones"
 )
+REMOTE_WINDING_DOWN = (
+    "the Remote turned off last is still finishing a phone's restart or switch, which can "
+    "take 40 s; turn it on again once that is done"
+)
 
 
 def _claim_remote_home(state: Runtime) -> bool:
@@ -4921,7 +5219,12 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
     """Serve in the background; idempotent while running. ``allow_write`` is left as persisted.
 
     :class:`RemoteAlreadyOn` while another process serves Remote from this home
-    (:func:`_claim_remote_home`): a ``serve``, or another fleet UI's panel.
+    (:func:`_claim_remote_home`): a ``serve``, or another fleet UI's panel. And
+    :class:`RemoteWindingDown` while the server this process stopped last still
+    finishes a phone's write (:data:`_winding_down`): its needs watcher and push sender
+    run until then, and a second server beside them, the home already this process's,
+    pushed every new item to the phone twice, each sender with its own record of what
+    it had pushed (sweep 2 of #243).
     """
     global _server
     problem = _remote_dependency_error()
@@ -4936,6 +5239,8 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
         with _lock:
             if _server is not None and _server.running:
                 return state.connection_info(_server.port)
+            if any(stopped.winding_down for stopped in _winding_down):
+                raise RemoteWindingDown(REMOTE_WINDING_DOWN)
             claimed = _claim_remote_home(state)
             app = build_remote_app(state, dist_dir=dist_dir)
             server = _Server(app, port)
@@ -4963,13 +5268,18 @@ def stop_remote_server() -> None:
     with _lock:
         server, _server = _server, None
         flusher, _flusher = _flusher, None
+        if server is not None:
+            # Told to stop, and among the servers winding down, before the lock goes: a
+            # start meanwhile sees it (start_remote_server), as does a stop of an earlier
+            # server ending on another thread (_release_remote_home).
+            server.stop_serving(0)
+            _winding_down.append(server)
     if flusher is not None:
         flusher.cancel()
     if server is not None:
         server.stop_serving()
         with _lock:
-            kept = [*_winding_down, server]
-            _winding_down[:] = [stopped for stopped in kept if stopped.winding_down]
+            _winding_down[:] = [stopped for stopped in _winding_down if stopped.winding_down]
             parked = server in _winding_down
         if parked:  # the home stays claimed until it is done (_release_remote_home)
             threading.Thread(
@@ -4981,7 +5291,9 @@ def stop_remote_server() -> None:
     if _runtime is not None:
         try:
             _runtime.flush_last_seen()
-        except Exception:  # the server is already down; only last_seen is lost
+        except OSError as exc:  # the server is already down; only last_seen is lost
+            log.warning("remote: flushing remote.json as the server stopped failed: %s", exc)
+        except Exception:
             log.warning("remote: flushing remote.json as the server stopped failed", exc_info=True)
     _release_remote_home()
 
@@ -5116,7 +5428,7 @@ class _AutoOffTimer:
     def __init__(
         self,
         state: Runtime,
-        turn_off: Callable[[], None],
+        turn_off: Callable[[], str | None],
         *,
         timer: Callable[[float, Callable[[], None]], Any] = threading.Timer,
     ) -> None:
@@ -5127,6 +5439,11 @@ class _AutoOffTimer:
         self._lock = threading.Lock()
         self.fired = False
         """Whether the deadline passed and Remote was turned off."""
+        self.failure: str | None = None
+        """What turning off could not do, as ``turn_off`` said it, for the way out to say
+        (:meth:`auto_off_outcome`)."""
+        self._settled = threading.Event()
+        """Set once ``turn_off`` has returned and :attr:`failure` holds what it said."""
 
     def auto_off_arm(self) -> None:
         """Wait toward the deadline ``remote.json`` holds now; none at all is never."""
@@ -5149,7 +5466,24 @@ class _AutoOffTimer:
             self.auto_off_arm()  # not yet, or extended from a phone meanwhile
             return
         self.fired = True
-        self._turn_off()
+        try:
+            self.failure = self._turn_off()
+        finally:
+            self._settled.set()
+
+    def auto_off_outcome(self) -> str | None:
+        """What turning off could not do, once it is done; ``None`` when it did all of it,
+        or never fired.
+
+        Waits for the timer's thread when it fired: ``turn_off`` tells the server to stop
+        before it returns what it could not do, and the way out, read as soon as the
+        server stopped, found no failure yet when that thread had not run on, and ``serve``
+        said "Remote turned off" and exited 0 with the phones still signed in (review of
+        #243, round 4).
+        """
+        if self.fired:
+            self._settled.wait()
+        return self.failure
 
     def auto_off_cancel(self) -> None:
         with self._lock:
@@ -5158,20 +5492,41 @@ class _AutoOffTimer:
                 self._timer = None
 
 
-def _remote_serve_off(state: Runtime, server: Any) -> None:
+def _remote_serve_off(state: Runtime, server: Any) -> str | None:
     """``serve``'s auto-off firing: the farewell, every device revoked (4410), the deadline
     cleared, and the server told to stop, even when ``remote.json`` cannot be written.
+    What could not be done comes back as a sentence, for the way out to say
+    (:func:`run_foreground`); ``None`` when all of it was.
+
+    It raised instead, on the timer's thread: a traceback, the deadline left in place
+    since its clearing never ran, and then "Remote turned off" and exit 0, under
+    ``--json`` too, while the phones kept cookies the next Remote accepted (sweep 2 of
+    #243). The deadline is cleared on its own try, as the R panel does.
 
     Its way out waits for a phone's write still running, and says so: told to stop
     already, the server takes the next Ctrl-C as the second, which quits at once
     (:func:`_remote_serve_server`).
     """
+    failure: str | None = None
     try:
-        revoke_every_remote_device("auto-off")
-        state.set_auto_off(None)
+        try:
+            revoke_every_remote_device("auto-off")
+        except Exception as exc:
+            log.warning("remote: auto-off could not revoke the devices: %s", exc)
+            failure = (
+                f"its devices could not be revoked ({exc}), so their cookies would open the "
+                "next Remote: run `aisquare remote revoke --all` once ~/.aisquare/remote.json "
+                "can be written"
+            )
+        try:
+            state.set_auto_off(None)
+        except Exception as exc:
+            log.warning("remote: auto-off could not clear its deadline: %s", exc)
+            failure = failure or f"its deadline is still in ~/.aisquare/remote.json ({exc})"
     finally:
         server.should_exit = True
         _remote_writes_announced("Ctrl-C")
+    return failure
 
 
 class RemoteBindError(RemoteError):
@@ -5220,7 +5575,9 @@ def run_foreground(
 ) -> bool:
     """``asq remote serve``: serve in this thread until Ctrl-C or auto-off.
 
-    ``True`` when auto-off ended it. In order: this home is claimed
+    ``True`` when auto-off ended it, and :class:`RemoteOffIncomplete` once the server
+    is down when auto-off could not revoke the devices or clear the deadline
+    (:func:`_remote_serve_off`). In order: this home is claimed
     (:class:`RemoteAlreadyOn` while another process serves Remote from it,
     :func:`_claim_remote_home`) and the port bound (:class:`RemoteBindError` when
     another process holds it), both before ``ready`` prints anything; the deadline is
@@ -5280,8 +5637,15 @@ def run_foreground(
                 if minutes and not timer.fired:
                     state.set_auto_off(None)  # no server, no deadline: nothing stays on to end
                 state.flush_last_seen()
-            except Exception:  # the way out reports what ended the server, not this
+            except OSError as exc:  # the way out reports what ended the server, not this
+                log.warning("remote: writing remote.json on the way out failed: %s", exc)
+            except Exception:
                 log.warning("remote: writing remote.json on the way out failed", exc_info=True)
+        failure = timer.auto_off_outcome()
+        if failure is not None:
+            raise RemoteOffIncomplete(
+                f"Remote turned off — the auto-off timer ran out, but {failure}"
+            )
         return timer.fired
     finally:
         sock.close()
@@ -5309,7 +5673,9 @@ __all__ = [
     "RemoteBindError",
     "RemoteError",
     "RemoteInfo",
+    "RemoteOffIncomplete",
     "RemoteUnavailable",
+    "RemoteWindingDown",
     "RequestError",
     "Runtime",
     "Sources",

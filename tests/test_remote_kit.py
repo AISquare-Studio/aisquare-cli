@@ -720,6 +720,139 @@ def test_a_write_cancelled_while_it_runs_never_leaves_its_request_id_running(
     assert (retry.status_code, retry.json()) == (500, crashed)
 
 
+class _HeldPool:
+    """An app whose one write thread a restart holds until the test lets it go, and a way to
+    know when a later write has reached the pool and waits there for that thread."""
+
+    def __init__(self, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(remote_server, "WRITE_WORKERS", 1)
+        self.holding, self.release = threading.Event(), threading.Event()
+        self.ran: list[str] = []
+        self.queued: list[str] = []
+
+        def restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+            self.holding.set()
+            assert self.release.wait(10), "the test never let the restart end"
+            return {"restarted": True}, "restart coder-1"
+
+        def note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+            self.ran.append(str(body["text"]))
+            return {"event": len(self.ran)}, f"note seq={len(self.ran)}"
+
+        writes = Writes({"agent/restart": restart, "note": note})
+        self.app = build_app(runtime, sources=_sources(), writes=writes, dist_dir=tmp_path)
+        run_write = self.app.kit.kit_run_write
+
+        async def watched(handler: Any, body: dict[str, Any], *rest: Any) -> Any:
+            if "text" in body:
+                self.queued.append(str(body["text"]))
+            return await run_write(handler, body, *rest)
+
+        monkeypatch.setattr(self.app.kit, "kit_run_write", watched)
+        self.answers: dict[str, Any] = {}
+        self.threads: list[threading.Thread] = []
+
+    def held_post(self, client: Any, runtime: Runtime, name: str, body: dict[str, Any]) -> None:
+        """POST from a thread of its own; the answer lands in ``answers[name or text]``."""
+
+        def post() -> None:
+            key = str(body.get("text", name))
+            self.answers[key] = client.post(f"{base(runtime)}/api/{name}", json=body)
+
+        thread = threading.Thread(target=post)
+        self.threads.append(thread)
+        thread.start()
+
+    def wait_queued(self, count: int) -> None:
+        deadline = time.monotonic() + 5
+        while len(self.queued) < count:
+            assert time.monotonic() < deadline, "the write never reached the pool"
+            time.sleep(0.01)
+
+    def finish(self) -> None:
+        self.release.set()
+        for thread in self.threads:
+            thread.join(10)
+
+
+@pytest.mark.parametrize(
+    ("change", "status", "error"),
+    [
+        ("writes switched off", 403, "read_only"),
+        ("writes switched off in another shell", 403, "read_only"),
+        ("the device revoked", 401, "unauthorized"),
+        ("auto-off passed", 404, "not_found"),
+    ],
+)
+def test_a_write_waiting_for_a_thread_is_refused_once_what_let_it_in_has_changed(
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+    status: int,
+    error: str,
+) -> None:
+    """The gates were read once, when the request arrived, and the handler then waited in
+    the write pool's queue behind restarts that hold a thread for 20 to 40 s: a write sent
+    just before ``allow-write off``, a revoke, auto-off or Remote off still ran once a
+    thread came free, the audit naming a device revoked minutes before (sweep 2 of #243).
+    The restart that had started is left to finish."""
+    pool = _HeldPool(runtime, tmp_path, monkeypatch)
+    runtime.set_allow_write(True)
+    with make_client(pool.app) as client:
+        assert unlock(client, runtime).status_code == 200
+        device_id = _device_id(client, runtime)
+        try:
+            pool.held_post(client, runtime, "agent/restart", {"agent": "coder-1"})
+            assert pool.holding.wait(5)
+            pool.held_post(client, runtime, "note", {"text": "ship it", "request_id": "n1"})
+            pool.wait_queued(1)
+            if change == "writes switched off":
+                runtime.set_allow_write(False)
+            elif change == "writes switched off in another shell":
+                Runtime(runtime._state_path, runtime._audit_path).set_allow_write(False)
+            elif change == "the device revoked":
+                runtime.revoke_device(device_id)
+            else:
+                runtime.set_auto_off(remote_server._remote_now() - timedelta(seconds=1))
+        finally:
+            pool.finish()
+    note = pool.answers["ship it"]
+    assert (note.status_code, note.json()["error"]) == (status, error), note.text
+    assert pool.ran == [], "the waiting write never ran"
+    assert pool.answers["agent/restart"].status_code == 200, "the running one finished"
+    assert _audited("note") == 0
+
+
+def test_the_writes_a_device_may_have_waiting_for_a_thread_are_bounded(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write pool's queue had no end: a device could bank writes behind restarts by the
+    hundred, to run long after it sent them, ahead of every other device's (sweep 2 of
+    #243). Past the bound its next write is refused at once; another device has its own."""
+    monkeypatch.setattr(remote_server, "WRITE_WAITING_PER_DEVICE", 2)
+    pool = _HeldPool(runtime, tmp_path, monkeypatch)
+    runtime.set_allow_write(True)
+    with make_client(pool.app) as client, make_client(pool.app) as other:
+        assert unlock(client, runtime).status_code == 200
+        assert unlock(other, runtime).status_code == 200
+        try:
+            pool.held_post(client, runtime, "agent/restart", {"agent": "coder-1"})
+            assert pool.holding.wait(5)
+            for n in (1, 2):
+                pool.held_post(client, runtime, "note", {"text": f"queued {n}"})
+                pool.wait_queued(n)
+            refused = client.post(f"{base(runtime)}/api/note", json={"text": "one too many"})
+            pool.held_post(other, runtime, "note", {"text": "another device's"})
+            pool.wait_queued(4)
+        finally:
+            pool.finish()
+    assert (refused.status_code, refused.json()["error"]) == (409, "busy")
+    assert "2 writes waiting" in refused.json()["message"]
+    assert sorted(pool.ran) == ["another device's", "queued 1", "queued 2"]
+    assert pool.app.kit._write_waiting == {}, "nothing is left counted"
+
+
 def test_the_dispatcher_answers_a_refused_body_with_every_key_as_a_lane_route_does(
     runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

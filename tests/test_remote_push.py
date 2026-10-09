@@ -45,7 +45,7 @@ from starlette.testclient import TestClient
 
 from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.core.paths import remote_audit_path, remote_push_path
-from aisquare.services import remote_push
+from aisquare.services import remote_push, remote_server
 from aisquare.services.ngrok_tunnel import (
     TOO_OLD_HINT,
     NgrokTunnel,
@@ -1578,16 +1578,33 @@ def test_the_push_routes_write_their_audit_lines_off_the_event_loop(
 
 def test_the_pace_counts_within_its_window_and_forgets_a_device_once_it_is_quiet() -> None:
     clock = [0.0]
-    pace = remote_push._PushPace(lambda: clock[0])
-    assert [pace.push_pace_wait("dev_a", 2, 60.0) for _ in range(3)] == [None, None, 60]
+    pace = remote_server._RateLimiter(lambda: clock[0])
+    assert [pace.limiter_wait_seconds("dev_a", 2, 60.0) for _ in range(3)] == [None, None, 60]
     clock[0] = 59.5
-    assert pace.push_pace_wait("dev_a", 2, 60.0) == 1, "the first call ages out in half a second"
-    assert pace.push_pace_wait("dev_b", 2, 60.0) is None, "every device has its own"
+    assert pace.limiter_wait_seconds("dev_a", 2, 60.0) == 1, "the first call ages out in 0.5 s"
+    assert pace.limiter_wait_seconds("dev_b", 2, 60.0) is None, "every device has its own"
     clock[0] = 60.0
-    assert pace.push_pace_wait("dev_a", 2, 60.0) is None
+    assert pace.limiter_wait_seconds("dev_a", 2, 60.0) is None
     clock[0] = 200.0
-    assert pace.push_pace_wait("dev_c", 2, 60.0) is None
-    assert list(pace._calls) == ["dev_c"], "the quiet devices are forgotten"
+    assert pace.limiter_wait_seconds("dev_c", 2, 60.0) is None
+    assert list(pace._attempts) == ["dev_c"], "the quiet devices are forgotten"
+
+
+def test_the_push_routes_pace_with_the_servers_one_rate_limiter(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The push routes paced their calls with a copy of the unlock limiter: the same sliding
+    window in two places, where a fix to one missed the other (review of #243, round 4)."""
+    made: list[object] = []
+
+    class Counted(remote_server._RateLimiter):
+        def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+            super().__init__(clock)
+            made.append(self)
+
+    monkeypatch.setattr(remote_server, "_RateLimiter", Counted)
+    remote_push.push_routes(RemoteKit(runtime))
+    assert len(made) == 2, "the test push's pace, and the subscriptions' pace"
 
 
 def test_a_test_push_goes_to_this_device_only_once_in_ten_seconds(

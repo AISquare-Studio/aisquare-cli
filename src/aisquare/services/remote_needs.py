@@ -2462,7 +2462,7 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
     from starlette.responses import JSONResponse
 
     from aisquare.services import fleet as fleet_service
-    from aisquare.services.remote_server import _audit_keys, remote_agent_lock
+    from aisquare.services.remote_server import RequestError, _audit_keys, remote_agent_lock
 
     async def needs_list_endpoint(
         request: Request, device: Device, body: dict[str, Any]
@@ -2499,6 +2499,9 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
         The item comes from the latest scan; the agent is re-derived right
         before typing, under the agent's action lock, and a card that is no
         longer current is a 409 ``stale`` that carries what is current instead.
+        The thread that types asks the gates again first
+        (:meth:`RemoteKit.kit_write_still_allowed`): a scan, the agent's re-derivation
+        and the wait for a thread of the shared pool came between them and it.
         """
         item_id, keys, text, enter = _needs_answer_body(body)
         watcher = _needs_watcher(kit)
@@ -2536,8 +2539,16 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
                 f"answer {item.id} {item.kind} {label}@{project.id} keys={_audit_keys(keys)} "
                 f"text={len(text)}ch enter={enter}"
             )
+            agent = snap.status.agent
+
+            def answer_now() -> None:
+                kit.kit_write_still_allowed(device)
+                _needs_send(agent, keys, text, enter)
+
             try:
-                await asyncio.to_thread(_needs_send, snap.status.agent, keys, text, enter)
+                await asyncio.to_thread(answer_now)
+            except RequestError:
+                raise  # refused before anything was typed: answered as the gate answers
             except Exception as exc:
                 # Part of it may have reached the pane: the trail says it was tried.
                 await asyncio.to_thread(kit.kit_audit, device, "needs/answer", f"{summary} failed")

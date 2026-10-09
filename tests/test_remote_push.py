@@ -679,6 +679,50 @@ def test_no_answer_at_all_counts_as_a_failure_and_keeps_it(isolated_home: Path) 
     assert load_push_state().subscriptions["dev_a"].failures == 1
 
 
+@pytest.mark.parametrize(
+    ("statuses", "kept", "refusals"),
+    [
+        ((None, 503, 401), True, 1),
+        ((429, 429, 403), True, 1),
+        ((403, 403, None, 403), True, 1),
+        ((403, 503, 403, 403), True, 2),
+        ((403, 503, 403, 403, 403), False, None),
+        ((403, 413, 403, 403), True, 2),
+    ],
+)
+def test_only_refusals_in_a_row_drop_a_subscription(
+    isolated_home: Path, statuses: tuple[int | None, ...], kept: bool, refusals: int | None
+) -> None:
+    """A laptop that wakes with no network times out twice, and the service then refuses
+    once, around a clock correction: one refusal, not the third in a row. A timeout, a 429,
+    a 5xx or a 413 between refusals ends their row; each but the 413 still counts as a
+    failure."""
+    browser = Browser(f"{FCM}x")
+    push_subscribe_device("dev_a", browser.record(), {"dev_a"})
+    for status in statuses:
+        push_record_outcome("dev_a", browser.endpoint, status)
+    held = load_push_state().subscriptions.get("dev_a")
+    assert (held is not None) is kept
+    if held is not None:
+        assert held.refusals == refusals
+        assert held.failures == sum(status != 413 for status in statuses)
+
+
+def test_the_refusals_in_a_row_are_kept_in_the_file_and_a_success_ends_them(
+    isolated_home: Path,
+) -> None:
+    browser = Browser(f"{FCM}x")
+    push_subscribe_device("dev_a", browser.record(), {"dev_a"})
+    push_record_outcome("dev_a", browser.endpoint, 403)
+    push_record_outcome("dev_a", browser.endpoint, 403)
+    assert load_push_state().subscriptions["dev_a"].refusals == 2  # read back from the file
+    push_record_outcome("dev_a", browser.endpoint, 201)
+    push_record_outcome("dev_a", browser.endpoint, 403)
+    push_record_outcome("dev_a", browser.endpoint, 403)
+    held = load_push_state().subscriptions["dev_a"]
+    assert (held.failures, held.refusals) == (2, 2)
+
+
 def test_an_answer_about_a_replaced_endpoint_changes_nothing(isolated_home: Path) -> None:
     old, new = Browser(f"{FCM}old"), Browser(f"{FCM}new")
     push_subscribe_device("dev_a", new.record(), {"dev_a"})

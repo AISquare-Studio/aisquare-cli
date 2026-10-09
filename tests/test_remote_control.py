@@ -1044,6 +1044,76 @@ def test_only_a_line_that_names_our_config_with_an_error_says_ngrok_cannot_take_
     assert not blames(json.dumps([path]), OUR_CONFIG)
 
 
+def test_a_config_named_by_its_whole_path_is_found_in_a_json_line_that_escapes_it() -> None:
+    """The human's own config is looked for by its whole path, ``ngrok.yml`` being every
+    ngrok's name; in a JSON line that path is escaped, a Windows one's backslashes doubled
+    and an ``&`` written ``\\u0026`` as Go writes it, and was not found in the line as read."""
+    blames = ngrok_tunnel.says_trouble_with
+    for own in (
+        "C:\\Users\\u\\AppData\\Local\\ngrok\\ngrok.yml",
+        "/home/r&d/.config/ngrok/ngrok.yml",
+    ):
+        said = json.dumps({"lvl": "crit", "msg": "bad config", "path": own, "err": "denied"})
+        assert blames(said.replace("&", "\\u0026"), own)
+        assert blames(f"ERROR:  Error reading configuration file '{own}': denied", own)
+        assert not blames(json.dumps({"lvl": "info", "msg": "open config file", "path": own}), own)
+
+
+@pytest.mark.parametrize(
+    "in_json", [False, True], ids=["said in plain text", "said in its JSON log"]
+)
+def test_an_ngrok_that_cannot_read_the_humans_own_config_runs_as_before_as_a_snaps_does(
+    tmp_path: Path, in_json: bool
+) -> None:
+    """A snap's ngrok may read no hidden path in the home and keeps its own config under
+    ~/snap. Handed a ~/.config/ngrok/ngrok.yml it cannot read (from pyngrok, an ngrok before
+    the snap, synced dotfiles), it ended on that file, the line naming no config of ours, so
+    it was never run again, and Remote had no tunnel where, run with no config, it came up
+    (sweep of #243). A line naming either config with an error runs it as before."""
+    own = write_ngrok_config(tmp_path, 'version: "3"\nagent:\n  authtoken: tok_123\n')
+    refused = (
+        json.dumps(
+            {"lvl": "crit", "msg": "failed to read config", "path": str(own), "err": "EACCES"}
+        )
+        if in_json
+        else f"ERROR:  Error reading configuration file '{own}': open {own}: permission denied"
+    )
+    popen, runs = ngrok_binary(tmp_path, with_our_config=refused)
+    tunnel = panels_ngrok(8750, own, popen)
+    assert tunnel.start_tunnel() is None
+    try:
+        assert tunnel.wait_for_url(10) == OURS["url"]
+        first, second = runs
+        assert first[-1].startswith(f"--config={own},")
+        assert not any(arg.startswith("--config=") for arg in second)
+        assert tunnel.api_refused
+        assert tunnel.api_warning == API_ON.format(addr="127.0.0.1:4040")
+    finally:
+        tunnel.stop_tunnel()
+
+
+def test_an_ngrok_that_cannot_sign_in_with_ours_over_a_version_3_config_runs_as_before(
+    tmp_path: Path,
+) -> None:
+    """A version-3 config keeps its authtoken under ``agent:``, where ours puts ``web_addr``:
+    should ngrok merge that map whole, ours takes the authtoken away, and no line names a
+    config. Run as before, ngrok comes up only if that was so. A version-2 file's authtoken
+    is beside our key, never under it: there a failure to sign in is ngrok's own, and it is
+    not run again (test_an_ngrok_that_ends_for_a_reason_of_its_own_is_never_run_again_...)."""
+    own = write_ngrok_config(tmp_path, "version: 3\nagent:\n  authtoken: tok_123\n")
+    popen, runs = ngrok_binary(
+        tmp_path, with_our_config="ERROR:  authentication failed: ERR_NGROK_4018"
+    )
+    tunnel = panels_ngrok(8750, own, popen)
+    assert tunnel.start_tunnel() is None
+    try:
+        assert tunnel.wait_for_url(10) == OURS["url"]
+        assert len(runs) == 2
+        assert tunnel.api_refused == AUTHTOKEN_HINT
+    finally:
+        tunnel.stop_tunnel()
+
+
 def test_the_panel_starts_its_ngrok_with_the_api_off() -> None:
     default = inspect.signature(RemoteController).parameters["tunnel_factory"].default
     assert default is remote_control.ngrok_without_its_api

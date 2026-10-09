@@ -1160,8 +1160,6 @@ function setRemote(payload) {
 function setNeeds(items) {
   if (!Array.isArray(items)) return;
   S.needs = items.filter((item) => item && typeof item === "object" && NEEDS_ID.test(item.id || ""));
-  const count = S.needs.length;
-  document.title = (count ? "(" + count + ") " : "") + "aisquare remote";
   drawNav();
   viewCall("needs");
 }
@@ -1275,15 +1273,18 @@ function buildShell() {
   drawBanner();
 }
 
+/* Off or locked, nothing connects and the machine's last word is not this page's: the off
+ * screen said "off in 0 min" under "Remote is off", with Extend live and a Connecting dot. */
 function drawStatus() {
   if (!UI.dot) return;
   const live = S.sockState === "open" && !S.stale;
-  const state = S.offline ? "down" : live ? "live" : S.stale ? "stale" : "wait";
+  const shut = !!S.off || S.locked;
+  const state = S.offline || shut ? "down" : live ? "live" : S.stale ? "stale" : "wait";
   UI.dot.className = "dot " + state;
   UI.dot.setAttribute("aria-label", DOT_SAID[state]); // its colour alone said stale to sight only
-  UI.ro.hidden = !S.remote || writable();
+  UI.ro.hidden = !S.remote || writable() || shut;
   const at = S.remote && typeof S.remote.auto_off_at === "string" ? Date.parse(S.remote.auto_off_at) : NaN;
-  if (Number.isFinite(at) && !S.locked) {
+  if (Number.isFinite(at) && !shut) {
     const minutes = Math.max(0, Math.round((at - Date.now()) / 60000));
     UI.off.textContent = "off in " + (minutes >= 90 ? Math.round(minutes / 60) + " h" : minutes + " min");
     UI.off.classList.toggle("soon", minutes <= 15);
@@ -1314,6 +1315,8 @@ function drawNav() {
   const name = S.route ? S.route.name : "";
   const count = (S.needs || []).length;
   UI.badge.textContent = count ? String(count) : "";
+  // Off or locked, the count is from before: the tab's title said it under "Remote is off".
+  document.title = (count && !S.off && !S.locked ? "(" + count + ") " : "") + "aisquare remote";
   const here = [
     [UI.navNeeds, name === "home" || name === "card"], [UI.navProjects, name === "projects" || name === "project" || name === "agent"],
     [UI.navDevices, name === "devices"], [UI.navSettings, name === "settings"],
@@ -1450,6 +1453,8 @@ function renderRoute() {
   closeSheet();
   clear(UI.main);
   drawNav();
+  drawStatus();
+  drawBanner();
   if (S.off) return drawOff();
   if (S.booting) return UI.main.appendChild(el("p", "empty", "Connecting to the machine…"));
   if (route.name !== "unlock" && S.locked) return toUnlock();

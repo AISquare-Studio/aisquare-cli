@@ -2109,6 +2109,44 @@ async function socketCloses() {
   };
 }
 
+/* The strip at the top, writes off, an auto-off set and a card in the feed, before and after the
+ * socket closed 4410 (Remote went off), 4404 (the link changed) and 4401 (signed out), and a
+ * handshake whose probe the machine answered 404: whether the timer, Extend and the READ-ONLY
+ * pill show, what the dot says, and the tab's title. And the banner of a page whose socket
+ * another tab took (4409), before and after it had to unlock. */
+async function offStrip() {
+  const remote = { status: 200, json: { allow_write: false, auto_off_at: new Date(Date.now() + 30 * 60000).toISOString(), version: "test" } };
+  const strip = (page) => page.run("({ off: !UI.off.hidden, extend: !UI.extend.hidden, readOnly: !UI.ro.hidden, dot: UI.dot.attrs['aria-label'], title: document.title })");
+  const closed = async (code, opened, probe) => {
+    let reads = 0;
+    const page = bootPage("#/", signedIn({
+      "GET api/remote": () => (++reads > 1 && probe ? probe : remote),
+      "GET api/needs": () => ({ status: 200, json: { items: [ITEM] } }),
+    }));
+    await settle();
+    if (opened) page.acceptSockets();
+    const before = strip(page);
+    page.live().fire("close", { code });
+    await settle();
+    return { before, after: strip(page), at: page.location.hash };
+  };
+  const taken = bootPage("#/", signedIn());
+  await settle();
+  taken.acceptSockets();
+  taken.live().fire("close", { code: 4409 });
+  await settle();
+  const said = !taken.run("UI.banner.hidden");
+  taken.run("toUnlock()");
+  await settle();
+  return {
+    off: await closed(4410, true),
+    link: await closed(4404, true),
+    signedOut: await closed(4401, true),
+    probedGone: await closed(1006, false, { status: 404, json: { error: "not_found", message: "no such link" } }),
+    takenThenLocked: { said, after: !taken.run("UI.banner.hidden"), at: taken.location.hash },
+  };
+}
+
 /* The strip at the top and the bottom nav (SPEC §6.3): an auto-off 10 minutes away with writes
  * on and two cards in the feed; then a remote frame with the auto-off two hours away and
  * writes off; then the READ-ONLY pill tapped. */
@@ -2497,6 +2535,7 @@ async function main() {
     socketCloses: await socketCloses(),
     unlockWait: await unlockAnswered(429, { error: "rate_limited", message: "too many tries" }),
     statusStrip: await statusStrip(),
+    offStrip: await offStrip(),
     screensListed: await screensListed(),
     cardFlicker: await cardFlicker(),
     failuresKept: await failuresKept(),

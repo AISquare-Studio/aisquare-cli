@@ -1984,6 +1984,34 @@ def test_each_close_code_and_a_failed_handshake_lead_where_the_spec_says(
     assert closes["dropped"] == {"shown": None, "probes": 0, "timers": ["connect"]}
 
 
+def test_a_page_that_cannot_go_on_keeps_no_timer_extend_or_connecting_dot(
+    boot_report: dict[str, Any],
+) -> None:
+    """The strip drew from the machine's last word whatever the screen: under "Remote is off on
+    the machine" it still said "off in 0 min", or counted down a deadline the machine had
+    dropped, beside a live Extend 1 h whose tap was refused, and a dot saying "Connecting"
+    though nothing would connect until Retry. Signed out, the dot said the same over the
+    unlock form, and the READ-ONLY pill offered a reason for a page that showed nothing; the
+    tab's title kept the feed's count from before; and a banner said another tab took the
+    live view, its Reconnect here doing nothing, over the unlock form."""
+    strip = boot_report["offStrip"]
+    gone = {
+        "off": False,
+        "extend": False,
+        "readOnly": False,
+        "dot": "Not connected",
+        "title": "aisquare remote",
+    }
+    for how in ("off", "link", "signedOut", "probedGone"):
+        assert strip[how]["before"]["off"] and strip[how]["before"]["extend"], how
+        assert strip[how]["before"]["readOnly"], how
+        assert strip[how]["before"]["title"] == "(1) aisquare remote", how
+        assert strip[how]["after"] == gone, how
+    assert strip["signedOut"]["at"] == "#/unlock" and strip["off"]["at"] == "#/"
+    taken = strip["takenThenLocked"]
+    assert taken == {"said": True, "after": False, "at": "#/unlock"}, "no Reconnect over a lock"
+
+
 def test_an_unlock_refused_for_too_many_tries_counts_down_to_the_next(
     boot_report: dict[str, Any],
 ) -> None:

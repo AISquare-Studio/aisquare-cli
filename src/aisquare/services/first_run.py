@@ -499,6 +499,8 @@ class FleetStep:
     detail: str = ""
     """The agent's id when it started; the reason when it was refused."""
     agent: FleetAgent | None = None
+    """The agent it started, or found running; for a refused restart, the row it was
+    about, so a caller can tell that row from a later one under the same label."""
     notes: tuple[str, ...] = ()
     """What the spawn's receipt said beside the agent (a reused worktree, a size note)."""
 
@@ -602,13 +604,15 @@ def _restart(restart: Restarter, project: ProjectInfo, agent: FleetAgent) -> Fle
         # restarted elsewhere since (by the manager) is that agent's, and is left running.
         receipt = restart(project, agent.label, agent_id=agent.id)
     except fleet_service.FleetError as exc:
-        return FleetStep(label=agent.label, role=agent.role, outcome="refused", detail=_why(exc))
+        # A refusal carries the row it was about: a later row under this label is another.
+        return FleetStep(agent.label, agent.role, "refused", _why(exc), agent)
     except Exception as exc:  # a bug in the fleet path is a refusal to show, not a crash
         return FleetStep(
             label=agent.label,
             role=agent.role,
             outcome="refused",
             detail=f"{type(exc).__name__}: {_why(exc)}",
+            agent=agent,
         )
     started = receipt.started
     return FleetStep(

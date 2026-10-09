@@ -1104,12 +1104,13 @@ class WelcomeView(VerticalScroll):
                 status.append("\n")
             status.append_text(line)
         # A coder whose window is gone and whose restart was refused: pressing again meets
-        # the same refusal, and the agent view's Restart is the same restart.
+        # the same refusal, and the agent view's Restart is the same restart. That row's
+        # own refusal only: a later row under the label was never asked (delta review).
         stuck = next(
             (
                 label
-                for label, step in self.steps.items()
-                if step.outcome == "refused" and label in live and live[label].state == "lost"
+                for label, row in live.items()
+                if row.state == "lost" and self._refusal_of(row) is not None
             ),
             None,
         )
@@ -1170,8 +1171,9 @@ class WelcomeView(VerticalScroll):
 
         An agent the frame does not see running says what the frame says instead,
         never "started" or "running" from what this page last heard; the last start's
-        refusal under its label goes beneath it. An agent a start of this page reported
-        that the frame shows ended since (💤) says so.
+        refusal about that very row (a lost coder's restart) goes beneath it. A refusal
+        about a row the frame no longer holds is over, and goes. An agent a start of this
+        page reported that the frame shows ended since (💤) says so.
         """
         lines: list[Text] = []
         shown: set[str] = set()
@@ -1183,15 +1185,19 @@ class WelcomeView(VerticalScroll):
             shown.add(label)
             if not row.running:
                 lines.append(state_line(label, row.state or "unknown", row.detail))
-                # The last start's refusal under this label is about this row (a lost
-                # coder's restart): left out, every press met the same refusal unseen.
-                refused = self.steps.get(label)
-                if refused is not None and refused.outcome == "refused":
+                # Left out, every press met the same refusal unseen (review of F7).
+                refused = self._refusal_of(row)
+                if refused is not None:
                     lines.append(step_line(refused))
                 continue
             agent = row.agent
             step = self.steps.get(label)
-            if step is None or step.agent is None or step.agent.id != agent.id:
+            if (
+                step is None
+                or step.outcome == "refused"
+                or step.agent is None
+                or step.agent.id != agent.id
+            ):
                 step = FleetStep(label, agent.role, "running", agent.id, agent)
             lines.append(step_line(step))
         ended = self._ended_rows()
@@ -1199,7 +1205,10 @@ class WelcomeView(VerticalScroll):
             if label in shown:
                 continue
             if step.outcome == "refused":
-                lines.append(step_line(step))
+                # A spawn refused under a label no row holds. A restart's refusal names its
+                # row, which has left the frame (reaped, or ended): that block is over.
+                if step.agent is None:
+                    lines.append(step_line(step))
             elif step.agent is not None and step.agent.id in ended:
                 # Exited since this page started it. Left out, the card read as if nothing
                 # had been pressed, and each press started one more that exited unseen.
@@ -1207,6 +1216,18 @@ class WelcomeView(VerticalScroll):
                 line.append("\n    its last screen is on its row in the sidebar", style="dim")
                 lines.append(line)
         return lines
+
+    def _refusal_of(self, row: _Live) -> FleetStep | None:
+        """The last start's refusal about this very row (a lost coder's restart), if any.
+
+        Matched by the row's id, not its label: a refusal stayed until the next press, and
+        under a later row with the same label (restarted elsewhere, then lost) it called a
+        restart that one press performs impossible, and advised a reap (delta review).
+        """
+        step = self.steps.get(row.agent.label)
+        if step is None or step.outcome != "refused" or step.agent is None:
+            return None
+        return step if step.agent.id == row.agent.id else None
 
     def _ended_rows(self) -> dict[str, tuple[str, str | None]]:
         """The chosen project's ended rows the shell's frame still lists (💤: the window is

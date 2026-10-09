@@ -728,6 +728,8 @@ def test_two_lost_coders_are_restarted_and_a_refusal_stops_the_rest(tmp_path: Pa
     )
     assert refusing.calls == [("coder-1", "agt_coder-1")] and spawns.calls == []
     assert [(s.label, s.outcome, s.detail) for s in later.steps] == [("coder-1", "refused", reason)]
+    # The refusal names the row it was about, so a later row under the label is another.
+    assert later.steps[0].agent is not None and later.steps[0].agent.id == "agt_coder-1"
 
 
 @pytest.mark.parametrize("state", ["lost", "unknown"])

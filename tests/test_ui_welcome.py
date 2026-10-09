@@ -1721,21 +1721,30 @@ def test_coders_whose_windows_are_gone_are_not_counted_and_are_restarted(
     assert not offered_after
 
 
+@pytest.mark.parametrize("codename", ["otter-falcon", None], ids=["codename", "no-codename"])
 def test_a_refused_restart_is_said_under_its_coder_with_the_way_out(
     captain: str | None,
     scripted: Callable[[Machine], None],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    codename: str | None,
 ) -> None:
     """A lost coder's restart that ``fleet.restart`` refuses (its account slot removed, a
     replay that cannot start) carries the lost row's own label, so the card left it out
     behind "✗ coder-1 — lost": Start the coders stayed offered under the trust-question
     line, and every press met the same refusal unseen (review of the sweep-2 fixes). The
-    reason is said under the coder, step 3 names the way out, and so does every press."""
+    reason is said under the coder, step 3 names the way out, and so does every press.
+
+    The command names the chosen project by the codename its first spawn gave it, which
+    the shell's frame has and step 1's copy of the project does not; else by its id."""
     machine, project = _ready_machine(tmp_path)
     reason = "cannot restart 'coder-1': no Claude account in slot 3 — see: aisquare accounts"
     machine.refuse_restart = {"coder-1": reason}
     listed_by(machine, project, monkeypatch)
+    if codename is not None:
+        with store_session() as store:  # what fleet.ensure_codename does at the first spawn
+            store.set_codename(project.id, codename)
+    assert project.codename is None, "premise: step 1's copy has no codename"
     scripted(machine)
 
     async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[Any]:
@@ -1759,9 +1768,127 @@ def test_a_refused_restart_is_said_under_its_coder_with_the_way_out(
         lines = text.splitlines()
         lost = lines.index("✗ coder-1 — lost (pane gone)")
         assert lines[lost + 1] == f"✗ coder-1: {reason}", text
-        assert "coder-1 could not be restarted: aisquare fleet reap --project" in text, text
+        way_out = f"aisquare fleet reap --project {codename or project.id} ends the rows"
+        assert f"coder-1 could not be restarted: {way_out}" in text, text
         assert "trusting this folder" not in text, text
     assert offered, "a refusal that may pass (a hand-over in flight) can still be retried"
+
+
+def _lost_and_refused(machine: Machine, reason: str) -> Callable[..., Awaitable[str]]:
+    """Up to a lost coder-1 whose restart was refused, as the step-3 card then reads."""
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> str:
+        await press(pilot, page, "fleet-manager")
+        await press(pilot, page, "fleet-coders")
+        machine.refuse_restart = {"coder-1": reason}
+        machine.states["coder-1"] = "lost"
+        app.refresh_data()
+        page.paint()
+        await press(pilot, page, "fleet-coders")
+        app.refresh_data()
+        page.paint()
+        return card(page, "fleet-status")
+
+    return go
+
+
+def test_a_refusal_is_about_its_own_row_and_goes_with_it(
+    captain: str | None,
+    scripted: Callable[[Machine], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A refused restart was matched by label and cleared only by the next press. Under a
+    later row with that label (restarted elsewhere once the account was back, then lost
+    again) it said a restart one press performs was refused, and advised a reap that ends
+    the row and its session; after a reap it named a block that was over (delta review).
+    It is said under the row it was about, and only while that row is in the frame."""
+    machine, project = _ready_machine(tmp_path)
+    listed_by(machine, project, monkeypatch)
+    scripted(machine)
+    reason = "cannot restart 'coder-1': no Claude account in slot 3 — see: aisquare accounts"
+    refused = _lost_and_refused(machine, reason)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[Any]:
+        seen: list[Any] = [await refused(pilot, app, page)]
+        machine.refuse_restart = {}  # the account is back: Restart in coder-1's own view
+        machine.restart(project, "coder-1", agent_id="agt_coder-1")
+        app.refresh_data()
+        page.paint()
+        seen.append(card(page, "fleet-status"))
+        machine.states["coder-1"] = "lost"  # the new coder-1's window closes
+        app.refresh_data()
+        page.paint()
+        seen.append(card(page, "fleet-status"))
+        await press(pilot, page, "fleet-coders")
+        seen.append(card(page, "fleet-status"))
+        return seen
+
+    before, restarted, lost_again, pressed = in_shell(machine, go)
+    assert reason in before and "fleet reap" in before, f"control: said for its row: {before}"
+    assert FLEET_UP in restarted and reason not in restarted, restarted
+    assert "✗ coder-1 — lost (pane gone)" in lost_again, lost_again
+    assert reason not in lost_again and "fleet reap" not in lost_again, lost_again
+    assert "trusting this folder" in lost_again, lost_again
+    assert machine.restarted == ["coder-1", "coder-1", "coder-1"], machine.restarted
+    assert "✓ coder-1 — started" in pressed and FLEET_UP in pressed, "one press resumes it"
+
+
+def test_a_refusal_goes_once_its_row_is_reaped(
+    captain: str | None,
+    scripted: Callable[[Machine], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``aisquare fleet reap`` ends the lost row the refusal was about, so the block it named
+    is over: the card kept the refusal, under no row, until the next press (delta review).
+    A spawn's refusal under a label no row holds stays, as before (the control)."""
+    machine, project = _ready_machine(tmp_path)
+    listed_by(machine, project, monkeypatch)
+    scripted(machine)
+    reason = "cannot restart 'coder-1': no Claude account in slot 3 — see: aisquare accounts"
+    refused = _lost_and_refused(machine, reason)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[str]:
+        before = await refused(pilot, app, page)
+        machine.live = [agent for agent in machine.live if agent.label != "coder-1"]  # reaped
+        app.refresh_data()
+        page.paint()
+        reaped = card(page, "fleet-status")
+        machine.cap = 2  # manager and coder-2: a spawn in coder-1's place meets the cap
+        await press(pilot, page, "fleet-coders")
+        return [before, reaped, card(page, "fleet-status")]
+
+    before, reaped, capped = in_shell(machine, go)
+    assert reason in before, f"control: said while its row is there: {before}"
+    assert reason not in reaped and "fleet reap" not in reaped, reaped
+    assert "✗ coder-1: demo-app already runs 2 agents" in capped, capped
+
+
+def test_a_spawn_refusal_is_not_said_under_a_row_that_came_later(
+    captain: str | None,
+    scripted: Callable[[Machine], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A refused Start manager, then a manager started elsewhere that is lost later: the
+    old refusal was painted under that manager's row, about a start it never met."""
+    machine, project = _ready_machine(tmp_path, refuse={"manager": "MGR-REFUSED at the cap"})
+    listed_by(machine, project, monkeypatch)
+    scripted(machine)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[str]:
+        await press(pilot, page, "fleet-manager")
+        refused = card(page, "fleet-status")
+        machine.live.append(_agent(project, "manager", "manager"))  # `fleet spawn manager`
+        machine.states["manager"] = "lost"
+        app.refresh_data()
+        page.paint()
+        return [refused, card(page, "fleet-status")]
+
+    refused, later = in_shell(machine, go)
+    assert "✗ manager: MGR-REFUSED at the cap" in refused, "control: said when it met it"
+    assert "✗ manager — lost (pane gone)" in later and "MGR-REFUSED" not in later, later
 
 
 def test_an_agent_the_page_started_that_exited_is_said(
@@ -1784,12 +1911,17 @@ def test_an_agent_the_page_started_that_exited_is_said(
         machine.exit("manager", 3)
         app.refresh_data()
         page.paint()  # the next frame, as the page's refresh tick paints it
-        return [started, card(page, "fleet-status"), visible(page, "fleet-manager")]
+        seen = [started, card(page, "fleet-status"), visible(page, "fleet-manager")]
+        machine.ended.clear()  # Stop on its 💤 row removes the window: the row leaves
+        app.refresh_data()
+        page.paint()
+        return [*seen, card(page, "fleet-status")]
 
-    started, exited, offered = in_shell(machine, go)
+    started, exited, offered, left = in_shell(machine, go)
     assert "✓ manager — started" in started, "control: running, it is not called exited"
     assert "✗ manager — exited (exit 3)" in exited and "last screen" in exited, exited
     assert "✓ manager" not in exited and offered, exited
+    assert "exited" not in left and "last screen" not in left, "said only while it is listed"
 
 
 @pytest.mark.parametrize("state", ["unknown", "lost"])

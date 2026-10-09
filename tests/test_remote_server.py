@@ -626,17 +626,19 @@ def _frames_until(ws: Any, kind: str, *, limit: int = 12) -> list[dict[str, Any]
     raise AssertionError(f"no {kind} frame in {seen}")
 
 
-def test_stream_sends_fleet_remote_and_once_asked_the_board_then_only_changes(
+def test_stream_sends_remote_and_once_asked_the_fleet_and_the_board_then_only_changes(
     client: TestClient, runtime: Runtime, fake: Fake
 ) -> None:
     unlock(client, runtime)
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
         first = _frames_until(ws, "remote")
-        kinds = [frame["type"] for frame in first]
-        assert kinds == ["fleet", "remote"]
-        for frame in first:
-            assert set(frame) == {"type", "payload", "ts"}
-        assert first[1]["payload"]["allow_write"] is False
+        assert [frame["type"] for frame in first] == ["remote"]
+        assert set(first[0]) == {"type", "payload", "ts"}
+        assert first[0]["payload"]["allow_write"] is False
+        ws.send_text(json.dumps({"subscribe_fleet": None}))
+        fleet = frame_within(ws)
+        assert fleet["type"] == "fleet" and set(fleet) == {"type", "payload", "ts"}
+        assert fleet["payload"] == {"name": "demo", "agents": []}
         ws.send_text(json.dumps({"subscribe_board": None}))
         board = frame_within(ws)
         assert board["type"] == "board"

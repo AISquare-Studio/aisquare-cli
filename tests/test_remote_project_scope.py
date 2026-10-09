@@ -643,6 +643,7 @@ def _frame(ws: Any, kind: str, *, limit: int = 20) -> dict[str, Any]:
 def test_ws_fleet_frames_follow_subscribe_fleet(runtime: Runtime, tmp_path: Path) -> None:
     client = _client(runtime, _sources(FLEETS), tmp_path, tick=0.02)
     with client.websocket_connect(f"/r/{runtime.token}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_fleet": None}))
         first = _frame(ws, "fleet")
         assert first["payload"] == {"name": "current", "agents": []}
         assert set(first) == {"type", "payload", "ts"}, "§4-D shape is unchanged"
@@ -661,9 +662,11 @@ def test_ws_survives_a_subscribe_fleet_for_a_project_that_is_gone(
     """A bad name costs that frame, not the socket — board and remote keep arriving."""
     client = _client(runtime, _sources(FLEETS), tmp_path, tick=0.02)
     with client.websocket_connect(f"/r/{runtime.token}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_fleet": ""}))
         _frame(ws, "fleet")
         ws.send_text(json.dumps({"subscribe_fleet": "nope"}))
-        assert _frame(ws, "remote")["payload"]["allow_write"] is False
+        runtime.set_allow_write(True)
+        assert _frame(ws, "remote")["payload"]["allow_write"] is True
         ws.send_text(json.dumps({"subscribe_fleet": "prj_other"}))
         assert _frame(ws, "fleet")["payload"] == {"name": "other", "agents": []}
 

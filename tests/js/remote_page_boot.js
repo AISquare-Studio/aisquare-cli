@@ -957,6 +957,32 @@ async function boardOnItsTab() {
   return steps;
 }
 
+/* The fleet the socket asks for, screen by screen: none on the feed, its project's on a
+ * project's tabs and on an agent's screen, asked once, false once they are left, and none
+ * on the socket a wake opens there. */
+async function fleetOnItsScreens() {
+  const page = bootPage("#/", signedIn());
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const fleet = () => asked(page.sockets[0], "subscribe_fleet");
+  const go = async (hash) => {
+    page.run("pageGo(" + JSON.stringify(hash) + ")");
+    await settle();
+    return fleet();
+  };
+  const steps = { feed: fleet() };
+  steps.project = await go("#/p/" + PROJECT + "/fleet");
+  await go("#/p/" + PROJECT + "/board");
+  steps.agent = await go("#/p/" + PROJECT + "/a/coder-1/live");
+  steps.left = await go("#/devices");
+  fire(page, "document", "visibilitychange");
+  page.acceptSockets();
+  await settle();
+  steps.woken = asked(page.live(), "subscribe_fleet");
+  return steps;
+}
+
 /* The Board tab with a board frame on it, left for the Fleet tab and opened again, its read
  * held: what the tab shows meanwhile, the reads it made, and what it shows once answered. */
 async function boardReopened() {
@@ -2369,6 +2395,7 @@ async function main() {
     liveScroll: await liveScroll(),
     padScroll: await padScroll(),
     boardOnItsTab: await boardOnItsTab(),
+    fleetOnItsScreens: await fleetOnItsScreens(),
     boardReopened: await boardReopened(),
     boardAnswers: await boardAnswers(),
     transcriptTimes: await transcriptTimes(),

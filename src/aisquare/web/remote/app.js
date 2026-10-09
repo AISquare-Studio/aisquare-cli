@@ -1027,7 +1027,7 @@ async function probe() {
 }
 
 function resubscribe() {
-  wsSend("subscribe_fleet", S.wantFleet);
+  if (S.wantFleet) wsSend("subscribe_fleet", S.wantFleet);
   if (S.wantBoard) wsSend("subscribe_board", S.wantBoard); // a new socket sends no board until asked
   for (const watcher of paneWatchers.values()) {
     watcher.fresh = false; // what it shows came before this socket: held until its next frame
@@ -1114,11 +1114,12 @@ function paneWatch(pid, label, fn) {
   };
 }
 
+/* Fleet frames only on a project's or an agent's screen (null stops them): no other draws one. */
 function wantProject(pid) {
   if (S.wantFleet !== pid) {
     S.wantFleet = pid;
     if (projectIdOf(S.fleet) !== pid) S.fleet = null;
-    wsSend("subscribe_fleet", pid);
+    wsSend("subscribe_fleet", pid || false);
   }
 }
 
@@ -1435,6 +1436,7 @@ function renderRoute() {
   if (S.view && typeof S.view.cleanup === "function") S.view.cleanup();
   S.view = null;
   S.route = route;
+  if (route.name !== "project" && route.name !== "agent") wantProject(null);
   S.since.clear();
   closeSheet();
   clear(UI.main);

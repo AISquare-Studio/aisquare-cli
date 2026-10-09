@@ -1294,6 +1294,20 @@ def test_the_page_asks_for_a_board_only_while_its_board_tab_shows(
     assert steps["sockets"] == 2 and steps["woken"] == ["prj_x"], "a new socket asks again"
 
 
+def test_the_page_asks_for_a_fleet_only_on_a_projects_screens_and_an_agents(
+    boot_report: dict[str, Any],
+) -> None:
+    """r4 7/9: every socket was read the current project's fleet every second from the moment
+    it opened, a ``fleet ls`` on the machine each time, though only a project's screens and
+    an agent's draw it. The page asked for one on every new socket, wherever it was."""
+    steps = boot_report["fleetOnItsScreens"]
+    assert steps["feed"] == [], "the feed draws no fleet"
+    assert steps["project"] == ["prj_x"]
+    assert steps["agent"] == ["prj_x"], "its tabs and its agents ask once"
+    assert steps["left"] == ["prj_x", False], "leaving them says so"
+    assert steps["woken"] == [], "a new socket asks for none where none is drawn"
+
+
 def test_a_board_tab_opened_again_reads_its_board_anew_and_never_shows_the_last_one(
     boot_report: dict[str, Any],
 ) -> None:

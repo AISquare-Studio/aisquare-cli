@@ -824,6 +824,42 @@ def test_no_board_is_read_or_sent_until_the_socket_asks_and_none_once_it_stops(
     assert [frame for frame in later if frame["type"] == "board"] == []
 
 
+def test_no_fleet_is_read_or_sent_until_the_socket_asks_and_none_once_it_stops(
+    runtime: Runtime, reads: Reads, tmp_path: Path
+) -> None:
+    """r4 7/9: every socket was read the current project's fleet every tick from the moment
+    it opened, a ``fleet ls`` each (tmux, the store, a write for a pane found dead), whatever
+    screen the phone showed, though only the page's project and agent screens draw it. Now
+    no fleet is read or sent until ``subscribe_fleet``, and ``{"subscribe_fleet": false}``
+    stops them again, as for the board."""
+    panes = Panes()
+    client = _socket_client(runtime, tmp_path, reads, panes)
+
+    def fleets() -> list[tuple[str, object]]:
+        return [call for call in reads.calls if call[0] == "fleet"]
+
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe": "first"}))
+        _captures(panes, ("first", None), 3)
+        unasked = fleets()
+        ws.send_text(json.dumps({"subscribe_fleet": "prj_b"}))
+        asked = _until(ws, lambda f: f["type"] == "fleet")
+        ws.send_text(json.dumps({"subscribe_fleet": False}))
+        ws.send_text(json.dumps({"subscribe": "second"}))
+        _until(ws, _pane("second"))  # read in order: every tick from the next one on stopped
+        reads.calls.clear()
+        _captures(panes, ("second", None), panes.asked.count(("second", None)) + 3)
+        stopped = fleets()
+        ws.send_text(json.dumps({"subscribe": "third"}))
+        later = [frame_within(ws)]
+        while not _pane("third")(later[-1]):
+            later.append(frame_within(ws))
+    assert unasked == [], "a socket that never asked was read a fleet on every tick"
+    assert asked["payload"]["project"] == "prj_b"
+    assert stopped == [], "a socket that said false was still read a fleet"
+    assert [frame for frame in later if frame["type"] == "fleet"] == []
+
+
 def test_a_false_that_lands_while_a_board_is_read_sends_no_board_frame(
     runtime: Runtime, tmp_path: Path
 ) -> None:
@@ -905,6 +941,7 @@ def test_a_switch_while_a_snapshot_is_read_never_sends_the_old_projects_frame(
     assert unlock(client, runtime).status_code == 200
     is_fleet = lambda f: f["type"] == "fleet"  # noqa: E731
     with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_fleet": None}))
         assert _until(ws, is_fleet)["payload"]["project"] is None
         hold[0] = True
         assert reading.wait(5), "a tick is reading the current project's fleet"

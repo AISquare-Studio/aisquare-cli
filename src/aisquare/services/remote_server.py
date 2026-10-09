@@ -32,13 +32,14 @@ instead of running twice. Each write that goes through appends one line to
 ``remote-audit.log``. :data:`NOT_WRITE_GATED` lists the few routes that change
 something without the gate, frozen.
 
-**The stream** sends ``fleet``, ``remote``, then ``needs_you`` and ``action``, each
-only when it changed, a ``heartbeat`` every :data:`HEARTBEAT_SECONDS` changed or not,
-then one ``pane`` frame per ``(project, label)`` subscription when its pane changed.
-A socket that asked with ``subscribe_board`` gets ``board`` frames too, ahead of the
-rest: the board's events and the sessions they name (:func:`remote_board_frame`), or
-why the board could not be read (:func:`remote_board_unread`), each naming the project
-its subscription named, as a ``pane`` frame does.
+**The stream** sends ``remote``, then ``needs_you`` and ``action``, each only when it
+changed, a ``heartbeat`` every :data:`HEARTBEAT_SECONDS` changed or not, then one
+``pane`` frame per ``(project, label)`` subscription when its pane changed. A socket
+that asked with ``subscribe_fleet`` gets ``fleet`` frames too, a project's ``fleet
+ls``, and one that asked with ``subscribe_board`` gets ``board`` frames, both ahead of
+the rest: the board's events and the sessions they name (:func:`remote_board_frame`),
+or why the board could not be read (:func:`remote_board_unread`), each naming the
+project its subscription named, as a ``pane`` frame does.
 
 **The lanes** live in their own modules and plug in through :class:`RemoteKit`:
 ``remote_needs`` (what needs the human), ``remote_push`` (Web Push),
@@ -4076,10 +4077,10 @@ def build_remote_app(
     async def stream(websocket: WebSocket) -> None:
         """``/ws``: every tick, each frame that changed (SPEC §1.6).
 
-        In order: ``board`` (only to a socket that sent ``subscribe_board``),
-        ``fleet``, ``remote``, then ``needs_you`` and ``action``, then the
-        ``heartbeat`` (every ``heartbeat`` seconds, changed or not, never on the
-        first tick), then one ``pane`` frame per subscription. Pane
+        In order: ``board`` and ``fleet`` (each only to a socket that asked, with
+        ``subscribe_board`` and ``subscribe_fleet``), ``remote``, then ``needs_you``
+        and ``action``, then the ``heartbeat`` (every ``heartbeat`` seconds, changed
+        or not, never on the first tick), then one ``pane`` frame per subscription. Pane
         subscriptions are ``(project, label)``: the same label in two projects is
         two agents, and a frame names the project its subscription named. A
         ``board`` frame names its subscription's project too: the board it carries
@@ -4101,6 +4102,13 @@ def build_remote_app(
         """``None`` = the CURRENT project; a ``{subscribe_fleet: "<project>"}`` text frame
         picks another one's ``fleet`` frames (``""``/``null`` returns). The frame shape
         does not change, only WHICH project's ``fleet ls`` payload fills it."""
+        fleet_wanted = False
+        """No ``fleet`` frame goes out until the socket asks with ``subscribe_fleet``, and
+        ``{subscribe_fleet: false}`` stops them. Each is a ``fleet ls``: tmux on the
+        project's socket, the store, and a write for a pane found dead. Every socket was
+        read one every tick from the moment it opened, a phone on the Needs screen too,
+        though only the page's project and agent screens draw it (review of #243, round
+        4)."""
         board_project: str | None = None
         """The same, for ``board`` frames and ``{subscribe_board: "<project>"}``."""
         board_wanted = False
@@ -4168,9 +4176,12 @@ def build_remote_app(
                     await push_if_changed("board", payload, project=board_ref or None)
             fleet_ref = fleet_project
             try:
-                payload = await snapshot(f"fleet:{fleet_ref or ''}", lambda: reads.fleet(fleet_ref))
-                if fleet_ref == fleet_project:
-                    await push_if_changed("fleet", payload)
+                if fleet_wanted:
+                    payload = await snapshot(
+                        f"fleet:{fleet_ref or ''}", lambda: reads.fleet(fleet_ref)
+                    )
+                    if fleet_wanted and fleet_ref == fleet_project:
+                        await push_if_changed("fleet", payload)
             except Exception as exc:
                 log.debug("remote: fleet frame skipped: %s", exc)
             await push_if_changed("remote", runtime.remote_json())
@@ -4219,7 +4230,7 @@ def build_remote_app(
                     await send_frame("pane", payload, agent=label, project=project or None)
 
         async def reader() -> None:
-            nonlocal fleet_project, board_project, board_wanted
+            nonlocal fleet_project, fleet_wanted, board_project, board_wanted
             while True:
                 received = await websocket.receive()
                 if received["type"] == "websocket.disconnect":
@@ -4255,7 +4266,10 @@ def build_remote_app(
                     panes_wanted.pop((project, label), None)
                 target = message.get("subscribe_fleet", False)
                 if target is None or isinstance(target, str):
-                    fleet_project = target or None
+                    fleet_project, fleet_wanted = target or None, True
+                    last.pop("fleet", None)
+                elif target is False and "subscribe_fleet" in message:
+                    fleet_wanted = False  # sent false: no fleet frames from now on
                     last.pop("fleet", None)
                 target = message.get("subscribe_board", False)
                 if target is None or isinstance(target, str):

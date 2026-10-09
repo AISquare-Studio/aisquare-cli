@@ -430,8 +430,7 @@ def test_the_action_frame_carries_this_devices_ledger_and_no_one_elses(
     url = f"{base(runtime)}/api/note"
     theirs.post(url, json={"text": "c", "request_id": "theirs-1"})
     with mine.websocket_connect(f"{base(runtime)}/ws") as ws:
-        first = [frame_within(ws)["type"] for _ in range(2)]
-        assert first == ["fleet", "remote"]
+        assert frame_within(ws)["type"] == "remote"
         mine.post(url, json={"text": "a", "request_id": "mine-1"})
         frame = _until(ws, "action")
     assert [entry["request_id"] for entry in frame["payload"]["actions"]] == ["mine-1"]

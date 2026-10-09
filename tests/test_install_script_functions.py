@@ -1869,6 +1869,101 @@ def test_an_amber_claude_code_row_is_unexpected_and_printed_in_the_doctors_words
 
 
 @pytest.mark.parametrize(
+    ("text", "printed"),
+    [
+        ("Zoë", "Zoë"),
+        ("café — naïve Ångström", "café — naïve Ångström"),
+        ('a "quote", a back\\slash, a /slash', 'a "quote", a back\\slash, a /slash'),
+        ("tab\there, newline\nthere", "tab\there, newline\nthere"),
+        ("日本語 नमस्ते", "日本語 नमस्ते"),
+        ("snake \U0001f40d and \U0001d11e", "snake \U0001f40d and \U0001d11e"),
+        # A directory name must not send the terminal a sequence: controls stay escaped.
+        ("esc \x1b[31m, C1 \x9b, DEL \x7f", "esc \\u001b[31m, C1 \\u009b, DEL \\u007f"),
+        ("ends with a backslash \\", "ends with a backslash \\"),
+        ("\\u0041 is text, not an escape", "\\u0041 is text, not an escape"),
+    ],
+    ids=[
+        "latin",
+        "dash",
+        "quote-backslash-slash",
+        "tab-newline",
+        "cjk-devanagari",
+        "surrogate-pairs",
+        "controls",
+        "trailing-backslash",
+        "escaped-backslash-u",
+    ],
+)
+def test_a_doctor_string_prints_as_the_text_it_encodes(
+    tmp_path: Path, text: str, printed: str
+) -> None:
+    """`aisquare --json doctor` writes every non-ASCII character as an escape, and the
+    summary decoded only a quote, a backslash and the dash, so a home named Zoë printed
+    escaped in the very line meant to say where to look (fix review of #257). It is
+    decoded in the shell alone, exactly: no interpreter is assumed. Compared as bytes,
+    so no locale is in the way."""
+    environment = {
+        **os.environ,
+        "AISQUARE_INSTALL_LIB": "1",
+        "PATH": base_path(tmp_path),
+        "BODY": json.dumps(text)[1:-1],
+    }
+    result = subprocess.run(
+        [SH, "-c", f'. "{SCRIPT}"\n_json_text "$BODY"'],
+        capture_output=True,
+        env=environment,
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+    )
+
+    assert json.dumps(text).isascii(), "the doctor's JSON is ASCII"
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (printed + "\n").encode("utf-8"), result.stdout
+
+
+def test_a_hand_written_escape_the_doctor_never_emits_still_decodes(tmp_path: Path) -> None:
+    """`\\/`, upper-case hex, and a lone surrogate (U+FFFD), which json.dumps never writes."""
+    environment = {
+        **os.environ,
+        "AISQUARE_INSTALL_LIB": "1",
+        "PATH": base_path(tmp_path),
+        "BODY": "\\/ and \\u00E9 and \\ud83d alone",
+    }
+    result = subprocess.run(
+        [SH, "-c", f'. "{SCRIPT}"\n_json_text "$BODY"'],
+        capture_output=True,
+        env=environment,
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+    )
+
+    assert result.stdout == "/ and é and \N{REPLACEMENT CHARACTER} alone\n".encode(), result
+
+
+def test_a_home_with_a_non_ascii_name_is_printed_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The summary prints the claude-code row's detail and fix in the doctor's words, and
+    printed Zo\\u00eb for a home named Zoë (fix review of #257)."""
+    home = tmp_path / "Zoë"
+    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
+    monkeypatch.setattr("aisquare.core.claude_accounts._home", lambda: home)
+    _claude_code_state("switched off", home, tmp_path, monkeypatch)
+    row = _claude_code_row()
+
+    result = _summary_then_handoff(
+        tmp_path,
+        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        node=False,
+        env={"PAYLOAD": json.dumps([row])},
+    )
+
+    assert str(home) in row["detail"] and str(home) in row["fix"], row
+    assert f"  claude-code — {row['detail']}\n    → {row['fix']}\n" in result.stdout, result.stdout
+    assert result.returncode == 2
+
+
+@pytest.mark.parametrize(
     ("state", "expected"),
     [("never connected", True), ("missing hooks", True), ("switched off", False)],
     ids=["never-connected", "missing", "switched-off"],

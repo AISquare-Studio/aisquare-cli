@@ -1840,15 +1840,95 @@ _doctor_fix() {
     _doctor_row "$1" | sed -n 's/.*"fix": *"\([^"\\]*\(\\.[^"\\]*\)*\)".*/\1/p'
 }
 
-# A JSON string's body ($1) as text, for printing: \\ and \" as what they stand
-# for, and the dash the doctor writes as \u2014. Other \uXXXX are left as they are.
+# A JSON string's body ($1) as the text it encodes, for printing (RFC 8259 §7).
+#
+# In this shell alone, because nothing else can be counted on here. The doctor
+# writes every non-ASCII character as a \u escape, so a home named Zoë printed as
+# that escape. Each one (a surrogate pair as one) becomes its UTF-8 bytes, and
+# \" \\ \/ \n \t what they stand for. Any other control character keeps its
+# escape, so a directory name cannot send the terminal a sequence; so does a
+# malformed escape, and a lone surrogate prints as U+FFFD.
 _json_text() {
-    _jt_mark=$(printf '\001')
-    printf '%s\n' "$1" | sed \
-        -e 's/\\\\/'"$_jt_mark"'/g' \
-        -e 's/\\"/"/g' \
-        -e 's/\\u2014/—/g' \
-        -e 's/'"$_jt_mark"'/\\/g'
+    _jt_in=$1
+    _jt_out=""
+    while :; do
+        case "$_jt_in" in
+            *\\*) ;;
+            *) break ;;
+        esac
+        _jt_out=$_jt_out${_jt_in%%\\*}
+        _jt_in=${_jt_in#*\\}
+        _jt_c=${_jt_in%"${_jt_in#?}"}
+        _jt_in=${_jt_in#?}
+        case "$_jt_c" in
+            \" | \\ | /)
+                _jt_out=$_jt_out$_jt_c
+                continue
+                ;;
+            n) _jt_cp=10 ;;
+            t) _jt_cp=9 ;;
+            u)
+                _jt_hex=${_jt_in%"${_jt_in#????}"}
+                case "$_jt_hex" in
+                    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
+                    *)
+                        _jt_out="$_jt_out\\u"
+                        continue
+                        ;;
+                esac
+                _jt_in=${_jt_in#????}
+                _jt_cp=$((0x$_jt_hex))
+                if [ "$_jt_cp" -ge 55296 ] && [ "$_jt_cp" -le 57343 ]; then
+                    # 0xD800-0xDFFF: a high surrogate and the low one after it.
+                    _jt_lo=""
+                    case "$_jt_in" in
+                        \\u[dD][c-fC-F][0-9a-fA-F][0-9a-fA-F]*)
+                            _jt_lo=${_jt_in#??}
+                            _jt_lo=${_jt_lo%"${_jt_lo#????}"}
+                            ;;
+                    esac
+                    if [ "$_jt_cp" -le 56319 ] && [ -n "$_jt_lo" ]; then
+                        _jt_in=${_jt_in#??????}
+                        _jt_cp=$((65536 + (_jt_cp - 55296) * 1024 + 0x$_jt_lo - 56320))
+                    else
+                        _jt_cp=65533
+                    fi
+                fi
+                if [ "$_jt_cp" -lt 32 ] || { [ "$_jt_cp" -ge 127 ] && [ "$_jt_cp" -lt 160 ]; }; then
+                    if [ "$_jt_cp" != 9 ] && [ "$_jt_cp" != 10 ]; then
+                        _jt_out="$_jt_out\\u$_jt_hex"
+                        continue
+                    fi
+                fi
+                ;;
+            *)
+                _jt_out="$_jt_out\\$_jt_c"
+                continue
+                ;;
+        esac
+        # The x keeps a newline the command substitution would strip.
+        _jt_out=$_jt_out$(
+            _utf8 "$_jt_cp"
+            printf x
+        )
+        _jt_out=${_jt_out%x}
+    done
+    printf '%s\n' "$_jt_out$_jt_in"
+}
+
+# The UTF-8 bytes of code point $1, written with printf's octal escapes, so no
+# locale or other tool is involved.
+# shellcheck disable=SC2059  # the format string is built here, from numbers.
+_utf8() {
+    if [ "$1" -lt 128 ]; then
+        printf "\\$(printf '%o' "$1")"
+    elif [ "$1" -lt 2048 ]; then
+        printf "\\$(printf '%o' $((192 + $1 / 64)))\\$(printf '%o' $((128 + $1 % 64)))"
+    elif [ "$1" -lt 65536 ]; then
+        printf "\\$(printf '%o' $((224 + $1 / 4096)))\\$(printf '%o' $((128 + $1 / 64 % 64)))\\$(printf '%o' $((128 + $1 % 64)))"
+    else
+        printf "\\$(printf '%o' $((240 + $1 / 262144)))\\$(printf '%o' $((128 + $1 / 4096 % 64)))\\$(printf '%o' $((128 + $1 / 64 % 64)))\\$(printf '%o' $((128 + $1 % 64)))"
+    fi
 }
 
 # True when the claude-code row says only that aisquare is not connected to Claude

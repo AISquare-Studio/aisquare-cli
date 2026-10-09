@@ -549,6 +549,7 @@ def board_data(
     events: int = _BOARD_EVENTS,
     since_seq: int | None = None,
     project: ProjectInfo | None = None,
+    glance: bool = False,
 ) -> tuple[ProjectInfo, list[TeamSession], list[TeamTask], list[TeamEvent]]:
     """Everything the board shows: sessions, tasks and recent events.
 
@@ -556,6 +557,11 @@ def board_data(
     watch UI polling every few seconds does not rehydrate its whole window.
     ``project`` lets a long-lived caller resolve identity once and pass it in,
     sparing a ``git rev-parse`` per call (the watch TUI does this).
+    ``glance`` reads what a reader of the events alone needs: of the sessions
+    only those the events name, newest seen first as ever, and no task. The
+    rest is every session and task the project ever had, and the remote's
+    ``board`` frame, read every second while a phone shows its Board tab, read
+    all of it to drop it.
     """
     _require_enabled()
     with store_session() as store:
@@ -564,6 +570,10 @@ def board_data(
             fetched = store.recent_events(resolved.id, limit=events)
         else:
             fetched = store.events_since(resolved.id, since_seq, limit=events)
+        if glance:
+            named = sorted({event.session_id for event in fetched if event.session_id})
+            sessions = store.team_sessions_seen_since(resolved.id, None, ids=named)
+            return resolved, sessions, [], fetched
         return (
             resolved,
             store.team_sessions(resolved.id),

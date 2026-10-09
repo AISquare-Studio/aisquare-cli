@@ -1777,6 +1777,9 @@ class Sources:
     explainability: ExplainabilitySource = field(
         default=lambda label, project: _live_explainability(label, project)
     )
+    board_frame: ProjectSource | None = None
+    """What a ``board`` frame carries, read for that alone (:func:`remote_board_payload`'s
+    ``boards``); ``None``: :func:`remote_board_frame` of ``board``, as for a test's fakes."""
 
 
 @dataclass(frozen=True)
@@ -2064,7 +2067,13 @@ BOARD_EVENTS = 200
 Board tab draws. ``asq board --json`` prints five, a glance in a terminal."""
 
 
-def remote_board_payload(project: str | None = None) -> dict[str, object]:
+BoardProjects = dict[tuple[Path | None, str], ProjectInfo]
+"""The board project of each project root under each ``AISQUARE_TEAM_HUB``, resolved once."""
+
+
+def remote_board_payload(
+    project: str | None = None, *, boards: BoardProjects | None = None
+) -> dict[str, object]:
     """``GET api/board`` and the ``board`` frame — the ONE call into ``board_data``.
 
     The project's root as ``cwd`` is exactly what ``asq board --json`` prints when
@@ -2080,13 +2089,33 @@ def remote_board_payload(project: str | None = None) -> dict[str, object]:
     page went by the board's own project id, dropped every frame and every read, and
     said "Loading…" for as long as the tab was open (review of #243, round 4).
 
+    The frame passes ``boards``, and is read for what :func:`remote_board_frame` keeps
+    of it. It is read every second while a phone shows its Board tab, and each read
+    resolved the board through ``team_project``, a ``git rev-parse`` process, wrote the
+    store (``ensure_project``, a write transaction beside every hook's), and read every
+    session and task the project ever had, for the frame to drop all but a few (review
+    of #243, round 4). Now the board project of each root is resolved once and kept in
+    ``boards``, as the TUI's Board tab resolves its own once: neither the hub nor where
+    a checkout's repository lives changes under a running server. ``board_data`` then
+    reads the events and the sessions they name (``glance``). ``GET api/board`` still
+    reads the whole board, as ``asq board --json`` prints it.
+
     #240 fold: pass ``exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS`` here (one line).
     """
     from aisquare.cli.team import board_json
+    from aisquare.core import orchestrator
     from aisquare.services import team as team_service
 
     cwd = None if project is None else _resolve_project(project).root
-    return board_json(*team_service.board_data(cwd, events=BOARD_EVENTS))
+    board: ProjectInfo | None = None
+    if boards is not None:
+        key = (cwd, os.environ.get(orchestrator.TEAM_HUB_ENV_VAR, ""))
+        board = boards.get(key)
+        if board is None:
+            board = boards[key] = team_service.resolve_project(cwd)
+    return board_json(
+        *team_service.board_data(cwd, events=BOARD_EVENTS, project=board, glance=boards is not None)
+    )
 
 
 def live_sources() -> Sources:
@@ -2143,6 +2172,11 @@ def live_sources() -> Sources:
                 entries = store.entries(project_id=target.id)
         return [entry.model_dump(mode="json") for entry in entries]
 
+    boards: BoardProjects = {}
+
+    def board_frame_payload(project: str | None = None) -> object:
+        return remote_board_frame(remote_board_payload(project, boards=boards))
+
     return Sources(
         projects=projects_payload,
         fleet=fleet_payload,
@@ -2152,6 +2186,7 @@ def live_sources() -> Sources:
         panes=_live_panes,
         transcript=_live_transcript,
         explainability=_live_explainability,
+        board_frame=board_frame_payload,
     )
 
 
@@ -3673,6 +3708,7 @@ def build_remote_app(
     from aisquare.services import remote_actions, remote_needs, remote_push
 
     reads = sources or live_sources()
+    board_frame = reads.board_frame or (lambda project: remote_board_frame(reads.board(project)))
     handlers = {
         name: _remote_write_tracked(name, handler)
         for name, handler in (writes or live_writes()).handlers.items()
@@ -4123,8 +4159,7 @@ def build_remote_app(
             if board_wanted:
                 try:
                     payload = await snapshot(
-                        f"board-frame:{board_ref or ''}",
-                        lambda: remote_board_frame(reads.board(board_ref)),
+                        f"board-frame:{board_ref or ''}", lambda: board_frame(board_ref)
                     )
                 except Exception as exc:  # said on the Board tab, not "Loading…" for good
                     log.debug("remote: board frame unread: %s", exc)

@@ -1955,6 +1955,9 @@ def test_the_sessions_seen_since_and_the_ones_named_are_chosen_by_the_query(
     named = store.team_sessions_seen_since(PROJECT.id, recent, ids=["ses_1", "ses_2", "ses_9"])
     assert [s.id for s in named] == ["ses_3", "ses_2", "ses_1"], "newest seen first, once each"
     assert store.team_sessions_seen_since("prj_other", recent, ids=["ses_1"]) == []
+    alone = store.team_sessions_seen_since(PROJECT.id, None, ids=["ses_1", "ses_3", "ses_9"])
+    assert [s.id for s in alone] == ["ses_3", "ses_1"], "no window: the ones named, and only them"
+    assert store.team_sessions_seen_since(PROJECT.id, None) == []
 
 
 def _board(store: ContextStore, project_id: str, *events: tuple[str, str | None, datetime]) -> None:

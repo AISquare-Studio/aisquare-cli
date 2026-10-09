@@ -397,6 +397,102 @@ def test_under_a_hub_each_projects_board_frame_is_the_hubs_board_named_for_that_
     assert "on the hub's board" in _event_texts(frame["payload"])
 
 
+def _seed_board(project: ProjectInfo) -> None:
+    """Three sessions, two of which write on the board, a task, and three notes."""
+    with store_session() as store:
+        for n, seen in enumerate(("10:01", "10:03", "10:02")):
+            store.upsert_session(
+                TeamSession(
+                    id=f"ses_{project.id[-6:]}_{n}",
+                    project_id=project.id,
+                    role="coder",
+                    label=f"coder-{n}",
+                    started_at=T0,
+                    last_seen_at=datetime.fromisoformat(f"2026-10-07T{seen}:00+00:00"),
+                )
+            )
+    team_service.add_task("ship it", cwd=project.root)
+    team_service.add_note("from coder-0", session_ref=f"ses_{project.id[-6:]}_0", cwd=project.root)
+    team_service.add_note("from coder-1", session_ref=f"ses_{project.id[-6:]}_1", cwd=project.root)
+    team_service.add_note("from the desk", cwd=project.root)
+
+
+def test_the_board_frame_is_what_the_board_read_makes_of_it(
+    two_projects: tuple[ProjectInfo, ProjectInfo],
+) -> None:
+    """r4 5/9 reads the frame for what it carries; it must carry what it did, the events
+    and the sessions they name, newest seen first, for a named project and the current."""
+    current, other = two_projects
+    for project in (current, other):
+        _seed_board(project)
+    sources = live_sources()
+    assert sources.board_frame is not None
+    for ref in (other.id, None):
+        frame = sources.board_frame(ref)
+        assert frame == remote_server.remote_board_frame(remote_board_payload(ref))
+        assert isinstance(frame, dict)
+        assert [one["label"] for one in frame["sessions"]] == ["coder-1", "coder-0"]
+
+
+def test_a_board_frame_runs_no_git_writes_nothing_and_reads_no_session_it_drops(
+    two_projects: tuple[ProjectInfo, ProjectInfo],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """r4 5/9: a phone on the Board tab cost a ``git rev-parse`` and a store write
+    (``ensure_project``) every second, and every session and task the project ever had was
+    read for the frame to drop. Measured over the live stream: the board's project is
+    resolved once for the server, and a frame reads its events and the sessions they name."""
+    from aisquare.core import orchestrator, workspace
+    from aisquare.core.store import SqliteStore
+
+    _current, other = two_projects
+    _seed_board(other)
+    asked: list[tuple[str, object]] = []
+
+    def spy(name: str, real: Any, *, store: bool = True) -> Any:
+        def called(*args: Any, **kwargs: Any) -> Any:
+            asked.append((name, args[1] if store else args[0]))
+            return real(*args, **kwargs)
+
+        return called
+
+    for name in ("ensure_project", "team_sessions", "team_tasks", "recent_events"):
+        monkeypatch.setattr(SqliteStore, name, spy(name, getattr(SqliteStore, name)))
+    git = spy("git", workspace.git_common_root, store=False)
+    monkeypatch.setattr(orchestrator, "git_common_root", git)
+
+    def of_other(name: str) -> list[object]:
+        ids = (other.id, other.root, other.root.resolve())
+        return [
+            arg
+            for asked_name, arg in asked
+            if asked_name == name and (getattr(arg, "id", arg) in ids)
+        ]
+
+    runtime = make_runtime()
+    client = make_client(build_app(runtime, sources=live_sources(), dist_dir=tmp_path, tick=0.02))
+    assert unlock(client, runtime).status_code == 200
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_board": other.id}))
+        frame = _until(ws, lambda f: f["type"] == "board")
+        deadline = time.monotonic() + 10
+        while len(of_other("recent_events")) < 4:
+            assert time.monotonic() < deadline, "the board frame was read fewer than 4 times"
+            time.sleep(0.01)
+    assert [event["payload"]["text"] for event in frame["payload"]["events"]] == [
+        "ship it",
+        "from coder-0",
+        "from coder-1",
+        "from the desk",
+    ]
+    assert len(of_other("git")) <= 1, "its project resolved once, not once a frame"
+    assert of_other("ensure_project") == [], "a frame writes nothing"
+    assert of_other("team_sessions") == [] and of_other("team_tasks") == []
+    whole = client.get(f"{base(runtime)}/api/board", params={"project": other.id}).json()
+    assert len(whole["sessions"]) == 3 and len(whole["tasks"]) == 1, "the read is the whole board"
+
+
 def _json_of_board() -> dict[str, Any]:
     result = CliRunner().invoke(cli, ["--json", "board"])
     assert result.exit_code == 0, result.output

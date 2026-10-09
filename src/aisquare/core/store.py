@@ -1014,7 +1014,7 @@ class ContextStore(Protocol):
     def get_session(self, session_id: str) -> TeamSession | None: ...
     def team_sessions(self, project_id: str) -> list[TeamSession]: ...
     def team_sessions_seen_since(
-        self, project_id: str, since: datetime, *, ids: Sequence[str] = ()
+        self, project_id: str, since: datetime | None, *, ids: Sequence[str] = ()
     ) -> list[TeamSession]: ...
     def update_session(
         self,
@@ -2022,21 +2022,24 @@ class SqliteStore:
         return [_row_to_session(row) for row in rows]
 
     def team_sessions_seen_since(
-        self, project_id: str, since: datetime, *, ids: Sequence[str] = ()
+        self, project_id: str, since: datetime | None, *, ids: Sequence[str] = ()
     ) -> list[TeamSession]:
         """The project's sessions seen at or after ``since``, and those named in ``ids`` however
-        long ago they were seen; newest seen first.
+        long ago they were seen; newest seen first. ``None`` for ``since``: those named alone.
 
         For a reader that runs every few seconds and needs the live few (``remote``'s needs
-        scan): :meth:`team_sessions` is every session the project ever had, and every Claude
-        Code start adds one that is never deleted. The window rides the ``(project_id,
-        last_seen_at)`` index; ``since`` compares as the stored ISO-8601 UTC strings do.
+        scan), or the few its events name (``remote``'s board frame): :meth:`team_sessions`
+        is every session the project ever had, and every Claude Code start adds one that is
+        never deleted. The window rides the ``(project_id, last_seen_at)`` index; ``since``
+        compares as the stored ISO-8601 UTC strings do.
         """
-        rows = self._conn.execute(
-            f"SELECT {_SESSION_COLUMNS} FROM team_session "
-            "WHERE project_id = ? AND last_seen_at >= ?",
-            (project_id, since.astimezone(UTC).isoformat()),
-        ).fetchall()
+        rows: list[sqlite3.Row] = []
+        if since is not None:
+            rows = self._conn.execute(
+                f"SELECT {_SESSION_COLUMNS} FROM team_session "
+                "WHERE project_id = ? AND last_seen_at >= ?",
+                (project_id, since.astimezone(UTC).isoformat()),
+            ).fetchall()
         named = sorted(set(ids))
         for start in range(0, len(named), 500):  # well under SQLite's bound on parameters
             chunk = named[start : start + 500]

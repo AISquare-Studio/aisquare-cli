@@ -844,6 +844,96 @@ def test_a_coder_whose_hand_over_never_started_its_replacement_is_reported() -> 
     assert _scan(_with_live_manager(fleet)) == [], "a live manager was nudged on it"
 
 
+def test_an_exit_is_its_own_rows_not_another_sessions_announced_later() -> None:
+    """``_needs_exit_of`` reads the exit announced under the row's own session: the manager
+    stopped cleanly, and a coder's hand-over failed after, is no manager down (its newest
+    exit on the board is the coder's), and the coder's card is the coder's alone. Read off
+    any session, the manager's clean stop read as a failed hand-over, and the reverse order
+    hid the coder's real card under the manager's newer exit."""
+    from aisquare.services.fleet import HANDOVER_FAILED
+
+    stopped, failed = NOW - timedelta(minutes=20), NOW - timedelta(minutes=10)
+    manager = _row("manager", role="manager", ended=stopped, exit_status=0)
+    coder = _row("coder-1", ended=failed, exit_status=0)
+    working = _row("coder-2")
+    fleet = Fleet(
+        ended=[manager, coder],
+        agents=[_status(working, "working", _session(working))],
+        sessions=[_session(manager, ended=stopped), _session(coder, ended=failed)],
+    )
+    managing, coding = fleet.sessions
+    fleet.events = [
+        _event(7, "agent_exited", "manager exited (0)", session=managing, at=stopped),
+        _event(
+            9, "agent_exited", f"coder-1 exited (0): {HANDOVER_FAILED}", session=coding, at=failed
+        ),
+    ]
+    assert [(item.kind, item.agent) for item in _scan(fleet)] == [("crashed", "coder-1")]
+    fleet.events = [
+        _event(
+            7, "agent_exited", f"coder-1 exited (0): {HANDOVER_FAILED}", session=coding, at=stopped
+        ),
+        _event(9, "agent_exited", "manager exited (0)", session=managing, at=failed),
+    ]
+    fleet.ended = [
+        manager.model_copy(update={"ended_at": failed}),
+        coder.model_copy(update={"ended_at": stopped}),
+    ]
+    assert [(item.kind, item.agent) for item in _scan(fleet)] == [("crashed", "coder-1")]
+
+
+def test_a_clean_exit_is_no_failed_hand_over_another_agent_announced_later() -> None:
+    from aisquare.services.fleet import HANDOVER_FAILED
+
+    done, failed = NOW - timedelta(minutes=20), NOW - timedelta(minutes=10)
+    one = _row("coder-1", ended=done, exit_status=0)
+    two = _row("coder-2", ended=failed, exit_status=0)
+    fleet = Fleet(
+        ended=[one, two],
+        events=[
+            _event(7, "agent_exited", "coder-1 exited (0)", session=_session(one), at=done),
+            _event(
+                9,
+                "agent_exited",
+                f"coder-2 exited (0): {HANDOVER_FAILED}",
+                session=_session(two),
+                at=failed,
+            ),
+        ],
+    )
+    assert [(item.kind, item.agent) for item in _scan(fleet)] == [("crashed", "coder-2")]
+
+
+def test_a_failed_hand_over_is_not_the_exit_of_a_later_row_of_its_session() -> None:
+    """A restart resumes the session, so a later row of the label has the session id of the
+    one whose hand-over failed. Reaped as lost, that row has no exit status and announces
+    nothing: the earlier row's failed exit, announced before it was created, is not its."""
+    from aisquare.services.fleet import HANDOVER_FAILED
+
+    first = _row(
+        "coder-1",
+        created=NOW - timedelta(minutes=55),
+        ended=NOW - timedelta(minutes=50),
+        exit_status=0,
+    )
+    again = first.model_copy(
+        update={
+            "id": "agt_again",
+            "created_at": NOW - timedelta(minutes=40),
+            "ended_at": NOW - timedelta(minutes=10),
+            "exit_status": None,
+        }
+    )
+    failed = _event(
+        7,
+        "agent_exited",
+        f"coder-1 exited (0): {HANDOVER_FAILED}",
+        session=_session(first),
+        at=NOW - timedelta(minutes=50),
+    )
+    assert _scan(Fleet(ended=[first, again], events=[failed])) == []
+
+
 def test_a_new_manager_ends_manager_down() -> None:
     old = _row("manager", role="manager", ended=NOW - timedelta(minutes=5), exit_status=3)
     new = _row("manager", role="manager", row_id="agt_new", created=NOW - timedelta(minutes=1))

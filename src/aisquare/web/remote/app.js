@@ -2523,6 +2523,7 @@ VIEWS.agent = (route, main) => {
       for (const item of items) sheet.body.appendChild(button("w row", item[0], item[1]));
     });
   };
+  let drawn = null;
   if (route.tab === "live") {
     const tools = el("div", "row-inline");
     const fit = checkbox("Fit width", false);
@@ -2539,9 +2540,11 @@ VIEWS.agent = (route, main) => {
     body.append(tools, pane);
     let landed = false;
     cleanups.push(paneWatch(pid, label, (payload) => {
+      drawn = payload;
       width = clampInt(payload.width, 20, 400);
       fitNow();
       draw(payload);
+      gateButtons();
       // The first screen opens at its foot, where a prompt waits; later ones keep the scroll.
       // Once the view is built: a cached frame is drawn before the input bar is added.
       if (!landed && Array.isArray(payload.rows) && payload.rows.length) {
@@ -2580,6 +2583,7 @@ VIEWS.agent = (route, main) => {
         const first = lines.firstChild;
         for (const node of nodes) lines.insertBefore(node, first);
       } else {
+        drawn = page;
         clear(lines);
         for (const node of nodes) lines.appendChild(node);
         if (!nodes.length) lines.appendChild(el("span", "ln muted", "No conversation recorded yet."));
@@ -2603,9 +2607,10 @@ VIEWS.agent = (route, main) => {
       return undefined;
     });
   }
-  if (route.tab !== "card") main.appendChild(inputBar(pid, label, cleanups, route.tab !== "live"));
+  if (route.tab !== "card") main.appendChild(inputBar(pid, label, cleanups, route.tab !== "live", () => drawn && drawn.agent_id));
   drawState();
-  const held = route.tab === "live" ? () => !paneFresh(pid, label) : null;
+  // Nor at an unread pane: it shows no agent.
+  const held = route.tab === "live" ? () => !paneFresh(pid, label) || isText(drawn && drawn.error) : null;
   return { fleet: drawState, needs: drawState, held, cleanup: () => { for (const fn of cleanups) fn(); } };
 };
 
@@ -2630,8 +2635,9 @@ function drawExplainability(body, card) {
 /* The bar under the pane: a growing textarea, ⏎ on by default (text left in
  * Claude Code's input box holds back its next question), Send, and the key
  * pad, which the soft keyboard and it never share the screen with. blind: the
- * tab shows no pane (Transcript), so Send types nothing while a prompt may be up. */
-function inputBar(pid, label, cleanups, blind) {
+ * tab shows no pane (Transcript), so Send types nothing while a prompt may be up. Each tap
+ * carries pin(), the agent_id of what the tab shows: none reaches a replacement. */
+function inputBar(pid, label, cleanups, blind, pin) {
   const bar = el("div", "inputbar");
   const line = el("div", "row-inline");
   const text = el("textarea", "say");
@@ -2710,11 +2716,12 @@ function inputBar(pid, label, cleanups, blind) {
     return false;
   };
   const sendKey = (key, tapped) => {
+    const body = { keys: [key], agent_id: pin() };
     if (key === "Escape") {
       const now = Date.now();
       if (now - lastEsc < ESC_REPEAT_MS) {
         lastEsc = 0;
-        confirmSheet("Press Esc again?", "Two Esc in a row open Claude Code's Rewind selector.", "Send Esc", () => post({ keys: [key] }, "Esc", tapped));
+        confirmSheet("Press Esc again?", "Two Esc in a row open Claude Code's Rewind selector.", "Send Esc", () => post(body, "Esc", tapped));
         return;
       }
       lastEsc = now;
@@ -2722,10 +2729,10 @@ function inputBar(pid, label, cleanups, blind) {
     if (key === "C-c" || key === "C-d") {
       const which = key === "C-c" ? "Ctrl-C" : "Ctrl-D";
       confirmSheet("Send " + which + "?", which + " interrupts " + label + "; a second one within 3 s exits Claude Code.", "Send " + which,
-        () => post({ keys: [key] }, which, tapped));
+        () => post(body, which, tapped));
       return;
     }
-    post({ keys: [key] }, "Key " + key, tapped);
+    post(body, "Key " + key, tapped);
   };
   // Send needs words. An empty box with ⏎ on was a bare Enter into the pane, which
   // picks a dialog's highlighted option ("1. Yes"); Enter on its own is the pad's.
@@ -2739,7 +2746,7 @@ function inputBar(pid, label, cleanups, blind) {
       toast("Too long (max " + TEXT_MAX.keys + " characters) — use Actions › Tell for a longer message.");
       return;
     }
-    const body = { text: value, enter: enter.box.checked };
+    const body = { text: value, enter: enter.box.checked, agent_id: pin() };
     if (blind) body.dialog_guard = true;
     send.classList.add("busy");
     gateButtons();

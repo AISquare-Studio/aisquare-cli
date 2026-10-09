@@ -151,7 +151,7 @@ must not act on a screen that went stale. It then opens a new connection, as a
 connection can die without a word (Wi-Fi giving way to mobile data). Waking the
 phone reconnects at once, and from the moment a connection is lost an agent's
 Live tab stays grey, its keys and Send held, until its pane has come through
-again.
+again. They are held too while the pane cannot be read.
 If the machine stops checking what needs you while the link is fine, the feed
 greys and says when it last looked.
 
@@ -310,10 +310,10 @@ Send on the Transcript tab, which does not show the pane, types nothing while
 the agent may be showing a prompt, a tool with no result yet included; send from
 Live, where the pane shows what the keys would answer.
 
-Every action is pinned to the agent you looked at: if a manager restarted or
-switched it in the meantime, the action is refused as `stale` rather than
-applied to the replacement (as `no_such_agent` when that happens while the
-request runs).
+Every action, and every key or line you type, is pinned to the agent you
+looked at: if a manager restarted or switched it in the meantime, it is refused
+as `stale` rather than applied to the replacement (as `no_such_agent` when that
+happens while the request runs).
 
 On a phone wide enough for eight keys (412 px is, 390 px is not) the key pad is
 one row, `Esc 1 2 3 ⏎ ↑ ↓ More` (⏎ being Enter), with the rest under More. On
@@ -541,7 +541,10 @@ a retry of one past the 50 but within the 1000 is refused with
 `send-keys` types into the pane whatever it shows, a prompt included. A script
 that cannot see the pane adds `"dialog_guard": true`, as the Transcript tab
 does, and nothing is typed while the agent may be showing a prompt (409
-`dialog_open`).
+`dialog_open`). A pane frame, `api/panes` and a transcript page name the agent
+they were read from (`agent_id`); sent with the keys, as the page sends it,
+nothing is typed once another agent holds the label, after a restart or a
+switch (409 `stale`).
 
 The code is `src/aisquare/services/remote_server.py` (the server and its gates)
 and `src/aisquare/services/remote_page.py` (the bundled page, whose files are in

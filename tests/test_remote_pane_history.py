@@ -239,8 +239,9 @@ def _project_stub(ref: str | None) -> Any:
     return _P()
 
 
-LIVE_KEYS = {"rows", "cursor", "width", "height", "cursor_visible"}
-"""What the live stream's frame holds: §4-D's four keys, and whether the cursor shows."""
+LIVE_KEYS = {"rows", "cursor", "width", "height", "cursor_visible", "agent_id"}
+"""What the live stream's frame holds: §4-D's four keys, whether the cursor shows, and the row
+it was captured from, which keys typed at it carry."""
 
 
 @requires_tmux

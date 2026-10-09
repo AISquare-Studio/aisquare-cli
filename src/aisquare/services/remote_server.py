@@ -2031,6 +2031,11 @@ def _live_panes(label: str, project: str | None = None, history: int = 0) -> dic
     alone (:func:`_pane_payload`), so the live stream and every existing client
     are untouched — the history keys appear only when history was asked for.
 
+    Every frame names the row it was captured from (``agent_id``), which the page
+    sends with the keys typed at it (``send-keys``): a replacement that took the
+    label since gets none of them. It also makes the replacement's first frame a
+    change the stream sends, however like the last one its screen is.
+
     Never another agent's screen: a row whose pane id the next tmux server gave
     away is 409 ``not_agent`` (``fleet._outlived``, FLEET-1). The server says
     when it started in the very command that took the frame
@@ -2049,6 +2054,7 @@ def _live_panes(label: str, project: str | None = None, history: int = 0) -> dic
     if fleet_service._outlived(agent, capture.facts.server_started):
         raise RequestError(409, "not_agent", PANE_OUTLIVED.format(label=label))
     payload = _pane_payload(capture)
+    payload["agent_id"] = agent.id
     if history <= 0:
         return payload
     payload["history_size"] = capture.facts.history_size
@@ -2080,6 +2086,10 @@ def _live_transcript(
     from there, and Load older put the new conversation above the old one as its
     past (review of #243, sweep of round 4). A cursor of another conversation, or
     of none this server made, is a 409 ``stale_cursor``.
+
+    A page names the row it was read for (``agent_id``), as a pane frame does: the
+    Transcript tab's Send carries it, so a reply to this conversation is typed into
+    no replacement that took the label since (``send-keys``).
     """
     from aisquare.core.store import store_session
     from aisquare.services import transcript as transcript_service
@@ -2107,6 +2117,7 @@ def _live_transcript(
     payload = page.page_json()
     if page.cursor is not None and session is not None:
         payload["cursor"] = f"{session.id}:{page.cursor}"
+    payload["agent_id"] = agent.id
     return payload
 
 
@@ -2762,6 +2773,15 @@ def live_writes() -> Writes:
         which the text and its Enter would answer (409 ``dialog_open``,
         ``remote_actions.action_keys_guard``). The Live tab shows the dialog, and
         its keys are how one is answered, so they go without it.
+
+        ``agent_id`` pins the keys to the row whose screen they were typed at, which a
+        pane frame and a transcript page name: once another row holds the label,
+        nothing is sent (409 ``stale``, ``current`` naming that row), as for every
+        other write that types into an agent. Unpinned, a key tapped at the prompt the
+        phone showed went into the replacement a ``fleet restart`` or a usage-limit
+        hand-over had started since, neither of which takes the agent's lock: into its
+        input box, ahead of the line the fleet types into a resumed agent, or into its
+        first dialog (review of #243, round 5).
         """
         from aisquare.services import fleet as fleet_service
 
@@ -2771,6 +2791,7 @@ def live_writes() -> Writes:
         enter = _remote_flag(body, "enter")
         confirmed = _remote_flag(body, "confirm_exit")
         guarded = _remote_flag(body, "dialog_guard")
+        pin = _optional_ref(body, "agent_id", guard=True)
         project = _optional_ref(body, "project")
         if text and len(text) > SEND_KEYS_TEXT_MAX:
             raise RequestError(
@@ -2791,6 +2812,13 @@ def live_writes() -> Writes:
             f"{label}@{target.id} text={len(text or '')}ch keys={_audit_keys(keys)} enter={enter}"
         )
         with _remote_keys_turn(target, label) as agent:
+            if pin is not None and agent.id != pin:
+                raise RequestError(
+                    409,
+                    "stale",
+                    f"{label!r} is another agent now ({agent.id}) — nothing was sent",
+                    current={"agent_id": agent.id},
+                )
             server = fleet_service.server_for(agent.tmux_socket)
             refusal = _remote_pane_refusal(server, agent)
             if refusal is not None:

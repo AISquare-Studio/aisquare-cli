@@ -1897,6 +1897,30 @@ def test_send_on_the_transcript_tab_types_nothing_while_a_prompt_may_be_up(
     assert guarded["typed"] == "", "sent, so the box is cleared"
 
 
+def test_keys_and_send_carry_the_agent_id_of_the_screen_they_were_typed_at(
+    boot_report: dict[str, Any],
+) -> None:
+    """Review of #243, round 5: a key carried no agent, so a ``1`` tapped at the permission
+    prompt the Live tab showed went into the replacement a restart or a hand-over had started
+    on the machine before the next frame came. Each key and line carries the ``agent_id``
+    of the frame drawn when it was tapped, a ^C confirmed on its sheet after the next
+    frame came included, and the Transcript tab's Send that of the page it read. A frame
+    that could not be read shows no agent to type at: the pad and Send wait for a screen,
+    as they wait for the first one on a new socket."""
+    pinned = boot_report["pinnedKeys"]
+    assert pinned["live"] == [
+        [["1"], "agt_1"],
+        [["C-c"], "agt_1"],  # asked at agt_1's screen, confirmed once agt_2's came
+        ["hello", "agt_2"],
+        [["2"], "agt_2"],  # refused stale
+        [["4"], "agt_3"],  # the "3" tapped at the unread frame never went
+    ]
+    assert pinned["staleSaid"] == "'coder-1' is another agent now (agt_3) — nothing was sent"
+    assert pinned["unread"] == [True, True, True], "Send, the pad, and the pane greyed"
+    assert pinned["read"] == [False, False, False]
+    assert pinned["transcript"] == [["yes", "agt_1", True]]
+
+
 def test_a_sheet_keeps_focus_where_it_put_it_and_closes_onto_the_screen_once_its_opener_went(
     boot_report: dict[str, Any],
 ) -> None:

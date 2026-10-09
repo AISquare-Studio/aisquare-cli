@@ -1806,6 +1806,63 @@ async function transcriptSendGuarded() {
   return { bodies, refused, typed: say.value };
 }
 
+/* Keys and Send carry the agent_id of the screen they were typed at. On Live: a pad key at
+ * one row's frame; a ^C asked on its sheet there and confirmed after a replacement's frame
+ * came (still the first row's: the tap was at its screen); Send at the replacement's frame;
+ * a key the machine refuses stale, and what the page says; a frame that could not be read,
+ * at which the pad and Send wait (a tap there sends nothing) until a screen comes. On
+ * Transcript: Send with the page's id. Each body as [keys or text, agent_id]. */
+async function pinnedKeys() {
+  const ok = { status: 200, json: { sent: true } };
+  const stale = { status: 409, json: { error: "stale", message: "'coder-1' is another agent now (agt_3) — nothing was sent", current: { agent_id: "agt_3" } } };
+  let answer = ok;
+  const live = await agentView({ "POST api/send-keys": () => answer });
+  const pane = (payload) => live.live().frame("pane", payload, { agent: "coder-1", project: PROJECT });
+  const held = () => [buttonNamed(live.main(), "Send").disabled, buttonNamed(live.main(), "3").disabled, live.run("document.body.classList.contains('held')")];
+  pane({ rows: ["❯ 1. Yes"], cursor: [0, 0], width: 80, height: 1, agent_id: "agt_1" });
+  await settle();
+  click(buttonNamed(live.main(), "1"));
+  await settle();
+  click(buttonNamed(live.main(), "^C"));
+  pane({ rows: ["❯ "], cursor: [2, 0], width: 80, height: 1, agent_id: "agt_2" });
+  await settle();
+  click(buttonNamed(live.run("UI.sheet"), "Send Ctrl-C"));
+  await settle();
+  await typeAndSend(live, "hello");
+  answer = stale;
+  click(buttonNamed(live.main(), "2"));
+  await settle();
+  const staleSaid = live.toast();
+  answer = ok;
+  pane({ rows: [], width: 0, height: 0, error: "no live agent 'coder-1' in prj_x" });
+  await settle();
+  const unread = held();
+  click(buttonNamed(live.main(), "3"));
+  await settle();
+  pane({ rows: ["❯ "], cursor: [2, 0], width: 80, height: 1, agent_id: "agt_3" });
+  await settle();
+  const read = held();
+  click(buttonNamed(live.main(), "4"));
+  await settle();
+  const said = (body) => [body.keys || body.text, body.agent_id === undefined ? null : body.agent_id];
+  const transcript = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
+    "GET api/transcript/coder-1": () => ({ status: 200, json: { lines: ["done?"], cursor: null, more: false, stamps: {}, agent_id: "agt_1" } }),
+    "POST api/send-keys": () => ok,
+  }));
+  await settle();
+  transcript.acceptSockets();
+  transcript.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  await settle();
+  await typeAndSend(transcript, "yes");
+  return {
+    live: live.sent("api/send-keys").map(said),
+    staleSaid,
+    unread,
+    read,
+    transcript: transcript.sent("api/send-keys").map((body) => said(body).concat(body.dialog_guard === true)),
+  };
+}
+
 /* Where focus goes: a card's Tell… opens a sheet whose message box takes it; the next feed
  * frame draws the card anew, its button with it, and then Close. */
 async function sheetFocus() {
@@ -3051,6 +3108,7 @@ async function main() {
     silentSocket: await silentSocket(),
     transcriptSend: await transcriptSend(),
     transcriptSendGuarded: await transcriptSendGuarded(),
+    pinnedKeys: await pinnedKeys(),
     sheetFocus: await sheetFocus(),
     focusLands: await focusLands(),
     focusKept: await focusKept(),

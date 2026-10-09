@@ -206,7 +206,7 @@ def _while_the_next_check_reads(
     read = Runtime._signature
     raced = False
 
-    def overtaken(self: Runtime) -> tuple[bytes, bytes] | None:
+    def overtaken(self: Runtime) -> bytes | None:
         nonlocal raced
         signature = read(self)
         if not raced:
@@ -282,11 +282,11 @@ def test_the_cli_toggle_in_this_process_reaches_a_separate_runtime(isolated_home
 
 
 def _counting_checks(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """How often the file is read and digested to check it (``Runtime._signature``)."""
+    """How often the file is read to check it (``Runtime._signature``)."""
     checks = [0]
     read = Runtime._signature
 
-    def counted(self: Runtime) -> tuple[bytes, bytes] | None:
+    def counted(self: Runtime) -> bytes | None:
         checks[0] += 1
         return read(self)
 
@@ -321,7 +321,7 @@ def test_a_request_checks_the_file_once_for_its_gates_and_its_route(
     where: list[str] = []
     read = Runtime._signature
 
-    def counted(self: Runtime) -> tuple[bytes, bytes] | None:
+    def counted(self: Runtime) -> bytes | None:
         where.append(threading.current_thread().name)
         return read(self)
 

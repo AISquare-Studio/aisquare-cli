@@ -104,9 +104,9 @@ class Replacement:
 
         A ``str`` is written as UTF-8 in text mode, as every text caller's always
         has been, so on Windows each ``\\n`` lands as ``\\r\\n``. ``bytes`` land
-        exactly as given: ``services.remote_server`` keeps a digest of the bytes
-        it wrote to know its own write when it reads the file back, which a CR
-        added per line would defeat.
+        exactly as given: ``services.remote_server`` keeps the bytes it wrote to
+        know its own write when it reads the file back, which a CR added per line
+        would defeat.
 
         A second call is refused: the temp has become the target, and the file
         it would write is a new one that no restriction was applied to.

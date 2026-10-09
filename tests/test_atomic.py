@@ -192,7 +192,7 @@ def test_owner_only_restricts_the_empty_temp_whatever_the_targets_bits(
 
 
 def test_bytes_land_exactly_and_text_lands_as_it_always_has(tmp_path: Path) -> None:
-    """``services.remote_server`` digests the bytes it writes to know its own write when it
+    """``services.remote_server`` keeps the bytes it writes to know its own write when it
     reads the file back, so bytes must reach the disk unchanged: in text mode Windows adds a
     CR per line. Every other caller passes text, and text is still written as it always was,
     UTF-8 with the platform's line ends."""

@@ -855,12 +855,15 @@ class Runtime:
         self._unpublished_undo: list[Callable[[], None]] = []
         """How to put memory back should that write fail (:meth:`_write_state`'s ``undo``)."""
         self._disk: bytes | None = None
-        """Digest of the file's bytes as this process last wrote or read them.
+        """The file's bytes as this process last wrote or read them.
 
-        A content fingerprint, not ``(mtime_ns, size)``: the modal coder measured
-        195 of 200 same-size rewrites landing inside one mtime tick on this WSL2
-        filesystem, so a regenerated passphrase of equal length went unnoticed.
-        The file is a few hundred bytes; hashing it costs about what the stat did.
+        The content, not ``(mtime_ns, size)``: the modal coder measured 195 of 200
+        same-size rewrites landing inside one mtime tick on this WSL2 filesystem, so
+        a regenerated passphrase of equal length went unnoticed. And the bytes, not a
+        hash of them: they hold the passphrase, and a blake2b of it read as a password
+        kept under a fast hash (CodeQL ``py/weak-sensitive-data-hashing``). The bytes
+        are as exact, hold nothing :attr:`_state` does not, and a few hundred of them
+        compare for less than the hash cost.
         """
         self._disk_moves = 0
         """How many times :attr:`_disk` has moved: every write this process renamed into
@@ -875,17 +878,12 @@ class Runtime:
 
     # -- persistence --
 
-    @staticmethod
-    def _state_digest(data: bytes) -> bytes:
-        return hashlib.blake2b(data, digest_size=16).digest()
-
-    def _signature(self) -> tuple[bytes, bytes] | None:
-        """``(digest, bytes)`` of the file right now, or ``None`` when it cannot be read."""
+    def _signature(self) -> bytes | None:
+        """The file's bytes right now, or ``None`` when it cannot be read."""
         try:
-            data = self._state_path.read_bytes()
+            return self._state_path.read_bytes()
         except OSError:
             return None
-        return (self._state_digest(data), data)
 
     @contextlib.contextmanager
     def _state_file_lock(self) -> Iterator[None]:
@@ -911,8 +909,8 @@ class Runtime:
         temp of this write's own needs no lock. What the read-modify-write
         decided (:meth:`_write_state`) is published once ``_lock`` is let go,
         still under the file lock, so its fsyncs and rename hold up no request
-        and no socket tick. Until the rename this process's digest of the file
-        stays the old one, so a reload meanwhile finds nothing new to adopt; and
+        and no socket tick. Until the rename the bytes this process knows the file
+        by stay the old ones, so a reload meanwhile finds nothing new to adopt; and
         a reload that read the old file before the rename and compares after it
         adopts nothing either (:attr:`_disk_moves`).
         """
@@ -965,8 +963,8 @@ class Runtime:
         ``aisquare remote allow-write on``, ``regenerate-password`` and ``revoke``
         run in their own process and write the file; a serving process that only
         trusted memory kept answering with the old switches (measured: 30 s of
-        ``allow_write:false`` after the toggle). One small read plus a blake2b
-        digest per check is the whole cost; the file is parsed only when its
+        ``allow_write:false`` after the toggle). One small read and a compare of
+        its bytes per check is the whole cost; the file is parsed only when its
         BYTES differ from what this process last wrote or read. Not mtime: on
         this filesystem 195 of 200 same-size rewrites shared an mtime tick, which
         hid a regenerated passphrase of equal length. An unreadable or
@@ -995,11 +993,10 @@ class Runtime:
             return False
         with self._lock:
             moves = self._disk_moves
-        signature = self._signature()
+        data = self._signature()
         with self._lock:
-            if signature is None or signature[0] == self._disk or moves != self._disk_moves:
+            if data is None or data == self._disk or moves != self._disk_moves:
                 return False
-            digest, data = signature
             try:
                 raw = json.loads(data.decode("utf-8-sig"))
             except (ValueError, RecursionError):
@@ -1007,7 +1004,7 @@ class Runtime:
             if not isinstance(raw, dict) or raw.get("version") != STATE_VERSION:
                 return False
             self.reads += 1
-            self._disk = digest
+            self._disk = data
             self._disk_moves += 1
             incoming = _State.from_json(raw)
             known = {device.id: device for device in self._state.devices}
@@ -1029,7 +1026,7 @@ class Runtime:
         one request, gates and route, or one tick of a socket.
 
         Every read of the state checks the file (:meth:`reload_if_changed`), a read and a
-        digest each, and one request made three or four of them on the event loop that
+        compare each, and one request made three or four of them on the event loop that
         serves every request and socket: the token, the deadline and the cookie's device
         at the gate, then the route's own (``api/remote``, the write gate); and every
         socket three a second (review of #243, round 3). Inside this block the first
@@ -1094,7 +1091,7 @@ class Runtime:
             data, raw = found
             state = _State.from_json(raw)
             if _encoded_state(state) == data:
-                self._disk = self._state_digest(data)
+                self._disk = data
                 return state
         with self._state_file_lock():
             found = self._read_state_file()
@@ -1137,18 +1134,18 @@ class Runtime:
         rename carries over), then renamed over the target with the Windows
         contention retry. A shared ``remote.json.tmp`` written under the umask and
         chmodded afterwards held them 0644 until the chmod, and two writers
-        collided on its name. Bytes, so the digest is of what is on disk: the next
-        check finds these exact bytes and skips the parse, and a sibling process
-        writing the same size in the same mtime tick is still seen, because its
-        bytes differ. ``unmade`` is why there is no temp, raised now that there
-        is something to write.
+        collided on its name. Bytes, so what this process knows is what is on
+        disk: the next check finds these exact bytes and skips the parse, and a
+        sibling process writing the same size in the same mtime tick is still
+        seen, because its bytes differ. ``unmade`` is why there is no temp, raised
+        now that there is something to write.
         """
         if pending is None:
             assert unmade is not None
             raise unmade
         pending.publish(body)
         with self._lock:
-            self._disk = self._state_digest(body)
+            self._disk = body
             self._disk_moves += 1
         if not pending.restricted and not self._said_unrestricted:
             self._said_unrestricted = True  # once: the flush may rewrite the file every 30 s
@@ -1522,8 +1519,8 @@ class Runtime:
         bytes being what memory would write, and no device past its lifetime.
         Compared with the file, not with what this process last wrote or read
         (:attr:`_disk`): a version-1 file written under a running server is never
-        adopted, so that digest still matched memory, and the flush must write
-        version 2 back over it.
+        adopted, so what this process last wrote still matched memory, and the
+        flush must write version 2 back over it.
         """
         if self._flush_needless(self._signature()):
             return
@@ -1533,14 +1530,14 @@ class Runtime:
             if not self._flush_needless(self._signature()):
                 self._write_state(self._state)
 
-    def _flush_needless(self, on_disk: tuple[bytes, bytes] | None) -> bool:
+    def _flush_needless(self, on_disk: bytes | None) -> bool:
         """Whether the file's bytes (:meth:`_signature`) are what memory would write, with no
         device left for a flush to prune."""
         now = _remote_now()
         with self._lock:
             return (
                 on_disk is not None
-                and on_disk[1] == _encoded_state(self._state)
+                and on_disk == _encoded_state(self._state)
                 and not any(device.device_expired(now) for device in self._state.devices)
             )
 

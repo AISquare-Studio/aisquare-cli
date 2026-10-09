@@ -32,7 +32,6 @@ import os
 import stat
 from collections.abc import Iterator
 from pathlib import Path
-from typing import IO, Any
 from uuid import uuid4
 
 from aisquare.core import paths
@@ -100,12 +99,6 @@ class Replacement:
         self._kept = kept
         self._durable = durable
 
-    def _sync(self, handle: IO[Any]) -> None:
-        """Push the temp's contents to the disk before the rename, if ``durable``."""
-        if self._durable:
-            handle.flush()
-            os.fsync(handle.fileno())
-
     def publish(self, body: str | bytes) -> None:
         """Write ``body`` into the temp and rename it over the target, once.
 
@@ -120,14 +113,14 @@ class Replacement:
         """
         if self.published:
             raise RuntimeError(f"{self.target} was already replaced by this temp")
-        if isinstance(body, bytes):
-            with self._temporary.open("wb") as raw:
-                raw.write(body)
-                self._sync(raw)
-        else:
-            with self._temporary.open("w", encoding="utf-8") as text:
-                text.write(body)
-                self._sync(text)
+        binary = isinstance(body, bytes)
+        with self._temporary.open(
+            "wb" if binary else "w", encoding=None if binary else "utf-8"
+        ) as handle:
+            handle.write(body)
+            if self._durable:
+                handle.flush()
+                os.fsync(handle.fileno())
         if self._kept is not None:
             # Exactly the target's: the umask may have narrowed them.
             os.chmod(self._temporary, self._kept)

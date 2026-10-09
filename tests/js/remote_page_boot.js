@@ -20,6 +20,7 @@ const vm = require("vm");
 
 const APP = path.join(__dirname, "..", "..", "src", "aisquare", "web", "remote", "app.js");
 const SOURCE = fs.readFileSync(APP, "utf8");
+const WORKER = fs.readFileSync(path.join(path.dirname(APP), "sw.js"), "utf8");
 const CSS = fs.readFileSync(path.join(path.dirname(APP), "app.css"), "utf8");
 /* The transcript box's padding, a side, as the stylesheet sets it. */
 const PRE_PADDING = /pre\.pane, pre\.transcript \{[^}]*padding: (\d+)px;/.exec(CSS)[1] + "px";
@@ -769,9 +770,11 @@ async function quickAnswerTwice() {
 }
 
 /* A browser that can take pushes and already holds a subscription made against
- * `key` (bytes); what it is asked to do is written down in `log`. */
+ * `key` (bytes); what it is asked to do is written down in `log`, and what the page listens
+ * for from its service worker in `heard`. */
 function fakePush(key) {
   const log = [];
+  const heard = {};
   const subscription = (name, bytes) => ({
     options: { applicationServerKey: Uint8Array.from(bytes).buffer },
     unsubscribe: async () => { log.push("unsubscribe " + name); return true; },
@@ -789,7 +792,8 @@ function fakePush(key) {
     },
   };
   const serviceWorker = {
-    getRegistration: async () => registration, register: async () => registration, ready: Promise.resolve(registration), addEventListener() {},
+    getRegistration: async () => registration, register: async () => registration, ready: Promise.resolve(registration),
+    addEventListener: (type, fn) => { (heard[type] = heard[type] || []).push(fn); },
   };
   const globals = {
     navigator: { serviceWorker, userAgent: "Mozilla/5.0 (Linux; Android 14)", platform: "Linux" },
@@ -798,7 +802,7 @@ function fakePush(key) {
     isSecureContext: true,
     atob: (text) => Buffer.from(text, "base64").toString("binary"),
   };
-  return { log, globals };
+  return { log, heard, globals };
 }
 
 const KEY_NOW = Array.from({ length: 65 }, (unused, n) => (n * 7 + 4) % 256);
@@ -2652,6 +2656,63 @@ async function pushScreens() {
   };
 }
 
+/* sw.js run as a worker of its scope, with the windows open in its browser at `open`: what it
+ * did, in order, for a push and for each notification tap, and what it posted to each window. */
+function workerAt(scope, open) {
+  const did = [];
+  const listeners = {};
+  const windows = open.map((url) => ({ url, posted: [] }));
+  const self = {
+    location: { origin: new URL(scope).origin },
+    registration: { scope, showNotification: async (title, options) => { did.push(["show", title, options.tag]); } },
+    clients: {
+      matchAll: async () => windows.map((one) => ({
+        url: one.url,
+        focus: async () => { did.push(["focus", one.url]); },
+        postMessage: (message) => { did.push(["post", one.url, message]); one.posted.push(message); },
+      })),
+      openWindow: async (url) => { did.push(["open", url]); },
+      claim: async () => undefined,
+    },
+    skipWaiting: () => undefined,
+    addEventListener: (type, fn) => { listeners[type] = fn; },
+  };
+  vm.runInContext(WORKER, vm.createContext({ self, URL }), { filename: "sw.js" });
+  const fire = async (type, event) => {
+    let waited = Promise.resolve();
+    listeners[type](Object.assign({ waitUntil: (promise) => { waited = promise; } }, event));
+    await waited;
+  };
+  const tap = (url) => fire("notificationclick", { notification: { close: () => did.push(["close"]), data: { url } } });
+  return { did, windows, fire, tap };
+}
+
+/* A notification tapped (SPEC §6.5): with the page open on Settings, the worker's message
+ * handed to the page; with no page open; with the link on another ngrok address (the domain
+ * changed) and the old page open; with a link no worker may open; and a push, shown. */
+async function notificationTap() {
+  const card = "#/n/" + NEEDS_ID + "/p/" + PROJECT + "/a/coder-1";
+  const scope = "https://x.ngrok-free.app/r/" + "t".repeat(32) + "/";
+  const open = workerAt(scope, [scope + "#/settings"]);
+  await open.tap(scope + card);
+  const push = fakePush(KEY_NOW);
+  const page = bootPage("#/settings", signedIn(pushRoutes([])), push.globals, scope);
+  await settle();
+  page.acceptSockets();
+  await settle();
+  for (const message of open.windows[0].posted) for (const fn of push.heard.message || []) fn({ data: message });
+  await settle();
+  const none = workerAt(scope, []);
+  await none.tap(scope + card);
+  const moved = workerAt(scope, [scope + "#/"]);
+  await moved.tap("https://y.ngrok-free.app/r/" + "t".repeat(32) + "/" + card);
+  const forged = workerAt(scope, [scope + "#/settings"]);
+  await forged.tap("https://evil.example/r/t/" + card);
+  const shown = workerAt(scope, []);
+  await shown.fire("push", { data: { json: () => ({ title: "x: coder-1 needs you", body: "coder-1 asks", tag: "asq-needs", url: scope + card }) } });
+  return { open: open.did, landed: page.location.hash, none: none.did, moved: moved.did, forged: forged.did, shown: shown.did };
+}
+
 /* The socket the page opens, on the machine itself under http and through ngrok under https;
  * and how every request the page made on the way asked (credentials, cache, headers). */
 async function socketUrls() {
@@ -2872,6 +2933,7 @@ async function main() {
     needsRefused: await needsRefused(),
     droppedTasks: await droppedTasks(),
     pushScreens: await pushScreens(),
+    notificationTap: await notificationTap(),
     socketUrls: await socketUrls(),
     writeBodies: await writeBodies(),
     padOrKeyboard: await padOrKeyboard(),

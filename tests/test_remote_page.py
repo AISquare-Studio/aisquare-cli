@@ -2269,6 +2269,32 @@ def test_notifications_say_where_they_stand_wherever_the_page_offers_them(
     assert push["iphone"].startswith("On iPhone and iPad, notifications need the page on the")
 
 
+def test_a_tapped_notification_opens_its_card_in_the_page_already_open(
+    boot_report: dict[str, Any],
+) -> None:
+    """docs/remote.md: tapping a notification opens the card. With the page open, that is the
+    worker focusing it and posting it the card's hash, and the page going there; with none
+    open, or the link on another ngrok address after the domain changed, a new window. No
+    test ran either end (one grepped sw.js for "postMessage"): the message's type or hash,
+    the page's listener, or the worker's choice of window could each break, a tap then only
+    bringing the page up on its last screen, with every test green. A link the worker may not
+    open brings up the page itself, at its feed; and a push is shown under its tag."""
+    tap = boot_report["notificationTap"]
+    scope = "https://x.ngrok-free.app/r/" + "t" * 32 + "/"
+    card = "#/n/ny_0123456789abcdef/p/prj_x/a/coder-1"
+    assert tap["open"] == [
+        ["close"],
+        ["focus", f"{scope}#/settings"],
+        ["post", f"{scope}#/settings", {"type": "open", "hash": card}],
+    ]
+    assert tap["landed"] == card, "the page went where the worker's message said"
+    assert tap["none"] == [["close"], ["open", scope + card]]
+    moved = "https://y.ngrok-free.app/r/" + "t" * 32 + "/" + card
+    assert tap["moved"] == [["close"], ["open", moved]]
+    assert tap["forged"][-1] == ["post", f"{scope}#/settings", {"type": "open", "hash": ""}]
+    assert tap["shown"] == [["show", "x: coder-1 needs you", "asq-needs"]]
+
+
 def test_the_socket_opens_under_the_pages_own_path_and_scheme(
     boot_report: dict[str, Any],
 ) -> None:

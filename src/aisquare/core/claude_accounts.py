@@ -206,6 +206,8 @@ read two ways is a launch that could land on two accounts. Lowercase because
 ``resolve`` compares case-insensitively (as it already does for emails), and a
 name that round-trips through ``--json`` and a shell should have one spelling.
 """
+ALIAS_HINT = "a letter, then up to 31 of a-z 0-9 . _ -"
+""":data:`ALIAS_PATTERN` in words: ``aisquare accounts alias``'s help, its error, asq's Rename."""
 
 
 def normalise_alias(raw: str) -> str:
@@ -218,7 +220,7 @@ def normalise_alias(raw: str) -> str:
     if "@" in alias:
         raise ValueError(f"{raw!r} reads as an email — an alias cannot contain '@'")
     if not ALIAS_PATTERN.match(alias):
-        raise ValueError(f"{raw!r} is not a valid alias — a letter, then up to 31 of a-z 0-9 . _ -")
+        raise ValueError(f"{raw!r} is not a valid alias — {ALIAS_HINT}")
     return alias
 
 

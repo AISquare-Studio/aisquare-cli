@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import os
+import re
 import sys
 import threading
 import time
@@ -31,7 +32,9 @@ from textual.containers import Vertical
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
+from typer.testing import CliRunner
 
+from aisquare.cli.app import app as cli_app
 from aisquare.cli.ui.app import ACCOUNTS_WORKER, FleetApp
 from aisquare.cli.ui.sidebar import AccountsSection, AccountsSelected, AccountsTitle
 from aisquare.cli.ui.terminal import TerminalPane
@@ -65,12 +68,17 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import device_flow, iam
 from aisquare.services import fleet as fleet_service
 from tests.pane_harness import asks_a_server, socket_of
+from tests.test_claude_accounts import fake_home as _redirected_home
 from tests.ui_workers import settle_page, settle_until
 
 T = TypeVar("T")
 SIZE = (140, 40)
 PRIVATE_SOCKET = f"asq-test-{os.getpid()}-ui-accounts"
 NOW = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+
+#: The sibling file's redirected home, for the Rename tests that write the real registry:
+#: slot 1's ``~/.claude`` must be a directory of the test's, never the developer's.
+fake_home = _redirected_home
 
 
 # --- fixtures and helpers --------------------------------------------------------------------
@@ -1537,6 +1545,237 @@ def test_two_quick_arrange_clicks_write_in_turn_and_both_report(
         "✓ slot 3 moved up once",
         "✓ slot 3 moved up twice",
     ]
+
+
+# --- naming: Rename ↔ `aisquare accounts alias` ---------------------------------------------------
+
+
+def _registry_frame() -> AccountsOverview:
+    """Every slot the registry holds, as the shell's reader folds it: aliases and all.
+
+    No slot is signed in, so no usage is read; what these tests read is the label.
+    """
+    return _overview(
+        *(
+            ClaudeAccountStatus(account=account, label=core.label(account), hooks_installed=True)
+            for account in accounts_service.list_accounts()
+        )
+    )
+
+
+def drive_registry(fn: Callable[[Pilot[None]], Awaitable[T]]) -> T:
+    """``drive``, with the shell reading the real registry (in ``fake_home``) on every frame."""
+
+    async def run() -> T:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_registry_frame)
+        async with app.run_test(size=SIZE) as pilot:
+            await settle(app)
+            return await fn(pilot)
+
+    return asyncio.run(run())
+
+
+def field(view: AccountsView, slot: int) -> accounts_view.AliasInput:
+    return row(view, slot).query_one(f"#account-alias-{slot}", accounts_view.AliasInput)
+
+
+def aliases() -> dict[int, str | None]:
+    return {account.slot: account.alias for account in accounts_service.list_accounts()}
+
+
+def heard(view: AccountsView, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Every notice the page gives from here on, with its tone."""
+    said: list[tuple[str, str]] = []
+    real_notice = view._notice
+
+    def spy(text: str, tone: str = "dim") -> None:
+        said.append((text, tone))
+        real_notice(text, tone)
+
+    monkeypatch.setattr(view, "_notice", spy)
+    return said
+
+
+def test_every_row_can_be_renamed_slot_one_and_a_slot_with_no_login_included() -> None:
+    overview = _overview(
+        _status(1, "me@example.com"), _status(2, "two@example.com"), _status(3, None)
+    )
+
+    async def go(pilot: Pilot[None]) -> dict[int, tuple[bool, str, bool, str]]:
+        view = await open_accounts(pilot)
+        return {
+            slot: (
+                row(view, slot).query_one(f"#account-rename-{slot}", Button).display,
+                str(row(view, slot).query_one(f"#account-rename-{slot}", Button).label),
+                row(view, slot).renaming,
+                field(view, slot).placeholder,
+            )
+            for slot in (1, 2, 3)
+        }
+
+    rows = drive(go, overview=overview)
+    for slot in (1, 2, 3):  # plain claude, a signed-in slot, a slot that needs a sign-in
+        assert rows[slot] == (True, "Rename", False, core.ALIAS_HINT), slot
+
+
+def test_the_fields_hint_is_the_one_the_cli_gives(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``aisquare accounts alias --help``, its refusal and the field say the same words."""
+    monkeypatch.setenv("COLUMNS", "200")  # one line of help per argument, so the words are whole
+    helped = runner.invoke(cli_app, ["accounts", "alias", "--help"])
+    assert helped.exit_code == 0, helped.output
+    assert f"The name: {core.ALIAS_HINT}" in helped.output
+    assert core.ALIAS_HINT == "a letter, then up to 31 of a-z 0-9 . _ -"
+    with pytest.raises(ValueError, match=re.escape(core.ALIAS_HINT)):
+        core.normalise_alias("has space")
+
+
+def test_rename_opens_one_focused_field_prefilled_with_the_alias() -> None:
+    overview = _overview(
+        _arranged(_status(1, "me@example.com"), position=1),
+        _arranged(_status(2, "two@example.com"), alias="work", position=2),
+    )
+
+    async def go(pilot: Pilot[None]) -> list[tuple[bool, bool, str, bool]]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        seen: list[tuple[bool, bool, str, bool]] = []
+        for slot in (2, 1):
+            await pilot.click(f"#account-rename-{slot}")
+            await pilot.pause()
+            other = 1 if slot == 2 else 2
+            seen.append(
+                (
+                    row(view, slot).renaming,
+                    row(view, other).renaming,
+                    field(view, slot).value,
+                    app.focused is field(view, slot),
+                )
+            )
+        tooltip = field(view, 1).tooltip
+        assert isinstance(tooltip, str) and core.ALIAS_HINT in tooltip
+        return seen
+
+    seen = drive(go, overview=overview)
+    assert seen[0] == (True, False, "work", True)  # the alias it has, ready to edit
+    assert seen[1] == (True, False, "", True)  # none: empty; and row 2's field closed for it
+
+
+def test_enter_names_the_slot_through_the_service_off_the_ui_thread_and_the_row_says_it(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core.create_account()
+    calls: list[tuple[str, str | None, bool]] = []
+    real_set_alias = accounts_service.set_alias
+
+    def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
+        calls.append((ref, alias, threading.current_thread() is threading.main_thread()))
+        return real_set_alias(ref, alias)
+
+    monkeypatch.setattr(accounts_service, "set_alias", set_alias)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], bool, str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        before = line(view, 2)
+        said = heard(view, monkeypatch)
+        await pilot.click("#account-rename-2")
+        await pilot.press(*"Work", "enter")
+        await settle(app)  # the write, then the frame AccountsChanged asked for
+        await accounts_read(app)
+        return said, row(view, 2).renaming, before, line(view, 2)
+
+    said, still_open, before, after = drive_registry(go)
+    assert calls == [("2", "Work", False)]  # the service, once, never on the UI thread
+    assert said == [("✓ slot 2 is now called work", "ok")]  # the service's stored spelling
+    assert not still_open
+    assert aliases() == {1: None, 2: "work"}
+    assert before.startswith("  2  account 2")
+    assert after.startswith("  2  work")  # the next frame's label, not a guess
+
+
+def test_a_blank_name_clears_the_alias(fake_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    core.create_account()
+    accounts_service.set_alias("2", "work")
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[tuple[str, str]], bool, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        await pilot.click("#account-rename-2")
+        prefilled = field(view, 2).value
+        field(view, 2).value = "   "  # blank, not merely empty
+        await pilot.press("enter")
+        await settle(app)
+        await accounts_read(app)
+        return prefilled, said, row(view, 2).renaming, line(view, 2)
+
+    prefilled, said, still_open, after = drive_registry(go)
+    assert prefilled == "work"
+    assert said == [("✓ slot 2: alias cleared", "ok")]
+    assert not still_open
+    assert aliases() == {1: None, 2: None}
+    assert after.startswith("  2  account 2")
+
+
+@pytest.mark.parametrize(
+    "typed",
+    ["123", "me@example.com", "has space", "-dash", "a" + "b" * 32, "Work"],
+    ids=["digits", "email", "space", "not-a-letter-first", "33-long", "taken"],
+)
+def test_a_name_the_service_refuses_is_said_and_the_field_stays_open_to_correct_it(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch, typed: str
+) -> None:
+    core.create_account()
+    core.create_account()
+    accounts_service.set_alias("3", "work")
+    with pytest.raises((ValueError, accounts_service.AccountsError)) as refused:
+        accounts_service.set_alias("2", typed)  # what the service says, to compare the page with
+    before = aliases()
+
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], bool, str, bool]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        await pilot.click("#account-rename-2")
+        field(view, 2).value = typed
+        await pilot.press("enter")
+        await settle(app)
+        await accounts_read(app)  # the frame after the refusal leaves the field alone too
+        return said, row(view, 2).renaming, field(view, 2).value, app.focused is field(view, 2)
+
+    said, still_open, value, focused = drive_registry(go)
+    assert said == [(f"✗ {refused.value}", "error")]
+    assert (still_open, value, focused) == (True, typed, True)  # as typed, ready to fix
+    assert aliases() == before == {1: None, 2: None, 3: "work"}  # nothing written
+
+
+def test_escape_closes_the_field_and_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        accounts_service, "set_alias", lambda ref, alias: calls.append((ref, alias))
+    )
+    overview = _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, bool, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await pilot.click("#account-rename-2")
+        await pilot.press(*"home")
+        app.refresh_accounts()  # the shell's tick lands mid-typing…
+        await accounts_read(app)
+        typed = field(view, 2).value  # …and leaves what is being typed alone
+        await pilot.press("escape")
+        await settle(app)
+        rename = row(view, 2).query_one("#account-rename-2", Button)
+        return typed, row(view, 2).renaming, app.focused is rename, notice(view)
+
+    typed, still_open, back_on_rename, said = drive(go, overview=overview)
+    assert typed == "home"
+    assert not still_open and back_on_rename  # closed, and the focus is back where it was
+    assert calls == []
+    assert said == "slot 2: rename cancelled — nothing changed"
 
 
 # --- the pace of the five-hour window (#146) ------------------------------------------------------

@@ -25,17 +25,19 @@ import contextlib
 import functools
 import logging
 import os
+import signal
+import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import ModuleType
+from types import FrameType, ModuleType
 from typing import Any
 
 from aisquare.core.state_file import StateUnwritableError, read_state, update_state
 from aisquare.services import remote_server
-from aisquare.services.ngrok_tunnel import NgrokTunnel, build_public_url
+from aisquare.services.ngrok_tunnel import NgrokTunnel, build_public_url, end_every_tunnel_now
 
 # The one sentence every read-only refusal says, re-exported for the modal.
 from aisquare.services.remote_server import READ_ONLY_REASON as READ_ONLY_REASON
@@ -756,7 +758,9 @@ class RemoteController:
             self.message = failure
             self._unreachable(failure)
             return False
-        dead.stop_tunnel()
+        # On a thread of its own, as this runs on Textual's: what the dead ngrok left in its
+        # group (a launcher's ngrok, still up) is given its seconds to end.
+        threading.Thread(target=dead.stop_tunnel, name="ngrok-stop", daemon=True).start()
         with self._lock:
             if self.public_url is not None:  # else the last restart never came up: keep it
                 self._link_before_revive = self.public_url
@@ -800,3 +804,43 @@ class RemoteController:
         """
         with contextlib.suppress(ValueError):
             self._server.note_public_url(url)
+
+
+ENDING_SIGNALS = ("SIGHUP", "SIGTERM")
+"""What ends the fleet UI from outside, by default: a terminal closed under it, a ``kill``."""
+
+
+@contextlib.contextmanager
+def ngrok_ends_with() -> Iterator[None]:
+    """For as long as the fleet UI runs: a hangup or a SIGTERM that ends the process ends every
+    ngrok it started first (``ngrok_tunnel.end_every_tunnel_now``).
+
+    ngrok runs in a process group of its own, so that stopping it stops what a launcher
+    started as well (``ngrok_tunnel``), and the hangup of a terminal closed under the
+    fleet UI reaches the UI's group, not ngrok's: the UI died of it, as ever, and its
+    ngrok ran on, its tunnel up and its static domain held, so the next start's ngrok
+    could not have it (ERR_NGROK_334). Only where the signal ends the process anyway (its
+    default action): one ignored, as under ``nohup``, or handled by someone else, is
+    left as it is. Signal handlers are the main thread's; elsewhere, and on Windows,
+    this does nothing.
+    """
+    if sys.platform == "win32" or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def end(signum: int, frame: FrameType | None) -> None:
+        end_every_tunnel_now()
+        signal.signal(signum, signal.SIG_DFL)  # and the signal does what it always did
+        os.kill(os.getpid(), signum)
+
+    installed: list[signal.Signals] = []
+    for name in ENDING_SIGNALS:
+        signum = signal.Signals[name]
+        if signal.getsignal(signum) is signal.SIG_DFL:
+            signal.signal(signum, end)
+            installed.append(signum)
+    try:
+        yield
+    finally:
+        for signum in installed:
+            signal.signal(signum, signal.SIG_DFL)

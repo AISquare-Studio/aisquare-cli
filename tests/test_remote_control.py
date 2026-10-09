@@ -11,9 +11,12 @@ branches — on/off, restore after a restart, auto-off, write actions default OF
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import io
 import json
+import os
+import signal
 import socket
 import subprocess
 import sys
@@ -245,7 +248,9 @@ def test_an_ngrok_that_ignores_the_terminate_is_killed() -> None:
     tunnel.wait_for_url(5)  # its empty log ends at once, and the reader asks for the exit code
     tunnel.stop_tunnel()
     reader_asked = f"wait {ngrok_tunnel.EXIT_CODE_WAIT_SECONDS}"
-    assert process.calls == [reader_asked, "terminate", "wait 5", "kill", "wait 5"]
+    waited = f"wait {ngrok_tunnel.STOP_SECONDS}"
+    assert process.calls == [reader_asked, "terminate", waited, "kill", waited]
+    assert ngrok_tunnel.STOP_SECONDS == 5
     assert not tunnel.running
 
 
@@ -385,6 +390,236 @@ def test_what_ngrok_printed_before_its_json_log_is_why_it_exited(
     assert tunnel.wait_for_url(timeout=10) is None
     assert tunnel.error == said
     tunnel.stop_tunnel()
+
+
+def launched_ngrok(tmp_path: Path, launcher: str) -> tuple[list[str], Path]:
+    """A command that runs a stand-in ngrok the way ``launcher`` does, and the file where the
+    stand-in writes its pid: it announces :data:`STARTED`, then stays up, logging nothing.
+
+    ``pyngrok`` runs it as its child, as pyngrok's ``ngrok`` console script does
+    (``subprocess.call``); ``sh`` runs it from a wrapper script without ``exec``."""
+    pid_file = tmp_path / "real-ngrok.pid"
+    real = tmp_path / "real-ngrok.py"
+    real.write_text(
+        "import os, sys, time\n"
+        f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+        f"print({json.dumps(json.dumps(STARTED))}, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    if launcher == "pyngrok":
+        script = tmp_path / "pyngrok-launcher.py"
+        script.write_text(
+            f"import subprocess, sys\nsys.exit(subprocess.call([sys.executable, {str(real)!r}]))\n"
+        )
+        return [sys.executable, str(script)], pid_file
+    wrapper = tmp_path / "ngrok-wrapper.sh"
+    wrapper.write_text(f'#!/bin/sh\n"{sys.executable}" "{real}"\nstatus=$?\nexit $status\n')
+    wrapper.chmod(0o755)
+    return [str(wrapper)], pid_file
+
+
+def pid_in(pid_file: Path) -> int:
+    deadline = time.monotonic() + 10
+    while not (pid_file.exists() and pid_file.read_text()):
+        assert time.monotonic() < deadline, "the stand-in ngrok never started"
+        time.sleep(0.02)
+    return int(pid_file.read_text())
+
+
+def gone(pid: int, seconds: float = 10.0) -> bool:
+    """Whether process ``pid`` has ended within ``seconds``."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+
+
+def finished(call: Callable[[], object], seconds: float = 15.0) -> bool:
+    """Run ``call`` on a thread of its own; whether it returned within ``seconds``."""
+    thread = threading.Thread(target=call, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    return not thread.is_alive()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+@pytest.mark.parametrize("launcher", ["pyngrok", "sh"])
+def test_stopping_an_ngrok_a_launcher_runs_stops_the_real_one_and_returns(
+    tmp_path: Path, launcher: str
+) -> None:
+    """The ``ngrok`` on a PATH may run the real binary as its child: pyngrok's console script,
+    a wrapper without ``exec``. Stopping signalled the launcher alone, so the real ngrok
+    stayed up, holding the tunnel and the static domain, and closing the log's pipe then
+    waited, for good, on the reader blocked in a read the real ngrok kept open: turning
+    Remote off never ended, and quitting hung on it (sweep of #243)."""
+    command, pid_file = launched_ngrok(tmp_path, launcher)
+    tunnel = NgrokTunnel(8750, command=command)
+    assert tunnel.start_tunnel() is None
+    real = pid_in(pid_file)
+    try:
+        assert tunnel.wait_for_url(timeout=10) == STARTED["url"]
+        assert finished(tunnel.stop_tunnel), "stopping hung on the log's pipe"
+        assert gone(real), "the real ngrok outlived the launcher it ran under"
+        assert not tunnel.running
+    finally:
+        with contextlib.suppress(OSError):
+            os.kill(real, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+def test_turning_off_a_remote_whose_ngrok_a_launcher_runs_ends_and_stops_it(
+    tmp_path: Path,
+) -> None:
+    command, pid_file = launched_ngrok(tmp_path, "pyngrok")
+    controller = RemoteController(
+        server=fake_server(), tunnel_factory=lambda port: NgrokTunnel(port, command=command)
+    )
+    controller.turn_on()
+    real = pid_in(pid_file)
+    try:
+        assert controller._waiter is not None
+        controller._waiter.join(10)
+        assert controller.public_url is not None
+        controller.turn_off(wait=False)
+        assert controller.wait_until_off(15), "still turning Remote off"
+        assert gone(real), "the real ngrok kept the tunnel up"
+        assert controller.message is None
+    finally:
+        with contextlib.suppress(OSError):
+            os.kill(real, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+def test_reviving_a_tunnel_whose_launcher_died_never_waits_on_textuals_thread(
+    tmp_path: Path,
+) -> None:
+    """A launcher killed from outside leaves the real ngrok up, its log's pipe open: the
+    watchdog, on Textual's thread, stopped the dead tunnel by closing that pipe, and the
+    fleet UI froze for good. The dead one is stopped on a thread of its own, the real ngrok
+    with it."""
+    command, pid_file = launched_ngrok(tmp_path, "pyngrok")
+    made: list[NgrokTunnel] = []
+
+    def factory(port: int) -> NgrokTunnel:
+        made.append(NgrokTunnel(port, command=command))
+        return made[-1]
+
+    controller = RemoteController(server=fake_server(), tunnel_factory=factory)
+    controller.turn_on()
+    first = pid_in(pid_file)
+    pid_file.unlink()
+    try:
+        assert controller._waiter is not None
+        controller._waiter.join(10)
+        launcher = made[0]._process
+        assert launcher is not None
+        os.kill(launcher.pid, signal.SIGKILL)  # the launcher alone, from outside
+        launcher.wait(5)
+        assert finished(controller.revive_tunnel_if_dead, 2.0), "the watchdog froze the UI"
+        assert controller.tunnel is made[1]
+        assert gone(first), "the dead tunnel's real ngrok was left up"
+    finally:
+        with contextlib.suppress(OSError):
+            os.kill(first, signal.SIGKILL)
+        controller.turn_off()
+        if pid_file.exists():
+            with contextlib.suppress(OSError, ValueError):
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+@pytest.mark.parametrize("signum", [signal.SIGHUP, signal.SIGTERM], ids=["hangup", "sigterm"])
+def test_a_fleet_ui_ended_by_a_hangup_or_a_sigterm_ends_its_ngrok_first(
+    tmp_path: Path, signum: signal.Signals
+) -> None:
+    """ngrok runs in a process group of its own, which a closed terminal's hangup does not
+    reach: the fleet UI died of it and its ngrok ran on, holding the static domain, so the
+    next start's ngrok could not have it. The fleet UI's ending signals end its ngrok, and
+    then the UI as they always did."""
+    command, pid_file = launched_ngrok(tmp_path, "pyngrok")
+    ui = tmp_path / "fleet-ui.py"
+    ui.write_text(
+        "import time\n"
+        "from aisquare.cli.ui.remote_control import ngrok_ends_with\n"
+        "from aisquare.services.ngrok_tunnel import NgrokTunnel\n"
+        f"tunnel = NgrokTunnel(8750, command={command!r})\n"
+        "assert tunnel.start_tunnel() is None and tunnel.wait_for_url(10)\n"
+        "with ngrok_ends_with():\n"
+        "    print('ready', flush=True)\n"
+        "    time.sleep(60)\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, str(ui)], stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True
+    )
+    real = None
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "ready"
+        real = pid_in(pid_file)
+        process.send_signal(signum)
+        assert process.wait(10) == -signum, "the signal no longer ends the fleet UI"
+        assert gone(real), "the fleet UI's ngrok outlived it"
+    finally:
+        process.kill()
+        process.wait(5)
+        if real is not None:
+            with contextlib.suppress(OSError):
+                os.kill(real, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+def test_an_ngrok_that_ended_on_its_own_leaves_no_group_for_a_stop_to_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once ngrok has exited, reaped, with nothing left in its group, the group's number is
+    free for any other program's group to take. A stop that came later (the watchdog's, or
+    turning off a Remote whose first ngrok never came up, hours after) signalled that number
+    all the same: SIGTERM, then SIGKILL, to whatever group had it by then."""
+    signalled: list[tuple[int, int]] = []
+    killpg = os.killpg
+
+    def recording(group: int, signum: int) -> None:
+        if signum:
+            signalled.append((group, signum))
+        killpg(group, signum)
+
+    monkeypatch.setattr(os, "killpg", recording)
+    tunnel = NgrokTunnel(8750, command=fake_ngrok(tmp_path, {"lvl": "info"}, linger=False))
+    assert tunnel.start_tunnel() is None
+    assert tunnel in ngrok_tunnel._LIVE
+    assert tunnel.wait_for_url(timeout=10) is None
+    assert tunnel._reader is not None
+    tunnel._reader.join(10)
+    assert tunnel not in ngrok_tunnel._LIVE, "nothing of it is left to signal as the UI ends"
+    tunnel.stop_tunnel()
+    assert signalled == [], "a group nothing was left in was signalled"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+def test_every_ngrok_this_process_started_is_signalled_as_it_ends_not_only_a_remotes(
+    tmp_path: Path,
+) -> None:
+    """A hangup's handler signalled the tunnel a Remote held and the one it was stopping: a dead
+    one the watchdog was still stopping on a thread of its own, or one a start had spawned
+    and not yet handed over, ran on, holding the static domain, once the fleet UI was gone."""
+    command, pid_file = launched_ngrok(tmp_path, "pyngrok")
+    tunnel = NgrokTunnel(8750, command=command)  # held by no Remote
+    assert tunnel.start_tunnel() is None
+    real = pid_in(pid_file)
+    try:
+        assert tunnel.wait_for_url(timeout=10) == STARTED["url"]
+        ngrok_tunnel.end_every_tunnel_now()
+        assert gone(real), "an ngrok no Remote held outlived the UI"
+    finally:
+        with contextlib.suppress(OSError):
+            os.kill(real, signal.SIGKILL)
+        tunnel.stop_tunnel()
+    assert tunnel not in ngrok_tunnel._LIVE
 
 
 def test_the_panel_says_why_ngrok_exited_before_it_announced_a_tunnel(tmp_path: Path) -> None:

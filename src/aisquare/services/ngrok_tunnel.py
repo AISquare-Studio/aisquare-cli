@@ -13,6 +13,12 @@ asks no one for a password and can replay a request: the unlock's passphrase,
 every device's cookie, the token in every path and every transcript, for any
 user or process on the machine to read.
 
+ngrok runs in a process group of its own, and stopping it stops the group: the
+``ngrok`` on a PATH may be a launcher that runs the real binary as its child (pyngrok's
+console script, the npm package's, a wrapper without ``exec``), and a signal to the
+launcher alone left the real ngrok up, its tunnel and its static domain held, and
+the log's pipe open, so stopping waited on it for good (sweep of #243).
+
 Pure functions (:func:`build_public_url`, :func:`parse_log_line`,
 :func:`missing_binary_message`) carry the logic, so PLAN §4-H's proxies for the
 "ngrok present" check — the URL builder and the missing-binary message — are unit
@@ -31,13 +37,17 @@ passphrase. A hand-started ngrok is told about with ``serve --public-url``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -72,6 +82,13 @@ PLAIN_CAUSE_MAX = 300
 EXIT_CODE_WAIT_SECONDS = 1.0
 """How long the log reader waits, once ngrok's log ended, for the exit code it says: the log
 ends a moment before the process does, and ``poll()`` then read ``None`` (6 runs in 40)."""
+STOP_SECONDS = 5.0
+"""How long stopping gives ngrok, and all its process group, to end after SIGTERM, and then
+again after SIGKILL."""
+READER_JOIN_SECONDS = 1.0
+"""How long stopping waits, once ngrok's group is gone, for the log reader to see its end."""
+_OWN_GROUP: dict[str, Any] = {} if sys.platform == "win32" else {"process_group": 0}
+"""Popen's word for a process group of ngrok's own: POSIX only, and the fleet UI runs there."""
 
 
 def build_public_url(host: str, token: str) -> str:
@@ -154,6 +171,97 @@ def _exit_code(process: subprocess.Popen[str]) -> int | None:
         return None
 
 
+def _own_group(process: subprocess.Popen[str]) -> int | None:
+    """The process group ``process`` leads, as it was started in one of its own; ``None`` where
+    there are none (Windows), or for a stand-in with no pid, which stopping signals alone."""
+    pid = getattr(process, "pid", None)
+    if sys.platform == "win32" or not isinstance(pid, int):
+        return None
+    try:
+        return pid if os.getpgid(pid) == pid else None
+    except OSError:  # gone already, and reaped: there is nothing of it to stop
+        return None
+
+
+_LIVE: set[NgrokTunnel] = set()
+"""Every tunnel whose ngrok is up, or not yet seen to end with all of its group: what
+:func:`end_every_tunnel_now` signals. Changed under :data:`_LIVE_LOCK`; read without it."""
+_LIVE_LOCK = threading.Lock()
+
+
+def end_every_tunnel_now() -> None:
+    """SIGTERM every ngrok this process started and has not seen end, and their groups, at once,
+    taking no lock and waiting for nothing: for a signal handler, as the process ends
+    (``aisquare.cli.ui.remote_control.ngrok_ends_with``). Every one, not only the tunnel a
+    Remote holds: a dead one the watchdog is still stopping, one a start has just spawned."""
+    for tunnel in tuple(_LIVE):  # one step under the GIL: no lock a handler could wait on
+        tunnel.signal_now()
+
+
+def _track(tunnel: NgrokTunnel) -> None:
+    with _LIVE_LOCK:
+        _LIVE.add(tunnel)
+
+
+def _untrack(tunnel: NgrokTunnel) -> None:
+    with _LIVE_LOCK:
+        _LIVE.discard(tunnel)
+
+
+def _signal_group(group: int, signum: int) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(group, signum)
+
+
+def _group_gone(group: int, deadline: float) -> bool:
+    """Whether every process of ``group`` has ended, by ``deadline`` (``time.monotonic``).
+
+    A member that may not be signalled (another user's) counts as gone: nothing here
+    could end it anyway."""
+    while True:
+        try:
+            os.killpg(group, 0)
+        except (ProcessLookupError, PermissionError):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+
+
+def _ended(process: subprocess.Popen[str], group: int | None) -> bool:
+    """Wait :data:`STOP_SECONDS` for ngrok, and its group, to end; whether they did. ngrok is
+    reaped first: a child not yet waited for still counts as a member of its group."""
+    deadline = time.monotonic() + STOP_SECONDS
+    try:
+        process.wait(timeout=STOP_SECONDS)
+    except subprocess.TimeoutExpired:
+        return False
+    return group is None or _group_gone(group, deadline)
+
+
+def _end_process(process: subprocess.Popen[str], group: int | None) -> None:
+    """SIGTERM ngrok and its whole group, and SIGKILL what is left of them after
+    :data:`STOP_SECONDS`; ngrok alone where it has no group of its own.
+
+    The group, and not ngrok's process: a launcher that runs the real ngrok as its child
+    and is signalled alone ends, and leaves the real one up, holding its tunnel, its
+    static domain and the log's pipe. A group whose leader already ended (a launcher
+    killed from outside) is signalled all the same, for what is left in it.
+    """
+    if group is None:
+        if process.poll() is not None:
+            return
+        process.terminate()
+        if not _ended(process, None):
+            process.kill()
+            _ended(process, None)
+        return
+    _signal_group(group, signal.SIGTERM)
+    if not _ended(process, group):
+        _signal_group(group, signal.SIGKILL)
+        _ended(process, group)
+
+
 def ngrok_static_host(raw: str | None) -> str | None:
     """The host ``--url`` takes, from a static domain however it was written; ``None`` if blank.
 
@@ -200,6 +308,9 @@ class NgrokTunnel:
         self._popen = popen
         self._command = list(command) if command is not None else None
         self._process: subprocess.Popen[str] | None = None
+        self._group: int | None = None
+        """The process group ngrok leads, all that it started in it, until stopping has seen
+        it gone; ``None`` without one (Windows, a stand-in)."""
         self._reader: threading.Thread | None = None
         self._lock = threading.Lock()
         self._url_ready = threading.Event()
@@ -234,18 +345,25 @@ class NgrokTunnel:
             # codec, a home like C:\Users\Иван in ngrok's first lines (cp1251 has no 0x98)
             # raised out of the log reader, which ended without a word, and the panel
             # waited out its 15 s while ngrok ran on with nobody draining its log.
-            self._process = self._popen(
+            # Its own process group, for stopping (stop_tunnel), and nothing to read from
+            # the terminal the fleet UI holds.
+            process = self._popen(
                 command,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                **_OWN_GROUP,
             )
         except OSError as exc:
             self.error = f"could not start {command[0]}: {exc}"
             return self.error
+        with self._lock:
+            self._process, self._group = process, _own_group(process)
+        _track(self)
         self._reader = threading.Thread(target=self._read_log, name="ngrok-log", daemon=True)
         self._reader.start()
         return None
@@ -260,19 +378,39 @@ class NgrokTunnel:
         return self._process is not None and self._process.poll() is None
 
     def stop_tunnel(self) -> None:
-        process = self._process
-        self._process = None
+        """End ngrok, and all it started, in :data:`STOP_SECONDS` (twice that for one that
+        ignores SIGTERM).
+
+        The log's pipe is never closed here: the reader holds it while blocked in a read,
+        so a close waits for that read, and a launcher's ngrok that outlived the launcher
+        kept the read going for as long as it logged nothing, which an idle ngrok does
+        not. With ngrok's group gone the log ends, and the reader closes it itself; one
+        still held open by a process that left the group is left to the reader.
+        """
+        with self._lock:
+            process, group, self._process = self._process, self._group, None
         if process is None:
             return
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-        if process.stdout is not None:
-            process.stdout.close()
+        _end_process(process, group)
+        with self._lock:
+            if self._group == group:
+                self._group = None  # gone: its number may name another group from now on
+        _untrack(self)
+        reader = self._reader
+        if reader is not None and reader is not threading.current_thread():
+            reader.join(READER_JOIN_SECONDS)
+            if reader.is_alive():
+                log.warning("ngrok: its log is still held open by a process outside its group")
+
+    def signal_now(self) -> None:
+        """SIGTERM ngrok and its group at once, taking no lock and waiting for nothing: for a
+        signal handler, as the process ends (:func:`end_every_tunnel_now`)."""
+        group, process = self._group, self._process
+        if group is not None:
+            _signal_group(group, signal.SIGTERM)
+        elif process is not None:
+            with contextlib.suppress(OSError):
+                process.terminate()
 
     # --- the log reader ---------------------------------------------------------------
 
@@ -280,26 +418,46 @@ class NgrokTunnel:
         """Hand each line of ngrok's log to :meth:`handle_line` until it ends, then say why
         no tunnel came, if none did, and wake whoever waits for one.
 
-        A ``ValueError`` is a pipe :meth:`stop_tunnel` closed only once ngrok was stopped;
-        any other is said: read as a closed pipe, a line the reader could not take ended
-        it without a word, the panel waiting out its 15 s for a URL that ngrok, still up,
-        had no one left to tell.
+        Nothing closes the pipe under the reader (:meth:`stop_tunnel`), so a ``ValueError``
+        is said: read as a closed pipe, a line the reader could not take ended it without
+        a word, the panel waiting out its 15 s for a URL that ngrok, still up, had no one
+        left to tell. The reader closes the pipe itself once the log has ended.
         """
         process = self._process
         if process is None or process.stdout is None:
             return
+        stdout = process.stdout
         try:
-            for line in process.stdout:
+            for line in stdout:
                 self.handle_line(line)
         except ValueError as exc:
-            if self._process is not process:  # stopped: closed under us, and nobody waits
-                return
             with self._lock:
                 if self.error is None:
                     self.error = f"ngrok's log could not be read: {exc}"
+        finally:
+            with contextlib.suppress(OSError, ValueError):
+                stdout.close()
+        code = _exit_code(process)
+        self._forget_if_gone(process, code)
         if self.public_url is None and self.error is None:
-            self.error = self._exit_sentence(_exit_code(process))
+            self.error = self._exit_sentence(code)
         self._url_ready.set()  # a URL that never comes must not block a waiter forever
+
+    def _forget_if_gone(self, process: subprocess.Popen[str], code: int | None) -> None:
+        """Once ngrok has exited with its log ended, its group too if nothing is left in it.
+
+        ngrok is reaped then, and with its group empty the group's number is free: a stop
+        that came later (the watchdog's, or turning off a Remote whose first ngrok never came
+        up, hours after) signalled whatever group took that number since, another program
+        of the human's. A group with something left in it keeps its number, and is kept."""
+        if code is None:
+            return
+        with self._lock:
+            group = self._group if self._process is process else None
+            if group is None or not _group_gone(group, deadline=0.0):
+                return
+            self._group = None
+        _untrack(self)
 
     def _exit_sentence(self, code: int | None) -> str:
         """Why there is no tunnel, when ngrok ended without one and logged no error: what it

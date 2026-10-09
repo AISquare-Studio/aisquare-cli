@@ -14,12 +14,15 @@ import asyncio
 import json
 import os
 import shutil
+import signal
 import socket
+import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, TypeVar
 
 import pytest
@@ -1222,6 +1225,41 @@ def test_quitting_leaves_remote_stopping_and_run_ui_waits_for_it_with_the_termin
     app_mod.run_ui()
     assert slow.release.is_set() and not slow.running, "run_ui returned before Remote stopped"
     assert "stopping Remote (its server and ngrok)…" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_run_ui_ends_its_ngrok_on_a_hangup_or_a_sigterm_and_puts_the_signals_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ngrok runs in a process group of its own, which a closed terminal's hangup does not
+    reach (``ngrok_ends_with``): for as long as the fleet UI runs, its ending signals end
+    its ngrok first, and once it is gone they are what they were."""
+    ending = [signal.SIGHUP, signal.SIGTERM]
+    assert all(signal.getsignal(signum) is signal.SIG_DFL for signum in ending)
+    ended: list[str] = []
+    during: dict[int, object] = {}
+
+    class Quit:
+        def __init__(self, **options: object) -> None:
+            self.unsaved: list[str] = []
+            self.remote = SimpleNamespace(wait_until_off=lambda timeout=None: True)
+
+        def run(self) -> None:
+            during.update({signum: signal.getsignal(signum) for signum in ending})
+
+    monkeypatch.setattr(app_mod, "FleetApp", Quit)
+    monkeypatch.setattr(remote_control, "end_every_tunnel_now", lambda: ended.append("ngrok"))
+    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda: None)
+    app_mod.run_ui()
+    assert all(callable(handler) for handler in during.values()), during
+    assert all(signal.getsignal(signum) is signal.SIG_DFL for signum in ending)
+    hangup = during[signal.SIGHUP]
+    assert callable(hangup)
+    with pytest.MonkeyPatch.context() as dying:
+        dying.setattr(os, "kill", lambda pid, signum: ended.append(f"killed by {signum}"))
+        dying.setattr(signal, "signal", lambda signum, handler: None)
+        hangup(signal.SIGHUP, None)
+    assert ended == ["ngrok", f"killed by {signal.SIGHUP}"], "ngrok first, then the UI as ever"
 
 
 # --- what Remote says reaches the human with the panel closed (sweep of #243) ------------------

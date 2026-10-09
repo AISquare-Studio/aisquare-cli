@@ -37,7 +37,7 @@ from textual.worker import Worker, WorkerState
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli_app
-from aisquare.cli.ui.app import ACCOUNTS_WORKER, FleetApp
+from aisquare.cli.ui.app import ACCOUNTS_WORKER, SIDEBAR_WIDTH_KEY, FleetApp
 from aisquare.cli.ui.sidebar import AccountsSection, AccountsSelected, AccountsTitle
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import accounts as accounts_view
@@ -55,6 +55,7 @@ from aisquare.cli.ui.views.accounts import (
 from aisquare.core import browser, credentials, paths
 from aisquare.core import claude_accounts as core
 from aisquare.core import tmux as tmux_core
+from aisquare.core.state_file import update_state
 from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed, TmuxServer, WindowInfo
 from aisquare.models import (
@@ -2271,6 +2272,68 @@ def test_rename_takes_no_width_from_a_line_and_its_field_gets_a_line_of_its_own(
     assert opened["below the line"] and opened["above the buttons"]
     assert core.ALIAS_HINT in opened["shows"]
     assert opened["strays"] == []
+
+
+@pytest.mark.parametrize(
+    ("size", "sidebar"),
+    [((90, 40), None), ((100, 40), None), ((140, 40), None), ((100, 40), 48), ((90, 40), 48)],
+    ids=["90x40", "100x40", "140x40", "100x40-sidebar48", "90x40-sidebar48"],
+)
+def test_every_button_can_be_reached_at_any_width(
+    no_network: dict[str, Any], size: tuple[int, int], sidebar: int | None
+) -> None:
+    """Seven buttons take 61 cells, and below about 98 columns a slot with every one of them
+    showing ran out of row: *Remove* was cut off the right edge, out of the mouse's reach. A
+    sidebar the user dragged wider takes the same columns at any terminal size: at 100 with a
+    48-column sidebar slot 2's Remove and slot 3's Sign in and Remove were cut, and at 90 even
+    Rename (review of #258, round 5). The button line scrolls sideways when it must, so every
+    button can be brought into view; where it fits, nothing scrolls and nothing moves."""
+    if sidebar is not None:
+        update_state(SIDEBAR_WIDTH_KEY, sidebar)  # restored at launch, as a drag left it
+    no_network["usage"] = ClaudeUsage(
+        available=True,
+        session_percent=37,
+        session_resets_at=NOW,
+        week_percent=64,
+        week_resets_at=NOW,
+    )
+    overview = _overview(
+        _status(1, "me@example.com", subscription=None),
+        _status(2, "two@example.com", subscription=None),
+        _status(3, None),  # unsigned and ours: Sign in and Remove both show, all seven
+    )
+
+    async def run() -> tuple[int, dict[int, int], list[str]]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: overview)
+        async with app.run_test(size=size) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2))
+            scrolls: dict[int, int] = {}
+            unreachable: list[str] = []
+            for slot in (1, 2, 3):
+                bar = row(view, slot).query_one(".account-buttons")
+                scrolls[slot] = bar.max_scroll_x
+                for button in row(view, slot).query(Button):
+                    if not button.display:
+                        continue
+                    bar.scroll_to_widget(button, animate=False)
+                    await pilot.pause()
+                    seen = bar.scrollable_content_region
+                    if not (
+                        seen.contains_region(button.region) and seen.right <= view.region.right
+                    ):
+                        unreachable.append(f"{button.id} at {button.region}, the line shows {seen}")
+            return app.sidebar.outer_size.width, scrolls, unreachable
+
+    width, scrolls, unreachable = asyncio.run(run())
+    if sidebar is not None:
+        assert width == sidebar  # the precondition: the sidebar really was that wide
+    assert unreachable == []  # every button, scrolled to, is wholly in view
+    if sidebar is None and size[0] >= 100:
+        assert scrolls == {1: 0, 2: 0, 3: 0}  # they fit: nothing scrolls, nothing moved
+    else:
+        assert scrolls[3] > 0  # all seven did not fit: the line scrolled to reach Remove
 
 
 # --- the pace of the five-hour window (#146) ------------------------------------------------------

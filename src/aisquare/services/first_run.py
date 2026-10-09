@@ -135,6 +135,8 @@ class ClaudeState:
     """What changes it through ``CLAUDE_CONFIG_DIR`` (``agents.Refusal.restart_fix``), which
     asq reads when it starts: step 2 says to start asq again, never that it notices a
     change made in another shell (review of #257)."""
+    refused_restart_first: bool = False
+    """Whether step 2 gives ``refused_restart_fix`` first (``agents.Refusal.restart_first``)."""
     signed_in: bool | None = None
     """``None`` when this probe did not look (the periodic one skips it)."""
     problem: str | None = None
@@ -256,6 +258,7 @@ def probe_claude(
     refused: str | None = None
     refused_fix: str | None = None
     refused_restart_fix: str | None = None
+    refused_restart_first = False
     if not is_connected and switched_off is None:
         try:
             if refusal is not None:
@@ -265,6 +268,7 @@ def probe_claude(
                 if found is not None:
                     refused, refused_fix = found.why, found.fix
                     refused_restart_fix = found.restart_fix
+                    refused_restart_first = found.restart_first
         except Exception as exc:
             problems.append(f"could not read the hook settings: {_why(exc)}")
     signed: bool | None = None
@@ -284,6 +288,7 @@ def probe_claude(
         refused=refused,
         refused_fix=refused_fix,
         refused_restart_fix=refused_restart_fix,
+        refused_restart_first=refused_restart_first,
         signed_in=signed,
         problem="; ".join(problems) or None,
     )

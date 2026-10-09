@@ -1224,13 +1224,11 @@ def _refused_fix(
     directory: Path, refusal: agents_service.Refusal, *, also: str | None = None
 ) -> str:
     """What changes ``refusal``, connect's for ``directory`` (``agents_service.access``):
-    the remedies it carries, made for the state of the path that blocks, so never a
-    command that refuses nor a step that cannot work. ``also`` is what to change instead
-    where a settings.json that is read-only by design (home-manager) is generated."""
-    if refusal.kind == "gone":
-        # A named directory that is not there and that connect makes no more of: this
-        # home's record of it is all that is left.
-        return _disconnect_fix(directory, "forget it: ")
+    the remedies it carries, in their order, so never a command that refuses nor a step
+    this user cannot take. A directory that is gone, and one with no step in place that
+    CLAUDE_CONFIG_DIR does not name, are left to forget. ``also`` is what to change
+    instead where a settings.json that is read-only by design (home-manager) is
+    generated."""
     fixes: list[str] = []
     if refusal.fix is not None:
         spec = agent_core.spec("claude-code", directory)
@@ -1238,8 +1236,11 @@ def _refused_fix(
         if also is not None and spec is not None and refusal.path == spec.settings_path:
             here = f"{here}, or {also} where that file is generated"
         fixes.append(here)
+    elif refusal.kind == "gone" or refusal.restart_fix is None:
+        fixes.append(_disconnect_fix(directory, "forget it: "))
     if refusal.restart_fix is not None:
-        fixes.append(f"{refusal.restart_fix}, {RESTART}")
+        restart = f"{refusal.restart_fix}, {RESTART}"
+        fixes = [restart, *fixes] if refusal.restart_first else [*fixes, restart]
     return "; or ".join(fixes)
 
 

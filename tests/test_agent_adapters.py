@@ -14,6 +14,7 @@ button. Each claim has its negative control in the same test.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -23,6 +24,7 @@ import subprocess
 import tomllib
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -55,6 +57,23 @@ def _connect(runner: CliRunner, config_dir: Path | None = None) -> None:
         argv += ["--config-dir", str(config_dir)]
     result = runner.invoke(app, argv)
     assert result.exit_code == 0, result.output
+
+
+def _stat_error(path: Path) -> str:
+    """The operating system's own words when asked for ``path``, which is not there."""
+    try:
+        os.stat(path)
+    except OSError as exc:
+        return str(exc.strerror)
+    raise AssertionError(f"{path} is there")
+
+
+#: The doctor's remedy through CLAUDE_CONFIG_DIR, for the directory sessions from this
+#: shell read while the variable is unset; set, it adds "or unset it" and comes first.
+_REPOINT_FIX = (
+    "point CLAUDE_CONFIG_DIR at a directory this user can write, "
+    "then start asq or aisquare again from that shell"
+)
 
 
 # --------------------------------------------------------------------------- the check
@@ -566,7 +585,7 @@ def test_a_recorded_dir_connect_cannot_make_is_named_gone_with_the_way_to_forget
     forget = runner.invoke(app, ["agents", "disconnect", "claude-code", "--config-dir", str(gone)])
     after = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
 
-    reason = f"{gone} does not exist"
+    reason = f"{gone}: {_stat_error(gone)}"
     assert f"hooks cannot be written in {gone}: {reason}" in row.detail, row
     assert f"{diagnostics._STALE_HOOKS} in: {kept}" in row.detail, "only kept is missing"
     assert f"forget it: aisquare agents disconnect claude-code --config-dir {gone}" in str(row.fix)
@@ -602,7 +621,8 @@ def test_a_recorded_dir_that_became_a_symlink_loop_is_gone_to_every_reader(
     stuck = [site.config_dir for site in lifecycle.uninstall_plan().unreadable]
     forget = runner.invoke(app, ["agents", "disconnect", "claude-code", "--config-dir", str(loop)])
 
-    assert f"hooks cannot be written in {loop}: {loop} does not exist" in row.detail, row
+    reason = f"{loop} is a link to {loop.name}: {_stat_error(loop)}"
+    assert f"hooks cannot be written in {loop}: {reason}" in row.detail, row
     fix = f"forget it: aisquare agents disconnect claude-code --config-dir {loop}"
     assert fix in str(row.fix), row.fix
     assert loop not in stuck, "uninstall reads it as the doctor does: nothing there"
@@ -642,7 +662,8 @@ def test_an_exported_config_dir_in_a_home_this_machine_lacks_is_never_offered_co
     reason = f"can't write {homeless}/settings.json: no such home on this machine"
     assert f"hooks cannot be written in {homeless}: {reason}" in row.detail, row
     assert [f.argv for f in fix_commands([row]) if f.argv[:2] == ("agents", "connect")] == []
-    assert "point CLAUDE_CONFIG_DIR at a directory on this machine" in str(row.fix), row.fix
+    repoint = "point CLAUDE_CONFIG_DIR at a directory this user can write, or unset it, "
+    assert str(row.fix).startswith(repoint), "the variable named it: its remedy comes first"
     assert welcome.refused == reason, welcome
     assert json.loads(clicked.stdout)["detail"] == reason, clicked.stdout
     assert paths.aisquare_home().exists() == built, "a refusal builds no aisquare home"
@@ -660,31 +681,78 @@ def test_an_exported_config_dir_in_a_home_this_machine_lacks_is_never_offered_co
     assert str(row.fix).endswith("then start asq or aisquare again from that shell"), row.fix
     in_place = dataclasses.replace(found, refused_fix="make it so", refused_restart_fix=None)
     assert "this page notices" in claude_text(in_place, platform="linux").plain, "control"
+    # Each remedy, done as worded, in a shell started again, lets connect write.
+    writable = tmp_path / "writable"
+    writable.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(writable))
+    repointed = runner.invoke(app, ["agents", "connect", "claude-code"])
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    unset = runner.invoke(app, ["agents", "connect", "claude-code"])
+    assert repointed.exit_code == 0, repointed.output
+    assert unset.exit_code == 0, unset.output
 
 
-def _relink(link: Path, to: Path) -> None:
-    to.mkdir(parents=True, exist_ok=True)
-    link.unlink()
-    link.symlink_to(to)
-
-
-def _unblock_file(path: Path) -> None:
-    path.unlink()
-    path.mkdir()
-
-
-#: Config dirs connect cannot make, each with the path that blocks and the first remedy
-#: the row prints, done as it is worded: (blocking, repair, named by CLAUDE_CONFIG_DIR).
+#: Config dirs connect cannot make. "the default dir" is ~/.claude with CLAUDE_CONFIG_DIR
+#: unset; every other is named by the variable.
 _CANNOT_MAKE = [
     "the default dir, recorded, now a loop",
     "the default dir, a dangling link",
+    "the default dir, in a HOME this user may not write",
     "a profile, recorded, now a dangling link",
     "a profile under a parent this user may not write",
     "that profile beside a connected ~/.claude",
     "a profile under a link that leads nowhere",
+    "a profile under a link to a file",
+    "a profile under a chain of links that leads nowhere",
     "a profile under a file",
     "a profile under a loop",
 ]
+
+
+def _cannot_make_shape(shape: str, home: Path, tmp_path: Path, runner: CliRunner) -> Path:
+    """Build ``shape`` and return the path that blocks the mkdir."""
+    claude = home / ".claude"
+    if shape.startswith("the default dir"):
+        if "recorded" in shape:
+            claude.mkdir(parents=True)
+            _connect(runner)
+            shutil.rmtree(claude)
+            claude.symlink_to(claude.name)
+            return claude
+        home.mkdir(parents=True)
+        if "HOME" in shape:
+            home.chmod(0o555)
+            return home
+        claude.symlink_to(home / "dotfiles" / "claude")
+        return claude
+    if "recorded" in shape:
+        profile = home / ".claude-work"
+        profile.mkdir(parents=True)
+        _connect(runner, profile)
+        shutil.rmtree(profile)
+        profile.symlink_to(home / "gone" / "work")
+        return profile
+    if "may not write" in shape or "beside" in shape:
+        if "beside" in shape:
+            claude.mkdir(parents=True)
+            _connect(runner)
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0o555)
+        return locked
+    home.mkdir(parents=True)
+    blocking = home / "dots"
+    if "a file" in shape and "link" not in shape:
+        blocking.write_text("not a directory", encoding="utf-8")
+    elif "link to a file" in shape:
+        (home / "afile").write_text("not a directory", encoding="utf-8")
+        blocking.symlink_to(home / "afile")
+    elif "chain" in shape:
+        (home / "hop").symlink_to(home / "missing")
+        blocking.symlink_to(home / "hop")
+    else:
+        blocking.symlink_to(blocking.name if "loop" in shape else home / "mnt" / "dots")
+    return blocking
 
 
 @pytest.mark.parametrize("shape", _CANNOT_MAKE)
@@ -699,164 +767,333 @@ def test_a_config_dir_connect_cannot_make_is_named_everywhere_and_never_offered_
     reads. A link there or above it that leads nowhere, a loop, a file in the way, or a
     parent this user may not write failed that mkdir while the doctor and Welcome offered
     Connect; then the refusal named nothing ("no directory it can be made in") and its
-    "create it yourself" failed too (review of #257). The path that blocks is named with
-    what it is, and the first remedy printed, done as worded, lets connect make it. A
-    remedy through CLAUDE_CONFIG_DIR says to start asq again; one in place, that this page
-    notices."""
+    "create it yourself" failed too; a link to a file was said to lead to nothing; and a
+    HOME this user may not write was told to become writable, with no other way (review
+    of #257). The path that blocks is named with what the operating system says of it.
+    Each remedy printed, done as worded, lets connect make it: moving that path aside,
+    where its folder lets this user, and always CLAUDE_CONFIG_DIR, which comes first
+    where it is set. Neither surface says the page notices a remedy through it."""
     if os.name == "nt":
         pytest.skip("links, loops and mode 555 are POSIX shapes here")
     monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
     home = isolated_agent_home
-    claude = home / ".claude"
-    if shape.startswith("the default dir"):
-        where = blocking = claude
-        if "recorded" in shape:
-            claude.mkdir(parents=True)
-            _connect(runner)
-            shutil.rmtree(claude)
-            claude.symlink_to(claude.name)
-        else:
-            home.mkdir(parents=True)
-            claude.symlink_to(home / "dotfiles" / "claude")
-
-        def repair() -> None:
-            _relink(claude, home / "real")
-
-    elif "recorded" in shape:
-        where = blocking = home / ".claude-work"
-        where.mkdir(parents=True)
-        _connect(runner, where)
-        shutil.rmtree(where)
-        where.symlink_to(home / "gone" / "work")
-
-        def repair() -> None:
-            _relink(where, home / "real")
-
-    elif "may not write" in shape or "beside" in shape:
-        if "beside" in shape:
-            claude.mkdir(parents=True)
-            _connect(runner)
-        blocking = tmp_path / "locked"
-        blocking.mkdir()
-        blocking.chmod(0o555)
-        if os.access(blocking, os.W_OK):
-            blocking.chmod(0o755)
-            pytest.skip("this user can write a mode-555 directory (root)")
-        where = blocking / "claude"
-
-        def repair() -> None:
-            blocking.chmod(0o755)
-
-    else:
-        home.mkdir(parents=True)
-        blocking = home / ("dots" if "nowhere" in shape else "profiles")
-        if "file" in shape:
-            blocking.write_text("not a directory", encoding="utf-8")
-        else:
-            blocking.symlink_to(blocking.name if "loop" in shape else home / "mnt" / "dots")
-        where = blocking / "claude"
-
-        def repair() -> None:
-            if "file" in shape:
-                _unblock_file(blocking)
-            else:
-                blocking.unlink()  # "or remove it"
-
-    named = shape not in _CANNOT_MAKE[:2]
-    if named:
-        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(where))
-    built = paths.db_path().exists()
     try:
+        blocking = _cannot_make_shape(shape, home, tmp_path, runner)
+        if "may not" in shape and os.access(blocking, os.W_OK):
+            pytest.skip("this user can write a mode-555 directory (root)")
+        named = not shape.startswith("the default dir")
+        where = home / ".claude" if not named else blocking / "claude"
+        if "recorded" in shape:
+            where = blocking
+        if named:
+            monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(where))
+        built = paths.db_path().exists()
         row = diagnostics._check_claude_code()
         welcome = first_run.probe_claude(sign_in=False, which=lambda _name: "/opt/claude")
         clicked = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
-        made = where.is_dir() or paths.db_path().exists() != built
+        made = os.path.isdir(where) or paths.db_path().exists() != built
     finally:
-        if (tmp_path / "locked").exists():
-            (tmp_path / "locked").chmod(0o755)
+        for folder in (home, tmp_path / "locked"):
+            if folder.is_dir():
+                folder.chmod(0o755)
     from aisquare.cli.ui.views.welcome import claude_text
 
     step_two = claude_text(welcome, platform="linux").plain
-    if "may not write" in shape or "beside" in shape:
-        blocking.chmod(0o555)
-    repair()
-    repaired = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+    if os.path.islink(blocking):
+        leads_to = os.readlink(blocking)
+        fact = (
+            f"{blocking} is a link to {leads_to}, which is not a directory"
+            if "link to a file" in shape
+            else f"{blocking} is a link to {leads_to}: {_stat_error(blocking)}"
+        )
+    elif os.path.isdir(blocking):
+        fact = f"this user may not create anything in {blocking}"
+    else:
+        fact = f"{blocking} is not a directory"
+    in_place = None if "may not" in shape or "beside" in shape else f"move {blocking} aside"
+    repoint = "point CLAUDE_CONFIG_DIR at a directory this user can write"
+    restart = f"{repoint}, or unset it" if named else repoint
+    fixes = [f"{in_place}, then connect again"] if in_place else []
+    then = f"{restart}, then start asq or aisquare again from that shell"
+    fixes = [then, *fixes] if named else [*fixes, then]
 
     reason = str(json.loads(clicked.stdout)["detail"])
-    assert clicked.exit_code == 1 and reason.startswith(f"can't create {where}: "), reason
-    assert str(blocking) in reason.removeprefix(f"can't create {where}: "), "names what blocks"
+    assert clicked.exit_code == 1 and reason == f"can't create {where}: {fact}", reason
     assert f"hooks cannot be written in {where}: {reason}" in row.detail, row
     assert [f.argv for f in fix_commands([row]) if f.argv[:2] == ("agents", "connect")] == []
-    assert str(blocking) in str(row.fix) and "disconnect" not in str(row.fix), row.fix
-    restart = "then start asq or aisquare again from that shell"
-    assert (restart in str(row.fix)) == named, row.fix
+    assert row.fix == "; or ".join(fixes), row.fix
     assert welcome.refused == reason, welcome
-    assert "this page notices within a few seconds" in step_two, step_two
-    assert ("then start asq again from that shell" in step_two) == named, step_two
+    sentences = [f"{restart}, then start asq again from that shell"]
+    sentences = [*sentences, in_place or ""] if named else [in_place or "", *sentences]
+    said = ". Or ".join(words for words in sentences if words)
+    assert f"Connect cannot change that. {said[:1].upper()}{said[1:]}." in step_two, step_two
+    assert "this page notices" not in step_two, "a remedy through the variable is not seen"
     assert not made, "nothing written before the refusal"
-    assert repaired.exit_code == 0, f"the remedy as printed lets connect make it: {repaired}"
+    # Each remedy, done as worded (a shell started again for the variable's), connects.
+    writable = tmp_path / "writable"
+    writable.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(writable))
+    done = {repoint: runner.invoke(app, ["agents", "connect", "claude-code"])}
+    if named:
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+        done["or unset it"] = runner.invoke(app, ["agents", "connect", "claude-code"])
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(where))
+    else:
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    if in_place is not None:
+        blocking.rename(blocking.with_name(f"{blocking.name}.aside"))
+        done[in_place] = runner.invoke(app, ["agents", "connect", "claude-code"])
+    assert {words: result.exit_code for words, result in done.items()} == dict.fromkeys(done, 0), {
+        words: result.output for words, result in done.items()
+    }
+    assert os.path.isdir(where) or in_place is None, "made where the variable names it"
 
 
-@pytest.mark.parametrize("folder", ["missing", "read-only", "a loop"])
+@pytest.mark.parametrize(
+    "folder", ["missing", "read-only", "a loop", "a loop, in a folder this user may not write"]
+)
 def test_a_settings_json_linked_nowhere_is_refused_first_with_a_remedy_that_works(
-    runner: CliRunner, claude_home: Path, tmp_path: Path, folder: str
+    runner: CliRunner,
+    claude_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    folder: str,
 ) -> None:
     """A settings.json linked into a dotfiles folder that moved: access() let connect
     through, and connect saved CLAUDE.md into the store and built ~/.aisquare before its
     write failed. Then its remedy, "make the folder it points into", could not work where
-    that folder is there but read-only, nor for a link in a loop (review of #257). Refused
-    first, with the folder and its state, and the first remedy, done as worded, works."""
+    that folder is there but read-only, nor for a link in a loop, and a loop in a folder
+    this user may not write got one remedy, which could not be done (review of #257).
+    Refused first, with what the operating system says of the folder, and each remedy
+    printed, done as worded, works: the file in place where its folder lets this user
+    replace it, and CLAUDE_CONFIG_DIR for the directory sessions from this shell read."""
     if os.name == "nt":
         pytest.skip("links to missing or read-only folders are POSIX shapes here")
     (claude_home / "CLAUDE.md").write_text("# Prefs\nuse tabs\n", encoding="utf-8")
     settings = claude_home / "settings.json"
     target = tmp_path / "dotfiles" / "claude" / "settings.json"
-    if folder == "a loop":
+    locked = claude_home if "may not write" in folder else target.parent
+    if folder.startswith("a loop"):
         settings.symlink_to(settings.name)
     else:
         settings.symlink_to(target)
-        if folder == "read-only":
-            target.parent.mkdir(parents=True)
-            target.parent.chmod(0o555)
-            if os.access(target.parent, os.W_OK):
-                target.parent.chmod(0o755)
-                pytest.skip("this user can write a mode-555 directory (root)")
+    if folder == "read-only" or "may not write" in folder:
+        locked.mkdir(parents=True, exist_ok=True)
+        locked.chmod(0o555)
     try:
+        if os.access(locked, os.W_OK) and locked.exists():
+            pytest.skip("this user can write a mode-555 directory (root)")
         refusal = agents_service.access("claude-code").connect
         row = diagnostics._check_claude_code()
         clicked = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
         built = paths.aisquare_home().exists()
     finally:
-        if target.parent.exists():
-            target.parent.chmod(0o755)
-    if folder == "a loop":
-        fix = f"make the link at {settings} lead to a JSON object this user can write, or remove it"
-        real = tmp_path / "real.json"
-        real.write_text("{}", encoding="utf-8")
-        settings.unlink()
-        settings.symlink_to(real)
-    elif folder == "missing":
-        fix = (
-            f"make {target.parent} a directory this user can write, "
-            f"or remove the link at {settings}"
-        )
-        target.parent.mkdir(parents=True)
-    else:
-        fix = f"make {target.parent} writable by this user, or remove the link at {settings}"
-    repaired = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+        if locked.exists():
+            locked.chmod(0o755)
 
     reason = str(json.loads(clicked.stdout)["detail"])
     assert refusal is not None and refusal.why == reason, refusal
     assert f"hooks cannot be written in {claude_home}: {reason}" in row.detail, row
-    if folder != "a loop":
-        assert reason.startswith(f"can't write {settings}: it is a link to {target}, whose "), (
-            reason
-        )
-        assert str(target.parent) in reason, "names the folder and its state"
-    assert row.fix == f"{fix}, then connect again", row.fix
+    if folder == "missing":
+        said = f"{target.parent}: {_stat_error(target.parent)}"
+    elif folder == "read-only":
+        said = f"this user may not create anything in {target.parent}"
+    if folder.startswith("a loop"):
+        assert reason == f"can't read {settings}: {_stat_error(settings)}", reason
+    else:
+        assert reason == f"can't write {settings}: it is a link to {target}, and {said}", reason
+    in_place = f"make {settings} a JSON object this user can write, then connect again"
+    fixes = [_REPOINT_FIX] if "may not write" in folder else [in_place, _REPOINT_FIX]
+    assert row.fix == "; or ".join(fixes), row.fix
     assert not built, "refused before the store was built or CLAUDE.md saved"
-    assert repaired.exit_code == 0, f"the remedy as printed lets connect write: {repaired}"
-    assert agent_core.hooks_installed("claude-code"), "written through the link"
+    writable = tmp_path / "writable"
+    writable.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(writable))
+    done = {"repoint": runner.invoke(app, ["agents", "connect", "claude-code"])}
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    if "may not write" not in folder:
+        settings.unlink()
+        settings.write_text("{}", encoding="utf-8")
+        done["in place"] = runner.invoke(app, ["agents", "connect", "claude-code"])
+        assert agent_core.hooks_installed("claude-code"), "written where it was refused"
+    assert {words: result.exit_code for words, result in done.items()} == dict.fromkeys(done, 0), {
+        words: result.output for words, result in done.items()
+    }
+
+
+_NOT_A_DIRECTORY_TO_READ = [
+    pytest.param("Claude Code's state file", id="state file"),
+]
+
+
+@pytest.mark.parametrize("shape", _NOT_A_DIRECTORY_TO_READ)
+def test_a_config_dir_variable_naming_no_directory_to_read_offers_only_the_variable(
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    """`CLAUDE_CONFIG_DIR=~/.claude.json`, a slip for ~/.claude that names Claude Code's own
+    state file: the only remedy printed was to make a settings.json inside it, which meant
+    turning that file into a directory, with no word of the variable, and Welcome said it
+    would notice (review of #257). Named with the operating system's answer, with the
+    variable's remedy alone, which, done as worded in a shell started again, lets connect
+    write."""
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    home = isolated_agent_home
+    home.mkdir(parents=True)
+    if "beside" in shape:
+        (home / ".claude").mkdir()
+        _connect(runner)
+    locked = home / "locked"
+    if "enter" in shape:
+        where = locked / "claude"
+        where.mkdir(parents=True)
+    else:
+        where = home / ".claude.json"
+        where.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(where))
+    if "enter" in shape:
+        locked.chmod(0)
+    try:
+        error: str | None = None  # Windows: a path through a file is one not there
+        try:
+            (where / "settings.json").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            error = exc.strerror
+        built = paths.db_path().exists()
+        row = diagnostics._check_claude_code()
+        welcome = first_run.probe_claude(sign_in=False, which=lambda _name: "/opt/claude")
+        clicked = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+        made = paths.db_path().exists() != built
+        doctor = runner.invoke(app, ["--json", "doctor"])
+        uninstall = runner.invoke(app, ["--json", "uninstall", "--dry-run"])
+    finally:
+        if locked.exists():
+            locked.chmod(0o755)
+    from aisquare.cli.ui.views.welcome import claude_text
+
+    step_two = claude_text(welcome, platform="linux").plain
+    settings = where / "settings.json"
+    reason = (
+        f"can't read {settings}: {error}"
+        if error is not None
+        else f"can't write {settings}: {where} is not a directory"
+    )
+    restart = "point CLAUDE_CONFIG_DIR at a directory this user can write, or unset it, "
+    assert json.loads(clicked.stdout)["detail"] == reason, clicked.stdout
+    assert f"hooks cannot be written in {where}: {reason}" in row.detail, row
+    assert row.fix == f"{restart}then start asq or aisquare again from that shell", row.fix
+    assert fix_commands([row]) == [], "no Connect: the click could only fail"
+    assert welcome.refused == reason, welcome
+    assert f"Connect cannot change that. {restart[:1].upper()}{restart[1:]}" in step_two
+    assert "this page notices" not in step_two, step_two
+    assert not made, "nothing written before the refusal"
+    for result in (doctor, uninstall):
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        assert result.exception is None or isinstance(result.exception, SystemExit), repr(
+            result.exception
+        )
+        assert len(lines) == 1 and json.loads(lines[0]), result.stdout
+    writable = tmp_path / "writable"
+    writable.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(writable))
+    repointed = runner.invoke(app, ["agents", "connect", "claude-code"])
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    unset = runner.invoke(app, ["agents", "connect", "claude-code"])
+    assert (repointed.exit_code, unset.exit_code) == (0, 0), (repointed.output, unset.output)
+    assert where.is_file() or "enter" in shape, "Claude Code's state file is left as it was"
+
+
+def test_a_link_loop_windows_reports_as_einval_is_named_in_its_own_words(
+    isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows reports a link loop as winerror 1921 with errno EINVAL, not ELOOP, so a loop
+    above CLAUDE_CONFIG_DIR read as a link to something "which does not exist" (review of
+    #257). Named with what the operating system said, whatever errno it chose."""
+    if os.name == "nt":
+        pytest.skip("links need a privilege on Windows; its error is played here")
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    home = isolated_agent_home
+    home.mkdir(parents=True)
+    loop = home / "loop"
+    loop.symlink_to(loop.name)
+    where = loop / "claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(where))
+    said = "The name of the file cannot be resolved by the system"
+    real = os.stat
+
+    def windows_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if os.fspath(path).startswith(str(loop)):
+            exc = OSError(errno.EINVAL, said, os.fspath(path))
+            setattr(exc, "winerror", 1921)  # noqa: B010 - not an attribute off Windows
+            raise exc
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", windows_stat)
+    refusal = agents_service.access("claude-code").connect
+    row = diagnostics._check_claude_code()
+
+    assert refusal is not None, "connect cannot make it"
+    assert refusal.why == f"can't create {where}: {loop} is a link to loop: {said}", refusal
+    assert refusal.fix == f"move {loop} aside", refusal
+    assert str(row.fix).endswith(f"; or move {loop} aside, then connect again"), row.fix
+
+
+def test_a_settings_json_inside_a_file_is_never_called_writable(tmp_path: Path) -> None:
+    """Asked about a settings.json that is not there, the rule asked whether its folder could
+    be written, and a folder that is a file (`CLAUDE_CONFIG_DIR=~/.claude.json`) could: on
+    Windows, where reading it says only that it is not there, connect was let through to a
+    write that failed after the context was saved (review of #257)."""
+    state = tmp_path / ".claude.json"
+    state.write_text("{}", encoding="utf-8")
+    folder = tmp_path / "claude"
+    folder.mkdir()
+
+    assert agents_service.settings_unwritable(state / "settings.json") == (
+        f"{state} is not a directory"
+    )
+    assert agents_service.settings_unwritable(folder / "settings.json") is None, "control"
+    assert agents_service.settings_unwritable(tmp_path / "gone" / "settings.json") is None, (
+        "a folder that is not there is made first"
+    )
+
+
+def test_a_profile_with_no_step_this_user_can_take_is_offered_only_forget_it(
+    runner: CliRunner, claude_home: Path
+) -> None:
+    """A recorded profile whose settings.json is a link to itself, in a folder this user may
+    not write: the one remedy printed, to make that link lead somewhere, could not be done
+    there (review of #257). No step in place is offered where its folder forbids it, and
+    CLAUDE_CONFIG_DIR does not move a profile: what is left is the disconnect that forgets
+    it, and done as worded, the row stops naming it."""
+    if os.name == "nt":
+        pytest.skip("a symlink loop in a mode-555 folder is a POSIX shape")
+    _connect(runner)
+    profile = claude_home.parent / ".claude-work"
+    profile.mkdir()
+    _connect(runner, profile)
+    (profile / "settings.json").unlink()
+    (profile / "settings.json").symlink_to("settings.json")
+    profile.chmod(0o555)
+    try:
+        if os.access(profile, os.W_OK):
+            pytest.skip("this user can write a mode-555 directory (root)")
+        row = diagnostics._check_claude_code()
+        forget = runner.invoke(
+            app, ["agents", "disconnect", "claude-code", "--config-dir", str(profile)]
+        )
+        after = diagnostics._check_claude_code()
+    finally:
+        profile.chmod(0o755)
+
+    assert f"hooks cannot be written in {profile}: " in row.detail, row
+    assert row.fix == f"forget it: aisquare agents disconnect claude-code --config-dir {profile}"
+    assert forget.exit_code == 0, forget.output
+    assert str(profile) not in after.detail and after.status is CheckStatus.ok, after
 
 
 def test_the_other_readers_of_an_exported_homeless_config_dir_never_raise(
@@ -1262,7 +1499,8 @@ def test_a_claude_md_connect_refuses_is_named_and_never_offered_connect(
     assert refusal == reason, "connect's own checks, in its own words"
     assert row.status is CheckStatus.warn, row
     assert f"hooks cannot be written in {claude_home}: {reason}" in row.detail, row
-    assert row.fix == f"make {claude_md} UTF-8 text this user can read, then connect again"
+    in_place = f"make {claude_md} UTF-8 text this user can read, then connect again"
+    assert row.fix == f"{in_place}; or {_REPOINT_FIX}", row.fix
     assert fix_commands([row]) == [], "no Connect: the click could only fail"
     assert (welcome.connected, welcome.refused) == (False, reason), welcome
     refusal, row = readable
@@ -1366,13 +1604,14 @@ def test_short_timeouts_connect_cannot_raise_are_named_and_never_offered_connect
     assert f"hooks cannot be written in {claude_home}: {reason}" in row.detail, row
     assert fix_commands([row]) == [], "no Connect: the click could only fail"
     if refused == "UTF-16 CLAUDE.md":
-        assert row.fix == f"make {claude_md} UTF-8 text this user can read, then connect again"
+        in_place = f"make {claude_md} UTF-8 text this user can read, then connect again"
     else:
-        assert row.fix == (
+        in_place = (
             f"make {settings_path} a JSON object this user can write, then connect again, or "
             "give its SessionStart and UserPromptSubmit hooks a timeout of at least 120 where "
             "that file is generated"
         )
+    assert row.fix == f"{in_place}; or {_REPOINT_FIX}", row.fix
     assert [fix.argv for fix in fix_commands([fixable])] == [(*argv[1:],)], (
         "control: where connect can write, the same row offers it"
     )

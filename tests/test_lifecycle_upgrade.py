@@ -1538,7 +1538,7 @@ def test_a_recorded_dir_pathlib_raises_on_does_not_end_the_commands_that_read_it
     """The ``~olduser/.claude`` shape still ended uninstall, doctor (asq's Doctor page,
     where Update is), status and agents list in a traceback, with nothing on stdout under
     --json: `_claude_home` expanded it unguarded (review of #257's fixes). It now reads as
-    a directory that does not exist, and the good one beside it is still read."""
+    a directory that is not there, and the good one beside it is still read."""
     bad = _dir_pathlib_raises_on(shape, tmp_path)
     good = _hooked(tmp_path / "claude", tmp_path / "gone" / "aisquare")
     _record(bad, good)
@@ -1551,7 +1551,7 @@ def test_a_recorded_dir_pathlib_raises_on_does_not_end_the_commands_that_read_it
         sites = {site["config_dir"]: site for site in claude["sites"]}
         assert set(sites) == {str(bad), str(good)}, sites
         if shape == "another-users-home":
-            assert sites[str(bad)]["refused"] == f"{bad} does not exist", sites
+            assert sites[str(bad)]["refused"] == f"{bad}: no such home on this machine", sites
 
 
 def test_a_hook_program_that_is_a_symlink_loop_beside_this_one_is_another_install(

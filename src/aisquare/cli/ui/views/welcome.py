@@ -186,18 +186,22 @@ def candidate_detail(candidate: Candidate) -> Text:
     return text
 
 
-def _refusal_remedy(fix: str | None, restart_fix: str | None) -> str:
-    """Step 2's remedy for a refusal, from the remedies it carries (``agents.Refusal``):
-    this page notices a change in place on its next look, and asq reads CLAUDE_CONFIG_DIR
-    only when it starts, so a remedy through it says to start asq again."""
-    said: list[str] = []
-    if fix is not None:
-        said.append(f"{fix[:1].upper()}{fix[1:]}, and this page notices within a few seconds.")
+def _refusal_remedy(fix: str | None, restart_fix: str | None, restart_first: bool) -> str:
+    """Step 2's remedy for a refusal, from the remedies it carries (``agents.Refusal``), in
+    their order. asq reads CLAUDE_CONFIG_DIR only when it starts, so a remedy through it
+    says to start asq again, and this page says it notices only when no remedy it gives
+    is one of those (review of #257)."""
+    said = [] if fix is None else [fix]
     if restart_fix is not None:
-        lead = "Or " if said else ""
-        start = restart_fix if said else f"{restart_fix[:1].upper()}{restart_fix[1:]}"
-        said.append(f"{lead}{start}, then start asq again from that shell.")
-    return " ".join(said) or "Fix it; this page notices within a few seconds."
+        restart = f"{restart_fix}, then start asq again from that shell"
+        said = [restart, *said] if restart_first else [*said, restart]
+    if not said:
+        return "Fix it; this page notices within a few seconds."
+    text = ". Or ".join(said)
+    text = f"{text[:1].upper()}{text[1:]}"
+    if restart_fix is None:
+        return f"{text}, and this page notices within a few seconds."
+    return f"{text}."
 
 
 def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
@@ -251,7 +255,11 @@ def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
         text.append("\n✗ ", style="red")
         text.append(f"aisquare's hooks cannot be written: {claude.refused} — ")
         text.append("Connect cannot change that. ")
-        text.append(_refusal_remedy(claude.refused_fix, claude.refused_restart_fix))
+        text.append(
+            _refusal_remedy(
+                claude.refused_fix, claude.refused_restart_fix, claude.refused_restart_first
+            )
+        )
     elif claude.manager_only:
         text.append("\n✗ ", style="red")
         # True either way: a repository that commits .claude/settings.json gives every

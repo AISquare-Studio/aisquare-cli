@@ -99,8 +99,9 @@ and an aisquare that upgrades and uninstalls itself.**
   and name the file, instead of rewriting `settings.json` with aisquare's hooks
   and nothing else. The doctor, Welcome and `agents list`/`status` name such a
   file and why, one they cannot even look at too, instead of offering a Connect
-  that would fail, calling the hooks missing, or ending in a traceback; so is a
-  `CLAUDE_CONFIG_DIR` in a home this machine does not have.
+  that would fail, calling the hooks missing, or ending in a traceback. The
+  doctor and Welcome also name a `CLAUDE_CONFIG_DIR` in a home this machine does
+  not have, instead of offering a Connect that would fail.
 - `aisquare agents disconnect` refuses, naming the file, to leave aisquare's
   hooks behind in a `settings.json` it cannot rewrite or read, instead of saying
   ✓ while they stay; the directory stays recorded until it can take them out.

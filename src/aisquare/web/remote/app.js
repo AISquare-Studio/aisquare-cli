@@ -2923,6 +2923,19 @@ function trackViewport() {
   update();
 }
 
+/* Each second. A socket that died with no close (a network switch) left the page stale for
+ * good, every button that could reconnect it waiting: replaced once a stale span, unless 4409. */
+function onSecond() {
+  checkStale();
+  if (S.stale && (S.sockState === "open" || S.sockState === "connecting") && Date.now() - S.lastWake > STALE_AFTER_MS) wake(true);
+  drawStatus();
+  const now = Date.now();
+  for (const pair of S.since) {
+    if (pair[0].isConnected) pair[0].textContent = ago(pair[1], now);
+    else S.since.delete(pair);
+  }
+}
+
 function boot() {
   buildShell();
   loadPending();
@@ -2941,15 +2954,7 @@ function boot() {
       if (data && data.type === "open" && typeof data.hash === "string") pageGo(data.hash);
     });
   }
-  setInterval(() => {
-    checkStale();
-    drawStatus();
-    const now = Date.now();
-    for (const pair of S.since) {
-      if (pair[0].isConnected) pair[0].textContent = ago(pair[1], now);
-      else S.since.delete(pair);
-    }
-  }, 1000);
+  setInterval(onSecond, 1000);
   start();
 }
 

@@ -372,9 +372,10 @@ function bootPage(hash, answer, globals) {
     live: () => sockets[sockets.length - 1],
     sent: (where) => requests.filter((one) => one.method === "POST" && one.path === where).map((one) => one.body),
     requests,
-    /* The names of the functions timers still hold, and one fired by its name: a timeout is
-     * gone once fired, an interval stays, as a browser's do. */
-    timers: () => Array.from(timers.values(), (timer) => timer.fn.name).filter(Boolean).sort(),
+    /* The names of the functions timeouts still hold (an interval is always held, so says
+     * nothing), and one fired by its name: a timeout is gone once fired, an interval stays, as
+     * a browser's do. */
+    timers: () => Array.from(timers.values()).filter((timer) => !timer.every).map((timer) => timer.fn.name).filter(Boolean).sort(),
     fireTimer(name) {
       for (const [id, timer] of Array.from(timers)) { // what it fires may set another: not this time
         if (timer.fn.name !== name) continue;
@@ -1681,6 +1682,36 @@ async function heldBetweenSockets() {
   return { wake: await lost("wake"), dropped: await lost(1006), taken: await lost(4409) };
 }
 
+/* A socket that died with no close (Wi-Fi gave way to cellular, a NAT forgot it), as each second's
+ * tick finds it: on the Live tab, nothing heard for 30 s; the same second again; 26 s on, its
+ * replacement silent too; then that one's pane. And a page whose socket another tab took (4409),
+ * a minute stale. After each: the sockets opened, stale, and whether Send waits. */
+async function silentSocket() {
+  const page = await agentView();
+  const later = (ms) => page.run("Date.now = ((then) => () => then + " + ms + ")(Date.now());");
+  const state = () => ({ sockets: page.sockets.length, stale: page.run("S.stale"), send: buttonNamed(page.main(), "Send").disabled });
+  const tick = async () => {
+    page.fireTimer("onSecond");
+    await settle();
+    return state();
+  };
+  const steps = [state()];
+  later(30000);
+  steps.push(await tick(), await tick());
+  later(26000);
+  steps.push(await tick());
+  page.acceptSockets();
+  paneCame(page);
+  steps.push(await tick());
+  const taken = await agentView();
+  taken.live().fire("close", { code: 4409 });
+  await settle();
+  taken.run("Date.now = ((then) => () => then + 60000)(Date.now());");
+  taken.fireTimer("onSecond");
+  await settle();
+  return { steps, taken: { sockets: taken.sockets.length, stale: taken.run("S.stale"), state: taken.run("S.sockState") } };
+}
+
 /* The columns the Transcript asks the machine to wrap to, on 360, 390 and 412 px phones,
  * whose transcript box is 334, 364 and 386 px inside its border; and a 340 px box, exactly 45
  * columns inside its padding by clientWidth, which is whole pixels and may have rounded up. */
@@ -2450,6 +2481,7 @@ async function main() {
     padConfirms: await padConfirms(),
     staleAcrossAWake: await staleAcrossAWake(),
     heldBetweenSockets: await heldBetweenSockets(),
+    silentSocket: await silentSocket(),
     transcriptSend: await transcriptSend(),
     sheetFocus: await sheetFocus(),
     transcriptColumns: await transcriptColumns(),

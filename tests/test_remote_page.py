@@ -1733,6 +1733,27 @@ def test_a_page_that_slept_holds_its_keys_until_the_machine_says_what_is_on_scre
     assert _css_value(_text("app.css"), "body.held pre.pane", "filter") == "grayscale(1)"
 
 
+def test_a_socket_that_died_without_a_close_is_replaced_once_the_page_goes_stale(
+    boot_report: dict[str, Any],
+) -> None:
+    """Only a close, a wake or a lost write opened a new socket. One that died with no close
+    (Wi-Fi gave way to cellular, a NAT or the tunnel's edge forgot it) fired none of them: the
+    page went stale after 25 s and stayed so, every button waiting, so no write could be lost
+    to reconnect it either, and an installed app has no reload. The tick that finds the page
+    stale replaces a socket still open or connecting, once a stale span; a page whose socket
+    another tab took waits for its own Reconnect, or the two would take it from each other.
+    Each step is the sockets opened, stale, and whether Send waits."""
+    silent = boot_report["silentSocket"]
+    assert silent["steps"] == [
+        {"sockets": 1, "stale": False, "send": False},
+        {"sockets": 2, "stale": True, "send": True},  # 30 s with nothing heard
+        {"sockets": 2, "stale": True, "send": True},  # the same second: no third
+        {"sockets": 3, "stale": True, "send": True},  # 26 s on, the new one silent too
+        {"sockets": 3, "stale": False, "send": False},  # its pane came
+    ]
+    assert silent["taken"] == {"sockets": 1, "stale": True, "state": "replaced"}
+
+
 def test_the_live_tabs_keys_wait_from_the_moment_its_socket_is_lost(
     boot_report: dict[str, Any],
 ) -> None:

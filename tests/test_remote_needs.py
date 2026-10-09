@@ -28,6 +28,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli
+from aisquare.core.claude_accounts import LimitNotice, format_reset
 from aisquare.core.config import AccountsSettings
 from aisquare.core.paths import remote_audit_path, remote_needs_path
 from aisquare.core.store import store_session
@@ -248,8 +249,11 @@ def test_rule_2_a_limited_row_is_limited_about_its_newest_limit_event() -> None:
     item = _one(_classify(status, _tail(_tool("toolu_q", "AskUserQuestion", **QUESTION)), events))
     assert item.kind == "limited"
     assert item.id == needs_item_id(PROJECT.id, "limited", "7")
-    assert item.reason == "coder-1 hit its usage limit · limit resets in 2h (14:00)"
-    assert item.detail == {"text": "coder-1 hit its five-hour limit · resets 2pm"}
+    assert item.reason == "coder-1 hit its usage limit · limit resets in 2h"
+    assert item.detail == {
+        "text": "coder-1 hit its five-hour limit · resets 2pm",
+        "resets_at": "2026-10-07T14:00:00+00:00",
+    }
     assert item.since == events[1].created_at
     assert item.actions == ("switch", "open", "dismiss")
 
@@ -1684,7 +1688,57 @@ def test_a_limit_pushes_never_near_its_reset_and_later_when_someone_is_on_it(
     item = _one(_classify(_limited(resets), manager_live=manager_live, accounts=accounts))
     expected = None if delay is None else item.since + timedelta(seconds=delay)
     assert item.push_after == expected
-    assert item.reason == "coder-1 hit its usage limit"
+    lifts = (
+        "" if resets is None else f" · limit resets {format_reset(resets, now=NOW, clock=False)}"
+    )
+    assert item.reason == "coder-1 hit its usage limit" + lifts
+
+
+def test_a_limits_reset_reaches_the_phone_as_an_instant_never_the_machines_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The card's reason, its push and the board's line in its detail said the reset by the
+    machine's clock: "(18:40)" from a machine in India, which a phone in UTC-7 read as its
+    own, for a reset at 06:10 there. The reason and the push say how far it is; the instant
+    goes to the page as ``resets_at``; the board's line comes without its reset, which it
+    said as of when the hook ran."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is POSIX-only: the process zone cannot be switched for the test")
+    from aisquare.services import remote_push
+    from aisquare.services import team as team_service
+
+    now = datetime(2026, 10, 7, 10, 0, 7, tzinfo=UTC)
+    resets = datetime(2026, 10, 7, 13, 10, tzinfo=UTC)
+    with monkeypatch.context() as local:
+        local.setenv("TZ", "Asia/Kolkata")
+        time.tzset()
+        try:
+            monkeypatch.setattr(team_service, "_now", lambda: now - timedelta(minutes=1))
+            line = team_service._limited_text(
+                "coder-1", "raw", LimitNotice("five-hour", resets), fleet=True
+            )
+            row = _row()
+            session = _session(row, state="limited", resets=resets)
+            event = _event(7, "limited", line, session=session, at=now - timedelta(minutes=1))
+            status = _status(row, "limited", session, fleet_service._limit_detail(resets, now))
+            item = _one(needs_from_agent(status, None, project=PROJECT, events=[event], now=now))
+            push = remote_push.push_needs_message([item], total=1, base_url=None)
+        finally:
+            local.undo()
+            time.tzset()
+    assert "(18:40)" in line and "(18:40)" in str(status.detail), (
+        "the control: the machine's own clock"
+    )
+    assert item.reason == "coder-1 hit its usage limit · limit resets in 3h 09m"
+    assert push["body"] == item.reason
+    assert item.detail == {
+        "text": "coder-1 hit its five-hour limit — `aisquare fleet switch coder-1` moves it to the "
+        "account with the most headroom (or wait for the reset)",
+        "resets_at": "2026-10-07T13:10:00+00:00",
+    }
+    assert item.excerpt == item.detail["text"]
+    clock = re.compile(r"\b\d{1,2}:\d{2}\b")
+    assert not clock.search(item.reason + item.excerpt + str(item.detail["text"]) + push["body"])
 
 
 @pytest.mark.parametrize(

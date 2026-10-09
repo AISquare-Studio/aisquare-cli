@@ -234,7 +234,7 @@ aisquare --json remote needs
 | board_question | the manager asks on the board, or a coder asks you (no `--to`, or `--to user`, `human`, `owner`, `all` or `everyone`), or asks a manager that is not there to answer (stopped, or parked on its usage limit) |
 | manager_down | the manager crashed; or, while agents still work and before it reported a result, it was killed or lost (no exit status), or a switch or a restart could not start its replacement. A manager that exits cleanly (`fleet stop`, the phone's Stop, its own `/exit`) is taken to be done |
 | crashed | an agent exited with an error in the last hour, or was stopped for a switch or a restart that could not start its replacement, its task unfinished, while no manager runs to handle it (one parked on its usage limit does not count) |
-| limited | an agent hit its usage limit |
+| limited | an agent hit its usage limit; when the limit named its reset, the card tells it by the phone's clock |
 | lost | an agent's pane is gone |
 | fleet_down | tmux is not answering for a project |
 | asked | an agent ended its turn with a question in plain text |

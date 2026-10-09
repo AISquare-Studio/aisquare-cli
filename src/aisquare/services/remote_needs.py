@@ -855,7 +855,18 @@ def _needs_limited_item(
     manager_live: bool,
     accounts: AccountsSettings | None,
 ) -> NeedsItem:
-    """A row parked on a usage limit: the subject is its newest ``limited`` event."""
+    """A row parked on a usage limit: the subject is its newest ``limited`` event.
+
+    When the limit lifts is said as a distance, and its instant goes in ``detail``
+    as ``resets_at``, for the page to tell by the phone's clock. The machine's
+    clock time (``format_reset``'s ``(13:10)``) read as the phone's own on a card,
+    a lock screen and the Fleet tab: 06:10 there, for a phone in UTC-7 (review of
+    #243, sweep of round 4). The board's line keeps it for the machine's terminal;
+    the card shows that line without its reset, as of when the hook ran.
+    """
+    from aisquare.core import claude_accounts as claude_accounts_core
+    from aisquare.services.remote_server import _iso_seconds
+
     agent, session = status.agent, status.session
     resets = session.limit_resets_at if session is not None else None
     if event is not None and event.kind == "limited":
@@ -864,22 +875,40 @@ def _needs_limited_item(
         subject = f"{agent.id}:{resets.isoformat() if resets is not None else '-'}"
         since = session.last_seen_at if session is not None else now
     reason = f"{name} hit its usage limit"
-    if status.detail and status.detail != "usage limit":
-        reason += f" · {status.detail}"
-    text = "" if event is None else event.text
+    detail: dict[str, Any] = {"text": "" if event is None else _needs_without_reset(event.text)}
+    lifts = "usage limit"
+    if resets is not None:
+        lifts = f"limit resets {claude_accounts_core.format_reset(resets, now=now, clock=False)}"
+        reason += f" · {lifts}"
+        detail["resets_at"] = _iso_seconds(resets)
     return _needs_item(
         "limited",
         subject,
         project=project,
         agent=agent,
         reason=reason,
-        excerpt=text or status.detail,
-        detail=_needs_fit({"text": text}, _DETAIL_TEXT_MAX),
+        excerpt=detail["text"] or lifts,
+        detail=_needs_fit(detail, _DETAIL_TEXT_MAX),
         since=since,
         push_after=_needs_limited_push(
             since, resets, now=now, manager_live=manager_live, accounts=accounts
         ),
     )
+
+
+_NEEDS_RESET_SAID = re.compile(r" · resets (?:now|in \d+[dhm](?: \d+[hm])?)(?: \([^()]*\))?")
+"""How a ``limited`` line of the board says when the limit lifts (``team._limited_text``,
+through ``format_reset``): `` · resets in 3h 10m (13:10)``, a distance as of when the hook
+ran and a clock time in the machine's zone."""
+
+
+def _needs_without_reset(text: str) -> str:
+    """A ``limited`` event's text without what it says of the reset (:data:`_NEEDS_RESET_SAID`).
+
+    Claude Code's own words, which a line quotes when it could not read the reset, are left
+    as they are: they name their zone.
+    """
+    return _NEEDS_RESET_SAID.sub("", text)
 
 
 def _needs_limited_push(

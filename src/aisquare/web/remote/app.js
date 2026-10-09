@@ -489,11 +489,14 @@ function renderNeedsCard(item, doc, opts) {
   const project = it.project && typeof it.project === "object" ? it.project : {};
   const where = [project.name, it.agent].filter(isText).map((part) => clip(plainText(part), 40));
   head.appendChild(mk(doc, "span", "where", where.join(" · ")));
-  const since = mk(doc, "span", "since", ago(it.since, typeof o.now === "number" ? o.now : Date.now()));
+  const now = typeof o.now === "number" ? o.now : Date.now();
+  const since = mk(doc, "span", "since", ago(it.since, now));
   head.appendChild(since);
   if (o.onSince) o.onSince(since, it.since);
   card.appendChild(head);
   card.appendChild(mk(doc, "p", "reason", it.reason));
+  const lifts = kind === "limited" && it.detail ? resetClock(it.detail.resets_at, now) : "";
+  if (lifts) card.appendChild(mk(doc, "p", "muted", "Resets at " + lifts));
   const detail = renderDetail(kind, it.detail, doc);
   if (isText(it.excerpt) && !excerptRepeats(it.excerpt, detail)) card.appendChild(mk(doc, "p", "excerpt", it.excerpt));
   if (detail.box) card.appendChild(detail.box);
@@ -642,6 +645,23 @@ function clock(iso) {
   const when = Date.parse(iso);
   if (!Number.isFinite(when)) return "";
   return new Date(when).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/* When a limit lifts, by the phone's clock (and weekday, if not today): the machine sends the
+ * instant, not its own clock's time, which a phone in UTC-7 read as 13:10 for 06:10. */
+function resetClock(iso, now) {
+  const at = new Date(typeof iso === "string" ? Date.parse(iso) : NaN);
+  if (!Number.isFinite(at.getTime())) return "";
+  const day = new Date(now).toDateString() === at.toDateString() ? {} : { weekday: "short" };
+  return at.toLocaleString([], Object.assign(day, { hour: "2-digit", minute: "2-digit" }));
+}
+
+/* A fleet row's detail; a limited row's reset as resetClock tells it. */
+function rowDetail(row, now) {
+  const at = row.state === "limited" && row.session ? row.session.limit_resets_at : null;
+  const shown = resetClock(at, now);
+  if (!shown) return isText(row.detail) ? plainText(row.detail) : "";
+  return "limit resets " + (Date.parse(at) > now ? ago(at, now) + " (" + shown + ")" : "now");
 }
 
 /* A transcript turn's time, dim after its speaker: the machine sends when (stamps), and the
@@ -2122,7 +2142,7 @@ VIEWS.project = (route, main) => {
         const top = el("span", "row-top");
         top.append(el("span", "name", label), ...stateBadges(row.state, needsFor(pid, label).length > 0));
         line.appendChild(top);
-        const sub = [plainText(row.agent.role), isText(row.detail) ? plainText(row.detail) : ""].filter(Boolean);
+        const sub = [plainText(row.agent.role), rowDetail(row, Date.now())].filter(Boolean);
         line.appendChild(el("span", "muted", sub.join(" · ")));
         body.appendChild(line);
       }

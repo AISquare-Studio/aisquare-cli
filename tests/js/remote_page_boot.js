@@ -1008,6 +1008,27 @@ async function transcriptTimes() {
   }
 }
 
+/* The Fleet tab on a phone in UTC-7, with a row parked on a limit that lifts at 13:10 UTC,
+ * 06:10 there, beside a waiting one: what each row's second line says. */
+async function limitTimes() {
+  const zone = process.env.TZ;
+  process.env.TZ = "America/Los_Angeles";
+  try {
+    const parked = {
+      agent: { id: "agt_2", label: "coder-2", role: "coder" }, state: "limited", detail: "limit resets in 3h 09m (13:10)",
+      session: { limit_resets_at: "2026-10-07T13:10:00+00:00" },
+    };
+    const fleet = Object.assign({}, FLEET, { agents: [FLEET.agents[0], parked] });
+    const page = bootPage("#/p/" + PROJECT + "/fleet", signedIn({ "GET api/fleet": () => ({ status: 200, json: fleet }) }));
+    page.run("Date.now = () => Date.parse('2026-10-07T10:00:07+00:00');");
+    await settle();
+    return page.main().querySelectorAll("span.muted").map((line) => line.textContent);
+  } finally {
+    if (zone === undefined) delete process.env.TZ;
+    else process.env.TZ = zone;
+  }
+}
+
 const OLDER_REMOTE = { allow_write: false, auto_off_at: null, version: "test" };
 
 function note(seq, text) {
@@ -2350,6 +2371,7 @@ async function main() {
     boardOnItsTab: await boardOnItsTab(),
     boardReopened: await boardReopened(),
     transcriptTimes: await transcriptTimes(),
+    limitTimes: await limitTimes(),
     readsAfterFrames: await readsAfterFrames(),
     backLeaves: await backLeaves(),
     lateAnswers: await lateAnswers(),

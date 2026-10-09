@@ -1319,6 +1319,25 @@ def test_a_transcript_tells_each_turns_time_by_the_phones_own_clock(
     assert (lines[1], lines[4]) == ("  commit it", "  done")
 
 
+def test_a_usage_limits_reset_is_told_by_the_phones_own_clock(
+    node_report: dict[str, Any], boot_report: dict[str, Any]
+) -> None:
+    """The limited card, its push and the Fleet tab said when a limit lifts by the machine's
+    clock, ``(13:10)`` on a phone in UTC-7 where it lifts at 06:10, beside a page that tells
+    every other time by the phone's. The machine sends the instant (a card's
+    ``detail.resets_at``, a row's ``session.limit_resets_at``) and the page tells it, with
+    the weekday when it is not today."""
+    times = node_report["limitTimes"]
+    (today,) = times["today"]
+    assert today.startswith("Resets at ") and "06:10" in today and "13:10" not in today
+    assert re.fullmatch(r"Resets at \S+ 06:10.*", times["later"][0]), times["later"]
+    assert times["none"] == []
+    rows = boot_report["limitTimes"]
+    assert rows[0] == "coder", "a row that is not limited keeps the detail it was sent"
+    assert rows[1].startswith("coder · limit resets in 3 h (") and "06:10" in rows[1]
+    assert "13:10" not in rows[1]
+
+
 def test_a_read_answered_after_a_newer_frame_of_its_kind_is_dropped(
     boot_report: dict[str, Any],
 ) -> None:

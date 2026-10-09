@@ -1656,6 +1656,128 @@ class SlowServer(FakeServer):
         super().stop_remote_server()
 
 
+class LockedServer(FakeServer):
+    """A server whose every write of ``remote.json`` waits for the file's lock, which another
+    process holds until the test lets it go (:attr:`free`); ``waiting`` is set as one waits."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.free = threading.Event()
+        self.waiting = threading.Event()
+
+    def _write_remote_json(self) -> None:
+        self.waiting.set()
+        assert self.free.wait(10), "the lock was never let go"
+        super()._write_remote_json()
+
+
+def test_the_panels_controls_write_remote_json_on_a_thread_of_their_own() -> None:
+    """The write switch, the Auto-off picker, Regenerate, Revoke and the start's deadline each
+    wrote ``remote.json`` on the caller's thread, Textual's in the fleet UI, waiting for the
+    file's lock: two seconds a press while another process held it, the fleet UI frozen for
+    them (sweep of #243). Each returns at once now, shows what it asked at once, says it is
+    saving while the write waits, and lands, in the order asked, once the lock is free."""
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
+    server = LockedServer()
+    server.devices = [{"id": "dev_0000000a", "ua": "iPhone", "first_seen": "t0", "last_seen": "t1"}]
+    tunnels: list[FakeTunnel] = []
+
+    def factory(port: int) -> FakeTunnel:
+        tunnels.append(FakeTunnel(port, url="https://a.ngrok-free.app", failure=None))
+        return tunnels[-1]
+
+    controller = RemoteController(server=server, tunnel_factory=factory, now=lambda: clock[0])
+    done = heard_news(controller)
+    controller.on_done, controller.on_news = controller.on_news, None
+    started = time.monotonic()
+    controller.turn_on(wait=False)
+    controller.set_allow_write(True, wait=False)
+    controller.set_auto_off(30, wait=False)
+    assert controller.regenerate_password(wait=False) is None
+    assert controller.revoke_device("dev_0000000a", wait=False) is False
+    assert time.monotonic() - started < 1.0, "a control waited for remote.json's lock"
+    assert server.waiting.wait(5)
+    assert controller.running and controller.message == remote_control.STARTING
+    assert tunnels == [], "no ngrok before the start's deadline is written"
+    assert controller.write_actions_allowed() is True, "the switch shows the press"
+    assert controller.auto_off_at == clock[0] + timedelta(minutes=30)
+    assert controller.adopt_server_deadline() == clock[0] + timedelta(minutes=30)
+    time.sleep(remote_control.SAVING_AFTER)
+    assert remote_control.SAVING in controller.status_line().splitlines()
+    assert not controller.writes_done(0.1)
+
+    server.free.set()
+    assert controller.writes_done(5)
+    assert server.auto_off_calls == [
+        clock[0] + timedelta(minutes=60),
+        clock[0] + timedelta(minutes=30),
+    ], "in the order asked"
+    assert server.allow_write_calls == [True] and server.allow_write is True
+    assert server.revoked == ["dev_0000000a"] and server.password == "ember-glade-heron-indigo"
+    assert done == [
+        ("New password — every device has to unlock again", False),
+        ("Revoked dev_0000000a", False),
+    ]
+    assert len(tunnels) == 1 and controller.tunnel is tunnels[0]
+    assert read_state()["remote_enabled"] is True, "saved once the deadline was written"
+    assert remote_control.SAVING not in controller.status_line()
+    controller.turn_off()
+
+
+def test_turning_off_while_a_starts_deadline_waits_leaves_nothing_of_that_start() -> None:
+    """A Remote turned off before its start's deadline was written: the stopping waits for that
+    write, then clears it, and nothing else of the start follows: no ngrok, no saved on."""
+    server = LockedServer()
+    tunnels: list[FakeTunnel] = []
+
+    def factory(port: int) -> FakeTunnel:
+        tunnels.append(FakeTunnel(port, url="https://a.ngrok-free.app", failure=None))
+        return tunnels[-1]
+
+    controller = RemoteController(server=server, tunnel_factory=factory)
+    controller.turn_on(wait=False)
+    assert server.waiting.wait(5)
+    controller.turn_off(wait=False)
+    assert not controller.running
+    server.free.set()
+    assert controller.wait_until_off(5) and controller.writes_done(5)
+    assert server.auto_off_calls[-1] is None, "cleared after the start's deadline landed"
+    assert tunnels == [] and not server.running
+    assert read_state()["remote_enabled"] is False
+
+
+def test_a_remote_still_starting_as_the_ui_quits_is_saved_as_on_for_the_next_start() -> None:
+    """A start saves its switch only once its deadline is written, on the thread that drives
+    the controller: a fleet UI that quit before then (a press, then q, while another process
+    held remote.json's lock) took no more steps, and the Remote the human turned on did not
+    come back at the next start."""
+    server = LockedServer()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    dropped: list[Callable[[], None]] = []
+    controller.call_back = dropped.append  # the UI is gone: what it was handed never runs
+    controller.turn_on(wait=False)
+    assert server.waiting.wait(5)
+    controller.shutdown_for_exit(wait=False)
+    assert read_state()["remote_enabled"] is True, "saved as on, for restore()"
+    server.free.set()
+    assert controller.wait_until_off(5) and controller.writes_done(5)
+    assert read_state()["remote_enabled"] is True
+    assert load_remote_state().remote_enabled is True
+
+
+def test_a_starts_failure_found_on_the_writers_thread_stops_only_that_start() -> None:
+    """A start whose deadline would not write is stopped from the writer's thread, maybe after
+    the human turned Remote off and on again: the Remote that start began, never another."""
+    server = fake_server()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    controller.turn_on()
+    other = remote_server.RemoteInfo("tok_OTHER", "pw", "http://127.0.0.1:8750/r/tok_OTHER/")
+    assert controller.turn_off(persist=False, serving=other) is False
+    assert controller.running and server.running
+    assert controller.turn_off(serving=controller.info) is True
+    assert not controller.running and not server.running
+
+
 def test_turning_remote_off_reads_off_at_once_and_stops_on_a_thread_of_its_own(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -300,7 +300,9 @@ class RemotePanel(ModalScreen[None]):
             switch.id == "remote-allow-write"
             and event.value != self.controller.write_actions_allowed()
         ):
-            self.controller.set_allow_write(event.value)
+            # Written on a thread of its own, as every control's write of remote.json is: it
+            # waits for that file's lock (sweep of #243). The switch shows the press at once.
+            self.controller.set_allow_write(event.value, wait=False)
             if event.value:
                 self.notify("Write actions are ON for remote devices", severity="warning")
         self.repaint(heard=switch.id)
@@ -310,13 +312,14 @@ class RemotePanel(ModalScreen[None]):
             return
         if event.value == self.controller.state.auto_off_minutes:
             return  # the Select announcing its initial value at mount — not a change
-        self.controller.set_auto_off(event.value)
+        self.controller.set_auto_off(event.value, wait=False)
         self.repaint()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        """The buttons. A new passphrase and a revoke are written on the controller's writer
+        thread; the fleet UI says each once it is done (``RemoteController.on_done``)."""
         if event.button.id == "remote-regen":
-            if self.controller.regenerate_password() is not None:
-                self.notify("New password — every device has to unlock again")
+            self.controller.regenerate_password(wait=False)
         elif event.button.id == "remote-copy":
             url = self.controller.link_url()
             if url is not None:
@@ -332,8 +335,7 @@ class RemotePanel(ModalScreen[None]):
         if not 0 <= row < len(self._device_rows):
             return
         device_id = self._device_rows[row][0]
-        if self.controller.revoke_device(device_id):  # else the status line says why not
-            self.notify(f"Revoked {device_id}")
+        self.controller.revoke_device(device_id, wait=False)  # said once done, or why not
 
     def action_close_panel(self) -> None:
         self.dismiss(None)

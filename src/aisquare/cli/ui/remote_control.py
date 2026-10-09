@@ -17,6 +17,13 @@ and this modal always agree.
 
 Write actions default OFF and this module never flips them on its own: the only
 path to ``allow_write=True`` is the user's switch.
+
+Every write of ``remote.json`` the controls ask for (the write switch, the auto-off
+timer, a new passphrase, a revoke, a start's deadline) runs on a thread of its own,
+one at a time and in the order asked: each waits for ``remote.json.lock``, two
+seconds while another process holds it, and on Textual's thread that froze the
+fleet UI (sweep of #243). The panel shows what was asked at once, and what landed
+once it has.
 """
 
 from __future__ import annotations
@@ -28,7 +35,10 @@ import os
 import signal
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_for_futures
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -69,8 +79,21 @@ than hold Textual's thread for the rest of a slow stop."""
 
 UNREACHABLE = "Remote is on, but phones cannot reach it"
 """How news of a tunnel that is not up begins (:attr:`RemoteController.on_news`)."""
+STARTING = "starting Remote…"
+"""The status line while a start's deadline is written, before ngrok starts."""
+SAVING = "saving to remote.json…"
+"""The status line's line while a write the controls asked for waits (:data:`SAVING_AFTER`)."""
+SAVING_AFTER = 0.5
+"""How long a write of ``remote.json`` runs before the status line says it is saving: one
+takes milliseconds, unless another process holds the file's lock."""
 
 TunnelFactory = Callable[[int], NgrokTunnel]
+CallBack = Callable[[Callable[[], None]], object]
+"""Runs a step on the thread that drives the controller (:attr:`RemoteController.call_back`)."""
+
+
+def _call_now(step: Callable[[], None]) -> None:
+    step()
 
 
 def ngrok_without_its_api(port: int) -> NgrokTunnel:
@@ -207,6 +230,31 @@ class RemoteController:
         self._refused_switches: dict[str, str] = {}
         """A switch ``state.json`` refused, by key, as the status line says it, until a later
         save of that switch lands."""
+        self.call_back: CallBack = _call_now
+        """How a step a write leads to reaches the thread that drives the controller: a start
+        saves its switch there, once its deadline is written, so that the save and a turn-off
+        meanwhile come in the order they happened. The fleet UI hands it Textual's
+        ``call_later``; with nothing else driving the controller, the step runs at once."""
+        self.on_done: NewsListener | None = None
+        """Told, on the writer's thread, what a control's write did once it has: a new
+        passphrase, a device revoked. The panel said so as the button was pressed, which
+        was when the write was done; it is done after now (:meth:`_remote_json_write`)."""
+        self._writes = ThreadPoolExecutor(max_workers=1, thread_name_prefix="remote-json")
+        """``remote.json``'s writes the controls ask for, one at a time and in order: each
+        waits for the file's lock, and on Textual's thread that froze the fleet UI. Its
+        thread is joined at the interpreter's exit, so a write asked for before a quit
+        lands."""
+        self._writes_lock = threading.Lock()
+        self._last_write: Future[None] | None = None
+        self._writing_since: float | None = None
+        """When the writes in hand began, while any is queued or running."""
+        self._writes_queued = 0
+        self._deadline_writes = 0
+        """Writes queued or running that hand the server a deadline already in hand
+        (:attr:`auto_off_at`): till they land, the server's says nothing of the panel's."""
+        self._write_switch_writes = 0
+        self._write_switch_wanted: bool | None = None
+        """The write switch as the last press asked, while its write is queued or running."""
         self.on_news: NewsListener | None = None
         """Told what the human should hear with the R panel closed, on whichever thread
         learned it: a Remote that did not come back at a TUI start, a tunnel that did not
@@ -234,63 +282,110 @@ class RemoteController:
         and the ``PermissionError`` raised out of ``restore()`` in ``FleetApp.on_mount``
         ended the fleet UI at start with uvicorn still serving in its thread. The server
         is stopped again instead, which leaves Remote as any start that fails does: off,
-        the saved switch as it was, and the status line saying why. ``wait`` is
-        :meth:`turn_off`'s, for that stop.
+        the saved switch as it was, and the status line saying why.
+
+        The server starts on the caller's thread; the deadline's write, the saved switch
+        and ngrok follow on the writer's (:meth:`_finish_start`), and ``wait=False``
+        returns before them, which is how the fleet UI turns Remote on: the write waited
+        for ``remote.json``'s lock on Textual's thread (sweep of #243). ``wait`` waits for
+        them, and for the stopping of a start that could not write its deadline.
 
         A Remote still turning off is waited for, a moment at most (:data:`OFF_WAIT_SECONDS`):
         its last steps clear the deadline and the public origin in the running process,
         and would clear this Remote's.
         """
+        self._turn_on(wait=wait, restoring=False)
+
+    def _turn_on(self, *, wait: bool, restoring: bool) -> bool:
+        """:meth:`turn_on`; whether the server is up (or was already). ``restoring``: a start of
+        the TUI's, whose trouble is news (:meth:`restore`)."""
         if self.running:
-            return
+            return True
         if not self.wait_until_off(OFF_WAIT_SECONDS):
             self.message = STILL_TURNING_OFF
-            return
+            return False
         self.public_url = None
         with self._news_lock:  # a new Remote: what the last one said may be news again
             self._last_news, self._unreachable_told = None, False
         if self._port_problem is not None:  # a sentence, never Remote on another port
             self.message = f"Remote could not start — {self._port_problem}"
-            return
+            return False
         try:
-            self.info = self._server.start_remote_server(self._dist_dir, port=self._port)
+            info = self._server.start_remote_server(self._dist_dir, port=self._port)
         except Exception as exc:  # the remote extra is missing, or the port is taken
             # RemoteUnavailable / RemoteError carry the sentence to show; Remote stays
             # off and the saved switch is not flipped, so a restart does not retry blindly.
             self.info = None
             self.message = f"Remote could not start — {exc}"
-            return
+            return False
         # The write switch is not touched: it is remote.json's, as the shell left it.
+        self.info, self.message = info, STARTING
+        deadline = self._hold_deadline()
+        start = functools.partial(self._finish_start, info, deadline, restoring)
+        written = self._remote_json_write(start, deadline=True)
+        if wait:
+            wait_for_futures([written])
+            self.wait_until_off()  # a start that could not write its deadline stops again
+        return True
+
+    def _finish_start(
+        self, info: remote_server.RemoteInfo, deadline: datetime | None, restoring: bool
+    ) -> None:
+        """The rest of a start, on the writer's thread: the deadline to the server, then the
+        saved switch (on the thread that drives the controller, :attr:`call_back`) and
+        ngrok. Nothing of it for a Remote turned off meanwhile, nor for a Remote whose
+        deadline would not write, which is stopped again."""
+        if self.info is not info:
+            return
         try:
-            self._arm_auto_off()
+            self._write_deadline(deadline)
         except Exception as exc:  # remote.json will not write: no Remote without its deadline
             # Never raises, and keeps the saved switch. The stopping's own failures are this
             # one again (the deadline cleared in the same file), so the sentence stands alone.
-            self.turn_off(
+            stopped = self.turn_off(
                 persist=False,
-                wait=wait,
+                wait=False,
                 status=f"Remote could not start — remote.json could not be written: {exc}",
                 report=False,
+                serving=info,
             )
+            if stopped and restoring:
+                self._remote_news(self.message)
             return
-        self.message = None
-        self.save_problem = None  # the deadline's write put the whole state
-        self._set_state(remote_enabled=True)
+        with self._lock:
+            if self.info is not info:
+                return
+            self.message = None
+            self.save_problem = None  # the deadline's write put the whole state
+        self.call_back(functools.partial(self._save_started, info))
         tunnel = self._watched_tunnel()
         failure = tunnel.start_tunnel()
-        if failure is not None:
-            # No tunnel, but the local server is up: the modal keeps the local link
-            # (PLAN §6 fallback) and the status line says what to install.
-            self.message = failure
-            self.tunnel = None
-            return
         with self._lock:  # its URL may land at once, and must not find "starting" after it
-            self.tunnel = tunnel
-            self.message = "starting ngrok…"
+            current = self.info is info
+            if current and failure is not None:
+                # No tunnel, but the local server is up: the modal keeps the local link
+                # (PLAN §6 fallback) and the status line says what to install.
+                self.message, self.tunnel = failure, None
+            elif current:
+                self.tunnel, self.message = tunnel, "starting ngrok…"
+        if not current:  # turned off as ngrok started: this one is nobody's to stop
+            if failure is None:
+                tunnel.stop_tunnel()
+            return
+        if failure is not None:
+            if restoring:
+                self._unreachable(failure)
+            return
         self._waiter = threading.Thread(
             target=self._await_url, args=(tunnel,), name="ngrok-url", daemon=True
         )
         self._waiter.start()
+
+    def _save_started(self, info: remote_server.RemoteInfo) -> None:
+        """Save that Remote is on, on the thread that drives the controller, where a turn-off
+        saves its own off: one that came before this step found the Remote gone."""
+        if self.info is info:
+            self._set_state(remote_enabled=True)
 
     def _watched_tunnel(self) -> NgrokTunnel:
         """A tunnel for this Remote's port that hands every URL it announces to
@@ -362,8 +457,11 @@ class RemoteController:
         wait: bool = True,
         status: str | None = None,
         report: bool = True,
-    ) -> None:
+        serving: remote_server.RemoteInfo | None = None,
+    ) -> bool:
         """Stop the server and the tunnel. ``persist=False`` keeps the saved switch (app exit).
+        ``serving``: only the Remote of that server, if it is still the one on (a start's own
+        failure, found on the writer's thread); whether it stopped one.
 
         Turning Remote off (the switch, auto-off) revokes every device after the
         farewell push, so no phone keeps a cookie for a Remote that is off: their
@@ -390,6 +488,8 @@ class RemoteController:
         ``remote.json`` that would not write once left ngrok up and the switch on.
         """
         with self._lock:  # a URL landing now must find the Remote off (_adopt_tunnel_url)
+            if serving is not None and self.info is not serving:
+                return False  # turned off, or on again, since: that one is not this to stop
             served, tunnel = self.info is not None, self.tunnel
             self.info = None
             self.tunnel = None
@@ -399,7 +499,7 @@ class RemoteController:
             self._set_state(remote_enabled=False)
         if not served and tunnel is None:
             self.message = status
-            return
+            return False
         self.message = status or TURNING_OFF
         stopper = threading.Thread(
             target=self._stop_remote,
@@ -413,6 +513,7 @@ class RemoteController:
         stopper.start()
         if wait:
             stopper.join()
+        return True
 
     def _stop_remote(
         self,
@@ -423,8 +524,13 @@ class RemoteController:
         status: str | None,
         report: bool,
     ) -> None:
-        """:meth:`turn_off`'s stopping, on its own thread; the status line says how it ended."""
+        """:meth:`turn_off`'s stopping, on its own thread; the status line says how it ended.
+
+        The writes the controls asked for before it land first (:meth:`_remote_json_write`): a
+        start's deadline, written after this cleared it, would hold ``remote.json`` past
+        Remote."""
         failure: str | None = None
+        self.writes_done()
         try:
             if served:
                 if persist:
@@ -493,30 +599,40 @@ class RemoteController:
         """
         if not self.state.remote_enabled or self.running:
             return
-        self.turn_on(wait=wait)
-        if not self.running:
-            self._remote_news(self.message)
-        elif self.tunnel is None:
-            self._unreachable(self.message)
+        if not self._turn_on(wait=wait, restoring=True):
+            self._remote_news(self.message)  # what came after the server is said as it ends
 
     def shutdown_for_exit(self, *, wait: bool = True) -> None:
         """At TUI exit: end the processes, keep the saved switches for ``restore``.
 
         ``wait=False`` leaves them stopping on their own thread (:meth:`turn_off`);
         :meth:`wait_until_off` is then where the exit waits for them.
+
+        A Remote still starting is saved as on first: a start saves its switch once its
+        deadline is written (:meth:`_save_started`), on the thread that drives the
+        controller, and a fleet UI that quit before then took no more steps, so a Remote
+        turned on and left at once did not come back at the next start.
         """
+        with self._lock:
+            starting = self.info is not None and not self.state.remote_enabled
+        if starting:
+            self._set_state(remote_enabled=True)
         self.turn_off(persist=False, wait=wait)
 
     # --- the controls ---------------------------------------------------------------------
 
     def write_actions_allowed(self) -> bool:
-        """The write switch as ``remote.json`` holds it, Remote on or off; off when unreadable."""
+        """The write switch as ``remote.json`` holds it, Remote on or off; off when unreadable.
+        While a press of it is still being written, what that press asked."""
+        wanted = self._write_switch_wanted
+        if wanted is not None:
+            return wanted
         try:
             return bool(self._server.remote_allow_write())
         except Exception:  # a remote.json that cannot be read shows writes as off
             return False
 
-    def set_allow_write(self, enabled: bool) -> None:
+    def set_allow_write(self, enabled: bool, *, wait: bool = True) -> None:
         """Flip the one write switch, in ``remote.json``, whether Remote is on or not: the
         TUI's next Remote and ``asq remote serve`` both start with what it says.
 
@@ -524,15 +640,29 @@ class RemoteController:
         file again: a write that fails has already changed the server's state in memory,
         and nothing rolls it back. So the status line says it was not saved; "could not be
         changed" sat beside a switch that showed the change, which phones had too.
+        ``wait=False`` returns before the write (:meth:`_remote_json_write`).
         """
-        try:
-            self._server.set_allow_write(bool(enabled))
-        except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
-            self.save_problem = f"write actions could not be saved to remote.json — {exc}"
-        else:
-            self.save_problem = None
+        enabled = bool(enabled)
+        with self._writes_lock:
+            self._write_switch_wanted = enabled
+            self._write_switch_writes += 1
 
-    def set_auto_off(self, minutes: int | None) -> None:
+        def remote_json_job() -> None:
+            try:
+                self._server.set_allow_write(enabled)
+            except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
+                self.save_problem = f"write actions could not be saved to remote.json — {exc}"
+            else:
+                self.save_problem = None
+            finally:
+                with self._writes_lock:
+                    self._write_switch_writes -= 1
+                    if not self._write_switch_writes:
+                        self._write_switch_wanted = None
+
+        self._then(self._remote_json_write(remote_json_job), wait)
+
+    def set_auto_off(self, minutes: int | None, *, wait: bool = True) -> None:
         """Pick a timer, or ``None`` for Never. Takes effect at once while Remote is on.
 
         A timer ``remote.json`` will not take still takes effect, and the status line says
@@ -540,34 +670,53 @@ class RemoteController:
         fleet UI. The running server has the timer too, since a write that fails has
         already changed its state in memory and nothing rolls that back, so the panel and
         the server's gate end Remote at the same time until the server reads the file
-        again (:meth:`adopt_server_deadline`).
+        again (:meth:`adopt_server_deadline`). ``wait=False`` returns before the write.
         """
         if minutes not in AUTO_OFF_CHOICES:
             raise ValueError(f"auto-off must be one of {AUTO_OFF_CHOICES}, not {minutes}")
         self._set_state(auto_off_minutes=minutes)
-        if self.running:
+        if not self.running:
+            return
+        deadline = self._hold_deadline()
+
+        def remote_json_job() -> None:
             try:
-                self._arm_auto_off()
+                self._write_deadline(deadline)
             except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
                 self.save_problem = f"auto-off could not be saved to remote.json — {exc}"
             else:
                 self.save_problem = None
 
-    def regenerate_password(self) -> str | None:
+        self._then(self._remote_json_write(remote_json_job, deadline=True), wait)
+
+    def regenerate_password(self, *, wait: bool = True) -> str | None:
         """A new passphrase from the server; ``None`` while Remote is off (nothing to unlock),
         or when ``remote.json`` would not take it, which the status line then says. The
         running server has the new one all the same, and has signed every phone out: the
         panel shows it until the server reads the file again after another process rewrote
-        it, which brings back the old passphrase, and the devices with it."""
+        it, which brings back the old passphrase, and the devices with it.
+
+        ``wait=False`` returns ``None`` before the write, and :attr:`on_done` is told once
+        the new passphrase is in."""
         if self.info is None:
             return None
-        try:
-            password = str(self._server.regenerate_password())
-        except Exception as exc:  # raised into the Regenerate button's handler: the UI ended
-            self.save_problem = f"the new password could not be saved to remote.json — {exc}"
+        made: list[str] = []
+
+        def remote_json_job() -> None:
+            try:
+                password = str(self._server.regenerate_password())
+            except Exception as exc:  # raised into the Regenerate button's handler: the UI ended
+                self.save_problem = f"the new password could not be saved to remote.json — {exc}"
+                return
+            self.save_problem = None
+            made.append(password)
+            self._done("New password — every device has to unlock again")
+
+        written = self._remote_json_write(remote_json_job)
+        if not wait:
             return None
-        self.save_problem = None
-        return password
+        wait_for_futures([written])
+        return made[0] if made else None
 
     def remote_status(self) -> dict[str, Any]:
         """``remote_server_status()``; ``{}`` while ``remote.json`` cannot be read. A paint
@@ -585,18 +734,86 @@ class RemoteController:
         rows = rows if isinstance(rows, list) else []
         return [row for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)]
 
-    def revoke_device(self, device_id: str) -> bool:
+    def revoke_device(self, device_id: str, *, wait: bool = True) -> bool:
         """Revoke one device; ``False`` when ``remote.json`` would not take it, which the
         status line then says (raised into the Revoke button's handler, it ended the UI).
         The running server has signed it out all the same, until it reads the file again
-        after another process rewrote it."""
-        try:
-            self._server.revoke_remote_device(device_id)
-        except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
-            self.save_problem = f"{device_id} could not be revoked in remote.json — {exc}"
+        after another process rewrote it.
+
+        ``wait=False`` returns ``False`` before the write, and :attr:`on_done` is told once
+        the device is revoked."""
+        revoked: list[bool] = []
+
+        def remote_json_job() -> None:
+            try:
+                self._server.revoke_remote_device(device_id)
+            except Exception as exc:  # an unwritable remote.json is a sentence, not a crash
+                self.save_problem = f"{device_id} could not be revoked in remote.json — {exc}"
+                return
+            self.save_problem = None
+            revoked.append(True)
+            self._done(f"Revoked {device_id}")
+
+        written = self._remote_json_write(remote_json_job)
+        if not wait:
             return False
-        self.save_problem = None
-        return True
+        wait_for_futures([written])
+        return bool(revoked)
+
+    # --- the writes of remote.json ------------------------------------------------------------
+
+    def _remote_json_write(
+        self, job: Callable[[], None], *, deadline: bool = False
+    ) -> Future[None]:
+        """Hand ``job``, a write of ``remote.json`` and what follows it, to the writer's thread,
+        after every write asked for before it. ``deadline``: it hands the server the deadline
+        in hand (:meth:`adopt_server_deadline` waits for it)."""
+
+        def remote_json_run() -> None:
+            try:
+                job()
+            except Exception:  # a write's own sentence is on the status line already
+                log.warning("remote: a write of remote.json failed", exc_info=True)
+            finally:
+                with self._writes_lock:
+                    self._writes_queued -= 1
+                    if deadline:
+                        self._deadline_writes -= 1
+                    if not self._writes_queued:
+                        self._writing_since = None
+
+        with self._writes_lock:
+            if not self._writes_queued:
+                self._writing_since = time.monotonic()
+            self._writes_queued += 1
+            if deadline:
+                self._deadline_writes += 1
+            written = self._writes.submit(remote_json_run)
+            self._last_write = written
+        return written
+
+    def writes_done(self, timeout: float | None = None) -> bool:
+        """Wait for every write asked for so far; whether they were all done in ``timeout``."""
+        last = self._last_write
+        if last is None:
+            return True
+        done, _left = wait_for_futures([last], timeout)
+        return bool(done)
+
+    @staticmethod
+    def _then(written: Future[None], wait: bool) -> None:
+        if wait:
+            wait_for_futures([written])
+
+    def _done(self, news: str) -> None:
+        """Tell :attr:`on_done` what a write did, on the writer's thread."""
+        hear = self.on_done
+        if hear is None:
+            return
+        try:
+            hear(news, False)
+        except Exception:  # on the writer's thread: nobody else would hear of it
+            log.warning("remote: what a write did could not be told: %s", news, exc_info=True)
 
     def unlock_failures(self, status: dict[str, Any] | None = None) -> tuple[int, str | None]:
         """Wrong passphrases in the last 30 min, and until when new unlocks are paused, from
@@ -612,12 +829,14 @@ class RemoteController:
 
     def status_line(self) -> str:
         """The status line: what Remote is doing or why it is not, then what ngrok's agent API
-        allows while it is on (:attr:`NgrokTunnel.api_warning`), a write of ``remote.json``
-        that did not land (:attr:`save_problem`) and a switch ``state.json`` refused, each on
-        a line of its own."""
+        allows while it is on (:attr:`NgrokTunnel.api_warning`), :data:`SAVING` while a write
+        of ``remote.json`` waits, one that did not land (:attr:`save_problem`) and a switch
+        ``state.json`` refused, each on a line of its own."""
         tunnel = self.tunnel
         api = tunnel.api_warning if tunnel is not None else None
-        lines = (self.message, api, self.save_problem, *self._refused_switches.values())
+        since = self._writing_since
+        saving = SAVING if since is not None and time.monotonic() - since >= SAVING_AFTER else None
+        lines = (self.message, api, saving, self.save_problem, *self._refused_switches.values())
         return "\n".join(line for line in lines if line)
 
     def link_url(self) -> str | None:
@@ -638,8 +857,9 @@ class RemoteController:
 
     # --- auto-off -------------------------------------------------------------------------------
 
-    def _arm_auto_off(self) -> None:
-        """Set (or clear, for Never) the deadline; the server reports it as ``auto_off_at``.
+    def _hold_deadline(self) -> datetime | None:
+        """Set (or clear, for Never) the deadline in hand, as the panel shows it at once; the
+        server has it once :meth:`_write_deadline` has run.
 
         An instant with its offset, from an aware clock: naive local time plus an
         hour ran an hour long across a DST fall-back, and was published without an
@@ -651,10 +871,15 @@ class RemoteController:
         minutes = self.state.auto_off_minutes
         now = _aware(self._now()).replace(microsecond=0)
         self.auto_off_at = None if minutes is None else now + timedelta(minutes=minutes)
+        return self.auto_off_at
+
+    def _write_deadline(self, deadline: datetime | None) -> None:
+        """Hand the server ``deadline``, which it reports as ``auto_off_at``; raises what the
+        write of ``remote.json`` raised. On the writer's thread."""
         # The server shows it as GET /api/remote's auto_off_at (PLAN §4-B); Never is
         # null there, which is the same thing it shows while Remote is off.
         self._deadline_unsaved = True
-        self._server.set_auto_off(self.auto_off_at)
+        self._server.set_auto_off(deadline)
         self._deadline_unsaved = False
 
     def adopt_server_deadline(self) -> datetime | None:
@@ -676,6 +901,8 @@ class RemoteController:
         waits for it.
         """
         if not self.running or (self.auto_off_at is None and not self._deadline_unsaved):
+            return self.auto_off_at
+        if self._deadline_writes:  # the server has not been handed the deadline in hand yet
             return self.auto_off_at
         try:
             served = self._server.remote_auto_off_at()

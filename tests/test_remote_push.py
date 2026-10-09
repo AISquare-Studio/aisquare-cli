@@ -19,6 +19,7 @@ import base64
 import contextlib
 import http.client
 import json
+import logging
 import os
 import stat
 import struct
@@ -1854,6 +1855,75 @@ def test_two_scans_through_the_listener_push_each_new_id_once(
             stop()
         assert len(transport.sent) == 1, f"run {attempt + 1}: one push, then none on restart"
     assert phone.read(transport.sent[0][2])["ids"] == [items[0].id, items[1].id]
+
+
+def test_the_sender_carries_on_after_a_failure_and_warns_once_a_streak(
+    runtime: Runtime,
+    roster: set[str],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A full disk, or a ``remote-push.json`` that cannot be read, raises out of a scan or a
+    due run. Raised past the loop, it ended the thread: no needs, auto-off or expiry push
+    for any phone until Remote restarted, and a queue filling that nobody read. No test
+    reached the handler that keeps it going (sweep 3 of #243). It carries on, retries, and
+    says so once a streak: a warning, then debug lines, and a warning again after a
+    success."""
+    monkeypatch.setattr(remote_push, "PUSH_COALESCE_SECONDS", 0.05)
+    monkeypatch.setattr(remote_push, "PUSH_SYSTEM_CHECK_SECONDS", 0.05)
+    transport = Transport()
+    monkeypatch.setattr(remote_push, "push_https_transport", transport)
+    roster.add("dev_aaaaaaaa")
+    phone = Browser(f"{FCM}phone")
+    push_subscribe_device("dev_aaaaaaaa", phone.record(), roster)
+    load_or_create_vapid_keys()
+    failing = threading.Event()
+    failing.set()
+    readable = remote_push.load_push_state
+
+    def disk_full() -> remote_push.PushState:
+        if failing.is_set() and threading.current_thread().name == "asq-remote-push":
+            raise OSError(28, "No space left on device")
+        return readable()
+
+    monkeypatch.setattr(remote_push, "load_push_state", disk_full)
+
+    def said(level: int) -> int:
+        return sum(
+            record.levelno == level and record.getMessage().startswith("remote: the push sender")
+            for record in caplog.records
+        )
+
+    def until(done: Callable[[], bool]) -> None:
+        deadline = time.monotonic() + 10
+        while not done():
+            assert time.monotonic() < deadline, "the sender stopped trying"
+            time.sleep(0.01)
+
+    kit = RemoteKit(runtime)
+    watcher = Watcher()
+    kit.lane_state["needs"] = watcher
+    due = datetime.now(UTC) - timedelta(minutes=1)
+    items = [needs_item(1, push_after=due)]
+    watcher.items = items
+    with caplog.at_level(logging.DEBUG, logger=remote_push.__name__):
+        stop = start_push_sender(kit)
+        assert stop is not None
+        try:
+            for listener in list(kit.needs_listeners):
+                listener(items, datetime.now(UTC))
+            until(lambda: said(logging.DEBUG) >= 2)  # failed three times in a row, at least
+            failing.clear()
+            for listener in list(kit.needs_listeners):
+                listener(items, datetime.now(UTC))
+                listener(items, datetime.now(UTC))
+            transport.wait_for(1)  # the thread lived on, and the push went
+            assert said(logging.WARNING) == 1, "one warning for the whole streak"
+            failing.set()
+            until(lambda: said(logging.WARNING) == 2)  # a new streak after the success
+        finally:
+            stop()
+    assert phone.read(transport.sent[0][2])["ids"] == [items[0].id]
 
 
 # --- with the real device model (lane b-security) ---------------------------------------------

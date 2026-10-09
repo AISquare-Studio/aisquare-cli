@@ -627,14 +627,18 @@ def settings_unreadable(directory: Path) -> str | None:
     command's business (review of #254).
     """
     settings = directory / "settings.json"
+    if paths.names_no_home(settings):
+        return None  # a home this machine does not have holds no file (agent_core.present)
     # One read, "missing" split out. An exists() first raised PermissionError on 3.11 to
     # 3.13 for a directory this user cannot enter, and answers False on 3.14, passing it
-    # as one with no hooks; either broke the promise above (review of #257).
+    # as one with no hooks; either broke the promise above (review of #257). "Missing" is
+    # agent_core's one notion of it, a symlink loop included, so this reader and the
+    # doctor agree that such a directory is gone (review of #257).
     try:
         raw = settings.read_bytes()
-    except (FileNotFoundError, NotADirectoryError):
-        return None
     except OSError as exc:
+        if agent_core.nothing_there(exc):
+            return None
         return f"its settings.json could not be read ({exc})"
     problem: str | None = None
     try:
@@ -676,6 +680,24 @@ def hook_binaries(directory: Path) -> tuple[list[agent_core.HookBinary], str | N
         if binary is not None and binary not in binaries:
             binaries.append(binary)
     return binaries, None
+
+
+def hooks_stuck(directory: Path) -> tuple[list[agent_core.HookBinary], str | None]:
+    """The programs ``directory``'s aisquare hooks run, and why they cannot be taken out of
+    it, or ``None`` when they can: :func:`hook_binaries`' reason, else, for hooks that are
+    there, a settings.json this user may not write.
+
+    The one rule for uninstall's plan and for `agents disconnect`
+    (``agents_service.access``): disconnect asked only the first half and ended in a
+    PermissionError traceback on a read-only settings.json holding the hooks, the
+    home-manager shape, which the doctor's own fixes sent people to (review of #257).
+    """
+    binaries, error = hook_binaries(directory)
+    if error is None and binaries:
+        unwritable = agents_service.settings_unwritable(directory / "settings.json")
+        if unwritable is not None:
+            error = _CANNOT_REWRITE.format(unwritable)
+    return binaries, error
 
 
 def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
@@ -1380,16 +1402,12 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         if key in seen:
             continue
         seen.add(key)
-        binaries, error = hook_binaries(directory)
-        unwritable = (
-            agents_service.settings_unwritable(directory / "settings.json") if binaries else None
-        )
+        # Hooks of ours that cannot be taken out: the run would fail on the write, so the
+        # plan says so first and keeps the package (review of #257). The rule
+        # `agents disconnect` asks too.
+        binaries, error = hooks_stuck(directory)
         if error is not None:
             unreadable.append(HookSite(directory, reason=error))
-        elif unwritable is not None:
-            # Hooks of ours that cannot be taken out: the run would fail on the write,
-            # so the plan says so first and keeps the package (review of #257).
-            unreadable.append(HookSite(directory, reason=_CANNOT_REWRITE.format(unwritable)))
         elif binaries:
             hooks.append(HookSite(directory, tuple(str(b.program) for b in binaries)))
     home = paths.aisquare_home()

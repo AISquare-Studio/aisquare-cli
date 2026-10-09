@@ -580,6 +580,36 @@ def test_a_recorded_dir_connect_cannot_make_is_named_gone_with_the_way_to_forget
     assert str(gone) not in {site["config_dir"] for site in after[0]["sites"]}, "forgotten"
 
 
+def test_a_recorded_dir_that_became_a_symlink_loop_is_gone_to_every_reader(
+    runner: CliRunner, claude_home: Path
+) -> None:
+    """A recorded profile replaced by a link to itself: the doctor said it does not exist
+    and to forget it with disconnect, while disconnect and uninstall read it as a
+    settings.json that could not be read, and disconnect refused the doctor's own fix
+    (review of #257). One notion of "nothing there" for every reader."""
+    from aisquare.services import lifecycle
+
+    if os.name == "nt":
+        pytest.skip("a symlink loop is a POSIX shape; NTFS links need a privilege")
+    _connect(runner)
+    loop = claude_home.parent / ".claude-c2"
+    loop.mkdir()
+    _connect(runner, loop)
+    shutil.rmtree(loop)
+    loop.symlink_to(loop.name)
+
+    row = diagnostics._check_claude_code()
+    stuck = [site.config_dir for site in lifecycle.uninstall_plan().unreadable]
+    forget = runner.invoke(app, ["agents", "disconnect", "claude-code", "--config-dir", str(loop)])
+
+    assert f"hooks cannot be written in {loop}: {loop} does not exist" in row.detail, row
+    fix = f"forget it: aisquare agents disconnect claude-code --config-dir {loop}"
+    assert fix in str(row.fix), row.fix
+    assert loop not in stuck, "uninstall reads it as the doctor does: nothing there"
+    assert forget.exit_code == 0, forget.output
+    assert [str(p) for p in agent_core.connected_dirs("claude-code")] == [str(claude_home)]
+
+
 @pytest.mark.parametrize("shape", ["new-profile", "never-started"])
 def test_a_config_dir_claude_code_has_not_made_is_offered_connect_beside_other_sites(
     runner: CliRunner, isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch, shape: str
@@ -1114,23 +1144,26 @@ def _trailing_comma(path: Path) -> None:
 
 @pytest.mark.parametrize(
     "shape",
-    ["a trailing comma", pytest.param("mode 000", marks=_NEEDS_DENIED_READS)],
+    ["a trailing comma", pytest.param("mode 000", marks=_NEEDS_DENIED_READS), "read-only"],
 )
 def test_disconnect_refuses_hooks_it_cannot_take_out_and_keeps_the_record(
     runner: CliRunner, claude_home: Path, shape: str
 ) -> None:
     """With one trailing comma, which Claude Code may read past, disconnect forgot the
     directory and said "✓ disconnected" while all six hooks stayed in the file; mode 000
-    ended in a traceback (review of #257). It refuses before touching anything, with
-    uninstall's own reason, and the record stays, as uninstall keeps it."""
+    ended in a traceback, and so did a read-only file, home-manager's shape (review of
+    #257). It refuses before touching anything, with uninstall's own reason, and the
+    record stays, as uninstall keeps it."""
     _connect(runner)
     settings_path = claude_home / "settings.json"
     if shape == "a trailing comma":
         _trailing_comma(settings_path)
     before = settings_path.read_bytes()
     registry = paths.agents_registry_path().read_text(encoding="utf-8")
-    settings_path.chmod(0 if shape == "mode 000" else 0o644)
+    settings_path.chmod({"mode 000": 0, "read-only": 0o444}.get(shape, 0o644))
     try:
+        if shape == "read-only" and os.access(settings_path, os.W_OK):
+            pytest.skip("this user can write a read-only file (root)")
         human = runner.invoke(app, ["agents", "disconnect", "claude-code"])
         machine = runner.invoke(app, ["--json", "agents", "disconnect", "claude-code"])
     finally:

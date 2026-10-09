@@ -666,6 +666,37 @@ def test_a_read_only_settings_json_still_says_what_its_hooks_run(
 
 
 @posix_route
+def test_two_routes_in_a_read_only_settings_json_never_advise_a_disconnect_that_refuses(
+    runner: CliRunner, claude: Path
+) -> None:
+    """The hooks and the plugin, both in a read-only settings.json (home-manager's link
+    into the Nix store): the row's fix was `keep the plugin: aisquare agents disconnect`,
+    and that disconnect ended in a PermissionError traceback (review of #257). It is
+    refused now, and the fix gives its reason instead of the command."""
+    _connect(runner)
+    _install_plugin(claude)
+    settings = claude / "settings.json"
+    settings.chmod(0o444)
+    try:
+        if os.access(settings, os.W_OK):
+            pytest.skip("this user can write a read-only file (root)")
+        row = diagnostics._check_claude_code()
+        clicked = runner.invoke(app, ["--json", "agents", "disconnect", "claude-code"])
+    finally:
+        settings.chmod(0o644)
+    writable = diagnostics._check_claude_code()
+
+    assert row.status is CheckStatus.warn and "runs aisquare two ways in" in row.detail, row
+    assert "aisquare agents disconnect" not in str(row.fix), row.fix
+    assert f"keep the plugin: cannot take the hooks out of {claude}: its settings.json " in (
+        str(row.fix)
+    )
+    assert json.loads(clicked.stdout)["error"] == "agent_file_unreadable", clicked.stdout
+    disconnect = f"keep the plugin: aisquare agents disconnect claude-code --config-dir {claude}"
+    assert disconnect in str(writable.fix), "control: a file it can rewrite keeps the command"
+
+
+@posix_route
 def test_hooks_naming_a_gone_aisquare_beside_the_plugin_say_so(
     runner: CliRunner, claude: Path, tmp_path: Path
 ) -> None:

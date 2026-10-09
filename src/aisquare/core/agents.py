@@ -378,8 +378,10 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
         return False
     try:
         settings = read_settings(spec.settings_path)
-    except SettingsNotAnObjectError:
-        return False  # nothing of ours can be found in it to take out, and it is left alone
+    except (SettingsNotAnObjectError, UnicodeDecodeError):
+        # Nothing of ours can be found in it to take out, and it is left alone. One that
+        # holds our hooks all the same is refused before this (services.agents.access).
+        return False
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         return False
@@ -964,21 +966,33 @@ _ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOO
 _ABSENT_WINERRORS = frozenset({21, 123, 1921})
 
 
-def _present(path: Path) -> bool:
+def nothing_there(exc: OSError) -> bool:
+    """Whether ``exc``, from opening or stat'ing a path, means nothing is there: what
+    ``Path.exists`` reads as absence. The one notion of "missing" for every reader of an
+    agent's files (:func:`present`, ``lifecycle.settings_unreadable``), so the doctor,
+    connect, disconnect and uninstall never disagree about one directory: a recorded one
+    that became a symlink loop was "does not exist" to the doctor and "could not be read"
+    to disconnect, which then refused the doctor's own fix (review of #257)."""
+    return exc.errno in _ABSENT_ERRNOS or getattr(exc, "winerror", None) in _ABSENT_WINERRORS
+
+
+def present(path: Path) -> bool:
     """Whether there is something at ``path`` for a reader to open; never raises.
 
-    Absent only where ``Path.exists`` reads absence. Every other error from stat (a link
+    Absent where ``Path.exists`` reads absence (:func:`nothing_there`), and where the path
+    still starts with a ``~user`` this machine does not have (``paths.names_no_home``):
+    read as written it would be looked up in the cwd. Every other error from stat (a link
     into a directory this user cannot search, EIO, ESTALE) counts as present, so the
     reader opens it and names it: ``Path.exists`` raised those on 3.11 to 3.13, which cost
     the doctor and `agents list` their whole output for one CLAUDE.md, and answers False
     on 3.14, where connect skipped a CLAUDE.md it never read (review of #257).
     """
+    if paths.names_no_home(path):
+        return False
     try:
         os.stat(path)
     except OSError as exc:
-        return exc.errno not in _ABSENT_ERRNOS and (
-            getattr(exc, "winerror", None) not in _ABSENT_WINERRORS
-        )
+        return not nothing_there(exc)
     except ValueError:  # an embedded NUL: no such file can exist
         return False
     return True
@@ -991,7 +1005,7 @@ def detected(spec: AgentSpec) -> bool:
     question, so the doctor's rows for agents aisquare cannot connect ask here
     rather than through :func:`detect`.
     """
-    return _present(spec.home) or any(_present(path) for path in spec.context_files)
+    return present(spec.home) or any(present(path) for path in spec.context_files)
 
 
 def claude_on_path() -> str | None:
@@ -1006,7 +1020,7 @@ def claude_on_path() -> str | None:
 
 
 def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False) -> AgentInfo:
-    existing = [path for path in spec.context_files if _present(path)]
+    existing = [path for path in spec.context_files if present(path)]
     # A record of an agent aisquare has no hooks for is no connection: 0.7.0's `agents
     # connect codex` wrote one and installed nothing, and it read as connected beside the
     # doctor's "can't connect it yet" (review of #257). `agents disconnect` clears it.
@@ -1065,9 +1079,9 @@ def detect(name: str, config_dir: Path | None = None) -> AgentInfo | None:
 
 
 def context_files(name: str, config_dir: Path | None = None) -> list[Path]:
-    """An agent's context files that are there to read (:func:`_present`), for ingestion."""
+    """An agent's context files that are there to read (:func:`present`), for ingestion."""
     spec = _spec(name, config_dir)
-    return [path for path in spec.context_files if _present(path)] if spec else []
+    return [path for path in spec.context_files if present(path)] if spec else []
 
 
 # --- which aisquare do the hooks actually RUN? (#84) -------------------------------------

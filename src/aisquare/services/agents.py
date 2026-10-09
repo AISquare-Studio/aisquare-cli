@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from aisquare.core import agents as agent_core
@@ -120,32 +121,6 @@ def plugin_beside_note(name: str, config_dir: Path | None = None) -> str | None:
     )
 
 
-def disconnect_refusal(name: str, config_dir: Path | None = None) -> str | None:
-    """Why `agents disconnect` cannot take aisquare's hooks out of ``config_dir``, or ``None``.
-
-    A settings.json that holds aisquare's hooks but that it cannot rewrite (not UTF-8
-    JSON, or not an object with a ``hooks`` object), or one it cannot read at all:
-    uninstall's and upgrade's own reader (``lifecycle.settings_unreadable``). Passed by,
-    disconnect forgot the directory and said "✓ disconnected" while all six hooks stayed,
-    which Claude Code, reading the file more forgivingly, may still run; one it could
-    not read ended in a traceback (review of #257). Refused before anything is touched,
-    so the record stays, as uninstall keeps it, and the doctor goes on naming the file.
-    """
-    spec = agent_core.spec(name, config_dir)
-    if spec is None or spec.settings_path is None:
-        return None
-    from aisquare.services import lifecycle  # lazy: lifecycle imports this module
-
-    directory = spec.settings_path.parent
-    left = lifecycle.settings_unreadable(directory)
-    if left is None:
-        return None
-    return (
-        f"cannot take the hooks out of {directory}: {left} — fix that file and disconnect "
-        "again, or take aisquare's hooks out of it by hand"
-    )
-
-
 def disconnect_notes(name: str, config_dir: Path | None = None, *, removed: bool) -> list[str]:
     """What `agents disconnect` says beside its ✓, given whether it ``removed`` anything
     (:func:`disconnect`: hooks, or this home's record of the directory).
@@ -252,7 +227,7 @@ def _read_before_writing(name: str, config_dir: Path | None) -> list[str]:
     the hooks go into (:func:`_check_settings`), then the context files it imports, whose
     text it returns. Raises :class:`AgentFileUnreadableError` for the first it cannot use.
 
-    One function for :func:`connect` and :func:`refused_file`, so what the doctor, Welcome
+    One function for :func:`connect` and :func:`access`, so what the doctor, Welcome
     and the installer are told is what connect does: asking about settings.json alone,
     they offered Connect for a CLAUDE.md connect refuses (review of #257).
     """
@@ -262,22 +237,58 @@ def _read_before_writing(name: str, config_dir: Path | None) -> list[str]:
     return [_read_agent_file(path) or "" for path in agent_core.context_files(name, config_dir)]
 
 
-def refused_file(name: str, config_dir: Path | None = None) -> tuple[Path, str] | None:
-    """The file `agents connect` would refuse in ``config_dir``, and why in its own words, or
-    ``None`` when it would write the hooks. Reads only, and never raises: a file it cannot
-    even stat is a refusal that names it.
+@dataclass(frozen=True)
+class Refusal:
+    """What `agents connect` or `agents disconnect` refuses in a config dir, before it
+    writes anything (:func:`access`)."""
 
-    Every check connect makes before it writes (:func:`_read_before_writing`): a
-    settings.json that is not a JSON object, or that this user may not write, and a
-    context file (``CLAUDE.md``) that is not UTF-8 text this user can read. A Connect
-    offered there can only fail the click, so the doctor names the file instead. So
-    does a named ``config_dir`` that does not exist and that connect would not make
-    (:func:`_check_found`), the directory itself being the file: a profile removed after
-    this home connected it was offered a Connect that could only say "not installed".
-    Whether Claude Code is installed at all is the callers' own question for the
-    directory a session from this shell reads: Welcome offers the install, and the
-    doctor says it is not detected.
+    path: Path
+    """The file it names: settings.json, a context file, or the directory itself."""
+    why: str
+    """The refusal, in the command's own words."""
+
+
+@dataclass(frozen=True)
+class DirAccess:
+    """What `agents connect` and `agents disconnect` can do with one config dir."""
+
+    connect: Refusal | None
+    """Why connect would refuse to write the hooks there, or ``None`` when it would."""
+    disconnect: Refusal | None
+    """Why disconnect could not take aisquare's hooks out of it, or ``None`` when it can,
+    or when there are none to take out."""
+
+
+def access(name: str, config_dir: Path | None = None) -> DirAccess:
+    """THE answer to "what can connect and disconnect do with this config dir", asked
+    before either writes anything. Reads only, and never raises: a file it cannot even
+    stat is a refusal that names it.
+
+    Every surface that offers, names or implies either command asks it, so none names a
+    command that would refuse: the doctor's row (its text, fixes, buttons and coders
+    note), Welcome step 2 (:func:`connect_refusal`), `agents list`/`status`/`scan`, and
+    `agents disconnect` itself; connect and init run the same checks as they go
+    (:func:`connect`). Several fixes in turn each answered for one surface, and every
+    round found a surface the last one missed (review of #257).
+
+    - ``connect``: connect's own checks, in its order. A named ``config_dir`` that does
+      not exist and that connect would not make (:func:`_check_found`), the directory
+      itself being the file. A settings.json in a home this machine does not have, that
+      is not a JSON object, or that this user may not write (:func:`_check_settings`).
+      A context file (``CLAUDE.md``) that is not UTF-8 text this user can read. Whether
+      Claude Code is installed at all is the callers' own question for the directory a
+      session from this shell reads: Welcome offers the install, and the doctor says it
+      is not detected.
+    - ``disconnect``: uninstall's own rule (``lifecycle.hooks_stuck``). A settings.json
+      it cannot read, one that holds aisquare's hooks but cannot be rewritten (not UTF-8
+      JSON, not an object with a ``hooks`` object), and one holding them that this user
+      may not write. A directory that is not there holds no hooks to take out
+      (``agent_core.nothing_there``), as the doctor reads it.
     """
+    return DirAccess(_connect_refusal(name, config_dir), _disconnect_refusal(name, config_dir))
+
+
+def _connect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
     spec = agent_core.spec(name, config_dir)
     if spec is None or not spec.connectable:
         return None
@@ -287,28 +298,40 @@ def refused_file(name: str, config_dir: Path | None = None) -> tuple[Path, str] 
             _check_found(name, config_dir)
         _read_before_writing(name, config_dir)
     except AgentFileUnreadableError as exc:
-        return (exc.path or spec.settings_path or spec.home), str(exc)
+        return Refusal(exc.path or spec.settings_path or spec.home, str(exc))
     except AgentNotInstalledError as exc:
-        return spec.home, str(exc)
+        return Refusal(spec.home, str(exc))
     except OSError as exc:
         # Fails open into a named refusal: the doctor and `agents list` ask this for every
         # directory, and a traceback here cost them their whole output (review of #257).
         where = Path(os.fsdecode(exc.filename)) if exc.filename else spec.home
-        return where, f"can't read {where}: {exc.strerror or exc}"
+        return Refusal(where, f"can't read {where}: {exc.strerror or exc}")
     return None
+
+
+def _disconnect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
+    spec = agent_core.spec(name, config_dir)
+    if spec is None or spec.settings_path is None:
+        return None
+    from aisquare.services import lifecycle  # lazy: lifecycle imports this module
+
+    directory = spec.settings_path.parent
+    _binaries, stuck = lifecycle.hooks_stuck(directory)
+    if stuck is None:
+        return None
+    return Refusal(
+        spec.settings_path,
+        f"cannot take the hooks out of {directory}: {stuck} — fix that file and disconnect "
+        "again, or take aisquare's hooks out of it by hand",
+    )
 
 
 def connect_refusal(name: str, config_dir: Path | None = None) -> str | None:
     """Why `agents connect` would refuse ``config_dir``, in its own words, or ``None`` when
-    it would write the hooks: :func:`refused_file`'s reason. Reads only.
-
-    Asked by Welcome's step 2 and ``agents list``/``status``, and through
-    :func:`refused_file` by the doctor's row, before Connect is offered or implied. A
-    file connect refuses can only fail the click, and a read-only settings.json
-    (home-manager's link into the Nix store) never cleared (review of #257).
-    """
-    refused = refused_file(name, config_dir)
-    return None if refused is None else refused[1]
+    it would write the hooks: :func:`access`'s answer for connect, as Welcome step 2 and
+    ``agents list``/``status`` read it."""
+    refusal = access(name, config_dir).connect
+    return None if refusal is None else refusal.why
 
 
 def settings_unwritable(path: Path) -> str | None:
@@ -466,7 +489,18 @@ def disconnect(name: str, config_dir: Path | None = None) -> bool:
     """
     if agent_core.detect(name, config_dir) is None:
         raise KeyError(name)
-    removed = agent_core.remove_hooks(name, config_dir)
+    try:
+        removed = agent_core.remove_hooks(name, config_dir)
+    except OSError as exc:
+        # A file that changed since `access` read it: named, never a traceback, as
+        # connect's write is (_install_hooks), and the record is kept.
+        spec = agent_core.spec(name, config_dir)
+        path = spec.settings_path if spec is not None else None
+        where = path.parent if path is not None else config_dir
+        raise AgentFileUnreadableError(
+            f"cannot take the hooks out of {where}: can't write {path}: {exc.strerror or exc}",
+            path,
+        ) from exc
     recorded = agent_core.connected_dirs(name)
     agent_core.set_connected(name, False, config_dir)
     return removed or agent_core.connected_dirs(name) != recorded

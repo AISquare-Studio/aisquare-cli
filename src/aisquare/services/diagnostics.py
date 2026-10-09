@@ -966,7 +966,7 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     refused = {
         site.config_dir: refusal
         for site in (*unhooked, *wrong_binary)
-        if (refusal := agents_service.refused_file("claude-code", site.config_dir)) is not None
+        if (refusal := agents_service.access("claude-code", site.config_dir).connect) is not None
     }
     unhooked = [site for site in unhooked if site.config_dir not in refused]
     # Where the plugin is the route that runs, what it runs is graded like a hook.
@@ -1056,11 +1056,11 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
         this = f"{agent_core.current_install()} ({__version__})"
         problems.append(f"{clauses} — this install is {this}")
     stale = {site.config_dir for site in wrong_binary}
-    for directory, (path, why) in refused.items():
-        problems.append(f"hooks cannot be written in {directory}: {why}")
+    for directory, refusal in refused.items():
+        problems.append(f"hooks cannot be written in {directory}: {refusal.why}")
         # Read-only by design (home-manager), the remedy is in what generates it.
         also = "point its hooks at this install" if directory in stale else None
-        fixes.append(_refused_fix(directory, path, also=also))
+        fixes.append(_refused_fix(directory, refusal.path, also=also))
     live = [site for site in doubled if site not in dead]
     if dead:
         listed = ", ".join(str(site.config_dir) for site in dead)
@@ -1090,12 +1090,11 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
         # --config-dir naming any other it never makes, so that form refuses as not installed.
         fixes.append(_RECONNECT)
     fixes.extend(
-        "remove them, and the plugin runs alone: "
-        f"aisquare agents disconnect claude-code --config-dir {site.config_dir}"
+        _disconnect_fix(site.config_dir, "remove them, and the plugin runs alone: ")
         for site in dead
     )
     fixes.extend(
-        f"keep the plugin: aisquare agents disconnect claude-code --config-dir {site.config_dir}"
+        f"{_disconnect_fix(site.config_dir, 'keep the plugin: ')}"
         f" (or keep the hooks: {_plugin_uninstall(site)})"
         for site in live
     )
@@ -1155,31 +1154,40 @@ def _short_timeouts(product: str, short: dict[Path, list[str]]) -> DoctorCheck:
     ]
     fixes: list[str] = []
     for directory, events in short.items():
-        refusal = agents_service.refused_file("claude-code", directory)
+        refusal = agents_service.access("claude-code", directory).connect
         if refusal is None:
             fixes.append(f"aisquare agents connect claude-code --config-dir {directory}")
             continue
-        path, why = refusal
-        problems.append(f"hooks cannot be written in {directory}: {why}")
+        problems.append(f"hooks cannot be written in {directory}: {refusal.why}")
         timeout = f"give its {' and '.join(events)} hooks a timeout of at least {ceiling}"
-        fixes.append(_refused_fix(directory, path, also=timeout))
+        fixes.append(_refused_fix(directory, refusal.path, also=timeout))
     return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
 
 
 def _refused_fix(directory: Path, path: Path, *, also: str | None = None) -> str:
     """What makes ``path``, the file `agents connect` refuses in ``directory``
-    (``agents_service.refused_file``), one it can use. ``also`` is what to change instead
+    (``agents_service.access``), one it can use. ``also`` is what to change instead
     where a settings.json that is read-only by design (home-manager) is generated."""
     spec = agent_core.spec("claude-code", directory)
     if spec is not None and path == spec.home:
         # The directory itself is gone, and connect makes no --config-dir but the one a
         # session from this shell reads: this home's record of it is all that is left.
-        return f"forget it: aisquare agents disconnect claude-code --config-dir {directory}"
+        return _disconnect_fix(directory, "forget it: ")
     if spec is None or path != spec.settings_path:
         # A context file connect imports (CLAUDE.md): the hooks need nothing else changed.
         return f"make {path} UTF-8 text this user can read, then connect again"
     fix = f"make {path} a JSON object this user can write, then connect again"
     return fix if also is None else f"{fix}, or {also} where that file is generated"
+
+
+def _disconnect_fix(directory: Path, lead: str) -> str:
+    """``lead`` and the disconnect that takes aisquare's hooks out of ``directory``, or,
+    where disconnect would refuse it (``agents_service.access``), that refusal and its
+    remedy: a fix never names a command that would refuse (review of #257)."""
+    refusal = agents_service.access("claude-code", directory).disconnect
+    if refusal is None:
+        return f"{lead}aisquare agents disconnect claude-code --config-dir {directory}"
+    return f"{lead}{refusal.why}"
 
 
 def _plugin_uninstall(site: agent_core.HookSiteHealth) -> str:

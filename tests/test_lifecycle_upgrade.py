@@ -1510,9 +1510,10 @@ def test_a_recorded_dir_pathlib_raises_on_does_not_stop_upgrade_reading_the_rest
 ) -> None:
     """A recorded ~/.claude-old linked to itself, or one a hand-edited agents.json spells
     ``~olduser/.claude``, ended upgrade, --check and asq's Update in a traceback, and the
-    good directory after it was never reached (sweep of #257). The loop is left with its
-    reason; the ``~olduser`` one is a directory this machine does not have, read as a
-    removed one is: nothing to rewrite there."""
+    good directory after it was never reached (sweep of #257). Both are directories that
+    are not there, read as a removed one is: nothing to rewrite there. The doctor says
+    the same of them, and `agents disconnect` forgets them; read as "could not be read",
+    the loop made disconnect refuse the doctor's own fix (review of #257)."""
     bad = _dir_pathlib_raises_on(shape, tmp_path)
     good = _hooked(tmp_path / "claude", tool.script)
     _record(bad, good)
@@ -1522,9 +1523,7 @@ def test_a_recorded_dir_pathlib_raises_on_does_not_stop_upgrade_reading_the_rest
     assert result.exit_code == 0, result.output
     plan = _one_object(result.stdout)
     assert plan["refresh_hooks"] == [str(good)], plan
-    left = [entry["config_dir"] for entry in plan["hooks_left"]]
-    assert left == ([str(bad)] if shape == "symlink-loop" else []), plan
-    assert all("its settings.json could not be read" in e["reason"] for e in plan["hooks_left"])
+    assert plan["hooks_left"] == [], plan
 
 
 @pytest.mark.parametrize(

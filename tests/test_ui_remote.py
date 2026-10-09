@@ -240,10 +240,48 @@ def test_with_ngrok_absent_the_modal_shows_the_install_hint_and_the_local_link()
         link = shown(modal.query_one("#remote-link", Static))
         info = app.remote.info
         assert info is not None
-        assert link == info.url_local == f"http://127.0.0.1:{app.remote._port}/r/{info.token}/"
+        local = f"http://127.0.0.1:{app.remote._port}/r/{info.token}/"
+        assert link == f"{info.url_local}\n{remote_view.LOCAL_ONLY}" and info.url_local == local
         assert "local only" in shown(modal.query_one("#remote-state", Static))
+        assert shown(modal.query_one("#remote-qr", Static)) == "", "no QR a phone cannot open"
 
     drive(go, tunnel=missing_ngrok)
+
+
+def test_no_qr_is_drawn_until_ngroks_link_is_up_nor_while_ngrok_restarts() -> None:
+    """With no tunnel up the panel drew a scannable QR of the 127.0.0.1 link: a phone that
+    scanned it got "cannot connect", leading to its own loopback, a first-time user without
+    ngrok most of all (sweep of #243). The QR is ngrok's link's only; the local link says
+    it is this machine's only."""
+    tunnels: list[FakeTunnel] = []
+
+    def late(port: int) -> NgrokTunnel:
+        tunnels.append(FakeTunnel(port, url=None, failure=None))
+        return tunnels[-1]
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        info = app.remote.info
+        assert info is not None
+        qr, link = modal.query_one("#remote-qr", Static), modal.query_one("#remote-link", Static)
+        assert shown(qr) == "", "starting ngrok: no QR of the local link"
+        assert shown(link).startswith(f"{info.url_local}\n")
+        tunnels[0].handle_line(json.dumps({"lvl": "info", "msg": "started tunnel", "url": PUBLIC}))
+        modal.repaint()
+        public = build_public_url(PUBLIC, info.token)
+        assert shown(qr) == qr_text(public) and shown(link) == public
+
+        app.remote.revive_tunnel_if_dead()  # a FakeTunnel never runs: it died
+        modal.repaint()
+        assert len(tunnels) == 2 and app.remote.public_url is None
+        assert shown(qr) == "", "restarting ngrok: no QR of the local link"
+        assert shown(link).startswith(f"{info.url_local}\n")
+
+    drive(go, tunnel=late)
 
 
 def test_a_link_ngrok_announces_after_the_wait_replaces_the_local_one_in_the_panel() -> None:
@@ -269,7 +307,8 @@ def test_a_link_ngrok_announces_after_the_wait_replaces_the_local_one_in_the_pan
         assert info is not None
         status = modal.query_one("#remote-status", Static)
         assert shown(status) == "ngrok did not announce a tunnel in time"
-        assert shown(modal.query_one("#remote-link", Static)) == info.url_local
+        assert shown(modal.query_one("#remote-link", Static)).startswith(f"{info.url_local}\n")
+        assert shown(modal.query_one("#remote-qr", Static)) == ""
 
         tunnels[0].handle_line(json.dumps({"lvl": "info", "msg": "started tunnel", "url": PUBLIC}))
         modal.repaint()
@@ -749,7 +788,8 @@ def test_a_repaint_reads_the_status_once_and_draws_the_qr_only_for_a_new_link(
 ) -> None:
     """Every one-second repaint encoded the QR anew, about 4 ms of segno on Textual's own
     thread, and read ``remote_server_status()`` twice, each read three digests of
-    ``remote.json`` (r2 review of #243). The QR is drawn again when the link changes."""
+    ``remote.json`` (r2 review of #243). The QR is drawn again when the link changes, and
+    only for ngrok's link."""
     drawn: list[str] = []
     reads: list[None] = []
     status = remote_server.remote_server_status
@@ -772,16 +812,18 @@ def test_a_repaint_reads_the_status_once_and_draws_the_qr_only_for_a_new_link(
         modal.query_one("#remote-on", Switch).toggle()
         await pilot.pause()
         info = app.remote.info
-        assert info is not None and drawn[-1:] == [info.url_local]
-        qrs, statuses = len(drawn), len(reads)
+        assert info is not None and drawn == [], "no QR of the local link"
+        statuses = len(reads)
         modal.repaint()
         modal.repaint()
-        assert len(drawn) == qrs, "the same link: no QR drawn again"
         assert len(reads) == statuses + 2, "one status read a repaint"
 
         app.remote.public_url = build_public_url(PUBLIC, info.token)  # ngrok announced it
         modal.repaint()
-        assert drawn[qrs:] == [app.remote.public_url]
+        assert drawn == [app.remote.public_url]
+        modal.repaint()
+        modal.repaint()
+        assert drawn == [app.remote.public_url], "the same link: no QR drawn again"
         await pilot.pause()
         assert shown(modal.query_one("#remote-qr", Static)) == qr_text(app.remote.public_url)
         assert shown(modal.query_one("#remote-link", Static)) == app.remote.public_url
@@ -809,6 +851,10 @@ def test_the_qr_is_light_on_dark_in_every_theme(theme: str) -> None:
         modal = await open_panel(pilot)
         modal.query_one("#remote-on", Switch).toggle()
         await pilot.pause()
+        assert app.remote._waiter is not None
+        app.remote._waiter.join(5)  # the QR is ngrok's link's: it comes with it
+        modal.repaint()
+        await pilot.pause()
         qr = modal.query_one("#remote-qr", Static)
         region = qr.region
         assert region.height >= 15, "the QR is on screen"
@@ -827,7 +873,7 @@ def test_the_qr_is_light_on_dark_in_every_theme(theme: str) -> None:
                 assert brightness(style.color) > brightness(style.bgcolor), (theme, style)
         assert glyphs > 10
 
-    drive(go, tunnel=missing_ngrok, size=(160, 100))
+    drive(go, tunnel=fake_tunnel_factory(url=PUBLIC), size=(160, 100))
 
 
 def test_qr_text_is_compact_half_block_art_of_the_url() -> None:

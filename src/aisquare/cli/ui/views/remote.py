@@ -11,7 +11,8 @@ from ngrok's log on a background thread. Opened like the theme picker
 The QR is segno's compact terminal rendering (half-block characters, ~18 rows
 for an ngrok URL) of exactly the text in the link row — one string feeds both,
 so what the phone scans is what the human reads — in colours of its own, never
-the theme's (:data:`QR_COLOURS`).
+the theme's (:data:`QR_COLOURS`). Only of ngrok's link: the local one, all the panel
+has while ngrok is missing, starting or restarting, leads a phone to its own loopback.
 """
 
 from __future__ import annotations
@@ -35,6 +36,10 @@ from aisquare.cli.ui.remote_control import (
 from aisquare.services.remote_server import _remote_instant
 
 QR_UNAVAILABLE = "QR unavailable — pip install segno"
+LOCAL_ONLY = (
+    "this machine only: a phone needs ngrok's link, which shows here, with its QR, once ngrok is up"
+)
+"""Under the local link, which the panel shows while ngrok is not up."""
 LOCAL_ZONE: tzinfo | None = None
 """The zone the panel says its times in: ``None`` is this machine's own (a seam for tests)."""
 QR_COLOURS = "#ffffff on #000000"
@@ -185,8 +190,11 @@ class RemotePanel(ModalScreen[None]):
         url = controller.link_url()
         if url != self._qr_url:
             self._qr_url = url
-            self.query_one("#remote-link", Static).update(Text(url or "turn Remote on for a link"))
-            self.query_one("#remote-qr", Static).update(qr_art(url) if url else "")
+            public = url is not None and url == controller.public_url
+            self.query_one("#remote-link", Static).update(_link_text(url, public=public))
+            # The local link's QR led a phone to its own loopback: "cannot connect", for a
+            # first-time user without ngrok most of all (sweep of #243).
+            self.query_one("#remote-qr", Static).update(qr_art(url) if url and public else "")
         self.query_one("#remote-regen", Button).disabled = not running
         self.query_one("#remote-copy", Button).disabled = url is None
         self._paint_devices(controller.devices(status))
@@ -329,6 +337,15 @@ class RemotePanel(ModalScreen[None]):
 
     def action_close_panel(self) -> None:
         self.dismiss(None)
+
+
+def _link_text(url: str | None, *, public: bool) -> Text:
+    """The link row: ngrok's link, or the local one and that a phone cannot open it."""
+    if url is None:
+        return Text("turn Remote on for a link")
+    if public:
+        return Text(url)
+    return Text.assemble(url, "\n", (LOCAL_ONLY, "dim"))
 
 
 def _auto_off_label(minutes: int | None) -> str:

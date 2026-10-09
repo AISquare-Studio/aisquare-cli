@@ -4777,6 +4777,10 @@ _home_claim: tuple[Path, int] | None = None
 
 SERVE_LOCK_NAME = "remote-serve.lock"
 """Beside ``remote.json``: held by the one process that serves Remote from that home."""
+CLAIM_PATIENCE_SECONDS = 0.05
+"""How long a claim of the home keeps trying a lock it finds held: one that asks whether
+another process serves (:func:`remote_served_elsewhere`) holds it for a moment, and must never
+make a real claim fail. A Remote that is on holds it for as long as it serves."""
 REMOTE_ALREADY_ON = (
     "another Remote is on for this ~/.aisquare (the fleet UI's R panel, or `aisquare remote "
     "serve` in another shell) — turn it off first: two would share one link, one passphrase, "
@@ -4813,18 +4817,53 @@ def _claim_remote_home(state: Runtime) -> bool:
     except OSError as exc:
         log.warning("remote: %s could not be opened (%s); serving without it", path, exc)
         return False
-    try:
-        lock_exclusive(fd)
-    except OSError as exc:
-        os.close(fd)
-        if exc.errno in _LOCK_HELD:
-            raise RemoteAlreadyOn(REMOTE_ALREADY_ON) from None
-        log.warning("remote: %s could not be locked (%s); serving without it", path, exc)
-        return False
+    patience = time.monotonic() + CLAIM_PATIENCE_SECONDS
+    while True:
+        try:
+            lock_exclusive(fd)
+            break
+        except OSError as exc:
+            if exc.errno in _LOCK_HELD and time.monotonic() < patience:
+                time.sleep(0.005)
+                continue
+            os.close(fd)
+            if exc.errno in _LOCK_HELD:
+                raise RemoteAlreadyOn(REMOTE_ALREADY_ON) from None
+            log.warning("remote: %s could not be locked (%s); serving without it", path, exc)
+            return False
     previous, _home_claim = _home_claim, (path, fd)
     if previous is not None:  # another home's, which this process serves no more
         _release_remote_claim(previous[1])
     return True
+
+
+def remote_served_elsewhere() -> bool:
+    """Whether another process serves Remote from this home: holds :data:`SERVE_LOCK_NAME`.
+
+    For the R panel, which said Remote was off while ``asq remote serve``, or another fleet
+    UI, served this home publicly, its devices listed and its write switch flipped from that
+    same panel (sweep of #243). ``False`` while this process serves from it, or when there is
+    no lock file to tell (none is made here). Takes the lock for a moment when it is free,
+    which a claim waits out (:data:`CLAIM_PATIENCE_SECONDS`).
+    """
+    path = remote_state_path().with_name(SERVE_LOCK_NAME)
+    with _lock:
+        if _home_claim is not None and _home_claim[0] == path:
+            return False
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        lock_exclusive(fd)
+    except OSError as exc:
+        return exc.errno in _LOCK_HELD
+    else:
+        with contextlib.suppress(OSError):
+            unlock(fd)
+        return False
+    finally:
+        os.close(fd)
 
 
 def _release_remote_home() -> None:

@@ -40,6 +40,10 @@ LOCAL_ONLY = (
     "this machine only: a phone needs ngrok's link, which shows here, with its QR, once ngrok is up"
 )
 """Under the local link, which the panel shows while ngrok is not up."""
+ELSEWHERE = "on in another process (asq remote serve, or another asq ui) — turn it off there"
+"""The state, while another process serves Remote from this home and this one does not."""
+ELSEWHERE_LINK = "its link is shown where it runs; asq remote status prints the local one"
+"""The link row, then: that Remote's link is the other process's to show."""
 LOCAL_ZONE: tzinfo | None = None
 """The zone the panel says its times in: ``None`` is this machine's own (a seam for tests)."""
 QR_COLOURS = "#ffffff on #000000"
@@ -100,8 +104,9 @@ class RemotePanel(ModalScreen[None]):
         self._device_rows: list[tuple[str, ...]] = []
         """The devices table's cells as last painted, a row per device, its id first."""
         self._device_columns: list[ColumnKey] = []
-        self._qr_url: str | None = ""
-        """The link the QR was last drawn for; ``""`` before the first paint."""
+        self._qr_url: tuple[str | None, bool] | None = None
+        """The link the QR was last drawn for, and whether another process served Remote
+        then; ``None`` before the first paint."""
         self._painted: dict[str, bool] = {}
         """What each switch was last painted to show, by id. A switch showing anything else
         was moved by the user since, and its ``Changed`` is still on its way."""
@@ -172,11 +177,12 @@ class RemotePanel(ModalScreen[None]):
         """
         controller = self.controller
         running = controller.running
+        elsewhere = not running and controller.served_elsewhere()
         writes = controller.write_actions_allowed()
         status = controller.remote_status()
         self._paint_switch("remote-on", running, heard)
         self._paint_switch("remote-allow-write", writes, heard)
-        self.query_one("#remote-state", Static).update(self._state_text())
+        self.query_one("#remote-state", Static).update(self._state_text(elsewhere=elsewhere))
         # Text, never a str, which is read as markup: the sentences carry exception text
         # and paths, where "[b]" was a tag and "[/b]" a MarkupError out of the repaint.
         self.query_one("#remote-status", Static).update(Text(controller.status_line()))
@@ -188,10 +194,11 @@ class RemotePanel(ModalScreen[None]):
         )
         self.query_one("#remote-unlocks", Static).update(self._unlocks_text(status))
         url = controller.link_url()
-        if url != self._qr_url:
-            self._qr_url = url
+        if (url, elsewhere) != self._qr_url:
+            self._qr_url = (url, elsewhere)
             public = url is not None and url == controller.public_url
-            self.query_one("#remote-link", Static).update(_link_text(url, public=public))
+            link = Text(ELSEWHERE_LINK) if elsewhere else _link_text(url, public=public)
+            self.query_one("#remote-link", Static).update(link)
             # The local link's QR led a phone to its own loopback: "cannot connect", for a
             # first-time user without ngrok most of all (sweep of #243).
             self.query_one("#remote-qr", Static).update(qr_art(url) if url and public else "")
@@ -217,10 +224,11 @@ class RemotePanel(ModalScreen[None]):
             switch.value = value
         self._painted[switch_id] = value
 
-    def _state_text(self) -> Text:
+    def _state_text(self, *, elsewhere: bool = False) -> Text:
+        """Whether Remote is on, and how; ``elsewhere``: another process serves this home."""
         controller = self.controller
         if not controller.running:
-            return Text("off", style="dim")
+            return Text(ELSEWHERE, style="bold yellow") if elsewhere else Text("off", style="dim")
         text = Text("on", style="bold green")
         if controller.public_url is None:
             text.append("  · local only — no tunnel yet", style="dim")

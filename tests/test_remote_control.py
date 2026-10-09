@@ -23,7 +23,7 @@ import sys
 import threading
 import time
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -42,6 +42,7 @@ from aisquare.cli.ui.remote_control import (
 )
 from aisquare.cli.watch import _load_saved_theme
 from aisquare.core import paths
+from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import read_state, update_state
 from aisquare.services import ngrok_tunnel, remote_server
 from aisquare.services.ngrok_tunnel import (
@@ -988,6 +989,7 @@ SERVER_CALLS = (
     "remote_auto_off_at",
     "remote_allow_write",
     "remote_password",
+    "remote_served_elsewhere",
 )
 
 
@@ -1024,6 +1026,8 @@ class FakeServer(types.ModuleType):
         back. The server keeps it until it reads the file again after another process
         rewrote it, which a test stands for by setting the field back."""
         self.calls: list[str] = []
+        self.served_elsewhere = False
+        """What ``remote_served_elsewhere()`` answers: another process serves this home."""
         self.DEFAULT_PORT = 8750
         self.RemoteInfo = remote_server.RemoteInfo
 
@@ -1092,6 +1096,9 @@ class FakeServer(types.ModuleType):
 
     def remote_password(self) -> str:
         return self.password
+
+    def remote_served_elsewhere(self) -> bool:
+        return self.served_elsewhere
 
 
 def _positional(function: Any) -> int:
@@ -2370,3 +2377,107 @@ def test_serve_says_to_turn_a_hand_started_ngroks_local_api_off(
     assert result.exit_code == 0, result.output
     assert "ngrok http 9004 --inspect=false" in result.output
     assert "web_addr: false in ngrok.yml" in result.output
+
+
+# --- another process serving this home (sweep of #243) ----------------------------------------
+
+
+@contextlib.contextmanager
+def another_process_serves() -> Iterator[int]:
+    """``remote-serve.lock`` held as another Remote's process holds it: through a descriptor
+    of its own, which conflicts with this process's as another process's does."""
+    paths.ensure_home()
+    path = paths.remote_state_path().with_name(remote_server.SERVE_LOCK_NAME)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        lock_exclusive(fd)
+        try:
+            yield fd
+        finally:
+            unlock(fd)
+    finally:
+        os.close(fd)
+
+
+def test_whether_another_process_serves_this_home_is_asked_of_its_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The panel said Remote was off while ``serve`` served this home: nothing asked the lock
+    that keeps two Remotes off one home. Asking it takes the lock for a moment, which a claim
+    made in that moment waits out rather than refusing."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    assert remote_server.remote_served_elsewhere() is False, "no lock file: nobody serves"
+    with another_process_serves():
+        assert remote_server.remote_served_elsewhere() is True
+    assert remote_server.remote_served_elsewhere() is False
+    state = remote_server.runtime()
+    with another_process_serves() as fd:
+        threading.Timer(0.01, unlock, args=(fd,)).start()  # a probe, holding it for a moment
+        try:
+            assert remote_server._claim_remote_home(state) is True, "the probe failed a claim"
+            assert remote_server.remote_served_elsewhere() is False, "this process serves"
+        finally:
+            monkeypatch.setattr(remote_server, "_server", None)
+            remote_server._release_remote_home()
+
+
+def test_the_panel_knows_when_another_process_serves_this_home() -> None:
+    """Looked for off Textual's thread, at most every few seconds; a start's sentence that
+    another Remote kept it off goes once the home is free."""
+    server = fake_server()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    server.served_elsewhere = True
+    looked: list[str] = []
+    answer = server.remote_served_elsewhere
+
+    def look() -> bool:
+        looked.append(threading.current_thread().name)
+        return answer()
+
+    server.remote_served_elsewhere = look  # type: ignore[method-assign]
+
+    def found() -> bool:
+        deadline = time.monotonic() + 5
+        while controller._elsewhere_looking and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return controller.elsewhere
+
+    controller.served_elsewhere()
+    assert found() is True and controller.served_elsewhere() is True
+    controller.served_elsewhere()
+    assert looked == ["remote-elsewhere"], "on a thread of its own, at most every few seconds"
+    server.fail_start = remote_server.RemoteAlreadyOn(remote_server.REMOTE_ALREADY_ON)
+    controller.turn_on()
+    assert controller.message == remote_control.ALREADY_ON
+    assert controller.password() == server.password, "the Remote that is on is that one's"
+    server.served_elsewhere = False
+    controller._elsewhere_at = None  # a few seconds on
+    controller.served_elsewhere()
+    assert found() is False and controller.message is None, "the home is free now"
+    assert controller.password() is None
+    server.fail_start = None
+    controller.turn_on()
+    server.served_elsewhere = True
+    controller._elsewhere_at = None
+    assert controller.served_elsewhere() is False, "this one serves"
+    controller._look_elsewhere()  # a look that found this one's own claim, as it started
+    assert controller.elsewhere is False
+    controller.elsewhere = True
+    assert controller.served_elsewhere() is False and controller.elsewhere is False
+    controller.turn_off()
+
+
+def test_status_says_whether_remote_is_on_for_this_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``asq remote status`` printed the link, the passphrase and the devices, and nothing of
+    whether any process served them: a human checking that the fleet was not exposed had
+    no way to tell from it, as from the R panel (sweep of #243)."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    runner = CliRunner()
+    off = runner.invoke(cli, ["--json", "remote", "status"])
+    assert off.exit_code == 0 and json.loads(off.stdout)["serving"] is False
+    assert "remote:      off" in runner.invoke(cli, ["remote", "status"]).stdout
+    with another_process_serves():
+        on = runner.invoke(cli, ["--json", "remote", "status"])
+        assert on.exit_code == 0 and json.loads(on.stdout)["serving"] is True
+        human = runner.invoke(cli, ["remote", "status"]).stdout
+        assert "remote:      on — a process serves this home" in human

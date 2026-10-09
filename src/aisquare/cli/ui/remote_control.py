@@ -86,6 +86,11 @@ SAVING = "saving to remote.json…"
 SAVING_AFTER = 0.5
 """How long a write of ``remote.json`` runs before the status line says it is saving: one
 takes milliseconds, unless another process holds the file's lock."""
+ELSEWHERE_EVERY_SECONDS = 3.0
+"""How often the panel looks whether another process serves Remote from this home: a lock
+taken for a moment each time (``remote_server.remote_served_elsewhere``)."""
+ALREADY_ON = f"Remote could not start — {remote_server.REMOTE_ALREADY_ON}"
+"""What a start says that another Remote, on this home, kept off."""
 
 TunnelFactory = Callable[[int], NgrokTunnel]
 CallBack = Callable[[Callable[[], None]], object]
@@ -255,6 +260,12 @@ class RemoteController:
         self._write_switch_writes = 0
         self._write_switch_wanted: bool | None = None
         """The write switch as the last press asked, while its write is queued or running."""
+        self.elsewhere = False
+        """Whether another process served Remote from this home, the last time it was looked
+        for (:meth:`served_elsewhere`)."""
+        self._elsewhere_lock = threading.Lock()
+        self._elsewhere_at: float | None = None
+        self._elsewhere_looking = False
         self.on_news: NewsListener | None = None
         """Told what the human should hear with the R panel closed, on whichever thread
         learned it: a Remote that did not come back at a TUI start, a tunnel that did not
@@ -839,6 +850,43 @@ class RemoteController:
         lines = (self.message, api, saving, self.save_problem, *self._refused_switches.values())
         return "\n".join(line for line in lines if line)
 
+    def served_elsewhere(self) -> bool:
+        """Whether another process serves Remote from this home (``asq remote serve``, another
+        fleet UI), as last found; ``False`` while this one serves.
+
+        The panel said "off" while one did, publicly tunnelled, its phones listed as signed in
+        in the same panel and its write switch flipped from it (sweep of #243). Looked for at
+        most every :data:`ELSEWHERE_EVERY_SECONDS`, on a thread of its own: a lock call on
+        NFS can block however non-blocking it is. Once the home is found free, a start's
+        sentence that another Remote kept it off goes.
+        """
+        if self.running:
+            self.elsewhere = False  # whatever a look made as this one claimed the home found
+            return False
+        now = time.monotonic()
+        with self._elsewhere_lock:
+            fresh = self._elsewhere_at is not None and (
+                now - self._elsewhere_at < ELSEWHERE_EVERY_SECONDS
+            )
+            if self._elsewhere_looking or fresh:
+                return self.elsewhere
+            self._elsewhere_looking, self._elsewhere_at = True, now
+        threading.Thread(target=self._look_elsewhere, name="remote-elsewhere", daemon=True).start()
+        return self.elsewhere
+
+    def _look_elsewhere(self) -> None:
+        try:
+            found = bool(self._server.remote_served_elsewhere())
+        except Exception:  # a home that cannot tell says nothing of another Remote
+            found = False
+        self.elsewhere = found and not self.running  # this one's own claim, as it started
+        if not found:
+            with self._lock:
+                if self.message == ALREADY_ON:
+                    self.message = None
+        with self._elsewhere_lock:
+            self._elsewhere_looking = False
+
     def link_url(self) -> str | None:
         """The public link when ngrok is up, else the local one — ``None`` while Remote is off."""
         if self.info is None:
@@ -847,13 +895,15 @@ class RemoteController:
 
     def password(self) -> str | None:
         """The passphrase as ``remote.json`` says now: a ``regenerate-password`` from a shell
-        shows at the next paint, not the one this Remote started with. ``None`` while off."""
-        if self.info is None:
+        shows at the next paint, not the one this Remote started with. ``None`` while off,
+        unless another process serves this home (:attr:`elsewhere`): it is that Remote's."""
+        info = self.info
+        if info is None and not self.elsewhere:
             return None
         try:
             return str(self._server.remote_password())
         except Exception:  # unreadable for a moment: the one in hand beats a blank
-            return self.info.password
+            return None if info is None else info.password
 
     # --- auto-off -------------------------------------------------------------------------------
 

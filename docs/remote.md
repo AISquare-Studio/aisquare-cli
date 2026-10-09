@@ -421,8 +421,9 @@ aisquare remote revoke --all
 aisquare remote regenerate-password --new-link
 ```
 
-`status` lists every device (`--json` too) and any lockout. `revoke --all` signs
-every device out but keeps Remote on. `regenerate-password` makes a new
+`status` says whether Remote is on for this home (served by the fleet UI or a
+`serve`), and lists every device (`--json` too) and any lockout. `revoke --all`
+signs every device out but keeps Remote on. `regenerate-password` makes a new
 passphrase and signs every device out; with `--new-link` it also makes a new
 token, so a leaked link stops working everywhere. The TUI shows the new link
 after Remote is turned off and on. The link `status` and `--new-link` print is
@@ -497,7 +498,8 @@ rewrote the `Host` header; ngrok's `--host-header=rewrite` does exactly that.
 Start ngrok without it (the R panel never uses it).
 
 **`serve`, or the R panel, says another Remote is on.** One `~/.aisquare` serves
-one Remote: the fleet UI's panel, or a `serve` in another shell, has it. Turn that
+one Remote: the fleet UI's panel, or a `serve` in another shell, has it. The panel
+says so whenever it is open, its state reading on in another process. Turn that
 one off, or use it. Two would share one link, one passphrase, one auto-off and
 one list of phones, and either going off would sign the other's phones out. One
 turned off while a phone's restart or switch was still running keeps the home

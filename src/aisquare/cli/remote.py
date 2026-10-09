@@ -293,11 +293,15 @@ def install_page(
 
 @app.command("status")
 def status_command(port: LinkPort = DEFAULT_PORT) -> None:
-    """The link, the password, the devices and failed unlocks, from ~/.aisquare/remote.json."""
+    """Whether Remote is on, the link, the password, the devices and failed unlocks, from
+    ~/.aisquare/remote.json."""
     from aisquare.services import remote_server
 
     state = _remote_runtime()
     payload = _describe_remote(state.connection_info(port), allow_write=state.allow_write)
+    # Whether a process serves this home (the fleet UI's R panel, a serve): status said
+    # nothing of it, and neither did the panel of another process's (sweep of #243).
+    payload["serving"] = serving = remote_server.remote_served_elsewhere()
     status = remote_server.remote_server_status()
     rows = status["devices"]
     devices = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
@@ -308,6 +312,8 @@ def status_command(port: LinkPort = DEFAULT_PORT) -> None:
         typer.echo(json.dumps(payload))
         return
     console = stdout_console()
+    on = "on — a process serves this home (the fleet UI's R panel, or a serve)"
+    console.print(f"remote:      {on if serving else 'off'}", markup=False)
     console.print(f"url:         {payload['url_local']}", markup=False)
     console.print(f"password:    {payload['password']}", markup=False)
     console.print(f"allow_write: {'on' if state.allow_write else 'off'}", markup=False)

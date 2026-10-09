@@ -1215,6 +1215,55 @@ def test_the_panels_controls_never_wait_for_remote_jsons_lock_on_textuals_thread
     drive(go, tunnel=missing_ngrok)
 
 
+def test_the_panel_says_remote_is_on_while_another_process_serves_this_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``asq remote serve`` (or another fleet UI) serving this home publicly, the panel
+    said "off", "turn Remote on for a link" and no passphrase, beside that Remote's phones
+    listed as signed in and a write switch that flipped its writes: a human checking whether
+    the fleet was exposed read that it was not (sweep of #243). It says another process
+    serves this home, and stops saying so, and why a start failed, once it does not."""
+    monkeypatch.setattr(remote_control, "ELSEWHERE_EVERY_SECONDS", 0.0)
+    paths.ensure_home()
+    serving = paths.remote_state_path().with_name(remote_server.SERVE_LOCK_NAME)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        passphrase = remote_server.runtime().password
+        fd = os.open(serving, os.O_RDWR | os.O_CREAT, 0o600)
+        lock_exclusive(fd)  # another process's Remote, on this home
+        try:
+            modal = await open_panel(pilot)
+            state = modal.query_one("#remote-state", Static)
+            for _ in range(100):
+                modal.repaint()
+                if shown(state) != "off":
+                    break
+                await asyncio.sleep(0.02)
+            assert shown(state) == remote_view.ELSEWHERE
+            assert shown(modal.query_one("#remote-link", Static)) == remote_view.ELSEWHERE_LINK
+            assert shown(modal.query_one("#remote-password", Static)) == passphrase
+            modal.query_one("#remote-on", Switch).toggle()
+            await written(pilot)
+            assert not app.remote.running
+            status = modal.query_one("#remote-status", Static)
+            assert shown(status) == remote_control.ALREADY_ON
+        finally:
+            unlock(fd)
+            os.close(fd)
+        for _ in range(100):
+            modal.repaint()
+            if shown(state) == "off":
+                break
+            await asyncio.sleep(0.02)
+        assert shown(state) == "off"
+        assert shown(status) == "", "the home is free: the start may be tried again"
+        assert shown(modal.query_one("#remote-link", Static)) == "turn Remote on for a link"
+
+    drive(go, tunnel=missing_ngrok)
+
+
 def test_a_switch_state_json_refuses_is_toasted_and_said_again_after_quit() -> None:
     """A refused save of a switch was dropped without a word, and a refused off brought Remote
     back at the next start (sweep of #243). It is said as a refused theme is: a toast, and a

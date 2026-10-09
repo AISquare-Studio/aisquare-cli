@@ -3937,15 +3937,17 @@ def build_remote_app(
     """Unlocks are decided one at a time: the budget's check and its record are then one
     step, so guesses that arrive together cannot all get past a budget with one left."""
 
-    def unlock_audited(device_id: str, summary: str) -> None:
-        """An unlock's audit line, best effort: what it records was saved already, and an
-        audit log that would not write answered a bare 500 with no cookie, the device on
-        disk and signed in, a phantom on every Devices screen (sweep 2 of #243)."""
+    def audited(device_id: str, endpoint: str, summary: str) -> None:
+        """An audit line for what has happened already, best effort, the log told when it
+        would not write: an unlock's audit log that would not write answered a bare 500
+        with no cookie, the device on disk and signed in, a phantom on every Devices
+        screen (sweep 2 of #243). A revoke that took effect but could not be saved is
+        recorded here too, before its 503 says so."""
         try:
-            runtime.audit(device_id, "unlock", summary)
+            runtime.audit(device_id, endpoint, summary)
         except OSError as exc:
             log.warning(
-                "remote: an unlock's audit line could not be written (%s): %s", exc, summary
+                "remote: a %s audit line could not be written (%s): %s", endpoint, exc, summary
             )
 
     def unlock_decision(
@@ -3985,12 +3987,12 @@ def build_remote_app(
                         f"{KNOWN_DEVICE_FAILURES_MAX} wrong passwords sent with its cookie"
                     )
                     log.warning("remote: %s", revoked)
-                    unlock_audited(known.id, revoked)
+                    audited(known.id, "unlock", revoked)
                 return None
             secret, device = unlocked
             reactivated = known is not None and device.id == known.id
             summary = f"device {device.id} " + ("reactivated" if reactivated else f"ua={ua[:60]}")
-            unlock_audited(device.id, summary)
+            audited(device.id, "unlock", summary)
             return secret, device, reactivated
 
     async def unlock_endpoint(request: Request) -> Response:
@@ -4124,8 +4126,10 @@ def build_remote_app(
             revoked = await asyncio.to_thread(revoke_now)
         except RequestError as exc:
             return JSONResponse(exc.request_error_body(), status_code=exc.status)
-        except OSError as exc:
+        except OSError as exc:  # it holds in memory, where the gate reads it: recorded
             log.warning("remote: a revoke could not be saved: %s", exc)
+            target = "self" if own else device_id
+            await asyncio.to_thread(audited, device.id, "devices/revoke", f"{target} unsaved")
             return kit.kit_refuse(503, "remote_state_unwritable", REVOKE_UNSAVED)
         if not revoked:
             return kit.kit_refuse(404, "not_found", "no such device")

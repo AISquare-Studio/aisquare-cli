@@ -887,7 +887,9 @@ def test_a_revoke_that_cannot_be_saved_holds_here_and_says_it_was_not_saved(
     app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A revoke holds in memory, where the gate reads it (review of #243, round 2), but the
-    write's error answered a bare 500 that said nothing of it (sweep 2 of #243)."""
+    write's error answered a bare 500 that said nothing of it (sweep 2 of #243). It took
+    effect, so the audit trail records it, as not saved: it had no line at all (review of
+    #243, round 4)."""
     mine, theirs = make_client(app), make_client(app)
     unlock(mine, runtime)
     other = unlock(theirs, runtime).json()["device"]["id"]
@@ -898,6 +900,28 @@ def test_a_revoke_that_cannot_be_saved_holds_here_and_says_it_was_not_saved(
     assert "revoked on the running Remote" in response.json()["message"]
     assert other not in runtime.device_ids()
     assert theirs.get(f"{base(runtime)}/api/board").status_code == 401
+    assert _audit_lines()[-1][2:] == ["devices/revoke", f"{other} unsaved"]
+
+
+def test_a_revoke_that_can_be_neither_saved_nor_audited_still_says_it_was_not_saved(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The audit line of a revoke that could not be saved is best effort, as an unlock's is:
+    a home that refuses ``remote.json`` may refuse its audit log too, and that must not turn
+    the answer into a bare 500."""
+    mine = make_client(app)
+    device_id = unlock(mine, runtime).json()["device"]["id"]
+    FullDisk(monkeypatch)
+
+    def unwritable(self: Runtime, device_id: str, endpoint: str, summary: str) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", str(remote_audit_path()))
+
+    monkeypatch.setattr(Runtime, "audit", unwritable)
+    with caplog.at_level("WARNING", logger=remote_server.__name__):
+        response = mine.delete(f"{base(runtime)}/api/devices/{device_id}")
+    assert (response.status_code, response.json()["error"]) == (503, "remote_state_unwritable")
+    assert device_id not in runtime.device_ids()
+    assert "devices/revoke audit line could not be written" in caplog.text
 
 
 # --- (3) device ids that are not cookies ----------------------------------------------

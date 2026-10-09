@@ -645,6 +645,44 @@ def test_a_board_frame_names_the_project_its_subscription_named(
     assert set(current) == {"type", "payload", "ts"} and current["payload"] == hub
 
 
+def test_a_board_that_cannot_be_read_is_a_frame_that_says_why(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """r4 4/9: a board snapshot that raised was skipped and logged at debug level, and the
+    page's Board tab said Loading… for as long as it was open: the orchestrator off, the
+    project removed, the store locked. The frame says why now, and the board replaces it
+    once it can be read again."""
+    failing = [True]
+
+    def board(project: str | None) -> object:
+        if project == "nope":
+            raise NoSuchProject("no project matches 'nope' (id prefix, name or codename)")
+        if failing[0]:
+            raise team_service.TeamDisabledError()
+        return {"project": {"id": "prj_b"}, "sessions": [], "events": []}
+
+    sources = dataclasses.replace(Reads().sources(), board=board)
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
+    assert unlock(client, runtime).status_code == 200
+    is_board = lambda f: f["type"] == "board"  # noqa: E731
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_board": "prj_b"}))
+        unread = _until(ws, is_board)
+        failing[0] = False
+        read = _until(ws, is_board)
+        ws.send_text(json.dumps({"subscribe_board": "nope"}))
+        gone = _until(ws, is_board)
+    assert unread["project"] == "prj_b"
+    assert unread["payload"] == {
+        "project": None,
+        "sessions": [],
+        "events": [],
+        "error": "the agent orchestrator is disabled (AISQUARE_TEAM=0)",
+    }
+    assert read["payload"]["project"] == {"id": "prj_b"} and "error" not in read["payload"]
+    assert gone["project"] == "nope" and "no project matches 'nope'" in gone["payload"]["error"]
+
+
 def _captures(panes: Panes, pane: tuple[str, str | None], count: int) -> None:
     """Wait for ``pane``'s ``count``-th capture: a tick each, and a tick reads its board,
     when its socket wants one, before it captures any pane."""

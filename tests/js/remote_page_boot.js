@@ -987,7 +987,8 @@ async function boardReopened() {
 
 /* The Board tab where every project's board is AISQUARE_TEAM_HUB's, whose own project id is
  * not the tab's: what it shows of a frame for another pid, and of a frame and of a read that
- * carry the hub's board. */
+ * carry the hub's board. Then a board that could not be read: a refused read, a frame that
+ * says why, and the board that came once it could be read. */
 async function boardAnswers() {
   const hub = { project: { id: "prj_hub" }, sessions: [], events: [note(1, "on the hub")] };
   const shown = (page) => page.main().querySelectorAll("div.events")[0].childNodes.map((one) => {
@@ -1011,7 +1012,21 @@ async function boardAnswers() {
   const read = await opened();
   read.read.settle({ status: 200, json: hub });
   await settle();
-  return { other, frame: shown(framed.page), read: shown(read.page) };
+  const failed = await opened();
+  failed.read.settle({ status: 404, json: { error: "not_found", message: "no project matches 'prj_x'" } });
+  await settle();
+  const refused = shown(failed.page);
+  failed.page.live().frame("board", hub, { project: PROJECT });
+  await settle();
+  const unread = await opened();
+  unread.page.live().frame("board", { project: null, sessions: [], events: [], error: "the agent orchestrator is disabled" }, { project: PROJECT });
+  await settle();
+  unread.read.settle({ status: 503, json: { error: "unavailable", message: "the agent orchestrator is disabled" } });
+  await settle();
+  return {
+    other, frame: shown(framed.page), read: shown(read.page),
+    refused, readable: shown(failed.page), unread: shown(unread.page),
+  };
 }
 
 /* A transcript read on a phone in UTC-7 from a machine that sends each turn's time as UTC:

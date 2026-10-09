@@ -36,8 +36,9 @@ something without the gate, frozen.
 only when it changed, a ``heartbeat`` every :data:`HEARTBEAT_SECONDS` changed or not,
 then one ``pane`` frame per ``(project, label)`` subscription when its pane changed.
 A socket that asked with ``subscribe_board`` gets ``board`` frames too, ahead of the
-rest: the board's events and the sessions they name (:func:`remote_board_frame`), each
-naming the project its subscription named, as a ``pane`` frame does.
+rest: the board's events and the sessions they name (:func:`remote_board_frame`), or
+why the board could not be read (:func:`remote_board_unread`), each naming the project
+its subscription named, as a ``pane`` frame does.
 
 **The lanes** live in their own modules and plug in through :class:`RemoteKit`:
 ``remote_needs`` (what needs the human), ``remote_push`` (Web Push),
@@ -2025,6 +2026,17 @@ def remote_board_frame(board: object) -> dict[str, object]:
         ],
         "events": events,
     }
+
+
+def remote_board_unread(exc: Exception) -> dict[str, object]:
+    """The ``board`` frame of a board that could not be read: the frame's keys, empty, and
+    ``error``, the sentence that says why, as a ``pane`` frame says why it has no screen.
+
+    The stream skipped such a frame and logged it at debug level, and the page's Board tab
+    said "Loading…" for as long as it was open: under ``AISQUARE_TEAM=0``, for a project
+    removed meanwhile, or while the store stayed locked (review of #243, round 4).
+    """
+    return {"project": None, "sessions": [], "events": [], "error": str(exc)}
 
 
 def _agent_state_counts(agents: list[FleetAgentStatus]) -> dict[str, int]:
@@ -4108,16 +4120,17 @@ def build_remote_app(
             # A switch that lands while a snapshot is read must not let the old project's
             # frame out after it: the page would show it as the new one's until next tick.
             board_ref = board_project
-            try:
-                if board_wanted:
+            if board_wanted:
+                try:
                     payload = await snapshot(
                         f"board-frame:{board_ref or ''}",
                         lambda: remote_board_frame(reads.board(board_ref)),
                     )
-                    if board_wanted and board_ref == board_project:
-                        await push_if_changed("board", payload, project=board_ref or None)
-            except Exception as exc:
-                log.debug("remote: board frame skipped: %s", exc)
+                except Exception as exc:  # said on the Board tab, not "Loading…" for good
+                    log.debug("remote: board frame unread: %s", exc)
+                    payload = remote_board_unread(exc)
+                if board_wanted and board_ref == board_project:
+                    await push_if_changed("board", payload, project=board_ref or None)
             fleet_ref = fleet_project
             try:
                 payload = await snapshot(f"fleet:{fleet_ref or ''}", lambda: reads.fleet(fleet_ref))

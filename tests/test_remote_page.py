@@ -1319,6 +1319,19 @@ def test_the_board_tab_draws_the_board_its_project_answers_with(
     assert board["frame"] == ["on the hub"] and board["read"] == ["on the hub"]
 
 
+def test_a_board_that_cannot_be_read_says_why_on_the_board_tab(
+    boot_report: dict[str, Any],
+) -> None:
+    """r4 4/9: the Board tab's read acted only on an answer that was ok, and the stream sent
+    no frame for a board that raised, so the tab said Loading… for as long as it was open:
+    with the orchestrator off, the project removed, the store locked. A refused read and a
+    frame that says why are each said there now, and a board that comes after is drawn."""
+    board = boot_report["boardAnswers"]
+    assert board["refused"] == ["no project matches 'prj_x'"]
+    assert board["readable"] == ["on the hub"], "a board read since takes the refusal's place"
+    assert board["unread"] == ["the agent orchestrator is disabled"], "the read after it is no news"
+
+
 def test_a_transcript_tells_each_turns_time_by_the_phones_own_clock(
     boot_report: dict[str, Any],
 ) -> None:

@@ -2151,10 +2151,12 @@ VIEWS.project = (route, main) => {
     const compose = noteComposer(pid);
     const list = el("div", "events");
     body.append(compose, list);
+    let failed = null; // a refused read, said here: dropped, it left "Loading…" for good
     const draw = () => {
       const board = S.wantBoard === pid ? S.board : null;
       clear(list);
-      if (!board) return list.appendChild(el("p", "empty", "Loading…"));
+      if (!board) return list.appendChild(el("p", "empty", failed ? failText(failed) : "Loading…"));
+      if (isText(board.error)) return list.appendChild(el("p", "empty", plainText(board.error)));
       const authors = new Map();
       for (const session of Array.isArray(board.sessions) ? board.sessions : []) {
         if (session && typeof session.id === "string") authors.set(session.id, plainText(session.label || session.role || "an agent"));
@@ -2179,10 +2181,9 @@ VIEWS.project = (route, main) => {
     if (!S.board) {
       apiCall("GET", API.board, { query: { project: pid } }).then((res) => {
         if (S.wantBoard !== pid || S.board) return; // the tab was left, or a frame came first
-        if (res.ok) {
-          S.board = res.data;
-          draw();
-        }
+        if (res.ok) S.board = res.data;
+        else failed = res;
+        draw();
       });
     }
   } else {

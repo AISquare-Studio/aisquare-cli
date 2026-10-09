@@ -3759,6 +3759,7 @@ def switch(
     spawned_by: str = "user",
     automatic: bool = False,
     agent_id: str | None = None,
+    before_stop: Callable[[], None] | None = None,
 ) -> SwitchReceipt:
     """Move a running agent to another Claude account — the hand-over of #146.
 
@@ -3809,7 +3810,12 @@ def switch(
     phone's Switch means the agent it showed, and a manager's switch or the
     automatic hand-over runs in another process, which can hand the label to
     a replacement between the phone's check and this read. By label, that
-    replacement was stopped and moved again (sweep of #243).
+    replacement was stopped and moved again (sweep of #243). ``before_stop``
+    is the caller's last check, asked once every refusal above has passed and
+    before anything is marked or stopped. It raises to refuse, and nothing has
+    been done then. The phone's dialog guard is one: the Escape it may send
+    must not come before a refusal this function makes up front, such as a
+    ``to`` that names no account.
     """
     with store_session() as store:
         agent = _live_agent(store, project, label, agent_id=agent_id)
@@ -3878,6 +3884,8 @@ def switch(
             f"{label!r} already runs on {claude_accounts_core.label(target)} (slot {target.slot})"
         )
     _refuse_a_replay_that_cannot_start(agent, session)
+    if before_stop is not None:
+        before_stop()
     # A hand-over whether it resumes or not: the agent is coming back, so its
     # claims wait for the replacement and no exit is announced. A fresh start
     # used to stop the agent as `fleet stop` does — the task went back to the

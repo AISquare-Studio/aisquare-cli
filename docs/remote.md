@@ -285,6 +285,8 @@ when the agent shows a prompt, stop, restart and switch are refused with
 prompt and then goes on. For its first few seconds a permission prompt cannot be
 told from a tool at work, so they are refused the same way while any tool the
 agent called has no result yet; there the Esc also stops a running tool. A
+switch checks the account first, so one it cannot make (an account that does not
+exist, the one the agent is on, none with room) is refused before any Esc. A
 card's Tell and Interrupt & tell refuse a dialog the same way. The menu's plain
 Tell types only into an agent waiting at its prompt: while the agent may be
 showing a prompt, even one left unanswered for hours, the message is left as a

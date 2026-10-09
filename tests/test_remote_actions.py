@@ -558,7 +558,12 @@ def log() -> list[str]:
 
 class FleetCalls:
     """``fleet_service.tell/stop/restart/switch``, replaced: every call is written down and
-    answered with what the test gave for it, a receipt or an error to raise."""
+    answered with what the test gave for it, a receipt or an error to raise.
+
+    A ``before_stop`` (the dialog guard, as the fleet's last check) runs first, as
+    ``fleet.switch`` runs it once its own refusals have passed. A call it refuses is not
+    written down: the fleet did nothing then. The answer, an error included, is what came
+    after it."""
 
     def __init__(self, log: list[str]) -> None:
         self.log = log
@@ -569,7 +574,9 @@ class FleetCalls:
         """Set by a test: every call waits for it, a request held mid-flight."""
 
     def fake(self, name: str) -> Callable[..., object]:
-        def call(*args: Any, **kwargs: object) -> object:
+        def call(*args: Any, **kwargs: Any) -> object:
+            if kwargs.get("before_stop") is not None:
+                kwargs["before_stop"]()
             self.calls.append((name, args, kwargs))
             self.log.append(f"fleet {name}")
             self.entered.set()
@@ -914,12 +921,14 @@ def test_switch_passes_to_fresh_reason_the_pin_and_spawned_by_user(
     phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
 ) -> None:
     """The pin goes to the fleet too, as a stop's and a restart's do: the manager's switch runs
-    in another process, which the remote's lock does not hold back."""
+    in another process, which the remote's lock does not hold back. The dialog guard goes as
+    the switch's last check before the stop."""
     _row(project)
     response = phone.post("agent/switch", **PINNED, to="2", reason="session limit")
     assert response.status_code == 200, response.text
     ((name, args, kwargs),) = fleet.calls
     assert (name, args[0].id, args[1:]) == ("switch", project.id, (LABEL,))
+    assert isinstance(kwargs.pop("before_stop"), remote_actions.ActionGuardLast)
     assert kwargs == {
         "to": "2",
         "fresh": False,
@@ -1096,17 +1105,33 @@ def test_a_card_whose_item_is_gone_is_409_stale_with_the_agents_items_now(
     assert fleet.calls == []
 
 
+@pytest.mark.parametrize("name", ["agent/stop", "agent/restart"])
 def test_a_card_whose_item_is_still_current_goes_through_with_one_read(
-    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo, name: str
 ) -> None:
     """A parked agent's card: the row reads ``limited``, so its item is no dialog."""
+    _row(project)
+    needs.state = "limited"
+    needs.items = (_item(project, "ny_limit"),)
+    response = phone.post(name, **PINNED, needs_id="ny_limit")
+    assert response.status_code == 200, response.text
+    assert fleet.names() == [name.removeprefix("agent/")]
+    assert needs.reads == 1, "the card's read serves the dialog guard too"
+
+
+def test_a_switch_from_a_card_reads_the_agent_again_right_before_the_stop(
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
+) -> None:
+    """The switch's guard is its last check, after the account lookup, which can read every
+    account's usage over the network: the card's read is seconds old by then, and a prompt
+    that opened meanwhile would take the stop's Enter."""
     _row(project)
     needs.state = "limited"
     needs.items = (_item(project, "ny_limit"),)
     response = phone.post("agent/switch", **PINNED, needs_id="ny_limit")
     assert response.status_code == 200, response.text
     assert fleet.names() == ["switch"]
-    assert needs.reads == 1, "the card's read serves the dialog guard too"
+    assert (needs.scans, needs.reads) == (2, 2), "the card's read, then the guard's own"
 
 
 @pytest.mark.parametrize(
@@ -2516,3 +2541,62 @@ def test_a_switch_leaves_alone_the_replacement_that_took_the_label_after_the_loc
     assert stopped == [] and pane.sent == [], "the replacement was not stopped"
     assert (response.status_code, response.json()["error"]) == (404, "no_such_agent")
     assert "'coder-1' is another agent now (agt_new)" in response.json()["message"]
+
+
+@pytest.mark.parametrize(
+    ("to", "slot", "choice", "said"),
+    [
+        ("alise", None, None, "no Claude account is called 'alise'"),
+        (None, 2, AccountChoice(_account(2), "headroom", []), "'coder-1' already runs on"),
+        (None, 2, AccountChoice(None, None, []), "no other account with headroom for 'coder-1'"),
+    ],
+    ids=["a typo", "the account it is on", "no account with room"],
+)
+def test_a_switch_the_fleet_refuses_up_front_sends_no_escape_first(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    to: str | None,
+    slot: int | None,
+    choice: AccountChoice | None,
+    said: str,
+) -> None:
+    """Sweep of #243, round 4: with a prompt up, a switch to ``alise`` (a typo) was refused
+    ``dialog_open``. Its retry with ``dismiss_dialog`` sent the Escape, which answered the
+    prompt "No", and only then did the switch find no account of that name; the page was
+    not told an Escape had gone. The guard is the switch's last check now: what the switch
+    refuses up front, it refuses with nothing sent, and nothing on the trail."""
+    with store_session() as store:
+        store.upsert_fleet_agent(_agent(project).model_copy(update={"account_slot": slot}))
+    needs.dialog = True
+    stopped = _fleet_switch_itself(monkeypatch, choice)
+    body: dict[str, object] = {**PINNED, "dismiss_dialog": True}
+    if to is not None:
+        body["to"] = to
+    response = phone.post("agent/switch", **body)
+    assert (response.status_code, response.json()["error"]) == (409, "fleet_error")
+    assert said in response.json()["message"]
+    assert pane.sent == [] and stopped == []
+    assert phone.audit() == [], "nothing reached the agent"
+
+
+def test_a_switch_the_fleet_takes_sends_its_escape_last_and_then_stops_the_agent(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control: an account with room, so the guard's Escape goes, once, then the stop.
+    A stop that fails after it is on the trail with both."""
+    _row(project)
+    needs.dialog = True
+    stopped = _fleet_switch_itself(monkeypatch, AccountChoice(_account(3), "headroom", []))
+    response = phone.post("agent/switch", **PINNED, dismiss_dialog=True)
+    assert (response.status_code, response.json()["error"]) == (409, "fleet_error")
+    assert pane.keys() == ["Escape"] and stopped == ["agt_one"]
+    assert phone.audit() == [
+        ("agent/switch", f"{_acted_on('agent/switch', project)} dismissed=yes failed=fleet_error")
+    ]

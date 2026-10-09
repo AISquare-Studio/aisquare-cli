@@ -7862,6 +7862,43 @@ def test_a_pinned_switch_or_tell_never_reaches_the_agent_that_took_its_label(
     ]
 
 
+def test_a_switchs_last_check_comes_after_its_own_refusals_and_before_anything_is_stopped(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``before_stop`` is the caller's last word: the phone's dialog guard, whose Escape
+    answers a prompt "No". Asked before the switch's own refusals, that Escape went to an
+    agent the switch then would not move, for a ``to`` that named no account (sweep of
+    #243, round 4). It is asked after them, once, before the session is marked or
+    ``/exit`` typed, and a check that refuses leaves the agent as it was."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+    before = (len(tmux.typed), len(tmux.killed))
+    asked: list[tuple[int, int]] = []
+
+    def check() -> None:
+        asked.append((len(tmux.typed), len(tmux.killed)))
+
+    with pytest.raises(FleetError, match="no Claude account in slot 9"):
+        fleet_service.switch(project, agent.label, to="9", before_stop=check)
+    with pytest.raises(FleetError, match="already runs on"):
+        fleet_service.switch(project, agent.label, to="2", before_stop=check)
+    assert asked == [], "the switch's own refusals come first"
+
+    def refuse() -> None:
+        check()
+        raise RuntimeError("the dialog guard said no")
+
+    with pytest.raises(RuntimeError, match="the dialog guard said no"):
+        fleet_service.switch(project, agent.label, before_stop=refuse)
+    assert asked == [before] and (len(tmux.typed), len(tmux.killed)) == before
+    assert _session_state(agent.session_id or "") != team_service.HANDOVER_STATE
+
+    receipt = fleet_service.switch(project, agent.label, before_stop=check)
+    assert asked == [before, before], "asked once, before /exit was typed"
+    assert receipt.to_slot == 3 and agent.pane_id in tmux.killed
+
+
 def test_a_refused_restart_of_a_death_no_listing_has_recorded_keeps_the_window(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

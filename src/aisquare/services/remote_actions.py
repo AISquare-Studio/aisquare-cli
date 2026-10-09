@@ -20,10 +20,11 @@ the rest is here:
   stop the agent the same way. With a dialog up, that Enter answers it: it can
   approve a Bash command or take a question's first option. So an open dialog
   refuses the action (409 ``dialog_open``), unless ``dismiss_dialog`` asks for one
-  Escape (No) first. No tell types into a dialog either. ``auto``, which is
-  ``fleet tell``, files its text as a board note while one may be up, and
-  ``send-keys`` with ``dialog_guard`` types nothing then
-  (:func:`action_keys_guard`).
+  Escape (No) first. A switch asks it last, after the fleet's own refusals
+  (:class:`ActionGuardLast`), so its Escape never comes before a refusal that
+  needed none. No tell types into a dialog either. ``auto``, which is ``fleet
+  tell``, files its text as a board note while one may be up, and ``send-keys``
+  with ``dialog_guard`` types nothing then (:func:`action_keys_guard`).
 * **One action per agent at a time.** ``remote_server.remote_agent_lock`` is
   taken without waiting, and the needs card's quick answers take it too (409
   ``busy``).
@@ -71,6 +72,7 @@ import threading
 import time
 import unicodedata
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, TypeVar
 
@@ -393,7 +395,9 @@ def action_tell_summary(label: str, target: ProjectInfo, mode: str, text: str, h
 
 
 @contextlib.contextmanager
-def action_audited(summary: Callable[[str], str]) -> Iterator[None]:
+def action_audited(
+    summary: Callable[[str], str], *, reached: Callable[[], bool] | None = None
+) -> Iterator[None]:
     """Audit a refusal raised inside as ``summary(<its error code>)``.
 
     For the steps after something reached the agent, or may have: an Escape
@@ -403,13 +407,23 @@ def action_audited(summary: Callable[[str], str]) -> Iterator[None]:
     there for what a device did to a live agent, finished or not (review of
     #243, round 1, F10). Any other exception here is a 400 ``write_failed``,
     logged as the dispatcher logs one, and audited the same way.
+
+    ``reached`` is for a fleet call that refuses up front and only then asks the
+    dialog guard, its last check before it stops the agent
+    (:class:`ActionGuardLast`). A refusal raised while it says no changed
+    nothing, so it stays off the trail, and the guard's own refusals keep the
+    line the guard gave them.
     """
     try:
         yield
     except RequestError as exc:
-        exc.audit = summary(exc.error)
+        if reached is None or reached():
+            exc.audit = summary(exc.error)
         raise
     except Exception as exc:
+        if reached is not None and not reached():
+            log.warning("remote: an action failed before it reached the agent: %s", exc)
+            raise RequestError(400, "write_failed", str(exc)) from exc
         log.warning("remote: an action failed after it reached the agent: %s", exc)
         raise RequestError(400, "write_failed", str(exc), audit=summary("write_failed")) from exc
 
@@ -726,6 +740,46 @@ def action_may_answer(snap: AgentNow) -> bool:
     notification has come at 6 s.
     """
     return remote_needs.needs_dialog_open(snap) or remote_needs.needs_tool_pending(snap)
+
+
+@dataclass
+class ActionGuardLast:
+    """The dialog guard as the fleet's last check before it stops the agent: the
+    ``before_stop`` of ``fleet.switch``, asked once every refusal the fleet makes up
+    front has passed.
+
+    Asked before the fleet call, the guard sent ``dismiss_dialog``'s Escape, which
+    answers a prompt "No", and the fleet then refused what it could have refused
+    first: a ``to`` that names no account, the account the agent is on, none with
+    room (sweep of #243, round 4). Asked last, it comes after the fleet's account
+    lookup, which can read every account's usage over the network, so it reads the
+    agent anew rather than going by a card's read from before (:func:`action_dialog_guard`
+    with no snapshot).
+    """
+
+    target: ProjectInfo
+    label: str
+    pin: str
+    dismiss: bool
+    doing: str
+    audit_start: str
+    dismissed: bool | None = None
+    """Whether the guard sent its Escape; ``None`` until the fleet asked it."""
+
+    def __call__(self) -> None:
+        self.dismissed = action_dialog_guard(
+            self.target,
+            self.label,
+            self.pin,
+            None,
+            dismiss=self.dismiss,
+            doing=self.doing,
+            audit_start=self.audit_start,
+        )
+
+    def action_guard_asked(self) -> bool:
+        """Whether the fleet got as far as the guard: a refusal before it changed nothing."""
+        return self.dismissed is not None
 
 
 def action_prompt_up(label: str) -> RequestError:
@@ -1089,7 +1143,9 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     ``fleet.restart`` do. The manager's switch and the automatic hand-over run in
     other processes, which the lock does not hold back, and one that handed the
     label on just after the lock's check had its replacement stopped and moved
-    again (sweep of #243, round 4).
+    again (sweep of #243, round 4). The dialog guard is the switch's last check
+    before the stop (:class:`ActionGuardLast`): what the switch refuses up front,
+    such as a ``to`` that names no account, it refuses before any Escape.
 
     A ``reason`` (:func:`action_switch_reason`) is typed into the replacement's
     prompt, so once the hand-over has been asked for, the audit line keeps how it
@@ -1108,20 +1164,19 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     # line keeps, ends it, as a tell's text ends a tell's, and is cleaned as that is.
     audit_start = f"switch {label}@{target.id} agent={agent_id}"
     said = "" if reason is None else f' reason="{action_audit_excerpt(reason)}"'
+    guard = ActionGuardLast(
+        target, label, agent_id, dismiss=dismiss, doing="switching", audit_start=audit_start
+    )
     with action_locked(target, label, agent_id) as row:
-        snap = action_check_needs(target, label, row.id, needs_id)
-        dismissed = row.ended_at is None and action_dialog_guard(
-            target,
-            label,
-            row.id,
-            snap,
-            dismiss=dismiss,
-            doing="switching",
-            audit_start=audit_start,
-        )
-        # The hand-over stops the agent before it starts it on the other account.
+        action_check_needs(target, label, row.id, needs_id)
+        # The hand-over stops the agent before it starts it on the other account. A switch
+        # of a row that has ended is the fleet's refusal, before the guard is asked.
         with action_audited(
-            lambda error: f"{audit_start} dismissed={action_yes_no(dismissed)} failed={error}{said}"
+            lambda error: (
+                f"{audit_start} dismissed={action_yes_no(guard.dismissed is True)} "
+                f"failed={error}{said}"
+            ),
+            reached=guard.action_guard_asked,
         ):
             receipt = action_fleet_call(
                 lambda: fleet_service.switch(
@@ -1132,6 +1187,7 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
                     reason=reason,
                     spawned_by="user",
                     agent_id=agent_id,
+                    before_stop=guard,
                 )
             )
     result: dict[str, object] = {
@@ -1148,8 +1204,8 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     from_slot = "-" if receipt.from_slot is None else str(receipt.from_slot)
     summary = (
         f"switch {label}@{target.id} slot={from_slot}->{receipt.to_slot} "
-        f"dismissed={action_yes_no(dismissed)} resumed={action_yes_no(receipt.resumed)} "
-        f"started={receipt.started.id}{said}"
+        f"dismissed={action_yes_no(guard.dismissed is True)} "
+        f"resumed={action_yes_no(receipt.resumed)} started={receipt.started.id}{said}"
     )
     return result, summary
 

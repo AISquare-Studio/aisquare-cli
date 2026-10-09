@@ -404,6 +404,11 @@ class WelcomeView(VerticalScroll):
         self.connect_error: str | None = None
         self.steps: dict[str, FleetStep] = {}
         """Per label, what the last start said about the chosen project's agents."""
+        self._standing: set[str] = set()
+        """The rows the last start's refusals were about that a frame read after it still
+        held. A refusal whose row has left the frame since was reaped or replaced, and is
+        over. One whose row no such frame held was ended by the restart itself (a vanished
+        pane's row ends before its replacement starts), and its block still stands."""
         self._frame_at_start: object = _NO_START
         """The shell's frame when ``steps`` was last written. The shell reads its store and
         sets a new frame object on the UI thread, so any other frame was read after the
@@ -891,6 +896,7 @@ class WelcomeView(VerticalScroll):
             return
         for step in result.steps:
             self.steps[step.label] = step
+        self._standing = set()
         self._frame_at_start = getattr(self.app, "snapshot", None)
         if self.project is not None:
             self.post_message(self.Progress(self.project.id))
@@ -927,16 +933,7 @@ class WelcomeView(VerticalScroll):
                 live[agent.label] = _Live(agent, state, getattr(status, "detail", None))
             else:
                 ended.add(agent.id)
-        notices = getattr(snapshot, "notices", None)
-        answered = (
-            isinstance(frame, dict)
-            and project.id in frame
-            and not (isinstance(notices, dict) and notices.get(project.id))
-            and getattr(snapshot, "stale_since", None) is None
-            and self._frame_at_start is not _NO_START
-            and snapshot is not self._frame_at_start
-        )
-        if answered:
+        if self._read_after_start():
             return live
         for step in self.steps.values():
             agent = step.agent
@@ -948,6 +945,24 @@ class WelcomeView(VerticalScroll):
             if seen is None or (seen.agent.id != agent.id and snapshot is self._frame_at_start):
                 live[agent.label] = _Live(agent)
         return live
+
+    def _read_after_start(self) -> bool:
+        """Whether the shell's frame was read after the last start landed, for the chosen
+        project and in full (not failed open, not kept from a busy store): then it is the
+        whole answer about that project's agents."""
+        project = self.project
+        snapshot = getattr(self.app, "snapshot", None)
+        frame = getattr(snapshot, "agents", None)
+        notices = getattr(snapshot, "notices", None)
+        return (
+            project is not None
+            and isinstance(frame, dict)
+            and project.id in frame
+            and not (isinstance(notices, dict) and notices.get(project.id))
+            and getattr(snapshot, "stale_since", None) is None
+            and self._frame_at_start is not _NO_START
+            and snapshot is not self._frame_at_start
+        )
 
     def _ready(self) -> bool:
         """Steps 1 and 2 done and tmux usable: what step 3's buttons wait for.
@@ -1115,11 +1130,15 @@ class WelcomeView(VerticalScroll):
         # A coder whose window is gone and whose restart was refused: pressing again meets
         # the same refusal, and the agent view's Restart is the same restart. That row's
         # own refusal only: a later row under the label was never asked (delta review).
+        # And only once a frame read after the start still holds the row: in the one the
+        # start landed on, a row the restart has ended itself still reads lost.
         stuck = next(
             (
                 label
                 for label, row in live.items()
-                if row.state == "lost" and self._refusal_of(row) is not None
+                if row.state == "lost"
+                and row.agent.id in self._standing
+                and self._refusal_of(row) is not None
             ),
             None,
         )
@@ -1181,8 +1200,9 @@ class WelcomeView(VerticalScroll):
         An agent the frame does not see running says what the frame says instead,
         never "started" or "running" from what this page last heard; the last start's
         refusal about that very row (a lost coder's restart) goes beneath it. A refusal
-        about a row the frame no longer holds is over, and goes. An agent a start of this
-        page reported that the frame shows ended since (💤) says so.
+        about a row that stood after the start and has left the frame since is over, and
+        goes (:attr:`_standing`). An agent a start of this page reported that the frame
+        shows ended since (💤) says so.
         """
         lines: list[Text] = []
         shown: set[str] = set()
@@ -1198,6 +1218,8 @@ class WelcomeView(VerticalScroll):
                 refused = self._refusal_of(row)
                 if refused is not None:
                     lines.append(step_line(refused))
+                    if self._read_after_start():
+                        self._standing.add(row.agent.id)
                 continue
             agent = row.agent
             step = self.steps.get(label)
@@ -1214,9 +1236,11 @@ class WelcomeView(VerticalScroll):
             if label in shown:
                 continue
             if step.outcome == "refused":
-                # A spawn refused under a label no row holds. A restart's refusal names its
-                # row, which has left the frame (reaped, or ended): that block is over.
-                if step.agent is None:
+                # A spawn refused under a label no row holds, or a restart whose row it ended
+                # itself before the replacement failed (tmux, the worktree): the block stands.
+                # A restart's row that stood after the start and left since was reaped or
+                # replaced: that block is over (delta reviews).
+                if step.agent is None or step.agent.id not in self._standing:
                     lines.append(step_line(step))
             elif step.agent is not None and step.agent.id in ended:
                 # Exited since this page started it. Left out, the card read as if nothing

@@ -136,6 +136,9 @@ class Machine:
     """Every label ``restart`` was asked for, refused or not."""
     refuse_restart: dict[str, str] = field(default_factory=dict)
     """Labels ``restart`` refuses, with the reason (``fleet.restart``'s FleetError)."""
+    restart_ends_row: bool = False
+    """A refused restart ends the row first, as ``fleet.restart`` ends a vanished pane's
+    row before its replacement fails to start (tmux, the worktree)."""
     ended: list[FleetAgent] = field(default_factory=list)
     """Rows that ended and that the listing still shows, as 💤 (their window kept)."""
 
@@ -248,6 +251,8 @@ class Machine:
         old = next(a for a in self.live if a.project_id == project.id and a.label == label)
         assert agent_id == old.id, f"Welcome restarted {label} by its label, not its row"
         if label in self.refuse_restart:
+            if self.restart_ends_row:
+                self.live.remove(old)
             raise fleet_service.FleetError(self.refuse_restart[label])
         new = old.model_copy(update={"id": f"{old.id}-again"})
         self.live.remove(old)
@@ -1834,6 +1839,49 @@ def test_a_refusal_is_about_its_own_row_and_goes_with_it(
     assert "✓ coder-1 — started" in pressed and FLEET_UP in pressed, "one press resumes it"
 
 
+def test_a_restart_that_ended_its_row_keeps_its_refusal(
+    captain: str | None,
+    scripted: Callable[[Machine], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """For a vanished pane, ``fleet.restart`` ends the row and only then starts the
+    replacement, which can still fail (tmux refuses the window, git the worktree). The
+    next frame no longer held the row, so its refusal was dropped as if reaped: the card
+    went back to the trust-question line as if Start the coders had never been pressed
+    (delta review). It stays, like a refusal under a label no row holds, with no reap
+    advice for a row that is gone; the next press starts a coder in its place. The other
+    order, a row that stood after the start and was reaped, is the test below."""
+    machine, project = _ready_machine(tmp_path)
+    listed_by(machine, project, monkeypatch)
+    scripted(machine)
+    reason = "tmux refused the window for coder-1"
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[Any]:
+        await press(pilot, page, "fleet-manager")
+        await press(pilot, page, "fleet-coders")
+        machine.refuse_restart, machine.restart_ends_row = {"coder-1": reason}, True
+        machine.states["coder-1"] = "lost"
+        app.refresh_data()
+        page.paint()
+        await press(pilot, page, "fleet-coders")
+        landed = card(page, "fleet-status")  # on the frame the start landed on
+        app.refresh_data()
+        page.paint()  # the next frame, as the page's refresh tick paints it
+        seen = [landed, card(page, "fleet-status"), visible(page, "fleet-coders")]
+        machine.refuse_restart = {}
+        await press(pilot, page, "fleet-coders")
+        return [*seen, card(page, "fleet-status")]
+
+    landed, next_frame, offered, pressed = in_shell(machine, go)
+    assert f"✗ coder-1: {reason}" in landed and "fleet reap" not in landed, landed
+    assert "coder-1 — lost" not in next_frame, f"premise: the restart ended it: {next_frame}"
+    assert f"✗ coder-1: {reason}" in next_frame, next_frame
+    assert "fleet reap" not in next_frame and offered, next_frame
+    assert machine.restarted == ["coder-1"], "the second press started a coder in its place"
+    assert "✓ coder-1 — started" in pressed and FLEET_UP in pressed, pressed
+
+
 def test_a_refusal_goes_once_its_row_is_reaped(
     captain: str | None,
     scripted: Callable[[Machine], None],
@@ -1842,7 +1890,8 @@ def test_a_refusal_goes_once_its_row_is_reaped(
 ) -> None:
     """``aisquare fleet reap`` ends the lost row the refusal was about, so the block it named
     is over: the card kept the refusal, under no row, until the next press (delta review).
-    A spawn's refusal under a label no row holds stays, as before (the control)."""
+    The row stood in a frame read after the start, and left a later one: the order the test
+    above is not. A spawn's refusal under a label no row holds stays, as before (control)."""
     machine, project = _ready_machine(tmp_path)
     listed_by(machine, project, monkeypatch)
     scripted(machine)

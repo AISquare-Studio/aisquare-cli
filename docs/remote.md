@@ -246,11 +246,13 @@ permission is for, every question with its options, the plan, the text. Under a
 permission, a question or a plan, the bottom of the agent's live screen is shown
 too, so the real option labels are on screen next to the buttons.
 
-**Quick answers** are the card's buttons: `1`, `2` and No for a permission; one
-per option, and Cancel, for a single question; `1` to `3` and Keep planning for a
-plan. A quick answer is checked against the agent **as it is now**: if the
-prompt has already gone, the card says "No longer needs you" and nothing is
-typed. Anything else is answered from the agent's key pad.
+**Quick answers** are the card's buttons: `1`, `2` and No for a tool's
+permission; one per option, and Cancel, for a single question with one answer to
+pick from at most nine; `1` to `3` and Keep planning for a plan. A quick answer
+is checked against the agent **as it is now**: if the prompt has already gone,
+the card says "No longer needs you" and nothing is typed. Anything else (one of
+Claude Code's own dialogs, a question of several answers) is answered from the
+agent's key pad.
 
 The other buttons follow the kind: **Tell** for a question asked in text,
 **Reply** on the board, **Switch account** for a usage limit, **Restart** for a

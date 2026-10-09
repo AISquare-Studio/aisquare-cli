@@ -1637,6 +1637,26 @@ def test_a_question_offers_digits_only_for_one_simple_choice(
         assert answer.keys == (str(number),)
 
 
+def test_the_guide_gives_quick_answers_only_to_the_cards_that_carry_them() -> None:
+    """docs/remote.md gave ``1``, ``2`` and No to every permission and a button an option to
+    every single question: one of Claude Code's own dialogs carries none, nor does a question
+    with several answers to pick, or more than nine options. Each is the key pad's."""
+    guide = Path(__file__).resolve().parents[1] / "docs" / "remote.md"
+    prose = " ".join(guide.read_text(encoding="utf-8").split())
+    assert "`1`, `2` and No for a tool's permission" in prose
+    assert "for a single question with one answer to pick from at most nine" in prose
+    assert "(one of Claude Code's own dialogs, a question of several answers)" in prose
+    row = _row()
+    dialog = _one(_classify(_status(row, "attention", _session(row, state="attention")), None))
+    assert (dialog.kind, dialog.answers) == ("permission", ())
+    tool = _tail(_tool("toolu_b", "Bash", command="make check"))
+    allow = _one(_classify(_status(row, "attention", _session(row, state="attention")), tool))
+    assert [answer.label for answer in allow.answers] == ["1", "2", "No"]
+    several = [{**QUESTION["questions"][0], "multiSelect": True}]
+    asking = _tail(_tool("toolu_q", "AskUserQuestion", questions=several))
+    assert _one(_classify(_status(row, "working", _session(row)), asking)).answers == ()
+
+
 # --- when a push may go out (C decides; D sends) ------------------------------------------
 
 

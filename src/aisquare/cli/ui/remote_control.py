@@ -214,6 +214,10 @@ class RemoteController:
         of its own: kept in :attr:`message`, nothing cleared it but a sentence about
         ngrok, and the panel went on saying the write switch or a revoke had not been
         saved long after both had been (sweep of #243)."""
+        self.read_problem: str | None = None
+        """Why ``remote.json`` could not be read at the last paint, until it can be: a file that
+        is no JSON object, one this account may not read. The panel showed writes off and no
+        devices, and said why only once Remote was switched on (sweep of #243)."""
         self.auto_off_at: datetime | None = None
         self._deadline_unsaved = False
         """Set by a write of the deadline that failed, until one goes through or the server is
@@ -730,12 +734,15 @@ class RemoteController:
         return made[0] if made else None
 
     def remote_status(self) -> dict[str, Any]:
-        """``remote_server_status()``; ``{}`` while ``remote.json`` cannot be read. A paint
-        reads it once and hands it to :meth:`devices` and :meth:`unlock_failures`."""
+        """``remote_server_status()``; ``{}`` while ``remote.json`` cannot be read, which the
+        status line then says (:attr:`read_problem`). A paint reads it once and hands it to
+        :meth:`devices` and :meth:`unlock_failures`."""
         try:
             status = self._server.remote_server_status()
-        except Exception:  # a half-written remote.json costs the list, not the modal
+        except Exception as exc:  # the file costs the list and the switches, not the modal
+            self.read_problem = f"remote.json could not be read — {exc}"
             return {}
+        self.read_problem = None
         return status if isinstance(status, dict) else {}
 
     def devices(self, status: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -841,13 +848,21 @@ class RemoteController:
     def status_line(self) -> str:
         """The status line: what Remote is doing or why it is not, then what ngrok's agent API
         allows while it is on (:attr:`NgrokTunnel.api_warning`), :data:`SAVING` while a write
-        of ``remote.json`` waits, one that did not land (:attr:`save_problem`) and a switch
-        ``state.json`` refused, each on a line of its own."""
+        of ``remote.json`` waits, one that did not land (:attr:`save_problem`), why the file
+        could not be read (:attr:`read_problem`) and a switch ``state.json`` refused, each on
+        a line of its own."""
         tunnel = self.tunnel
         api = tunnel.api_warning if tunnel is not None else None
         since = self._writing_since
         saving = SAVING if since is not None and time.monotonic() - since >= SAVING_AFTER else None
-        lines = (self.message, api, saving, self.save_problem, *self._refused_switches.values())
+        lines = (
+            self.message,
+            api,
+            saving,
+            self.save_problem,
+            self.read_problem,
+            *self._refused_switches.values(),
+        )
         return "\n".join(line for line in lines if line)
 
     def served_elsewhere(self) -> bool:

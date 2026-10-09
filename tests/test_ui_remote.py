@@ -1074,6 +1074,29 @@ def test_a_remote_json_that_will_not_write_is_a_sentence_for_each_control_of_the
     drive(go, tunnel=missing_ngrok)
 
 
+def test_a_remote_json_that_cannot_be_read_is_a_sentence_in_the_panel_not_a_silence() -> None:
+    """A ``remote.json`` that is no JSON object (a hand edit's typo) showed as writes off and
+    no devices, and the panel said why only once Remote was switched on: a cause dropped, as
+    ngrok's own plain-text errors were (sweep of #243). The status line says it as the panel
+    paints, until the file can be read."""
+    paths.ensure_home()
+    paths.remote_state_path().write_text("[]")
+
+    async def go(pilot: Pilot[None]) -> None:
+        modal = await open_panel(pilot)
+        status = modal.query_one("#remote-status", Static)
+        said = shown(status)
+        assert said.startswith("remote.json could not be read — ")
+        assert "is not a JSON object" in said
+        assert modal.query_one("#remote-allow-write", Switch).value is False
+        paths.remote_state_path().unlink()  # moved aside: a new link and passphrase
+        modal.repaint()
+        await pilot.pause()
+        assert shown(status) == ""
+
+    drive(go, tunnel=missing_ngrok)
+
+
 def test_a_write_that_lands_takes_away_the_sentence_that_one_did_not_in_the_panel() -> None:
     """The panel said write actions had not been saved for as long as Remote stayed on, after
     the switch, flipped back, had saved them (sweep of #243)."""

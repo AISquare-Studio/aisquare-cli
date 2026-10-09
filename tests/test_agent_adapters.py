@@ -703,6 +703,7 @@ _CANNOT_MAKE = [
     "that profile beside a connected ~/.claude",
     "a profile under a link that leads nowhere",
     "a profile under a link to a file",
+    "a profile under a link to a folder this user may not write",
     "a profile under a chain of links that leads nowhere",
     "a profile under a file",
     "a profile under a loop",
@@ -739,7 +740,11 @@ def _cannot_make_shape(shape: str, home: Path, tmp_path: Path, runner: CliRunner
         locked = tmp_path / "locked"
         locked.mkdir()
         locked.chmod(0o555)
-        return locked
+        if "link" not in shape:
+            return locked
+        home.mkdir(parents=True)
+        (home / "dots").symlink_to(locked)
+        return home / "dots"
     home.mkdir(parents=True)
     blocking = home / "dots"
     if "a file" in shape and "link" not in shape:
@@ -799,15 +804,15 @@ def test_a_config_dir_connect_cannot_make_is_named_everywhere_and_never_offered_
     from aisquare.cli.ui.views.welcome import claude_text
 
     step_two = claude_text(welcome, platform="linux").plain
-    if os.path.islink(blocking):
+    if os.path.isdir(blocking):  # a directory, or a link to one
+        fact = f"this user may not create anything in {blocking}"
+    elif os.path.islink(blocking):
         leads_to = os.readlink(blocking)
         fact = (
             f"{blocking} is a link to {leads_to}, which is not a directory"
             if "link to a file" in shape
             else f"{blocking} is a link to {leads_to}: {_stat_error(blocking)}"
         )
-    elif os.path.isdir(blocking):
-        fact = f"this user may not create anything in {blocking}"
     else:
         fact = f"{blocking} is not a directory"
     in_place = None if "may not" in shape or "beside" in shape else f"move {blocking} aside"

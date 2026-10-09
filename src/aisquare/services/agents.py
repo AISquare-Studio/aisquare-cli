@@ -499,16 +499,15 @@ def _cannot_make(where: Path) -> tuple[str, str | None] | None:
 
     It names the nearest path on the way that is there, and what the operating system
     says of it (:func:`_no_room`). "No directory it can be made in" named none, and its
-    "create it yourself" failed (review of #257). That path moved aside, ``mkdir -p``
-    makes the rest, so that is offered where its folder lets this user move it.
+    "create it yourself" failed (review of #257). Where that path is no directory at all
+    (a file, or a link to nothing or to a file), moved aside, ``mkdir -p`` makes the
+    rest, so that is offered where its folder lets this user move it.
     """
     blocking = next((p for p in (where, *where.parents) if os.path.lexists(p)), None)
     stopped = None if blocking is None else _no_room(blocking)
     if blocking is None or stopped is None:
         return None
-    movable = (os.path.islink(blocking) or not os.path.isdir(blocking)) and _writable_dir(
-        blocking.parent
-    )
+    movable = not os.path.isdir(blocking) and _writable_dir(blocking.parent)
     return stopped, f"move {blocking} aside" if movable else None
 
 

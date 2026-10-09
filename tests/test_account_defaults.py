@@ -10,7 +10,7 @@ and, in the CONTRIBUTING tradition, a control beside every claim: the rung that
 must NOT win, the launch that must stay byte-identical, the slot that must not
 inherit a default it was never given.
 
-Every test runs in a redirected home (``fake_home`` from the sibling file), so
+Every test runs in a redirected home (``fake_home``, tests/conftest.py), so
 nothing here reads the developer's ``~/.claude.json`` or writes their registry.
 """
 
@@ -38,11 +38,6 @@ from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics
 from aisquare.services import settings as settings_service
 from tests.test_claude_accounts import _installed, _sign_in
-from tests.test_claude_accounts import fake_home as _redirected_home
-
-#: The sibling file's redirected home, re-exported so pytest collects it here too: every
-#: test below reads and writes Claude Code's files, and none may touch the developer's.
-fake_home = _redirected_home
 
 CORRUPT = b"this is not a sqlite database, and the accounts surface must say so in words"
 

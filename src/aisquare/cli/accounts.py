@@ -428,9 +428,7 @@ def _set_role_default(role: str, ref: str | None, *, clear: bool) -> None:
 @app.command("alias")
 def alias(
     ref: SlotRef,
-    name: Annotated[
-        str | None, typer.Argument(help="The name: a letter, then up to 31 of a-z 0-9 . _ -")
-    ] = None,
+    name: Annotated[str | None, typer.Argument(help=f"The name: {core.ALIAS_HINT}")] = None,
     clear: Annotated[bool, typer.Option("--clear", help="Remove the slot's alias.")] = False,
 ) -> None:
     """Name an account (`work`, `personal`) so --account and the board can say it."""

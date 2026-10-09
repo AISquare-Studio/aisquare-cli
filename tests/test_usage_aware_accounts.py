@@ -49,10 +49,6 @@ from aisquare.services import hooks as hooks_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services import team as team_service
 from tests.test_claude_accounts import LIVE_USAGE, NOW, _sign_in
-from tests.test_claude_accounts import fake_home as _redirected_home
-
-#: Re-exported so pytest collects it here (see tests/test_account_defaults.py).
-fake_home = _redirected_home
 
 #: ``NOW`` is the sibling file's clock (the credentials its ``_sign_in`` writes expire
 #: relative to it); the parser tests use a SUNDAY so the weekday arithmetic is visible.

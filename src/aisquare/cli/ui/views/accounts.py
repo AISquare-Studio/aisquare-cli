@@ -15,12 +15,16 @@ docs/plans/claude-accounts.md. Two halves, one page:
   directory and, the moment Claude Code has written a login into it, records
   the account, installs aisquare's hooks and closes the window. Nothing is
   typed for the user and nothing is written into Claude Code's files.
-- **Arranging** (#145) — each row carries *Default*, *↑*/*↓* and
-  *Disable*/*Enable*: the machine default a launch picks when nothing more
-  specific says, the priority order, and whether the slot may be picked at
-  all. They write the registry through ``services.claude_accounts`` exactly as
-  ``aisquare accounts default|move|disable`` do; the page shows the default
-  with a ★ and lists the slots in priority order.
+- **Arranging** (#145) — each row carries *Default*, *↑*/*↓*,
+  *Disable*/*Enable* and *Rename*: the machine default a launch picks when
+  nothing more specific says, the priority order, whether the slot may be
+  picked at all, and the alias (``work``, ``personal``) that ``--account``,
+  the board and the row's label say. They write the registry through
+  ``services.claude_accounts`` exactly as ``aisquare accounts
+  default|move|disable|alias`` do; the page shows the default with a ★ and
+  lists the slots in priority order. *Rename* opens a field on its row,
+  prefilled with the alias: Enter saves (blank clears it), Esc closes it
+  untouched, and a name the service refuses keeps the field open to correct.
 
 **The view holds no state that matters** (fleet-tui plan §2). The shell hands
 it a fresh ``AccountsOverview`` on every refresh; what the view owns is the
@@ -46,10 +50,11 @@ from typing import Any, ClassVar, NamedTuple
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.timer import Timer
-from textual.widgets import Button, Static
+from textual.widgets import Button, Input, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.common import format_reset, local_time
@@ -84,12 +89,38 @@ SIGN_OUT_WORKER = "aisquare-sign-out"
 COMPLETE_WORKER = "claude-complete-sign-in"
 REMOVE_WORKER = "claude-remove"
 ARRANGE_WORKER = "claude-arrange"
+RENAME_WORKER = "claude-rename"
 
 _BAR_CELLS = 5
 _WARN_AT = 50.0
 _HOT_AT = 80.0
 
 SessionReader = Callable[[], "iam.Session | None"]
+
+
+class _RenameWrite(NamedTuple):
+    """A *Rename* write in flight: the slot, the text the field said when Enter sent it, and
+    which opening of that field sent it (``AccountRow.openings``)."""
+
+    slot: int
+    submitted: str
+    opening: int
+
+
+class _Renamed(NamedTuple):
+    """What a *Rename* write reports: the account as the service stored it, and the notice."""
+
+    account: ClaudeAccount
+    said: str
+
+
+@dataclass
+class _Saved:
+    """A name this page saved that the frames may not show yet (``AccountsView._settle_saved``)."""
+
+    alias: str | None
+    outlived: bool = False
+    """A new frame has disagreed once: the read in flight when the write landed."""
 
 
 class SignOutOutcome(NamedTuple):
@@ -387,21 +418,57 @@ class _ClaudeLogin:
 # --- widgets -----------------------------------------------------------------------------------
 
 
-class AccountRow(Horizontal):
-    """One slot: its line, then the buttons that arrange it and the two that change the machine.
+class AliasInput(Input):
+    """*Rename*'s field on a row: Enter submits (``Input.Submitted``), Esc posts ``Cancelled``."""
+
+    BINDINGS: ClassVar = [Binding("escape", "cancel_rename", "cancel", show=False)]
+
+    class Cancelled(Message):
+        """Esc in the field: close it and write nothing."""
+
+        def __init__(self, field: AliasInput) -> None:
+            super().__init__()
+            self.field = field
+
+    def action_cancel_rename(self) -> None:
+        self.post_message(self.Cancelled(self))
+
+
+class AccountRow(Vertical):
+    """One slot: its line, and beneath it the buttons that arrange it and change the machine.
 
     *Default* makes it the machine default (hidden once it is); *↑*/*↓* move it
     in the priority order (the end stops are disabled); *Disable*/*Enable*
-    take it out of or back into automatic selection; *Sign in* appears when it
-    has no login; *Remove* when the CLI owns the directory. Every button is a
-    command (``aisquare accounts default|move|disable|enable|run|remove``),
-    and the row shows what the shell's next frame says rather than guessing.
+    take it out of or back into automatic selection; *Rename* opens a field
+    on a line of its own, beneath the account line, to set or clear its alias,
+    on every slot; *Sign in* appears when it has no login; *Remove* when the
+    CLI owns the directory.
+    Every button is a command (``aisquare accounts
+    default|move|disable|enable|alias|run|remove``), and the row shows what the
+    shell's next frame says rather than guessing — the field included: a
+    frame never touches what is being typed in it.
+
+    Three lines, each with the row's width to itself: the account line, the
+    field (only while renaming), the buttons. The buttons used to share the
+    line's, and *Rename* took ten more columns from it — at 100 columns slot 3's
+    line was one cell wide, and with the field open slot 2's printed down 89
+    rows and pushed *Remove* off the page (review of #258). The field is wide
+    enough for the whole format hint (:data:`core.ALIAS_HINT`, 40 cells, plus
+    its border and padding). The page keeps its scrollbar's gutter, so the
+    rows the field makes taller cannot narrow every line when the page starts
+    to scroll. Every label fits in nine cells, the arrows in five: all seven
+    buttons take 61, inside a row's 63 at 100 columns. Narrower than that — a
+    smaller terminal, or a sidebar the user has dragged wider — the button
+    line scrolls sideways rather than cut *Remove* off out of reach (review of
+    #258, round 5).
     """
 
     DEFAULT_CSS = """
     AccountRow { height: auto; margin: 0 0 1 0; }
-    AccountRow .account-line { width: 1fr; height: auto; padding: 1 0 0 0; }
-    AccountRow Button { min-width: 10; margin: 0 0 0 1; }
+    AccountRow .account-line { width: 1fr; height: auto; }
+    AccountRow .account-alias { width: 48; max-width: 100%; }
+    AccountRow .account-buttons { width: 1fr; height: auto; overflow-x: auto; }
+    AccountRow Button { min-width: 9; margin: 0 1 0 0; }
     AccountRow .arrow { min-width: 5; }
     """
 
@@ -412,6 +479,8 @@ class AccountRow(Horizontal):
         self.trend: UsageTrend | None = None
         self.first = True
         self.last = True
+        self.openings = 0
+        """How often *Rename*'s field has opened: a write closes only the opening it came from."""
 
     @property
     def slot(self) -> int:
@@ -419,15 +488,62 @@ class AccountRow(Horizontal):
 
     def compose(self) -> ComposeResult:
         yield Static(account_line_text(self.status, self.usage), classes="account-line")
-        yield Button("Default", id=f"account-default-{self.slot}", variant="success")
-        yield Button("↑", id=f"account-up-{self.slot}", classes="arrow")
-        yield Button("↓", id=f"account-down-{self.slot}", classes="arrow")
-        yield Button("Disable", id=f"account-toggle-{self.slot}")
-        yield Button("Sign in", id=f"account-sign-in-{self.slot}", variant="primary")
-        yield Button("Remove", id=f"account-remove-{self.slot}", variant="default")
+        field = AliasInput(
+            placeholder=core.ALIAS_HINT, id=f"account-alias-{self.slot}", classes="account-alias"
+        )
+        field.tooltip = f"alias: {core.ALIAS_HINT} · Enter saves, empty clears, Esc cancels"
+        field.display = False
+        yield field
+        with Horizontal(classes="account-buttons"):
+            yield Button("Default", id=f"account-default-{self.slot}", variant="success")
+            yield Button("↑", id=f"account-up-{self.slot}", classes="arrow")
+            yield Button("↓", id=f"account-down-{self.slot}", classes="arrow")
+            yield Button("Disable", id=f"account-toggle-{self.slot}")
+            yield Button("Rename", id=f"account-rename-{self.slot}")
+            yield Button("Sign in", id=f"account-sign-in-{self.slot}", variant="primary")
+            yield Button("Remove", id=f"account-remove-{self.slot}", variant="default")
 
     def on_mount(self) -> None:
         self._paint()
+
+    @property
+    def alias_field(self) -> AliasInput:
+        return self.query_one(AliasInput)
+
+    @property
+    def renaming(self) -> bool:
+        """Whether *Rename*'s field is open on this row."""
+        return self.alias_field.display
+
+    def open_rename(self, on_its_way: str | None = None) -> None:
+        """Open the field prefilled with the alias (empty when there is none), focused.
+
+        ``on_its_way`` is the name a write still in flight is saving, and it
+        wins: the frame's alias predates that write, and a field reopened
+        before it lands said the old name — an Enter taken as "confirm" then
+        undid the name just saved (review of #258, round 3). Already open, it
+        only takes the focus back: what was typed is kept.
+        """
+        field = self.alias_field
+        if not field.display:
+            self.openings += 1
+            field.value = on_its_way if on_its_way is not None else self.status.account.alias or ""
+            field.display = True
+        field.focus()
+
+    def close_rename(self) -> None:
+        """Close the field; if it held the focus, *Rename* gets it back.
+
+        Only then: a write can finish after the user has gone to the sidebar or
+        another page, and pulling the focus back to this row took it from
+        wherever they had moved it (review of #258).
+        """
+        field = self.alias_field
+        had_focus = field.has_focus
+        field.display = False
+        field.value = ""
+        if had_focus:
+            self.query_one(f"#account-rename-{self.slot}", Button).focus()
 
     def show(
         self,
@@ -468,7 +584,7 @@ class AccountsView(Vertical):
 
     DEFAULT_CSS = """
     AccountsView { padding: 1 2; }
-    AccountsView #accounts-body { height: 1fr; }
+    AccountsView #accounts-body { height: 1fr; scrollbar-gutter: stable; }
     AccountsView .section-title { height: auto; margin-top: 1; }
     AccountsView #aisquare-status { height: auto; margin-top: 1; }
     AccountsView #aisquare-code { height: auto; margin-top: 1; }
@@ -511,6 +627,10 @@ class AccountsView(Vertical):
         self._usage_timer: Timer | None = None
         self._cancel_sign_in: threading.Event | None = None
         self._arranging = threading.Lock()  # one registry write at a time (arrange_accounts)
+        self._renames: dict[Worker[Any], _RenameWrite] = {}
+        """*Rename* writes sent and not yet reported, by worker (``rename_account``)."""
+        self._saved: dict[int, _Saved] = {}
+        """Names *Rename* saved, by slot, until the frames have caught up (``_settle_saved``)."""
         self._on_screen = False
 
     # --- layout ------------------------------------------------------------------------
@@ -609,6 +729,8 @@ class AccountsView(Vertical):
         of ``usage``, so keying on answers would ask again every tick. Off screen
         this does nothing, and ``on_show`` reads as before.
         """
+        if overview is not self.overview:  # the shell re-hands its last frame on a click
+            self._settle_saved(overview)
         self.overview = overview
         previous, self.session = self.session, self._read_session()
         if not self.is_mounted:
@@ -645,13 +767,45 @@ class AccountsView(Vertical):
         sign_in.tooltip = hint
         sign_out.tooltip = hint
 
+    def _settle_saved(self, frame: AccountsOverview) -> None:
+        """Weigh a new frame against the names *Rename* saved that the frames have not shown.
+
+        A saved name is the service's answer (``set_alias`` returns the stored
+        account), and the row says it from the moment the write lands: the row
+        that kept the frame's older name prefilled *Rename* with it, and an
+        Enter taken as "confirm" put the old name back (review of #258, round 4).
+
+        One frame read BEFORE a write can still arrive AFTER it: the shell's
+        read in flight when the write landed (``FleetApp.refresh_accounts``
+        reads one at a time and owes one more). Every read after that one
+        starts after the write. So a saved name stands over the first new frame
+        that disagrees and yields to the next: by then the frame is the
+        registry's word, another terminal's rename included. A frame that
+        agrees, or that no longer has the slot, settles it at once.
+        """
+        aliases = {status.account.slot: status.account.alias for status in frame.accounts}
+        for slot, saved in list(self._saved.items()):
+            if slot not in aliases or aliases[slot] == saved.alias or saved.outlived:
+                del self._saved[slot]
+            else:
+                saved.outlived = True
+
+    def _as_saved(self, status: ClaudeAccountStatus) -> ClaudeAccountStatus:
+        """``status`` as the row shows it: with the name *Rename* saved, while one stands."""
+        saved = self._saved.get(status.account.slot)
+        if saved is None or saved.alias == status.account.alias:
+            return status
+        account = status.account.model_copy(update={"alias": saved.alias})
+        return status.model_copy(update={"account": account, "label": core.label(account)})
+
     def _paint_claude(self, overview: AccountsOverview) -> None:
         self.query_one("#claude-title", Static).update(claude_title_text(overview))
         self.query_one("#claude-add", Button).disabled = not overview.claude.installed
         holder = self.query_one("#claude-rows", Vertical)
         existing = {row.slot: row for row in holder.query(AccountRow)}
         count = len(overview.accounts)
-        for index, status in enumerate(overview.accounts):
+        for index, frame_status in enumerate(overview.accounts):
+            status = self._as_saved(frame_status)
             slot = status.account.slot
             row = existing.pop(slot, None)
             first, last = index == 0, index == count - 1
@@ -681,6 +835,9 @@ class AccountsView(Vertical):
 
     def rows(self) -> list[AccountRow]:
         return list(self.query(AccountRow))
+
+    def row_of(self, slot: int) -> AccountRow | None:
+        return next((row for row in self.rows() if row.slot == slot), None)
 
     def _notice(self, text: str, tone: str = "dim") -> None:
         style = {"ok": "green", "warn": "yellow", "error": "bold red"}.get(tone, "dim")
@@ -921,13 +1078,16 @@ class AccountsView(Vertical):
         elif button_id.startswith("account-toggle-"):
             event.stop()
             slot = int(button_id.rsplit("-", 1)[1])
-            current = next((r for r in self.rows() if r.slot == slot), None)
+            current = self.row_of(slot)
             disabling = current is None or not current.status.account.disabled
             outcome = "disabled — never picked automatically" if disabling else "enabled"
             self.arrange_accounts(
                 lambda: accounts_service.set_disabled(str(slot), disabling),
                 done=f"✓ slot {slot} {outcome}",
             )
+        elif button_id.startswith("account-rename-"):
+            event.stop()
+            self.open_rename(int(button_id.rsplit("-", 1)[1]))
 
     # --- arranging (#145): default, order, disabled ----------------------------------------------
 
@@ -969,6 +1129,104 @@ class AccountsView(Vertical):
     def _arrange_finished(self, worker: Worker[Any], state: WorkerState) -> None:
         if state is WorkerState.SUCCESS and isinstance(worker.result, str):
             self._notice(worker.result, "ok")
+        elif state is WorkerState.ERROR:
+            self._notice(f"✗ {worker.error}", "error")
+        self.post_message(AccountsChanged())
+
+    # --- naming: the alias `aisquare accounts alias` sets ---------------------------------------
+
+    def open_rename(self, slot: int) -> None:
+        """Open *Rename*'s field on ``slot``'s row; another row's closes unsaved: one at a time."""
+        for row in self.rows():
+            if row.slot != slot and row.renaming:
+                row.close_rename()
+        target = self.row_of(slot)
+        if target is not None:
+            on_its_way = [write.submitted for write in self._renames.values() if write.slot == slot]
+            target.open_rename(on_its_way[-1] if on_its_way else None)  # the latest sent
+
+    @on(Input.Submitted, ".account-alias")
+    def _rename_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.rename_account(int((event.input.id or "").rsplit("-", 1)[1]), event.value)
+
+    @on(AliasInput.Cancelled)
+    def _rename_cancelled(self, event: AliasInput.Cancelled) -> None:
+        event.stop()
+        slot = int((event.field.id or "").rsplit("-", 1)[1])
+        row = self.row_of(slot)
+        if row is not None:
+            row.close_rename()
+        if any(write.slot == slot for write in self._renames.values()):
+            # Esc closes the field; it cannot stop a write already sent, so it must not
+            # say nothing changed — that write's own notice follows (review of #258).
+            self._notice(
+                f"slot {slot}: field closed — the name already sent is still being saved; "
+                "its result follows"
+            )
+        else:
+            self._notice(f"slot {slot}: rename cancelled — nothing changed")
+
+    def rename_account(self, slot: int, typed: str) -> None:
+        """Name ``slot`` ``typed`` (blank: unname it) off the UI thread, as ``accounts alias`` does.
+
+        The service judges the name — :func:`core.normalise_alias`'s rules, and
+        whether another slot has it — so nothing is checked here. A refusal is
+        the worker's error: the notice says it and the field stays open with
+        what was typed, to be corrected. The write takes the arranging lock, so
+        it waits its turn behind a *Default* or *↑* still writing. On success
+        the row says the name the service stored at once, and the page re-reads
+        as an arrangement does; :meth:`_settle_saved` decides when the frames
+        have the last word again.
+
+        The write is kept in :attr:`_renames` until it reports, with what the
+        field said when it was sent and which opening of the field sent it. So
+        success closes the field only while it is that opening and still says
+        that: text typed after Enter, while the write waited, is the next name,
+        and closing on it threw it away unsaved; a second Enter saves it. A field
+        closed and reopened meanwhile is the user's new edit, prefilled with the
+        name on its way, and stays open. And Esc meanwhile does not claim
+        nothing changed (review of #258).
+        """
+        alias = typed.strip() or None
+
+        def work() -> _Renamed:
+            with self._arranging:
+                account = accounts_service.set_alias(str(slot), alias)
+            if alias is None:
+                return _Renamed(account, f"✓ slot {account.slot}: alias cleared")
+            return _Renamed(account, f"✓ slot {account.slot} is now called {account.alias}")
+
+        worker = self.run_worker(
+            work,
+            name=RENAME_WORKER,
+            group=RENAME_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+        # Before the worker can report: its state change is handled on this thread.
+        row = self.row_of(slot)
+        self._renames[worker] = _RenameWrite(slot, typed, row.openings if row is not None else 0)
+
+    def _rename_finished(self, worker: Worker[Any], state: WorkerState) -> None:
+        write = self._renames.pop(worker, None)
+        if state is WorkerState.SUCCESS and isinstance(worker.result, _Renamed):
+            stored = worker.result.account
+            self._notice(worker.result.said, "ok")
+            self._saved[stored.slot] = _Saved(stored.alias)
+            if self.overview is not None:
+                self._paint_claude(self.overview)  # the label and the next prefill say it now
+            row = self.row_of(write.slot) if write is not None else None
+            # Closed only if it is the opening that sent the write and still says what it
+            # saved: anything typed since, or a field reopened since, is the next edit.
+            sent_from_here = (
+                write is not None
+                and row is not None
+                and row.openings == write.opening
+                and row.alias_field.value == write.submitted
+            )
+            if row is not None and row.renaming and sent_from_here:
+                row.close_rename()
         elif state is WorkerState.ERROR:
             self._notice(f"✗ {worker.error}", "error")
         self.post_message(AccountsChanged())
@@ -1143,3 +1401,5 @@ class AccountsView(Vertical):
             self._remove_finished(worker, state)
         elif worker.name == ARRANGE_WORKER:
             self._arrange_finished(worker, state)
+        elif worker.name == RENAME_WORKER:
+            self._rename_finished(worker, state)

@@ -41,8 +41,9 @@ from aisquare.models import ClaudeAccount
 from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics
 from aisquare.services import team as team_service
+from tests.conftest import CLAUDE_ACCOUNTS_NOW
 
-NOW = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+NOW = CLAUDE_ACCOUNTS_NOW  # the clock ``fake_home`` (tests/conftest.py) stops the code at
 
 #: What https://api.anthropic.com/api/oauth/usage answered on 2026-09-09 (Claude Code
 #: 2.1.266), trimmed to the keys the parser reads plus two it must ignore.
@@ -63,22 +64,6 @@ LIVE_USAGE = {
 
 
 # --------------------------------------------------------------------------- fixtures
-
-
-@pytest.fixture
-def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A home of our own: the default slot's files land here, never in the developer's."""
-    home = tmp_path / "home"
-    (home / ".claude").mkdir(parents=True)
-    monkeypatch.setattr(core, "_home", lambda: home)
-    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
-    monkeypatch.setattr(core, "keychain_platform", lambda: False)
-    # The clock the production code reads is the clock the fixtures write
-    # credentials against: tokens here expire at NOW + 7 h, and a command that
-    # asked the wall clock would find them expired the same evening.
-    monkeypatch.setattr(core, "_now", lambda: NOW)
-    monkeypatch.setattr(service, "_now", lambda: NOW)
-    return home
 
 
 def _sign_in(

@@ -2051,6 +2051,63 @@ def test_a_switch_or_a_remove_that_names_no_one_project_changes_nothing(
     assert _audit_lines() == before
 
 
+def test_a_task_another_session_holds_is_refused_claim_lost(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``asq task claim`` refuses it as ``claim_lost``; from the phone it fell to 400
+    ``write_failed``, as ``project/remove``'s busy refusal did (sweep 2 of #243)."""
+    from aisquare.services import team as team_service
+
+    (alpha,) = _projects(home, "code/alpha")
+    monkeypatch.chdir(alpha.root)
+    task, _added = team_service.add_task("ship it")
+    client = _project_writes(runtime, tmp_path)
+    url = f"{base(runtime)}/api/task/claim"
+    assert client.post(url, json={"ref": task.id}).status_code == 200
+    again = client.post(url, json={"ref": task.id})
+    assert (again.status_code, again.json()["error"]) == (409, "claim_lost"), again.text
+    assert task.id in again.json()["message"]
+
+
+def test_a_task_ref_that_names_two_tasks_is_refused_ambiguous_id(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``asq task`` refuses it as ``ambiguous_id``; from the phone it was 404 ``not_found``,
+    a task that is not there, where two are (sweep 2 of #243, project/remove's class)."""
+    from aisquare.services import team as team_service
+
+    (alpha,) = _projects(home, "code/alpha")
+    monkeypatch.chdir(alpha.root)
+    first, _added = team_service.add_task("one")
+    team_service.add_task("two")
+    client = _project_writes(runtime, tmp_path)
+    for route in ("task/claim", "task/done"):
+        refused = client.post(f"{base(runtime)}/api/{route}", json={"ref": "tsk_"})
+        assert (refused.status_code, refused.json()["error"]) == (400, "ambiguous_id"), route
+    assert client.post(f"{base(runtime)}/api/task/claim", json={"ref": first.id}).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("route", "body"),
+    [("task/claim", {"ref": "tsk_1"}), ("task/done", {"ref": "tsk_1"}), ("note", {"text": "hi"})],
+)
+def test_the_board_writes_are_refused_team_disabled_with_the_orchestrator_off(
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+    body: dict[str, str],
+) -> None:
+    """``AISQUARE_TEAM=0``: ``asq`` refuses the board's writes as ``team_disabled``, and so
+    do the agent actions, 409; these fell to 400 ``write_failed`` (sweep 2 of #243)."""
+    monkeypatch.setenv("AISQUARE_TEAM", "0")
+    client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    refused = client.post(f"{base(runtime)}/api/{route}", json=body)
+    assert (refused.status_code, refused.json()["error"]) == (409, "team_disabled")
+
+
 # --- (8) the Origin of a write or a socket ------------------------------------------------
 
 

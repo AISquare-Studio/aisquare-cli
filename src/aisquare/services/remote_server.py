@@ -2510,6 +2510,28 @@ class _ExitKeyGuard:
             return True
 
 
+@contextlib.contextmanager
+def _remote_board_refusals() -> Iterator[None]:
+    """The board's refusals as ``asq`` gives them, as a write's: 409 ``team_disabled`` with
+    the orchestrator off (``AISQUARE_TEAM=0``), as the agent actions answer it too, 409
+    ``claim_lost`` for a task another session holds, and 400 ``ambiguous_id`` for a ref
+    that names two tasks or sessions. They fell to 400 ``write_failed``, "the write
+    failed", where nothing had, and to 404 ``not_found`` where two were found (sweep 2 of
+    #243)."""
+    from aisquare.core.store import AmbiguousIdError
+    from aisquare.services import team as team_service
+
+    try:
+        yield
+    except team_service.TeamDisabledError as exc:
+        raise RequestError(409, "team_disabled", str(exc)) from None
+    except team_service.ClaimLostError as exc:
+        raise RequestError(409, "claim_lost", str(exc)) from None
+    except AmbiguousIdError as exc:
+        said = f"{exc.ref!r} is ambiguous — use more characters"
+        raise RequestError(400, "ambiguous_id", said) from None
+
+
 def live_writes() -> Writes:
     """The write endpoints over the services the CLI commands call, then the agent actions."""
     from aisquare.services import remote_actions
@@ -2520,7 +2542,8 @@ def live_writes() -> Writes:
         from aisquare.services import team as team_service
 
         author = _optional_ref(body, "as")
-        task = team_service.claim_task(_required(body, "ref"), session_ref=author)
+        with _remote_board_refusals():
+            task = team_service.claim_task(_required(body, "ref"), session_ref=author)
         return {"task": task.model_dump(mode="json")}, f"claimed {task.id} as={author or '-'}"
 
     def task_done(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -2531,7 +2554,8 @@ def live_writes() -> Writes:
         note = _optional_ref(body, "note")
         if note is not None:
             check_note_text(note, "note")
-        task = team_service.finish_task(ref, note=note, session_ref=author)
+        with _remote_board_refusals():
+            task = team_service.finish_task(ref, note=note, session_ref=author)
         return {"task": task.model_dump(mode="json")}, f"done {task.id} as={author or '-'}"
 
     def write_note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -2562,14 +2586,15 @@ def live_writes() -> Writes:
         author, to = _optional_ref(body, "as"), _optional_ref(body, "to", limit=NOTE_TO_MAX)
         if to is not None:
             check_note_to(to)
-        event = team_service.add_note(
-            text,
-            session_ref=author,
-            task_ref=_optional_ref(body, "task"),
-            to_role=to,
-            kind=kind,
-            cwd=None if project is None else _resolve_project(project).root,
-        )
+        with _remote_board_refusals():
+            event = team_service.add_note(
+                text,
+                session_ref=author,
+                task_ref=_optional_ref(body, "task"),
+                to_role=to,
+                kind=kind,
+                cwd=None if project is None else _resolve_project(project).root,
+            )
         addressed = "-" if to is None else json.dumps(to)
         summary = f"{event.kind} seq={event.seq} as={author or '-'} to={addressed}"
         return {"event": event.as_envelope().model_dump(mode="json")}, summary

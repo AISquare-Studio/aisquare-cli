@@ -923,6 +923,13 @@ def test_a_settings_json_linked_nowhere_is_refused_first_with_a_remedy_that_work
 
 _NOT_A_DIRECTORY_TO_READ = [
     pytest.param("Claude Code's state file", id="state file"),
+    pytest.param("Claude Code's state file, beside a connected ~/.claude", id="state file beside"),
+    pytest.param("in a folder this user cannot enter", id="unenterable", marks=_NEEDS_DENIED_READS),
+    pytest.param(
+        "in a folder this user cannot enter, beside a connected ~/.claude",
+        id="unenterable beside",
+        marks=_NEEDS_DENIED_READS,
+    ),
 ]
 
 
@@ -935,11 +942,13 @@ def test_a_config_dir_variable_naming_no_directory_to_read_offers_only_the_varia
     shape: str,
 ) -> None:
     """`CLAUDE_CONFIG_DIR=~/.claude.json`, a slip for ~/.claude that names Claude Code's own
-    state file: the only remedy printed was to make a settings.json inside it, which meant
-    turning that file into a directory, with no word of the variable, and Welcome said it
-    would notice (review of #257). Named with the operating system's answer, with the
-    variable's remedy alone, which, done as worded in a shell started again, lets connect
-    write."""
+    state file, or a directory in a folder this user cannot enter: the only remedy printed
+    was to make a settings.json inside it, which for ~/.claude.json meant turning that file
+    into a directory, with no word of the variable, and Welcome said it would notice; beside
+    a connected ~/.claude the row was green. In the folder this user cannot enter,
+    `doctor --json` printed nothing and `uninstall --dry-run` ended in a traceback (review
+    of #257). Named with the operating system's answer, with the variable's remedy alone,
+    which, done as worded in a shell started again, lets connect write."""
     monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
     home = isolated_agent_home
     home.mkdir(parents=True)

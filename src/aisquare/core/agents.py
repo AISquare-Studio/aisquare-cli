@@ -1410,13 +1410,15 @@ def _claude_dirs_on_disk() -> list[Path]:
         candidates.append(paths.expand_user(Path(env)))
     home = _home()
     candidates.append(home / ".claude")
-    if home.is_dir():
-        candidates.extend(sorted(path for path in home.glob(".claude*") if path.is_dir()))
+    # os.path.isdir, which never raises: ``Path.is_dir`` raised PermissionError on 3.11
+    # to 3.13 for one in a folder this user cannot enter, and cost the doctor its output.
+    if os.path.isdir(home):
+        candidates.extend(sorted(path for path in home.glob(".claude*") if os.path.isdir(path)))
     seen: set[Path] = set()
     found: list[Path] = []
     for candidate in candidates:
         key = _dir_key(candidate)
-        if key in seen or not candidate.is_dir():
+        if key in seen or not os.path.isdir(candidate):
             continue
         seen.add(key)
         try:
@@ -1529,7 +1531,10 @@ def _hook_dir_candidates(name: str) -> list[tuple[Path, bool]]:
     for path in connected_dirs(name, _registry()):
         add(path, recorded=True)
     ambient = ambient_hook_dir(name)
-    if ambient is not None and ambient.is_dir():
+    # os.path.isdir: for a CLAUDE_CONFIG_DIR in a folder this user cannot enter,
+    # ``Path.is_dir`` raised on 3.11 to 3.13, and the doctor printed nothing and
+    # uninstall a traceback (review of #257).
+    if ambient is not None and os.path.isdir(ambient):
         add(ambient, recorded=False)
     if name == "claude-code":
         for path in _claude_dirs_on_disk():

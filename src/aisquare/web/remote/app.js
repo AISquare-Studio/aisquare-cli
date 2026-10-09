@@ -72,6 +72,7 @@ const READ_ONLY = "writes are off — on the machine run `aisquare remote allow-
 const OFF_OR_MOVED = "Remote is off on the machine, or the link changed";
 const UNKEPT_SIGN_IN = "The machine took the passphrase, but this browser did not keep the sign-in — " +
   "allow cookies for this page, then unlock again.";
+const LOST_WAIT = "The phone lost the connection; this goes out again if it is back within 15 seconds.";
 
 // --- the pure core: escapes out, runs in, DOM out ---
 
@@ -773,6 +774,7 @@ async function apiWrite(path, body, verb, onWait, at) {
   let res = await apiCall("POST", path, { body: pending.body });
   if (res.network) {
     if (onWait) onWait();
+    let late = 0;
     res = await new Promise((resolve) => {
       pending.resolve = resolve;
       // The retry waits for a reconnect (flushRetries). A socket that still looks
@@ -780,7 +782,15 @@ async function apiWrite(path, body, verb, onWait, at) {
       // connection that lost this request: replace it now. Offline, the reconnect
       // backs off until the phone is back.
       wake(true);
+      // Offline, none may come, and past RETRY_WITHIN_MS it would not go again: the wait ends
+      // there. Its sheet stayed busy, and could not be closed, while the phone stayed offline.
+      late = setTimeout(function tooLate() {
+        if (pending.retried) return;
+        pending.retried = true;
+        finishPending(pending, notSentAgain("late"));
+      }, Math.max(0, pending.at + RETRY_WITHIN_MS - Date.now()));
     });
+    clearTimeout(late);
     if (res.network) res = Object.assign({}, res, { unconfirmed: true });
   }
   // A retry lost too may still have run on the machine, and a retry answered
@@ -1887,7 +1897,7 @@ function tellSheet(ctx, mode) {
       sheet.busy(true);
       sheet.status.textContent = current === "interrupt" ? "Interrupting " + label + "…" : "Sending…";
       const res = await apiWrite(writePath("agent/tell"), body, "Tell " + label, () => {
-        sheet.status.textContent = "The phone lost the connection; this goes out again if it is back within 15 seconds.";
+        sheet.status.textContent = LOST_WAIT;
       });
       sheet.busy(false);
       if (res.ok) {
@@ -1940,7 +1950,7 @@ function replySheet(ctx) {
       const body = { text: text.value, kind: "note", project: ctx.pid };
       if (isText(author)) body.to = author;
       sheet.busy(true);
-      const res = await apiWrite(writePath("note"), body, "Reply");
+      const res = await apiWrite(writePath("note"), body, "Reply", () => { sheet.status.textContent = LOST_WAIT; });
       sheet.busy(false);
       if (res.ok) {
         sheet.close();
@@ -2290,7 +2300,7 @@ function noteComposer(pid) {
     if (to.value.trim()) body.to = to.value.trim();
     post.classList.add("busy");
     gateButtons();
-    const res = await apiWrite(writePath("note"), body, "Note");
+    const res = await apiWrite(writePath("note"), body, "Note", () => say(LOST_WAIT));
     post.classList.remove("busy");
     gateButtons();
     if (res.ok) {

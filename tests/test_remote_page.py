@@ -1322,6 +1322,33 @@ def test_a_write_lost_before_the_phone_had_to_unlock_is_not_sent_again(
     assert len(gone["bodies"]) == 1 and gone["pending"] == 0
 
 
+def test_a_sheet_whose_write_was_lost_lets_go_once_the_write_would_not_go_again(
+    boot_report: dict[str, Any],
+) -> None:
+    """A lost write waited for the next socket to open, and its sheet with it: busy, Close
+    disabled, Escape and a tap beside it refused, the page behind inert. With the phone still
+    offline nothing ever settled it, while the sheet went on promising a retry "within 15
+    seconds" long after, and an installed app has no Back. Past those 15 s the write would not
+    go again anyway: the wait ends there, the sheet says so and can be closed, and nothing is
+    sent when the phone is back. A Reply, and a note on the Board tab, said nothing at all
+    while they waited."""
+    offline = boot_report["offlineSheet"]
+    waiting = "The phone lost the connection; this goes out again if it is back within 15 seconds."
+    tell = {"title": "Tell coder-1", "busy": True, "close": True, "said": waiting}
+    assert offline["waiting"] == tell
+    assert offline["late"] == {
+        **tell,
+        "busy": False,
+        "close": False,
+        "said": "Not sent again — the phone was away too long to be sure the agent still shows "
+        "what you saw. If the machine got it, its result shows here; if not, look, then send "
+        "it again.",
+    }
+    assert offline["escaped"] is None and offline["told"] == 1
+    assert offline["replying"] == {**tell, "title": "Reply on the board"}
+    assert offline["noting"] == waiting, "a note on the Board tab says it waits too"
+
+
 def test_send_with_nothing_typed_presses_no_enter(boot_report: dict[str, Any]) -> None:
     """With ⏎ on, as it is by default, Send on an empty box posted ``{enter: true}``: a bare
     Enter into the pane, which picks a dialog's highlighted option ("1. Yes")."""

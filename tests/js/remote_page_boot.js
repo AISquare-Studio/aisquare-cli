@@ -674,6 +674,54 @@ async function lostRead() {
   return { lost, phone, offline: page.run("S.offline"), bannerHidden: page.run("UI.banner.hidden") };
 }
 
+/* A Tell from the Actions menu whose request was lost, the phone offline so its new socket never
+ * opens: the sheet while it waits, once its 15 s are up, after Escape, and the writes that went
+ * once the phone is back; and a card's Reply, and a note on the Board tab, lost the same way,
+ * while they wait. */
+async function offlineSheet() {
+  const page = await agentView({ "POST api/agent/tell": () => "network" });
+  page.live().frame("fleet", FLEET);
+  await settle();
+  click(buttonNamed(page.main(), "Actions…"));
+  click(buttonNamed(page.run("UI.sheet"), "Tell…"));
+  find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "carry on";
+  click(buttonNamed(page.run("UI.sheet"), "Tell"));
+  await settle();
+  const sheet = (one) => {
+    const wrap = one.run("UI.sheet");
+    const close = buttonNamed(wrap, "Close");
+    const said = find(wrap, (node) => node.className === "status");
+    return { title: sheetTitle(one), busy: wrap.classList.contains("busy"), close: close ? close.disabled : null, said: said ? said.textContent : null };
+  };
+  const waiting = sheet(page);
+  page.run("Date.now = ((then) => () => then + 16000)(Date.now());");
+  page.fireTimer("tooLate");
+  await settle();
+  const late = sheet(page);
+  page.run("for (const fn of document.listeners.keydown || []) fn({ type: 'keydown', key: 'Escape' });");
+  const escaped = sheetTitle(page);
+  page.acceptSockets();
+  await settle();
+  const question = Object.assign({}, ITEM, { kind: "board_question", detail: { text: "Which store?", author: "lead-1" }, answers: [], actions: ["reply"] });
+  const feed = bootPage("#/", signedIn({ "GET api/needs": () => ({ status: 200, json: { items: [question] } }), "POST api/note": () => "network" }));
+  await settle();
+  feed.acceptSockets();
+  await settle();
+  click(buttonNamed(feed.main(), "Reply…"));
+  find(feed.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "Postgres";
+  click(buttonNamed(feed.run("UI.sheet"), "Post"));
+  await settle();
+  const board = bootPage("#/p/" + PROJECT + "/board", signedIn({ "POST api/note": () => "network" }));
+  await settle();
+  board.acceptSockets();
+  await settle();
+  find(board.main(), (node) => node.tagName === "TEXTAREA").value = "ship it";
+  click(buttonNamed(board.main(), "Post"));
+  await settle();
+  const noting = find(board.main(), (node) => node.className === "status").textContent;
+  return { waiting, late, escaped, told: page.sent("api/agent/tell").length, replying: sheet(feed), noting };
+}
+
 /* Two quick taps on a card's answers while the first is in flight. */
 async function quickAnswerTwice() {
   const held = deferred();
@@ -2492,6 +2540,7 @@ async function main() {
     lostKeyLongAgo: await lostKeyLongAgo(),
     lostThenSignedOut: await lostThenSignedOut(),
     lostRead: await lostRead(),
+    offlineSheet: await offlineSheet(),
     emptySend: await emptySend(),
     scansStopped: await scansStopped(),
     pushKeyChanged: await pushTurnedOn(KEY_BEFORE),

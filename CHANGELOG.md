@@ -66,7 +66,7 @@ and an aisquare that upgrades and uninstalls itself.**
   (#247).
 - **Rename on asq's Accounts page** names a Claude account (`work`,
   `personal`) or, left blank, clears its name, as `aisquare accounts alias`
-  does.
+  does (#258).
 
 ### Changed
 - The README is a front page under 250 lines whose every link is absolute, so

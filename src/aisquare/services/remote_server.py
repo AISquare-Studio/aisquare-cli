@@ -4774,6 +4774,12 @@ _foreground: uvicorn.Server | None = None
 _flusher: threading.Timer | None = None
 _home_claim: tuple[Path, int] | None = None
 """``remote-serve.lock`` and its descriptor, while this process serves Remote from that home."""
+_claiming = threading.Lock()
+"""Held while this process claims a home (:func:`_claim_remote_home`, under :data:`_lock`), or
+looks whether another process serves one (:func:`remote_served_elsewhere`, never under it):
+one at a time. On NFS, Linux makes ``flock`` a lock of the whole process, so a look whose
+lock landed as this process claimed the home took that claim for its own, and its unlock let
+the home go, for another process's Remote to take as this one served."""
 
 SERVE_LOCK_NAME = "remote-serve.lock"
 """Beside ``remote.json``: held by the one process that serves Remote from that home."""
@@ -4812,26 +4818,27 @@ def _claim_remote_home(state: Runtime) -> bool:
     path = state._state_path.with_name(SERVE_LOCK_NAME)
     if _home_claim is not None and _home_claim[0] == path:
         return False  # this process serves from here already
-    try:
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-    except OSError as exc:
-        log.warning("remote: %s could not be opened (%s); serving without it", path, exc)
-        return False
-    patience = time.monotonic() + CLAIM_PATIENCE_SECONDS
-    while True:
+    with _claiming:
         try:
-            lock_exclusive(fd)
-            break
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         except OSError as exc:
-            if exc.errno in _LOCK_HELD and time.monotonic() < patience:
-                time.sleep(0.005)
-                continue
-            os.close(fd)
-            if exc.errno in _LOCK_HELD:
-                raise RemoteAlreadyOn(REMOTE_ALREADY_ON) from None
-            log.warning("remote: %s could not be locked (%s); serving without it", path, exc)
+            log.warning("remote: %s could not be opened (%s); serving without it", path, exc)
             return False
-    previous, _home_claim = _home_claim, (path, fd)
+        patience = time.monotonic() + CLAIM_PATIENCE_SECONDS
+        while True:
+            try:
+                lock_exclusive(fd)
+                break
+            except OSError as exc:
+                if exc.errno in _LOCK_HELD and time.monotonic() < patience:
+                    time.sleep(0.005)
+                    continue
+                os.close(fd)
+                if exc.errno in _LOCK_HELD:
+                    raise RemoteAlreadyOn(REMOTE_ALREADY_ON) from None
+                log.warning("remote: %s could not be locked (%s); serving without it", path, exc)
+                return False
+        previous, _home_claim = _home_claim, (path, fd)
     if previous is not None:  # another home's, which this process serves no more
         _release_remote_claim(previous[1])
     return True
@@ -4845,25 +4852,31 @@ def remote_served_elsewhere() -> bool:
     same panel (sweep of #243). ``False`` while this process serves from it, or when there is
     no lock file to tell (none is made here). Takes the lock for a moment when it is free,
     which a claim waits out (:data:`CLAIM_PATIENCE_SECONDS`).
+
+    Never as this process claims a home (:data:`_claiming`), and never under :data:`_lock`,
+    which every status read takes: on NFS a lock call can block however non-blocking. So
+    :data:`_home_claim` is read without it: a claim, which sets it, holds :data:`_claiming`,
+    and a release that lands meanwhile leaves nobody serving, which is what this says then.
     """
     path = remote_state_path().with_name(SERVE_LOCK_NAME)
-    with _lock:
-        if _home_claim is not None and _home_claim[0] == path:
+    with _claiming:
+        claim = _home_claim
+        if claim is not None and claim[0] == path:
             return False
-    try:
-        fd = os.open(path, os.O_RDWR)
-    except OSError:
-        return False
-    try:
-        lock_exclusive(fd)
-    except OSError as exc:
-        return exc.errno in _LOCK_HELD
-    else:
-        with contextlib.suppress(OSError):
-            unlock(fd)
-        return False
-    finally:
-        os.close(fd)
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except OSError:
+            return False
+        try:
+            lock_exclusive(fd)
+        except OSError as exc:
+            return exc.errno in _LOCK_HELD
+        else:
+            with contextlib.suppress(OSError):
+                unlock(fd)
+            return False
+        finally:
+            os.close(fd)
 
 
 def _release_remote_home() -> None:

@@ -2529,6 +2529,73 @@ def test_whether_another_process_serves_this_home_is_asked_of_its_lock(
             remote_server._release_remote_home()
 
 
+def test_a_look_at_who_serves_this_home_never_overlaps_this_processs_own_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On NFS, Linux makes ``flock`` a lock of the whole process: a look whose lock landed as
+    this process claimed the home took the claim for its own, and its unlock let the home go,
+    for another process's Remote to take beside this one. A claim waits for a look under
+    way, and a look waits for a claim, then finds this process serving."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    state = remote_server.runtime()
+    paths.ensure_home()
+    paths.remote_state_path().with_name(remote_server.SERVE_LOCK_NAME).touch()
+    calls: list[str] = []
+    stalled, go_on = threading.Event(), threading.Event()
+
+    def locking(fd: int) -> None:
+        name = threading.current_thread().name
+        calls.append(f"lock by {name}")
+        if not go_on.is_set():  # a lock call that takes a while, as one on NFS may
+            stalled.set()
+            assert go_on.wait(5)
+        lock_exclusive(fd)
+
+    def unlocking(fd: int) -> None:
+        calls.append(f"unlock by {threading.current_thread().name}")
+        unlock(fd)
+
+    monkeypatch.setattr(remote_server, "lock_exclusive", locking)
+    monkeypatch.setattr(remote_server, "unlock", unlocking)
+    answers: dict[str, object] = {}
+
+    def run(name: str, call: Callable[[], object]) -> threading.Thread:
+        thread = threading.Thread(target=lambda: answers.update({name: call()}), name=name)
+        thread.start()
+        return thread
+
+    look = run("look", remote_server.remote_served_elsewhere)
+    try:
+        assert stalled.wait(5)
+        claim = run("claim", lambda: remote_server._claim_remote_home(state))
+        time.sleep(0.2)
+        assert calls == ["lock by look"], "the claim locked while a look held the lock"
+        go_on.set()
+        look.join(5)
+        claim.join(5)
+        assert calls == ["lock by look", "unlock by look", "lock by claim"]
+        assert answers == {"look": False, "claim": True}
+
+        go_on.clear()
+        stalled.clear()
+        remote_server._release_remote_home()
+        calls.clear()
+        claim = run("claim", lambda: remote_server._claim_remote_home(state))
+        assert stalled.wait(5)
+        look = run("look", remote_server.remote_served_elsewhere)
+        time.sleep(0.2)
+        assert calls == ["lock by claim"], "a look locked while this process claimed the home"
+        go_on.set()
+        claim.join(5)
+        look.join(5)
+        assert calls == ["lock by claim"], "the look found this process serving: no lock"
+        assert answers == {"look": False, "claim": True}
+    finally:
+        go_on.set()
+        monkeypatch.setattr(remote_server, "_server", None)
+        remote_server._release_remote_home()
+
+
 def test_the_panel_knows_when_another_process_serves_this_home() -> None:
     """Looked for off Textual's thread, at most every few seconds; a start's sentence that
     another Remote kept it off goes once the home is free."""

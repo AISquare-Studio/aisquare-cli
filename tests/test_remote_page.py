@@ -2269,6 +2269,32 @@ def test_notifications_say_where_they_stand_wherever_the_page_offers_them(
     assert push["iphone"].startswith("On iPhone and iPad, notifications need the page on the")
 
 
+def test_the_socket_opens_under_the_pages_own_path_and_scheme(
+    boot_report: dict[str, Any],
+) -> None:
+    """Everything is under ``/r/<token>/`` and the stream is its ``ws`` (above). A page under
+    https must open ``wss:``: a ``ws://`` from it is mixed content, blocked, and the live view
+    never connects through ngrok; one rooted at ``/ws`` is outside the token, a handshake the
+    server answers 404. The fake browser booted only under http and kept no socket's URL, so
+    either change passed every test."""
+    token = "t" * 32
+    urls = boot_report["socketUrls"]
+    assert {key: urls[key] for key in ("http", "https")} == {
+        "http": [f"ws://127.0.0.1:8750/r/{token}/ws"],
+        "https": [f"wss://x.ngrok-free.app/r/{token}/ws"],
+    }
+
+
+def test_every_request_asks_as_the_spec_says(boot_report: dict[str, Any]) -> None:
+    """SPEC §6.3: same-origin credentials (the session cookie), JSON, and the header that
+    skips ngrok's warning page, without which the free plan's tunnel answers its own HTML
+    and the page reads it as Remote being off. No test looked at how the page asked: the
+    fake browser kept only the path and body."""
+    headers = {"content-type": "application/json", "ngrok-skip-browser-warning": "1"}
+    asked = {"credentials": "same-origin", "cache": "no-store", "headers": headers}
+    assert boot_report["socketUrls"]["asked"] == [asked]
+
+
 def test_each_write_carries_what_the_spec_says_it_sends(boot_report: dict[str, Any]) -> None:
     """SPEC §6.3's writes, as the machine received them. Send carries the ⏎ toggle; a note
     and a Reply their project, a Reply the question's author; a card's Tell mode prompt and

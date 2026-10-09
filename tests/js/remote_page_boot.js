@@ -265,8 +265,10 @@ function deferred() {
 
 /* Boot app.js at `hash`, the machine answering every request through `answer`:
  * (method, path, body) -> {status, json}, or "network" for a request that never
- * arrives, or a promise of either. `globals` adds to the browser (fakePush). */
-function bootPage(hash, answer, globals) {
+ * arrives, or a promise of either. `globals` adds to the browser (fakePush); `base` is
+ * the page's own URL, the machine's at http by default. */
+function bootPage(hash, answer, globals, base) {
+  const address = base || BASE;
   const doc = {
     title: "",
     visibilityState: "visible",
@@ -324,7 +326,7 @@ function bootPage(hash, answer, globals) {
     back: () => setImmediate(() => page.back()), // a traversal is queued, never done at once
   };
   const location = {
-    protocol: "http:",
+    protocol: new URL(address).protocol,
     get hash() {
       return current;
     },
@@ -335,12 +337,13 @@ function bootPage(hash, answer, globals) {
       const value = String(url);
       go(value.slice(value.indexOf("#")), true);
     },
-    toString: () => BASE + current,
+    toString: () => address + current,
   };
   const fetch = async (url, init) => {
     const where = String(url).split("?")[0];
     const body = typeof init.body === "string" ? JSON.parse(init.body) : null;
-    requests.push({ method: init.method, path: where, body, query: String(url).split("?")[1] || "" });
+    const how = JSON.stringify({ credentials: init.credentials, cache: init.cache, headers: init.headers });
+    requests.push({ method: init.method, path: where, body, query: String(url).split("?")[1] || "", how });
     const reply = await answer(init.method, where, body);
     if (reply === "network") throw new TypeError("Failed to fetch");
     const text = JSON.stringify(reply.json);
@@ -353,8 +356,10 @@ function bootPage(hash, answer, globals) {
     sessionStorage: storage(),
     localStorage: storage(),
     fetch,
-    WebSocket: function WebSocket() {
-      return new FakeSocket(sockets);
+    WebSocket: function WebSocket(url) {
+      const sock = new FakeSocket(sockets);
+      sock.url = String(url);
+      return sock;
     },
     crypto: globalThis.crypto,
     URL,
@@ -2647,6 +2652,20 @@ async function pushScreens() {
   };
 }
 
+/* The socket the page opens, on the machine itself under http and through ngrok under https;
+ * and how every request the page made on the way asked (credentials, cache, headers). */
+async function socketUrls() {
+  const asked = new Set();
+  const at = async (base) => {
+    const page = bootPage("#/", signedIn(), null, base);
+    await settle();
+    for (const one of page.requests) asked.add(one.how);
+    return page.sockets.map((sock) => sock.url);
+  };
+  const urls = { http: await at(BASE), https: await at("https://x.ngrok-free.app/r/" + "t".repeat(32) + "/") };
+  return Object.assign(urls, { asked: Array.from(asked, (one) => JSON.parse(one)) });
+}
+
 /* What each write carries (SPEC §6.3), as the machine received it, its request_id left out:
  * Send with ⏎ unticked; a note from the Board tab; a Reply on a board question; a card's
  * Tell; a usage limit card's Switch account; and a Tell refused agent_busy, then sent again
@@ -2853,6 +2872,7 @@ async function main() {
     needsRefused: await needsRefused(),
     droppedTasks: await droppedTasks(),
     pushScreens: await pushScreens(),
+    socketUrls: await socketUrls(),
     writeBodies: await writeBodies(),
     padOrKeyboard: await padOrKeyboard(),
     staleCards: await staleCards(),

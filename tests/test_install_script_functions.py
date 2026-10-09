@@ -2266,7 +2266,7 @@ def test_a_run_from_that_repository_lists_hooks_it_could_not_write(
     assert said.startswith(f"  claude-code — Claude Code hooks cannot be written in {claude}"), (
         result.stdout
     )
-    assert f"    → make {claude / 'settings.json'} a JSON object" in said, result.stdout
+    assert f"    → repair {claude / 'settings.json'} (it is not valid JSON" in said, result.stdout
     assert "the full detail and a fix for each" not in result.stdout, result.stdout
     assert "UNEXPECTED=1" in result.stdout
     assert result.returncode == 2

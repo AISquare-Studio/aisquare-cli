@@ -708,22 +708,27 @@ def _hooks_name(claude: Path, program: str) -> None:
 
 
 @posix_route
+@pytest.mark.parametrize("folder", ["writable", "read-only"])
 def test_a_read_only_settings_json_still_says_what_its_hooks_run(
-    runner: CliRunner, claude: Path, tmp_path: Path
+    runner: CliRunner, claude: Path, tmp_path: Path, folder: str
 ) -> None:
     """Read-only, as home-manager's link into the Nix store is, a settings.json whose hooks
     name an aisquare that is gone read only as "hooks cannot be written": the row no
-    longer said every event fails (review of #257). Both, and still no Connect."""
+    longer said every event fails, and in a read-only folder it dropped the remedy where
+    that file is generated (review of #257). Both, and still no Connect."""
     _connect(runner)
     gone = tmp_path / "old-venv" / "bin" / "aisquare"
     _hooks_name(claude, str(gone))
     settings = claude / "settings.json"
     settings.chmod(0o444)
+    if folder == "read-only":
+        claude.chmod(0o555)
     try:
         if os.access(settings, os.W_OK):
             pytest.skip("this user can write a read-only file (root)")
         row = diagnostics._check_claude_code()
     finally:
+        claude.chmod(0o755)
         settings.chmod(0o644)
     writable = diagnostics._check_claude_code()
 

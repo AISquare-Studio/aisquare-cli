@@ -1421,15 +1421,21 @@ def _claude_dirs_on_disk() -> list[Path]:
         if key in seen or not os.path.isdir(candidate):
             continue
         seen.add(key)
-        try:
-            ours = bool(hook_commands("claude-code", candidate)) or (
-                plugin_route_supported() and claude_plugin(candidate) is not None
-            )
-        except (OSError, ValueError):
-            continue  # unreadable or undecodable settings.json — see the docstring
-        if ours:
+        if holds_aisquare(candidate):
             found.append(candidate)
     return found
+
+
+def holds_aisquare(config_dir: Path) -> bool:
+    """Whether ``config_dir``'s settings.json holds an aisquare hook or enables the aisquare
+    plugin: what makes a directory on disk the doctor's business whether or not this home
+    recorded it. False for one that cannot be read or decoded (:func:`_claude_dirs_on_disk`)."""
+    try:
+        return bool(hook_commands("claude-code", config_dir)) or (
+            plugin_route_supported() and claude_plugin(config_dir) is not None
+        )
+    except (OSError, ValueError):
+        return False
 
 
 def _dir_key(path: Path) -> Path:

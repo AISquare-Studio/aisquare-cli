@@ -6,7 +6,6 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 from aisquare.core import agents as agent_core
 from aisquare.core import paths
@@ -253,27 +252,17 @@ class Refusal:
     writes anything (:func:`access`)."""
 
     path: Path
-    """The file it names: settings.json, a context file, or the directory itself."""
+    """The path that blocks it: settings.json, a context file, the directory itself, or the
+    nearest path on the way to a directory connect would make."""
     why: str
     """The refusal, in the command's own words."""
-    kind: RefusalKind = "file"
-    """``gone`` for a named directory that is not there and that connect will not make,
-    whose record is all there is to forget; ``file`` for every other refusal."""
-    fix: str | None = None
-    """The step that changes it where it is (:func:`_in_place`), offered only where this
-    user may take it: ``None`` otherwise, and for ``gone``."""
-    restart_fix: str | None = None
-    """The step through ``CLAUDE_CONFIG_DIR``, for the directory sessions from this shell
-    read, which that variable moves whatever blocks it there; ``None`` for any other.
-    asq and aisquare read the variable when they start, so every surface that says it
-    adds "then start asq or aisquare again from that shell", and never that it notices
-    the change (review of #257)."""
-    restart_first: bool = False
-    """Whether ``restart_fix`` comes first: the variable is set, so it named the directory,
-    and a slip in it (``~/.claude.json`` for ``~/.claude``) has no remedy in place."""
-
-
-RefusalKind = Literal["file", "gone"]
+    fact: str = ""
+    """What is wrong with ``path``, as the operating system or the parse says it. Its one
+    remedy in place is to repair that: each round of steps synthesized for one state of
+    the path missed another it could not work in (review of #257)."""
+    this_shell: bool = False
+    """Whether the directory is the one sessions from this shell read, which pointing
+    ``CLAUDE_CONFIG_DIR`` at another directory moves them off."""
 
 
 @dataclass(frozen=True)
@@ -320,6 +309,7 @@ def _connect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
     spec = agent_core.spec(name, config_dir)
     if spec is None or not spec.connectable:
         return None
+    here = _this_shells_dir(name, config_dir) is not None
     try:
         # In connect's order, so the reason is connect's whichever check refuses first:
         # its first step makes the directory a Claude Code that has never started has not
@@ -328,70 +318,21 @@ def _connect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
         if where is not None:
             blocked = _cannot_make(where)
             if blocked is not None:
-                why = f"can't create {where}: {blocked[0]}"
-                return _refused(name, config_dir, where, why, blocked[1])
+                blocking, fact = blocked
+                return Refusal(blocking, f"can't create {where}: {fact}", fact, here)
         elif config_dir is not None:
             _check_found(name, config_dir)
         _read_before_writing(name, config_dir)
-    except AgentFileUnreadableError as exc:
-        path = exc.path or spec.settings_path or spec.home
-        return _refused(name, config_dir, path, str(exc), _in_place(path, spec))
-    except AgentNotInstalledError as exc:
-        return _refused(name, config_dir, spec.home, str(exc), None, "gone")
+    except (AgentFileUnreadableError, AgentNotInstalledError) as exc:
+        path = getattr(exc, "path", None) or spec.home
+        return Refusal(path, str(exc), str(exc).partition(f"{path}: ")[2] or str(exc), here)
     except OSError as exc:
         # Fails open into a named refusal: the doctor and `agents list` ask this for every
         # directory, and a traceback here cost them their whole output (review of #257).
-        where = Path(os.fsdecode(exc.filename)) if exc.filename else spec.home
-        why = f"can't read {where}: {exc.strerror or exc}"
-        return _refused(name, config_dir, where, why, _in_place(where, spec))
+        path = Path(os.fsdecode(exc.filename)) if exc.filename else spec.home
+        fact = exc.strerror or str(exc)
+        return Refusal(path, f"can't read {path}: {fact}", fact, here)
     return None
-
-
-#: The remedy through CLAUDE_CONFIG_DIR (``Refusal.restart_fix``).
-_REPOINT = "point CLAUDE_CONFIG_DIR at a directory this user can write"
-
-
-def _refused(
-    name: str,
-    config_dir: Path | None,
-    path: Path,
-    why: str,
-    fix: str | None,
-    kind: RefusalKind = "file",
-) -> Refusal:
-    """A refusal of ``config_dir`` with its remedies: ``fix`` in place, and, whatever blocks
-    the directory sessions from this shell read, the one through ``CLAUDE_CONFIG_DIR``,
-    first where that variable is set. Offered only when the variable was set, it was
-    missing for a read-only HOME; and the remedy in place given for a variable naming a
-    file (``~/.claude.json``) was to turn Claude Code's own state file into a directory
-    (review of #257)."""
-    if _this_shells_dir(name, config_dir) is None:
-        return Refusal(path, why, kind, fix)
-    named = bool(os.environ.get("CLAUDE_CONFIG_DIR", "").strip())
-    restart = f"{_REPOINT}, or unset it" if named else _REPOINT
-    return Refusal(path, why, kind, fix, restart, restart_first=named)
-
-
-def _writable_dir(path: Path) -> bool:
-    """Whether ``path`` is a directory this user may create things in."""
-    return os.path.isdir(path) and os.access(path, os.W_OK | os.X_OK)
-
-
-def _in_place(path: Path, spec: agent_core.AgentSpec) -> str | None:
-    """The end state of ``path``, a file connect refuses, in which connect writes, offered
-    only where this user may bring it about: its folder is a directory this user can
-    write, so whatever is there can be replaced, or it is a file this user can rewrite.
-    Else ``None``: a settings.json inside a file was told to become a JSON object, and a
-    loop in a read-only folder to become a link to one (review of #257)."""
-    if paths.names_no_home(path) or not (
-        _writable_dir(path.parent) or (os.path.isfile(path) and os.access(path, os.R_OK | os.W_OK))
-    ):
-        return None
-    if path == spec.settings_path:
-        return f"make {path} a JSON object this user can write"
-    if path in spec.context_files:
-        return f"make {path} UTF-8 text this user can read"
-    return f"make {path} readable by this user"
 
 
 def _disconnect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
@@ -491,24 +432,16 @@ def _this_shells_dir(name: str, config_dir: Path | None) -> Path | None:
     return ambient if same else None
 
 
-def _cannot_make(where: Path) -> tuple[str, str | None] | None:
-    """Why :func:`_make_first_run_dir` cannot make ``where``, which is not there, with the
-    step in place that lets it, where this user may take one; or ``None``. Asked by
+def _cannot_make(where: Path) -> tuple[Path, str] | None:
+    """The path that stops :func:`_make_first_run_dir` making ``where``, which is not there,
+    and what the operating system says of it (:func:`_no_room`); or ``None``. Asked by
     connect before its mkdir and by :func:`access` for it, in the same words, so no
-    Connect is offered that this first step refuses.
-
-    It names the nearest path on the way that is there, and what the operating system
-    says of it (:func:`_no_room`). "No directory it can be made in" named none, and its
-    "create it yourself" failed (review of #257). Where that path is no directory at all
-    (a file, or a link to nothing or to a file), moved aside, ``mkdir -p`` makes the
-    rest, so that is offered where its folder lets this user move it.
+    Connect is offered that this first step refuses. It is the nearest path on the way
+    that is there: "no directory it can be made in" named none (review of #257).
     """
     blocking = next((p for p in (where, *where.parents) if os.path.lexists(p)), None)
     stopped = None if blocking is None else _no_room(blocking)
-    if blocking is None or stopped is None:
-        return None
-    movable = not os.path.isdir(blocking) and _writable_dir(blocking.parent)
-    return stopped, f"move {blocking} aside" if movable else None
+    return None if blocking is None or stopped is None else (blocking, stopped)
 
 
 def _no_room(folder: Path) -> str | None:
@@ -537,7 +470,7 @@ def _make_first_run_dir(name: str, config_dir: Path | None) -> None:
         return
     blocked = _cannot_make(where)
     if blocked is not None:
-        raise AgentFileUnreadableError(f"can't create {where}: {blocked[0]}", where)
+        raise AgentFileUnreadableError(f"can't create {where}: {blocked[1]}", where)
     try:
         where.mkdir(parents=True, exist_ok=True)
     except OSError as exc:

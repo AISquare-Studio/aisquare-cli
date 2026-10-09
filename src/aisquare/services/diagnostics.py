@@ -928,8 +928,7 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     ]
     if not sites:
         # Connect makes the directory a session from this shell reads, unless it refuses it
-        # (agents_service.access): an exported CLAUDE_CONFIG_DIR naming a ~user this machine
-        # does not have was offered a Connect that could only fail (review of #257).
+        # (agents_service.access): a Connect that could only fail was offered (review of #257).
         ambient = agent_core.ambient_hook_dir("claude-code")
         refusal = agents_service.access("claude-code").connect
         if ambient is not None and refusal is not None:
@@ -940,12 +939,10 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
             )
         return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
     graded = [site for site in sites if site not in switched_off]
-    # The directory sessions from this shell read, when Claude Code is on PATH and has
-    # not made it yet: npm and Homebrew make it on the first start, and
-    # CLAUDE_CONFIG_DIR can name a new profile. No site grades it, so beside any other
-    # site this row was green while those sessions ran no hooks, and Welcome offered
-    # Connect. `agents connect` makes it (review of #257); a recorded one that was
-    # removed is graded below, and its --config-dir Connect makes it too.
+    # The directory sessions from this shell read, when no site grades it: not made yet
+    # (npm and Homebrew make it on the first start; CLAUDE_CONFIG_DIR can name a new
+    # profile), or not a directory. Beside any other site this row was green while those
+    # sessions ran no hooks, and Welcome offered Connect (review of #257).
     unmade = _unmade_ambient_dir(sites)
 
     # The shared answer, which counts the plugin route as connected.
@@ -968,13 +965,11 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
         for site in graded
         if site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT) and site not in dead
     ]
-    # A file `agents connect` refuses (a settings.json that is not a JSON object or that
-    # this user may not write, a CLAUDE.md it cannot read) leaves a directory with no
-    # hooks, and its Connect could only fail: a read-only settings.json, home-manager's
-    # link into the Nix store, never cleared. Named with connect's own reason, as a
-    # switched-off one is, and given no button (review of #257). Hooks it holds that run
-    # the wrong program still say so: that is the diagnosis, and read only as "cannot be
-    # written" the row hid that every event fails.
+    # A directory `agents connect` refuses (agents_service.access) got a Connect that
+    # could only fail: home-manager's read-only settings.json never cleared. Named with
+    # connect's own reason and no button (review of #257). Hooks it holds that run the
+    # wrong program still say so: read only as "cannot be written", the row hid that
+    # every event fails.
     refused = {
         site.config_dir: refusal
         for site in (*unhooked, *wrong_binary)
@@ -982,7 +977,6 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     }
     unhooked = [site for site in unhooked if site.config_dir not in refused]
     if unmade is not None and (refusal := agents_service.access("claude-code").connect):
-        # Not made yet, and connect would not make it either: named, with no Connect.
         refused[unmade] = refusal
         unmade = None
     # Where the plugin is the route that runs, what it runs is graded like a hook.
@@ -1003,10 +997,8 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
         and unmade is None
     )
     # A plugin enabled for this folder alone misses where the fleet's coders start, by
-    # Welcome step 2's own rule. Said on every branch of the row, as step 2 says it
-    # whatever else is wrong, and with connect's refusal where it has one, as step 2
-    # names it: the note named a Connect that refuses, and only a green row said it
-    # (review of #257).
+    # Welcome step 2's own rule: said on every branch of the row, with connect's refusal
+    # where it has one; only a green row said it, naming a Connect that refuses (#257).
     coders = _coders_missed(
         {
             site.config_dir: agents_service.access("claude-code", site.config_dir).connect
@@ -1136,9 +1128,8 @@ def _coders_missed(
 ) -> tuple[str, list[str]] | None:
     """What the row says for config dirs whose plugin misses the coders
     (:func:`_misses_the_coders`), each with connect's refusal or ``None``, and the fixes:
-    the Connect that covers every folder where connect would write the hooks, bare for
-    the directory a session from this shell reads; else that refusal's remedy, never a
-    Connect that refuses. ``None`` when no route misses them."""
+    the Connect that covers every folder (bare for the directory this shell reads), or
+    where connect refuses, that refusal's remedy. ``None`` when no route misses them."""
     if not missed:
         return None
     ambient = agent_core.ambient_hook_dir("claude-code")
@@ -1215,34 +1206,42 @@ def _short_timeouts(
     return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
 
 
-#: What every remedy through CLAUDE_CONFIG_DIR ends with (``Refusal.restart_fix``): asq
-#: and aisquare read it when they start, so a change made in another shell never reaches
-#: the running one (review of #257).
-RESTART = "then start asq or aisquare again from that shell"
+#: For the directory sessions from this shell read; asq and aisquare read the variable
+#: only when they start (review of #257).
+_REPOINT = (
+    "point CLAUDE_CONFIG_DIR at another directory this user can write, "
+    "then start asq or aisquare again from that shell"
+)
 
 
 def _refused_fix(
     directory: Path, refusal: agents_service.Refusal, *, also: str | None = None
 ) -> str:
-    """What changes ``refusal``, connect's for ``directory`` (``agents_service.access``):
-    the remedies it carries, in their order, so never a command that refuses nor a step
-    this user cannot take. A directory that is gone, and one with no step in place that
-    CLAUDE_CONFIG_DIR does not name, are left to forget. ``also`` is what to change
-    instead where a settings.json that is read-only by design (home-manager) is
-    generated."""
-    fixes: list[str] = []
-    if refusal.fix is not None:
-        spec = agent_core.spec("claude-code", directory)
-        here = f"{refusal.fix}, then connect again"
-        if also is not None and spec is not None and refusal.path == spec.settings_path:
-            here = f"{here}, or {also} where that file is generated"
-        fixes.append(here)
-    elif refusal.kind == "gone" or refusal.restart_fix is None:
-        fixes.append(_disconnect_fix(directory, "forget it: "))
-    if refusal.restart_fix is not None:
-        restart = f"{refusal.restart_fix}, {RESTART}"
-        fixes = [restart, *fixes] if refusal.restart_first else [*fixes, restart]
-    return "; or ".join(fixes)
+    """What changes ``refusal``, connect's for ``directory`` (``agents_service.access``): to
+    repair the path that blocks, or what generates a settings.json read-only by design
+    (``also``); for the directory sessions from this shell read, CLAUDE_CONFIG_DIR, with
+    the disconnect that takes out one the doctor grades anyway (recorded, or holding
+    aisquare), where it would work and leave no plugin; for another recorded, forgetting
+    it. Each step made for one state of the path met a state it failed in (review of #257).
+    """
+    spec = agent_core.spec("claude-code", directory)
+    fix = f"repair {refusal.path} ({refusal.fact}), then connect again"
+    if also is not None and spec is not None and refusal.path == spec.settings_path:
+        fix += f", or {also} where that file is generated"
+    key = agent_core.dir_identity(directory)
+    recorded = key in {agent_core.dir_identity(p) for p in agent_core.connected_dirs("claude-code")}
+    held = agent_core.holds_aisquare(directory)
+    leaves = agents_service.access("claude-code", directory).disconnect is None and not (
+        agent_core.plugin_route_supported() and agent_core.claude_plugin(directory)
+    )
+    disconnect = f"aisquare agents disconnect claude-code --config-dir {directory}"
+    if refusal.this_shell and not (recorded or held):
+        return f"{fix}; or {_REPOINT}"
+    if refusal.this_shell and leaves:
+        return f"{fix}; or {_REPOINT}, and disconnect this one: {disconnect}"
+    if recorded and leaves:
+        return f"{fix}; or forget it: {disconnect}"
+    return fix
 
 
 def _disconnect_fix(directory: Path, lead: str) -> str:

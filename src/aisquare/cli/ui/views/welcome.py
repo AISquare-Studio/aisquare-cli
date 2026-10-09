@@ -186,24 +186,6 @@ def candidate_detail(candidate: Candidate) -> Text:
     return text
 
 
-def _refusal_remedy(fix: str | None, restart_fix: str | None, restart_first: bool) -> str:
-    """Step 2's remedy for a refusal, from the remedies it carries (``agents.Refusal``), in
-    their order. asq reads CLAUDE_CONFIG_DIR only when it starts, so a remedy through it
-    says to start asq again, and this page says it notices only when no remedy it gives
-    is one of those (review of #257)."""
-    said = [] if fix is None else [fix]
-    if restart_fix is not None:
-        restart = f"{restart_fix}, then start asq again from that shell"
-        said = [restart, *said] if restart_first else [*said, restart]
-    if not said:
-        return "Fix it; this page notices within a few seconds."
-    text = ". Or ".join(said)
-    text = f"{text[:1].upper()}{text[1:]}"
-    if restart_fix is None:
-        return f"{text}, and this page notices within a few seconds."
-    return f"{text}."
-
-
 def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
     """Step 2's body: the agent, its sign-in and its hooks — or how to install it."""
     text = Text()
@@ -254,11 +236,12 @@ def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
     elif claude.refused is not None:
         text.append("\n✗ ", style="red")
         text.append(f"aisquare's hooks cannot be written: {claude.refused} — ")
-        text.append("Connect cannot change that. ")
+        # Repaired in place, the page sees it on its next look; CLAUDE_CONFIG_DIR, asq
+        # reads only when it starts. The refusal is of the directory this shell reads.
         text.append(
-            _refusal_remedy(
-                claude.refused_fix, claude.refused_restart_fix, claude.refused_restart_first
-            )
+            "Connect cannot change that. Repair it and this page checks again within a few "
+            "seconds, or point CLAUDE_CONFIG_DIR at another directory this user can write, "
+            "then start asq again from that shell."
         )
     elif claude.manager_only:
         text.append("\n✗ ", style="red")

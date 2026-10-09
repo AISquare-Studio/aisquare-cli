@@ -1084,6 +1084,79 @@ def test_an_ngrok_that_cannot_read_our_config_runs_as_before_and_the_panel_says_
         controller.turn_off()
 
 
+def test_an_ngrok_stopped_after_it_blamed_our_config_is_not_started_again(
+    tmp_path: Path,
+) -> None:
+    """ngrok said our config is why it cannot go on, and was stopped (Remote turned off)
+    before it ended by itself. The reader then saw it end, and only the check that this
+    tunnel was not stopped meanwhile kept it from starting ngrok again without our config:
+    a tunnel up, its API on, for a Remote that is off. No test held that check (sweep 3 of
+    #243)."""
+    own = write_ngrok_config(tmp_path, 'version: "2"\nauthtoken: tok_123\n')
+    script = tmp_path / "blaming-ngrok.py"
+    script.write_text(
+        "import sys, time\n"
+        "if any(arg.startswith('--config=') for arg in sys.argv):\n"
+        f"    print({f'ERROR:  open /home/u/.aisquare/{OUR_CONFIG}: permission denied'!r},"
+        " flush=True)\n"
+        "else:\n"
+        f"    print({json.dumps(json.dumps(OURS))}, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    runs: list[list[str]] = []
+
+    def popen(command: list[str], **kwargs: Any) -> subprocess.Popen[str]:
+        runs.append(command)
+        return subprocess.Popen([sys.executable, str(script), *command[1:]], **kwargs)
+
+    tunnel = panels_ngrok(8750, own, popen)
+    assert tunnel.start_tunnel() is None
+    try:
+        deadline = time.monotonic() + 10
+        while not tunnel._configs_refused:  # its log reader has the blame
+            assert time.monotonic() < deadline, "the stand-in never said it"
+            time.sleep(0.02)
+        tunnel.stop_tunnel()
+        assert tunnel._reader is not None
+        tunnel._reader.join(10)
+        assert len(runs) == 1, "an ngrok was started for a tunnel that was stopped"
+        assert not tunnel.running
+    finally:
+        tunnel.stop_tunnel()
+
+
+def test_what_an_ngrok_left_in_its_group_as_it_exited_is_stopped_with_it(
+    tmp_path: Path,
+) -> None:
+    """An ngrok, or a launcher, that exits on its own may leave a process in its group that
+    no longer holds the log's pipe. Its group is kept for stopping while anything is left in
+    it: forgotten, the stop signalled nobody, and the one left ran on (sweep 3 of #243)."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("process groups are POSIX")
+    pid_file = tmp_path / "left.pid"
+    body = (
+        "import subprocess\n"
+        "left = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],"
+        " stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        f"open({str(pid_file)!r}, 'w').write(str(left.pid))\n"
+        f"print({json.dumps(json.dumps(STARTED))}, flush=True)\n"
+        "sys.exit(0)\n"
+    )
+    tunnel = NgrokTunnel(8750, command=ngrok_printing(tmp_path, body))
+    assert tunnel.start_tunnel() is None
+    left = pid_in(pid_file)
+    try:
+        assert tunnel.wait_for_url(timeout=10) == STARTED["url"]
+        assert tunnel._reader is not None
+        tunnel._reader.join(10)  # it saw the log end, and the exit
+        assert not tunnel.running
+        tunnel.stop_tunnel()
+        assert gone(left), "what ngrok left in its group ran on"
+    finally:
+        with contextlib.suppress(OSError):
+            os.kill(left, signal.SIGKILL)
+
+
 @pytest.mark.parametrize(
     ("ended", "said"),
     [
@@ -2270,6 +2343,24 @@ def test_a_remote_still_starting_as_the_ui_quits_is_saved_as_on_for_the_next_sta
     assert controller.wait_until_off(5) and controller.writes_done(5)
     assert read_state()["remote_enabled"] is True
     assert load_remote_state().remote_enabled is True
+
+
+def test_a_start_turned_off_before_its_switch_was_saved_leaves_the_switch_off() -> None:
+    """A start hands the save of its switch to the thread that drives the controller once its
+    deadline is written; a turn-off there before that step ran has saved the off already. The
+    start's late save is for a Remote that is gone, and saved, it brought back at the next
+    start a Remote the human had turned off. No test held that check (sweep 3 of #243)."""
+    server = fake_server()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    handed: list[Callable[[], None]] = []
+    controller.call_back = handed.append  # Textual's queue, not yet run
+    controller.turn_on(wait=False)
+    assert controller.writes_done(5) and handed, "the start's save is queued"
+    controller.turn_off()  # the human's switch, on that thread, before the queued save runs
+    assert load_remote_state().remote_enabled is False
+    for step in handed:
+        step()
+    assert load_remote_state().remote_enabled is False, "the next start brings back nothing"
 
 
 def test_a_starts_failure_found_on_the_writers_thread_stops_only_that_start() -> None:

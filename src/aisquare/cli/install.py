@@ -19,6 +19,7 @@ from aisquare.cli.common import fail
 from aisquare.core import selfcli
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
+from aisquare.core.version import __version__
 from aisquare.services import install_route
 from aisquare.services import lifecycle as lifecycle_service
 
@@ -288,7 +289,9 @@ def upgrade(
         plan = lifecycle_service.upgrade_plan(version, check=check)
     except lifecycle_service.InvalidVersion as exc:
         fail(
-            f"--version takes a version such as 0.8.1, not {str(exc)!r}",
+            # The release that runs: it exists, so a copied example asks uv for nothing
+            # no index has, and it follows every version bump (sweep of #257).
+            f"--version takes a version such as {__version__}, not {str(exc)!r}",
             error="invalid_version",
         )
     if check:

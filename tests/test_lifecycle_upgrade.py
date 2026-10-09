@@ -2013,16 +2013,18 @@ def test_a_version_that_is_not_a_version_is_refused_before_anything(
 
 
 def test_a_bad_version_is_answered_with_an_example_this_flag_takes(
-    runner: CliRunner, machine: Machine
+    runner: CliRunner, machine: Machine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The example was 0.9.1, a release of this product that does not exist; a user who
-    copied it asked uv for it (sweep of #257). It is a patch of this release series."""
+    """The example was 0.9.1, then 0.8.1: releases of this product that do not exist, which
+    a user who copied one asked uv for (sweep of #257). It is the release that runs."""
+    monkeypatch.setattr(install_cli, "__version__", "0.7.0")
+
     result = runner.invoke(app, ["upgrade", "--version", "garbage"])
 
     example = re.search(r"--version takes a version such as (\S+), not 'garbage'", result.stderr)
     assert result.exit_code == 1
     assert example is not None, result.stderr
-    assert example[1] == "0.8.1" and install_route.version_argument(example[1]) == example[1]
+    assert example[1] == "0.7.0" and install_route.version_argument(example[1]) == example[1]
     assert machine.installs == [] and machine.lookups == 0
 
 

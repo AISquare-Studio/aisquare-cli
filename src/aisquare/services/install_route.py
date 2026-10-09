@@ -202,7 +202,7 @@ def version_argument(text: str) -> str | None:
     """``--version``'s value as the bare version uv's ``name@version`` takes, or ``None``.
 
     It is pasted into the package spec, so it must be ONE version token: a
-    leading ``v`` (``v0.8.1``, how tags are written) is dropped, and anything
+    leading ``v`` (``v0.8.0``, how tags are written) is dropped, and anything
     that does not then parse as a PEP 440 version is refused.
     """
     candidate = text.strip()

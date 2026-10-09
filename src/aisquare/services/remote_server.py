@@ -1132,7 +1132,7 @@ class Runtime:
             self._disk = self._state_digest(body)
             self._disk_moves += 1
         if not pending.restricted and not self._said_unrestricted:
-            self._said_unrestricted = True  # once: the flush rewrites the file every 30 s
+            self._said_unrestricted = True  # once: the flush may rewrite the file every 30 s
             log.warning(_UNRESTRICTED, self._state_path, "the password and the link token")
 
     def _save_state(self) -> None:
@@ -1495,11 +1495,35 @@ class Runtime:
 
         Another process's change lands first: a flush that wrote memory over a
         fresher file would undo the very ``allow-write on`` this is about.
+
+        A flush with nothing new writes nothing. It wrote every time, every 30 s
+        while Remote was on with no phone even open: an owner-only temp (an
+        ``icacls`` run on Windows, ``_writing`` held through it), the same bytes,
+        two fsyncs and a rename (sweep 2 of #243). Nothing new is the file's own
+        bytes being what memory would write, and no device past its lifetime.
+        Compared with the file, not with what this process last wrote or read
+        (:attr:`_disk`): a version-1 file written under a running server is never
+        adopted, so that digest still matched memory, and the flush must write
+        version 2 back over it.
         """
+        if self._flush_needless(self._signature()):
+            return
         with self._state_file_lock():
             self.reload_if_changed()
             self.prune_expired_devices(_remote_now())
-            self._write_state(self._state)
+            if not self._flush_needless(self._signature()):
+                self._write_state(self._state)
+
+    def _flush_needless(self, on_disk: tuple[bytes, bytes] | None) -> bool:
+        """Whether the file's bytes (:meth:`_signature`) are what memory would write, with no
+        device left for a flush to prune."""
+        now = _remote_now()
+        with self._lock:
+            return (
+                on_disk is not None
+                and on_disk[1] == _encoded_state(self._state)
+                and not any(device.device_expired(now) for device in self._state.devices)
+            )
 
     def register_socket(self, device_id: str, close: Callable[[int], None]) -> None:
         with self._lock:

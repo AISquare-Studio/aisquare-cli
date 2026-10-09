@@ -193,14 +193,21 @@ def test_both_files_are_restricted_to_the_owner_before_they_hold_anything(
 def test_a_restriction_that_fails_is_said_once_not_at_every_flush(
     runtime: Runtime, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A serving process rewrites ``remote.json`` every 30 s, so a warning per write would
-    repeat for as long as it serves wherever ``icacls`` cannot run. The file is still written."""
+    """A serving process may rewrite ``remote.json`` every 30 s, so a warning per write
+    would repeat for as long as it serves wherever ``icacls`` cannot run. The file is still
+    written. Each flush here has a phone's newer ``last_seen`` to write: one with nothing
+    new writes nothing."""
     from aisquare.core import paths
 
     monkeypatch.setattr(paths, "restrict_to_owner", lambda path: False)
     with caplog.at_level(logging.WARNING, logger=remote_server.__name__):
-        for _ in range(3):
+        unlocked = runtime.unlock_device(PASSWORD, "Pixel")
+        assert unlocked is not None
+        for second in range(3):
+            unlocked[1].last_seen = f"2026-10-07T09:00:0{second}+00:00"  # a request touched it
             runtime.flush_last_seen()
+            seen = json.loads(remote_state_path().read_bytes())["devices"][0]["last_seen"]
+            assert seen == unlocked[1].last_seen, "written"
         runtime.set_allow_write(True)
     said = [r.getMessage() for r in caplog.records if r.name == remote_server.__name__]
     assert len(said) == 1 and "could not restrict" in said[0], said

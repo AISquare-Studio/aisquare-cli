@@ -2207,6 +2207,9 @@ def test_a_slow_restriction_of_the_temp_holds_no_lock_and_loses_no_revoke(
     unlocked = runtime.unlock_device(PASSWORD, "Pixel")
     assert unlocked is not None
     device_id = unlocked[1].id
+    later = remote_server._remote_now() + timedelta(seconds=5)
+    monkeypatch.setattr(remote_server, "_remote_now", lambda: later)
+    assert runtime.device_is_live(device_id)  # a request: the flush has a last_seen to write
     restricting, done = threading.Event(), threading.Event()
     real = paths.restrict_to_owner
 
@@ -2277,3 +2280,47 @@ def test_a_v1_file_written_under_a_running_server_is_not_adopted(runtime: Runtim
     assert runtime.password == PASSWORD
     runtime.flush_last_seen()
     assert json.loads(path.read_bytes())["version"] == 2
+
+
+def test_a_flush_with_nothing_new_to_write_writes_nothing(
+    runtime: Runtime, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every 30 s while Remote was on, with no phone even open, the flush made an
+    owner-only temp (an ``icacls`` run on Windows, with ``_writing`` held), wrote the same
+    bytes into it, fsynced it, renamed it over ``remote.json`` and fsynced the directory
+    (sweep 2 of #243). What it is for still happens: a device a request touched is
+    written, and one past its lifetime is pruned."""
+    from aisquare.core import paths
+    from aisquare.core.atomic import Replacement
+
+    unlocked = runtime.unlock_device(PASSWORD, "Pixel")
+    assert unlocked is not None
+    device_id = unlocked[1].id
+    written: list[bytes] = []
+    restricted: list[str] = []
+    publish, restrict = Replacement.publish, paths.restrict_to_owner
+
+    def counted_publish(replacement: Replacement, body: str | bytes) -> None:
+        written.append(body if isinstance(body, bytes) else body.encode())
+        publish(replacement, body)
+
+    def counted_restrict(path: Path) -> bool:
+        restricted.append(path.name)
+        return restrict(path)
+
+    monkeypatch.setattr(Replacement, "publish", counted_publish)
+    monkeypatch.setattr(paths, "restrict_to_owner", counted_restrict)
+    before = remote_state_path().read_bytes()
+    runtime.flush_last_seen()
+    runtime.flush_last_seen()
+    assert (written, restricted) == ([], []), "no temp, no write, no rename"
+    assert remote_state_path().read_bytes() == before
+    clock.advance(seconds=5)
+    assert runtime.device_is_live(device_id)  # what a request or a socket's tick does
+    runtime.flush_last_seen()
+    assert len(written) == 1, "a touched device is written"
+    (stored,) = json.loads(remote_state_path().read_bytes())["devices"]
+    assert stored["last_seen"] == remote_server._iso_seconds(clock.now)
+    clock.advance(days=8)
+    runtime.flush_last_seen()
+    assert json.loads(remote_state_path().read_bytes())["devices"] == [], "and pruned"

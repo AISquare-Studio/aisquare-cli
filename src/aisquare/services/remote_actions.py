@@ -429,7 +429,7 @@ def action_tell_summary(label: str, target: ProjectInfo, mode: str, text: str, h
     return f'tell {label}@{target.id} mode={mode} {how} text={len(text)}ch "{excerpt}"'
 
 
-_ESCAPE_SENT = "Escape had been sent first, answering its prompt No"
+_ESCAPE_SENT = "Escape had been sent first, which answers a prompt No or stops a running tool"
 """What a refusal after the dialog guard's Escape adds to the fleet's sentence."""
 
 

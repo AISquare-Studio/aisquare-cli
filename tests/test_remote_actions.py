@@ -1501,7 +1501,8 @@ def test_a_fleet_call_that_fails_after_a_dismissal_records_both(
     response = phone.post(name, **PINNED, dismiss_dialog=True)
     assert response.status_code == 409 and response.json() == {
         "error": "fleet_error",
-        "message": "tmux went away — Escape had been sent first, answering its prompt No",
+        "message": "tmux went away — Escape had been sent first, which answers a prompt No or "
+        "stops a running tool",
     }
     assert pane.keys() == ["Escape"]
     assert phone.audit() == [(name, f"{_acted_on(name, project)} dismissed=yes failed=fleet_error")]

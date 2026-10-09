@@ -418,7 +418,8 @@ def _render_transcript_record(record: dict[str, Any] | None, width: int) -> list
     ``isMeta`` that holds kilobytes the model wrote about the conversation so far,
     which rendered as the human's words. It is one dim line saying the
     conversation was compacted, since the turns above it are no longer what the
-    agent remembers.
+    agent remembers. Nor are the other "user" records Claude Code writes itself
+    (:func:`_render_claude_codes_own`).
     """
     if record is None or record.get("type") not in ("user", "assistant"):
         return []
@@ -433,6 +434,10 @@ def _render_transcript_record(record: dict[str, Any] | None, width: int) -> list
     blocks = _blocks(message.get("content"))
     if not blocks:
         return []
+    if role == "user":
+        own = _render_claude_codes_own(record, blocks, width)
+        if own is not None:
+            return own
 
     body: list[str] = []
     for block in blocks:
@@ -451,6 +456,72 @@ def _render_transcript_record(record: dict[str, Any] | None, width: int) -> list
 
     # No time on the speaker's line: read_page sends it beside the lines (Page.stamps).
     return [_SPEAKERS["user" if role == "user" else "assistant"], *body, ""]
+
+
+_OWN_TEXT = re.compile(
+    r"\s*<(command-|bash-|local-command|system-reminder|task-notification|user-prompt)[a-z-]*>"
+)
+"""How the text of a "user" record Claude Code writes itself begins: a slash command and its
+output, a ``!`` command and its output, a background task's notice, a reminder, a hook's
+words. Claude Code 2.1.295's own test of what is not a person's turn, to the tag's end."""
+
+_OWN_OUTPUT = ("local-command-stdout", "bash-stdout", "local-command-stderr", "bash-stderr")
+"""The tags a command's output comes in, the ones read first first."""
+
+
+def _render_claude_codes_own(
+    record: dict[str, Any], blocks: list[dict[str, Any]], width: int
+) -> list[str] | None:
+    """A "user" record Claude Code wrote itself, as lines; ``None`` for the human's words.
+
+    Its ``origin`` names another source than a person (a background task's notice
+    has ``{"kind": "task-notification"}``), or its text opens with one of Claude
+    Code's tags (:data:`_OWN_TEXT`) and holds it closed: text a person typed that
+    only starts like one is theirs, as typed. Rendered under ``> you``, a notice,
+    often a sub-agent's whole report, read as the human's words, as the output of
+    a ``/model`` did. The human's own command (``<command-name>``,
+    ``<bash-input>``) is still theirs, without the tags; a notice or an output is
+    one dim line, its summary or its first line, as is the first line of another
+    source's words in no tag; a reminder or a hook's words are nothing.
+    """
+    text = "\n".join(
+        part
+        for block in blocks
+        if block.get("type") == "text" and isinstance(part := block.get("text"), str)
+    )
+    origin = record.get("origin")
+    foreign = isinstance(origin, dict) and origin.get("kind") not in (None, "human")
+    opening = _OWN_TEXT.match(text)
+    if not foreign:
+        if opening is None or _own_tag(text, opening.group(0).strip()[1:-1]) is None:
+            return None
+        command = _own_tag(text, "command-name")
+        if command:
+            said = command if command.startswith("/") else "/" + command
+            if args := _own_tag(text, "command-args"):
+                said += " " + args
+            return [_SPEAKERS["user"], *_wrap(said, width), ""]
+        if typed := _own_tag(text, "bash-input"):
+            return [_SPEAKERS["user"], *_wrap("! " + typed, width), ""]
+    note = _own_tag(text, "summary") or next(
+        (found for name in _OWN_OUTPUT if (found := _own_tag(text, name))), ""
+    )
+    if not note and (status := _own_tag(text, "status")):
+        note = f"background task {status}"
+    if not note and foreign and opening is None:
+        note = text  # another source's words, in no tag
+    first = next((line.strip() for line in note.splitlines() if line.strip()), "")
+    if not first:
+        return []
+    room = max(1, width - 4)
+    shown = first if len(first) <= room else first[: room - 1] + "…"
+    return [f"{_DIM}  ⎿ {shown}{_OFF}", ""]
+
+
+def _own_tag(text: str, name: str) -> str | None:
+    """What the first ``<name>…</name>`` in ``text`` holds, stripped; ``None`` without one."""
+    found = re.search(f"<{re.escape(name)}>(.*?)</{re.escape(name)}>", text, re.DOTALL)
+    return None if found is None else found.group(1).strip()
 
 
 # --- the tail: what the needs-you scan classifies on (SPEC §4.3) ---------------------------

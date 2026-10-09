@@ -253,6 +253,92 @@ def test_a_compaction_summary_is_one_line_saying_so_never_the_persons_words(
     assert "  Picking up the cache work." in text
 
 
+def test_claude_codes_own_records_are_never_the_persons_words(tmp_path: Path) -> None:
+    """Claude Code writes a "user" record of its own, with no ``isMeta``, when a background
+    task ends (``origin`` ``task-notification``, ``promptSource`` "system", its notice and
+    often a sub-agent's whole report as the text) and for the output of a slash command
+    (``<local-command-stdout>``). Each rendered under ``> you``, the human's words: on this
+    machine 812 notices, one of them 1 453 lines. A notice is one dim line, its summary (or
+    its first line, in no tag); an output one dim line, its first; a reminder nothing."""
+    notice = {
+        **_user(
+            "<task-notification>\n<task-id>bq1</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n"
+            "<output-file>/tmp/bq1.output</output-file>\n<status>completed</status>\n"
+            '<summary>Background command "make build" completed (exit code 0)</summary>\n'
+            "<result>" + "the sub-agent's report, line after line\n" * 300 + "</result>\n"
+            "</task-notification>",
+            uuid="n1",
+        ),
+        "origin": {"kind": "task-notification"},
+        "promptSource": "system",
+    }
+    untagged = {
+        **_user("A background task you started has finished.", uuid="n2"),
+        "origin": {"kind": "task-notification"},
+    }
+    path = _write(
+        tmp_path / "own.jsonl",
+        [
+            _user("build it in the background", uuid="u1"),
+            notice,
+            untagged,
+            _user("<local-command-stdout>Set model to Opus</local-command-stdout>", uuid="o1"),
+            _user("<local-command-stdout></local-command-stdout>", uuid="o2"),
+            _user("<system-reminder>The date changed.</system-reminder>", uuid="r1"),
+            _user("ship it", uuid="u2"),
+        ],
+    )
+    text = plain(read_page(path, width=80).lines)
+    assert text == [
+        "> you",
+        "  build it in the background",
+        "",
+        '  ⎿ Background command "make build" completed (exit code 0)',
+        "",
+        "  ⎿ A background task you started has finished.",
+        "",
+        "  ⎿ Set model to Opus",
+        "",
+        "> you",
+        "  ship it",
+        "",
+    ]
+
+
+def test_the_persons_own_commands_are_theirs_without_the_tags(tmp_path: Path) -> None:
+    """A slash command and a ``!`` command are the human's, recorded in Claude Code's tags:
+    ``> you``, the command as typed. Words a person typed that only start like a tag, never
+    closing it, are theirs as typed."""
+    path = _write(
+        tmp_path / "commands.jsonl",
+        [
+            _user(
+                "<command-message>model</command-message>\n<command-name>/model</command-name>\n"
+                "<command-args>opus</command-args>",
+                uuid="c1",
+            ),
+            _user("<bash-input>git status</bash-input>", uuid="b1"),
+            _user(
+                "<bash-stdout>On branch main</bash-stdout><bash-stderr></bash-stderr>", uuid="b2"
+            ),
+            _user("<command-name> is the tag the parser misses: fix it", uuid="u1"),
+        ],
+    )
+    assert plain(read_page(path, width=80).lines) == [
+        "> you",
+        "  /model opus",
+        "",
+        "> you",
+        "  ! git status",
+        "",
+        "  ⎿ On branch main",
+        "",
+        "> you",
+        "  <command-name> is the tag the parser misses: fix it",
+        "",
+    ]
+
+
 def test_metadata_records_are_skipped(tmp_path: Path) -> None:
     path = _write(
         tmp_path / "meta.jsonl",

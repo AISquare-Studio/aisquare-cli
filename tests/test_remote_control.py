@@ -322,6 +322,50 @@ def test_an_ngrok_that_ignores_the_terminate_is_killed() -> None:
     assert not tunnel.running
 
 
+def test_an_ngrok_group_that_ignores_the_terminate_is_killed_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where ngrok runs in a process group of its own (Linux, macOS), stopping SIGTERMs the
+    group and SIGKILLs what is left of it: the stand-in above has no pid, so it reaches only
+    the group-less terminate() and kill(), and no test held the group's SIGKILL. Without it,
+    an ngrok, or a launcher's child, that ignored the SIGTERM kept its tunnel and the static
+    domain (ERR_NGROK_334 for the next Remote) while the panel said Remote was off (sweep 3
+    of #243)."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("process groups are POSIX")
+    monkeypatch.setattr(ngrok_tunnel, "STOP_SECONDS", 0.5)
+    pids = tmp_path / "pids"
+    body = (
+        "import os, signal\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "child = os.fork()\n"  # a child in ngrok's group, deaf to SIGTERM as well
+        "if child == 0:\n"
+        "    time.sleep(60)\n"
+        "    os._exit(0)\n"
+        f"open({str(pids)!r}, 'w').write(str(os.getpid()) + ' ' + str(child))\n"
+        f"print({json.dumps(json.dumps(STARTED))}, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    tunnel = NgrokTunnel(8750, command=ngrok_printing(tmp_path, body))
+    assert tunnel.start_tunnel() is None
+    deadline = time.monotonic() + 10
+    while len(pids.read_text().split()) < 2 if pids.exists() else True:
+        assert time.monotonic() < deadline, "the stand-in ngrok never started"
+        time.sleep(0.02)
+    leader, child = (int(pid) for pid in pids.read_text().split())
+    try:
+        assert tunnel.wait_for_url(timeout=10) == STARTED["url"]
+        started = time.monotonic()
+        assert finished(tunnel.stop_tunnel, 10), "stopping hung"
+        assert time.monotonic() - started >= ngrok_tunnel.STOP_SECONDS, "the SIGTERM was heeded"
+        assert gone(leader) and gone(child), "what ignored the SIGTERM was left running"
+        assert not tunnel.running
+    finally:
+        for pid in (leader, child):
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
+
 def test_a_url_its_listener_could_not_take_never_ends_the_log_reader(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1969,6 +2013,82 @@ def test_a_url_that_lands_as_the_wait_runs_out_is_told_as_up_after_the_trouble(
         ),
         ("ngrok is up — phones can reach Remote now", False),
     ]
+
+
+def test_a_url_adopted_after_the_wait_ran_out_and_before_its_verdict_is_no_trouble() -> None:
+    """The log reader can adopt the URL after the waiter's wait ran out and before it takes
+    the lock to say so: adoption tells nothing then, as nothing was told yet. Only the
+    waiter's check for a URL now in hand keeps it from saying ngrok did not announce a
+    tunnel, and toasting that phones cannot reach a Remote that has its link: no test
+    held that check (sweep 3 of #243)."""
+    server = fake_server()
+    tunnels: list[FakeTunnel] = []
+
+    def factory(port: int) -> FakeTunnel:
+        tunnels.append(FakeTunnel(port, url=None, failure=None))
+        tunnel = tunnels[-1]
+        waited = tunnel.wait_for_url
+
+        def wait_then_the_url_lands(timeout: float = 15.0) -> str | None:
+            url = waited(timeout)  # ran out: None
+            reader = threading.Thread(target=tunnel.handle_line, args=(json.dumps(STARTED),))
+            reader.start()
+            reader.join(5)  # adopted before the waiter decides
+            return url
+
+        tunnel.wait_for_url = wait_then_the_url_lands  # type: ignore[method-assign]
+        return tunnel
+
+    controller = RemoteController(server=server, tunnel_factory=factory, url_timeout=0.1)
+    heard = heard_news(controller)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    assert controller.link_url() == build_public_url(STARTED["url"], server.token)
+    assert controller.message is None
+    assert heard == []
+
+
+class StartingTunnel(FakeTunnel):
+    """A tunnel whose ngrok takes a while to spawn: ``start_tunnel`` waits for ``release``,
+    then starts as :class:`FakeTunnel` does, or fails with ``failure``."""
+
+    def __init__(self, port: int, *, failure: str | None = None) -> None:
+        super().__init__(port, url="https://abcd-12.ngrok-free.app", failure=failure)
+        self.entered, self.release = threading.Event(), threading.Event()
+        self.stop_calls = 0
+
+    def start_tunnel(self) -> str | None:
+        self.entered.set()
+        self.release.wait(10)
+        return super().start_tunnel()
+
+    def stop_tunnel(self) -> None:
+        self.stop_calls += 1
+        super().stop_tunnel()
+
+
+@pytest.mark.parametrize("failure", [None, INSTALL_HINT], ids=["it started", "it failed"])
+def test_a_remote_turned_off_while_its_ngrok_starts_leaves_no_ngrok_running(
+    failure: str | None,
+) -> None:
+    """A switch-off landing while ngrok spawns finds no tunnel to stop yet: the start alone
+    knows it, and stops it once it has started, so no ngrok of a Remote that is off holds
+    the static domain for the next one (ERR_NGROK_334). No test spawned slowly enough for
+    a turn-off to land there (sweep 3 of #243). One that failed to start has nothing to
+    stop."""
+    server = fake_server()
+    tunnel = StartingTunnel(8750, failure=failure)
+    controller = RemoteController(server=server, tunnel_factory=lambda port: tunnel)
+    controller.turn_on(wait=False)
+    assert tunnel.entered.wait(5), "ngrok never began to start"
+    controller.turn_off(wait=False)  # wait=True would wait for the start, on the writer
+    assert tunnel.stop_calls == 0 and not controller.running
+    tunnel.release.set()
+    assert controller.writes_done(5) and controller.wait_until_off(5)
+    assert tunnel.stop_calls == (1 if failure is None else 0)
+    assert tunnel.stopped is (failure is None)
+    assert controller.tunnel is None and controller.link_url() is None
 
 
 def test_auto_off_and_what_turning_off_could_not_do_are_news() -> None:

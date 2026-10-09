@@ -176,6 +176,14 @@ PANE_CAPTURE_WORKERS = 4
 WRITE_WORKERS = 8
 """Threads in the pool every write handler runs on (:meth:`RemoteKit.kit_write_pool`): keys
 waiting out an action's lock, and the actions themselves, which take seconds."""
+WRITE_WAITING_PER_DEVICE = 64
+"""Writes one device may have waiting for a thread of the write pool; one more is 409
+``busy`` (:meth:`RemoteKit.kit_run_write`). A restart or a switch holds a thread
+for 20 to 40 s, and the pool's queue had no end: a device could bank writes behind them by
+the hundred, to run long after it sent them, ahead of every other device's (sweep 2 of
+#243). The page sends one agent's keys one at a time, and an action holds its agent's
+lock, so a phone never comes near this; a burst of taps at a busy agent's pad does not
+either (they are refused 409 ``busy`` within 2 s)."""
 HEARTBEAT_SECONDS = 10.0
 """How often a socket gets a ``heartbeat`` frame, changed or not, so the page can tell a quiet
 fleet from a dead link (the default of ``build_app(heartbeat=)``)."""
@@ -3421,6 +3429,8 @@ class RemoteKit:
     """Each device's live sockets, oldest first, as closers that take a close code."""
     lane_state: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _write_waiting: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    """Per device id, its writes waiting for a thread of the write pool (:meth:`kit_run_write`)."""
 
     def kit_device(self, request: HTTPConnection) -> Device:
         """The device gate 4 found for this request; the cookie is never looked up twice."""
@@ -3492,6 +3502,33 @@ class RemoteKit:
         """Whether writes are on right now (``remote.json``, re-read when it changes)."""
         return self.runtime.allow_write
 
+    def kit_write_still_allowed(self, device: Device) -> None:
+        """Refuse a write that waited while what let it in changed: 404 ``not_found`` once
+        auto-off passed, 401 ``unauthorized`` once its device is gone or signed out, 403
+        ``read_only`` once writes are off. Called in the thread that runs the write, right
+        before it does.
+
+        The gates read all three when the request arrived, and a write then waited for a
+        thread of the write pool, behind restarts that hold one for 20 to 40 s: one sent
+        just before ``allow-write off``, a revoke, auto-off or Remote off (which revokes
+        every device) still ran once a thread came free, the audit naming a device revoked
+        minutes before (sweep 2 of #243). So ``remote.json`` is read afresh here, whatever
+        the request's own check (:meth:`Runtime.remote_state_checked`) found back then. A
+        write that has started is left to finish.
+        """
+        runtime = self.runtime
+        checked = _STATE_CHECKED.set(None)
+        try:
+            with runtime.remote_state_checked():
+                if runtime.auto_off_passed(_remote_now()):
+                    raise RequestError(404, "not_found", LINK_GONE)
+                if not runtime.device_is_live(device.id):
+                    raise RequestError(401, "unauthorized", NOT_UNLOCKED)
+                if not runtime.allow_write:
+                    raise RequestError(403, "read_only", READ_ONLY_REASON)
+        finally:
+            _STATE_CHECKED.reset(checked)
+
     def kit_public_url(self) -> str | None:
         """``https://<host>/r/<token>/`` for a push link, or ``None`` when no origin is known.
 
@@ -3538,16 +3575,53 @@ class RemoteKit:
             return self.write_pool
 
     async def kit_run_write(
-        self, handler: WriteHandler, body: dict[str, Any], arrived: float
+        self, handler: WriteHandler, body: dict[str, Any], arrived: float, device: Device
     ) -> tuple[dict[str, object], str]:
-        """``handler(body)`` on the write pool, told when its request reached the server
-        (``arrived``, ``time.monotonic``), and in this request's context otherwise."""
+        """``handler(body)`` on the write pool for ``device``, told when its request reached
+        the server (``arrived``, ``time.monotonic``), and in this request's context otherwise.
+
+        The thread asks the gates again first (:meth:`kit_write_still_allowed`), since the
+        write may have waited for it. A device may have :data:`WRITE_WAITING_PER_DEVICE`
+        writes waiting at once, and one more is 409 ``busy``: the machine is still busy with
+        what that device sent, and no wait it could name in a ``Retry-After`` is known.
+        """
         import asyncio
 
-        context = contextvars.copy_context()
-        context.run(_WRITE_ARRIVED.set, arrived)
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self.kit_write_pool(), context.run, handler, body)
+        waiting = [device.id]
+        """Counted among the device's writes waiting for a thread, until it is not."""
+
+        def stop_waiting() -> None:
+            with self._lock:
+                if waiting:
+                    waiting.clear()
+                    left = self._write_waiting.get(device.id, 1) - 1
+                    if left > 0:
+                        self._write_waiting[device.id] = left
+                    else:
+                        self._write_waiting.pop(device.id, None)
+
+        def write_now() -> tuple[dict[str, object], str]:
+            stop_waiting()
+            self.kit_write_still_allowed(device)
+            return handler(body)
+
+        with self._lock:
+            queued = self._write_waiting.get(device.id, 0)
+            if queued >= WRITE_WAITING_PER_DEVICE:
+                raise RequestError(
+                    409,
+                    "busy",
+                    f"this device has {queued} writes waiting for the machine already — "
+                    "send this once they are done",
+                )
+            self._write_waiting[device.id] = queued + 1
+        try:
+            context = contextvars.copy_context()
+            context.run(_WRITE_ARRIVED.set, arrived)
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(self.kit_write_pool(), context.run, write_now)
+        finally:
+            stop_waiting()  # it never ran: cancelled, or its pool shut down first
 
     def kit_socket_opened(self, device_id: str, closer: Callable[[int], None]) -> None:
         """Count a device's new socket; past :data:`WS_SOCKETS_PER_DEVICE`, close its oldest."""
@@ -3965,9 +4039,16 @@ def build_remote_app(
         Never more than :data:`AUTO_OFF_CEILING` ahead; a Remote with no deadline
         (Never) has nothing to extend, 409 ``no_auto_off``. The TUI adopts the later
         deadline (``RemoteController.enforce_auto_off``) and ``serve``'s timer re-arms.
+        The thread that extends asks the gates again first
+        (:meth:`RemoteKit.kit_write_still_allowed`): it may have waited for the pool.
         """
+
+        def extend_now() -> datetime | None:
+            kit.kit_write_still_allowed(device)
+            return runtime.extend_auto_off(_remote_now())
+
         try:
-            extended = await asyncio.to_thread(runtime.extend_auto_off, _remote_now())
+            extended = await asyncio.to_thread(extend_now)
         except OSError as exc:  # the deadline was put back (Runtime._write_state's undo)
             log.warning("remote: an extend could not be saved: %s", exc)
             return kit.kit_refuse(503, "remote_state_unwritable", STATE_UNWRITABLE)
@@ -3992,7 +4073,9 @@ def build_remote_app(
         the write switch says. Another id is a change to who can reach the fleet,
         so a read-only phone cannot sign every other phone out, the owner's
         included. An id that is not a device's shape, or no device's, is a 404.
-        The revoke writes ``remote.json`` in a worker thread, as an unlock does.
+        The revoke writes ``remote.json`` in a worker thread, as an unlock does, and
+        that thread asks the gates again first for another device's
+        (:meth:`RemoteKit.kit_write_still_allowed`): it may have waited for the pool.
         """
         device = kit.kit_device(request)
         device_id = request.path_params["device_id"]
@@ -4001,8 +4084,16 @@ def build_remote_app(
             return kit.kit_refuse(404, "not_found", "no such device")
         if not own and not kit.kit_write_allowed():
             return kit.kit_refuse(403, "read_only", READ_ONLY_REASON)
+
+        def revoke_now() -> bool:
+            if not own:
+                kit.kit_write_still_allowed(device)
+            return runtime.revoke_device(device_id)
+
         try:
-            revoked = await asyncio.to_thread(runtime.revoke_device, device_id)
+            revoked = await asyncio.to_thread(revoke_now)
+        except RequestError as exc:
+            return JSONResponse(exc.request_error_body(), status_code=exc.status)
         except OSError as exc:
             log.warning("remote: a revoke could not be saved: %s", exc)
             return kit.kit_refuse(503, "remote_state_unwritable", REVOKE_UNSAVED)
@@ -4093,7 +4184,7 @@ def build_remote_app(
         async def dispatched(body: dict[str, Any]) -> Response:
             nonlocal summary
             try:
-                result, summary = await kit.kit_run_write(handler, body, arrived)
+                result, summary = await kit.kit_run_write(handler, body, arrived, device)
                 status, payload = 200, result
             except RequestError as exc:
                 status, payload = exc.status, exc.request_error_body()

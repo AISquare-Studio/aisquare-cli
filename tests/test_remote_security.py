@@ -964,6 +964,22 @@ def test_revoking_another_device_needs_writes_and_closes_its_socket(
     assert _audit_lines()[-1][2:] == ["devices/revoke", other]
 
 
+def test_revoking_another_device_asks_the_gates_again_in_the_thread_that_revokes(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Writes were on when the request arrived, and off by the time a thread of the shared
+    pool revoked: as a queued write did, the revoke went ahead, the owner's own phone
+    signed out by a device whose writes were just switched off (sweep 2 of #243)."""
+    mine, theirs = make_client(app), make_client(app)
+    unlock(mine, runtime)
+    other = unlock(theirs, runtime).json()["device"]["id"]
+    monkeypatch.setattr(app.kit, "kit_write_allowed", lambda: True)  # on when it arrived
+    response = mine.delete(f"{base(runtime)}/api/devices/{other}")
+    assert (response.status_code, response.json()["error"]) == (403, "read_only")
+    assert other in runtime.device_ids()
+    assert [line for line in _audit_lines() if line[2] == "devices/revoke"] == []
+
+
 def _closed_with(ws: Any) -> int:
     for _ in range(400):
         message = receive_within(ws)
@@ -1145,6 +1161,24 @@ def test_extend_adds_an_hour_up_to_eight_hours_ahead(
         client.post(url, json={})
     capped = client.get(f"{base(runtime)}/api/remote").json()["auto_off_at"]
     assert capped == (clock.now + timedelta(hours=8)).isoformat()
+
+
+def test_an_extend_asks_the_gates_again_in_the_thread_that_extends(
+    app: Any, runtime: Runtime, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The switch is read when the request arrives, and the extend runs later, in a thread
+    of the pool every read and socket snapshot shares: as a write queued for its thread
+    did, an extend whose writes were switched off meanwhile still gave Remote another
+    public hour (sweep 2 of #243)."""
+    client = make_client(app)
+    unlock(client, runtime)
+    deadline = clock.now + timedelta(minutes=10)
+    runtime.set_auto_off(deadline)
+    monkeypatch.setattr(app.kit, "kit_write_allowed", lambda: True)  # on when it arrived
+    response = client.post(f"{base(runtime)}/api/remote/extend", json={})
+    assert (response.status_code, response.json()["error"]) == (403, "read_only")
+    assert runtime.auto_off_deadline() == deadline
+    assert [line for line in _audit_lines() if line[2] == "remote/extend"] == []
 
 
 def test_extend_never_brings_a_far_deadline_closer(runtime: Runtime, clock: Clock) -> None:

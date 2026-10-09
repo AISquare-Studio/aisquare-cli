@@ -167,6 +167,10 @@ The R panel's **Allow write actions** switch sets the same value. There is one
 write switch, the server's own, in `~/.aisquare/remote.json`: the shell and the
 panel both set it there, whether Remote is on or off, so they always agree and
 starting the TUI never changes it. The page's READ-ONLY sentence names both.
+Switching writes off, signing a phone out or turning Remote off also stops what
+that phone sent and the machine has not started yet: a write waiting behind a
+restart is refused, not run. One already running (a restart takes up to 40
+seconds) finishes.
 
 The writes, and the routes they use:
 
@@ -400,7 +404,8 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   Esc, Ctrl-C, Enter and its other control keys by name (a carriage return typed
   is the Enter key itself).
 - **Caps**: 64 KiB per request, 2 048 characters per keystroke message, 8 000
-  per note or tell and 200 for whom a note is to, 4 live connections per device.
+  per note or tell and 200 for whom a note is to, 4 live connections per device,
+  64 writes per device waiting for the machine (`busy` past that).
   A device turns its notifications on or off at most 6 times a minute and sends
   one test every 10 seconds; a subscription sent again unchanged, or an
   unsubscribe with nothing to remove, writes no audit line.

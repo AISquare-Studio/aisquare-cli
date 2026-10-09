@@ -649,6 +649,33 @@ def test_an_exported_config_dir_in_a_home_this_machine_lacks_is_never_offered_co
     assert list(work.iterdir()) == [], "nothing is made in the cwd"
 
 
+def test_the_other_readers_of_an_exported_homeless_config_dir_never_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same exported `~olduser/.claude` still raised RuntimeError one line after the
+    fixed reader, in the sign-in window's and a fleet spawn's environment
+    (carry_environment), and in `team spawn`/`team harness` (account_scope): a bare
+    expanduser (review of #257). The window gets it as this shell holds it, never joined
+    to the cwd, where its claude would make it."""
+    from aisquare.core import harness
+
+    if os.name == "nt":
+        pytest.skip("Windows guesses a ~user's home instead of failing to expand it")
+    homeless = "~aisquare-no-such-user/.claude"
+    _, carried = claude_accounts_service.carry_environment(
+        ["claude"], {"CLAUDE_CONFIG_DIR": homeless}, cwd=tmp_path
+    )
+    _, relative = claude_accounts_service.carry_environment(
+        ["claude"], {"CLAUDE_CONFIG_DIR": "profile"}, cwd=tmp_path
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", homeless)
+    scope = harness.account_scope()
+
+    assert carried["CLAUDE_CONFIG_DIR"] == homeless, carried
+    assert relative["CLAUDE_CONFIG_DIR"] == str(tmp_path / "profile"), "control: resolved"
+    assert scope != "default" and len(scope) == 12, scope
+
+
 @pytest.mark.parametrize("shape", ["new-profile", "never-started"])
 def test_a_config_dir_claude_code_has_not_made_is_offered_connect_beside_other_sites(
     runner: CliRunner, isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch, shape: str

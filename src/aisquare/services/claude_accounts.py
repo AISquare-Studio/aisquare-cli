@@ -1220,7 +1220,11 @@ def carry_environment(
     for var in CARRIED_VARS:
         value = view.get(var, "").strip()
         if value:
-            to_set[var] = str((base / Path(value).expanduser()).absolute())
+            path = paths.expand_user(Path(value))
+            # A `~olduser/…` naming a home this machine does not have travels as written,
+            # as this shell holds it: expanding it raised, and joined to the cwd it named a
+            # directory there for the window's claude to make (review of #257).
+            to_set[var] = value if paths.names_no_home(path) else str((base / path).absolute())
     to_unset = [var for var in CARRIED_VARS if var not in to_set]
     argv = list(command)
     if to_unset:

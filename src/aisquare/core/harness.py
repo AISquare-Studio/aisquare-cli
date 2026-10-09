@@ -61,7 +61,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 from aisquare.core import spawn
-from aisquare.core.paths import aisquare_home
+from aisquare.core.paths import aisquare_home, expand_user
 
 if TYPE_CHECKING:  # runtime import stays lazy: config imports harness back
     from aisquare.core.config import TeamSettings
@@ -396,7 +396,7 @@ def account_scope() -> str:
     raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     if not raw:
         return "default"
-    resolved = str(Path(raw).expanduser())
+    resolved = str(expand_user(Path(raw)))  # a `~olduser/…` keys as written (#257)
     return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:12]
 
 

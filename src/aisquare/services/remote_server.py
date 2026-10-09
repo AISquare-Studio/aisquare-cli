@@ -2686,6 +2686,12 @@ def live_writes() -> Writes:
         judged and typed into under the agent's action lock (:func:`_remote_keys_turn`).
         Once a byte may have reached the pane, a failure is still audited: the trail
         exists for what a device did to a live agent, finished or not.
+
+        ``dialog_guard`` is for a sender that does not see the pane, the page's
+        Transcript tab: nothing is typed while the agent may be showing a dialog,
+        which the text and its Enter would answer (409 ``dialog_open``,
+        ``remote_actions.action_keys_guard``). The Live tab shows the dialog, and
+        its keys are how one is answered, so they go without it.
         """
         from aisquare.services import fleet as fleet_service
 
@@ -2694,6 +2700,7 @@ def live_writes() -> Writes:
         keys = [] if body.get("keys") is None else check_remote_key_names(body["keys"])
         enter = _remote_flag(body, "enter")
         confirmed = _remote_flag(body, "confirm_exit")
+        guarded = _remote_flag(body, "dialog_guard")
         project = _optional_ref(body, "project")
         if text and len(text) > SEND_KEYS_TEXT_MAX:
             raise RequestError(
@@ -2719,6 +2726,8 @@ def live_writes() -> Writes:
             if refusal is not None:
                 said = refusal.format(label=label)
                 raise RequestError(409, "not_agent", f"{said} — nothing was sent")
+            if guarded:
+                remote_actions.action_keys_guard(target, label, agent.id)
             exits = sum(key in EXIT_KEYS for key in keys)
             if exits and not exit_keys.exit_keys_allowed(
                 (target.id, label), exits, confirmed=confirmed

@@ -1554,6 +1554,28 @@ def test_the_transcript_tabs_keys_never_wait_for_a_pane(boot_report: dict[str, A
     }
 
 
+def test_send_on_the_transcript_tab_types_nothing_while_a_prompt_may_be_up(
+    boot_report: dict[str, Any],
+) -> None:
+    """Sweep of #243, round 4: the Transcript tab shows no pane, and its Send typed the text
+    and Enter into whatever the agent showed, ⏎ being on by default: into a Bash prompt,
+    the Enter took "1. Yes". It asks the machine to type nothing while a prompt may be up
+    (``dialog_guard``), and a refusal keeps the text and says where to look. The Live
+    tab's Send, beside the prompt, goes without it (the write bodies' test)."""
+    guarded = boot_report["transcriptSendGuarded"]
+    sent = {"agent": "coder-1", "project": "prj_x", "enter": True, "dialog_guard": True}
+    assert guarded["bodies"] == [
+        {**sent, "text": "no - run the tests instead"},
+        {**sent, "text": "run the tests"},
+    ]
+    assert guarded["refused"] == {
+        "toast": "Not sent — coder-1 may be showing a prompt that this would answer. "
+        "Look at it on Live first.",
+        "typed": "no - run the tests instead",
+    }
+    assert guarded["typed"] == "", "sent, so the box is cleared"
+
+
 def test_a_sheet_keeps_focus_where_it_put_it_and_closes_onto_the_screen_once_its_opener_went(
     boot_report: dict[str, Any],
 ) -> None:

@@ -135,6 +135,19 @@ def test_confirm_exit_that_is_not_a_json_boolean_is_refused_before_the_guard(
     assert pane.sent == []
 
 
+@pytest.mark.parametrize("value", NOT_BOOLEANS, ids=repr)
+def test_a_dialog_guard_that_is_not_a_json_boolean_is_refused_and_types_nothing(
+    pane: FakePane, value: object
+) -> None:
+    """``dialog_guard`` keeps a sender that cannot see the pane from answering a prompt with
+    its text and Enter. Read by ``bool()``, ``0`` would have typed them all the same."""
+    with pytest.raises(RequestError) as refused:
+        _send_keys({"agent": "coder-1", "text": "1", "enter": True, "dialog_guard": value})
+    assert (refused.value.status, refused.value.error) == (400, "invalid")
+    assert refused.value.message == "'dialog_guard' must be true or false"
+    assert pane.sent == []
+
+
 def test_a_json_boolean_or_none_is_read_as_it_says(pane: FakePane) -> None:
     _send_keys({"agent": "coder-1", "keys": ["Down"], "enter": False})
     _send_keys({"agent": "coder-1", "keys": ["Up"], "enter": None})

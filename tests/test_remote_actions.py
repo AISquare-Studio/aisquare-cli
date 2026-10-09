@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -29,9 +30,20 @@ from aisquare.core.paths import remote_audit_path
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError
 from aisquare.core.workspace import find_project_root, project_id_for
-from aisquare.models import FleetAgent, FleetAgentState, FleetAgentStatus, ProjectInfo, TeamTask
+from aisquare.models import (
+    ClaudeAccount,
+    FleetAgent,
+    FleetAgentState,
+    FleetAgentStatus,
+    ProjectInfo,
+    TeamEvent,
+    TeamSession,
+    TeamTask,
+)
+from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_actions, remote_needs, remote_server
+from aisquare.services.claude_accounts import AccountChoice
 from aisquare.services.fleet import RestartReceipt, StopReceipt, SwitchReceipt, TellResult
 from aisquare.services.remote_actions import (
     ACTION_AUDIT_EXCERPT,
@@ -638,7 +650,12 @@ def log() -> list[str]:
 
 class FleetCalls:
     """``fleet_service.tell/stop/restart/switch``, replaced: every call is written down and
-    answered with what the test gave for it, a receipt or an error to raise."""
+    answered with what the test gave for it, a receipt or an error to raise.
+
+    A ``before_stop`` (the dialog guard, as the fleet's last check) runs first, as
+    ``fleet.switch`` and ``fleet.restart`` run it once their own refusals have passed. A
+    call it refuses is not written down: the fleet did nothing then. The answer, an error
+    included, is what came after it."""
 
     def __init__(self, log: list[str]) -> None:
         self.log = log
@@ -649,7 +666,9 @@ class FleetCalls:
         """Set by a test: every call waits for it, a request held mid-flight."""
 
     def fake(self, name: str) -> Callable[..., object]:
-        def call(*args: Any, **kwargs: object) -> object:
+        def call(*args: Any, **kwargs: Any) -> object:
+            if kwargs.get("before_stop") is not None:
+                kwargs["before_stop"]()
             self.calls.append((name, args, kwargs))
             self.log.append(f"fleet {name}")
             self.entered.set()
@@ -698,6 +717,19 @@ class FakePane:
             raise TmuxError(f"can't find pane: {pane_id}")
         self.sent.append((pane_id, "paste", text))
         self.log.append("paste")
+
+    def send_literal(self, pane_id: str, text: str) -> None:
+        """``send-keys``' text: keystrokes, not a paste."""
+        self.sent.append((pane_id, "literal", text))
+        self.log.append("literal")
+
+    def pane_facts(self, pane_id: str) -> SimpleNamespace:
+        """What ``fleet tell`` and ``send-keys`` ask before they type: the pane runs the agent."""
+        return SimpleNamespace(dead=False, current_command="claude")
+
+    def started_at(self) -> datetime:
+        """The server started before every row here was written: no pane outlived its row."""
+        return T0 - timedelta(hours=1)
 
     def keys(self) -> list[str]:
         return [what for _pane, kind, what in self.sent if kind == "key"]
@@ -751,6 +783,8 @@ class FakeNeeds:
         self.lag = 1
         self.items: tuple[NeedsItem, ...] = ()
         self.tail: TranscriptTail | None = None
+        self.session: TeamSession | None = None
+        """The row's board session, for the predicates that read it."""
         self.pane_quiet: bool | None = True
         self.before_read: Callable[[], None] | None = None
         self.reads = 0
@@ -776,7 +810,11 @@ class FakeNeeds:
             row = store.fleet_agent_by_label(project.id, label, live_only=False)
         if row is None:
             raise fleet_service.NoSuchAgent(f"no agent {label!r}")
-        status = None if self.window_gone else FleetAgentStatus(agent=row, state=self.state)
+        status = (
+            None
+            if self.window_gone
+            else FleetAgentStatus(agent=row, state=self.state, session=self.session)
+        )
         snap = AgentNow(
             project=project,
             status=status,
@@ -957,11 +995,13 @@ def test_a_stop_whose_claims_were_not_released_is_still_a_200_that_says_so(
 def test_restart_passes_fresh_the_pin_and_spawned_by_user(
     phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
 ) -> None:
+    """The dialog guard goes as the restart's last check before the stop."""
     _row(project)
     response = phone.post("agent/restart", **PINNED, fresh=True)
     assert response.status_code == 200, response.text
     ((name, args, kwargs),) = fleet.calls
     assert (name, args[0].id, args[1:]) == ("restart", project.id, (LABEL,))
+    assert isinstance(kwargs.pop("before_stop"), remote_actions.ActionGuardLast)
     assert kwargs == {"fresh": True, "spawned_by": "user", "agent_id": "agt_one"}
     assert phone.audit() == [
         (
@@ -971,15 +1011,25 @@ def test_restart_passes_fresh_the_pin_and_spawned_by_user(
     ]
 
 
-def test_switch_passes_to_fresh_and_reason_and_spawned_by_user(
+def test_switch_passes_to_fresh_reason_the_pin_and_spawned_by_user(
     phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
 ) -> None:
+    """The pin goes to the fleet too, as a stop's and a restart's do: the manager's switch runs
+    in another process, which the remote's lock does not hold back. The dialog guard goes as
+    the switch's last check before the stop."""
     _row(project)
     response = phone.post("agent/switch", **PINNED, to="2", reason="session limit")
     assert response.status_code == 200, response.text
     ((name, args, kwargs),) = fleet.calls
     assert (name, args[0].id, args[1:]) == ("switch", project.id, (LABEL,))
-    assert kwargs == {"to": "2", "fresh": False, "reason": "session limit", "spawned_by": "user"}
+    assert isinstance(kwargs.pop("before_stop"), remote_actions.ActionGuardLast)
+    assert kwargs == {
+        "to": "2",
+        "fresh": False,
+        "reason": "session limit",
+        "spawned_by": "user",
+        "agent_id": "agt_one",
+    }
     assert phone.audit() == [
         (
             "agent/switch",
@@ -1156,10 +1206,26 @@ def test_a_card_whose_item_is_still_current_goes_through_with_one_read(
     _row(project)
     needs.state = "limited"
     needs.items = (_item(project, "ny_limit"),)
-    response = phone.post("agent/switch", **PINNED, needs_id="ny_limit")
+    response = phone.post("agent/stop", **PINNED, needs_id="ny_limit")
     assert response.status_code == 200, response.text
-    assert fleet.names() == ["switch"]
+    assert fleet.names() == ["stop"]
     assert needs.reads == 1, "the card's read serves the dialog guard too"
+
+
+@pytest.mark.parametrize("name", ["agent/restart", "agent/switch"])
+def test_a_restart_or_switch_from_a_card_reads_the_agent_again_right_before_the_stop(
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo, name: str
+) -> None:
+    """Their guard is their last check, after the account lookup, which can read every
+    account's usage over the network: the card's read is seconds old by then, and a prompt
+    that opened meanwhile would take the stop's Enter."""
+    _row(project)
+    needs.state = "limited"
+    needs.items = (_item(project, "ny_limit"),)
+    response = phone.post(name, **PINNED, needs_id="ny_limit")
+    assert response.status_code == 200, response.text
+    assert fleet.names() == [name.removeprefix("agent/")]
+    assert (needs.scans, needs.reads) == (2, 2), "the card's read, then the guard's own"
 
 
 @pytest.mark.parametrize(
@@ -1425,11 +1491,16 @@ def test_a_fleet_call_that_fails_after_a_dismissal_records_both(
     project: ProjectInfo,
     name: str,
 ) -> None:
+    """The trail has both, and so does the phone: the fleet's sentence cannot know that the
+    agent's prompt was answered No before it failed (sweep of #243, round 4)."""
     _row(project)
     needs.dialog = True
     fleet.answers[name.removeprefix("agent/")] = fleet_service.FleetError("tmux went away")
     response = phone.post(name, **PINNED, dismiss_dialog=True)
-    assert response.status_code == 409 and response.json()["error"] == "fleet_error"
+    assert response.status_code == 409 and response.json() == {
+        "error": "fleet_error",
+        "message": "tmux went away — Escape had been sent first, answering its prompt No",
+    }
     assert pane.keys() == ["Escape"]
     assert phone.audit() == [(name, f"{_acted_on(name, project)} dismissed=yes failed=fleet_error")]
 
@@ -1560,6 +1631,8 @@ def test_a_request_id_still_running_is_409_in_progress(
 def test_auto_is_fleet_tell_and_answers_what_the_cli_prints_plus_mode_and_project(
     phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
 ) -> None:
+    """``fleet tell`` of the row the lock read, pinned: a manager's restart in another process
+    may hand the label on in between. The agent is read once first, for a dialog."""
     _row(project)
     printed = CliRunner().invoke(cli, ["--json", "fleet", "tell", LABEL, "ship it"])
     assert printed.exit_code == 0, printed.output
@@ -1571,12 +1644,12 @@ def test_auto_is_fleet_tell_and_answers_what_the_cli_prints_plus_mode_and_projec
         "tell",
         project.id,
         (LABEL, "ship it"),
-        {"sender": None},
+        {"sender": None, "agent_id": "agt_one"},
     )
     answered = response.json()
     assert (answered.pop("mode"), answered.pop("project")) == ("auto", project.id)
     assert answered == json.loads(printed.stdout)
-    assert needs.reads == 0, "auto is fleet tell itself, which reads the agent on its own"
+    assert (needs.scans, needs.reads) == (1, 1), "one read, for a dialog; fleet tell reads its own"
     assert phone.audit() == [
         ("agent/tell", f'tell coder-1@{project.id} mode=auto delivered=no text=7ch "ship it"')
     ]
@@ -2320,3 +2393,347 @@ def test_prompt_types_into_a_quiet_waiting_agent_that_has_no_transcript(
     response = phone.post("agent/tell", agent=LABEL, text="hi", mode="prompt")
     assert response.status_code == 200, response.text
     assert [kind for _pane, kind, _what in pane.sent] == ["paste", "key"]
+
+
+# --- what may answer a prompt: auto's tell, and send-keys with the guard -----------------------
+#
+# Review of #243, round 4: every path that types an Enter or a digit into an agent reads it
+# first, as the guard of stop, restart and switch does (``action_may_answer``).
+
+PROMPT_UP = "it is showing a prompt, which typing would answer"
+TOOL_PENDING = "it has a tool pending, and a prompt for it may have just opened"
+
+
+def _notes(project: ProjectInfo) -> list[TeamEvent]:
+    """The project's board notes, oldest first."""
+    with store_session() as store:
+        events = store.recent_events(project.id, limit=50)
+    return sorted((event for event in events if event.kind == "note"), key=lambda e: e.seq)
+
+
+@pytest.mark.parametrize(
+    ("setup", "why"),
+    [
+        ({"dialog": True}, PROMPT_UP),
+        ({"tail": _a_prompt_just_drawn(), "pane_quiet": False}, TOOL_PENDING),
+        (
+            {"tail": _a_prompt_just_drawn(), "pane_quiet": False, "state": "working"},
+            "it is working",
+        ),
+    ],
+    ids=["a prompt", "a prompt too new to see", "a tool at work"],
+)
+def test_an_auto_tell_while_a_prompt_may_be_up_is_a_board_note_and_never_fleet_tell(
+    phone: Phone,
+    fleet: FleetCalls,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    setup: dict[str, object],
+    why: str,
+) -> None:
+    """``fleet tell`` types into a row that reads ``waiting``, whatever its pane shows. Auto
+    files the note fleet tell files for an agent it does not type into, says why, and the
+    pane gets nothing. A prompt in its first seconds, a tool use whose pane still prints,
+    cannot be told from a tool at work, so it counts. A row that reads ``working`` is told
+    what ``fleet tell`` tells it: the note is what that would have filed too."""
+    _row(project)
+    needs.state = "waiting"
+    for attribute, value in setup.items():
+        setattr(needs, attribute, value)
+    response = phone.post("agent/tell", agent=LABEL, agent_id="agt_one", text="use the test DB")
+    assert response.status_code == 200, response.text
+    (note,) = _notes(project)
+    assert (note.to_role, note.text) == (LABEL, "use the test DB")
+    assert response.json() == {
+        "label": LABEL,
+        "delivered": False,
+        "how": f"{why} — filed as board note #{note.seq} to coder-1",
+        "mode": "auto",
+        "project": project.id,
+    }
+    assert fleet.calls == [] and pane.sent == []
+    assert phone.audit() == [
+        (
+            "agent/tell",
+            f'tell coder-1@{project.id} mode=auto delivered=no text=15ch "use the test DB"',
+        )
+    ]
+
+
+def test_an_auto_tell_never_types_into_a_permission_prompt_left_for_half_an_hour(
+    phone: Phone,
+    own_predicates: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #243, round 4: coder-1 stopped at a Bash prompt overnight, and in the
+    morning the menu's Tell said "don't run that, use the test DB". The session still
+    says ``attention``, but the board's word goes stale after 30 minutes, and
+    ``fleet._derive`` reads the quiet pane as ``waiting``. ``fleet tell`` typed into
+    it, and its Enter took "1. Yes": the command the message meant to refuse ran.
+    Needs-you's own predicate reads that row as a prompt, so auto files the note
+    instead. The control: once the session says ``waiting``, the same tell is typed."""
+    _row(project)
+    asked = T0 - timedelta(hours=8)
+    own_predicates.state = "waiting"
+    own_predicates.session = TeamSession(
+        id="ses_one",
+        project_id=project.id,
+        role="coder",
+        started_at=asked,
+        last_seen_at=asked,
+        state="attention",
+    )
+
+    def status_of(agent: FleetAgent) -> FleetAgentStatus:
+        """``fleet tell``'s own read of the row, as ``_derive`` words a stale attention."""
+        return FleetAgentStatus(agent=agent, state="waiting", session=own_predicates.session)
+
+    monkeypatch.setattr(fleet_service, "status_of", status_of)
+    text = "don't run that, use the test DB"
+    response = phone.post("agent/tell", agent=LABEL, text=text)
+    assert response.status_code == 200, response.text
+    assert response.json()["delivered"] is False
+    assert response.json()["how"].startswith(PROMPT_UP)
+    assert pane.sent == [], "neither the text nor its Enter reached the prompt"
+    assert [(note.to_role, note.text) for note in _notes(project)] == [(LABEL, text)]
+
+    own_predicates.session = own_predicates.session.model_copy(update={"state": "waiting"})
+    typed = phone.post("agent/tell", agent=LABEL, text="carry on")
+    assert typed.status_code == 200, typed.text
+    assert typed.json()["delivered"] is True
+    assert pane.sent == [("%7", "paste", "carry on"), ("%7", "key", "Enter")]
+
+
+@pytest.mark.parametrize(
+    ("setup", "message"),
+    [
+        (
+            {"dialog": True},
+            "coder-1 is showing a prompt; typing now would answer it — "
+            "answer it or dismiss it first",
+        ),
+        (
+            {"tail": _a_prompt_just_drawn(), "pane_quiet": False},
+            "coder-1 has a tool pending, and a prompt for it may have just opened; typing "
+            "now could answer it — look at its pane first",
+        ),
+    ],
+    ids=["a prompt", "a prompt too new to see"],
+)
+def test_send_keys_with_the_dialog_guard_types_nothing_while_a_prompt_may_be_up(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    setup: dict[str, object],
+    message: str,
+) -> None:
+    """Sweep of #243, round 4: the Transcript tab, which shows no pane, has the input bar
+    too, and its Send posted the text and Enter, ⏎ being on by default. Into a Bash
+    prompt the Enter took "1. Yes", and a digit in the text picked that option. With
+    ``dialog_guard`` nothing is typed while the agent may show one. The Live tab, which
+    shows the prompt, sends without it, and is typed as before."""
+    _row(project)
+    for attribute, value in setup.items():
+        setattr(needs, attribute, value)
+    body = {"agent": LABEL, "text": "no - run the tests instead", "enter": True}
+    refused = phone.post("send-keys", **body, dialog_guard=True)
+    assert refused.status_code == 409
+    assert refused.json() == {"error": "dialog_open", "message": message}
+    assert pane.sent == [] and phone.audit() == []
+    sent = phone.post("send-keys", **body)
+    assert sent.status_code == 200, sent.text
+    assert pane.sent == [("%7", "literal", body["text"]), ("%7", "key", "Enter")]
+
+
+def test_send_keys_with_the_dialog_guard_types_at_a_prompt_that_shows_none(
+    phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    """The guard reads the agent's own facts, once: never the project's scan, which keys
+    would wait on."""
+    _row(project)
+    needs.state = "waiting"
+    sent = phone.post("send-keys", agent=LABEL, text="carry on", enter=True, dialog_guard=True)
+    assert sent.status_code == 200, sent.text
+    assert pane.sent == [("%7", "literal", "carry on"), ("%7", "key", "Enter")]
+    assert (needs.scans, needs.reads) == (0, 1)
+
+
+def test_send_keys_whose_label_was_handed_on_while_the_guard_looked_types_nothing(
+    phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    """The keys were for the row read under the lock; the guard's read must be of it too."""
+    _row(project)
+    needs.state = "waiting"
+    needs.before_read = lambda: _replaced(project)
+    refused = phone.post("send-keys", agent=LABEL, text="1", enter=True, dialog_guard=True)
+    assert refused.status_code == 409
+    assert refused.json() == {
+        "error": "stale",
+        "message": "'coder-1' is another agent now (agt_new) — nothing was done",
+        "current": {"agent_id": "agt_new"},
+    }
+    assert pane.sent == []
+
+
+# --- the switch, as fleet.switch itself makes it -------------------------------------------------
+
+
+def _account(slot: int) -> ClaudeAccount:
+    return ClaudeAccount(slot=slot, config_dir=Path(f"/nonexistent/claude-{slot}"), managed=True)
+
+
+def _fleet_switch_itself(
+    monkeypatch: pytest.MonkeyPatch, choice: AccountChoice | None
+) -> list[str]:
+    """``fleet.switch`` as main has it, short of a second Claude login: ``choice`` is what the
+    account lookup answers (``None``: the lookup itself, over no accounts at all), a replay
+    can start, and ``fleet.stop`` writes down the row it was asked to stop, then fails, so
+    nothing is started. Returns what it wrote down."""
+    stopped: list[str] = []
+
+    def stop(project: ProjectInfo, label: str, **kwargs: object) -> StopReceipt:
+        stopped.append(str(kwargs["agent_id"]))
+        raise fleet_service.FleetError("tmux went away")
+
+    monkeypatch.setattr(fleet_service, "stop", stop)
+    monkeypatch.setattr(
+        fleet_service, "_refuse_a_replay_that_cannot_start", lambda agent, session: None
+    )
+    if choice is not None:
+        monkeypatch.setattr(
+            claude_accounts_service, "choose_for_handover", lambda *args, **kwargs: choice
+        )
+    return stopped
+
+
+def test_a_switch_leaves_alone_the_replacement_that_took_the_label_after_the_lock_checked(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sweep of #243, round 4: the manager's ``fleet switch``, in another process, had ended
+    agt_one and was recording its replacement while the phone's Switch, pinned to agt_one,
+    took the lock. The pin held there, against the ended row, and ``fleet.switch`` read the
+    label again: it sent the replacement ``/exit`` and moved it to a third account. The
+    pin goes with the call now, and the replacement is not touched."""
+    _row(project, ended=True)
+    stopped = _fleet_switch_itself(monkeypatch, AccountChoice(_account(3), "headroom", []))
+    newest_row = remote_actions.action_newest_row
+    reads: list[str | None] = []
+
+    def handed_on_after_the_locks_read(target: ProjectInfo, label: str) -> FleetAgent | None:
+        row = newest_row(target, label)
+        reads.append(None if row is None else row.id)
+        if len(reads) == 2:  # the read under the lock: the replacement is recorded just after
+            _row(project, "agt_new", minute=1)
+        return row
+
+    monkeypatch.setattr(remote_actions, "action_newest_row", handed_on_after_the_locks_read)
+    response = phone.post("agent/switch", **PINNED)
+    assert reads == ["agt_one", "agt_one"], "the pin held under the lock"
+    assert stopped == [] and pane.sent == [], "the replacement was not stopped"
+    assert (response.status_code, response.json()["error"]) == (404, "no_such_agent")
+    assert "'coder-1' is another agent now (agt_new)" in response.json()["message"]
+
+
+@pytest.mark.parametrize(
+    ("to", "slot", "choice", "said"),
+    [
+        ("alise", None, None, "no Claude account is called 'alise'"),
+        (None, 2, AccountChoice(_account(2), "headroom", []), "'coder-1' already runs on"),
+        (None, 2, AccountChoice(None, None, []), "no other account with headroom for 'coder-1'"),
+    ],
+    ids=["a typo", "the account it is on", "no account with room"],
+)
+def test_a_switch_the_fleet_refuses_up_front_sends_no_escape_first(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    to: str | None,
+    slot: int | None,
+    choice: AccountChoice | None,
+    said: str,
+) -> None:
+    """Sweep of #243, round 4: with a prompt up, a switch to ``alise`` (a typo) was refused
+    ``dialog_open``. Its retry with ``dismiss_dialog`` sent the Escape, which answered the
+    prompt "No", and only then did the switch find no account of that name; the page was
+    not told an Escape had gone. The guard is the switch's last check now: what the switch
+    refuses up front, it refuses with nothing sent, and nothing on the trail."""
+    with store_session() as store:
+        store.upsert_fleet_agent(_agent(project).model_copy(update={"account_slot": slot}))
+    needs.dialog = True
+    stopped = _fleet_switch_itself(monkeypatch, choice)
+    body: dict[str, object] = {**PINNED, "dismiss_dialog": True}
+    if to is not None:
+        body["to"] = to
+    response = phone.post("agent/switch", **body)
+    assert (response.status_code, response.json()["error"]) == (409, "fleet_error")
+    assert said in response.json()["message"]
+    assert pane.sent == [] and stopped == []
+    assert phone.audit() == [], "nothing reached the agent"
+
+
+def test_a_switch_the_fleet_takes_sends_its_escape_last_and_then_stops_the_agent(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control: an account with room, so the guard's Escape goes, once, then the stop.
+    A stop that fails after it is on the trail with both."""
+    _row(project)
+    needs.dialog = True
+    stopped = _fleet_switch_itself(monkeypatch, AccountChoice(_account(3), "headroom", []))
+    response = phone.post("agent/switch", **PINNED, dismiss_dialog=True)
+    assert (response.status_code, response.json()["error"]) == (409, "fleet_error")
+    assert pane.keys() == ["Escape"] and stopped == ["agt_one"]
+    assert phone.audit() == [
+        ("agent/switch", f"{_acted_on('agent/switch', project)} dismissed=yes failed=fleet_error")
+    ]
+
+
+def test_a_restart_the_fleet_refuses_up_front_sends_no_escape_first(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The switch's case, in a restart: with a prompt up, a restart of coder-1, whose task
+    was closed meanwhile, was refused ``dialog_open``, and its retry with ``dismiss_dialog``
+    answered the prompt "No" before ``fleet.restart`` refused the closed task. The guard is
+    the restart's last check too: what it refuses up front, it refuses with nothing sent."""
+    done = TeamTask(
+        id="tsk_1",
+        project_id=project.id,
+        key="k",
+        title="ship",
+        status="done",
+        created_at=T0,
+        updated_at=T0,
+    )
+    with store_session() as store:
+        store.upsert_task(done)
+        store.upsert_fleet_agent(_agent(project).model_copy(update={"task_id": done.id}))
+    needs.dialog = True
+    stopped: list[str] = []
+
+    def stop(project: ProjectInfo, label: str, **kwargs: object) -> StopReceipt:
+        stopped.append(str(kwargs["agent_id"]))
+        raise fleet_service.FleetError("tmux went away")
+
+    monkeypatch.setattr(fleet_service, "stop", stop)
+    response = phone.post("agent/restart", **PINNED, dismiss_dialog=True)
+    assert (response.status_code, response.json()["error"]) == (409, "fleet_error")
+    assert "cannot restart 'coder-1': task tsk_1 is done" in response.json()["message"]
+    assert pane.sent == [] and stopped == []
+    assert phone.audit() == [], "nothing reached the agent"

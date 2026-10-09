@@ -293,12 +293,20 @@ when the agent shows a prompt, stop, restart and switch are refused with
 prompt and then goes on. For its first few seconds a permission prompt cannot be
 told from a tool at work, so they are refused the same way while any tool the
 agent called has no result yet; there the Esc also stops a running tool. A
-card's Tell and Interrupt & tell refuse a dialog the same way; the menu's plain
-Tell types only into an agent waiting at its prompt.
+restart or a switch checks first what it can, so what it would refuse anyway (a
+task closed meanwhile; for a switch, an account that does not exist, the one the
+agent is on, none with room) is refused before any Esc. A card's Tell and
+Interrupt & tell refuse a dialog the same way. The menu's plain Tell types only
+into an agent waiting at its prompt: while the agent may be showing a prompt,
+even one left unanswered for hours, the message is left as a board note instead.
+Send on the Transcript tab, which does not show the pane, types nothing while
+the agent may be showing a prompt, a tool with no result yet included; send from
+Live, where the pane shows what the keys would answer.
 
 Every action is pinned to the agent you looked at: if a manager restarted or
 switched it in the meantime, the action is refused as `stale` rather than
-applied to the replacement.
+applied to the replacement (as `no_such_agent` when that happens while the
+request runs).
 
 On a phone wide enough for eight keys (412 px is, 390 px is not) the key pad is
 one row, `Esc 1 2 3 ⏎ ↑ ↓ More` (⏎ being Enter), with the rest under More. On
@@ -498,6 +506,11 @@ with another endpoint or body is refused with `request_id_reused`. The server
 keeps the answers of a device's 50 newest writes and the ids of its 1000 newest:
 a retry of an older one is refused with `already_answered`, which says how it
 ended, and does not run again.
+
+`send-keys` types into the pane whatever it shows, a prompt included. A script
+that cannot see the pane adds `"dialog_guard": true`, as the Transcript tab
+does, and nothing is typed while the agent may be showing a prompt (409
+`dialog_open`).
 
 The code is `src/aisquare/services/remote_server.py` (the server and its gates)
 and `src/aisquare/services/remote_page.py` (the bundled page, whose files are in

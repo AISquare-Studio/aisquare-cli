@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from starlette.requests import Request
@@ -311,6 +311,40 @@ def test_expiry_reaches_a_device_that_never_asks_again() -> None:
     clock.now = T0 + ACTION_LEDGER_TTL
     ledger.ledger_recent("dev_other")
     assert ledger._finished == {} and ledger._running == {} and ledger._spent == {}
+
+
+def test_expiry_drops_the_old_and_keeps_the_young_in_the_order_they_came() -> None:
+    clock = Clock()
+    ledger = ActionLedger(clock=clock)
+    for n in range(ACTION_LEDGER_SIZE + 10):
+        clock.now = T0 + timedelta(seconds=n)
+        _finished(ledger, "dev_a", f"r{n}")
+    clock.now = T0 + ACTION_LEDGER_TTL + timedelta(seconds=4.5)  # r0..r4 are past it
+    assert [ledger.ledger_seen("dev_a", f"r{n}") for n in range(5)] == [None] * 5
+    assert ledger.ledger_seen("dev_a", "r5") == LedgerSeen(None, True, spent=200)
+    assert list(ledger._spent["dev_a"]) == [f"r{n}" for n in range(5, 10)]
+    assert len(ledger.ledger_recent("dev_a")) == ACTION_LEDGER_SIZE
+
+
+def test_dropping_what_expired_looks_only_at_what_it_drops() -> None:
+    """Every socket's every tick drops what expired, for every device, and a device keeps a
+    thousand ids: a pass that looked at every record and rebuilt each device's table cost
+    each tick what the whole ledger held (sweep 2 of #243). Records are oldest first, so a
+    pass stops at the first one young enough."""
+    looked: list[datetime] = []
+
+    class Now:
+        def __sub__(self, when: datetime) -> timedelta:
+            looked.append(when)
+            return T0 + ACTION_LEDGER_TTL - when
+
+    book = {
+        f"dev_{d}": {f"r{n}": ("held", T0 + timedelta(seconds=n)) for n in range(1_000)}
+        for d in range(3)
+    }
+    remote_actions._ledger_drop_expired(book, cast(datetime, Now()))  # r0 is past the TTL
+    assert [len(held) for held in book.values()] == [999] * 3
+    assert len(looked) == 6, "per device, the one it dropped and the first it kept"
 
 
 def test_the_ledger_keeps_the_answers_of_the_newest_fifty_per_device() -> None:

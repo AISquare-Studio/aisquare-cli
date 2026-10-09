@@ -156,16 +156,23 @@ def _ledger_now() -> datetime:
 def _ledger_drop_expired(
     book: dict[str, dict[str, tuple[_Record, datetime]]], now: datetime
 ) -> None:
-    """Forget every record of ``book`` (device → request id → (record, when)) past the TTL."""
+    """Forget every record of ``book`` (device → request id → (record, when)) past the TTL.
+
+    Each device's records are oldest first, every one added as it happens and a repeat
+    moved to the end, so the walk stops at the first one young enough: a pass costs what
+    it drops, not what is kept. Every socket's every tick makes one (the ``action``
+    frame), and a device's ids are kept by the thousand (:data:`ACTION_LEDGER_IDS`).
+    """
     for device_id in list(book):
-        kept = {
-            request_id: held
-            for request_id, held in book[device_id].items()
-            if now - held[1] < ACTION_LEDGER_TTL
-        }
-        if kept:
-            book[device_id] = kept
-        else:
+        held = book[device_id]
+        expired: list[str] = []
+        for request_id, (_record, when) in held.items():
+            if now - when < ACTION_LEDGER_TTL:
+                break
+            expired.append(request_id)
+        for request_id in expired:
+            del held[request_id]
+        if not held:
             del book[device_id]
 
 

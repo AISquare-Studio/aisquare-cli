@@ -898,6 +898,7 @@ def test_a_revoke_that_cannot_be_saved_holds_here_and_says_it_was_not_saved(
     response = mine.delete(f"{base(runtime)}/api/devices/{other}")
     assert (response.status_code, response.json()["error"]) == (503, "remote_state_unwritable")
     assert "revoked on the running Remote" in response.json()["message"]
+    assert f"run  aisquare remote revoke {other}  on the machine" in response.json()["message"]
     assert other not in runtime.device_ids()
     assert theirs.get(f"{base(runtime)}/api/board").status_code == 401
     assert _audit_lines()[-1][2:] == ["devices/revoke", f"{other} unsaved"]

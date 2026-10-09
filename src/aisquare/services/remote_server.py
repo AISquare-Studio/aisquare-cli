@@ -3263,12 +3263,15 @@ STATE_UNWRITABLE = (
 path or the error, which a phone that has not unlocked yet may read: the log has both."""
 REVOKE_UNSAVED = (
     "revoked on the running Remote, but the machine's ~/.aisquare/remote.json would not write "
-    "(a full disk, or a home it may not write): this Remote saves it once that is fixed on "
-    "the machine, and a Remote turned on again before then would take the device back"
+    "(a full disk, or a home it may not write): once it can, run  aisquare remote revoke {device}  "
+    "on the machine, as until it is saved a change to that file from a shell, or a Remote "
+    "turned on again, would take the device back"
 )
-"""503 ``remote_state_unwritable`` for a revoke: it holds in memory, where the gate reads it, and
-the next flush that can write saves it (:meth:`Runtime.flush_last_seen` writes memory whenever
-it differs from the file)."""
+"""503 ``remote_state_unwritable`` for a revoke, ``{device}`` its id: it holds in memory, where
+the gate reads it, and the next flush that can write saves it (:meth:`Runtime.flush_last_seen`
+writes memory whenever it differs from the file). Not always: a write from another process
+before then is read by this one (``reload_if_changed``) with the device still in it, so the
+sentence names the command that makes the revoke hold (review of #243, round 4)."""
 CRASHED = "the machine hit an error answering that"
 """500 ``internal_error``: what the ledger answers a retry of a request that crashed, in the
 words the page uses for a crash."""
@@ -4278,7 +4281,8 @@ def build_remote_app(
             log.warning("remote: a revoke could not be saved: %s", exc)
             target = "self" if own else device_id
             await asyncio.to_thread(audited, device.id, "devices/revoke", f"{target} unsaved")
-            return kit.kit_refuse(503, "remote_state_unwritable", REVOKE_UNSAVED)
+            unsaved = REVOKE_UNSAVED.format(device=device_id)
+            return kit.kit_refuse(503, "remote_state_unwritable", unsaved)
         if not revoked:
             return kit.kit_refuse(404, "not_found", "no such device")
         await asyncio.to_thread(

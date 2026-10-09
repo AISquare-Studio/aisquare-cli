@@ -1107,6 +1107,65 @@ def test_agents_status_names_a_directory_connect_refuses_as_the_doctor_does(
     assert missing == f"0/1 ok — missing in {claude_home}", missing
 
 
+def _trailing_comma(path: Path) -> None:
+    text = path.read_text(encoding="utf-8").rstrip()
+    path.write_text(text.removesuffix("}").rstrip() + ",\n}\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["a trailing comma", pytest.param("mode 000", marks=_NEEDS_DENIED_READS)],
+)
+def test_disconnect_refuses_hooks_it_cannot_take_out_and_keeps_the_record(
+    runner: CliRunner, claude_home: Path, shape: str
+) -> None:
+    """With one trailing comma, which Claude Code may read past, disconnect forgot the
+    directory and said "✓ disconnected" while all six hooks stayed in the file; mode 000
+    ended in a traceback (review of #257). It refuses before touching anything, with
+    uninstall's own reason, and the record stays, as uninstall keeps it."""
+    _connect(runner)
+    settings_path = claude_home / "settings.json"
+    if shape == "a trailing comma":
+        _trailing_comma(settings_path)
+    before = settings_path.read_bytes()
+    registry = paths.agents_registry_path().read_text(encoding="utf-8")
+    settings_path.chmod(0 if shape == "mode 000" else 0o644)
+    try:
+        human = runner.invoke(app, ["agents", "disconnect", "claude-code"])
+        machine = runner.invoke(app, ["--json", "agents", "disconnect", "claude-code"])
+    finally:
+        settings_path.chmod(0o644)
+    kept = settings_path.read_bytes(), paths.agents_registry_path().read_text(encoding="utf-8")
+    settings_path.write_text("{}", encoding="utf-8")  # readable again, hooks gone
+    _connect(runner)
+    control = runner.invoke(app, ["agents", "disconnect", "claude-code"])
+
+    assert human.exit_code == 1, human.output
+    assert human.output.startswith(f"✗ cannot take the hooks out of {claude_home}: its "), human
+    assert "disconnect again, or take aisquare's hooks out of it by hand" in human.output
+    payload = json.loads(machine.stdout)  # exactly one object
+    assert (payload["error"], payload["ref"]) == ("agent_file_unreadable", "claude-code")
+    assert str(payload["detail"]).startswith(f"cannot take the hooks out of {claude_home}: ")
+    assert kept == (before, registry), "nothing touched: the hooks and their record stay"
+    assert control.exit_code == 0 and "✓ disconnected claude-code" in control.output, control
+    assert not agent_core.hook_commands("claude-code"), "control: a file it can rewrite"
+
+
+def test_the_accounts_disconnect_still_forgets_a_slot_beside_an_unparseable_file(
+    claude_home: Path,
+) -> None:
+    """The refusal above is the command's, not the service's: removing an account, whose
+    directory leaves either way, calls the service, which forgets the record as before."""
+    agents_service.connect("claude-code", claude_home)
+    _trailing_comma(claude_home / "settings.json")
+
+    forgot = agents_service.disconnect("claude-code", claude_home)
+
+    assert forgot is True and agent_core.connected_dirs("claude-code") == [], "forgotten"
+    text = (claude_home / "settings.json").read_text(encoding="utf-8")
+    assert text.count(" hook ") == 6, "and the file is left as it was"
+
+
 def test_hooks_switched_off_are_not_connected_and_never_offered_connect(
     runner: CliRunner, claude_home: Path
 ) -> None:

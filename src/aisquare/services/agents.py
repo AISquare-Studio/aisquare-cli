@@ -120,6 +120,32 @@ def plugin_beside_note(name: str, config_dir: Path | None = None) -> str | None:
     )
 
 
+def disconnect_refusal(name: str, config_dir: Path | None = None) -> str | None:
+    """Why `agents disconnect` cannot take aisquare's hooks out of ``config_dir``, or ``None``.
+
+    A settings.json that holds aisquare's hooks but that it cannot rewrite (not UTF-8
+    JSON, or not an object with a ``hooks`` object), or one it cannot read at all:
+    uninstall's and upgrade's own reader (``lifecycle.settings_unreadable``). Passed by,
+    disconnect forgot the directory and said "✓ disconnected" while all six hooks stayed,
+    which Claude Code, reading the file more forgivingly, may still run; one it could
+    not read ended in a traceback (review of #257). Refused before anything is touched,
+    so the record stays, as uninstall keeps it, and the doctor goes on naming the file.
+    """
+    spec = agent_core.spec(name, config_dir)
+    if spec is None or spec.settings_path is None:
+        return None
+    from aisquare.services import lifecycle  # lazy: lifecycle imports this module
+
+    directory = spec.settings_path.parent
+    left = lifecycle.settings_unreadable(directory)
+    if left is None:
+        return None
+    return (
+        f"cannot take the hooks out of {directory}: {left} — fix that file and disconnect "
+        "again, or take aisquare's hooks out of it by hand"
+    )
+
+
 def disconnect_notes(name: str, config_dir: Path | None = None, *, removed: bool) -> list[str]:
     """What `agents disconnect` says beside its ✓, given whether it ``removed`` anything
     (:func:`disconnect`: hooks, or this home's record of the directory).

@@ -76,6 +76,10 @@ def connect(name: AgentName, config_dir: ConfigDir = None) -> None:
 @app.command("disconnect")
 def disconnect(name: AgentName, config_dir: ConfigDir = None) -> None:
     """Disconnect an agent (its already-imported context is kept)."""
+    refusal = agents_service.disconnect_refusal(name, config_dir)
+    if refusal is not None:
+        # Before anything is touched: hooks it cannot take out keep their record too.
+        fail(refusal, error="agent_file_unreadable", ref=name, detail=refusal)
     try:
         removed = agents_service.disconnect(name, config_dir)
     except KeyError:

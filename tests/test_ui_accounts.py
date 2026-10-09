@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
+from rich.cells import cell_len
 from textual.containers import Vertical
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
@@ -68,17 +69,12 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import device_flow, iam
 from aisquare.services import fleet as fleet_service
 from tests.pane_harness import asks_a_server, socket_of
-from tests.test_claude_accounts import fake_home as _redirected_home
 from tests.ui_workers import settle_page, settle_until
 
 T = TypeVar("T")
 SIZE = (140, 40)
 PRIVATE_SOCKET = f"asq-test-{os.getpid()}-ui-accounts"
 NOW = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
-
-#: The sibling file's redirected home, for the Rename tests that write the real registry:
-#: slot 1's ``~/.claude`` must be a directory of the test's, never the developer's.
-fake_home = _redirected_home
 
 
 # --- fixtures and helpers --------------------------------------------------------------------
@@ -1596,6 +1592,23 @@ def heard(view: AccountsView, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str
     return said
 
 
+def slow_set_alias(monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, threading.Event]:
+    """``set_alias`` held at its door until the test opens it: a write waiting on a busy store.
+
+    Returns ``(entered, release)``: set when the write is under way, and the gate it waits on.
+    """
+    entered, release = threading.Event(), threading.Event()
+    real_set_alias = accounts_service.set_alias
+
+    def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
+        entered.set()
+        release.wait(timeout=5)
+        return real_set_alias(ref, alias)
+
+    monkeypatch.setattr(accounts_service, "set_alias", set_alias)
+    return entered, release
+
+
 def test_every_row_can_be_renamed_slot_one_and_a_slot_with_no_login_included() -> None:
     overview = _overview(
         _status(1, "me@example.com"), _status(2, "two@example.com"), _status(3, None)
@@ -1675,7 +1688,7 @@ def test_enter_names_the_slot_through_the_service_off_the_ui_thread_and_the_row_
 
     monkeypatch.setattr(accounts_service, "set_alias", set_alias)
 
-    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], bool, str, str]:
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], bool, bool, str, str]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         before = line(view, 2)
@@ -1684,12 +1697,14 @@ def test_enter_names_the_slot_through_the_service_off_the_ui_thread_and_the_row_
         await pilot.press(*"Work", "enter")
         await settle(app)  # the write, then the frame AccountsChanged asked for
         await accounts_read(app)
-        return said, row(view, 2).renaming, before, line(view, 2)
+        back = app.focused is row(view, 2).query_one("#account-rename-2", Button)
+        return said, row(view, 2).renaming, back, before, line(view, 2)
 
-    said, still_open, before, after = drive_registry(go)
+    said, still_open, back_on_rename, before, after = drive_registry(go)
     assert calls == [("2", "Work", False)]  # the service, once, never on the UI thread
     assert said == [("✓ slot 2 is now called work", "ok")]  # the service's stored spelling
     assert not still_open
+    assert back_on_rename  # the field had the focus, so Rename gets it back
     assert aliases() == {1: None, 2: "work"}
     assert before.startswith("  2  account 2")
     assert after.startswith("  2  work")  # the next frame's label, not a guess
@@ -1751,6 +1766,189 @@ def test_a_name_the_service_refuses_is_said_and_the_field_stays_open_to_correct_
     assert aliases() == before == {1: None, 2: None, 3: "work"}  # nothing written
 
 
+def test_a_write_that_lands_after_the_user_moved_away_leaves_the_focus_where_they_put_it(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Success handed the focus back to *Rename* whenever the field was open, so a slow write
+    pulled the user back from the sidebar they had gone to meanwhile (review of #258)."""
+    core.create_account()
+    entered, release = slow_set_alias(monkeypatch)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, bool, str | None]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        try:
+            await pilot.click("#account-rename-2")
+            await pilot.press(*"work", "enter")
+            assert await asyncio.to_thread(entered.wait, 5)  # the write is under way…
+            app.sidebar.focus()  # …and the user goes to the sidebar before it lands
+            await pilot.pause()
+            moved = app.focused is app.sidebar
+        finally:
+            release.set()
+        await settle(app)
+        await pilot.pause()
+        return moved, row(view, 2).renaming, app.focused is app.sidebar, aliases()[2]
+
+    moved, still_open, stayed, saved = drive_registry(go)
+    assert moved  # the precondition: the focus really was elsewhere when the write landed
+    assert not still_open and saved == "work"  # the write landed and closed the field…
+    assert stayed  # …without taking the focus back from the sidebar
+
+
+def test_text_typed_while_the_write_waits_is_kept_as_the_next_name(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The field stays live while its write waits; success closed it and emptied it whatever
+    it said by then, so a typo fixed after Enter was thrown away unsaved (review of #258).
+    It closes only on the text it saved, and a second Enter saves the rest."""
+    core.create_account()
+    entered, release = slow_set_alias(monkeypatch)
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[tuple[bool, str, bool, str | None], bool, list[tuple[str, str]], str | None]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        try:
+            await pilot.click("#account-rename-2")
+            await pilot.press(*"work", "enter")
+            assert await asyncio.to_thread(entered.wait, 5)
+            await pilot.press("s")  # typed while the first write waits
+        finally:
+            release.set()
+        await settle(app)
+        await pilot.pause()
+        kept = (
+            row(view, 2).renaming,
+            field(view, 2).value,
+            app.focused is field(view, 2),
+            aliases()[2],
+        )
+        await pilot.press("enter")  # the second Enter saves it, and its success closes the field
+        await settle(app)
+        await pilot.pause()
+        return kept, row(view, 2).renaming, said, aliases()[2]
+
+    kept, still_open, said, saved = drive_registry(go)
+    assert kept == (True, "works", True, "work")  # the first write landed; the edit was kept
+    assert not still_open and saved == "works"
+    assert said == [("✓ slot 2 is now called work", "ok"), ("✓ slot 2 is now called works", "ok")]
+
+
+def test_a_slot_removed_while_its_field_is_open_is_said_and_its_row_leaves(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = core.create_account()
+
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], list[int], list[int]]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        await pilot.click("#account-rename-2")
+        await pilot.press(*"work")
+        accounts_service.remove(second)  # `aisquare accounts remove 2`, in another terminal
+        before = [r.slot for r in view.rows()]  # no frame since: the row is still here
+        await pilot.press("enter")
+        await settle(app)  # the refusal, then the frame AccountsChanged asked for
+        await accounts_read(app)
+        return said, before, [r.slot for r in view.rows()]
+
+    said, before, after = drive_registry(go)
+    with pytest.raises(accounts_service.NoSuchAccount) as vanished:
+        accounts_service.set_alias("2", "work")  # what the service says, to compare the page with
+    assert before == [1, 2]
+    assert said == [(f"✗ {vanished.value}", "error")]
+    assert after == [1]  # the next frame took the row away, and its field with it
+    assert aliases() == {1: None}  # the name landed nowhere else
+
+
+def test_a_rename_waits_its_turn_behind_an_arrange_write_still_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """*Rename* takes the same lock as *Default* and the arrows, so a rename pressed while an
+    arrangement is still writing writes after it, not beside it, and both report."""
+    default_in, release = threading.Event(), threading.Event()
+    order: list[str] = []
+
+    def set_default(ref: str | None, *, project: Any = None) -> None:
+        order.append(f"default {ref}: start")
+        default_in.set()
+        release.wait(timeout=5)
+        order.append(f"default {ref}: end")
+
+    def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
+        order.append(f"alias {ref} {alias}")
+        return _status(2, "two@example.com").account.model_copy(update={"alias": alias})
+
+    monkeypatch.setattr(accounts_service, "set_default", set_default)
+    monkeypatch.setattr(accounts_service, "set_alias", set_alias)
+    overview = _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[tuple[str, str]]]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        try:
+            await pilot.click("#account-default-2")
+            assert await asyncio.to_thread(default_in.wait, 5)  # Default is writing…
+            await pilot.click("#account-rename-2")
+            await pilot.press(*"work", "enter")
+            await asyncio.sleep(0.2)  # …and the rename's thread has had its chance to start
+            waiting = list(order)
+        finally:
+            release.set()
+        await settle(app)
+        await pilot.pause()
+        return waiting, said
+
+    waiting, said = drive(go, overview=overview)
+    assert waiting == ["default 2: start"]  # the rename did not write while Default held it
+    assert order == ["default 2: start", "default 2: end", "alias 2 work"]
+    assert said == [
+        ("✓ slot 2 is the machine default", "ok"),
+        ("✓ slot 2 is now called work", "ok"),
+    ]
+
+
+def test_escape_while_a_write_is_on_its_way_does_not_say_nothing_changed(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Esc closes the field; it cannot call back a write Enter already sent. It said "rename
+    cancelled — nothing changed", and then the write landed (review of #258, the tester)."""
+    core.create_account()
+    entered, release = slow_set_alias(monkeypatch)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], bool, str | None]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        said = heard(view, monkeypatch)
+        try:
+            await pilot.click("#account-rename-2")
+            await pilot.press(*"work", "enter")
+            assert await asyncio.to_thread(entered.wait, 5)  # the write is on its way…
+            await pilot.press("escape")  # …when Esc is pressed
+            await pilot.pause()
+            closed = not row(view, 2).renaming
+        finally:
+            release.set()
+        await settle(app)
+        await pilot.pause()
+        return said, closed, aliases()[2]
+
+    said, closed, saved = drive_registry(go)
+    assert closed and saved == "work"  # the field closed, and the write landed all the same
+    assert said == [
+        (
+            "slot 2: field closed — the name already sent is still being saved; its result follows",
+            "dim",
+        ),
+        ("✓ slot 2 is now called work", "ok"),
+    ]
+    assert not any("nothing changed" in text for text, _ in said)
+
+
 def test_escape_closes_the_field_and_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, str | None]] = []
     monkeypatch.setattr(
@@ -1776,6 +1974,91 @@ def test_escape_closes_the_field_and_writes_nothing(monkeypatch: pytest.MonkeyPa
     assert not still_open and back_on_rename  # closed, and the focus is back where it was
     assert calls == []
     assert said == "slot 2: rename cancelled — nothing changed"
+
+
+#: The account lines on the page before *Rename* (acc38c72), measured with the frame
+#: below as (width, height) per slot: the buttons shared each line's row, and this is
+#: what they left it. *Rename* must leave every line at least this wide and no taller.
+BASE_LINES = {
+    (100, 40): {1: (29, 5), 2: (18, 7), 3: (7, 7)},
+    (140, 40): {1: (71, 3), 2: (60, 3), 3: (49, 2)},
+}
+
+
+@pytest.mark.parametrize("size", list(BASE_LINES), ids=["100x40", "140x40"])
+def test_rename_takes_no_width_from_a_line_and_its_field_gets_a_line_of_its_own(
+    no_network: dict[str, Any], size: tuple[int, int]
+) -> None:
+    """*Rename* joined the buttons on each account line's row and took ten more columns from
+    it: at 100 columns slot 3's line was one cell wide, and with the field open slot 2's
+    printed down 89 rows, *Remove* went off the page, and the hint was cut to "a letter,
+    then up to 31 of a-z" (review of #258, the tester). Measured, not looked at."""
+    no_network["usage"] = ClaudeUsage(
+        available=True,
+        session_percent=37,
+        session_resets_at=NOW,
+        week_percent=64,
+        week_resets_at=NOW,
+    )
+    overview = _overview(
+        _status(1, "me@example.com", subscription=None),
+        _status(2, "two@example.com", subscription=None),
+        _status(3, None),
+    )
+
+    def lines(view: AccountsView) -> dict[int, tuple[int, int]]:
+        return {
+            slot: (region.width, region.height)
+            for slot in (1, 2, 3)
+            for region in [row(view, slot).query_one(".account-line", Static).region]
+        }
+
+    def strays(view: AccountsView) -> list[str]:
+        """Every shown button that is not wholly inside its row and the page."""
+        out = []
+        for slot in (1, 2, 3):
+            box = row(view, slot).region
+            for button in row(view, slot).query(Button):
+                where = button.region
+                inside = box.x <= where.x and where.right <= box.right <= view.region.right
+                if button.display and not inside:
+                    out.append(f"{button.id} at {where} outside {box}")
+        return out
+
+    async def run() -> tuple[dict[str, Any], dict[str, Any]]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: overview)
+        async with app.run_test(size=size) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2))
+            texts = [cell_len(line(view, slot)) for slot in (1, 2, 3)]
+            closed = {"lines": lines(view), "strays": strays(view), "texts": texts}
+            await pilot.click("#account-rename-2")
+            await pilot.pause()
+            alias = field(view, 2)
+            account_line = row(view, 2).query_one(".account-line", Static).region
+            buttons = [b.region for b in row(view, 2).query(Button) if b.display]
+            opened = {
+                "lines": lines(view),
+                "strays": strays(view),
+                "below the line": alias.region.y >= account_line.bottom,
+                "above the buttons": all(alias.region.bottom <= b.y for b in buttons),
+                "shows": alias.render_line(0).text,
+            }
+            return closed, opened
+
+    closed, opened = asyncio.run(run())
+    assert closed["texts"] == [93, 94, 31]  # the frame BASE_LINES was measured with
+    for slot, (width, height) in closed["lines"].items():
+        base_width, base_height = BASE_LINES[size][slot]
+        assert width >= base_width and height <= base_height, (slot, (width, height))
+    assert closed["strays"] == []
+    # Open: the field has a line of its own, takes nothing from any account line,
+    # shows the whole hint, and pushes no button out of the page.
+    assert opened["lines"] == closed["lines"]
+    assert opened["below the line"] and opened["above the buttons"]
+    assert core.ALIAS_HINT in opened["shows"]
+    assert opened["strays"] == []
 
 
 # --- the pace of the five-hour window (#146) ------------------------------------------------------

@@ -98,6 +98,13 @@ _HOT_AT = 80.0
 SessionReader = Callable[[], "iam.Session | None"]
 
 
+class _RenameWrite(NamedTuple):
+    """A *Rename* write in flight: the slot, and the text the field said when Enter sent it."""
+
+    slot: int
+    submitted: str
+
+
 class SignOutOutcome(NamedTuple):
     """What *Sign out* did: the keys the CLI had minted (#142), then the session."""
 
@@ -409,8 +416,8 @@ class AliasInput(Input):
         self.post_message(self.Cancelled(self))
 
 
-class AccountRow(Horizontal):
-    """One slot: its line, then the buttons that arrange it and the two that change the machine.
+class AccountRow(Vertical):
+    """One slot: its line, and beneath it the buttons that arrange it and change the machine.
 
     *Default* makes it the machine default (hidden once it is); *↑*/*↓* move it
     in the priority order (the end stops are disabled); *Disable*/*Enable*
@@ -421,13 +428,25 @@ class AccountRow(Horizontal):
     default|move|disable|enable|alias|run|remove``), and the row shows what the
     shell's next frame says rather than guessing — the field included: a
     frame never touches what is being typed in it.
+
+    Three lines, each with the row's width to itself: the account line, the
+    field (only while renaming), the buttons. The buttons used to share the
+    line's, and *Rename* took ten more columns from it — at 100 columns slot 3's
+    line was one cell wide, and with the field open slot 2's printed down 89
+    rows and pushed *Remove* off the page (review of #258). The field is wide
+    enough for the whole format hint (:data:`core.ALIAS_HINT`, 40 cells, plus
+    its border and padding). The page keeps its scrollbar's gutter, so the
+    rows the field makes taller cannot narrow every line when the page starts
+    to scroll. Every label fits in nine cells, the arrows in five: all seven
+    buttons take 61, inside a row's 63 at 100 columns.
     """
 
     DEFAULT_CSS = """
     AccountRow { height: auto; margin: 0 0 1 0; }
-    AccountRow .account-line { width: 1fr; height: auto; padding: 1 0 0 0; }
-    AccountRow .account-alias { width: 36; margin: 0 0 0 1; }
-    AccountRow Button { min-width: 10; margin: 0 0 0 1; }
+    AccountRow .account-line { width: 1fr; height: auto; }
+    AccountRow .account-alias { width: 48; max-width: 100%; }
+    AccountRow .account-buttons { width: 1fr; height: auto; }
+    AccountRow Button { min-width: 9; margin: 0 1 0 0; }
     AccountRow .arrow { min-width: 5; }
     """
 
@@ -451,39 +470,50 @@ class AccountRow(Horizontal):
         field.tooltip = f"alias: {core.ALIAS_HINT} · Enter saves, empty clears, Esc cancels"
         field.display = False
         yield field
-        yield Button("Default", id=f"account-default-{self.slot}", variant="success")
-        yield Button("↑", id=f"account-up-{self.slot}", classes="arrow")
-        yield Button("↓", id=f"account-down-{self.slot}", classes="arrow")
-        yield Button("Disable", id=f"account-toggle-{self.slot}")
-        yield Button("Rename", id=f"account-rename-{self.slot}")
-        yield Button("Sign in", id=f"account-sign-in-{self.slot}", variant="primary")
-        yield Button("Remove", id=f"account-remove-{self.slot}", variant="default")
+        with Horizontal(classes="account-buttons"):
+            yield Button("Default", id=f"account-default-{self.slot}", variant="success")
+            yield Button("↑", id=f"account-up-{self.slot}", classes="arrow")
+            yield Button("↓", id=f"account-down-{self.slot}", classes="arrow")
+            yield Button("Disable", id=f"account-toggle-{self.slot}")
+            yield Button("Rename", id=f"account-rename-{self.slot}")
+            yield Button("Sign in", id=f"account-sign-in-{self.slot}", variant="primary")
+            yield Button("Remove", id=f"account-remove-{self.slot}", variant="default")
 
     def on_mount(self) -> None:
         self._paint()
 
     @property
+    def alias_field(self) -> AliasInput:
+        return self.query_one(AliasInput)
+
+    @property
     def renaming(self) -> bool:
         """Whether *Rename*'s field is open on this row."""
-        return self.query_one(AliasInput).display
+        return self.alias_field.display
 
     def open_rename(self) -> None:
         """Open the field prefilled with the alias (empty when there is none), focused.
 
         Already open, it only takes the focus back: what was typed is kept.
         """
-        field = self.query_one(AliasInput)
+        field = self.alias_field
         if not field.display:
             field.value = self.status.account.alias or ""
             field.display = True
         field.focus()
 
-    def close_rename(self, *, refocus: bool = False) -> None:
-        """Close the field; ``refocus`` hands the focus back to *Rename*, where it came from."""
-        field = self.query_one(AliasInput)
+    def close_rename(self) -> None:
+        """Close the field; if it held the focus, *Rename* gets it back.
+
+        Only then: a write can finish after the user has gone to the sidebar or
+        another page, and pulling the focus back to this row took it from
+        wherever they had moved it (review of #258).
+        """
+        field = self.alias_field
+        had_focus = field.has_focus
         field.display = False
         field.value = ""
-        if refocus:
+        if had_focus:
             self.query_one(f"#account-rename-{self.slot}", Button).focus()
 
     def show(
@@ -525,7 +555,7 @@ class AccountsView(Vertical):
 
     DEFAULT_CSS = """
     AccountsView { padding: 1 2; }
-    AccountsView #accounts-body { height: 1fr; }
+    AccountsView #accounts-body { height: 1fr; scrollbar-gutter: stable; }
     AccountsView .section-title { height: auto; margin-top: 1; }
     AccountsView #aisquare-status { height: auto; margin-top: 1; }
     AccountsView #aisquare-code { height: auto; margin-top: 1; }
@@ -568,6 +598,8 @@ class AccountsView(Vertical):
         self._usage_timer: Timer | None = None
         self._cancel_sign_in: threading.Event | None = None
         self._arranging = threading.Lock()  # one registry write at a time (arrange_accounts)
+        self._renames: dict[Worker[Any], _RenameWrite] = {}
+        """*Rename* writes sent and not yet reported, by worker (``rename_account``)."""
         self._on_screen = False
 
     # --- layout ------------------------------------------------------------------------
@@ -1058,8 +1090,16 @@ class AccountsView(Vertical):
         slot = int((event.field.id or "").rsplit("-", 1)[1])
         row = self.row_of(slot)
         if row is not None:
-            row.close_rename(refocus=True)
-        self._notice(f"slot {slot}: rename cancelled — nothing changed")
+            row.close_rename()
+        if any(write.slot == slot for write in self._renames.values()):
+            # Esc closes the field; it cannot stop a write already sent, so it must not
+            # say nothing changed — that write's own notice follows (review of #258).
+            self._notice(
+                f"slot {slot}: field closed — the name already sent is still being saved; "
+                "its result follows"
+            )
+        else:
+            self._notice(f"slot {slot}: rename cancelled — nothing changed")
 
     def rename_account(self, slot: int, typed: str) -> None:
         """Name ``slot`` ``typed`` (blank: unname it) off the UI thread, as ``accounts alias`` does.
@@ -1070,31 +1110,43 @@ class AccountsView(Vertical):
         what was typed, to be corrected. The write takes the arranging lock, so
         it waits its turn behind a *Default* or *↑* still writing, and the page
         re-reads afterwards as an arrangement does: the label is the frame's.
+
+        The write is kept in :attr:`_renames` until it reports, with what the
+        field said when it was sent. So success closes the field only while it
+        still says that: text typed after Enter, while the write waited, is the
+        next name, and closing on it threw it away unsaved; a second Enter saves
+        it. And Esc meanwhile does not claim nothing changed (review of #258).
         """
         alias = typed.strip() or None
 
-        def work() -> tuple[int, str]:
+        def work() -> str:
             with self._arranging:
                 account = accounts_service.set_alias(str(slot), alias)
             if alias is None:
-                return slot, f"✓ slot {account.slot}: alias cleared"
-            return slot, f"✓ slot {account.slot} is now called {account.alias}"
+                return f"✓ slot {account.slot}: alias cleared"
+            return f"✓ slot {account.slot} is now called {account.alias}"
 
-        self.run_worker(
+        worker = self.run_worker(
             work,
             name=RENAME_WORKER,
             group=RENAME_WORKER,
             thread=True,
             exit_on_error=False,
         )
+        # Before the worker can report: its state change is handled on this thread.
+        self._renames[worker] = _RenameWrite(slot, typed)
 
     def _rename_finished(self, worker: Worker[Any], state: WorkerState) -> None:
-        if state is WorkerState.SUCCESS and isinstance(worker.result, tuple):
-            slot, said = worker.result
-            self._notice(said, "ok")
-            row = self.row_of(slot)
-            if row is not None and row.renaming:
-                row.close_rename(refocus=True)
+        write = self._renames.pop(worker, None)
+        if state is WorkerState.SUCCESS and isinstance(worker.result, str):
+            self._notice(worker.result, "ok")
+            row = self.row_of(write.slot) if write is not None else None
+            # Closed only on the text it saved: anything typed since is the next name.
+            saved = (
+                write is not None and row is not None and row.alias_field.value == write.submitted
+            )
+            if row is not None and row.renaming and saved:
+                row.close_rename()
         elif state is WorkerState.ERROR:
             self._notice(f"✗ {worker.error}", "error")
         self.post_message(AccountsChanged())

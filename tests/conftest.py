@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as metadata_version
 from pathlib import Path
@@ -404,6 +405,39 @@ def isolated_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     home = tmp_path / "agent-home"
     monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
     monkeypatch.setattr("aisquare.core.claude_accounts._home", lambda: home)
+    return home
+
+
+CLAUDE_ACCOUNTS_NOW = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+"""The clock :func:`fake_home` stops the Claude accounts code at.
+
+Tests that write credentials against it import it (``NOW`` in
+test_claude_accounts.py), so a token they mint and the clock that grades it agree.
+"""
+
+
+@pytest.fixture
+def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A home of our own: the default slot's files land here, never in the developer's.
+
+    For every file that writes Claude Code's files or the accounts registry. It
+    lived in test_claude_accounts.py and the others imported it from there,
+    which coupled test modules (review of #258). test_agents.py keeps a
+    narrower ``fake_home`` of its own, which takes precedence there.
+    """
+    from aisquare.core import claude_accounts as core
+    from aisquare.services import claude_accounts as service
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(core, "_home", lambda: home)
+    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
+    monkeypatch.setattr(core, "keychain_platform", lambda: False)
+    # The clock the production code reads is the clock the fixtures write
+    # credentials against: tokens here expire at NOW + 7 h, and a command that
+    # asked the wall clock would find them expired the same evening.
+    monkeypatch.setattr(core, "_now", lambda: CLAUDE_ACCOUNTS_NOW)
+    monkeypatch.setattr(service, "_now", lambda: CLAUDE_ACCOUNTS_NOW)
     return home
 
 

@@ -11,6 +11,7 @@ Every assertion reads what a widget SHOWS.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -1419,15 +1420,31 @@ def test_quitting_leaves_remote_stopping_and_run_ui_waits_for_it_with_the_termin
     assert "stopping Remote (its server and ngrok)…" in capsys.readouterr().err
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+@contextlib.contextmanager
+def at_their_default(signums: Sequence[signal.Signals]) -> Iterator[None]:
+    """``signums`` at their default for a while, as a fleet UI started from a terminal has
+    them: a suite run under nohup has SIGHUP ignored, which ``ngrok_ends_with`` leaves as it
+    is, and every assertion about the hangup then failed."""
+    inherited = {signum: signal.getsignal(signum) for signum in signums}
+    for signum in signums:
+        signal.signal(signum, signal.SIG_DFL)
+    try:
+        yield
+    finally:
+        for signum, handler in inherited.items():
+            if handler is not None:
+                signal.signal(signum, handler)
+
+
 def test_run_ui_ends_its_ngrok_on_a_hangup_or_a_sigterm_and_puts_the_signals_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ngrok runs in a process group of its own, which a closed terminal's hangup does not
     reach (``ngrok_ends_with``): for as long as the fleet UI runs, its ending signals end
     its ngrok first, and once it is gone they are what they were."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("POSIX signals")
     ending = [signal.SIGHUP, signal.SIGTERM]
-    assert all(signal.getsignal(signum) is signal.SIG_DFL for signum in ending)
     ended: list[str] = []
     during: dict[int, object] = {}
 
@@ -1442,9 +1459,10 @@ def test_run_ui_ends_its_ngrok_on_a_hangup_or_a_sigterm_and_puts_the_signals_bac
     monkeypatch.setattr(app_mod, "FleetApp", Quit)
     monkeypatch.setattr(remote_control, "end_every_tunnel_now", lambda: ended.append("ngrok"))
     monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda: None)
-    app_mod.run_ui()
-    assert all(callable(handler) for handler in during.values()), during
-    assert all(signal.getsignal(signum) is signal.SIG_DFL for signum in ending)
+    with at_their_default(ending):
+        app_mod.run_ui()
+        assert all(callable(handler) for handler in during.values()), during
+        assert all(signal.getsignal(signum) is signal.SIG_DFL for signum in ending)
     hangup = during[signal.SIGHUP]
     assert callable(hangup)
     with pytest.MonkeyPatch.context() as dying:

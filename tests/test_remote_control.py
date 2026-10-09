@@ -514,7 +514,6 @@ def finished(call: Callable[[], object], seconds: float = 15.0) -> bool:
     return not thread.is_alive()
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
 @pytest.mark.parametrize("launcher", ["pyngrok", "sh"])
 def test_stopping_an_ngrok_a_launcher_runs_stops_the_real_one_and_returns(
     tmp_path: Path, launcher: str
@@ -524,6 +523,8 @@ def test_stopping_an_ngrok_a_launcher_runs_stops_the_real_one_and_returns(
     stayed up, holding the tunnel and the static domain, and closing the log's pipe then
     waited, for good, on the reader blocked in a read the real ngrok kept open: turning
     Remote off never ended, and quitting hung on it (sweep of #243)."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("process groups are POSIX")
     command, pid_file = launched_ngrok(tmp_path, launcher)
     tunnel = NgrokTunnel(8750, command=command)
     assert tunnel.start_tunnel() is None
@@ -538,10 +539,11 @@ def test_stopping_an_ngrok_a_launcher_runs_stops_the_real_one_and_returns(
             os.kill(real, signal.SIGKILL)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
 def test_turning_off_a_remote_whose_ngrok_a_launcher_runs_ends_and_stops_it(
     tmp_path: Path,
 ) -> None:
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("process groups are POSIX")
     command, pid_file = launched_ngrok(tmp_path, "pyngrok")
     controller = RemoteController(
         server=fake_server(), tunnel_factory=lambda port: NgrokTunnel(port, command=command)
@@ -561,7 +563,6 @@ def test_turning_off_a_remote_whose_ngrok_a_launcher_runs_ends_and_stops_it(
             os.kill(real, signal.SIGKILL)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
 def test_reviving_a_tunnel_whose_launcher_died_never_waits_on_textuals_thread(
     tmp_path: Path,
 ) -> None:
@@ -569,6 +570,8 @@ def test_reviving_a_tunnel_whose_launcher_died_never_waits_on_textuals_thread(
     watchdog, on Textual's thread, stopped the dead tunnel by closing that pipe, and the
     fleet UI froze for good. The dead one is stopped on a thread of its own, the real ngrok
     with it."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("process groups are POSIX")
     command, pid_file = launched_ngrok(tmp_path, "pyngrok")
     made: list[NgrokTunnel] = []
 
@@ -599,19 +602,26 @@ def test_reviving_a_tunnel_whose_launcher_died_never_waits_on_textuals_thread(
                 os.kill(int(pid_file.read_text()), signal.SIGKILL)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
-@pytest.mark.parametrize("signum", [signal.SIGHUP, signal.SIGTERM], ids=["hangup", "sigterm"])
+# By name, resolved past the skip: Windows has no SIGHUP, and a parameter that was
+# signal.SIGHUP failed the collection of this whole module there.
+@pytest.mark.parametrize("name", ["SIGHUP", "SIGTERM"], ids=["hangup", "sigterm"])
 def test_a_fleet_ui_ended_by_a_hangup_or_a_sigterm_ends_its_ngrok_first(
-    tmp_path: Path, signum: signal.Signals
+    tmp_path: Path, name: str
 ) -> None:
     """ngrok runs in a process group of its own, which a closed terminal's hangup does not
     reach: the fleet UI died of it and its ngrok ran on, holding the static domain, so the
     next start's ngrok could not have it. The fleet UI's ending signals end its ngrok, and
     then the UI as they always did."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("POSIX signals")
+    signum = signal.Signals[name]
     command, pid_file = launched_ngrok(tmp_path, "pyngrok")
     ui = tmp_path / "fleet-ui.py"
     ui.write_text(
-        "import time\n"
+        "import signal, time\n"
+        # As from a terminal: a suite run under nohup hands its children SIGHUP ignored,
+        # which ngrok_ends_with leaves as it is, and the hangup then ends nothing.
+        f"signal.signal(signal.{name}, signal.SIG_DFL)\n"
         "from aisquare.cli.ui.remote_control import ngrok_ends_with\n"
         "from aisquare.services.ngrok_tunnel import NgrokTunnel\n"
         f"tunnel = NgrokTunnel(8750, command={command!r})\n"
@@ -639,7 +649,6 @@ def test_a_fleet_ui_ended_by_a_hangup_or_a_sigterm_ends_its_ngrok_first(
                 os.kill(real, signal.SIGKILL)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
 def test_an_ngrok_that_ended_on_its_own_leaves_no_group_for_a_stop_to_signal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -647,6 +656,8 @@ def test_an_ngrok_that_ended_on_its_own_leaves_no_group_for_a_stop_to_signal(
     free for any other program's group to take. A stop that came later (the watchdog's, or
     turning off a Remote whose first ngrok never came up, hours after) signalled that number
     all the same: SIGTERM, then SIGKILL, to whatever group had it by then."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("process groups are POSIX")
     signalled: list[tuple[int, int]] = []
     killpg = os.killpg
 
@@ -667,13 +678,14 @@ def test_an_ngrok_that_ended_on_its_own_leaves_no_group_for_a_stop_to_signal(
     assert signalled == [], "a group nothing was left in was signalled"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
 def test_every_ngrok_this_process_started_is_signalled_as_it_ends_not_only_a_remotes(
     tmp_path: Path,
 ) -> None:
     """A hangup's handler signalled the tunnel a Remote held and the one it was stopping: a dead
     one the watchdog was still stopping on a thread of its own, or one a start had spawned
     and not yet handed over, ran on, holding the static domain, once the fleet UI was gone."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("process groups are POSIX")
     command, pid_file = launched_ngrok(tmp_path, "pyngrok")
     tunnel = NgrokTunnel(8750, command=command)  # held by no Remote
     assert tunnel.start_tunnel() is None
@@ -741,13 +753,15 @@ def test_a_tunnel_ngroks_api_started_is_never_the_link_nor_where_a_push_leads(
         controller.turn_off()
 
 
-def write_ngrok_config(tmp_path: Path, text: str) -> tuple[dict[str, str], Path]:
-    """An ``XDG_CONFIG_HOME`` holding an ngrok config with ``text``, and that config's path."""
-    xdg = tmp_path / "xdg"
-    own = xdg / "ngrok" / "ngrok.yml"
+def write_ngrok_config(tmp_path: Path, text: str) -> Path:
+    """An ngrok config with ``text``, as the human's own, and its path. Handed to
+    :func:`api_off_configs` as ``own``: where ngrok keeps its own depends on the platform
+    the suite runs on (:func:`ngrok_default_config`), and an environment that points there
+    on Linux pointed nowhere on Windows, nor on macOS, where the human's real one was read."""
+    own = tmp_path / "ngrok" / "ngrok.yml"
     own.parent.mkdir(parents=True)
     own.write_text(text)
-    return {"XDG_CONFIG_HOME": str(xdg)}, own
+    return own
 
 
 @pytest.mark.parametrize(
@@ -759,37 +773,39 @@ def write_ngrok_config(tmp_path: Path, text: str) -> tuple[dict[str, str], Path]
     ],
 )
 def test_ngroks_api_is_turned_off_in_a_config_merged_over_the_humans_own(
-    tmp_path: Path, version: str, line: str, api: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: str, line: str, api: str
 ) -> None:
     """``web_addr: false`` turns ngrok's agent API off, and a flag cannot: it goes in a config
     of ours, of the version the human's own is, named after theirs (``--config`` replaces
     where ngrok looks), so their authtoken and reserved domain still hold."""
-    environ, own = write_ngrok_config(tmp_path, f"{line}\nauthtoken: tok_123\n")
-    configs = api_off_configs(environ=environ)
+    own = write_ngrok_config(tmp_path, f"{line}\nauthtoken: tok_123\n")
+    configs = api_off_configs(own=own)
     assert configs is not None
     first, ours = configs
-    assert first == own == ngrok_default_config(environ=environ)
+    assert first == own
     assert ours == paths.aisquare_home() / f"remote-ngrok-v{version}.yml"
     assert ours.read_text().endswith(f'version: "{version}"\n{api}\n')
-    assert api_off_configs(environ=environ) == configs, "written once, the same each start"
+    assert api_off_configs(own=own) == configs, "written once, the same each start"
     command = ngrok_command(8750, configs=configs)
     assert command[-1] == f"--config={own},{ours}"
+    monkeypatch.setattr(ngrok_tunnel, "ngrok_default_config", lambda **_: own)
+    assert api_off_configs() == configs, "the human's own is where ngrok keeps it"
 
 
 def test_without_a_config_of_the_humans_ngrok_starts_as_it_always_did(tmp_path: Path) -> None:
     """No config to keep and nothing to sign in with: ngrok says so itself, once. An authtoken
     in the environment signs it in with ours alone; a version not known here, or a path
     ``--config`` would split, keeps ngrok as it always was."""
-    missing = {"XDG_CONFIG_HOME": str(tmp_path / "nowhere")}
-    assert api_off_configs(environ=missing) is None
-    signed_in = api_off_configs(environ={**missing, "NGROK_AUTHTOKEN": "tok_123"})
+    missing = tmp_path / "nowhere" / "ngrok.yml"
+    assert api_off_configs(own=missing, environ={}) is None
+    signed_in = api_off_configs(own=missing, environ={"NGROK_AUTHTOKEN": "tok_123"})
     assert signed_in == [paths.aisquare_home() / "remote-ngrok-v2.yml"]
-    environ, _own = write_ngrok_config(tmp_path, "authtoken: tok_123\n")
-    assert api_off_configs(environ=environ) is None, "a config with no version"
-    environ, _own = write_ngrok_config(tmp_path / "v1", 'version: "1"\n')
-    assert api_off_configs(environ=environ) is None
-    environ, _own = write_ngrok_config(tmp_path / "a,b", 'version: "2"\n')
-    assert api_off_configs(environ=environ) is None, "--config splits on the comma"
+    own = write_ngrok_config(tmp_path, "authtoken: tok_123\n")
+    assert api_off_configs(own=own, environ={}) is None, "a config with no version"
+    own = write_ngrok_config(tmp_path / "v1", 'version: "1"\n')
+    assert api_off_configs(own=own, environ={}) is None
+    own = write_ngrok_config(tmp_path / "a,b", 'version: "2"\n')
+    assert api_off_configs(own=own, environ={}) is None, "--config splits on the comma"
 
 
 @pytest.mark.parametrize(
@@ -807,9 +823,10 @@ def test_ngroks_own_config_is_where_ngroks_docs_place_it(
     assert ngrok_default_config(platform=platform, environ=environ, home=tmp_path) == (
         tmp_path / where
     )
+    xdg = tmp_path / "xdg"  # absolute on every platform the suite runs on, as "/xdg" is not
     assert ngrok_default_config(
-        platform="linux", environ={"XDG_CONFIG_HOME": "/xdg"}, home=tmp_path
-    ) == Path("/xdg/ngrok/ngrok.yml")
+        platform="linux", environ={"XDG_CONFIG_HOME": str(xdg)}, home=tmp_path
+    ) == (xdg / "ngrok" / "ngrok.yml")
     assert (
         ngrok_default_config(
             platform="win32", environ={"LOCALAPPDATA": str(tmp_path / "local")}, home=tmp_path
@@ -824,11 +841,11 @@ def test_a_config_of_ours_that_is_no_utf8_is_written_again_not_raised_into_the_u
     """Our config was read as strict UTF-8, and a byte that is none raised a UnicodeDecodeError,
     no OSError, out of every start of ngrok: the watchdog's, on Textual's thread, ended the
     fleet UI (sweep of #243, as ngrok's log was)."""
-    environ, own = write_ngrok_config(tmp_path, 'version: "2"\nauthtoken: tok_123\n')
+    own = write_ngrok_config(tmp_path, 'version: "2"\nauthtoken: tok_123\n')
     paths.ensure_home()
     ours = paths.aisquare_home() / "remote-ngrok-v2.yml"
     ours.write_bytes(b"web_addr: \xff\n")
-    assert api_off_configs(environ=environ) == [own, ours]
+    assert api_off_configs(own=own) == [own, ours]
     assert ours.read_text(encoding="utf-8").endswith('version: "2"\nweb_addr: false\n')
 
 
@@ -858,80 +875,92 @@ def test_an_ngrok_whose_api_off_config_cannot_be_had_starts_as_before(tmp_path: 
     assert seen == [ngrok_command(8750, sys.executable, url=tunnel.static_host)], "as before"
 
 
-def fake_ngrok_binary(tmp_path: Path, *, refuses_our_config: bool) -> tuple[Path, Path]:
-    """An executable standing in for the ngrok binary, and the file where it records each
-    command line it was run with, one JSON list a line. It serves its API, and says so, only
-    when run without our config; ``refuses_our_config``: run with it, it exits as ngrok does
-    when it cannot read a config (a snap that may not read ours, say)."""
-    runs = tmp_path / "ngrok-runs.jsonl"
-    binary = tmp_path / "ngrok"
+OUR_CONFIG = "remote-ngrok-v2.yml"
+"""The file name of our config, for a human's own ngrok.yml of version 2."""
+
+
+def ngrok_binary(
+    tmp_path: Path, *, with_our_config: str | None = None
+) -> tuple[Callable[..., subprocess.Popen[str]], list[list[str]]]:
+    """A ``popen`` that runs a stand-in for the ngrok binary on the command it is handed, and
+    every command it was handed. The stand-in serves its API, and says so, only when run
+    without our config; run with it, it prints ``with_our_config``, if given, and exits 1,
+    as an ngrok that will not go on does.
+
+    The stand-in is a Python script this interpreter runs: an extensionless file with a
+    shebang is no program on Windows (``tests/fakebin.py``), which ran nothing there."""
+    script = tmp_path / "ngrok-binary.py"
     refuse = (
-        "    print('ERROR:  open /home/u/.aisquare/remote-ngrok-v2.yml: permission denied',"
-        " file=sys.stderr)\n"
-        "    sys.exit(1)\n"
-        if refuses_our_config
+        f"    print({with_our_config!r}, file=sys.stderr)\n    sys.exit(1)\n"
+        if with_our_config is not None
         else "    pass\n"
     )
-    binary.write_text(
-        f"#!{sys.executable}\n"
-        "import json, sys, time\n"
-        f"with open({str(runs)!r}, 'a') as runs:\n"
-        "    runs.write(json.dumps(sys.argv[1:]) + '\\n')\n"
-        "ours = any(arg.startswith('--config=') for arg in sys.argv)\n"
-        "if ours:\n"
+    script.write_text(
+        "import sys, time\n"
+        "if any(arg.startswith('--config=') for arg in sys.argv):\n"
         f"{refuse}"
         "else:\n"
         f"    print({json.dumps(json.dumps(WEB_SERVICE))}, flush=True)\n"
         f"print({json.dumps(json.dumps(OURS))}, flush=True)\n"
         "time.sleep(60)\n"
     )
-    binary.chmod(0o755)
-    return binary, runs
+    runs: list[list[str]] = []
+
+    def popen(command: list[str], **kwargs: Any) -> subprocess.Popen[str]:
+        runs.append(command)
+        return subprocess.Popen([sys.executable, str(script), *command[1:]], **kwargs)
+
+    return popen, runs
 
 
-def test_the_panels_ngrok_runs_with_its_agent_api_off(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def panels_ngrok(port: int, own: Path, popen: Callable[..., subprocess.Popen[str]]) -> NgrokTunnel:
+    """The panel's ngrok, its API off over the human's ``own`` config, run by ``popen``."""
+    return NgrokTunnel(
+        port,
+        which=lambda name: name,
+        popen=popen,
+        api_off=True,
+        configs=lambda: api_off_configs(own=own),
+    )
+
+
+def test_the_panels_ngrok_runs_with_its_agent_api_off(tmp_path: Path) -> None:
     """The panel's ngrok served its agent API, which any user of the machine could use to stop
     Remote's tunnel and start it again with the inspector on, reading the passphrase and every
     cookie off it (sweep of #243). It runs with the API off, and says nothing of it."""
-    environ, own = write_ngrok_config(tmp_path, 'version: "2"\nauthtoken: tok_123\n')
-    monkeypatch.setenv("XDG_CONFIG_HOME", environ["XDG_CONFIG_HOME"])
-    binary, runs = fake_ngrok_binary(tmp_path, refuses_our_config=False)
-    tunnel = NgrokTunnel(8750, binary=str(binary), which=lambda name: name, api_off=True)
+    own = write_ngrok_config(tmp_path, 'version: "2"\nauthtoken: tok_123\n')
+    popen, runs = ngrok_binary(tmp_path)
+    tunnel = panels_ngrok(8750, own, popen)
     assert tunnel.start_tunnel() is None
     try:
         assert tunnel.wait_for_url(10) == OURS["url"]
-        ours = paths.aisquare_home() / "remote-ngrok-v2.yml"
-        (run,) = [json.loads(line) for line in runs.read_text().splitlines()]
-        assert run[-1] == f"--config={own},{ours}" and "--inspect=false" in run
+        (run,) = runs
+        assert run[-1] == f"--config={own},{paths.aisquare_home() / OUR_CONFIG}"
+        assert "--inspect=false" in run
         assert tunnel.api_warning is None and tunnel.api_refused is None
     finally:
         tunnel.stop_tunnel()
 
 
 def test_an_ngrok_that_will_not_take_our_config_runs_as_before_and_the_panel_says_its_api_is_on(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     """Merging is ngrok's to judge, and a Remote with ngrok's API on is better than none: an
     ngrok that ends before it announces, run with our config, is run again without it, and
     the status line says the API is on, and what to set."""
-    environ, _own = write_ngrok_config(tmp_path, 'version: "2"\nauthtoken: tok_123\n')
-    monkeypatch.setenv("XDG_CONFIG_HOME", environ["XDG_CONFIG_HOME"])
-    binary, runs = fake_ngrok_binary(tmp_path, refuses_our_config=True)
+    own = write_ngrok_config(tmp_path, 'version: "2"\nauthtoken: tok_123\n')
+    refused = f"ERROR:  open /home/u/.aisquare/{OUR_CONFIG}: permission denied"
+    popen, runs = ngrok_binary(tmp_path, with_our_config=refused)
     server = fake_server()
     controller = RemoteController(
-        server=server,
-        tunnel_factory=lambda port: NgrokTunnel(
-            port, binary=str(binary), which=lambda name: name, api_off=True
-        ),
+        server=server, tunnel_factory=lambda port: panels_ngrok(port, own, popen)
     )
     controller.turn_on()
     try:
         assert controller._waiter is not None
         controller._waiter.join(10)
         assert controller.link_url() == build_public_url(OURS["url"], server.token)
-        first, second = [json.loads(line) for line in runs.read_text().splitlines()]
+        first, second = runs
         assert first[-1].startswith("--config=") and not any(
             arg.startswith("--config=") for arg in second
         )
@@ -2383,18 +2412,26 @@ def test_serve_says_to_turn_a_hand_started_ngroks_local_api_off(
 
 
 @contextlib.contextmanager
-def another_process_serves() -> Iterator[int]:
+def another_process_serves() -> Iterator[Callable[[], None]]:
     """``remote-serve.lock`` held as another Remote's process holds it: through a descriptor
-    of its own, which conflicts with this process's as another process's does."""
+    of its own, which conflicts with this process's as another process's does. Yields what
+    lets it go, at most once, from any thread: Windows' ``locking`` raises for a lock let go
+    already, as ``flock`` does not."""
     paths.ensure_home()
     path = paths.remote_state_path().with_name(remote_server.SERVE_LOCK_NAME)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    once = threading.Lock()
+
+    def release() -> None:
+        if once.acquire(blocking=False):
+            unlock(fd)
+
     try:
         lock_exclusive(fd)
         try:
-            yield fd
+            yield release
         finally:
-            unlock(fd)
+            release()
     finally:
         os.close(fd)
 
@@ -2411,8 +2448,8 @@ def test_whether_another_process_serves_this_home_is_asked_of_its_lock(
         assert remote_server.remote_served_elsewhere() is True
     assert remote_server.remote_served_elsewhere() is False
     state = remote_server.runtime()
-    with another_process_serves() as fd:
-        threading.Timer(0.01, unlock, args=(fd,)).start()  # a probe, holding it for a moment
+    with another_process_serves() as release:
+        threading.Timer(0.01, release).start()  # a probe, holding it for a moment
         try:
             assert remote_server._claim_remote_home(state) is True, "the probe failed a claim"
             assert remote_server.remote_served_elsewhere() is False, "this process serves"

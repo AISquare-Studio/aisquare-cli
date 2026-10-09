@@ -361,16 +361,25 @@ def _untrack(tunnel: NgrokTunnel) -> None:
         _LIVE.discard(tunnel)
 
 
-def _signal_group(group: int, signum: int) -> None:
+def _signal_group(group: int, *, kill: bool = False) -> None:
+    """SIGTERM every process of ``group``, or SIGKILL it with ``kill``.
+
+    Process groups are POSIX: on Windows :func:`_own_group` gives none, so nothing calls
+    this there, and the ``sys.platform`` check is what lets mypy's run on the Windows leg
+    read past ``os.killpg`` and ``SIGKILL``, which that platform has not."""
+    if sys.platform == "win32":
+        return
     with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(group, signum)
+        os.killpg(group, signal.SIGKILL if kill else signal.SIGTERM)
 
 
 def _group_gone(group: int, deadline: float) -> bool:
     """Whether every process of ``group`` has ended, by ``deadline`` (``time.monotonic``).
 
     A member that may not be signalled (another user's) counts as gone: nothing here
-    could end it anyway."""
+    could end it anyway. Windows has no groups (:func:`_signal_group`)."""
+    if sys.platform == "win32":
+        return True
     while True:
         try:
             os.killpg(group, 0)
@@ -409,9 +418,9 @@ def _end_process(process: subprocess.Popen[str], group: int | None) -> None:
             process.kill()
             _ended(process, None)
         return
-    _signal_group(group, signal.SIGTERM)
+    _signal_group(group)
     if not _ended(process, group):
-        _signal_group(group, signal.SIGKILL)
+        _signal_group(group, kill=True)
         _ended(process, group)
 
 
@@ -611,7 +620,7 @@ class NgrokTunnel:
         signal handler, as the process ends (:func:`end_every_tunnel_now`)."""
         group, process = self._group, self._process
         if group is not None:
-            _signal_group(group, signal.SIGTERM)
+            _signal_group(group)
         elif process is not None:
             with contextlib.suppress(OSError):
                 process.terminate()

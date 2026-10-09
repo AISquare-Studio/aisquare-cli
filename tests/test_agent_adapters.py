@@ -647,6 +647,125 @@ def test_an_exported_config_dir_in_a_home_this_machine_lacks_is_never_offered_co
     assert json.loads(clicked.stdout)["detail"] == reason, clicked.stdout
     assert paths.aisquare_home().exists() == built, "a refusal builds no aisquare home"
     assert list(work.iterdir()) == [], "nothing is made in the cwd"
+    # Only the variable changes it, and asq and aisquare read it when they start: Welcome
+    # promised "this page notices", and the doctor's fix never said to start again.
+    import dataclasses
+
+    from aisquare.cli.ui.views.welcome import claude_text
+
+    found = dataclasses.replace(welcome, binary="/opt/homebrew/bin/claude")
+    step_two = claude_text(found, platform="linux").plain
+    assert "then start asq again from that shell" in step_two, step_two
+    assert "this page notices" not in step_two, step_two
+    assert str(row.fix).endswith("then start asq or aisquare again from that shell"), row.fix
+    file_refused = dataclasses.replace(found, refused_by_environment=False)
+    assert "this page notices" in claude_text(file_refused, platform="linux").plain, "control"
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "the default dir, recorded, now a loop",
+        "the default dir, a dangling link",
+        "a profile, recorded, now a dangling link",
+        "a profile under a parent this user may not write",
+        "that profile beside a connected ~/.claude",
+    ],
+)
+def test_a_config_dir_connect_cannot_make_is_named_everywhere_and_never_offered_connect(
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    """With `claude` on PATH, connect first makes the directory a session from this shell
+    reads, and access() did not ask whether it can: a link there that leads nowhere (a
+    dotfiles target that moved, a loop) or a parent this user may not write. The doctor
+    and Welcome offered Connect, which failed "can't create …"; a default ~/.claude turned
+    loop read "can't read its settings.json", with a fix no one can make (review of #257).
+    Connect's own first step, in its own words, everywhere."""
+    if os.name == "nt":
+        pytest.skip("links, loops and mode 555 are POSIX shapes here")
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    claude = isolated_agent_home / ".claude"
+    where = claude
+    if shape.startswith("the default dir"):
+        if "recorded" in shape:
+            claude.mkdir(parents=True)
+            _connect(runner)
+            shutil.rmtree(claude)
+            claude.symlink_to(claude.name)
+        else:
+            isolated_agent_home.mkdir(parents=True)
+            claude.symlink_to(isolated_agent_home / "dotfiles" / "claude")
+    elif "recorded" in shape:
+        where = isolated_agent_home / ".claude-work"
+        where.mkdir(parents=True)
+        _connect(runner, where)
+        shutil.rmtree(where)
+        where.symlink_to(isolated_agent_home / "gone" / "work")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(where))
+    else:
+        if "beside" in shape:
+            claude.mkdir(parents=True)
+            _connect(runner)
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0o555)
+        if os.access(locked, os.W_OK):
+            locked.chmod(0o755)
+            pytest.skip("this user can write a mode-555 directory (root)")
+        where = locked / "claude"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(where))
+    built = paths.db_path().exists()
+    try:
+        row = diagnostics._check_claude_code()
+        welcome = first_run.probe_claude(sign_in=False, which=lambda _name: None)
+        clicked = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+        made = where.is_dir()
+    finally:
+        if (tmp_path / "locked").exists():
+            (tmp_path / "locked").chmod(0o755)
+
+    reason = str(json.loads(clicked.stdout)["detail"])
+    assert clicked.exit_code == 1 and reason.startswith(f"can't create {where}: "), reason
+    assert f"hooks cannot be written in {where}: {reason}" in row.detail, row
+    assert [f.argv for f in fix_commands([row]) if f.argv[:2] == ("agents", "connect")] == []
+    remedy = "remove the link at" if os.path.islink(where) else "yourself, or point"
+    assert remedy in str(row.fix) and "disconnect" not in str(row.fix), row.fix
+    assert welcome.refused == reason, welcome
+    assert paths.db_path().exists() == built and not made, "nothing written before it"
+
+
+def test_a_settings_json_linked_into_a_missing_folder_is_refused_before_anything_is_written(
+    runner: CliRunner, claude_home: Path, tmp_path: Path
+) -> None:
+    """A settings.json linked into a dotfiles folder that moved: access() let connect
+    through, and connect saved CLAUDE.md into the store and built ~/.aisquare before its
+    write failed (review of #257). Refused first, in the same words everywhere."""
+    if os.name == "nt":
+        pytest.skip("a link to a missing folder is a POSIX shape here")
+    (claude_home / "CLAUDE.md").write_text("# Prefs\nuse tabs\n", encoding="utf-8")
+    settings = claude_home / "settings.json"
+    target = tmp_path / "dotfiles" / "claude" / "settings.json"
+    settings.symlink_to(target)
+
+    refusal = agents_service.access("claude-code").connect
+    row = diagnostics._check_claude_code()
+    clicked = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+    built = paths.aisquare_home().exists()
+    target.parent.mkdir(parents=True)
+    linked = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
+
+    reason = str(json.loads(clicked.stdout)["detail"])
+    assert reason.startswith(f"can't write {settings}: it is a link to {target}"), reason
+    assert refusal is not None and refusal.why == reason, refusal
+    assert f"hooks cannot be written in {claude_home}: {reason}" in row.detail, row
+    assert f"remove the link at {settings}" in str(row.fix), row.fix
+    assert not built, "refused before the store was built or CLAUDE.md saved"
+    assert linked.exit_code == 0 and agent_core.hooks_installed("claude-code"), linked.output
+    assert target.is_file(), "control: once its folder is there, the link is written through"
 
 
 def test_the_other_readers_of_an_exported_homeless_config_dir_never_raise(

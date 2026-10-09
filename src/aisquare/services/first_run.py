@@ -128,6 +128,10 @@ class ClaudeState:
     that is not a JSON object or that this user may not write, or a CLAUDE.md it cannot
     read (``agents.connect_refusal``). Connect could only fail, so step 2 says why
     instead of offering it (review of #257)."""
+    refused_by_environment: bool = False
+    """The refusal is the environment's (``agents.Refusal.kind``): a ``CLAUDE_CONFIG_DIR``
+    naming a home this machine does not have. asq reads it when it starts, so step 2 says
+    to change it and start asq again, not that this page notices (review of #257)."""
     signed_in: bool | None = None
     """``None`` when this probe did not look (the periodic one skips it)."""
     problem: str | None = None
@@ -179,10 +183,6 @@ def _hooks_off_default() -> Path | None:
         return None
     where = agent_core.ambient_hook_dir("claude-code")
     return where / "settings.json" if where is not None else None
-
-
-def _refusal_default() -> str | None:
-    return agents_service.connect_refusal("claude-code")
 
 
 def _signed_in_default() -> bool:
@@ -251,9 +251,15 @@ def probe_claude(
         except Exception as exc:
             problems.append(f"could not read the hook settings: {_why(exc)}")
     refused: str | None = None
+    refused_by_environment = False
     if not is_connected and switched_off is None:
         try:
-            refused = (refusal or _refusal_default)()
+            if refusal is not None:
+                refused = refusal()
+            else:  # connect's own refusal, with what would change it (agents.access)
+                found = agents_service.access("claude-code").connect
+                refused = found.why if found is not None else None
+                refused_by_environment = found is not None and found.kind == "environment"
         except Exception as exc:
             problems.append(f"could not read the hook settings: {_why(exc)}")
     signed: bool | None = None
@@ -271,6 +277,7 @@ def probe_claude(
         manager_only=manager_only,
         hooks_off=switched_off,
         refused=refused,
+        refused_by_environment=refused_by_environment,
         signed_in=signed,
         problem="; ".join(problems) or None,
     )

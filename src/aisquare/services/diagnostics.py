@@ -935,7 +935,7 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
             return _warn(
                 "claude-code",
                 f"{product} hooks cannot be written in {ambient}: {refusal.why}",
-                _refused_fix(ambient, refusal.path),
+                _refused_fix(ambient, refusal),
             )
         return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
     graded = [site for site in sites if site not in switched_off]
@@ -1084,7 +1084,7 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
         problems.append(f"hooks cannot be written in {directory}: {refusal.why}")
         # Read-only by design (home-manager), the remedy is in what generates it.
         also = "point its hooks at this install" if directory in stale else None
-        fixes.append(_refused_fix(directory, refusal.path, also=also))
+        fixes.append(_refused_fix(directory, refusal, also=also))
     live = [site for site in doubled if site not in dead]
     if dead:
         listed = ", ".join(str(site.config_dir) for site in dead)
@@ -1162,7 +1162,7 @@ def _coders_missed(
         for directory, refusal in refused.items()
     )
     fixes = [*connects]
-    fixes.extend(_refused_fix(d, refusal.path) for d, refusal in refused.items())
+    fixes.extend(_refused_fix(d, refusal) for d, refusal in refused.items())
     return clause, fixes
 
 
@@ -1207,29 +1207,48 @@ def _short_timeouts(
             continue
         problems.append(f"hooks cannot be written in {directory}: {refusal.why}")
         timeout = f"give its {' and '.join(events)} hooks a timeout of at least {ceiling}"
-        fixes.append(_refused_fix(directory, refusal.path, also=timeout))
+        fixes.append(_refused_fix(directory, refusal, also=timeout))
     if coders is not None:  # the coders' gap, said on this branch too (_coders_missed)
         problems.append(coders[0])
         fixes.extend(coders[1])
     return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
 
 
-def _refused_fix(directory: Path, path: Path, *, also: str | None = None) -> str:
-    """What makes ``path``, the file `agents connect` refuses in ``directory``
-    (``agents_service.access``), one it can use. ``also`` is what to change instead
-    where a settings.json that is read-only by design (home-manager) is generated."""
-    spec = agent_core.spec("claude-code", directory)
-    if spec is not None and path == spec.home:
-        # The directory itself is gone, and connect makes no --config-dir but the one a
-        # session from this shell reads: this home's record of it is all that is left.
+#: The remedy for a refusal only the environment can change (``Refusal.kind``): asq and
+#: aisquare read CLAUDE_CONFIG_DIR when they start, so a change made in another shell
+#: never reaches the running one (review of #257).
+ENVIRONMENT_FIX = (
+    "point CLAUDE_CONFIG_DIR at a directory on this machine, or unset it, then start asq "
+    "or aisquare again from that shell"
+)
+
+
+def _refused_fix(
+    directory: Path, refusal: agents_service.Refusal, *, also: str | None = None
+) -> str:
+    """What changes ``refusal``, connect's for ``directory`` (``agents_service.access``), by
+    its kind: never a command that refuses, nor a file to fix where none can help. ``also``
+    is what to change instead where a settings.json that is read-only by design
+    (home-manager) is generated."""
+    path = refusal.path
+    if refusal.kind == "gone":
+        # A named directory that is not there and that connect makes no more of: this
+        # home's record of it is all that is left.
         return _disconnect_fix(directory, "forget it: ")
-    if paths.names_no_home(path):
-        # The directory a session from this shell reads (CLAUDE_CONFIG_DIR), under a ~user
-        # this machine does not have: nothing may be made there, and no file can change it.
+    if refusal.kind == "environment":
+        return ENVIRONMENT_FIX
+    if refusal.kind == "make":
+        # The directory a session from this shell reads, which connect would make.
+        if os.path.islink(path):
+            return f"remove the link at {path}, or make what it points to, then connect again"
         return (
-            f"point CLAUDE_CONFIG_DIR at a directory on this machine: {directory} is in the "
-            "home of a user it does not have"
+            f"create {path} yourself, or point CLAUDE_CONFIG_DIR at a directory this user "
+            "can create, then connect again"
         )
+    if os.path.islink(path) and not os.path.exists(path):
+        # A settings.json linked into a folder that is gone (a dotfiles target that moved).
+        return f"remove the link at {path}, or make the folder it points into, then connect again"
+    spec = agent_core.spec("claude-code", directory)
     if spec is None or path != spec.settings_path:
         # A context file connect imports (CLAUDE.md): the hooks need nothing else changed.
         return f"make {path} UTF-8 text this user can read, then connect again"

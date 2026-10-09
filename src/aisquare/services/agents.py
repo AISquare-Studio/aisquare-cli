@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from aisquare.core import agents as agent_core
 from aisquare.core import paths
@@ -254,6 +255,17 @@ class Refusal:
     """The file it names: settings.json, a context file, or the directory itself."""
     why: str
     """The refusal, in the command's own words."""
+    kind: RefusalKind = "file"
+    """What would change it, so every surface gives the same remedy: ``file``, a file to
+    fix; ``gone``, a named directory that is not there and that connect will not make,
+    whose record is all there is to forget; ``make``, the directory connect would make
+    for a Claude Code that has never started, which it cannot (a link that leads nowhere,
+    or a parent this user may not write); ``environment``, a ``CLAUDE_CONFIG_DIR`` naming
+    a home this machine does not have, which only that variable changes, in a shell
+    started again."""
+
+
+RefusalKind = Literal["file", "gone", "make", "environment"]
 
 
 @dataclass(frozen=True)
@@ -274,7 +286,7 @@ def access(name: str, config_dir: Path | None = None) -> DirAccess:
 
     Every surface that offers, names or implies either command asks it, so none names a
     command that would refuse: the doctor's row (its text, fixes, buttons and coders
-    note), Welcome step 2 (:func:`connect_refusal`), `agents list`/`status`/`scan`, and
+    note), Welcome step 2, `agents list`/`status`/`scan` (:func:`connect_refusal`), and
     `agents disconnect` itself; connect and init run the same checks as they go
     (:func:`connect`). Several fixes in turn each answered for one surface, and every
     round found a surface the last one missed (review of #257).
@@ -301,14 +313,24 @@ def _connect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
     if spec is None or not spec.connectable:
         return None
     try:
-        # In connect's order, so the reason is connect's whichever check refuses first.
-        if config_dir is not None and _first_run_dir(name, config_dir) is None:
+        # In connect's order, so the reason is connect's whichever check refuses first:
+        # its first step makes the directory a Claude Code that has never started has not
+        # made, and that mkdir can refuse as well (:func:`_cannot_make`).
+        where = _first_run_dir(name, config_dir)
+        if where is not None:
+            cannot = _cannot_make(where)
+            if cannot is not None:
+                return Refusal(where, f"can't create {where}: {cannot}", "make")
+        elif config_dir is not None:
             _check_found(name, config_dir)
         _read_before_writing(name, config_dir)
     except AgentFileUnreadableError as exc:
-        return Refusal(exc.path or spec.settings_path or spec.home, str(exc))
+        path = exc.path or spec.settings_path or spec.home
+        # Only the variable names that home: no file there can change it (_check_settings).
+        kind: RefusalKind = "environment" if paths.names_no_home(path) else "file"
+        return Refusal(path, str(exc), kind)
     except AgentNotInstalledError as exc:
-        return Refusal(spec.home, str(exc))
+        return Refusal(spec.home, str(exc), "gone")
     except OSError as exc:
         # Fails open into a named refusal: the doctor and `agents list` ask this for every
         # directory, and a traceback here cost them their whole output (review of #257).
@@ -353,6 +375,13 @@ def settings_unwritable(path: Path) -> str | None:
     if paths.names_no_home(path):
         return _NO_HOME  # read as written it would land in the cwd (paths.expand_user)
     try:
+        if path.is_symlink() and not path.exists():
+            # A link that leads nowhere: the write lands where it points, or fails there,
+            # after connect has saved CLAUDE.md and built ~/.aisquare (review of #257).
+            folder = Path(os.path.realpath(path)).parent
+            if folder.is_dir() and os.access(folder, os.W_OK):
+                return None
+            return f"it is a link to {os.readlink(path)}, whose folder is missing or unwritable"
         target = path if path.exists() else path.parent
         if not target.exists() or os.access(target, os.W_OK):
             return None
@@ -401,11 +430,38 @@ def _first_run_dir(name: str, config_dir: Path | None) -> Path | None:
     return where
 
 
+def _cannot_make(where: Path) -> str | None:
+    """Why :func:`_make_first_run_dir` cannot make ``where``, which is not there, or ``None``.
+
+    Asked by connect before its mkdir and by :func:`access` for it, in the same words, so
+    no Connect is offered that this first step refuses: a link where the directory should
+    be, that leads nowhere (a dotfiles target that moved, or a loop), and a parent this
+    user may not write, both failed the click with "can't create …" while the doctor and
+    Welcome offered it (review of #257).
+    """
+    if os.path.lexists(where):  # it is not there (_first_run_dir), so a link leads nowhere
+        try:
+            target = os.readlink(where)
+        except OSError:
+            return "something that is not a directory is there"
+        return f"it is a link to {target}, which leads nowhere"
+    ancestor = next((p for p in where.parents if os.path.lexists(p)), None)
+    if ancestor is None or not os.path.isdir(ancestor):
+        return "no directory it can be made in"
+    if not os.access(ancestor, os.W_OK | os.X_OK):
+        return f"this user may not create it in {ancestor}"
+    return None
+
+
 def _make_first_run_dir(name: str, config_dir: Path | None) -> None:
-    """Make :func:`_first_run_dir`'s directory, where there is one."""
+    """Make :func:`_first_run_dir`'s directory, where there is one, unless
+    :func:`_cannot_make` refuses it: in its words, before anything is written."""
     where = _first_run_dir(name, config_dir)
     if where is None:
         return
+    cannot = _cannot_make(where)
+    if cannot is not None:
+        raise AgentFileUnreadableError(f"can't create {where}: {cannot}", where)
     try:
         where.mkdir(parents=True, exist_ok=True)
     except OSError as exc:

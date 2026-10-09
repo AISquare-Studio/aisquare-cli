@@ -94,25 +94,28 @@ and an aisquare that upgrades and uninstalls itself.**
   connect a Claude Code from npm or Homebrew that has never started: they make
   its `~/.claude`, as Welcome's Connect did, instead of saying it is not
   installed.
-- `aisquare agents connect` and `init --agent` refuse a `settings.json` that is
-  not valid JSON or that you may not write, and a `CLAUDE.md` they cannot read,
-  and name the file, instead of rewriting `settings.json` with aisquare's hooks
-  and nothing else. The doctor, Welcome and `agents list`/`status` name such a
-  file and why, one they cannot even look at too, instead of offering a Connect
-  that would fail, calling the hooks missing, or ending in a traceback. The
-  doctor and Welcome also name a `CLAUDE_CONFIG_DIR` in a home this machine does
-  not have, instead of offering a Connect that would fail.
+- `aisquare agents connect` and `init --agent` refuse a `settings.json` that
+  is not valid JSON, that you may not write, or that links into a folder that
+  is gone, and a `CLAUDE.md` they cannot read, and name the file, instead of
+  rewriting `settings.json` with aisquare's hooks and nothing else. The
+  doctor, Welcome and `agents list`/`status` name such a file and why, one
+  they cannot even look at too, instead of offering a Connect that would fail,
+  calling the hooks missing, or ending in a traceback. The doctor and Welcome
+  also name a `CLAUDE_CONFIG_DIR` in a home this machine does not have, and
+  what to change, instead of offering a Connect that would fail.
 - `aisquare agents disconnect` refuses, naming the file, to leave aisquare's
   hooks behind in a `settings.json` it cannot rewrite or read, instead of saying
   ✓ while they stay; the directory stays recorded until it can take them out.
-- A Claude Code config dir this home connected that was since removed, or that
-  became a symlink loop, reads as gone in the doctor, with the `aisquare agents
-  disconnect claude-code --config-dir` that forgets it, and `agents list` says it
-  does not exist, instead of offering a Connect that would fail.
+- A Claude Code config dir this home connected and that was since removed, or
+  that became a symlink loop, reads as gone in the doctor, with the `aisquare
+  agents disconnect claude-code --config-dir` that forgets it, and `agents list`
+  says it does not exist. The one sessions from this shell read, turned into a
+  link that leads nowhere, is named as that, with the link to remove, instead of
+  a Connect that would fail.
 - The one-line installer no longer tells you to sign in to Claude Code for a
   hooks problem signing in cannot fix: an unexpected Claude Code state exits 2
-  and prints the doctor's own detail and fix. With `--no-agent`, it leaves Claude
-  Code alone: its state is named, never counted against the run.
+  and prints the doctor's own detail and fix. With `--no-agent`, it leaves
+  Claude Code alone: its state is named, never counted against the run.
 - The Accounts page could say `usage: …` for up to a minute after it opened;
   it now reads usage on its first frame. CI: the frequent Windows-leg flakes
   are gone, CI also runs nightly and on demand, and ruff and mypy are pinned

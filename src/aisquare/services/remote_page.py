@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import mimetypes
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -68,6 +69,47 @@ def page_content_type(name: str) -> str | None:
     under ``nosniff`` a browser refuses to run a script served with the wrong type.
     """
     return _PAGE_TYPES.get(PurePosixPath(name).suffix.lower())
+
+
+_BUILD_TYPES = {
+    **_PAGE_TYPES,
+    ".mjs": "text/javascript; charset=utf-8",
+    ".json": "application/json",
+    ".map": "application/json",
+    ".wasm": "application/wasm",
+    ".ico": "image/x-icon",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".avif": "image/avif",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".otf": "font/otf",
+    ".txt": "text/plain; charset=utf-8",
+}
+
+
+@functools.cache
+def _python_types() -> mimetypes.MimeTypes:
+    """Python's own table of types: a ``MimeTypes()`` reads none of the machine's files,
+    and not its registry, which only ``mimetypes.init`` reads into the module's table."""
+    return mimetypes.MimeTypes()
+
+
+def build_content_type(name: str) -> str:
+    """The ``Content-Type`` a file of an installed build (``install-page``, ``--dist``) is
+    served with: the page's own types and the rest of what a web build holds from the same
+    kind of closed list, any other from Python's own table, else ``application/octet-stream``.
+
+    Typed by ``mimetypes``, as starlette types a file, an installed page's scripts took what
+    the machine's tables said: under a Windows registry that maps ``.js`` to ``text/plain``
+    they were served so, with ``nosniff``, and the browser refused every one of them.
+    """
+    suffix = PurePosixPath(name).suffix.lower()
+    known = _BUILD_TYPES.get(suffix) or _python_types().guess_type(f"file{suffix}")[0]
+    return known or "application/octet-stream"
 
 
 def remote_page_headers() -> dict[str, str]:
@@ -170,6 +212,7 @@ __all__ = [
     "PAGE_CACHE_CONTROL",
     "PAGE_CSP",
     "PAGE_PACKAGE",
+    "build_content_type",
     "bundled_page_files",
     "bundled_page_present",
     "bundled_page_response",

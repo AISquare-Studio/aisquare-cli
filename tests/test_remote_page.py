@@ -289,6 +289,48 @@ def test_the_content_types_are_a_closed_list() -> None:
         assert remote_page.page_content_type(name) is None, name
 
 
+def test_an_installed_build_is_typed_by_a_closed_list_never_the_machines_tables(
+    runtime: Runtime, built: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An installed build was served by ``FileResponse``, typed by ``mimetypes``, which reads
+    the machine's own tables: on Windows the registry, where ``.js`` can be ``text/plain``.
+    Served so beside ``nosniff``, every script of the page was refused and it never booted.
+    Here the machine's tables say what such a registry says, as CPython reads it on Windows.
+    A type the closed list does not hold comes from Python's own table, not the machine's."""
+    import mimetypes
+
+    tables = mimetypes.MimeTypes()
+    for suffix in (".js", ".css", ".pdf"):
+        tables.add_type("text/plain", suffix)
+    monkeypatch.setattr(mimetypes, "_db", tables)
+    assert mimetypes.guess_type("app.js")[0] == "text/plain", "the control: the tables say so"
+    names = ["index-DfFvQnFu.js", "legacy.js", "chunk.mjs", "app.css", "inter.woff2", "data.json"]
+    names.append("guide.pdf")
+    for name in [*names, "notes.xyz"]:
+        (built / "assets" / name).write_text("x")
+    remote_server.install_page(built)
+    client = make_client(build_app(runtime, sources=_sources()))
+
+    typed = {
+        name: client.get(f"{base(runtime)}/assets/{name}").headers["content-type"]
+        for name in [*names, "notes.xyz"]
+    }
+    index = client.get(f"{base(runtime)}/")
+
+    assert typed == {
+        "index-DfFvQnFu.js": "text/javascript; charset=utf-8",
+        "legacy.js": "text/javascript; charset=utf-8",
+        "chunk.mjs": "text/javascript; charset=utf-8",
+        "app.css": "text/css; charset=utf-8",
+        "inter.woff2": "font/woff2",
+        "data.json": "application/json",
+        "guide.pdf": "application/pdf",
+        "notes.xyz": "application/octet-stream",
+    }
+    assert index.headers["content-type"] == "text/html; charset=utf-8"
+    assert index.headers["x-content-type-options"] == "nosniff"
+
+
 def test_the_page_headers_keep_the_token_in_the_path_to_ourselves() -> None:
     assert remote_page.remote_page_headers() == {
         "x-content-type-options": "nosniff",

@@ -99,10 +99,12 @@ SessionReader = Callable[[], "iam.Session | None"]
 
 
 class _RenameWrite(NamedTuple):
-    """A *Rename* write in flight: the slot, and the text the field said when Enter sent it."""
+    """A *Rename* write in flight: the slot, the text the field said when Enter sent it, and
+    which opening of that field sent it (``AccountRow.openings``)."""
 
     slot: int
     submitted: str
+    opening: int
 
 
 class SignOutOutcome(NamedTuple):
@@ -457,6 +459,8 @@ class AccountRow(Vertical):
         self.trend: UsageTrend | None = None
         self.first = True
         self.last = True
+        self.openings = 0
+        """How often *Rename*'s field has opened: a write closes only the opening it came from."""
 
     @property
     def slot(self) -> int:
@@ -491,14 +495,19 @@ class AccountRow(Vertical):
         """Whether *Rename*'s field is open on this row."""
         return self.alias_field.display
 
-    def open_rename(self) -> None:
+    def open_rename(self, on_its_way: str | None = None) -> None:
         """Open the field prefilled with the alias (empty when there is none), focused.
 
-        Already open, it only takes the focus back: what was typed is kept.
+        ``on_its_way`` is the name a write still in flight is saving, and it
+        wins: the frame's alias predates that write, and a field reopened
+        before it lands said the old name — an Enter taken as "confirm" then
+        undid the name just saved (review of #258, round 3). Already open, it
+        only takes the focus back: what was typed is kept.
         """
         field = self.alias_field
         if not field.display:
-            field.value = self.status.account.alias or ""
+            self.openings += 1
+            field.value = on_its_way if on_its_way is not None else self.status.account.alias or ""
             field.display = True
         field.focus()
 
@@ -1077,7 +1086,8 @@ class AccountsView(Vertical):
                 row.close_rename()
         target = self.row_of(slot)
         if target is not None:
-            target.open_rename()
+            on_its_way = [write.submitted for write in self._renames.values() if write.slot == slot]
+            target.open_rename(on_its_way[-1] if on_its_way else None)  # the latest sent
 
     @on(Input.Submitted, ".account-alias")
     def _rename_submitted(self, event: Input.Submitted) -> None:
@@ -1112,10 +1122,13 @@ class AccountsView(Vertical):
         re-reads afterwards as an arrangement does: the label is the frame's.
 
         The write is kept in :attr:`_renames` until it reports, with what the
-        field said when it was sent. So success closes the field only while it
-        still says that: text typed after Enter, while the write waited, is the
-        next name, and closing on it threw it away unsaved; a second Enter saves
-        it. And Esc meanwhile does not claim nothing changed (review of #258).
+        field said when it was sent and which opening of the field sent it. So
+        success closes the field only while it is that opening and still says
+        that: text typed after Enter, while the write waited, is the next name,
+        and closing on it threw it away unsaved; a second Enter saves it. A field
+        closed and reopened meanwhile is the user's new edit, prefilled with the
+        name on its way, and stays open. And Esc meanwhile does not claim
+        nothing changed (review of #258).
         """
         alias = typed.strip() or None
 
@@ -1134,18 +1147,23 @@ class AccountsView(Vertical):
             exit_on_error=False,
         )
         # Before the worker can report: its state change is handled on this thread.
-        self._renames[worker] = _RenameWrite(slot, typed)
+        row = self.row_of(slot)
+        self._renames[worker] = _RenameWrite(slot, typed, row.openings if row is not None else 0)
 
     def _rename_finished(self, worker: Worker[Any], state: WorkerState) -> None:
         write = self._renames.pop(worker, None)
         if state is WorkerState.SUCCESS and isinstance(worker.result, str):
             self._notice(worker.result, "ok")
             row = self.row_of(write.slot) if write is not None else None
-            # Closed only on the text it saved: anything typed since is the next name.
-            saved = (
-                write is not None and row is not None and row.alias_field.value == write.submitted
+            # Closed only if it is the opening that sent the write and still says what it
+            # saved: anything typed since, or a field reopened since, is the next edit.
+            sent_from_here = (
+                write is not None
+                and row is not None
+                and row.openings == write.opening
+                and row.alias_field.value == write.submitted
             )
-            if row is not None and row.renaming and saved:
+            if row is not None and row.renaming and sent_from_here:
                 row.close_rename()
         elif state is WorkerState.ERROR:
             self._notice(f"✗ {worker.error}", "error")

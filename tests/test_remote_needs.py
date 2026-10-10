@@ -553,6 +553,38 @@ def test_rule_8_attention_without_a_tool_is_a_dialog() -> None:
     assert item.since == seen
 
 
+@pytest.mark.parametrize(
+    "said",
+    ["Claude Code needs your input", "An MCP server needs your input", "tester needs your input"],
+)
+def test_an_elicitation_asked_mid_call_is_a_dialog_not_the_calls_permission(said: str) -> None:
+    """An MCP server asks for input while its tool call is still pending, so the tool use
+    has no result and rule 5 took it first: "waits for a permission answer to use
+    mcp__deploy__release", its notice's words dropped, and quick answers whose "1" typed a
+    digit into the form's field, the toast saying it was sent and the agent still blocked
+    (SPEC §4.2 gives a form no buttons; sweep 4 of #243). Its notice says it asks for
+    input, as a permission prompt's does not: the dialog form, as rule 8 makes it."""
+    row = _row()
+    seen = NOW - timedelta(seconds=30)
+    session = _session(row, state="attention", seen=seen)
+    call = _tool("toolu_mcp", "mcp__deploy__release", at=seen - timedelta(seconds=8), env="prod")
+    tail = _tail(call, at=seen - timedelta(seconds=8))
+    status = _status(row, "attention", session)
+    events = [_event(4, "attention", said, session=session, at=seen)]
+    item = _one(_classify(status, tail, events))
+    assert item.kind == "permission"
+    assert item.id == needs_item_id(PROJECT.id, "permission", f"attention:4:{seen.isoformat()}")
+    assert item.reason == "coder-1 shows a dialog that needs you"
+    assert (item.detail, item.excerpt, item.answers) == ({"text": said}, said, ())
+    permission = "Claude needs your permission to use mcp__deploy__release"
+    prompt = _one(
+        _classify(status, tail, [_event(4, "attention", permission, session=session, at=seen)])
+    )
+    assert prompt.reason == "coder-1 waits for a permission answer to use mcp__deploy__release"
+    assert [answer.label for answer in prompt.answers] == ["1", "2", "No"]
+    assert [answer.label for answer in _one(_classify(status, tail)).answers] == ["1", "2", "No"]
+
+
 def test_a_dialog_after_the_agent_moved_on_is_not_named_by_the_notice_before_it() -> None:
     """``mark_attention`` flips a session once per turn: a turn's later dialogs leave no event
     and move ``last_seen_at`` alone. A usage-limit dialog after a Bash prompt that was
@@ -1817,7 +1849,10 @@ def test_the_guide_gives_quick_answers_only_to_the_cards_that_carry_them() -> No
     prose = " ".join(guide.read_text(encoding="utf-8").split())
     assert "`1`, `2` and No for a tool's permission" in prose
     assert "for a single question with one answer to pick from at most nine" in prose
-    assert "(one of Claude Code's own dialogs, a question of several answers)" in prose
+    assert (
+        "(one of Claude Code's own dialogs, a form an MCP server asks you to fill in, even in"
+        " the middle of its tool's call, a question of several answers)"
+    ) in prose
     row = _row()
     dialog = _one(_classify(_status(row, "attention", _session(row, state="attention")), None))
     assert (dialog.kind, dialog.answers) == ("permission", ())

@@ -278,7 +278,8 @@ permission; one per option, and Cancel, for a single question with one answer to
 pick from at most nine; `1` to `3` and Keep planning for a plan. A quick answer
 is checked against the agent **as it is now**: if the prompt has already gone,
 the card says "No longer needs you" and nothing is typed. Anything else (one of
-Claude Code's own dialogs, a question of several answers) is answered from the
+Claude Code's own dialogs, a form an MCP server asks you to fill in, even in the
+middle of its tool's call, a question of several answers) is answered from the
 agent's key pad.
 
 The other buttons follow the kind: **Tell** for a question asked in text,

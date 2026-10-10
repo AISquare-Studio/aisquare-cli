@@ -127,6 +127,13 @@ LIMIT_DIALOG = re.compile(r"session paused|usage limit|usage credits", re.IGNORE
 paused — choose: continue on usage credits or switch models") rather than a permission
 prompt. A Claude Code string, not a contract: matched loosely, pinned by a test."""
 
+_INPUT_NOTICE = re.compile(r"needs your input", re.IGNORECASE)
+"""An attention notification that asks for input in a form, not for a permission ("Claude
+needs your permission to use Bash"): an MCP server's elicitation ("Claude Code needs your
+input", "An MCP server needs your input") or an agent's ("<label> needs your input"), in
+Claude Code 2.1.296. A digit typed there goes into a field. A Claude Code string, not a
+contract."""
+
 NEEDS_ANSWER_KEYS = frozenset(
     {*"123456789", "Escape", "Enter", "Up", "Down", "Space", "Tab", "y", "n"}
 )
@@ -793,7 +800,9 @@ def needs_from_agent(
        prompt has its own tool use, so the 2nd prompt of a turn is a new item. Not under
        a ``Task``, whose sub-agent's tool uses are in its own records: every prompt of the
        sub-agent's has that one pending tool, so the prompt is also its notice, the
-       ``last_seen_at`` each notification moves (:func:`_needs_subagent_prompt`);
+       ``last_seen_at`` each notification moves (:func:`_needs_subagent_prompt`). Nor
+       while the notice asks for input (:data:`_INPUT_NOTICE`): an MCP server's
+       elicitation comes while its tool call is pending, and that form is rule 8's;
     6. no pending tool, and the newest record an interruption later than the session's last
        hook → ``interrupted``, whatever the row reads (Esc fires no Stop, so a dismissed
        prompt still reads ``attention`` and an interrupted turn ``working``);
@@ -868,14 +877,16 @@ def needs_from_agent(
     if pending:
         if not attention:
             return []  # a tool running, or the 6 s before Claude Code's notification
-        if pending[0].name in _SUBAGENT_TOOLS and session is not None:
-            return _needs_subagent_prompt(
-                pending[0], session, pane_output, project=project, agent=agent, now=now
-            )
-        return [
-            _needs_permission_item(pending[0], project=project, agent=agent, name=name, now=now)
-        ]
-    if tail is not None and _needs_marker_later(status, tail):
+        notice = _needs_notice(attention_event, tail)
+        if notice is None or not _INPUT_NOTICE.search(notice.text):
+            if pending[0].name in _SUBAGENT_TOOLS and session is not None:
+                return _needs_subagent_prompt(
+                    pending[0], session, pane_output, project=project, agent=agent, now=now
+                )
+            return [
+                _needs_permission_item(pending[0], project=project, agent=agent, name=name, now=now)
+            ]
+    elif tail is not None and _needs_marker_later(status, tail):
         return [_needs_interrupted_item(tail, project=project, agent=agent, name=name, now=now)]
     if attention or _needs_unanswered(status, tail, unread=False):
         notice = _needs_notice(attention_event, tail)

@@ -101,9 +101,11 @@ ngrok http --url=your-name.ngrok-free.app --inspect=false 127.0.0.1:8750
 ```
 
 `serve` prints the local link and the passphrase and runs until Ctrl-C or until
-auto-off. Stop the ngrok you started beside it then too, as `serve` says on its way
-out: left up, ngrok hands the phones' requests, their cookies with them, to whatever
-takes port 8750 next, and any account on the machine can. (The panel stops its own
+auto-off; a `kill` (SIGTERM) or a closed terminal (SIGHUP, unless it runs under
+`nohup`) stops it as Ctrl-C does, and it then exits 143 or 129. Stop the ngrok you
+started beside it then too, as `serve` says on its way out: left up, ngrok hands
+the phones' requests, their cookies with them, to whatever takes port 8750 next,
+and any account on the machine can. (The panel stops its own
 ngrok first, once the phones heard Remote is off, and lets go of the port after.) A
 Ctrl-C while a phone's write is still running (a restart or switch can take 40
 seconds) says which, and waits for it: cut short, it can leave the agent down. A
@@ -476,7 +478,9 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   signs every phone out (after a goodbye notification), and from that moment
   every request is a 404 and no unlock goes through, while the server is still
   stopping. Closing the UI or stopping `serve` with Ctrl-C does not; expiry
-  bounds them. Either, once the auto-off time has come, is auto-off.
+  bounds them. Either, once the auto-off time has come, is auto-off. A Remote that
+  ended with no way out at all (killed, or a fleet UI ended by a signal) has its
+  auto-off run when Remote next comes on, if its time came meanwhile.
 - **Auto-off** is enforced by the server itself: past the deadline every request
   is a 404, and within half a minute Remote turns off, phones signed out, even
   on a machine that slept through the deadline. With writes on, a phone can
@@ -578,8 +582,8 @@ The stream sends `{"type", "payload", "ts"}` frames, each kind when it changed:
   subscription named one. A connection watches 8 panes at most; one more is
   refused with an `error` frame, `{"error": "too_many_subscriptions", "message"}`.
 
-A pane or a board that could not be read is a frame whose `error` says why, and
-one still being read when a tick ends follows on a later tick. The connection
+A pane, a board or a fleet that could not be read is a frame whose `error` says
+why, and one still being read when a tick ends follows on a later tick. The connection
 closes with 4401 for a device that is no longer signed in, 4409 when the same
 device opened a fifth connection, and 4410 when Remote is turned off.
 

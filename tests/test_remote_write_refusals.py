@@ -237,6 +237,66 @@ def test_a_ref_that_names_nothing_is_404_in_a_sentence_naming_its_field(
     )
 
 
+def test_a_board_writes_audit_line_names_the_session_it_resolved_not_the_ref_it_was_sent(
+    phone: TestClient, runtime: Runtime
+) -> None:
+    """The store reads ``as`` as an id prefix and drops the ``*``, ``?`` and ``[`` in it:
+    ``ses_abc`` and 400 ``*`` named ``ses_abc123def``, and the note's line said
+    ``as=ses_abc****…``, cut at 300 characters before its ``to=``, never naming the
+    session; ``ses_a?b?c[`` read as a ref that named nothing (sweep 5 of #243). Every board
+    write's line names the session now, and a ref longer than any id is refused."""
+    from aisquare.services import team as team_service
+
+    (alpha,) = (p for p in project_service.list_projects() if p.root.name == "alpha")
+    _session(alpha, "ses_abc123def")
+    task, _added = team_service.add_task("ship it")
+
+    def written(route: str, body: dict[str, str]) -> str:
+        response = phone.post(f"{base(runtime)}/api/{route}", json=body)
+        assert response.status_code == 200, response.text
+        return remote_audit_path().read_text(encoding="utf-8").splitlines()[-1].split(" ", 3)[3]
+
+    padded = phone.post(
+        f"{base(runtime)}/api/note", json={"text": "hi", "as": "ses_abc" + "*" * 400}
+    )
+    assert (padded.status_code, padded.json()["error"]) == (413, "too_large")
+    for sent in ("ses_a?b?c[", "ses_abc*", "ses_abc"):
+        line = written("note", {"text": "hi", "as": sent, "to": "coder-9"})
+        assert line.endswith(' as=ses_abc123def to="coder-9"'), (sent, line)
+    assert written("task/claim", {"ref": task.id, "as": "ses_a*"}) == (
+        f"claimed {task.id} as=ses_abc123def"
+    )
+    assert written("task/done", {"ref": task.id, "as": "ses_ab"}) == (
+        f"done {task.id} as=ses_abc123def"
+    )
+
+
+def test_a_board_writes_as_is_read_as_the_board_reads_it(
+    phone: TestClient, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The session ``as`` names is resolved once for the audit line and again by the board's
+    service: read by a copy of the board's reading, the two could come to name different
+    sessions, or the copy none, and a note the board would take was refused or audited as
+    another session. Whatever the board reads ``as`` to name, the line names."""
+    from aisquare.services import team as team_service
+
+    (alpha,) = (p for p in project_service.list_projects() if p.root.name == "alpha")
+    _session(alpha, "ses_abc123def")
+    resolve = team_service._resolve_session
+
+    def read_a_role_too(store: Any, ref: str | None) -> TeamSession | None:
+        return resolve(store, "ses_abc123def" if ref == "manager" else ref)
+
+    monkeypatch.setattr(team_service, "_resolve_session", read_a_role_too)
+
+    posted = phone.post(f"{base(runtime)}/api/note", json={"text": "hi", "as": "manager"})
+
+    assert posted.status_code == 200, posted.text
+    assert posted.json()["event"]["payload"]["session_id"] == "ses_abc123def"
+    line = remote_audit_path().read_text(encoding="utf-8").splitlines()[-1]
+    assert line.endswith(" as=ses_abc123def to=-"), line
+
+
 def test_a_note_on_a_task_of_another_projects_board_is_refused_invalid(
     phone: TestClient, runtime: Runtime, home: Path
 ) -> None:

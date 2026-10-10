@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -251,8 +251,13 @@ def serve_remote(
             markup=False,
         )
 
+    ended_by: int | None = None
     try:
         timed_out = remote_server.run_foreground(dist, port, auto_off, public_url, ready=banner)
+    except remote_server.RemoteSignalled as exc:  # a SIGTERM or SIGHUP: its way out ran
+        ended_by = exc.signum
+        if exc.fired:
+            _remote_said("Remote turned off — the auto-off timer ran out")
     except remote_server.RemoteBindError as exc:
         fail(str(exc), error="remote_bind_failed", detail=str(exc))
     except remote_server.RemoteOffIncomplete as exc:  # auto-off ended it, not all of it done
@@ -269,10 +274,16 @@ def serve_remote(
         # human's, and forwarded the public link on, to the port anyone here may bind now,
         # with every page's reconnect, push tap and Home Screen launch (sweep 4 of #243).
         if served:
-            stderr_console().print(
-                f"Remote is off — stop the ngrok you exposed it with, if any: {left_up}",
-                markup=False,
-            )
+            _remote_said(f"Remote is off — stop the ngrok you exposed it with, if any: {left_up}")
+    if ended_by is not None:  # as the signal would have ended it, once all of that is done
+        raise typer.Exit(128 + ended_by)
+
+
+def _remote_said(line: str) -> None:
+    """One line on stderr from ``serve``'s way out, which a SIGHUP takes: the terminal it
+    would go to is gone then, and the line with it, never the exit."""
+    with suppress(OSError):
+        stderr_console().print(line, markup=False)
 
 
 @app.command("install-page")
@@ -290,7 +301,10 @@ def install_page(
     from aisquare.core.paths import remote_dist_dir
     from aisquare.services import remote_server
 
-    source = dist.resolve()
+    source = remote_server._remote_resolved(dist)
+    if source is None:  # a symlink loop: RuntimeError on 3.11 and 3.12, never a traceback
+        message = remote_server.PAGE_DOES_NOT_RESOLVE.format(path=dist)
+        fail(message, error="invalid_dist", ref=str(dist))
     if not (source / "index.html").is_file():
         fail(
             f"no index.html in {source} — build aisquare-remote first (npm run build)",

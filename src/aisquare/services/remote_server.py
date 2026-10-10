@@ -179,6 +179,11 @@ WS_CLIENT_MESSAGE_MAX = 4_096
 """The longest text frame a client may send; anything longer is ignored unread."""
 WS_PANE_SUBSCRIPTIONS_MAX = 8
 """Panes one socket may watch at once; a 9th ``subscribe`` is refused with an error frame."""
+WS_SEND_SECONDS = 20.0
+"""The longest a socket's frame or close may wait for the phone to take what was sent before it.
+A phone that stopped reading, asleep or off its network, leaves the server's buffer full, and
+the send waited for it with no end: the socket's stream stopped there, its auto-off, revoke and
+sign-out checks with it (sweep 5 of #243). As long as uvicorn gives a ping its answer."""
 WS_SOCKETS_PER_DEVICE = 4
 """Live sockets per device. A 5th closes the device's OLDEST (4409) rather than refusing the
 new one: what a sleeping phone leaves behind is a half-open socket, and evicting it is what
@@ -346,6 +351,9 @@ NOTE_TEXT_MAX = 8_000
 NOTE_TO_MAX = 200
 """The longest ``to`` a note may name, a role or a label: what the page's composer takes. The
 board keeps it with the event, and every board read and frame carries it."""
+BOARD_REF_MAX = 64
+"""The longest session or task ref a board write takes (``as``, ``task``, a task's ``ref``):
+an id is 30 characters, and a prefix of one shorter."""
 NOTE_KINDS = frozenset({"note", "decision", "question", "result"})
 """The kinds a phone may post. The others (``attention``, ``limited``, ``agent_exited``,
 ``switched``…) are the fleet's own reports, which wake the manager or set an agent's state."""
@@ -400,6 +408,10 @@ AUDIT_DEVICE_MAX = 32
 AUDIT_ENDPOINT_MAX = 32
 AUDIT_SUMMARY_MAX = 300
 """How much of each field an audit line keeps (:func:`_audit_clean`)."""
+AUDIT_KEYS_MAX = 120
+"""The longest key list an audit line spells out (:func:`_audit_keys`): what is left of
+:data:`AUDIT_SUMMARY_MAX` once a send-keys or a quick answer has named its agent, project,
+item and text, with the ``enter=`` and the ``failed`` that follow the keys."""
 
 
 class RemoteError(RuntimeError):
@@ -426,6 +438,18 @@ class RemoteWindingDown(RemoteError):
 class RemoteOffIncomplete(RemoteError):
     """``serve``'s auto-off turned Remote off, but could not do all of it: the devices still
     signed in, or the deadline still in ``remote.json`` (:func:`run_foreground`)."""
+
+
+class RemoteSignalled(Exception):
+    """``serve`` was ended by a signal other than Ctrl-C (SIGTERM, SIGHUP), and its way out
+    ran: :func:`run_foreground` raises it last, for the CLI to say what it says on every way
+    out and then exit as that signal says, 128 and its number. ``fired``: auto-off had
+    ended it first."""
+
+    def __init__(self, signum: int, *, fired: bool) -> None:
+        super().__init__(f"ended by signal {signum}")
+        self.signum = signum
+        self.fired = fired
 
 
 class RequestError(Exception):
@@ -1390,12 +1414,16 @@ class Runtime:
                     found = device
         return found
 
-    def unlock_device(self, password: str, ua: str) -> tuple[str, Device] | None:
+    def unlock_device(
+        self, password: str, ua: str, *, evicted: list[str] | None = None
+    ) -> tuple[str, Device] | None:
         """A new device and its cookie's secret when ``password`` is right, else ``None``.
 
         Compared before ``remote.json.lock`` is taken, so a wrong guess, the common
         case while someone is guessing, waits on no other process here; and compared
-        again under the lock, since a ``regenerate-password`` may land in between.
+        again under the lock, since a ``regenerate-password`` may land in between. The
+        id of a device it removed to make room (:meth:`_make_room_for_a_device`) is
+        appended to ``evicted``, for the caller to put on the audit trail.
         """
         import secrets
 
@@ -1420,28 +1448,31 @@ class Runtime:
                 expires_at=_iso_seconds(now + DEVICE_LIFETIME),
             )
             state = self._state
-            self._make_room_for_a_device(now)  # a drop, as a revoke: no undo (_write_state)
+            room = self._make_room_for_a_device(now)  # a drop, as a revoke: no undo
             state.devices.append(device)
 
             def unmade() -> None:
                 state.devices = [kept for kept in state.devices if kept is not device]
 
             self._write_state(state, undo=unmade)
+            if room is not None and evicted is not None:
+                evicted.append(room)
             return secret, device
 
-    def _make_room_for_a_device(self, now: datetime) -> None:
+    def _make_room_for_a_device(self, now: datetime) -> str | None:
         """Under the file lock, before an unlock adds a device: past :data:`DEVICES_MAX`,
         drop the one unused longest of those signed out or expired, as a revoke would (its
-        push subscription goes at the next push); with every one signed in, 409
-        ``too_many_devices`` and nothing changes."""
+        push subscription goes at the next push), and give its id; with every one signed
+        in, 409 ``too_many_devices`` and nothing changes."""
         if len(self._state.devices) < DEVICES_MAX:
-            return
+            return None
         idle = [device for device in self._state.devices if not device.device_signed_in(now)]
         if not idle:
             raise RequestError(409, "too_many_devices", TOO_MANY_DEVICES)
         never = datetime.min.replace(tzinfo=UTC)  # a stamp that does not read: unused longest
         oldest = min(idle, key=lambda device: _remote_instant(device.last_seen) or never)
         self._drop(oldest.id, WS_CLOSE_UNAUTHORIZED)
+        return oldest.id
 
     def device_for_cookie(self, secret: str | None) -> Device | None:
         """The SIGNED-IN device behind a cookie, its ``last_seen`` refreshed; ``None`` otherwise.
@@ -2360,9 +2391,25 @@ def _live_transcript(
     return payload
 
 
+TRANSCRIPT_OFFSET_DIGITS = 19
+"""The most digits a cursor's offset has: a byte offset in a file, which 2**63 bounds."""
+
+
 def _remote_offset(text: str) -> bool:
-    """Whether ``text`` is a cursor's offset as the server writes it: a whole number past 0."""
-    return text.isascii() and text.isdigit() and int(text) > 0
+    """Whether ``text`` is a cursor's offset as the server writes it: a whole number past 0,
+    no longer than a file offset is.
+
+    ``int`` raises ``ValueError`` past 4 300 digits, CPython's limit on reading one from a
+    string: such a cursor was a 503 ``unavailable`` with Python's own message and a warning
+    in the log for every request, where any other cursor the server did not write is a 409
+    ``stale_cursor``, which the page answers by reading from the end (sweep 5 of #243).
+    """
+    return (
+        text.isascii()
+        and text.isdigit()
+        and len(text) <= TRANSCRIPT_OFFSET_DIGITS
+        and int(text) > 0
+    )
 
 
 def _pane_width(agent: FleetAgent) -> int:
@@ -2424,6 +2471,20 @@ def remote_board_unread(exc: Exception) -> dict[str, object]:
     removed meanwhile, or while the store stayed locked (review of #243, round 4).
     """
     return {"project": None, "sessions": [], "events": [], "error": str(exc)}
+
+
+def remote_fleet_unread(ref: str | None, exc: Exception) -> dict[str, object]:
+    """The ``fleet`` frame of a fleet that could not be read: the project it was asked for,
+    no agents, and ``error``, the sentence that says why, as a board's says it
+    (:func:`remote_board_unread`).
+
+    The stream skipped such a frame and logged it at debug level, so the Fleet tab and an
+    agent's screen kept the last fleet they had, its agents working or waiting, under
+    heartbeats that said the link was alive: after its project was removed while the phone
+    slept, or with a store that would not open (sweep 5 of #243).
+    """
+    project = None if ref is None else {"id": ref}
+    return {"project": project, "agents": [], "error": str(exc)}
 
 
 def _agent_state_counts(agents: list[FleetAgentStatus]) -> dict[str, int]:
@@ -2717,8 +2778,9 @@ def _live_explainability(label: str, project: str | None = None) -> dict[str, ob
     )
 
 
-def _required(body: Mapping[str, Any], key: str) -> str:
-    """A string the write cannot go without; 400 ``invalid`` when it is missing or blank.
+def _required(body: Mapping[str, Any], key: str, *, limit: int | None = None) -> str:
+    """A string the write cannot go without; 400 ``invalid`` when it is missing or blank,
+    413 ``too_large`` over ``limit``.
 
     This and the readers below are the ONE way a write reads its body's fields, the
     agent actions' and the quick answers' included (``remote_actions.action_required``
@@ -2728,6 +2790,8 @@ def _required(body: Mapping[str, Any], key: str) -> str:
     value = body.get(key)
     if not isinstance(value, str) or not value.strip():
         raise RequestError(400, "invalid", f"{key!r} is required")
+    if limit is not None and len(value) > limit:
+        raise RequestError(413, "too_large", f"{key!r} is over {limit} characters")
     return value.strip()
 
 
@@ -2749,11 +2813,29 @@ def _audit_keys(keys: list[str] | None) -> str:
     and an authenticated device is precisely who the trail exists to hold to
     account. Defence in depth now: :func:`check_remote_key_names` refuses any such
     name before a key is sent, and :meth:`Runtime.audit` scrubs every field.
+
+    A run of one key is written once with its count (``PageDown*31``), and a list longer
+    than :data:`AUDIT_KEYS_MAX` stops at the last name that fits and says how many keys it
+    left out (``…+12``): spelled out whole, 32 keys took up to 290 characters, and the
+    300-character cut of the line took the ``enter=`` and the ``failed`` after them, so a
+    send that failed with keys typed read as one that went through (sweep 5 of #243).
     """
+    import itertools
+
     if not keys:
         return "0"
     scrubbed = [_UNSAFE_IN_A_KEY_NAME.sub("?", key)[:32] or "?" for key in keys]
-    return "[" + ",".join(scrubbed) + "]"
+    listed: list[str] = []
+    left = len(scrubbed)
+    for name, run in itertools.groupby(scrubbed):
+        count = len(list(run))
+        entry = name if count == 1 else f"{name}*{count}"
+        more = "" if left == count else f",…+{left - count}"  # room for it, if one is next
+        if len(",".join([*listed, entry])) + len(more) > AUDIT_KEYS_MAX:
+            return "[" + ",".join([*listed, f"…+{left}"]) + "]"
+        listed.append(entry)
+        left -= count
+    return "[" + ",".join(listed) + "]"
 
 
 def _optional_ref(
@@ -2907,6 +2989,30 @@ def _remote_ref_unknown(ref: str, named: list[tuple[str, str]]) -> tuple[str, st
     return named[0]
 
 
+def _remote_author(ref: str | None) -> str | None:
+    """The id of the session a board write's ``as`` names, which the board's service is
+    given in its place and the audit line records: what the server resolved, never what
+    the body said. ``KeyError(ref)`` for one that names none, as the services raise it
+    (:func:`_remote_board_refusals`).
+
+    The store reads a ref as an id prefix and drops the ``*``, ``?`` and ``[`` in it, so
+    ``ses_abc`` with 400 ``*`` after it named ``ses_abc123def``, and the note's line said
+    ``as=ses_abc****…``, cut at 300 characters before its ``to=``, and never named the
+    session the note was posted as; ``ses_a?b?c[`` read as a ref that named nothing
+    (sweep 5 of #243). Read by the board's own reading of ``as`` (``team._resolve_session``),
+    which the services then read again: one of its own here could come to name another
+    session than the one the note is posted as, or none.
+    """
+    if ref is None:
+        return None
+    from aisquare.core.store import store_session
+    from aisquare.services import team as team_service
+
+    with store_session() as store:
+        session = team_service._resolve_session(store, ref)
+    return None if session is None else session.id
+
+
 def live_writes() -> Writes:
     """The write endpoints over the services the CLI commands call, then the agent actions."""
     from aisquare.services import remote_actions
@@ -2916,22 +3022,26 @@ def live_writes() -> Writes:
     def task_claim(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.services import team as team_service
 
-        ref, author = _required(body, "ref"), _optional_ref(body, "as")
+        ref = _required(body, "ref", limit=BOARD_REF_MAX)
+        author = _optional_ref(body, "as", limit=BOARD_REF_MAX)
         with _remote_board_refusals(("ref", ref, "task"), ("as", author, "session")):
-            task = team_service.claim_task(ref, session_ref=author)
-        return {"task": task.model_dump(mode="json")}, f"claimed {task.id} as={author or '-'}"
+            session = _remote_author(author)
+            task = team_service.claim_task(ref, session_ref=session)
+        return {"task": task.model_dump(mode="json")}, f"claimed {task.id} as={session or '-'}"
 
     def task_done(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         """Close a task, with a ``note`` held to a note's rules (:func:`check_note_text`)."""
         from aisquare.services import team as team_service
 
-        ref, author = _required(body, "ref"), _optional_ref(body, "as")
+        ref = _required(body, "ref", limit=BOARD_REF_MAX)
+        author = _optional_ref(body, "as", limit=BOARD_REF_MAX)
         note = _optional_ref(body, "note")
         if note is not None:
             check_note_text(note, "note")
         with _remote_board_refusals(("ref", ref, "task"), ("as", author, "session")):
-            task = team_service.finish_task(ref, note=note, session_ref=author)
-        return {"task": task.model_dump(mode="json")}, f"done {task.id} as={author or '-'}"
+            session = _remote_author(author)
+            task = team_service.finish_task(ref, note=note, session_ref=session)
+        return {"task": task.model_dump(mode="json")}, f"done {task.id} as={session or '-'}"
 
     def write_note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         """A note on a project's board: ``project``'s, or the current one's without it, the
@@ -2948,7 +3058,9 @@ def live_writes() -> Writes:
         ``as=`` and bare, ``"to": "coder-1 as=manager"`` read as a note posted as
         the manager, and 300 characters of it cut the real ``as=`` off the line
         (sweep of #243). ``to`` holds only characters that print
-        (:func:`check_note_to`). ``as`` must name a session, or the note is refused,
+        (:func:`check_note_to`). ``as=`` is the id of the session ``as`` resolved to
+        (:func:`_remote_author`), not the ref as sent: a long one cut ``to=`` off the line
+        all the same. ``as`` must name a session, or the note is refused,
         and so is a ``task`` of another project's board: 400 ``invalid``, where it fell to
         ``write_failed``, as if the write had failed (sweep 3 of #243). Said for the
         phone, by its field: the board's sentence names ``asq note``'s ``--task``. Only
@@ -2964,15 +3076,17 @@ def live_writes() -> Writes:
         if kind not in NOTE_KINDS:
             kinds = ", ".join(sorted(NOTE_KINDS))
             raise RequestError(400, "invalid", f"'kind' must be one of {kinds}")
-        author, to = _optional_ref(body, "as"), _optional_ref(body, "to", limit=NOTE_TO_MAX)
+        author = _optional_ref(body, "as", limit=BOARD_REF_MAX)
+        to = _optional_ref(body, "to", limit=NOTE_TO_MAX)
         if to is not None:
             check_note_to(to)
-        task = _optional_ref(body, "task")
+        task = _optional_ref(body, "task", limit=BOARD_REF_MAX)
         try:
             with _remote_board_refusals(("as", author, "session"), ("task", task, "task")):
+                session = _remote_author(author)
                 event = team_service.add_note(
                     text,
-                    session_ref=author,
+                    session_ref=session,
                     task_ref=task,
                     to_role=to,
                     kind=kind,
@@ -2984,7 +3098,7 @@ def live_writes() -> Writes:
             said = f"{task!r} is a task of another project's board (the 'task' field)"
             raise RequestError(400, "invalid", said) from None
         addressed = "-" if to is None else json.dumps(to)
-        summary = f"{event.kind} seq={event.seq} as={author or '-'} to={addressed}"
+        summary = f"{event.kind} seq={event.seq} as={session or '-'} to={addressed}"
         return {"event": event.as_envelope().model_dump(mode="json")}, summary
 
     def project_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -3026,7 +3140,9 @@ def live_writes() -> Writes:
         """Forget a registration, as ``project forget`` does, refusals and their codes
         included: one with live fleet agents is 409 ``project_busy``, where it fell to
         400 ``write_failed`` as if the write had failed (sweep 2 of #243). The ref is read
-        without the server's working directory (:func:`remote_project_ref`)."""
+        without the server's working directory (:func:`remote_project_ref`). The audit line
+        names the project it forgot, as a switch's does: the ref as sent could be padded past
+        the line's 300 characters and still name it (sweep 5 of #243)."""
         from aisquare.services import project as project_service
 
         ref = _required(body, "ref")
@@ -3038,7 +3154,7 @@ def live_writes() -> Writes:
             raise RequestError(400, "ambiguous_project", str(exc)) from None
         except project_service.ProjectBusyError as exc:
             raise RequestError(409, "project_busy", str(exc)) from None
-        return {"report": _as_json(report)}, f"removed {ref}"
+        return {"report": _as_json(report)}, f"removed {report.project.id}"
 
     def write_send_keys(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         """Type into one agent's pane: ``text`` (as hex, nothing parses it), or pad ``keys``.
@@ -3563,15 +3679,30 @@ def _built_page_target(dist: Path, path: Path) -> Path | None:
     ``dist``, with no hidden part; else ``None``, a path the system refuses included.
     The one rule for what is served (:func:`_built_page_file`) and what ``install-page``
     copies (:func:`_page_copy_skips`)."""
-    try:
-        resolved = path.resolve()
-    except (OSError, ValueError, RuntimeError):  # RuntimeError: a symlink loop, 3.11 and 3.12
-        return None
-    if not resolved.is_relative_to(dist):
+    resolved = _remote_resolved(path)
+    if resolved is None or not resolved.is_relative_to(dist):
         return None
     if any(part.startswith(".") for part in resolved.relative_to(dist).parts):
         return None
     return resolved
+
+
+def _remote_resolved(path: Path) -> Path | None:
+    """``path`` resolved, or ``None`` for one that does not resolve: the one rule for every
+    page path Remote resolves, a ``--dist``, the installed build, ``install-page``'s source
+    and each file in them (:func:`_built_page_target`).
+
+    A symbolic link loop raises ``RuntimeError`` ("Symlink loop from ...") on Python 3.11
+    and 3.12, which CI runs, where 3.13 returns the path; a path the system refuses raises
+    ``OSError``, or ``ValueError`` for a NUL byte. Only the files of a build caught all
+    three: a ``--dist`` or an ``install-page`` source that was a loop, or an installed
+    build that became one, ended ``serve``, ``install-page`` and the R panel's start in a
+    traceback, and no ``--json`` answer (review of #243, round 7).
+    """
+    try:
+        return path.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
 
 
 def _is_navigation(rel: str, accept: str) -> bool:
@@ -3855,6 +3986,11 @@ async def _refuse_at_the_gate(
         await send({"type": "websocket.close", "code": close_code})
         return
     await _json_error(status, error, message)(scope, receive, send)
+
+
+class _RemoteSocketStalled(Exception):
+    """A socket's frame waited :data:`WS_SEND_SECONDS` for its phone to take what was sent
+    before it: the stream ends, and no close is sent, which would wait the same."""
 
 
 class _TokenGate:
@@ -4480,7 +4616,8 @@ def build_remote_app(
         name: _remote_write_tracked(name, handler)
         for name, handler in (writes or live_writes()).handlers.items()
     }
-    dist = (dist_dir or remote_dist_dir()).resolve()
+    unresolved = dist_dir or remote_dist_dir()
+    dist = _remote_resolved(unresolved) or unresolved  # a loop: a build with no file at all
     limiter = _RateLimiter(clock)
     budget = UnlockBudget(runtime)
     cache = _Cache(ttl=tick * 0.9)
@@ -4540,8 +4677,12 @@ def build_remote_app(
         a CLI command held it stalled every socket and every read for seconds. A known
         device's last allowed wrong guess revokes it, and says so in the log and on
         the audit trail: that is most likely a stolen cookie, and its owner would
-        otherwise find only a device gone.
+        otherwise find only a device gone. So does an unlock that removed a signed-out
+        device to make room (:data:`DEVICES_MAX`): it took that device's push
+        subscription with it, and was the one removal of a device nothing recorded,
+        while writes are off too (sweep 5 of #243).
         """
+        evicted: list[str] = []
         with unlock_turn:
             known = next(
                 (found for found in map(runtime.known_device_for_cookie, cookies) if found), None
@@ -4549,11 +4690,11 @@ def build_remote_app(
             if known is None and not budget.unlock_budget_allows(direct):
                 return budget.budget_exhausted_until() or _remote_now()
             if known is None:
-                unlocked = runtime.unlock_device(password, ua)
+                unlocked = runtime.unlock_device(password, ua, evicted=evicted)
             elif runtime.password_matches(password):
                 # Its own device again; one revoked or expired since the lookup is a new one.
                 unlocked = runtime.reactivate_device(known.id, ua) or runtime.unlock_device(
-                    password, ua
+                    password, ua, evicted=evicted
                 )
             else:
                 unlocked = None
@@ -4572,6 +4713,10 @@ def build_remote_app(
             secret, device = unlocked
             reactivated = known is not None and device.id == known.id
             summary = f"device {device.id} " + ("reactivated" if reactivated else f"ua={ua[:60]}")
+            if evicted:
+                made_room = f"device {evicted[0]} removed for {device.id}: {DEVICES_MAX} at most"
+                log.info("remote: %s", made_room)
+                summary = f"device {device.id} evicted {evicted[0]} ua={ua[:60]}"
             kit.kit_audit(device, "unlock", summary)
             return secret, device, reactivated
 
@@ -4687,17 +4832,35 @@ def build_remote_app(
         the write switch says. Another id is a change to who can reach the fleet,
         so a read-only phone cannot sign every other phone out, the owner's
         included. An id that is not a device's shape, or no device's, is a 404.
-        The revoke writes ``remote.json`` in a worker thread, as an unlock does, and
-        that thread asks the gates again first for another device's
-        (:meth:`RemoteKit.kit_write_still_allowed`): it may have waited for the pool.
+
+        Another device's revoke is a write like any other (SPEC §1.5), through
+        :meth:`RemoteKit.kit_gated`: its optional ``request_id``, sent again, is
+        answered with what the first one did, where the retry of a revoke whose answer
+        was lost read 404 ``not_found``, as if it had failed, and a malformed id went
+        unread (sweep 5 of #243). The ledger knows it by the device it names, so an id
+        reused for another device's revoke is 409 ``request_id_reused``, not the first
+        one's answer.
         """
         device = kit.kit_device(request)
         device_id = request.path_params["device_id"]
         own = device_id == device.id
         if not own and not DEVICE_ID.fullmatch(device_id):
             return kit.kit_refuse(404, "not_found", "no such device")
-        if not own and not kit.kit_write_allowed():
-            return kit.kit_refuse(403, "read_only", READ_ONLY_REASON)
+        if own:
+            return await devices_revoked(request, device, device_id)
+        return await kit.kit_gated(
+            request,
+            device,
+            f"devices/{device_id}",
+            lambda _body: devices_revoked(request, device, device_id),
+        )
+
+    async def devices_revoked(request: Request, device: Device, device_id: str) -> Response:
+        """:func:`devices_delete_endpoint`'s answer once it is let through. The revoke writes
+        ``remote.json`` in a worker thread, as an unlock does, and that thread asks the
+        gates again first for another device's (:meth:`RemoteKit.kit_write_still_allowed`):
+        it may have waited for the pool."""
+        own = device_id == device.id
 
         def revoke_now() -> bool:
             if not own:
@@ -4931,6 +5094,12 @@ def build_remote_app(
         whole tick, so while one read hung (a fleet waiting out tmux's 30 s, a store kept
         busy) every frame of the socket came every two ticks, and an auto-off or a device
         signed out elsewhere closed it up to two ticks late (sweep of #243, round 5).
+
+        A frame or a close waits :data:`WS_SEND_SECONDS` at most for the phone to take what
+        went before it, and a socket whose phone does not ends there: one that stopped
+        reading held its stream in a send for good, auto-off and sign-out checks and all.
+        Its connection, still holding what it could not send, is cut once the server stops
+        (:func:`_remote_cut_stuck`).
         """
         device = kit.kit_device(websocket)  # the gate refused a socket without one
         await websocket.accept()
@@ -4979,8 +5148,8 @@ def build_remote_app(
         otherwise log a traceback on every tick of every socket."""
 
         async def close_with(code: int) -> None:
-            with contextlib.suppress(Exception):
-                await websocket.close(code=code)
+            with contextlib.suppress(Exception):  # TimeoutError: a phone that is not reading
+                await asyncio.wait_for(websocket.close(code=code), WS_SEND_SECONDS)
 
         def closer(code: int) -> None:
             loop.call_soon_threadsafe(lambda: loop.create_task(close_with(code)))
@@ -4993,7 +5162,10 @@ def build_remote_app(
                 frame["agent"] = agent
             if project is not None:
                 frame["project"] = project
-            await websocket.send_text(json.dumps(frame))
+            try:
+                await asyncio.wait_for(websocket.send_text(json.dumps(frame)), WS_SEND_SECONDS)
+            except TimeoutError:
+                raise _RemoteSocketStalled(kind) from None
 
         async def push_if_changed(
             kind: str, payload: object, *, project: str | None = None
@@ -5065,9 +5237,10 @@ def build_remote_app(
                     board = remote_board_unread(board)
                 await push_if_changed("board", board, project=board_ref or None)
             fleet = remote_taken(fleet_kind)
-            if isinstance(fleet, Exception):
-                log.debug("remote: fleet frame skipped: %s", fleet)
-            elif fleet is not _UNREAD and fleet_wanted and fleet_ref == fleet_project:
+            if fleet is not _UNREAD and fleet_wanted and fleet_ref == fleet_project:
+                if isinstance(fleet, Exception):  # said where the fleet was, not frozen as live
+                    log.debug("remote: fleet frame unread: %s", fleet)
+                    fleet = remote_fleet_unread(fleet_ref, fleet)
                 await push_if_changed("fleet", fleet)
             await push_if_changed("remote", runtime.remote_json())
             # The lanes' frames, each guarded as board and fleet are: one lane's bug,
@@ -5177,6 +5350,8 @@ def build_remote_app(
                 await asyncio.wait([reading], timeout=max(0.0, ends - loop.time()))
         except WebSocketDisconnect:
             pass
+        except _RemoteSocketStalled as exc:  # its close would wait as long: none is sent
+            log.debug("remote: stream for %s stalled on a %s frame", device.id, exc)
         except Exception as exc:
             log.debug("remote: stream for %s ended: %s", device.id, exc)
             # A failure, said as one (the page reconnects with backoff): returning
@@ -5517,14 +5692,82 @@ def _remote_uvicorn_config(app: Any, port: int) -> uvicorn.Config:
     )
 
 
+def _remote_uvicorn_server() -> type[uvicorn.Server]:
+    """uvicorn's server for Remote, in the TUI's thread (:class:`_Server`) and under ``serve``
+    (:func:`_remote_serve_server`) alike: its stop cuts what a phone that stopped reading
+    holds up (:func:`_remote_cut_stuck`). Made where a server is, from the ``uvicorn``
+    imported then: it is the remote extra's."""
+    import asyncio
+
+    import uvicorn
+
+    class RemoteUvicorn(uvicorn.Server):
+        remote_cutting: asyncio.Task[None] | None = None
+        """The cut of what is stuck, from the tick its stop begins (:func:`_remote_cut_stuck`).
+        Kept here: the loop holds a task only weakly."""
+
+        async def on_tick(self, counter: int) -> bool:
+            stopping = await super().on_tick(counter)
+            if stopping and self.remote_cutting is None:
+                self.remote_cutting = asyncio.ensure_future(_remote_cut_stuck(self))
+            return stopping
+
+    return RemoteUvicorn
+
+
+async def _remote_cut_stuck(server: uvicorn.Server) -> None:
+    """While ``server`` stops: once no phone's write runs, give the rest
+    :data:`REMOTE_WINDING_DOWN_SECONDS`, then cut every connection that waits on its peer
+    (:func:`_remote_connection_stuck`), and any that comes to, until no connection is left.
+
+    uvicorn's stop closes each connection and waits for it to go, with no limit. A close
+    lets what was written drain first, and a phone that stopped reading, asleep or off its
+    network, never takes it: the connection never went, so ``serve`` never exited after its
+    auto-off, holding ``remote-serve.lock`` (every fleet UI's panel said Remote was on
+    elsewhere), a Ctrl-C changed nothing, and the R panel's next start was refused as
+    winding down for as long as the phone's TCP lived (sweep 5 of #243). Cut, a connection
+    goes at once. A phone's write still running is waited for, as the way out waits for
+    it; a read that sent nothing yet holds nothing to cut, and is let finish.
+    """
+    import asyncio
+
+    while remote_writes_running():
+        await asyncio.sleep(0.1)
+    await asyncio.sleep(REMOTE_WINDING_DOWN_SECONDS)
+    while server.server_state.connections:
+        for connection in list(server.server_state.connections):
+            if _remote_connection_stuck(connection):
+                connection.transport.abort()
+        await asyncio.sleep(0.1)
+
+
+def _remote_connection_stuck(connection: Any) -> bool:
+    """Whether a connection of a stopping server waits on its peer, which may never come
+    back (:func:`_remote_cut_stuck`): it holds bytes the peer has not taken, or a request
+    whose body has not all come.
+
+    uvicorn lets a request it is reading finish, and a client that sent a request's head
+    and part of its body, then nothing, a phone that slept or lost its network mid-upload,
+    or anyone holding the link at ``unlock``, held it for good: nothing was waiting to be
+    sent, so only the bytes held were cut, and ``serve`` never exited after its auto-off
+    and the R panel's next start was refused as winding down (sweep of #243, round 7).
+    Such a request was never asked in full, so nothing it would have done is lost.
+    """
+    transport = getattr(connection, "transport", None)
+    if transport is None:
+        return False
+    if transport.get_write_buffer_size():
+        return True
+    cycle = getattr(connection, "cycle", None)  # uvicorn's HTTP request in flight, h11's or not
+    return cycle is not None and not cycle.response_complete and cycle.more_body is True
+
+
 class _Server:
     """uvicorn in a daemon thread, stopped by flipping ``should_exit``."""
 
     def __init__(self, app: Any, port: int) -> None:
-        import uvicorn
-
         self.port = port
-        self._server = uvicorn.Server(_remote_uvicorn_config(app, port))
+        self._server = _remote_uvicorn_server()(_remote_uvicorn_config(app, port))
         self._thread = threading.Thread(
             target=self._serve_in_thread, name="asq-remote", daemon=True
         )
@@ -5578,7 +5821,9 @@ to start beside (:func:`start_remote_server`)."""
 
 REMOTE_WINDING_DOWN_SECONDS = 5.0
 """How long :func:`remote_wait_for_writes` gives a stopped server once its writes are done: the
-answers go out, then the lanes stop, as :meth:`_Server.stop_serving` allows."""
+answers go out, then the lanes stop, as :meth:`_Server.stop_serving` allows. And how long a
+stopping server waits, its writes done, before it cuts a connection whose phone takes nothing
+more (:func:`_remote_cut_stuck`)."""
 
 _WRITE_TARGET = re.compile(r"[\w.@-]{1,64}\Z")
 """An agent named in a write's body that may be printed to the terminal: a label, never a
@@ -5734,15 +5979,56 @@ def _remote_serve_server(config: uvicorn.Config) -> uvicorn.Server:
     """
     import signal
 
-    import uvicorn
+    class RemoteServe(_remote_uvicorn_server()):  # type: ignore[misc]  # uvicorn's, made here
+        remote_ended_by: int | None = None
+        """The first signal other than Ctrl-C that ended it (:class:`RemoteSignalled`)."""
+        remote_interrupted = False
+        """Whether a Ctrl-C came: raised again as ``KeyboardInterrupt`` once it stopped."""
 
-    class RemoteServe(uvicorn.Server):
         def handle_exit(self, sig: int, frame: FrameType | None) -> None:
             again = self.should_exit and sig == signal.SIGINT
+            if sig == signal.SIGINT:
+                self.remote_interrupted = True
+            elif self.remote_ended_by is None:
+                self.remote_ended_by = sig
             super().handle_exit(sig, frame)
             if again and remote_writes_running():
                 _remote_quit_now()
             _remote_writes_announced("Ctrl-C again")
+
+        @contextlib.contextmanager
+        def capture_signals(self) -> Iterator[None]:
+            """uvicorn's, with a hangup handled as SIGTERM is, and neither raised again once
+            it has stopped.
+
+            uvicorn puts back the handlers it found and raises each signal it caught again:
+            a SIGTERM's is the default, so ``serve`` died of it inside ``run``, before its way
+            out, and a SIGHUP, which it does not catch, killed it at once. Neither revoked
+            the devices of a deadline that had passed, cleared the deadline or saved
+            ``last_seen``, nor said to stop the ngrok, and the phones' cookies opened the
+            next Remote (sweep 5 of #243). :func:`run_foreground` takes its way out, then
+            raises :class:`RemoteSignalled`. A Ctrl-C is raised again, as uvicorn does.
+
+            A hangup that was ignored when ``serve`` started stays ignored: ``nohup`` ignores
+            it so that closing the terminal leaves the process running, and a handler here
+            stopped Remote at the very close it was started to outlive.
+            """
+            if threading.current_thread() is not threading.main_thread():
+                yield  # signal handlers are the main thread's
+                return
+            names = ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK")  # SIGBREAK: Windows' Ctrl-Break
+            handled = [getattr(signal, name) for name in names if hasattr(signal, name)]
+            hangup = getattr(signal, "SIGHUP", None)
+            if hangup is not None and signal.getsignal(hangup) is signal.SIG_IGN:
+                handled.remove(hangup)  # nohup's: the terminal's close is not to end it
+            before = {sig: signal.signal(sig, self.handle_exit) for sig in handled}
+            try:
+                yield
+            finally:
+                for sig, handler in before.items():
+                    signal.signal(sig, handler)
+            if self.remote_interrupted:
+                signal.raise_signal(signal.SIGINT)
 
     return RemoteServe(config)
 
@@ -5917,6 +6203,25 @@ def _release_remote_claim(fd: int) -> None:
     os.close(fd)
 
 
+def _remote_auto_off_missed(state: Runtime) -> None:
+    """As Remote comes on, its home claimed: a deadline that passed with no Remote left to keep
+    it is an auto-off whose way out never ran, and it runs now, before any phone is let in.
+    Every device is revoked and the deadline cleared.
+
+    Every way out Remote takes clears its deadline, and when the deadline had passed it
+    revokes the devices too (:func:`run_foreground`; the R panel's ``shutdown_for_exit``).
+    A process that never took one left both: one killed (SIGKILL, a crash, a power cut),
+    or a fleet UI ended by a SIGTERM or a SIGHUP, which stop its ngrok and end it at once.
+    The next Remote set a deadline of its own and let in every phone the missed auto-off
+    would have signed out, for up to the 7 days a device lives (sweep 5 of #243).
+    """
+    if not state.auto_off_passed(_remote_now()):
+        return
+    log.warning("remote: the last Remote's auto-off time passed with no Remote to keep it")
+    state.revoke_every_device("auto-off missed", close_code=WS_CLOSE_REMOTE_OFF)
+    state.set_auto_off(None)
+
+
 def _page_missing(dist_dir: Path | None) -> str | None:
     """``None`` when there is a page to serve; otherwise the sentence that says why not.
 
@@ -5929,19 +6234,30 @@ def _page_missing(dist_dir: Path | None) -> str | None:
     fresh machine's first ``R`` press just works. Only an install that lost its
     bundled page gets :data:`NO_PAGE_HINT` instead of a server that answers every
     request with nothing. A ``--dist`` that is a web project's own directory, not its
-    build, is refused as ``install-page`` refuses it (:func:`_page_project_not_build`).
+    build, is refused as ``install-page`` refuses it (:func:`_page_project_not_build`). One
+    that does not resolve, a symbolic link loop, is refused as such; an installed build that
+    does not is no installed page, as :func:`build_app` serves it (:func:`_remote_resolved`).
     """
     if dist_dir is not None:
-        dist = dist_dir.resolve()
+        dist = _remote_resolved(dist_dir)
+        if dist is None:
+            return PAGE_DOES_NOT_RESOLVE.format(path=dist_dir)
         if not (dist / "index.html").is_file():
             return f"no index.html in {dist}"
         return _page_project_not_build(dist)
-    if (remote_dist_dir().resolve() / "index.html").is_file():
+    installed = _remote_resolved(remote_dist_dir())
+    if installed is not None and (installed / "index.html").is_file():
         return None
     from aisquare.services import remote_page
 
     return None if remote_page.bundled_page_present() else NO_PAGE_HINT
 
+
+PAGE_DOES_NOT_RESOLVE = (
+    "{path} does not resolve to a directory: a symbolic link in it leads round in a loop"
+)
+"""Why a ``--dist`` or an ``install-page`` source that does not resolve is no page
+(:func:`_remote_resolved`)."""
 
 _PAGE_PROJECT_FILES = ("package.json", "node_modules")
 """What a web project's own directory holds beside its source ``index.html``, and its built
@@ -5980,6 +6296,26 @@ def _page_copy_skips(source: Path, directory: str, names: list[str]) -> set[str]
     }
 
 
+def _page_copy_narrowed(root: Path) -> None:
+    """Take group and other write off every directory and file of an installed copy.
+
+    ``copytree`` keeps the build's own modes (``copy2`` for each file, ``copystat`` for each
+    directory) and the umask never applies: a build made on a FAT or exFAT drive, on a WSL
+    ``/mnt/c`` path, or out of an archive that kept its modes, all 0777 and 0666, was
+    installed world-writable, under a home other accounts may traverse (macOS's is 0755).
+    Any of them could then replace ``index.html`` or its script, which are served before
+    the passphrase, and take the passphrase and the device's cookie with them (sweep 5 of
+    #243). The copy holds no link to look past: ``copytree`` copied what each one names.
+    """
+    import stat
+
+    for directory, _subdirectories, files in os.walk(root):
+        for path in (directory, *(os.path.join(directory, name) for name in files)):
+            mode = stat.S_IMODE(os.lstat(path).st_mode)
+            if mode & 0o022:
+                os.chmod(path, mode & ~0o022)
+
+
 def install_page(source: Path) -> Path:
     """Copy a built ``aisquare-remote`` dist into :func:`remote_dist_dir`, atomically.
 
@@ -5989,24 +6325,38 @@ def install_page(source: Path) -> Path:
     serve from ``source`` stays behind (:func:`_built_page_file`): its hidden files, as
     the bundled page's do, which is where a project keeps ``.env`` and ``.git``, and a
     link that leads out of it or to a hidden file, whose content the copy would
-    otherwise hold under the link's own name. The copy lands in a staging directory
-    beside the destination and is swapped in with two renames — same filesystem, so
-    each rename is atomic — rather than removing the destination first, so a server
-    reading the old page mid-swap never sees a half-written one.
+    otherwise hold under the link's own name. Nothing in the copy is writable by group or
+    others, whatever the build's modes were (:func:`_page_copy_narrowed`). The copy lands
+    in a staging directory beside the destination and is swapped in with two renames —
+    same filesystem, so each rename is atomic — rather than removing the destination
+    first, so a server reading the old page mid-swap never sees a half-written one.
+
+    The staging directory is made inside one only this account may enter (``mkdtemp``'s
+    0700), and leaves it only once its modes are narrowed. Made beside the destination,
+    the copy took the build's 0666 and 0777 as each file and directory was written, and
+    another account could open a file for writing in that moment and keep it open past
+    the narrowing, or put its own file in a directory before the walk reached it, which
+    the walk then left as it was, its owner's (sweep of #243, round 7).
     """
-    source = source.resolve()
+    resolved = _remote_resolved(source)
+    if resolved is None:
+        raise NoRemotePage(PAGE_DOES_NOT_RESOLVE.format(path=source))
+    source = resolved
     if not (source / "index.html").is_file():
         raise NoRemotePage(f"no index.html in {source} — build aisquare-remote first")
     project = _page_project_not_build(source)
     if project is not None:
         raise NoRemotePage(project)
+    import tempfile
+
     ensure_home()
     destination = remote_dist_dir()
-    staging = destination.with_name(f".{destination.name}.staging-{os.getpid()}")
-    shutil.rmtree(staging, ignore_errors=True)
+    private = Path(tempfile.mkdtemp(prefix=f".{destination.name}.private-", dir=destination.parent))
+    staging = private / f".{destination.name}.staging-{os.getpid()}"
     previous = destination.with_name(f".{destination.name}.previous-{os.getpid()}")
     try:
         shutil.copytree(source, staging, ignore=functools.partial(_page_copy_skips, source))
+        _page_copy_narrowed(staging)
         shutil.rmtree(previous, ignore_errors=True)
         if destination.exists():
             destination.rename(previous)
@@ -6017,11 +6367,12 @@ def install_page(source: Path) -> Path:
                 previous.rename(destination)
             raise
     except BaseException:
-        # Named for this process, so no later install's own clean-up ever matched it: each
+        # Unique to this try, so no later install's own clean-up would ever find it: each
         # failed try (a full disk, a file it could not read) left another partial copy
         # holding the very space the refusal says to free (sweep 4 of #243).
-        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(private, ignore_errors=True)
         raise
+    shutil.rmtree(private, ignore_errors=True)
     shutil.rmtree(previous, ignore_errors=True)
     return destination
 
@@ -6054,6 +6405,7 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
                 raise RemoteWindingDown(_remote_winding_down())
             claimed = _claim_remote_home(state)
             state.remote_coming_on()
+            _remote_auto_off_missed(state)
             app = build_remote_app(state, dist_dir=dist_dir)
             server = _Server(app, port)
             server.start_serving()
@@ -6469,7 +6821,8 @@ def run_foreground(
     on while a phone keeps extending it, with the farewell push and every device
     revoked (4410); the flusher writes ``last_seen`` and prunes devices every
     30 s. Ctrl-C revokes nothing (SPEC §2.4): the devices' own expiry bounds them;
-    one that comes once the deadline has passed is auto-off, which does.
+    one that comes once the deadline has passed is auto-off, which does. A SIGTERM or a
+    SIGHUP takes the same way out as Ctrl-C, then :class:`RemoteSignalled` is raised.
     """
     global _foreground, _flusher
     problem = _remote_dependency_error()
@@ -6484,6 +6837,7 @@ def run_foreground(
         claimed = _claim_remote_home(state)  # before anything is bound or printed
     state.remote_coming_on()
     try:
+        _remote_auto_off_missed(state)
         sock = _bind_remote_socket(port)
     except BaseException:
         if claimed:
@@ -6535,6 +6889,9 @@ def run_foreground(
             raise RemoteOffIncomplete(
                 f"Remote turned off — the auto-off timer ran out, but {failure}"
             )
+        ended_by = getattr(server, "remote_ended_by", None)
+        if ended_by is not None:
+            raise RemoteSignalled(ended_by, fired=timer.fired)
         return timer.fired
     finally:
         sock.close()
@@ -6564,6 +6921,7 @@ __all__ = [
     "RemoteError",
     "RemoteInfo",
     "RemoteOffIncomplete",
+    "RemoteSignalled",
     "RemoteUnavailable",
     "RemoteWindingDown",
     "RequestError",

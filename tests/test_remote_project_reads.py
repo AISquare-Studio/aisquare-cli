@@ -813,6 +813,41 @@ def test_a_board_that_cannot_be_read_is_a_frame_that_says_why(
     assert gone["project"] == "nope" and "no project matches 'nope'" in gone["payload"]["error"]
 
 
+def test_a_fleet_that_cannot_be_read_is_a_frame_that_says_why(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """A fleet snapshot that raised was skipped and logged at debug level, so the page kept
+    the last fleet it had, its agents working or waiting, under heartbeats that said the
+    link was alive: after the project was removed while the phone slept, or with a store
+    that would not open (sweep 5 of #243). The frame says why now, naming the project it
+    was asked for, and the fleet replaces it once it can be read again."""
+    failing = [False]
+
+    def fleet(project: str | None) -> object:
+        if failing[0]:
+            raise NoSuchProject(f"no project matches {project!r} (id prefix, name or codename)")
+        return {"project": {"id": project}, "agents": [{"agent": {"label": "coder-1"}}]}
+
+    sources = dataclasses.replace(Reads().sources(), fleet=fleet)
+    client = make_client(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))
+    assert unlock(client, runtime).status_code == 200
+    is_fleet = lambda f: f["type"] == "fleet"  # noqa: E731
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe_fleet": "prj_f"}))
+        read = _until(ws, is_fleet)
+        failing[0] = True
+        unread = _until(ws, is_fleet)
+        failing[0] = False
+        again = _until(ws, is_fleet)
+    assert read["payload"]["agents"] and "error" not in read["payload"]
+    assert unread["payload"] == {
+        "project": {"id": "prj_f"},
+        "agents": [],
+        "error": "no project matches 'prj_f' (id prefix, name or codename)",
+    }
+    assert again["payload"] == read["payload"]
+
+
 def _captures(panes: Panes, pane: tuple[str, str | None], count: int) -> None:
     """Wait for ``pane``'s ``count``-th capture: a tick each, and a tick starts its board's
     read, when its socket wants one, before its captures, and waits for them all."""

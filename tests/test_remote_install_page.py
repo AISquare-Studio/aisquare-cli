@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import shutil
 import socket
+import stat
 import sys
 import urllib.request
 from collections.abc import Callable
@@ -86,6 +88,62 @@ def test_install_page_copies_the_dist_into_the_directory_the_server_serves(
     assert (destination / "assets" / "app.js").read_text() == "console.log('remote')"
     # The installed page counts on its own: here there is no bundled one to fall back to.
     assert remote_server._page_missing(None) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows keeps no group or other bits")
+def test_an_installed_page_is_writable_by_no_one_else_whatever_the_builds_modes(
+    isolated_home: Path, built: Path
+) -> None:
+    """``copytree`` kept the build's modes and never applied the umask: a build that came
+    with 0777 directories and 0666 files (a FAT drive, ``/mnt/c``, an archive) was installed
+    world-writable, and another account could replace the page that takes the passphrase,
+    served before it (sweep 5 of #243). The build's other bits are left as they were."""
+    for path in (built, built / "assets"):
+        path.chmod(0o777)
+    for path in (built / "index.html", built / "assets" / "app.js"):
+        path.chmod(0o666)
+
+    destination = remote_server.install_page(built)
+
+    modes = {
+        str(path.relative_to(destination)): stat.S_IMODE(path.stat().st_mode)
+        for path in (destination, *destination.rglob("*"))
+    }
+    assert modes == {".": 0o755, "assets": 0o755, "index.html": 0o644, "assets/app.js": 0o644}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows keeps no group or other bits")
+def test_an_installed_page_is_copied_where_no_other_account_can_reach_it(
+    isolated_home: Path, built: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Narrowed only once copied, the copy took the build's 0666 and 0777 as it was written
+    beside the destination: another account could open a file for writing then and keep it
+    open past the narrowing, or put its own file in a directory the walk then left as it
+    was (sweep of #243, round 7). The copy is made inside a directory only this account may
+    enter, and the swap leaves nothing of it behind."""
+    for path in (built, built / "assets"):
+        path.chmod(0o777)
+    for path in (built / "index.html", built / "assets" / "app.js"):
+        path.chmod(0o666)
+    home = remote_dist_dir().parent
+    reachable: list[str] = []
+    real_copytree = shutil.copytree
+
+    def copy_and_look(src: Path, dst: Path, *args: Any, **kwargs: Any) -> Any:
+        copied = real_copytree(src, dst, *args, **kwargs)
+        within = [Path(dst), *Path(dst).parents]
+        between = within[: within.index(home)]
+        if not any(stat.S_IMODE(path.stat().st_mode) & 0o077 == 0 for path in between):
+            reachable.append(str(Path(dst).relative_to(home)))
+        return copied
+
+    monkeypatch.setattr(shutil, "copytree", copy_and_look)
+
+    destination = remote_server.install_page(built)
+
+    assert reachable == [], "the copy, its build's modes still on it, was in reach"
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o755
+    assert [p.name for p in home.iterdir() if p.name.startswith(".remote-dist.")] == []
 
 
 def test_install_page_replaces_an_older_page_and_leaves_no_staging_directory(

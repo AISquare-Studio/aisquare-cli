@@ -379,6 +379,60 @@ def test_a_send_that_fails_after_typing_is_still_on_the_audit_trail(
     assert summary == "coder-1@prj_p text=6ch keys=0 enter=True failed"
 
 
+def test_a_send_of_32_keys_that_fails_still_says_failed_and_enter_on_its_audit_line(
+    runtime: Runtime, pane: FakePane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every key name was spelled out, up to 290 characters for 32 keys, and the
+    300-character cut of the line took the ``enter=`` and the ``failed`` after them: a send
+    that failed with keys typed read as one that went through (sweep 5 of #243). With the
+    longest label and a real project id, a run reads as one name and its count, and a list
+    past what fits says how many keys it left out."""
+    project = SimpleNamespace(id="prj_" + "a" * 26, root=Path("/tmp/p"))
+    monkeypatch.setattr(remote_server, "_resolve_project", lambda ref: project)
+    client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
+    assert unlock(client, runtime).status_code == 200
+    runtime.set_allow_write(True)
+    label = "coder-" + "x" * 18
+    pane.fail_keys = True
+
+    def sent(keys: list[str]) -> str:
+        client.post(
+            f"{base(runtime)}/api/send-keys", json={"agent": label, "keys": keys, "enter": True}
+        )
+        return _audit_lines()[-1][3]
+
+    mixed = sent(["PageDown", "PageUp"] * 16)
+    assert mixed.endswith(",…+18] enter=True failed"), mixed
+    assert sent(["PageDown"] * 31 + ["1"]) == (
+        f"{label}@{project.id} text=0ch keys=[PageDown*31,1] enter=True failed"
+    )
+
+
+def test_a_key_list_on_an_audit_line_fits_its_room_and_accounts_for_every_key() -> None:
+    """A send's line and a quick answer's (``remote_needs``) both write their outcome after
+    the keys, and the quick answer's ``enter=`` and ``failed`` were cut off the same way: 32
+    keys spelled out took up to 290 characters (sweep 5 of #243). Whatever 32 keys are
+    sent, the list fits :data:`AUDIT_KEYS_MAX` and still says, in order, every key it
+    names, how many times, and how many it left out."""
+    import random
+
+    names = ["PageDown", "PageUp", "BSpace", "Escape", "Delete", "F12", "C-c", "9"]
+    draw = random.Random(243)
+    for _ in range(500):
+        keys = [draw.choice(names) for _ in range(SEND_KEYS_KEYS_MAX)]
+        listed = remote_server._audit_keys(keys)
+        assert len(listed) <= remote_server.AUDIT_KEYS_MAX + 2, listed
+        named: list[str] = []
+        left_out = 0
+        for entry in listed.removeprefix("[").removesuffix("]").split(","):
+            if entry.startswith("…+"):
+                left_out = int(entry.removeprefix("…+"))
+            else:
+                name, _, count = entry.partition("*")
+                named += [name] * int(count or 1)
+        assert named == keys[: len(named)] and len(named) + left_out == len(keys), listed
+
+
 def test_a_key_outside_the_allowlist_sends_nothing_at_all(pane: FakePane) -> None:
     send = live_writes().handlers["send-keys"]
     with pytest.raises(RequestError):
@@ -1153,6 +1207,32 @@ def test_past_the_device_cap_with_every_device_signed_in_an_unlock_is_refused_40
     assert "set-cookie" not in refused.headers
     assert runtime.device_ids() == kept and _devices_on_disk() == kept
     assert all(phone.get(f"{base(runtime)}/api/board").status_code == 200 for phone in phones[:3])
+
+
+def test_a_device_removed_to_make_room_is_named_on_the_audit_trail_and_in_the_log(
+    app: Any, runtime: Runtime, clock: Clock, monkeypatch: pytest.MonkeyPatch, caplog: Any
+) -> None:
+    """The cap's removal took a device and its push subscription with nothing on the trail,
+    writes off too: the owner saw the device go, its notifications stop, and no line said
+    why, where a revoke and a known device's last wrong guess are both recorded (sweep 5 of
+    #243). The unlock that made room says which device it removed, before the free text."""
+    monkeypatch.setattr(remote_server, "DEVICES_MAX", 2)
+    owner, reader, third = (_from(app, f"198.51.100.{90 + n}") for n in range(3))
+    assert unlock(owner, runtime).status_code == 200
+    (owned,) = runtime.device_ids()
+    clock.advance(hours=2)
+    assert unlock(reader, runtime).status_code == 200
+    clock.advance(hours=23)  # the owner's device is signed out; the reader's is used
+    assert reader.get(f"{base(runtime)}/api/board").status_code == 200
+    with caplog.at_level("INFO", logger="aisquare.services.remote_server"):
+        made = unlock(third, runtime)
+    assert made.status_code == 200, made.text
+    kept, newest = runtime.device_ids()
+    assert owned not in (kept, newest) and _devices_on_disk() == [kept, newest]
+    _ts, device, endpoint, summary = _audit_lines()[-1]
+    assert (device, endpoint) == (newest, "unlock")
+    assert summary.startswith(f"device {newest} evicted {owned} ua="), summary
+    assert any(owned in record.getMessage() for record in caplog.records)
 
 
 def test_an_open_socket_closes_4401_when_its_device_goes(
@@ -1953,6 +2033,7 @@ def team(monkeypatch: pytest.MonkeyPatch) -> FakeTeam:
     fake = FakeTeam()
     for name in ("add_note", "claim_task", "finish_task"):
         monkeypatch.setattr(team_service, name, getattr(fake, name))
+    monkeypatch.setattr(remote_server, "_remote_author", lambda ref: ref)  # every ref a session
     return fake
 
 
@@ -2358,7 +2439,7 @@ def test_a_remove_from_the_phone_forgets_the_registration(
     assert removed.status_code == 200, removed.text
     assert removed.json()["report"]["project"]["id"] == beta.id
     assert [project.id for project in project_service.list_projects()] == [alpha.id]
-    assert _audit_lines()[-1][2:] == ["project/remove", "removed beta"]
+    assert _audit_lines()[-1][2:] == ["project/remove", f"removed {beta.id}"]
 
 
 @pytest.mark.parametrize("ref", ["docs", "{home}/code/docs", "~/code/docs"])
@@ -2373,7 +2454,8 @@ def test_a_remove_forgets_the_project_it_names_wherever_the_server_runs(
     ``project forget`` reads it from a shell: the server ran in a project with a ``docs/``
     directory, so that project was forgotten, the pin moved off it, and the trail said
     ``removed docs``, while the project named ``docs`` stayed (sweep 4 of #243). A name
-    is a name; an absolute path still names its project."""
+    is a name; an absolute path still names its project. The trail names the project it
+    forgot, whatever ref named it (sweep 5 of #243)."""
     current, docs, other = _projects(home, "code/current", "code/docs", "code/other")
     (current.root / "docs").mkdir()
     monkeypatch.chdir(current.root)
@@ -2385,7 +2467,7 @@ def test_a_remove_forgets_the_project_it_names_wherever_the_server_runs(
     assert removed.json()["report"]["active_changed"] is False
     assert [project.id for project in project_service.list_projects()] == [current.id, other.id]
     assert project_service.info().id == current.id
-    assert _audit_lines()[-1][2:] == ["project/remove", f"removed {said}"]
+    assert _audit_lines()[-1][2:] == ["project/remove", f"removed {docs.id}"]
 
 
 def test_a_project_with_live_agents_is_not_removed_and_the_phone_hears_why(

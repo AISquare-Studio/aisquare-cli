@@ -1167,6 +1167,32 @@ async function boardAnswers() {
   };
 }
 
+/* The Fleet tab and an agent's screen with a fleet frame drawn, then the frame of a fleet the
+ * machine could not read (its project removed, a store that will not open): what each says. */
+async function fleetUnread() {
+  const unread = { project: { id: PROJECT }, agents: [], error: "no project matches 'prj_x'" };
+  const opened = async (hash) => {
+    const page = bootPage(hash, signedIn());
+    await settle();
+    page.acceptSockets();
+    await settle();
+    page.live().frame("fleet", FLEET);
+    await settle();
+    return page;
+  };
+  const tab = await opened("#/p/" + PROJECT + "/fleet");
+  const drawn = () => tab.main().querySelectorAll("div.data")[0].textContent;
+  const rows = drawn();
+  tab.live().frame("fleet", unread);
+  await settle();
+  const agent = await opened("#/p/" + PROJECT + "/a/coder-1/live");
+  const state = () => agent.main().querySelectorAll("span.state")[0].textContent;
+  const live = state();
+  agent.live().frame("fleet", unread);
+  await settle();
+  return { rows, unread: drawn(), live, stateUnread: state() };
+}
+
 /* A transcript read on a phone in UTC-7 from a machine that sends each turn's time as UTC:
  * the lines it draws. */
 async function transcriptTimes() {
@@ -3385,6 +3411,7 @@ async function main() {
     fleetOnItsScreens: await fleetOnItsScreens(),
     boardReopened: await boardReopened(),
     boardAnswers: await boardAnswers(),
+    fleetUnread: await fleetUnread(),
     transcriptTimes: await transcriptTimes(),
     limitTimes: await limitTimes(),
     readsAfterFrames: await readsAfterFrames(),

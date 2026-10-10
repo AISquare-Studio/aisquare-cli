@@ -1756,6 +1756,19 @@ def test_a_board_that_cannot_be_read_says_why_on_the_board_tab(
     assert board["unread"] == ["the agent orchestrator is disabled"], "the read after it is no news"
 
 
+def test_a_fleet_that_cannot_be_read_says_why_where_its_agents_were(
+    boot_report: dict[str, Any],
+) -> None:
+    """The stream sent no frame for a fleet that raised, so the Fleet tab and an agent's
+    screen kept the last fleet they had, its agents working or waiting, under heartbeats
+    that said the link was alive (sweep 5 of #243). Its frame says why now: the tab draws
+    that sentence in place of the rows, and the agent's screen drops the state it had."""
+    fleet = boot_report["fleetUnread"]
+    assert "coder-1" in fleet["rows"]
+    assert fleet["unread"] == "no project matches 'prj_x'"
+    assert fleet["live"] != "" and fleet["stateUnread"] == ""
+
+
 def test_a_transcript_tells_each_turns_time_by_the_phones_own_clock(
     boot_report: dict[str, Any],
 ) -> None:

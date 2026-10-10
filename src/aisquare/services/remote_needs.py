@@ -2666,7 +2666,10 @@ def _needs_answer_body(body: Mapping[str, object]) -> tuple[str, list[str], str,
 
     The text reaches the pane byte for byte, as ``send-keys``' does, so it passes the
     same :func:`~aisquare.services.remote_server.check_remote_text`: a ``"\\x03"`` in it
-    would be a Ctrl-C that no key allowlist saw and the audit line could not show.
+    would be a Ctrl-C that no key allowlist saw and the audit line could not show. Both
+    is what ``send-keys`` calls both, keys given and words given: an empty ``keys`` next
+    to words, from a client that always sends the field, gives no key to lose the order
+    of. Refused as both, it was told it sent what it had not.
     """
     from aisquare.services.remote_server import (
         SEND_KEYS_TEXT_MAX,
@@ -2680,11 +2683,11 @@ def _needs_answer_body(body: Mapping[str, object]) -> tuple[str, list[str], str,
     raw_keys, raw_text = body.get("keys"), body.get("text")
     if raw_text is not None and not isinstance(raw_text, str):
         raise RequestError(400, "invalid", "'text' must be a string")
-    if raw_keys is not None and raw_text:
+    keys = [] if raw_keys is None else check_remote_key_names(raw_keys)
+    if keys and raw_text:
         raise RequestError(
             400, "text_and_keys", "send 'keys' or 'text', not both: the order would be lost"
         )
-    keys = [] if raw_keys is None else check_remote_key_names(raw_keys)
     refused = [key for key in keys if key not in NEEDS_ANSWER_KEYS]
     if refused:
         allowed = ", ".join(sorted(NEEDS_ANSWER_KEYS))

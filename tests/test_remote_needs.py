@@ -3526,6 +3526,17 @@ def test_an_answer_is_keys_or_words_never_both(
     assert live.tmux.typed == []
 
 
+def test_an_answer_in_words_beside_no_keys_is_words_as_send_keys_takes_it(live: Live) -> None:
+    """A client that always sends ``keys``, empty when the human typed, sent no key to lose
+    the order of: ``send-keys`` takes the body, and a quick answer refused it as both."""
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    body = {"id": card["id"], "keys": [], "text": "yes", "enter": True}
+    response = live.client.post(live.url("needs/answer"), json=body)
+    assert response.status_code == 200, response.text
+    assert live.tmux.typed == [("text", "%7", "yes"), ("keys", "%7", "Enter")]
+
+
 @pytest.mark.parametrize("text", ["\x03", "yes\x1b[201~", "no\x7f", "ok\x04", "1\r"])
 def test_an_answer_in_words_carries_no_control_character(live: Live, text: str) -> None:
     """Words reach the pane byte for byte, so a control in them would be a keystroke

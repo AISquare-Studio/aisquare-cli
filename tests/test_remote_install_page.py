@@ -21,6 +21,7 @@ import errno
 import json
 import shutil
 import socket
+import sys
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -483,3 +484,35 @@ def test_a_hidden_file_of_the_build_is_never_served(
     assert response.status_code in (200, 404)
     if response.status_code == 200:
         assert response.text.startswith("<!doctype html>"), "only ever the document"
+
+
+@pytest.mark.parametrize("installed", [False, True], ids=["dist", "install-page"])
+def test_a_symlink_loop_in_the_build_is_a_file_it_does_not_have_on_every_python(
+    isolated_home: Path, built: Path, installed: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``Path.resolve`` of a symlink loop raises ``RuntimeError`` ("Symlink loop from ...") on
+    Python 3.11 and 3.12, which CI runs, and returns the path on 3.13. The page's lookup and
+    install-page's copy caught ``OSError`` and ``ValueError``: a loop in a build answered a
+    bare 500, a traceback in the log, to anyone holding the link, and stopped install-page
+    with one. On 3.13 resolve is made to raise for the loop as 3.12's does."""
+    loop = built / "loop.js"
+    try:
+        loop.symlink_to(loop)
+    except OSError:
+        pytest.skip("this platform cannot make the symlink")
+    if sys.version_info >= (3, 13):
+        resolve = Path.resolve
+
+        def resolve_as_3_12(self: Path, strict: bool = False) -> Path:
+            if self.name == "loop.js":
+                raise RuntimeError(f"Symlink loop from {str(self)!r}")
+            return resolve(self, strict)
+
+        monkeypatch.setattr(Path, "resolve", resolve_as_3_12)
+    if installed:
+        destination = remote_server.install_page(built)
+        assert not (destination / "loop.js").is_symlink()
+    runtime = Runtime(remote_state_path(), remote_audit_path())
+    app = build_app(runtime) if installed else build_app(runtime, dist_dir=built)
+    response = make_client(app).get(f"/r/{runtime.token}/loop.js")
+    assert response.status_code == 404, response.text

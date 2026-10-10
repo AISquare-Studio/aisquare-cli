@@ -3565,7 +3565,7 @@ def _built_page_target(dist: Path, path: Path) -> Path | None:
     copies (:func:`_page_copy_skips`)."""
     try:
         resolved = path.resolve()
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):  # RuntimeError: a symlink loop, 3.11 and 3.12
         return None
     if not resolved.is_relative_to(dist):
         return None

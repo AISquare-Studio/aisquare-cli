@@ -485,7 +485,8 @@ class FixCommand:
 
     @property
     def label(self) -> str:
-        return "aisquare " + " ".join(self.argv)
+        """The command as the fix it came from prints it, quoted for this shell."""
+        return install_route.command_line(["aisquare", *self.argv])
 
 
 def _argv_for(known: _KnownFix, rest: str) -> tuple[str, ...] | None:

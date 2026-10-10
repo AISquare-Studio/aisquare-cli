@@ -613,8 +613,8 @@ def _check_database() -> DoctorCheck:
             f"context.db is readable ({count} user entries) — but it was found "
             f"TRUNCATED and rebuilt at {when}; the sessions, tasks and notes it "
             "held are gone",
-            f"Nothing to repair — the history was lost before this. "
-            f"Acknowledge it with: rm {marker}",
+            "Nothing to repair — the history was lost before this. "
+            f"Acknowledge it with: {install_route.command_line(['rm', str(marker)])}",
         )
     return _ok("database", f"context.db is readable ({count} user entries)")
 

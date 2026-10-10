@@ -1446,6 +1446,8 @@ def test_a_config_dir_with_a_space_or_a_dollar_is_quoted_and_its_button_names_it
     connect = ["agents", "connect", "claude-code", "--config-dir", str(profile)]
     assert install_route.command_line(["aisquare", *connect]) in str(row.fix), row.fix
     assert buttons == [tuple(connect)], buttons
+    label = install_route.command_line(["aisquare", *connect])
+    assert [fix.label for fix in fix_commands([row])] == [label], "as the fix above it prints it"
     assert pressed is not None and pressed.exit_code == 0, pressed
     assert install_route.split_line(printed) == [
         "aisquare",

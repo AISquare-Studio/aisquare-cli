@@ -20,7 +20,9 @@ import socket
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
+from typing import Any
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
@@ -481,16 +483,29 @@ def _beyond_pypi(route: install_route.InstallRoute) -> str | None:
 
 def _latest_for(route: install_route.InstallRoute) -> install_route.LatestRelease:
     """PyPI's newest release, pre-releases counted when this install's upgrade takes them
-    (``install_route.takes_prereleases``), unless PyPI says nothing about what it gets
-    (:func:`_beyond_pypi`). With a cutoff, PyPI's newest was taken as the target, and the
-    unchanged version uv correctly left was reported as §3.9.1's silent no-op on every run
-    (sweep of #257)."""
-    why = _beyond_pypi(route)
-    if why is not None:
-        return install_route.LatestRelease(None, f"PyPI was not asked: {why}")
+    (``install_route.takes_prereleases``); under a uv cutoff, the newest uploaded before it.
+
+    PyPI is not asked for an install that resolves from its own index, or under a cutoff
+    that cannot be read: its word says nothing about what that install gets
+    (:func:`_beyond_pypi`). Taken as the target under a cutoff, PyPI's newest failed the
+    unchanged version uv rightly left as §3.9.1's silent no-op; then, not asked, every run
+    and --check found something to do, and each reinstall changed nothing (#257).
+    """
+    cutoff = install_route.cutoff(route)
+    before = install_route.cutoff_time(route, datetime.now(UTC))
+    if install_route.own_index(route) is not None or (cutoff is not None and before is None):
+        return install_route.LatestRelease(None, f"PyPI was not asked: {_beyond_pypi(route)}")
+    # Only what is asked for is passed, so a stand-in for the lookup that takes neither
+    # keyword (the damaged-store census) still answers.
+    asked: dict[str, Any] = {}
     if install_route.takes_prereleases(route, __version__):
-        return install_route.fetch_latest(prereleases=True)
-    return install_route.fetch_latest()
+        asked["prereleases"] = True
+    if before is not None:
+        asked["uploaded_before"] = before
+    found = install_route.fetch_latest(**asked)
+    if cutoff is None or found.version is None:
+        return found
+    return replace(found, cutoff=cutoff)
 
 
 def runs_this_install(binary: agent_core.HookBinary, found: install_route.Facts) -> bool:
@@ -726,7 +741,8 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
     notes: list[str] = []
     latest = plan.latest_version
     moved_elsewhere = latest is not None and not install_route.same_version(version or "", latest)
-    if plan.target is None and version is not None and moved_elsewhere:
+    pypis = plan.latest is not None and plan.latest.cutoff is None
+    if plan.target is None and version is not None and moved_elsewhere and pypis:
         held = "your uv cutoff allows" if cutoff is not None else "your package index served"
         notes.append(f"PyPI's latest is {latest}; {held} {version}")
     notes.append(

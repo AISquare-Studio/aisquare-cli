@@ -62,6 +62,7 @@ import sys
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from importlib import metadata
 from pathlib import Path
 from typing import Any, NoReturn
@@ -244,10 +245,16 @@ class LatestRelease:
 
     version: str | None
     error: str | None = None
+    cutoff: str | None = None
+    """The uv cutoff (``--exclude-newer P14D``) ``version`` is the newest release under, when
+    it is that rather than PyPI's newest."""
 
 
 def fetch_latest(
-    timeout: float = LOOKUP_TIMEOUT_SECONDS, *, prereleases: bool = False
+    timeout: float = LOOKUP_TIMEOUT_SECONDS,
+    *,
+    prereleases: bool = False,
+    uploaded_before: datetime | None = None,
 ) -> LatestRelease:
     """The newest ``aisquare-cli`` on PyPI. Never raises; an unreachable PyPI is an answer.
 
@@ -260,7 +267,9 @@ def fetch_latest(
     uploaded (measured). With ``prereleases``, for an install whose upgrade takes them
     (:func:`takes_prereleases`), it is the newest release PyPI lists with a file that
     is not yanked, as uv picks: such an install was told "up to date" while uv would
-    have installed a newer pre-release (sweep of #257).
+    have installed a newer pre-release (sweep of #257). With ``uploaded_before``, for an
+    install under a uv cutoff (:func:`cutoff_time`), it is the newest such release with a
+    file uploaded before then, as uv's ``--exclude-newer`` filters them.
     """
     # Here, not at module top: see the module docstring's one exception.
     from http.client import HTTPException
@@ -277,6 +286,12 @@ def fetch_latest(
     except (URLError, HTTPException, OSError, TimeoutError, ValueError) as exc:
         # HTTPException is not an OSError: a truncated body raises IncompleteRead.
         return LatestRelease(None, f"could not reach PyPI ({exc})")
+    if uploaded_before is not None:
+        releases = payload.get("releases") if isinstance(payload, dict) else None
+        allowed = _newest_listed(releases, finals_only=not prereleases, before=uploaded_before)
+        if allowed is None:
+            return LatestRelease(None, "PyPI lists no release uploaded before the cutoff")
+        return LatestRelease(allowed)
     info = payload.get("info") if isinstance(payload, dict) else None
     version = info.get("version") if isinstance(info, dict) else None
     if not isinstance(version, str) or version_key(version) is None:
@@ -288,19 +303,46 @@ def fetch_latest(
     return LatestRelease(version)
 
 
-def _newest_listed(releases: object) -> str | None:
-    """The newest version in PyPI's ``releases`` that has a file not yanked, or ``None``."""
+def _newest_listed(
+    releases: object, *, finals_only: bool = False, before: datetime | None = None
+) -> str | None:
+    """The newest version in PyPI's ``releases`` that has a file not yanked (and, with
+    ``before``, uploaded before then), pre-releases left out with ``finals_only``."""
     if not isinstance(releases, dict):
         return None
     newest: str | None = None
     for version, files in releases.items():
         if not isinstance(version, str) or not isinstance(files, list):
             continue
-        if not any(isinstance(file, dict) and file.get("yanked") is not True for file in files):
+        if version_key(version) is None or (finals_only and is_prerelease(version)):
             continue
-        if version_key(version) is not None and (newest is None or is_newer(version, newest)):
+        if not any(_installable(file, before) for file in files):
+            continue
+        if newest is None or is_newer(version, newest):
             newest = version
     return newest
+
+
+def _installable(file: object, before: datetime | None) -> bool:
+    """Whether one file of PyPI's ``releases`` is one uv would take: not yanked, and with
+    ``before``, uploaded before then. A time that cannot be read is not before anything."""
+    if not isinstance(file, dict) or file.get("yanked") is True:
+        return False
+    if before is None:
+        return True
+    uploaded = _instant(file.get("upload_time_iso_8601"))
+    return uploaded is not None and uploaded < before
+
+
+def _instant(text: object) -> datetime | None:
+    """An RFC 3339 timestamp (``2026-09-26T00:58:02.070800Z``) with its zone, else ``None``."""
+    if not isinstance(text, str):
+        return None
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None else None
 
 
 def open_url(request: Any, *, timeout: float) -> Any:
@@ -1008,6 +1050,31 @@ def cutoff(route: InstallRoute) -> str | None:
         return None
     at = options.index(_CUTOFF_FLAG)
     return command_line(options[at : at + 2])
+
+
+#: A cooldown as uv records it in the receipt: an ISO 8601 span of weeks, days, hours,
+#: minutes and seconds (``P14D``, ``P1W``, ``PT36H``, ``P1DT12H``; uv refuses months and
+#: years, measured with uv 0.12.19).
+_SPAN = re.compile(
+    r"P(?:(\d+)W)?(?:(\d+)D)?(?:T(?=\d)(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?"
+)
+
+
+def cutoff_time(route: InstallRoute, now: datetime) -> datetime | None:
+    """When this install's uv cutoff falls: its timestamp, or its span back from ``now``.
+    ``None`` when it has no cutoff, or one this cannot read (then nothing is compared)."""
+    options = route.receipt.options if route.receipt is not None else ()
+    if _CUTOFF_FLAG not in options[:-1]:
+        return None
+    value = options[options.index(_CUTOFF_FLAG) + 1]
+    span = _SPAN.fullmatch(value)
+    if span is not None and any(span.groups()):
+        weeks, days, hours, minutes, seconds = (float(part or 0) for part in span.groups())
+        return now - timedelta(
+            weeks=weeks, days=days, hours=hours, minutes=minutes, seconds=seconds
+        )
+    # A date or a timestamp, given any way, is recorded as an RFC 3339 timestamp (measured).
+    return _instant(value)
 
 
 def takes_prereleases(route: InstallRoute, current: str) -> bool:

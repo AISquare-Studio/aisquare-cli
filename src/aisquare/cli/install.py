@@ -56,6 +56,8 @@ def _plan_json(plan: lifecycle_service.UpgradePlan) -> dict[str, Any]:
         "target": plan.target or "latest",
         "latest": plan.latest_version,
         "latest_error": plan.latest.error if plan.latest is not None else None,
+        # Set when "latest" is the newest release under this uv cutoff, not PyPI's newest.
+        "latest_cutoff": plan.latest.cutoff if plan.latest is not None else None,
         "update_available": plan.update_available,
         "route": plan.route.kind,
         "install": plan.route.describe(),
@@ -88,6 +90,9 @@ def _latest_line(plan: lifecycle_service.UpgradePlan) -> str:
         # PyPI's newest is older than what runs (a release not yet published, a
         # pre-release): "you have it" said otherwise (sweep of #257).
         verdict = "yours is newer"
+    if plan.latest.cutoff is not None:
+        held = f"latest your uv cutoff allows ({plan.latest.cutoff})"
+        return f"{held}: {plan.latest.version} ({verdict})"
     return f"latest: {plan.latest.version} ({verdict})"
 
 
@@ -101,6 +106,15 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
         if plan.up_to_date:
             # Not "upgrade with: aisquare upgrade", which answers "nothing to do" (sweep of #257).
             _say("nothing to upgrade")
+            return
+        if plan.target is None and plan.update_available is None:
+            # Nothing to compare (an index of its own, PyPI out of reach): "upgrade with"
+            # sent every run to a reinstall that changed nothing (review of #257).
+            newest = _newest(install_route.cutoff(plan.route))
+            _say(
+                "can't tell whether anything is newer: `aisquare upgrade` reinstalls the "
+                f"newest release {newest}, which may be the one you have"
+            )
             return
         pin = f" --version {plan.target}" if plan.target else ""
         _say(f"upgrade with: aisquare upgrade{pin}")
@@ -128,15 +142,17 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
     if get_state().json_output:
         _echo_json({"dry_run": True, **_plan_json(plan)})
         return
-    where = (
-        f"{plan.destination} (latest on PyPI)"
-        if plan.target is None and plan.latest_version is not None
-        else plan.destination
-    )
+    where = plan.destination
+    if plan.target is None and plan.latest is not None and plan.latest.version is not None:
+        held = plan.latest.cutoff is not None
+        where += " (the newest your uv cutoff allows)" if held else " (latest on PyPI)"
     _say(f"aisquare {plan.current} → {where}")
     if plan.target is None and plan.latest is not None and plan.latest.version is None:
         newest = _newest(install_route.cutoff(plan.route))
-        _say(f"  {plan.latest.error}; uv will install the newest release {newest}")
+        _say(
+            f"  {plan.latest.error}; uv will install the newest release {newest}, "
+            "which may be the one you have"
+        )
     _say(f"  install: {plan.route.describe()}")
     _say(f"  runs:    {plan.command}")
     for site in plan.refresh:
@@ -170,6 +186,7 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
                 "previous": plan.current,
                 "version": report.version,
                 "latest": plan.latest_version,
+                "latest_cutoff": plan.latest.cutoff if plan.latest is not None else None,
                 "route": plan.route.kind,
                 "command": plan.command,
                 "hooks": [
@@ -316,6 +333,11 @@ def upgrade(
             )
         elif plan.target is not None:
             _say(f"aisquare {plan.current} is already the version asked for — nothing to do")
+        elif plan.latest is not None and plan.latest.cutoff is not None:
+            _say(
+                f"aisquare {plan.current} is up to date ({plan.latest_version} is the newest "
+                f"release your uv cutoff allows: {plan.latest.cutoff}) — nothing to do"
+            )
         else:
             _say(
                 f"aisquare {plan.current} is up to date (PyPI's latest is "

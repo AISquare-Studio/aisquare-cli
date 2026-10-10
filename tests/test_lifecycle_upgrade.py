@@ -23,7 +23,7 @@ import re
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -2281,45 +2281,156 @@ def test_an_install_on_its_own_index_does_not_take_pypis_word_for_latest(
     assert "is the newest release your package index serves" in run.stdout
 
 
+def _pypi_with_uploads(**uploaded: datetime) -> bytes:
+    """PyPI's JSON answer with one wheel per release, uploaded when given; its info.version
+    is the newest, as PyPI's is."""
+    newest = max(uploaded, key=lambda version: install_route.version_key(version) or ())
+    releases = {
+        version: [{"yanked": False, "upload_time_iso_8601": when.isoformat()}]
+        for version, when in uploaded.items()
+    }
+    return json.dumps({"info": {"version": newest}, "releases": releases}).encode()
+
+
+@pytest.mark.parametrize("newer_allowed", [False, True], ids=["nothing-newer", "a-newer-one"])
 @pytest.mark.parametrize(
     ("tail", "restated"),
     [(_COOLDOWN, "--exclude-newer P7D"), (_FIXED_CUTOFF, "--exclude-newer 2026-10-01T00:00:00Z")],
     ids=["cooldown", "fixed-date"],
 )
-def test_an_install_under_a_uv_cutoff_does_not_take_pypis_word_for_latest(
+def test_an_install_under_a_uv_cutoff_is_compared_with_the_newest_release_it_allows(
     runner: CliRunner,
     tool: Tool,
     machine: Machine,
     monkeypatch: pytest.MonkeyPatch,
     tail: str,
     restated: str,
+    newer_allowed: bool,
 ) -> None:
-    """uv takes nothing uploaded after the cutoff, so PyPI's newest may be out of reach.
-    Taken as the target, the version uv rightly left unchanged failed every run as
-    §3.9.1's silent no-op, after --check had said an update was available (sweep of #257)."""
+    """Taken as the target, PyPI's newest failed the version uv rightly left as §3.9.1's
+    silent no-op (sweep of #257). Then, not asked at all, every --check said "upgrade with"
+    and every run replaced the environment, under live fleet agents' hooks too, to change
+    nothing (review of #257). The newest release with a file uploaded before the cutoff,
+    from PyPI's upload times, is what this install's upgrade can get."""
     (tool.prefix / install_route.RECEIPT_NAME).write_text(
         _receipt(_OURS_PINNED, tail=tail), encoding="utf-8"
     )
     monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
-    machine.new_version = "0.8.0"  # nothing newer was uploaded before the cutoff
+    if tail == _COOLDOWN:
+        before, after = datetime.now(UTC) - timedelta(days=30), datetime.now(UTC)
+    else:
+        before, after = datetime(2026, 9, 20, tzinfo=UTC), datetime(2026, 10, 5, tzinfo=UTC)
+    uploads = {"0.8.0": before, "0.9.0": after}
+    if newer_allowed:
+        uploads["0.8.1"] = before + timedelta(hours=1)
+    body = _pypi_with_uploads(**uploads)
+    monkeypatch.setattr(install_route, "fetch_latest", _REAL_FETCH_LATEST)
+    monkeypatch.setattr(install_route, "open_url", lambda _request, timeout: _Response(body))
+    allowed = "0.8.1" if newer_allowed else "0.8.0"
+    machine.new_version = allowed
 
-    check = runner.invoke(app, ["--json", "upgrade", "--check"])
+    check = runner.invoke(app, ["upgrade", "--check"])
+    planned = _one_object(runner.invoke(app, ["--json", "upgrade", "--check"]).stdout)
     run = runner.invoke(app, ["upgrade", "--yes"])
 
-    assert machine.lookups == 0, "PyPI's newest says nothing about what the cutoff allows"
-    report = _one_object(check.stdout)
-    assert report["runnable"] is True, report
-    assert report["latest"] is None and f"its uv cutoff ({restated})" in report["latest_error"]
+    lines = check.stdout.splitlines()
+    held = f"latest your uv cutoff allows ({restated}): {allowed}"
+    assert planned["latest"] == allowed and planned["latest_cutoff"] == restated, planned
     assert run.exit_code == 0, run.output
-    assert f"✓ aisquare 0.8.0 is the newest release your uv cutoff allows ({restated})" in (
-        run.stdout
+    if newer_allowed:
+        assert f"{held} (an update is available)" in lines, lines
+        assert "upgrade with: aisquare upgrade" in lines, lines
+        assert machine.installs[0][0][-5:] == [
+            *restated.split(),
+            "--refresh-package",
+            "aisquare-cli",
+            "aisquare-cli[serve]>=0.8.0",
+        ]
+        assert "✓ aisquare 0.8.1 (was 0.8.0)" in run.stdout, run.stdout
+    else:
+        assert f"{held} (you have it)" in lines and "nothing to upgrade" in lines, lines
+        assert machine.installs == [], "nothing newer is allowed: no reinstall"
+        assert (
+            f"aisquare 0.8.0 is up to date (0.8.0 is the newest release your uv cutoff "
+            f"allows: {restated}) — nothing to do"
+        ) in run.stdout, run.stdout
+
+
+@pytest.mark.parametrize(
+    ("options", "why"),
+    [
+        ('index-url = "https://mirror.example/simple"', "its own index (--index-url)"),
+        ('exclude-newer = "not a time"', "its uv cutoff (--exclude-newer"),
+    ],
+    ids=["own-index", "unreadable-cutoff"],
+)
+def test_check_where_nothing_can_be_compared_says_it_cannot_tell(
+    runner: CliRunner, tool: Tool, machine: Machine, options: str, why: str
+) -> None:
+    """Not asking PyPI left update_available unknown, and --check said "upgrade with:
+    aisquare upgrade" on every run, for a reinstall that changed nothing (review of #257).
+    It says it cannot tell, and the plan that the reinstall may change nothing."""
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        _receipt(_OURS_PINNED, tail=f"\n[tool.options]\n{options}\n"), encoding="utf-8"
     )
-    assert machine.installs[0][0][-5:] == [
-        *restated.split(),
-        "--refresh-package",
-        "aisquare-cli",
-        "aisquare-cli[serve]>=0.8.0",
-    ]
+
+    check = runner.invoke(app, ["upgrade", "--check"])
+    plan = runner.invoke(app, ["upgrade", "--dry-run"])
+
+    assert machine.lookups == 0, "PyPI says nothing about what this install gets"
+    assert why in check.stdout, check.stdout
+    assert "upgrade with:" not in check.stdout, check.stdout
+    assert "can't tell whether anything is newer" in check.stdout, check.stdout
+    assert "which may be the one you have" in plan.stdout, plan.stdout
+    assert machine.installs == []
+
+
+@pytest.mark.parametrize(
+    ("value", "back"),
+    [
+        ("P14D", timedelta(days=14)),
+        ("P1W", timedelta(weeks=1)),
+        ("PT36H", timedelta(hours=36)),
+        ("P1DT12H", timedelta(days=1, hours=12)),
+        ("PT90M", timedelta(minutes=90)),
+    ],
+)
+def test_a_cooldown_falls_its_span_back_from_now(
+    tmp_path: Path, value: str, back: timedelta
+) -> None:
+    """The spans uv 0.12.19 records (measured: "14 days" is P14D, "1 week" P1W, "36 hours"
+    PT36H; it refuses months and years)."""
+    tail = (
+        '\n[tool.options]\nexclude-newer = "2026-10-01T00:00:00Z"\n'
+        f'exclude-newer-span = "{value}"\n'
+    )
+    route = _uv_route(tmp_path, _receipt(_OURS_PINNED, tail=tail))
+    now = datetime(2026, 10, 9, 12, tzinfo=UTC)
+
+    assert install_route.cutoff_time(route, now) == now - back
+
+
+@pytest.mark.parametrize(
+    ("value", "when"),
+    [
+        ("2026-09-11T04:00:00Z", datetime(2026, 9, 11, 4, tzinfo=UTC)),
+        ("2026-09-26T02:56:18.110325444Z", datetime(2026, 9, 26, 2, 56, 18, 110325, tzinfo=UTC)),
+        ("2026-09-10T12:00:00", None),
+        ("P", None),
+        ("someday", None),
+    ],
+    ids=["date", "nanoseconds", "no-zone", "empty-span", "unreadable"],
+)
+def test_a_cutoff_date_is_read_as_uv_records_it_and_anything_else_is_not_guessed(
+    tmp_path: Path, value: str, when: datetime | None
+) -> None:
+    """uv records a date or a timestamp, given any way, as an RFC 3339 timestamp, with
+    nanoseconds for a span's (measured). One that cannot be read compares nothing."""
+    route = _uv_route(
+        tmp_path, _receipt(_OURS_PINNED, tail=f'\n[tool.options]\nexclude-newer = "{value}"\n')
+    )
+
+    assert install_route.cutoff_time(route, datetime(2026, 10, 9, tzinfo=UTC)) == when
 
 
 @pytest.mark.parametrize(

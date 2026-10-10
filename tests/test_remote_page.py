@@ -1443,6 +1443,24 @@ def test_a_retry_lost_too_is_not_confirmed_and_its_result_still_arrives(
     assert lost["send"] == {"busy": False, "disabled": False}
 
 
+def test_results_that_arrive_together_are_each_shown_and_none_takes_anothers_place(
+    boot_report: dict[str, Any],
+) -> None:
+    """SPEC §6.3 toasts the result of each request this page sent. The ledger reports a
+    reloaded tab's writes in one pass, and the page toasted each in turn: every toast took
+    the last one's place at once, so only the oldest result was shown or said, and a Stop
+    that failed read as done. A frame that turned writes off, and a result in the same tick
+    of the socket, went the same way. A line now goes under the ones still shown."""
+    together = boot_report["toastsTogether"]
+    refused = "Stop coder-2: Escape was sent; coder-2 has not stopped yet"
+    assert together["read"] == [refused, "Restart coder-1: done"]
+    frames = [refused, "Restart coder-1: done", "Writes are off — read-only", "Tell coder-3: done"]
+    assert together["frames"] == frames
+    assert together["orphans"] == 0
+    assert together["capped"] == [*frames[1:], "A fifth line"], "four at most, the oldest goes"
+    assert together["newest"] == "A fifth line"
+
+
 def test_an_answer_cut_off_halfway_is_a_lost_request_not_a_remote_that_went_off(
     boot_report: dict[str, Any],
 ) -> None:
@@ -1708,6 +1726,21 @@ def test_a_write_refused_read_only_shuts_every_write_button_at_once(
     assert "can watch but not act" in refused["sheet"]
 
 
+def test_settings_says_whether_writes_are_on_as_the_machine_says_it_now(
+    boot_report: dict[str, Any],
+) -> None:
+    """Settings wrote its "writes on" line once, as the screen was built, and nothing drew it
+    again: after allow-write off it said "writes on" beside the READ-ONLY pill, and the
+    version the frame named never replaced the one before. A frame, and a 403
+    ``read_only`` that came after the human went on to Settings, now tell it again."""
+    facts = boot_report["settingsFacts"]
+    assert facts["before"] == "aisquare test · writes on"
+    assert facts["off"] == {"line": "aisquare 0.7.0 · writes off", "pill": True}
+    assert facts["on"] == "aisquare 0.7.0 · writes on"
+    assert facts["left"] == "aisquare test · writes on"
+    assert facts["refused"] == "aisquare test · writes off"
+
+
 def test_every_key_of_the_pad_has_a_name_a_screen_reader_can_say(
     boot_report: dict[str, Any],
 ) -> None:
@@ -1845,6 +1878,34 @@ def test_a_usage_limits_reset_is_told_by_the_phones_own_clock(
     assert rows[0] == "coder", "a row that is not limited keeps the detail it was sent"
     assert rows[1].startswith("coder · limit resets in 3 h (") and "06:10" in rows[1]
     assert "13:10" not in rows[1]
+
+
+def test_the_board_tab_leaves_out_a_limits_reset_the_machines_clock_told(
+    boot_report: dict[str, Any],
+) -> None:
+    """The board's ``limited`` line says the reset by the machine's clock, ``(18:40)`` from a
+    machine in UTC+5:30, and the Board tab drew it as it came: a phone in UTC-7 read that
+    the limit lifts this evening beside a card that says 06:10, and a distance that never
+    moved. The tab cuts it from every limited line, and only from those, the same whether
+    ``GET api/board`` drew the board or the frame that follows, whose sessions say no state
+    and no reset; the card and the Fleet row tell the reset by the phone's clock."""
+    switch_it = " — `aisquare fleet switch {}` moves it to the account with the most headroom"
+    report = boot_report["boardLimitTimes"]
+    quoted, newest, coder_2, older = report["read"]
+    assert quoted == "coder-1 said: hit its session limit · resets in 3h 10m (18:40)"
+    wait = " (or wait for the reset)"
+    assert newest == "coder-1 hit its session limit" + switch_it.format("coder-1") + wait
+    assert older.startswith("coder-1 hit its session limit" + switch_it.format("coder-1"))
+    assert coder_2.startswith("coder-2 hit its session limit" + switch_it.format("coder-2"))
+    assert report["framed"] == ["after", *report["read"]]
+
+
+def test_the_page_finds_a_limits_reset_in_a_board_line_as_the_card_does() -> None:
+    """The page's copy of how a ``limited`` line says its reset is the server's, which cuts
+    the same words out of the card's text: two copies of it would drift apart."""
+    found = re.search(r"^const RESET_SAID = /(.*)/;$", _text("app.js"), re.MULTILINE)
+    assert found is not None
+    assert found.group(1) == remote_needs._NEEDS_RESET_SAID.pattern
 
 
 def test_a_read_answered_after_a_newer_frame_of_its_kind_is_dropped(
@@ -2451,6 +2512,19 @@ def test_the_page_reconnects_and_reads_again_when_the_phone_wakes(
     assert wakes["asks"]["drop"] == {"sockets": 2, "sent": pane}
 
 
+def test_a_hidden_tab_another_took_the_socket_from_stays_off_it_when_the_network_returns(
+    boot_report: dict[str, Any],
+) -> None:
+    """SPEC §6.4: after a 4409 the page reconnects only once its tab is visible again. The
+    online listener forced its wake, and forcing skipped that check too, so a network flap
+    gave a hidden tab a socket of its own again. A device keeps four, so that one closed the
+    oldest of the others with 4409: the tab in view said another tab took over and stopped
+    updating. The wake with no socket also made no reads."""
+    wakes = boot_report["wakes"]
+    assert wakes["hiddenOnline"] == {"sockets": 1, "state": "replaced", "reads": []}
+    assert wakes["shown"]["sockets"] == 2, "shown, the same tab takes its socket back"
+
+
 def test_a_card_is_dismissed_by_hand_and_after_a_tell_only_once_it_was_typed_in(
     boot_report: dict[str, Any],
 ) -> None:
@@ -2465,6 +2539,224 @@ def test_a_card_is_dismissed_by_hand_and_after_a_tell_only_once_it_was_typed_in(
     assert gone["delivered"] == {"sent": card, "cards": 0, "told": told}
     assert gone["notDelivered"] == {"sent": [], "cards": 1, "told": told}
     assert gone["reply"] == {"sent": [{"id": "ny_00000000000000b2"}], "cards": 0}
+
+
+def test_a_reply_to_a_coder_that_asked_reaches_it_as_its_tell_does(
+    boot_report: dict[str, Any],
+) -> None:
+    """Reply filed a board note to the coder that asked, and dismissed the card. A note to a
+    coder wakes nobody (only one to the manager does): it reads it at its next prompt, and
+    nothing prompts a coder that asked and waits, so it sat idle with the card gone. A reply
+    to an agent the fleet runs is now its Tell from the menu, typed in while it waits and the
+    same note otherwise, and says which; the card goes once it was typed in, as a Tell's
+    does, or once the note answers it on the board. The manager still gets the note."""
+    replies = boot_report["crewReplies"]
+    told = {"agent": "coder-1", "project": "prj_x", "text": "Take T-4.", "mode": "auto"}
+    told.update(needs_id="ny_00000000000000c1", agent_id="agt_1")
+    assert replies["typed"] == {
+        "title": "Tell coder-1",
+        "told": [told],
+        "noted": [],
+        "toast": "Typed into coder-1",
+        "dismissed": ["ny_00000000000000c1"],
+        "said": None,
+    }
+    assert replies["filed"] == {
+        "title": "Tell coder-1",
+        "told": [told],
+        "noted": [],
+        "toast": "coder-1: it is working — filed as board note #12 to coder-1",
+        "dismissed": [],
+        "said": None,
+    }
+    assert replies["manager"] == {
+        "title": "Reply on the board",
+        "told": [],
+        "noted": [{"text": "Take T-4.", "kind": "note", "project": "prj_x", "to": "manager"}],
+        "toast": "Posted on the board",
+        "dismissed": ["ny_00000000000000c2"],
+        "said": None,
+    }
+
+
+def test_a_reply_to_a_coder_that_ended_or_was_replaced_since_it_asked_is_the_note_it_was(
+    boot_report: dict[str, Any],
+) -> None:
+    """The reply's Tell is pinned to the row that asked. Once that coder was stopped, or a
+    fresh row holds its label, the machine refuses the pin ``stale`` every time: the sheet
+    said the card no longer needed you while the question stayed open, Tell again was
+    refused the same way, and nothing reached anyone. The reply is then the note Reply
+    always posted, to the coder's label, which answers the card on the board, and the card
+    is dismissed. A card that went (its ``current`` is the agent's items, an array) is said
+    as a Tell's is, and Tell again goes; refused for the row then, it is the note too."""
+    replies = boot_report["crewReplies"]
+    told = {"agent": "coder-1", "project": "prj_x", "text": "Take T-4.", "mode": "auto"}
+    told.update(needs_id="ny_00000000000000c1", agent_id="agt_1")
+    noted = {"text": "Take T-4.", "kind": "note", "project": "prj_x", "to": "coder-1"}
+    for gone in ("ended", "replaced"):
+        assert replies[gone] == {
+            "title": "Tell coder-1",
+            "told": [told],
+            "noted": [noted],
+            "toast": "Posted on the board",
+            "dismissed": ["ny_00000000000000c1"],
+            "said": None,
+        }, gone
+    assert replies["went"] == {
+        "title": "Tell coder-1",
+        "told": [told],
+        "noted": [],
+        "toast": "",
+        "dismissed": [],
+        "said": "No longer needs you: nothing waits on coder-1 now. Tell again to send it anyway.",
+    }
+    again = {key: value for key, value in told.items() if key != "needs_id"}
+    assert replies["wentThenEnded"] == {
+        "title": "Tell coder-1",
+        "told": [told, again],
+        "noted": [noted],
+        "toast": "Posted on the board",
+        "dismissed": [],
+        "said": None,
+    }
+
+
+def test_the_tell_a_reply_sends_is_typed_into_the_coder_that_asked_on_the_board(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The machine's half of a reply to a coder: the board card it builds carries the
+    coder's row, and the Tell the page sends with the card's ``needs_id`` and that row's
+    ``agent_id`` is taken as the coder's own item, and typed into its pane while it waits.
+    Nothing on the board answers it, so the card stays until the page dismisses it. Its
+    transcript says it waits: one the machine cannot read may hide a prompt, and gets the
+    note instead."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.core.store import store_session
+    from aisquare.models import FleetAgent, TeamEvent, TeamSession
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services import remote_actions
+    from tests.test_remote_needs import FakeTmux, _rooted, _transcript
+
+    now = datetime.now(UTC)
+    root = tmp_path / "proj"
+    root.mkdir()
+    text = {"type": "text", "text": "Asked on the board."}
+    said = {
+        "type": "assistant", "uuid": "a1", "timestamp": (now - timedelta(minutes=1)).isoformat(),
+        "message": {"id": "m1", "role": "assistant", "content": [text]},
+    }  # fmt: skip
+    transcript = _transcript(tmp_path / "coder-1.jsonl", said)
+    with store_session() as store:
+        project = store.onboard_project(_rooted(root))
+        store.upsert_session(
+            TeamSession(
+                id="ses_c", project_id=project.id, role="coder", label="coder-1",
+                started_at=now - timedelta(hours=1), last_seen_at=now, state="waiting",
+                transcript_path=str(transcript),
+            )
+        )  # fmt: skip
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_c", project_id=project.id, label="coder-1", role="coder", pane_id="%9",
+                session_id="ses_c", cwd=project.root, created_at=now - timedelta(hours=1),
+            )
+        )  # fmt: skip
+        store.add_team_event(
+            TeamEvent(
+                id="evt_q", project_id=project.id, session_id="ses_c", kind="question",
+                text="Take T-4 or T-5?", to_role="manager", created_at=now - timedelta(minutes=1),
+            )
+        )  # fmt: skip
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    sources = remote_needs.live_needs_sources()
+    (card,) = remote_needs.scan_needs_you(sources, now=now, dismissed=())
+    assert (card.kind, card.agent, card.agent_id) == ("board_question", "coder-1", "agt_c")
+    told, _trail = remote_actions.action_tell(
+        {
+            "agent": "coder-1", "project": project.id, "text": "Take T-4.", "mode": "auto",
+            "needs_id": card.id, "agent_id": card.agent_id,
+        }
+    )  # fmt: skip
+    assert told["delivered"] is True
+    assert tmux.typed == [("paste", "%9", "Take T-4."), ("keys", "%9", "Enter")]
+    later = remote_needs.scan_needs_you(sources, now=datetime.now(UTC), dismissed=())
+    assert [item.id for item in later] == [card.id]
+
+
+@pytest.mark.parametrize("since", ["ended", "replaced"])
+def test_a_reply_to_a_coder_gone_since_it_asked_is_refused_as_a_tell_and_answered_as_a_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, since: str
+) -> None:
+    """The machine's half of a reply to a coder that was stopped since it asked, or whose
+    label a fresh row holds now: the Tell the page sends, pinned to the card's row, is
+    refused ``stale`` and types nothing, and the card stays. The note the page posts in its
+    place, to the coder's label, answers the card on the board, as Reply always did."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.core.store import store_session
+    from aisquare.models import FleetAgent, TeamEvent, TeamSession
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services.remote_server import RequestError, live_writes
+    from tests.test_remote_needs import FakeTmux, _rooted
+
+    now = datetime.now(UTC)
+    root = tmp_path / "proj"
+    root.mkdir()
+
+    def coder(session: str, agent: str, pane: str, started: datetime) -> None:
+        with store_session() as store:
+            store.upsert_session(
+                TeamSession(
+                    id=session, project_id=project.id, role="coder", label="coder-1",
+                    started_at=started, last_seen_at=now, state="waiting",
+                )
+            )  # fmt: skip
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=agent, project_id=project.id, label="coder-1", role="coder",
+                    pane_id=pane, session_id=session, cwd=project.root, created_at=started,
+                )
+            )  # fmt: skip
+
+    with store_session() as store:
+        project = store.onboard_project(_rooted(root))
+    coder("ses_c", "agt_c", "%9", now - timedelta(hours=1))
+    with store_session() as store:
+        store.add_team_event(
+            TeamEvent(
+                id="evt_q", project_id=project.id, session_id="ses_c", kind="question",
+                text="Take T-4 or T-5?", to_role="manager", created_at=now - timedelta(minutes=1),
+            )
+        )  # fmt: skip
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    sources = remote_needs.live_needs_sources()
+    (card,) = remote_needs.scan_needs_you(sources, now=now, dismissed=())
+    assert (card.kind, card.agent, card.agent_id) == ("board_question", "coder-1", "agt_c")
+    with store_session() as store:
+        store.end_fleet_agent("agt_c", exit_status=0)
+    if since == "replaced":
+        coder("ses_d", "agt_d", "%10", now)
+    writes = live_writes().handlers
+    with pytest.raises(RequestError) as refused:
+        writes["agent/tell"](
+            {
+                "agent": "coder-1", "project": project.id, "text": "Take T-4.", "mode": "auto",
+                "needs_id": card.id, "agent_id": card.agent_id,
+            }
+        )  # fmt: skip
+    assert (refused.value.status, refused.value.error) == (409, "stale")
+    assert refused.value.extra["current"] == {"agent_id": "agt_d" if since == "replaced" else None}
+    assert tmux.typed == []
+    assert [item.id for item in remote_needs.scan_needs_you(sources, now=now, dismissed=())] == [
+        card.id
+    ]
+    note = {"text": "Take T-4.", "kind": "note", "project": project.id, "to": "coder-1"}
+    writes["note"](note)
+    assert tmux.typed == []
+    assert remote_needs.scan_needs_you(sources, now=datetime.now(UTC), dismissed=()) == []
 
 
 def test_a_card_refused_stale_says_so_in_its_place_and_the_feed_is_read_again(
@@ -2526,6 +2818,30 @@ def test_a_tell_refused_because_the_agent_was_replaced_goes_to_the_new_one_when_
     }
     gone = "there is no agent 'coder-1' in x now — nothing was done"
     assert report["noneNow"] == {"said": [gone, gone], "sent": [["agt_1", None]] * 2}
+
+
+def test_a_cards_tell_refused_because_its_agent_is_another_row_now_offers_no_tell_again(
+    boot_report: dict[str, Any],
+) -> None:
+    """A card's Tell refused ``stale`` offers "Tell again to send it anyway", a Tell with no
+    card, pinned to the card's row as before. That reaches coder-1 only when its item went
+    (``current`` is its items). Once coder-1 was stopped, or a fresh row holds its label,
+    the machine refuses that pin every time, and the sheet still offered it. It says the
+    machine's sentence instead, and offers Tell again only to the fresh row, which it then
+    pins; the card gives way all the same."""
+    stale = boot_report["staleCards"]
+    shown = ["No longer needs you: nothing waits on coder-1 now."]
+    assert stale["tellReplaced"] == {
+        "shown": shown,
+        "sheet": "Tell coder-1",
+        "said": "'coder-1' is another agent now (agt_d) — nothing was done"
+        ". Tell again to send it to the new coder-1.",
+    }
+    assert stale["tellEnded"] == {
+        "shown": shown,
+        "sheet": "Tell coder-1",
+        "said": "there is no agent 'coder-1' in proj now — nothing was done",
+    }
 
 
 def test_each_refusal_is_said_in_the_sentence_the_spec_gives_it(

@@ -1,21 +1,16 @@
-/* aisquare remote: the phone page aisquare-cli bundles (SPEC §6).
- *
- * One classic deferred script, ES2020, no build step, no framework, nothing from another
- * origin. It lives at /r/<token>/, so every URL here is relative, routing is by hash, and
- * the server only ever serves the top.
+/* aisquare remote: the phone page aisquare-cli bundles (SPEC §6). One classic deferred
+ * script, ES2020, no build step or framework, nothing from another origin. It lives at
+ * /r/<token>/: every URL is relative, routing is by hash, the server serves only the top.
  *
  * Rendering rules (SPEC §6.6), held by tests/test_remote_page.py:
- * - every server string reaches the DOM as text (textContent or a text node), after
- *   plainText() drops escape sequences and controls;
- * - no server string is written to an attribute, a URL or a style, but two numbers the
- *   page parses and clamps itself: an ANSI colour (0-255, as rgb() through el.style) and a
- *   pane's width (20-400, the --cols Fit width uses);
- * - setAttribute takes only literal names from a short list, handlers are added with
- *   addEventListener, and navigation goes through pageGo(), the one place location.hash is
- *   set (or replaced), from ids it validated.
+ * - a server string reaches the DOM only as text, after plainText() drops escapes and controls;
+ * - none goes to an attribute, a URL or a style, but two numbers parsed and clamped here: an
+ *   ANSI colour (0-255, rgb() through el.style) and a pane's width (20-400, Fit width's --cols);
+ * - setAttribute takes literal names from a short list, handlers go through addEventListener,
+ *   and pageGo() is the one place location.hash is set or replaced, from ids it validated.
  *
- * ansiToRuns, renderRuns and renderNeedsCard are pure: node runs them against a recording
- * fake document (tests/js/remote_page_check.js). The page boots only where there is one.
+ * ansiToRuns, renderRuns and renderNeedsCard are pure: tests/js/remote_page_check.js runs them
+ * against a recording fake document. The page boots only where there is a document.
  */
 "use strict";
 
@@ -61,6 +56,7 @@ const STRIP_ROWS = 10;
 /* A socket watches at most 8 panes; the agent view keeps one for itself. */
 const STRIPS_MAX = 6;
 const PLAN_LINES = 20;
+const TOAST_LINES = 4;
 /* A card's detail text this short shows whole in its box, on any phone. */
 const SHORT_TEXT = 280;
 const TEXT_MAX = { keys: 2048, tell: 8000, note: 8000 };
@@ -80,10 +76,9 @@ function isPlain(code) {
   return code >= 0x20 && code !== 0x7f && (code < 0x80 || code > 0x9f) && !BIDI.has(code);
 }
 
-/* Where the control or escape at text[i] ends. A CSI ends at its final byte (an
- * SGR's parameters go to onSgr); OSC, DCS, SOS, PM and APC are strings, dropped
- * with their payload up to BEL or ST, and to the very end when unterminated, so
- * an OSC 8 link's target or a title never shows; any other control goes alone. */
+/* Where the control or escape at text[i] ends: a CSI at its final byte (an SGR's parameters
+ * to onSgr); OSC, DCS, SOS, PM and APC with their payload, up to BEL, ST or the end, so an
+ * OSC 8 link's target or a title never shows; any other control alone. */
 function skipControl(text, i, onSgr) {
   const code = text.charCodeAt(i);
   let kind = "";
@@ -122,9 +117,8 @@ function skipControl(text, i, onSgr) {
   return final >= 0x30 && final <= 0x7e ? k + 1 : k;
 }
 
-/* Walk text: plain chunks to onText, SGR parameters to onSgr, everything else
- * dropped. A tab is whitespace, not a control, and stays; a newline stays only
- * where the text is more than one line. */
+/* Walk text: plain chunks to onText, SGR parameters to onSgr, the rest dropped. A tab
+ * stays; a newline only where the text is more than one line. */
 function scanAnsi(text, keepLines, onText, onSgr) {
   let i = 0;
   let from = 0;
@@ -141,8 +135,8 @@ function scanAnsi(text, keepLines, onText, onSgr) {
   if (i > from) onText(text.slice(from, i));
 }
 
-/* Any server value as display text: escapes, controls and bidi overrides out,
- * newlines and tabs kept. Whatever comes back is only ever set as text. */
+/* Any server value as display text: escapes, controls and bidi overrides out, newlines and
+ * tabs kept. What comes back is only ever set as text. */
 function plainText(value) {
   if (value === null || value === undefined) return "";
   const text = typeof value === "string" ? value : typeof value === "number" || typeof value === "boolean" ? String(value) : "";
@@ -322,8 +316,8 @@ function safeColour(value) {
   return match ? "rgb(" + clampByte(match[1]) + ", " + clampByte(match[2]) + ", " + clampByte(match[3]) + ")" : null;
 }
 
-/* Runs as one line of spans. Re-checked here, whoever built them: text through
- * plainText, classes from the fixed set, colours as clamped rgb() only. */
+/* Runs as one line of spans, re-checked whoever built them: text through plainText, classes
+ * from the fixed set, colours as clamped rgb() only. */
 function renderRuns(runs, doc) {
   const line = doc.createElement("span");
   line.className = "ln";
@@ -411,9 +405,8 @@ function planBlock(box, plan, doc) {
   }
 }
 
-/* What the human must read before answering, by kind, as {box, text, lead}: box is null
- * when there is nothing, text is the full text the box shows, when that is what it shows,
- * and lead is what the box opens with, when the server builds the excerpt from it. */
+/* What the human must read before answering, by kind, as {box, text, lead}: box null when
+ * there is nothing, text the full text the box shows, lead what an excerpt is built from. */
 function renderDetail(kind, detail, doc) {
   const d = detail && typeof detail === "object" && !Array.isArray(detail) ? detail : {};
   const box = mk(doc, "div", "detail");
@@ -478,10 +471,9 @@ function renderDetail(kind, detail, doc) {
   return { box: shown ? box : null, text, lead };
 }
 
-/* Whether an excerpt only says again what the detail shows whole. A text's is cut from the
- * text (all of it, its first 280 characters, its last paragraph, the question it ends on);
- * one from the end of a long text stays, as its box may hold it below the fold. The others
- * are built from what the box leads with. */
+/* Whether an excerpt only repeats what the detail shows whole. A text's is cut from the text
+ * (its first 280 characters, last paragraph or question); one from the end of a long text
+ * stays, as its box may hold it below the fold. Others come from what the box leads with. */
 function excerptRepeats(excerpt, detail) {
   const flat = (value) => plainText(value).replace(/\s+/g, " ").trim();
   const part = flat(excerpt).replace(/…$/, "").trim();
@@ -492,8 +484,8 @@ function excerptRepeats(excerpt, detail) {
   return whole.startsWith(part) || (whole.length <= SHORT_TEXT && whole.includes(part));
 }
 
-/* One needs item as a card. Pure: the page passes its handlers in opts, and
- * node passes none. Only div span pre p h2 h3 ul li button are made here. */
+/* One needs item as a card. Pure: handlers come in opts (none from node). Only div span pre
+ * p h2 h3 ul li button are made here. */
 function renderNeedsCard(item, doc, opts) {
   const o = opts || {};
   const it = item && typeof item === "object" ? item : {};
@@ -614,7 +606,7 @@ function routeHash(route) {
 // --- the page (browser only from here) ---
 
 const S = {
-  remote: null, needs: null, needsFailed: null, actions: [], fleet: null, board: null,
+  remote: null, needs: null, needsFailed: null, fleet: null, board: null,
   wantFleet: null, wantBoard: null, panes: new Map(), sock: null, sockState: "idle",
   opened: false, backoff: 0, retryTimer: 0, lastFrameAt: 0, stale: false, offline: false, away: null,
   off: null, locked: false, booting: false, view: null, route: null, pending: new Map(), orphans: new Map(),
@@ -670,6 +662,10 @@ function resetClock(iso, now) {
   const day = new Date(now).toDateString() === at.toDateString() ? {} : { weekday: "short" };
   return at.toLocaleString([], Object.assign(day, { hour: "2-digit", minute: "2-digit" }));
 }
+
+/* A limited line says its reset by the machine's clock, for its terminal: the Board tab cuts
+ * it, as the card's text is cut (remote_needs._NEEDS_RESET_SAID); the card tells it. */
+const RESET_SAID = / · resets (?:now|in \d+[dhm](?: \d+[hm])?)(?: \([^()]*\))?/;
 
 /* A fleet row's detail; a limited row's reset as resetClock tells it. */
 function rowDetail(row, now) {
@@ -740,10 +736,9 @@ function apiPath(template, params) {
   return template.replace(/\{(\w+)\}/g, (whole, key) => encodeURIComponent(String(params[key])));
 }
 
-/* One request, answered as {ok, status, data, error, message, retryAfter, network, notJson}.
- * A 401 sends the page to unlock (but unlock's own). An answer that is not JSON is not this
- * server (ngrok's offline page, or a link that moved), except a bare 500, this server
- * failing. A body cut off halfway is a lost answer. */
+/* One request, as {ok, status, data, error, message, retryAfter, network, notJson}. A 401
+ * (not unlock's own) goes to unlock. Not JSON is not this server (ngrok's offline page, a
+ * moved link), but for a bare 500. A body cut off halfway is a lost answer. */
 async function apiCall(method, path, options) {
   const o = options || {};
   const init = {
@@ -787,10 +782,10 @@ async function apiCall(method, path, options) {
   return res;
 }
 
-/* A write: a fresh request_id, and one retry with the SAME id after the next reconnect when
- * the phone lost the request, if that comes soon enough (flushRetries). The server's ledger
- * answers a retried id from what it recorded, so a restart never runs twice. onWait hears
- * when the answer waits for the phone to be back; at is when it was tapped, if not now. */
+/* A write: a fresh request_id, and one retry with the SAME id after the next reconnect if the
+ * phone lost the request and that comes soon (flushRetries); the ledger answers a retried id
+ * as it did, so a restart never runs twice. onWait: the answer waits for the phone; at: when
+ * it was tapped, if not now. */
 async function apiWrite(path, body, verb, onWait, at) {
   const id = newRequestId();
   const pending = {
@@ -825,11 +820,10 @@ async function apiWrite(path, body, verb, onWait, at) {
   return res;
 }
 
-/* A new socket is open: each write whose request was lost goes out again with its request_id,
- * within RETRY_WITHIN_MS of its tap. An id the machine received is answered from its ledger;
- * one it never received runs now, and an older key would land on whatever the agent shows by
- * then, so an older write is not sent again, nor one from before an unlock, whose device's
- * ledger may know none of its ids. The page says so, and shows the result if the machine had it. */
+/* A new socket is open: each write whose request was lost goes out again under its id within
+ * RETRY_WITHIN_MS of its tap, answered from the ledger if the machine had it. An older one
+ * would land on whatever the agent shows by then, and one from before an unlock on a ledger
+ * that may not know it: neither goes, the page says so, and shows any result that comes. */
 function flushRetries() {
   const now = Date.now();
   for (const pending of S.pending.values()) {
@@ -853,9 +847,8 @@ function dropRetries() {
   }
 }
 
-/* Keys to one agent go one at a time, each once the one before it was answered, so the
- * machine never types a later one first. A key behind one that did not go through, or that
- * waited past RETRY_WITHIN_MS, is not sent ("held"). send(at) sends it, tapped at at. */
+/* Keys to one agent go one at a time, each once the one before was answered. A key behind
+ * one that failed, or that waited past RETRY_WITHIN_MS, is "held". send(at): tapped at at. */
 const keyTurns = new Map();
 
 function keysInTurn(pid, label, send) {
@@ -881,8 +874,8 @@ function finishPending(pending, res) {
   if (resolve) resolve(res);
 }
 
-/* What this tab still waits on, kept across a reload so a result the ledger
- * reports later is still shown (SPEC §3.9: restart and switch take 40 s). */
+/* What this tab waits on, kept across a reload so a result the ledger reports later still
+ * shows (SPEC §3.9: restart and switch take 40 s). */
 function savePending() {
   try {
     const rows = [];
@@ -910,7 +903,6 @@ function loadPending() {
 /* The ledger's word on requests this page sent (the action frame, or actions/recent). */
 function settleFromLedger(entries) {
   if (!Array.isArray(entries)) return;
-  S.actions = entries;
   for (const entry of entries) {
     if (!entry || typeof entry.request_id !== "string") continue;
     const body = entry.body && typeof entry.body === "object" ? entry.body : {};
@@ -932,9 +924,7 @@ function settleFromLedger(entries) {
   }
 }
 
-/* SPEC §6.4, as one sentence per refusal. A network error reaches here only
- * once nothing will retry it: a write's one retry was lost as well, or a call
- * that is never retried. */
+/* SPEC §6.4, a sentence per refusal. A network error comes here once nothing retries it. */
 function failText(res, max) {
   if (res.notSent === "held") return "Not sent — the key before it did not go through, or took too long. Look at the pane, then tap it again.";
   if (res.notSent) {
@@ -957,15 +947,15 @@ function failText(res, max) {
   return message || plainText(res.error) || "That did not work (" + res.status + ").";
 }
 
-/* What a refusal does beyond its sentence. A read_only shows writes off at once. Late, its
- * sheet never takes the place of one opened since (sheet: the one that sent it), and a gone
- * agent sends the page to its fleet only from that agent's own screen. */
+/* A refusal beyond its sentence: read_only shows writes off at once, its sheet never over
+ * one opened since (sheet sent it); a gone agent's screen goes to its fleet. */
 function afterFailure(res, route, sheet) {
   if (res.status === 403 && res.error === "read_only") {
     if (writable()) {
       S.remote = Object.assign({}, S.remote, { allow_write: false });
       drawStatus();
       gateButtons();
+      viewCall("remote");
     }
     if (!sheetOpen() || (sheet && sheet.isOpen())) readOnlySheet(res.message);
   }
@@ -1124,8 +1114,8 @@ function onFrame(text) {
   } else if (frame.type === "error" && payload && typeof payload === "object") toast(plainText(payload.message));
 }
 
-/* The heartbeat says when the machine last looked for what needs you, by its own clock as
- * the frame's ts is: a watcher stuck in a scan leaves the feed saying how old it is. */
+/* When the machine last looked for what needs you, by its clock as the frame's ts is: a
+ * watcher stuck in a scan leaves the feed saying how old it is. */
 function noteScan(ts, payload) {
   const scanned = payload && typeof payload.needs_scanned_at === "string" ? payload.needs_scanned_at : "";
   const behind = Date.parse(ts) - Date.parse(scanned) > SCAN_BEHIND_MS ? scanned : "";
@@ -1164,10 +1154,9 @@ function wantProject(pid) {
   }
 }
 
-/* Board frames only while the Board tab shows (null stops them): a board is every session
- * and task of its project, sent again with every session's heartbeat, and no other screen
- * draws it. One kept from before is not shown again: no frame came while it was not asked.
- * A frame names the pid it answers, since under AISQUARE_TEAM_HUB its board is the hub's. */
+/* Board frames only while the Board tab shows (null stops them): a board is all of a project,
+ * sent again on every heartbeat, and no other screen draws it. One from before is not shown
+ * again. A frame names its pid, since under AISQUARE_TEAM_HUB the board is the hub's. */
 function wantBoard(pid) {
   if (S.wantBoard === pid) return;
   S.wantBoard = pid;
@@ -1186,6 +1175,7 @@ function setRemote(payload) {
   }
   drawStatus();
   gateButtons();
+  viewCall("remote");
 }
 
 function setNeeds(items) {
@@ -1195,8 +1185,8 @@ function setNeeds(items) {
   viewCall("needs");
 }
 
-/* A read answered after a frame of its kind came may be older than the frame (a wake reads
- * and reconnects at once), and the socket sends a kind again only once it changes: dropped. */
+/* A read answered after a frame of its kind may be older (a wake reads and reconnects at
+ * once), and the socket sends a kind only as it changes: dropped. */
 async function refreshNeeds() {
   const heard = S.heard.needs;
   const res = await apiCall("GET", API.needs);
@@ -1221,8 +1211,7 @@ async function refreshRemote() {
   if (res.ok && S.heard.remote === heard) setRemote(res.data);
 }
 
-/* Whether the browser says this phone has no network. Only then is the phone the one
- * away: with serve stopped or the tunnel down the phone is online. */
+/* Whether the browser says this phone has no network: only then is the phone the one away. */
 function phoneOffline() {
   return navigator.onLine === false;
 }
@@ -1246,10 +1235,9 @@ function checkStale() {
   drawStatus();
 }
 
-/* Writes off, or nothing heard for 25 s: every action button waits. "w" marks a write, "a"
- * an action that is not one. Sign out is neither (SPEC §6.3): a plain DELETE that needs no
- * live socket. "pk" keys and Send also wait until the Live tab's pane came on this socket,
- * and the pane is greyed until then, as it may be the one from before. */
+/* Writes off, or nothing heard for 25 s: every action button waits ("w" a write, "a" not;
+ * Sign out is neither, SPEC §6.3). "pk" keys and Send wait, too, for the Live tab's pane to
+ * come on this socket, greyed until then as it may be the one from before. */
 function gateButtons() {
   const shut = !writable() || S.stale;
   const held = !!(S.view && S.view.held && S.view.held());
@@ -1362,19 +1350,26 @@ function drawNav() {
   UI.nav.hidden = name === "unlock" || !!S.off;
 }
 
+/* A toast goes under any still shown, so results that come together are each read and said. */
 function toast(text) {
   if (!UI.toast || !text) return;
   const shown = plainText(text);
-  UI.toast.textContent = shown;
+  if (!UI.toast.classList.contains("show")) clear(UI.toast);
+  for (const old of Array.from(UI.toast.childNodes)) if (old.textContent === shown) UI.toast.removeChild(old);
+  const line = el("p", null, shown);
+  UI.toast.appendChild(line);
+  while (UI.toast.childNodes.length > TOAST_LINES) UI.toast.removeChild(UI.toast.firstChild);
   UI.toast.classList.add("show");
-  clearTimeout(UI.toastTimer);
   // Four seconds reads a short line; a sentence from the machine gets time to be read.
-  UI.toastTimer = setTimeout(() => UI.toast.classList.remove("show"), Math.min(10000, 4000 + Math.max(0, shown.length - 60) * 60));
+  setTimeout(() => {
+    if (line.parentNode !== UI.toast) return;
+    if (UI.toast.childNodes.length > 1) UI.toast.removeChild(line);
+    else UI.toast.classList.remove("show");
+  }, Math.min(10000, 4000 + Math.max(0, shown.length - 60) * 60));
 }
 
-/* A modal sheet, as a screen reader is told it too: named by its heading, the page behind
- * it inert, focus in it, and back on what opened it (the first, when one sheet takes the
- * place of another) once it closes. */
+/* A modal sheet, to a screen reader too: named by its heading, the page behind inert, focus
+ * in it, then back on what opened the first one. */
 function openSheet(title, build) {
   if (!sheetOpen()) UI.opener = document.activeElement;
   closeSheet(true);
@@ -1452,9 +1447,9 @@ function sheetOpen() {
   return !!UI.sheet && UI.sheet.classList.contains("open");
 }
 
-/* No CloseWatcher (Safari; Firefox before 149): a sheet holds a history entry of its own, which
- * Back, iOS's swipe too, takes with the sheet. A sheet closed otherwise takes it off ("leaving"),
- * and a route asked for meanwhile waits for that (UI.then): pushed first, the Back undid it. */
+/* No CloseWatcher (Safari; Firefox before 149): a sheet holds a history entry, which Back
+ * (iOS's swipe too) takes with it. Closed otherwise, it takes the entry off ("leaving"), and
+ * a route asked for meanwhile waits (UI.then), or that Back would undo it. */
 function sheetEntry() {
   if (UI.entry || !window.history || typeof history.pushState !== "function") return;
   history.pushState({ sheet: true }, "");
@@ -1497,10 +1492,9 @@ function readOnlySheet(message) {
 
 // --- routing ---
 
-/* THE one place the page navigates (SPEC §6.6): a route object, or a hash that validates
- * like any route (a notification's postMessage brings one). A redirect (replace) takes the
- * place of the entry it leaves: Back never lands on #/unlock or a gone agent's tab, which
- * would send the page on again. */
+/* THE one place the page navigates (SPEC §6.6), to a route or a hash that validates as one
+ * (a notification brings one). A redirect replaces its entry: Back never lands on #/unlock
+ * or a gone agent's tab, which would send the page on again. */
 function pageGo(target, replace) {
   if (UI.entry === "leaving") {
     UI.then = [target, replace];
@@ -1542,9 +1536,8 @@ function renderRoute() {
   return landFocus(from, route);
 }
 
-/* Focus where it was, if still there; else the tab chosen, else the heading, else the
- * screen, so a screen reader keeps its place and hears of the change. The page's first
- * screen is left alone, as any page's is when it loads. */
+/* Focus where it was, else the tab chosen, the heading or the screen, so a screen reader
+ * keeps its place and hears of the change; not on the page's first screen. */
 function landFocus(from, route) {
   const now = document.activeElement;
   const first = !UI.landed;
@@ -1581,9 +1574,8 @@ function toUnlock() {
   S.sockState = "idle";
   if (sock) sock.close(1000);
   if (!S.route || S.route.name !== "unlock") pageGo("#/unlock", true);
-  // Already at #/unlock, as a page (re)loaded there is: its route was drawn while the boot
-  // still asked who this is, so no form is on screen and no hashchange will come. Draw it
-  // now. A form already shown keeps what is typed in it.
+  // Already at #/unlock (a page loaded there), drawn while the boot asked who this is: no
+  // form shows and no hashchange comes, so draw it. One shown keeps what is typed in it.
   else if (!S.view) renderRoute();
 }
 
@@ -1616,8 +1608,8 @@ function drawOff() {
   drawNav();
 }
 
-/* Off, a wake or a tapped notification asks again, as Retry (any) does: Remote may be on
- * again under the same link, as a fleet UI started again turns it back on. */
+/* Off, a wake or a tapped notification asks again, as Retry (any) does: a fleet UI started
+ * again turns Remote on again under the same link. */
 function lookAgain(any) {
   if (!any && S.off !== "off" && S.off !== "gone") return;
   S.off = null;
@@ -1625,8 +1617,9 @@ function lookAgain(any) {
   start();
 }
 
-/* Visible again, back on the page, or back online: the socket may be a dead
- * one a sleeping phone left behind, so replace it and read everything again. */
+/* Visible again, back on the page, or back online: the socket may be a dead one a sleeping
+ * phone left behind, so replace it and read everything again. force skips the second between
+ * wakes, never the wait of a tab another took the socket from (4409) to be shown. */
 function wake(force) {
   const now = Date.now();
   if (!force && now - S.lastWake < 1000) return;
@@ -1635,7 +1628,7 @@ function wake(force) {
   if (S.off) return lookAgain();
   // Nothing to wake before the first answer: a page still booting, or one not unlocked.
   if (S.locked || S.booting) return;
-  if (S.sockState === "replaced" && !force && document.visibilityState !== "visible") return;
+  if (S.sockState === "replaced" && document.visibilityState !== "visible") return;
   connect();
   drawBanner();
   refreshNeeds();
@@ -1734,9 +1727,9 @@ VIEWS.unlock = (route, main) => {
   return { cleanup: () => clearInterval(countdown) };
 };
 
-/* A good passphrase: go live, its backoff from the first step as Retry's, then back to the
- * route the lock interrupted. False when the page is locked or off again instead: the machine
- * answering the next request as signed out means this browser did not keep the cookie. */
+/* A good passphrase: go live, the backoff from its first step, then back to the route the
+ * lock interrupted. False when locked or off again instead: signed out on the next request,
+ * this browser did not keep the cookie. */
 async function unlocked(data) {
   S.locked = false;
   S.backoff = 0;
@@ -1976,7 +1969,7 @@ const TELL_MODES = {
   interrupt: ["Interrupt & tell", "One Esc stops what it is doing; this is typed once it is back at its prompt."],
 };
 
-function tellSheet(ctx, mode) {
+function tellSheet(ctx, mode, replyTo) {
   const label = plainText(ctx.label);
   openSheet(TELL_MODES[mode][0] + " " + label, (sheet) => {
     const lead = el("p", "lead", TELL_MODES[mode][1]);
@@ -2009,7 +2002,9 @@ function tellSheet(ctx, mode) {
         if (delivered && ctx.needsId) dismissItem({ id: ctx.needsId });
         return;
       }
+      // current lists the agent's items once the card went; else it names the pin's row now.
       const now = res.status === 409 && res.error === "stale" ? (res.data && res.data.current) || [] : null;
+      if (now && replyTo && !Array.isArray(now)) return postReply(ctx, sheet, replyTo, text.value);
       if (now && ctx.item) {
         // The card gives way, the words stay: Tell again is a Tell with no card.
         const item = ctx.item;
@@ -2036,36 +2031,41 @@ function tellSheet(ctx, mode) {
   });
 }
 
+/* A note to the manager wakes it; another agent the fleet runs reads one only at its next
+ * prompt, which nothing brings one that asked and waits: a reply to it is a Tell (auto). */
 function replySheet(ctx) {
   const detail = ctx.item.detail && typeof ctx.item.detail === "object" ? ctx.item.detail : {};
   const author = typeof detail.author === "string" ? detail.author : "";
+  if (author === ctx.label && ctx.agentId && author.trim().toLowerCase() !== "manager") return tellSheet(ctx, "auto", author);
   openSheet("Reply on the board", (sheet) => {
     sheet.body.appendChild(el("p", "lead", isText(author) ? "A note to " + author + " on the board." : "A note on the board."));
     const text = el("textarea", "compose");
     text.setAttribute("aria-label", "Reply");
     text.maxLength = TEXT_MAX.note;
     sheet.body.appendChild(text);
-    sheet.bar.appendChild(button("w primary", "Post", async () => {
-      if (!text.value.trim()) {
-        sheet.status.textContent = "Type something first.";
-        return;
-      }
-      const body = { text: text.value, kind: "note", project: ctx.pid };
-      if (isText(author)) body.to = author;
-      sheet.busy(true);
-      const res = await apiWrite(writePath("note"), body, "Reply", () => { sheet.status.textContent = LOST_WAIT; });
-      sheet.busy(false);
-      if (res.ok) {
-        sheet.close();
-        toast("Posted on the board");
-        dismissItem(ctx.item);
-        return;
-      }
-      sheet.say(failText(res, TEXT_MAX.note));
-      afterFailure(res, ctx, sheet);
+    sheet.bar.appendChild(button("w primary", "Post", () => {
+      if (text.value.trim()) return postReply(ctx, sheet, author, text.value);
+      sheet.status.textContent = "Type something first.";
     }));
     text.focus();
   });
+}
+
+/* A reply as a note to whoever asked, which answers its card on the board. */
+async function postReply(ctx, sheet, author, words) {
+  const body = { text: words, kind: "note", project: ctx.pid };
+  if (isText(author)) body.to = author;
+  sheet.busy(true);
+  const res = await apiWrite(writePath("note"), body, "Reply", () => { sheet.status.textContent = LOST_WAIT; });
+  sheet.busy(false);
+  if (res.ok) {
+    sheet.close();
+    toast("Posted on the board");
+    if (ctx.item) dismissItem(ctx.item);
+    return;
+  }
+  sheet.say(failText(res, TEXT_MAX.note));
+  afterFailure(res, ctx, sheet);
 }
 
 const AGENT_ACTIONS = {
@@ -2316,14 +2316,15 @@ VIEWS.project = (route, main) => {
       const events = (Array.isArray(board.events) ? board.events : []).filter((one) => one && one.payload && typeof one.payload === "object");
       events.sort((a, b) => toInt(b.payload.seq) - toInt(a.payload.seq));
       if (!events.length) list.appendChild(el("p", "empty", "Nothing on the board yet."));
+      const now = Date.now();
       for (const event of events.slice(0, 200)) {
         const p = event.payload;
         const kind = typeof event.kind === "string" ? event.kind.replace(/^team\./, "") : "note";
         const card = el("div", "event");
         const by = p.session_id ? authors.get(p.session_id) || "an agent" : "you";
         const to = isText(p.to_role) ? " → " + plainText(p.to_role) : "";
-        card.appendChild(el("p", "muted", plainText(kind) + " · " + by + to + " · " + ago(event.ts, Date.now())));
-        card.appendChild(el("p", "text", p.text));
+        card.appendChild(el("p", "muted", plainText(kind) + " · " + by + to + " · " + ago(event.ts, now)));
+        card.appendChild(el("p", "text", kind === "limited" && typeof p.text === "string" ? p.text.replace(RESET_SAID, "") : p.text));
         list.appendChild(card);
       }
       return undefined;
@@ -2461,9 +2462,8 @@ function paneRenderer(pre) {
   };
 }
 
-/* Columns of the monospace font that fit, for transcript lines wrapped to this phone: inside
- * the box's padding, which clientWidth counts (8 px a side: lines one or two columns too wide
- * wrapped again), and half a pixel short, as clientWidth may round a width up. */
+/* Monospace columns that fit, for transcript lines wrapped to this phone: inside the padding
+ * clientWidth counts, and half a pixel short, as clientWidth may round a width up. */
 function measureColumns(box) {
   const probe = el("span", "measure", "0000000000");
   box.appendChild(probe);
@@ -2856,9 +2856,8 @@ async function workerRegistration() {
   return existing || navigator.serviceWorker.register("sw.js", { scope: "./" });
 }
 
-/* A subscription only works with the key it was made against: one made against a key the
- * machine no longer has (remote-push.json lost and made again) is refused at every push.
- * A browser that does not say which key its subscription used is believed. */
+/* A subscription made against a key the machine no longer has (remote-push.json made again)
+ * is refused at every push. One that does not say its key is believed. */
 function madeWithKey(sub, vapid) {
   const own = sub && sub.options && sub.options.applicationServerKey;
   if (!own) return true;
@@ -2914,9 +2913,8 @@ async function pushDisable() {
   await apiCall("DELETE", API.pushSubscription);
 }
 
-/* After every unlock: a subscription this browser already has goes to the
- * machine again, so a re-unlocked or new device keeps its notifications; made
- * anew first if the machine's key changed. */
+/* After every unlock, a subscription this browser has goes to the machine again, made anew
+ * if its key changed, so a re-unlocked or new device keeps its notifications. */
 async function pushResend() {
   try {
     if (!pushCapable()) return;
@@ -3015,7 +3013,11 @@ VIEWS.settings = (route, main) => {
   draw();
   const about = el("section", "panel");
   about.appendChild(el("h3", null, "This page"));
-  about.appendChild(el("p", "muted", "aisquare " + plainText(S.remote && S.remote.version ? S.remote.version : "") + " · writes " + (writable() ? "on" : "off")));
+  const facts = about.appendChild(el("p", "muted"));
+  const tellFacts = () => {
+    facts.textContent = "aisquare " + plainText(S.remote && S.remote.version ? S.remote.version : "") + " · writes " + (writable() ? "on" : "off");
+  };
+  tellFacts();
   about.appendChild(button(null, "Sign out", async () => {
     if (!S.me) {
       const res = await apiCall("GET", API.devices);
@@ -3025,7 +3027,7 @@ VIEWS.settings = (route, main) => {
     signOut(S.me);
   }));
   main.appendChild(about);
-  return {};
+  return { remote: tellFacts };
 };
 
 // --- auto-off ---
@@ -3064,9 +3066,8 @@ function trackViewport() {
   update();
 }
 
-/* Each second. A socket that died with no close (a network switch) never closes: once the page
- * is stale it is replaced a stale span after its connect (an unlock's, Retry's or the backoff's
- * has its own), and never after 4409. */
+/* Each second. A socket that died with no close (a network switch) never closes: stale, it
+ * is replaced a stale span after its connect, and never after 4409. */
 function onSecond() {
   checkStale();
   if (S.stale && (S.sockState === "open" || S.sockState === "connecting") && Date.now() - S.lastConnect > STALE_AFTER_MS) wake(true);

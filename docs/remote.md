@@ -274,7 +274,7 @@ aisquare --json remote needs
 | board_question | the manager asks on the board, or a coder asks you (no `--to`, or `--to user`, `human`, `owner`, `all` or `everyone`), or asks a manager that is not there to answer (stopped, or parked on its usage limit) |
 | manager_down | the manager crashed; or, while agents still work and before it reported a result, it was killed or lost (no exit status), or a switch or a restart could not start its replacement. A manager that exits cleanly (`fleet stop`, the phone's Stop, its own `/exit`) is taken to be done |
 | crashed | an agent exited with an error in the last hour, or was stopped for a switch or a restart that could not start its replacement, its task unfinished, while no manager runs to handle it (one parked on its usage limit does not count) |
-| limited | an agent hit its usage limit; when the limit named its reset, the card tells it by the phone's clock |
+| limited | an agent hit its usage limit; when the limit named its reset, the card tells it by the phone's clock, and the Board tab leaves out the reset its line says by the machine's |
 | failed | an agent's turn ended on an API error (a login that expired, credit that ran out, the API overloaded past Claude Code's own retries), and it waits at its prompt |
 | lost | an agent's pane is gone |
 | fleet_down | tmux is not answering for a project |
@@ -321,6 +321,13 @@ or **Switch account** for a failed turn, **Restart** for a crash. **Dismiss**
 hides a card for good, on every phone and through a restart of Remote, however
 long what it is about lasts. A tell or a reply dismisses its card itself once it
 was delivered.
+
+A reply is a board note to whoever asked, and a note to the manager wakes it.
+Any other agent the fleet runs reads a note only at its next prompt, and nothing
+prompts one that asked and waits, so a reply to one goes as Tell from its menu
+does: typed into its prompt while it waits there, otherwise left as that note.
+When the agent that asked has ended since, or its name is another agent's now,
+the reply is that note.
 
 ---
 

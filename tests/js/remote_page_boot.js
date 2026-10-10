@@ -390,7 +390,10 @@ function bootPage(hash, answer, globals, base) {
     sockets, location,
     run: (code) => vm.runInContext(code, context),
     main: () => page.run("UI.main"),
-    toast: () => page.run("UI.toast.textContent"),
+    /* What the newest toast says, and every toast line on screen. Timers never fire on their
+     * own here, so a line stays until TOAST_LINES newer ones push it out. */
+    toast: () => page.run("UI.toast.childNodes.length ? UI.toast.childNodes[UI.toast.childNodes.length - 1].textContent : ''"),
+    toasts: () => page.run("UI.toast.classList.contains('show') ? UI.toast.childNodes.map((line) => line.textContent) : []"),
     /* Every socket the page opened and the machine has not answered yet, accepted. */
     acceptSockets() {
       for (const sock of sockets) if (sock.readyState === 0) sock.accept();
@@ -637,6 +640,34 @@ async function lostTwice() {
   page.live().frame("action", { actions: [{ request_id: id, endpoint: "send-keys", status: 200, body: { sent: true }, at: "2026-10-07T10:13:00+00:00" }] });
   await settle();
   return { bodies, said, orphaned, later: page.toast(), send: sendState(page) };
+}
+
+/* Results that arrive together. A tab reloaded with three writes in flight, and the ledger's
+ * first read reports two of them (newest first: a Stop refused, then a Restart done); then,
+ * in one tick of the socket, the frame that turns writes off and the third write's result.
+ * The toast lines on screen after each; then after a fifth line. */
+async function toastsTogether() {
+  const now = Date.now();
+  const kept = storage();
+  kept.setItem("asq.pending", JSON.stringify([
+    ["rq-restart", "Restart coder-1", now - 20000], ["rq-stop", "Stop coder-2", now - 10000], ["rq-tell", "Tell coder-3", now - 5000],
+  ]));
+  const at = "2026-10-07T10:13:00+00:00";
+  const ledger = [
+    { request_id: "rq-stop", endpoint: "agent/stop", status: 409, body: { error: "still_busy", message: "Escape was sent; coder-2 has not stopped yet" }, at },
+    { request_id: "rq-restart", endpoint: "agent/restart", status: 200, body: { label: "coder-1" }, at },
+  ];
+  const page = bootPage("#/", signedIn({ "GET api/actions/recent": () => ({ status: 200, json: { actions: ledger } }) }), { sessionStorage: kept });
+  await settle();
+  const read = page.toasts();
+  page.acceptSockets();
+  await settle();
+  page.live().frame("remote", { allow_write: false, auto_off_at: null, version: "test" });
+  page.live().frame("action", { actions: [{ request_id: "rq-tell", endpoint: "agent/tell", status: 200, body: { delivered: true }, at }] });
+  await settle();
+  const frames = page.toasts();
+  page.run("toast('A fifth line')");
+  return { read, frames, capped: page.toasts(), newest: page.toast(), orphans: page.run("S.orphans.size") };
 }
 
 /* A send-keys the machine ran and answered 200, its connection dropping halfway through the
@@ -1080,6 +1111,37 @@ async function refusedReadOnly() {
   };
 }
 
+/* The Settings screen's line on this page while the machine's word changes under it: a
+ * `remote` frame turning writes off and naming a version, one turning them on again, and a
+ * pad key's 403 read_only answered after the human went on to Settings. */
+async function settingsFacts() {
+  const facts = (page) => {
+    const panel = page.main().querySelectorAll("section.panel").find((one) => one.firstChild.textContent === "This page");
+    return panel.querySelectorAll("p.muted")[0].textContent;
+  };
+  const page = bootPage("#/settings", signedIn());
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const before = facts(page);
+  page.live().frame("remote", { allow_write: false, auto_off_at: null, version: "0.7.0" });
+  await settle();
+  const off = { line: facts(page), pill: !page.run("UI.ro.hidden") };
+  page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "0.7.0" });
+  await settle();
+  const on = facts(page);
+  const answer = deferred();
+  const late = await agentView({ "POST api/send-keys": () => answer.promise });
+  click(buttonNamed(late.main(), "1"));
+  await settle();
+  late.location.hash = "#/settings";
+  await settle();
+  const left = facts(late);
+  answer.settle({ status: 403, json: { error: "read_only", message: "writes are off" } });
+  await settle();
+  return { before, off, on, left, refused: facts(late) };
+}
+
 /* The live tab's scroll: after a pane that could not be read, after the first screen,
  * and after another screen once the human scrolled up to read. */
 async function liveScroll() {
@@ -1309,6 +1371,46 @@ async function limitTimes() {
     page.run("Date.now = () => Date.parse('2026-10-07T10:00:07+00:00');");
     await settle();
     return page.main().querySelectorAll("span.muted").map((line) => line.textContent);
+  } finally {
+    if (zone === undefined) delete process.env.TZ;
+    else process.env.TZ = zone;
+  }
+}
+
+/* The Board tab on a phone in UTC-7, from a machine in UTC+5:30 whose board's limited lines
+ * say the reset by its own clock: coder-1 parked on a limit that lifts at 13:10 UTC (18:40
+ * on the machine, 06:10 on the phone), an older limited line of coder-1's, one of coder-2's
+ * (back at work), and a note that quotes such a line. Each line's text, newest first, as
+ * GET api/board drew them, then as the board frame that follows does: a frame's sessions
+ * are only their id, label and role (remote_server.remote_board_frame). */
+async function boardLimitTimes() {
+  const zone = process.env.TZ;
+  process.env.TZ = "America/Los_Angeles";
+  try {
+    const switchIt = (label) => " — `aisquare fleet switch " + label + "` moves it to the account with the most headroom (or wait for the reset)";
+    const limited = (seq, session, text) => ({ kind: "team.limited", ts: "2026-10-07T10:00:00+00:00", payload: { seq, text, session_id: session } });
+    const board = {
+      project: { id: PROJECT },
+      sessions: [
+        { id: "ses_1", label: "coder-1", role: "coder", state: "limited", limit_resets_at: "2026-10-07T13:10:00+00:00" },
+        { id: "ses_2", label: "coder-2", role: "coder", state: "working", limit_resets_at: "2026-10-07T10:12:00+00:00" },
+      ],
+      events: [
+        limited(1, "ses_1", "coder-1 hit its session limit · resets in 2d 4h (Fri 02:00)" + switchIt("coder-1")),
+        limited(2, "ses_2", "coder-2 hit its session limit · resets in 12m" + switchIt("coder-2")),
+        limited(3, "ses_1", "coder-1 hit its session limit · resets in 3h 10m (18:40)" + switchIt("coder-1")),
+        note(4, "coder-1 said: hit its session limit · resets in 3h 10m (18:40)"),
+      ],
+    };
+    const page = bootPage("#/p/" + PROJECT + "/board", signedIn({ "GET api/board": () => ({ status: 200, json: board }) }));
+    page.run("Date.now = () => Date.parse('2026-10-07T10:00:07+00:00');");
+    await settle();
+    const lines = () => page.main().querySelectorAll("p.text").map((line) => line.textContent);
+    const read = lines();
+    const sessions = board.sessions.map(({ id, label, role }) => ({ id, label, role }));
+    page.live().frame("board", Object.assign({}, board, { sessions, events: board.events.concat([note(5, "after")]) }), { project: PROJECT });
+    await settle();
+    return { read, framed: lines() };
   } finally {
     if (zone === undefined) delete process.env.TZ;
     else process.env.TZ = zone;
@@ -2722,10 +2824,10 @@ async function writesReachTheirRoutes() {
   return { board: writes(board), reply: writes(feed), agent: writes(agent), refused };
 }
 
-/* Waking and reconnecting (SPEC §6.4): a 4409 while the tab is hidden, then pageshow still
- * hidden, then the tab shown; each of visibilitychange, pageshow and online on a shown tab;
- * and what a new socket asks for after a wake (on the Board tab) and after a dropped
- * connection (on an agent's Live tab). */
+/* Waking and reconnecting (SPEC §6.4): a 4409 while the tab is hidden, then pageshow and
+ * online (a network flap reaches every tab) still hidden, then the tab shown; each of
+ * visibilitychange, pageshow and online on a shown tab; and what a new socket asks for after
+ * a wake (on the Board tab) and after a dropped connection (on an agent's Live tab). */
 async function wakes() {
   const reads = (page, from) => page.requests.slice(from).filter((one) => one.method === "GET").map((one) => one.path).sort();
   const page = bootPage("#/", signedIn());
@@ -2740,7 +2842,11 @@ async function wakes() {
   fire(page, "window", "pageshow");
   await settle();
   const hiddenShow = page.sockets.length;
-  const from = page.requests.length;
+  let from = page.requests.length;
+  fire(page, "window", "online");
+  await settle();
+  const hiddenOnline = { sockets: page.sockets.length, state: page.run("S.sockState"), reads: reads(page, from) };
+  from = page.requests.length;
   page.run("document.visibilityState = 'visible'");
   fire(page, "document", "visibilitychange");
   await settle();
@@ -2772,7 +2878,7 @@ async function wakes() {
     await settle();
     asks[how] = { sockets: one.sockets.length, sent: one.live().sent.map((message) => Object.keys(message).filter((key) => key !== "project").map((key) => key + " " + message[key]).join()) };
   }
-  return { replaced, hiddenShow, shown, each, asks };
+  return { replaced, hiddenShow, hiddenOnline, shown, each, asks };
 }
 
 /* Cards dismissed: by hand (answered 200, and 404 for one already gone); after a Tell from
@@ -2817,6 +2923,61 @@ async function dismissals() {
   return {
     byHand: await byHand(done), gone: await byHand(() => ({ status: 404, json: { error: "not_found", message: "no such item" } })),
     delivered: await tell(true), notDelivered: await tell(false), reply: result(reply),
+  };
+}
+
+/* A Reply on a board question to the agent that asked, as the machine builds one for a coder
+ * the fleet runs (agent and agent_id are its row), the tell typed in and filed as a note, and
+ * refused stale as the machine refuses it once that row ended or another holds coder-1, or
+ * once the card went (then, tapped again, once the row ended too); and a Reply to the
+ * manager. The sheet's title, what was sent, the toast, the dismissals and what the sheet
+ * said last, while it is open. */
+async function crewReplies() {
+  const crew = Object.assign({}, ITEM, {
+    id: "ny_00000000000000c1", kind: "board_question", detail: { text: "Take T-4 or T-5?", author: "coder-1" }, answers: [], actions: ["reply", "dismiss"],
+  });
+  const manager = Object.assign({}, crew, { id: "ny_00000000000000c2", agent: "manager", agent_id: "agt_m", detail: { text: "Ship it?", author: "manager" } });
+  const ok = () => ({ status: 200, json: { ok: true } });
+  const strip = (body) => Object.fromEntries(Object.entries(body).filter(([key]) => key !== "request_id"));
+  // told answers each tap of the sheet's button in turn, the last one any tap after it.
+  const reply = async (item, told, go) => {
+    const answers = [].concat(told);
+    const page = bootPage("#/", signedIn({
+      "GET api/needs": () => ({ status: 200, json: { items: [item] } }),
+      "POST api/agent/tell": () => (answers.length > 1 ? answers.shift() : answers[0])(),
+      "POST api/note": ok,
+      "POST api/needs/dismiss": ok,
+    }));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    click(buttonNamed(page.main(), "Reply…"));
+    const title = sheetTitle(page);
+    find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "Take T-4.";
+    let said = null;
+    for (let tap = [].concat(told).length; tap > 0 && sheetTitle(page); tap--) {
+      click(buttonNamed(page.run("UI.sheet"), go));
+      await settle();
+      const status = sheetTitle(page) && find(page.run("UI.sheet"), (node) => node.className === "status");
+      said = status ? status.textContent : null;
+    }
+    return {
+      title, told: page.sent("api/agent/tell").map(strip), noted: page.sent("api/note").map(strip),
+      toast: page.toast(), dismissed: page.sent("api/needs/dismiss").map((body) => body.id), said,
+    };
+  };
+  const answered = (delivered, how) => () => ({ status: 200, json: { label: "coder-1", delivered, how, mode: "auto", project: PROJECT } });
+  const stale = (message, current) => () => ({ status: 409, json: { error: "stale", message, current } });
+  const ended = stale("there is no agent 'coder-1' in proj now — nothing was done", { agent_id: null });
+  const went = stale("coder-1 no longer shows what that card was about — nothing was done", []);
+  return {
+    typed: await reply(crew, answered(true, "typed into its pane (it was waiting)"), "Tell"),
+    filed: await reply(crew, answered(false, "it is working — filed as board note #12 to coder-1"), "Tell"),
+    ended: await reply(crew, ended, "Tell"),
+    replaced: await reply(crew, stale("'coder-1' is another agent now (agt_d) — nothing was done", { agent_id: "agt_d" }), "Tell"),
+    went: await reply(crew, went, "Tell"),
+    wentThenEnded: await reply(crew, [went, ended], "Tell"),
+    manager: await reply(manager, answered(true, "typed into its pane (it was waiting)"), "Post"),
   };
 }
 
@@ -3489,6 +3650,19 @@ async function staleCards() {
   await settle();
   tell.sent = told.requests.filter((one) => one.path === "api/agent/tell").map((one) => [one.body.text, one.body.needs_id || null, one.body.agent_id || null]);
   tell.after = sheetTitle(told);
+  // The same Tell once coder-1 is another row, or none: the pin it would go again with is
+  // that ended one.
+  const pinRefused = async (message, agent) => {
+    const gone = await feed(asked, { "POST api/agent/tell": () => ({ status: 409, json: { error: "stale", message, current: { agent_id: agent } } }) });
+    click(buttonNamed(gone.main(), "Tell…"));
+    find(gone.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "yes, merge";
+    click(buttonNamed(gone.run("UI.sheet"), "Tell"));
+    await settle();
+    const said = find(gone.run("UI.sheet"), (node) => node.className === "status");
+    return { shown: shown(gone), sheet: sheetTitle(gone), said: said && said.textContent };
+  };
+  const tellReplaced = await pinRefused("'coder-1' is another agent now (agt_d) — nothing was done", "agt_d");
+  const tellEnded = await pinRefused("there is no agent 'coder-1' in proj now — nothing was done", null);
   const crashed = Object.assign({}, ITEM, { kind: "crashed", detail: {}, answers: [], actions: ["stop"] });
   const stopped = await feed(crashed, { "POST api/agent/stop": stale([]) });
   click(buttonNamed(stopped.main(), "Stop…"));
@@ -3497,6 +3671,8 @@ async function staleCards() {
   return {
     answer,
     tell,
+    tellReplaced,
+    tellEnded,
     stop: { shown: shown(stopped), sheet: sheetTitle(stopped) },
   };
 }
@@ -3562,6 +3738,7 @@ async function main() {
     unlockWrong: await unlockAnswered(401, { error: "wrong_password", message: "wrong password" }),
     lostWrite: await lostWrite(),
     lostTwice: await lostTwice(),
+    toastsTogether: await toastsTogether(),
     bodyCut: await bodyCut(),
     lostKeyLongAgo: await lostKeyLongAgo(),
     lostThenSignedOut: await lostThenSignedOut(),
@@ -3582,6 +3759,7 @@ async function main() {
     notTyped: await notTyped(),
     ledgerUndone: await ledgerUndone(),
     refusedReadOnly: await refusedReadOnly(),
+    settingsFacts: await settingsFacts(),
     keyNames: await keyNames(),
     liveScroll: await liveScroll(),
     padScroll: await padScroll(),
@@ -3592,6 +3770,7 @@ async function main() {
     fleetUnread: await fleetUnread(),
     transcriptTimes: await transcriptTimes(),
     limitTimes: await limitTimes(),
+    boardLimitTimes: await boardLimitTimes(),
     readsAfterFrames: await readsAfterFrames(),
     backLeaves: await backLeaves(),
     lateAnswers: await lateAnswers(),
@@ -3621,6 +3800,7 @@ async function main() {
     writesReachTheirRoutes: await writesReachTheirRoutes(),
     wakes: await wakes(),
     dismissals: await dismissals(),
+    crewReplies: await crewReplies(),
     afterLeaving: await afterLeaving(),
     refusalSentences: await refusalSentences(),
     reasonsGiven: await reasonsGiven(),

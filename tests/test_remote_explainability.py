@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -150,26 +151,48 @@ def test_updated_at_is_the_apis_iso_stamp_whatever_zone_a_fact_carries() -> None
     assert card["updated_at"] == "2026-09-12T10:30:30+00:00"
 
 
-def test_payload_keys_stay_inside_the_contract() -> None:
-    allowed = {
-        "available",
-        "reason",
-        "model",
-        "tokens_in",
-        "tokens_out",
-        "cost_estimate_usd",
-        "policy",
-        "updated_at",
-    }
-    for verdict in (GREEN, NO_SDK, RED):
-        card = explainability_payload(
+CARD_KEYS = frozenset(
+    {"available", "reason", "model", "tokens_in", "tokens_out", "policy", "updated_at"}
+)
+"""Every key the card can have: the contract the CHANGELOG states and the page reads."""
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _cards() -> list[dict[str, object]]:
+    return [
+        explainability_payload(
             agent=_agent(),
             session=_session(),
             turns=[_turn(1, 1, 1)],
             verdict=verdict,
             policy=POLICY,
         )
-        assert set(card) <= allowed, card
+        for verdict in (GREEN, NO_SDK, RED)
+    ]
+
+
+def test_payload_keys_stay_inside_the_contract() -> None:
+    for card in _cards():
+        assert set(card) <= CARD_KEYS, card
+
+
+def test_the_changelog_and_the_page_name_only_keys_a_card_has() -> None:
+    """The CHANGELOG gave the card a ``cost_estimate_usd?``, and the page kept a line to
+    draw it, but nothing sets it: the CLI carries no price table, and a user with a green
+    doctor looked for a cost the release notes listed. Each key the CHANGELOG names is one
+    a card has, every key a card can have is named, and the Card tab reads no other."""
+    produced = set().union(*(set(card) for card in _cards()))
+    assert produced == CARD_KEYS
+    changelog = " ".join((ROOT / "CHANGELOG.md").read_text(encoding="utf-8").split())
+    shape = re.search(r"\*\*`GET api/explainability/<agent>`\*\*: `\{([^}]*)\}`", changelog)
+    assert shape is not None
+    assert {key.strip().rstrip("?") for key in shape.group(1).split(",")} == CARD_KEYS
+    page = (ROOT / "src/aisquare/web/remote/app.js").read_text(encoding="utf-8")
+    drawn = re.search(r"\nfunction drawExplainability\(body, card\) \{\n(.*?)\n\}\n", page, re.S)
+    assert drawn is not None
+    read = set(re.findall(r"\bcard\.([a-z_]+)", drawn.group(1)))
+    assert "tokens_in" in read, "the control: the reads are seen"
+    assert read <= CARD_KEYS, read - CARD_KEYS
 
 
 # --- the endpoint ----------------------------------------------------------------------

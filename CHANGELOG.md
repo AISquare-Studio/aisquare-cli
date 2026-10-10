@@ -74,9 +74,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   their project. Reads return exactly what `asq --json` prints (the same
   builders, `projects_json`, `agents_json` and `board_json`).
 - **`GET api/explainability/<agent>`**: `{available, reason?, model?, tokens_in?,
-  tokens_out?, cost_estimate_usd?, policy?, updated_at?}`, `available` only when
-  the explainability SDK is present and no doctor check is RED. It never raises;
-  an unknown agent is a 404 like `panes/<agent>`.
+  tokens_out?, policy?, updated_at?}`, `available` only when the explainability
+  SDK is present and no doctor check is RED. It never raises; an unknown agent
+  is a 404 like `panes/<agent>`.
 - **Writes, off until `asq remote allow-write on`.** `send-keys`, `note`,
   `task/claim`, `task/done`, `project/switch|add|remove`, the agent actions,
   quick answers and extend answer 403 `read_only` until then. Each write that

@@ -2353,9 +2353,8 @@ def explainability_payload(
     ``available`` is true only when the SDK is present AND no doctor check is
     RED; otherwise ``reason`` says which. Model and tokens come from the board
     session and the recorded turns regardless, so the card still shows what the
-    fleet knows on a machine where the SDK is missing. ``cost_estimate_usd`` is
-    only ever set by the SDK lane — the CLI carries no price table, and a
-    guessed figure on a demo card is worse than none.
+    fleet knows on a machine where the SDK is missing. It names no cost: the CLI
+    carries no price table, and a guessed figure on a demo card is worse than none.
     """
     payload: dict[str, object] = {"available": verdict.sdk_present and not verdict.red}
     if not verdict.sdk_present:

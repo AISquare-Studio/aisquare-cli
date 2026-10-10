@@ -2615,7 +2615,6 @@ function drawExplainability(body, card) {
   if (isText(card.model)) lines.push("model: " + plainText(card.model));
   if (typeof card.tokens_in === "number") lines.push("tokens in: " + card.tokens_in);
   if (typeof card.tokens_out === "number") lines.push("tokens out: " + card.tokens_out);
-  if (typeof card.cost_estimate_usd === "number") lines.push("cost estimate: $" + card.cost_estimate_usd.toFixed(2));
   const policy = card.policy && typeof card.policy === "object" ? card.policy : null;
   if (policy) {
     for (const key of ["tracing", "shipping", "target", "gateway", "redaction"]) {

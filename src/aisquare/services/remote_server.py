@@ -5716,8 +5716,8 @@ def _remote_uvicorn_server() -> type[uvicorn.Server]:
 
 async def _remote_cut_stuck(server: uvicorn.Server) -> None:
     """While ``server`` stops: once no phone's write runs, give the rest
-    :data:`REMOTE_WINDING_DOWN_SECONDS`, then cut every connection still holding bytes its
-    peer has not taken, and any that comes to, until no connection is left.
+    :data:`REMOTE_WINDING_DOWN_SECONDS`, then cut every connection that waits on its peer
+    (:func:`_remote_connection_stuck`), and any that comes to, until no connection is left.
 
     uvicorn's stop closes each connection and waits for it to go, with no limit. A close
     lets what was written drain first, and a phone that stopped reading, asleep or off its
@@ -5735,10 +5735,30 @@ async def _remote_cut_stuck(server: uvicorn.Server) -> None:
     await asyncio.sleep(REMOTE_WINDING_DOWN_SECONDS)
     while server.server_state.connections:
         for connection in list(server.server_state.connections):
-            transport = getattr(connection, "transport", None)
-            if transport is not None and transport.get_write_buffer_size():
-                transport.abort()
+            if _remote_connection_stuck(connection):
+                connection.transport.abort()
         await asyncio.sleep(0.1)
+
+
+def _remote_connection_stuck(connection: Any) -> bool:
+    """Whether a connection of a stopping server waits on its peer, which may never come
+    back (:func:`_remote_cut_stuck`): it holds bytes the peer has not taken, or a request
+    whose body has not all come.
+
+    uvicorn lets a request it is reading finish, and a client that sent a request's head
+    and part of its body, then nothing, a phone that slept or lost its network mid-upload,
+    or anyone holding the link at ``unlock``, held it for good: nothing was waiting to be
+    sent, so only the bytes held were cut, and ``serve`` never exited after its auto-off
+    and the R panel's next start was refused as winding down (sweep of #243, round 7).
+    Such a request was never asked in full, so nothing it would have done is lost.
+    """
+    transport = getattr(connection, "transport", None)
+    if transport is None:
+        return False
+    if transport.get_write_buffer_size():
+        return True
+    cycle = getattr(connection, "cycle", None)  # uvicorn's HTTP request in flight, h11's or not
+    return cycle is not None and not cycle.response_complete and cycle.more_body is True
 
 
 class _Server:

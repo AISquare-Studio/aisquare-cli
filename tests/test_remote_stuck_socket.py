@@ -6,7 +6,8 @@ close waited with no end, so its auto-off, revoke and sign-out checks stopped wi
 uvicorn's stop closes a connection and waits for it to go, which a close does only once
 what was written drains. So ``serve`` never exited after its auto-off, and the R panel's
 next start was refused as winding down for as long as the phone's TCP lived (sweep 5 of
-#243). These run the real server on loopback, with a client that never reads.
+#243); a request whose body never came held it the same way (round 7). These run the real
+server on loopback, with a client that never reads, or never finishes its request.
 """
 
 from __future__ import annotations
@@ -137,6 +138,32 @@ def _phone_that_stopped_reading(port: int, token: str, cookie: str) -> Iterator[
         sock.close()
 
 
+@contextlib.contextmanager
+def _request_whose_body_never_comes(port: int, token: str) -> Iterator[socket.socket]:
+    """An unlock that sent its head and part of its body, then nothing: a phone that slept
+    mid-upload, or anyone holding the link."""
+    sock = socket.create_connection(("127.0.0.1", port))
+    sock.sendall(
+        (
+            f"POST /r/{token}/api/unlock HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+            f"Origin: http://127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
+            'Content-Length: 100\r\n\r\n{"password": '
+        ).encode()
+    )
+    try:
+        yield sock
+    finally:
+        sock.close()
+
+
+def _waiting_on_a_body(server: Any) -> bool:
+    """Whether one of ``server``'s connections reads a request whose body has not all come."""
+    return any(
+        getattr(connection, "cycle", None) is not None and connection.cycle.more_body
+        for connection in list(server.server_state.connections)
+    )
+
+
 def _held_up(server: Any) -> bool:
     """Whether one of ``server``'s connections holds bytes its peer has not taken."""
     return any(
@@ -198,6 +225,47 @@ def test_a_phone_that_stopped_reading_lets_remote_go_off_and_on_again(
             )
             again = remote_server.start_remote_server(port=_free_port())
             assert again.token == token, "on again, its phone still holding the old socket"
+        else:
+            uvicorn_server.should_exit = True  # what auto-off does (_remote_serve_off)
+            foreground.join(15)
+            assert not foreground.is_alive(), "serve never returned"
+            assert ended == [False]
+
+
+@pytest.mark.parametrize("stopped_by", ["the R panel", "serve's auto-off"])
+def test_a_request_whose_body_never_comes_lets_remote_go_off_and_on_again(
+    remote: None, stopped_by: str
+) -> None:
+    """uvicorn lets a request it is reading finish, and one that sent part of its body, then
+    nothing, held the stop for good: it holds no byte the peer has not taken, so it was not
+    cut (sweep of #243, round 7). It was never asked in full, so it is cut as well."""
+    port = _free_port()
+    if stopped_by == "the R panel":
+        info = remote_server.start_remote_server(port=port)
+        token, serving = info.token, remote_server._server
+        assert serving is not None
+        uvicorn_server = serving._server
+    else:
+        token = remote_server.runtime().token
+        ended: list[bool] = []
+        foreground = threading.Thread(
+            target=lambda: ended.append(remote_server.run_foreground(port=port)), daemon=True
+        )
+        foreground.start()
+        _wait_for(lambda: remote_server._foreground is not None)
+        serving_now = remote_server._foreground
+        assert serving_now is not None
+        uvicorn_server = serving_now
+        _wait_for(lambda: uvicorn_server.started)
+    with _request_whose_body_never_comes(port, token):
+        _wait_for(lambda: _waiting_on_a_body(uvicorn_server))
+        if stopped_by == "the R panel":
+            remote_server.stop_remote_server()
+            _wait_for(
+                lambda: not any(stopped.winding_down for stopped in remote_server._winding_down)
+            )
+            again = remote_server.start_remote_server(port=_free_port())
+            assert again.token == token, "on again, the request still unfinished"
         else:
             uvicorn_server.should_exit = True  # what auto-off does (_remote_serve_off)
             foreground.join(15)

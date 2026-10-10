@@ -1990,7 +1990,9 @@ def test_the_pads_exit_and_rewind_guards_each_ask_before_a_key_goes(
     """Only the page asks before ^C or ^D (one interrupts the agent, a second within 3 s exits
     Claude Code) and before a second Esc within 1.5 s (two open its Rewind selector): the
     machine lets the first of each through. Nothing tested any of them, nor the resend of a
-    second ^C the machine refused. Each step: the key, the sheet it left, the keys sent."""
+    second ^C the machine refused. Round-7 verifier: an Esc sheet closed unanswered ended the
+    window, so the next tap went with no sheet as the second Esc; only a confirmed one does.
+    Each step: the key, the sheet it left, the keys sent."""
     pad = boot_report["padConfirms"]
     assert pad["steps"] == [
         ["^C", "Send Ctrl-C?", 0],
@@ -2007,8 +2009,11 @@ def test_the_pads_exit_and_rewind_guards_each_ask_before_a_key_goes(
         ["Esc", None, 7],  # the confirmed one starts no new pair
         ["Esc", "Press Esc again?", 7],  # 1.4 s after the last: still within 1.5 s
         ["Close", None, 7],
+        ["Esc", "Press Esc again?", 7],  # the sheet closed unanswered sent nothing
+        ["Close", None, 7],
+        ["Esc", None, 8],  # 1.6 s after the last one sent
     ]
-    escapes = [["Escape"]] * 4
+    escapes = [["Escape"]] * 5
     assert pad["keys"] == [["C-c"], ["C-c"], ["C-c", "confirm_exit"], *escapes]
 
 
@@ -2143,14 +2148,18 @@ def test_the_transcript_tabs_key_pad_types_nothing_while_a_prompt_may_be_up(
     ⏎ or ``1`` took "1. Yes" and ran the command blind. Each such key asks the machine to
     type nothing while a prompt may be up, and a refusal says where to look. Esc answers a
     prompt only No and stops a turn, so it goes as it does from Live, but a second Esc
-    straight after it, which opens Claude Code's Rewind selector, is not sent from here."""
+    straight after it, which opens Claude Code's Rewind selector, is not sent from here.
+    Round-7 verifier: the refused tap reset the window, so a third tap went as the second
+    Esc. Each refused tap runs the window on, and an Esc goes once 1.5 s pass without one."""
     pad = boot_report["transcriptPad"]
     assert pad["bodies"] == [
         [["1"], True],
         [["Enter"], True],
         [["y"], True],
         [["Escape"], False],
+        [["Escape"], False],
     ]
+    assert pad["escapes"] == [1, 1], "the third tap, and one 1.4 s after it, sent nothing"
     assert pad["refused"] == (
         "Not sent — coder-1 may be showing a prompt that this would answer. "
         "Look at it on Live first."

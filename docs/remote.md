@@ -393,9 +393,11 @@ one row, `Esc 1 2 3 ⏎ ↑ ↓ More` (⏎ being Enter), with the rest under Mor
 a narrower phone More takes the line under the seven, and below 360 px the
 eight are two rows of four, More last.
 Ctrl-C and Ctrl-D ask first, and a second one within 3 seconds asks again,
-because Claude Code exits on it. A second Esc within a second and a half asks
-too, and from the Transcript tab is not sent: two in a row open Claude Code's
-Rewind selector. The pad and the phone's
+because Claude Code exits on it. A second Esc within a second and a half of the
+last one sent asks too, again after its sheet was closed unanswered, and from
+the Transcript tab is not sent, nor is any Esc there until a second and a half
+passes with none tapped: two in a row open Claude Code's Rewind selector. The
+pad and the phone's
 keyboard never share the screen. Keys reach an agent one at a time, in the order
 they were tapped, and a key shows in the accent colour until the machine has
 answered it; one that waits behind a key that did not get through, or for longer

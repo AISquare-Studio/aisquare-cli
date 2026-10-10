@@ -1840,10 +1840,10 @@ async function keysInOrder() {
 }
 
 /* The pad's guards, which only the page keeps: ^C and ^D each ask first; a second Esc within
- * 1.5 s asks first (two open Claude Code's Rewind), at once or 1.4 s after the last, and one
- * 2 s after the last does not; a second ^C the machine refuses double_press goes again, with
- * confirm_exit, only once the human says so. After each step: the sheet on screen and how
- * many keys were sent. */
+ * 1.5 s asks first (two open Claude Code's Rewind), at once or 1.4 s after the last, again
+ * once its sheet was closed, and one 2 s (or 1.6 s) after the last does not; a second ^C the
+ * machine refuses double_press goes again, with confirm_exit, only once the human says so.
+ * After each step: the sheet on screen and how many keys were sent. */
 async function padConfirms() {
   let ctrlC = 0;
   const page = await agentView({
@@ -1874,6 +1874,10 @@ async function padConfirms() {
   page.run("Date.now = ((then) => () => then + 1400)(Date.now());");
   await act("pad", "Esc");
   await act("sheet", "Close");
+  await act("pad", "Esc");
+  await act("sheet", "Close");
+  page.run("Date.now = ((then) => () => then + 200)(Date.now());");
+  await act("pad", "Esc");
   return { steps, keys: sent().map((body) => (body.confirm_exit === true ? body.keys.concat("confirm_exit") : body.keys)) };
 }
 
@@ -1922,7 +1926,8 @@ async function transcriptSendGuarded() {
 /* The key pad on the Transcript tab, which draws no pane: 1, ⏎ and More's y each ask the
  * machine to type nothing while a prompt may be up (dialog_guard), as Send does; the first is
  * refused dialog_open, and what the page says then. Esc goes as it does from Live, and a
- * second Esc straight after it is not sent at all. Each body as [keys, dialog_guard]. */
+ * second Esc straight after it is not sent at all, nor a third, nor one 1.4 s after that;
+ * one 1.5 s after the last refused tap goes. Each body as [keys, dialog_guard]. */
 async function transcriptPad() {
   let answer = { status: 409, json: { error: "dialog_open", message: "coder-1 is showing a prompt" } };
   const page = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
@@ -1937,14 +1942,27 @@ async function transcriptPad() {
   await settle();
   const refused = page.toast();
   answer = { status: 200, json: { sent: true } };
-  for (const name of ["⏎", "y", "Esc", "Esc"]) {
+  const later = (ms) => page.run("Date.now = ((then) => () => then + " + ms + ")(Date.now());");
+  later(0); // the taps below at one instant, however slow the run
+  for (const name of ["⏎", "y", "Esc", "Esc", "Esc"]) {
     click(buttonNamed(page.main(), name));
     await settle();
   }
+  const twice = { toast: page.toast(), sheet: sheetTitle(page) };
+  const escapes = () => page.sent("api/send-keys").filter((body) => body.keys[0] === "Escape").length;
+  const thrice = escapes();
+  later(1400);
+  click(buttonNamed(page.main(), "Esc"));
+  await settle();
+  const soon = escapes();
+  later(1500);
+  click(buttonNamed(page.main(), "Esc"));
+  await settle();
   return {
     bodies: page.sent("api/send-keys").map((body) => [body.keys, body.dialog_guard === true]),
     refused,
-    twice: { toast: page.toast(), sheet: sheetTitle(page) },
+    twice,
+    escapes: [thrice, soon],
   };
 }
 

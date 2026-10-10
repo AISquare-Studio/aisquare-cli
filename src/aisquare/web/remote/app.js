@@ -2724,10 +2724,9 @@ function inputBar(pid, label, cleanups, blind, pin) {
     if (key === "Escape") {
       const now = Date.now();
       if (now - lastEsc < ESC_REPEAT_MS) {
-        lastEsc = 0;
-        if (blind) return toast("Not sent — two Esc open the Rewind selector. Send it from Live.");
-        confirmSheet("Press Esc again?", "Two Esc in a row open Claude Code's Rewind selector.", "Send Esc", () => post(body, "Esc", tapped));
-        return;
+        if (!blind) return confirmSheet("Press Esc again?", "Two Esc in a row open Claude Code's Rewind selector.", "Send Esc", () => { lastEsc = 0; post(body, "Esc", tapped); });
+        lastEsc = now; // not sent, so the window runs on
+        return toast("Not sent — two Esc open the Rewind selector. Send it from Live.");
       }
       lastEsc = now;
     }

@@ -4510,6 +4510,12 @@ def build_remote_app(
         most for them. A snapshot still being read after that sends its frame on a later
         tick, and the frames that need no read (``remote``, ``needs_you``, ``action``,
         the heartbeat) and the snapshots that came back go out without it.
+
+        A tick is one tick, the wait for its reads included: the next begins a tick after
+        this one began. The wait for the reads and the pause after the frames each took a
+        whole tick, so while one read hung (a fleet waiting out tmux's 30 s, a store kept
+        busy) every frame of the socket came every two ticks, and an auto-off or a device
+        signed out elsewhere closed it up to two ticks late (sweep of #243, round 5).
         """
         device = kit.kit_device(websocket)  # the gate refused a socket without one
         await websocket.accept()
@@ -4608,7 +4614,7 @@ def build_remote_app(
             del pending[kind]
             return _read_outcome(began)
 
-        async def tick_once() -> None:
+        async def tick_once(ends: float) -> None:
             nonlocal next_heartbeat, first_tick
             # Every snapshot is read at once and waited for a tick at most. Read in turn and
             # awaited, one that hung held every frame behind it: a tmux that stops answering
@@ -4636,7 +4642,7 @@ def build_remote_app(
             for kind in [kind for kind in pending if kind not in wanted_kinds]:
                 _let_read_go(pending.pop(kind))  # switched away from, or unsubscribed
             if not all(began.done() for began in in_flight):
-                await asyncio.wait(in_flight, timeout=tick)
+                await asyncio.wait(in_flight, timeout=max(0.0, ends - loop.time()))
             board = remote_taken(board_kind)
             if board is not _UNREAD and board_wanted and board_ref == board_project:
                 if isinstance(board, Exception):  # said on the Board tab, not "Loading…" for good
@@ -4741,6 +4747,7 @@ def build_remote_app(
         reading = asyncio.ensure_future(reader())
         try:
             while not reading.done():
+                ends = loop.time() + tick
                 # One check of remote.json a tick, for everything the tick reads of it.
                 with runtime.remote_state_checked():
                     # By id, every tick: Remote off (auto-off included) is 4410, a device that
@@ -4751,8 +4758,8 @@ def build_remote_app(
                     if not runtime.device_is_live(device.id):
                         await close_with(WS_CLOSE_UNAUTHORIZED)
                         break
-                    await tick_once()
-                await asyncio.wait([reading], timeout=tick)
+                    await tick_once(ends)
+                await asyncio.wait([reading], timeout=max(0.0, ends - loop.time()))
         except WebSocketDisconnect:
             pass
         except Exception as exc:

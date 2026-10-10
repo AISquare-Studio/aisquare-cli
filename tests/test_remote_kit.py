@@ -1187,6 +1187,48 @@ def test_a_read_a_little_slower_than_the_tick_still_sends_its_frame(
     assert frame["payload"] == {"agents": [], "read": 1}, "the first read, sent once it was back"
 
 
+def test_while_a_read_hangs_the_other_frames_still_come_once_a_tick(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """Sweep of #243, round 5: a tick waited a whole tick for a read that hung, and the stream
+    then paused another whole tick before the next one. While a fleet waited out tmux's
+    30 s, the Live pane, needs-you and every other frame came every two ticks, and an
+    auto-off closed the socket up to two ticks late. The wait and the pause share one tick
+    now. The control: with nothing hung, the same pane comes once a tick as before."""
+    tick = 0.25
+
+    def gaps(hang: bool) -> list[float]:
+        release = threading.Event()
+        screens = itertools.count()
+
+        def fleet(project: str | None) -> object:
+            release.wait(20)
+            return {"agents": []}
+
+        def panes(agent: str, project: str | None, history: int) -> dict[str, object]:
+            return {"rows": [f"screen {next(screens)}"], "width": 80, "height": 1}
+
+        sources = dataclasses.replace(_sources(), fleet=fleet, panes=panes)
+        _app, client = _stream_app(runtime, tmp_path, sources=sources, tick=tick)
+        came: list[float] = []
+        try:
+            with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+                if hang:
+                    ws.send_text(json.dumps({"subscribe_fleet": None}))
+                ws.send_text(json.dumps({"subscribe": "coder-1"}))
+                while len(came) < 8:
+                    if _frame_within(ws)["type"] == "pane":
+                        came.append(time.monotonic())
+                release.set()  # before the socket's end waits for the read's thread
+        finally:
+            release.set()
+        return sorted(later - earlier for earlier, later in itertools.pairwise(came[2:]))
+
+    for hang in (False, True):
+        between = gaps(hang)
+        assert between[len(between) // 2] < tick * 1.5, (hang, between)
+
+
 def test_needs_frames_come_after_board_fleet_and_remote(
     runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

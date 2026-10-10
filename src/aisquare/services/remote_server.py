@@ -2381,7 +2381,7 @@ BOARD_EVENTS = 200
 Board tab draws. ``asq board --json`` prints five, a glance in a terminal."""
 
 
-BoardProjects = dict[tuple[Path | None, str], ProjectInfo]
+BoardProjects = dict[tuple[Path, str], ProjectInfo]
 """The board project of each project root under each ``AISQUARE_TEAM_HUB``, resolved once."""
 
 
@@ -2392,7 +2392,11 @@ def remote_board_payload(
 
     The project's root as ``cwd`` is exactly what ``asq board --json`` prints when
     run there, ``AISQUARE_TEAM_HUB`` included (``team_service._project``); ``None``
-    is the current project, as it always was. With :data:`BOARD_EVENTS` events,
+    is the current project, the root :func:`_resolve_project` gives it as it does
+    for the fleet and the actions: the pinned project, else the server's directory's.
+    With ``cwd=None`` the board followed the server's directory alone, so after a
+    ``project/switch`` the fleet was the new project's and the board, the tasks and
+    a note the old one's (sweep 4 of #243). With :data:`BOARD_EVENTS` events,
     not the CLI's five: the Board tab is the board, and with five a question a
     card sent the human to "reply on the board" to was gone from it once five
     newer lines were (review of #243, round 3).
@@ -2420,7 +2424,7 @@ def remote_board_payload(
     from aisquare.core import orchestrator
     from aisquare.services import team as team_service
 
-    cwd = None if project is None else _resolve_project(project).root
+    cwd = _resolve_project(project).root
     board: ProjectInfo | None = None
     if boards is not None:
         key = (cwd, os.environ.get(orchestrator.TEAM_HUB_ENV_VAR, ""))
@@ -2471,7 +2475,7 @@ def live_sources() -> Sources:
     def tasks_payload(project: str | None = None) -> object:
         from aisquare.services import team as team_service
 
-        cwd = None if project is None else _resolve_project(project).root
+        cwd = _resolve_project(project).root  # the current one's as remote_board_payload's
         return [task.model_dump(mode="json") for task in team_service.list_tasks(None, cwd=cwd)]
 
     def memory_payload(project: str | None = None) -> object:
@@ -2860,7 +2864,8 @@ def live_writes() -> Writes:
         return {"task": task.model_dump(mode="json")}, f"done {task.id} as={author or '-'}"
 
     def write_note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
-        """A note on a project's board: ``project``'s, or the current one's without it.
+        """A note on a project's board: ``project``'s, or the current one's without it, the
+        project keys and an agent action without one go to (:func:`_resolve_project`).
 
         The board resolves from the project's root exactly as ``asq note`` run
         there would; with ``as``, the session's own board still wins (the CLI's
@@ -2901,7 +2906,7 @@ def live_writes() -> Writes:
                     task_ref=task,
                     to_role=to,
                     kind=kind,
-                    cwd=None if project is None else _resolve_project(project).root,
+                    cwd=_resolve_project(project).root,
                 )
         except ValueError as exc:  # a task of another project's board, as ``asq note`` says
             if task is None or type(exc) is not ValueError:

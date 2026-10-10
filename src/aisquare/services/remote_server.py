@@ -2831,7 +2831,10 @@ def live_writes() -> Writes:
         (sweep of #243). ``to`` holds only characters that print
         (:func:`check_note_to`). ``as`` must name a session, or the note is refused,
         and so is a ``task`` of another project's board: 400 ``invalid``, where it fell to
-        ``write_failed``, as if the write had failed (sweep 3 of #243).
+        ``write_failed``, as if the write had failed (sweep 3 of #243). Said for the
+        phone, by its field: the board's sentence names ``asq note``'s ``--task``. Only
+        that refusal: another ``ValueError`` from deeper in (a pydantic one, a text that
+        will not encode) is still a write that failed.
         """
         from aisquare.services import team as team_service
 
@@ -2857,7 +2860,10 @@ def live_writes() -> Writes:
                     cwd=None if project is None else _resolve_project(project).root,
                 )
         except ValueError as exc:  # a task of another project's board, as ``asq note`` says
-            raise RequestError(400, "invalid", str(exc)) from None
+            if task is None or type(exc) is not ValueError:
+                raise  # not the board's refusal: a write that failed
+            said = f"{task!r} is a task of another project's board (the 'task' field)"
+            raise RequestError(400, "invalid", said) from None
         addressed = "-" if to is None else json.dumps(to)
         summary = f"{event.kind} seq={event.seq} as={author or '-'} to={addressed}"
         return {"event": event.as_envelope().model_dump(mode="json")}, summary

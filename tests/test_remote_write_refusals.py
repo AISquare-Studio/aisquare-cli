@@ -252,11 +252,29 @@ def test_a_note_on_a_task_of_another_projects_board_is_refused_invalid(
         400,
         {
             "error": "invalid",
-            "message": f"--task {task.id}: that task belongs to another project's board",
+            "message": f"{task.id!r} is a task of another project's board (the 'task' field)",
         },
     )
     _alpha, _sessions, _tasks, events = team_service.board_data()
     assert events == [], "nothing was posted to the note's own board either"
+
+
+def test_a_note_that_fails_deeper_than_the_boards_refusal_is_still_a_write_that_failed(
+    phone: TestClient, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the board's own refusal of a foreign task is 400 ``invalid``: a ``ValueError``
+    of another kind raised under it, a text that will not encode, is a write that failed,
+    and its sentence is no field's (merge of round 5 of #243)."""
+    from aisquare.services import team as team_service
+
+    task, _added = team_service.add_task("ship it")
+
+    def refuses(*args: object, **kwargs: object) -> None:
+        raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+
+    monkeypatch.setattr(team_service, "add_note", refuses)
+    response = phone.post(f"{base(runtime)}/api/note", json={"text": "hi", "task": task.id})
+    assert (response.status_code, response.json()["error"]) == (400, "write_failed")
 
 
 # --- an audit line that will not write ----------------------------------------------------

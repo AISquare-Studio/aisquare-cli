@@ -2280,6 +2280,51 @@ async function staleBeforeASocket() {
   return { unlock: await made(4401), retry: await made(4410), reconnect: await made(1006) };
 }
 
+/* The backoff across a sign-in that ran out while the link was down: a drop, two handshakes the
+ * machine was away for, a third it refused (its probe a 401, so the lock), then the passphrase,
+ * and the first socket after it failing too. Each is how long the reconnect it set waits, in s
+ * before the jitter. */
+async function backoffAcrossAnUnlock() {
+  let away = false;
+  let signedOut = false;
+  const page = bootPage("#/", (method, where, body) => {
+    if (method === "POST" && where === "api/unlock") {
+      signedOut = false;
+      return { status: 200, json: { ok: true, device: { id: "dev_0a1b2c3d" } } };
+    }
+    if (away) return "network";
+    return signedOut ? { status: 401, json: { error: "unauthorized" } } : signedIn()(method, where, body);
+  });
+  await settle();
+  page.acceptSockets();
+  page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  await settle();
+  const waits = [];
+  const fail = async () => {
+    page.live().readyState = 3;
+    page.live().fire("close", { code: 1006 });
+    await settle();
+    if (page.timers().includes("connect")) waits.push(page.run("BACKOFF_SECONDS[S.backoff - 1]"));
+  };
+  await fail();
+  away = true;
+  for (let i = 0; i < 2; i++) {
+    page.fireTimer("connect");
+    await fail();
+  }
+  away = false;
+  signedOut = true;
+  page.fireTimer("connect");
+  await fail();
+  const locked = page.run("S.locked");
+  const { input, form } = unlockForm(page);
+  input.value = PASSPHRASE;
+  form.dispatch("submit");
+  await settle();
+  await fail();
+  return { waits, locked };
+}
+
 /* The columns the Transcript asks the machine to wrap to, on 360, 390 and 412 px phones,
  * whose transcript box is 334, 364 and 386 px inside its border; and a 340 px box, exactly 45
  * columns inside its padding by clientWidth, which is whole pixels and may have rounded up. */
@@ -3343,6 +3388,7 @@ async function main() {
     heldBetweenSockets: await heldBetweenSockets(),
     silentSocket: await silentSocket(),
     staleBeforeASocket: await staleBeforeASocket(),
+    backoffAcrossAnUnlock: await backoffAcrossAnUnlock(),
     transcriptSend: await transcriptSend(),
     transcriptSendGuarded: await transcriptSendGuarded(),
     pinnedKeys: await pinnedKeys(),

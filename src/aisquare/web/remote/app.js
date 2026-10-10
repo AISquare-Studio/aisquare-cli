@@ -1735,11 +1735,12 @@ VIEWS.unlock = (route, main) => {
   return { cleanup: () => clearInterval(countdown) };
 };
 
-/* A good passphrase: go live, then back to the route the lock interrupted. False
- * when the page is locked or off again instead: the machine answering the next
- * request as signed out means this browser did not keep the cookie. */
+/* A good passphrase: go live, its backoff from the first step as Retry's, then back to the
+ * route the lock interrupted. False when the page is locked or off again instead: the machine
+ * answering the next request as signed out means this browser did not keep the cookie. */
 async function unlocked(data) {
   S.locked = false;
+  S.backoff = 0;
   S.me = data && data.device && typeof data.device.id === "string" ? data.device.id : null;
   let after = "#/";
   try {

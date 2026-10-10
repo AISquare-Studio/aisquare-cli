@@ -1986,6 +1986,19 @@ def test_a_socket_made_after_the_page_went_stale_has_its_own_span_to_bring_a_fra
         assert steps == [made, made, replaced], how  # made; a second on; 26 s on, still silent
 
 
+def test_the_first_socket_after_an_unlock_that_fails_is_tried_again_after_a_second(
+    boot_report: dict[str, Any],
+) -> None:
+    """A sign-in that ran out while the link was down locks the page from a probe, with the
+    backoff as far on as those failures took it. A wake and Retry start it again from the first
+    step (SPEC §6.4); the unlock kept it, so the first socket after the passphrase that failed
+    waited 8 s here, and up to 30 s, with the machine just heard from and every button held.
+    Each is how long the reconnect it set waits: the drop, two handshakes the machine was away
+    for, and the first after the unlock."""
+    across = boot_report["backoffAcrossAnUnlock"]
+    assert across == {"waits": [1, 2, 4, 1], "locked": True}
+
+
 def test_the_live_tabs_keys_wait_from_the_moment_its_socket_is_lost(
     boot_report: dict[str, Any],
 ) -> None:

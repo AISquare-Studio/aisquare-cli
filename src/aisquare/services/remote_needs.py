@@ -47,6 +47,7 @@ import math
 import os
 import re
 import threading
+import unicodedata
 from collections.abc import Callable, Collection, Mapping, MutableMapping, MutableSet, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -462,12 +463,13 @@ def looks_like_a_question(text: str) -> bool:
     (Swift's ``String?``, SQL's ``WHERE id = ?``, Ruby's ``admin?``, a lazy
     ``(.*?)``), and a closing summary that showed some was an ``asked`` card,
     pushed again every turn. Each line is read without its markdown (``*_`>#``)
-    and trailing quotes, brackets and spaces. The text asks when a line ending in
-    ``?`` lies in its last paragraph (after its last blank line outside a code
-    block), or among its last 12 non-empty lines and within its last 600
-    characters. So "Which approach? 1. … 2. …" asks, and so does a coder's
-    closing "Want me to commit this?" — which the push policy, not this test,
-    keeps from crying wolf.
+    and trailing quotes, brackets, spaces and emoji, nor an aside in parentheses
+    or brackets after its question (:func:`_needs_line_asks`). The text asks when
+    a line ending in a question mark (``?``, or a script's own) lies in its last
+    paragraph (after its last blank line outside a code block), or among its last
+    12 non-empty lines and within its last 600 characters. So "Which approach?
+    1. … 2. …" asks, and so does a coder's closing "Want me to commit this?" —
+    which the push policy, not this test, keeps from crying wolf.
     """
     lines = _needs_lines(text)
     body = "\n".join(lines)
@@ -499,6 +501,18 @@ def looks_like_a_question(text: str) -> bool:
 
 _NEEDS_TRAILING = " \t*_`>#\"'\u201d\u2019\u00bb)]}"
 """What a line may end with after its question mark: markdown, closing quotes and brackets."""
+
+_NEEDS_QUESTION_MARKS = frozenset("?\uff1f\u061f\ufe56\u2047\u2048\u2049\u203d")
+"""What ends a question: ``?``, the fullwidth one of Chinese and Japanese (U+FF1F), the one of
+Arabic, Persian and Urdu (U+061F), and their variants. Claude answers in the human's language."""
+
+_NEEDS_SYMBOLS = frozenset({"So", "Sk", "Cf", "Mn", "Me"})
+"""Unicode categories a line may also end with after its question: an emoji, and its skin
+tone, variation selector, joiner or keycap."""
+
+_NEEDS_ASIDE = re.compile(r"[ \t]*(?:\([^()]*\)|\[[^\[\]]*\])[^()\[\]\w]*$")
+"""An aside in parentheses or brackets that ends a line, and what may close the line after
+it but words: ``Merge it? (y/n)``, ``Proceed? [y/N]``."""
 
 _NEEDS_FENCE = re.compile(r"[ \t>]*(`{3,}|~{3,})")
 """A line that opens or closes a fenced code block: three backticks or tildes or more, after
@@ -581,11 +595,33 @@ def _needs_prose(lines: Sequence[str]) -> list[str | None]:
 
 
 def _needs_line_asks(line: str) -> bool:
-    return line.rstrip(_NEEDS_TRAILING).endswith("?")
+    """Whether a prose line ends on a question: its mark, then only what may close a line
+    (:data:`_NEEDS_TRAILING`, a symbol such as an emoji), or asides after it.
+
+    ``?`` alone, then quotes and brackets alone, missed "Merge it? (y/n)", "Shall I deploy
+    to staging? 🚀", and every question asked in Chinese, Japanese or Arabic: no card and
+    no push for an agent waiting on its human's answer (review of #243, sweep 3).
+    """
+    while True:
+        if _needs_ends_asking(line):
+            return True
+        aside = _NEEDS_ASIDE.search(line)
+        if aside is None or not aside.start():
+            return False
+        line = line[: aside.start()]
+
+
+def _needs_ends_asking(line: str) -> bool:
+    end = len(line)
+    while end and (
+        line[end - 1] in _NEEDS_TRAILING or unicodedata.category(line[end - 1]) in _NEEDS_SYMBOLS
+    ):
+        end -= 1
+    return end > 0 and line[end - 1] in _NEEDS_QUESTION_MARKS
 
 
 def _needs_asked_tail(text: str) -> str:
-    """The question an assistant ended on: its last prose line ending in ``?``, to the end."""
+    """The question an assistant ended on: its last prose line that asks, to the end."""
     lines = _needs_lines(text)
     prose = _needs_prose(lines)
     for index in range(len(lines) - 1, -1, -1):

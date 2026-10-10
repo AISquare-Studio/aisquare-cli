@@ -1884,6 +1884,50 @@ def test_text_that_asks(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
+        "The branch is green.\n\nShould I go ahead and merge it? (y/n)",
+        "Want me to also update the README? (It still mentions the old flag.)",
+        "Proceed with the migration? [y/N]",
+        "Merge it now? (y/n) [default: no]",
+        "Shall I deploy to staging? 🚀",
+        "Ready to merge? 👍🏽",
+        "Ship it? ❤️",
+        "**Should I push? (it is a force-push)**",
+        "要我现在提交吗\uff1f",
+        "缓存已经改好了。\n\n你想用哪种方案\uff1f\n1. Redis\n2. SQLite\n3. 不用缓存",
+        "この変更をコミットしてもよろしいですか\uff1f",
+        "هل تريد أن أدفع التغييرات الآن؟",
+    ],
+)
+def test_text_that_asks_after_its_question_mark_or_with_another_one(text: str) -> None:
+    """``?`` alone, then quotes and brackets alone, missed a question followed by an aside or
+    an emoji, and every question asked in Chinese, Japanese or Arabic, in which Claude answers
+    its human: no card and no push for an agent waiting on an answer (review of #243, sweep
+    3). The card shows the question it found."""
+    assert looks_like_a_question(text)
+    row = _row()
+    tail = _tail(newest="assistant_text", text=text)
+    item = _one(_classify(_status(row, "waiting", _session(row, state="waiting")), tail))
+    assert item.kind == "asked" and item.excerpt
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Fixed the parser (see below).",
+        "Updated the docs [skip ci]",
+        "Merged (was it the cache?) and pushed.",
+        "Done 🚀",
+        "缓存已经改好了。",
+        "Fixed in [#123](https://example.com/pull/123)",
+    ],
+)
+def test_an_aside_or_an_emoji_alone_asks_nothing(text: str) -> None:
+    assert not looks_like_a_question(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "",
         "Done.",
         "Why did it fail? The cache was cold.\n\nFixed and pushed.",

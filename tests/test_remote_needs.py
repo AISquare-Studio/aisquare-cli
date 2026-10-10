@@ -3015,6 +3015,89 @@ def _transcript(path: Path, *records: dict[str, Any]) -> Path:
     return path
 
 
+def _counted_session_events(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Every ``(session, kind)`` the store is asked for its newest event of, from now on."""
+    from aisquare.core.store import SqliteStore
+
+    asked: list[tuple[str, str]] = []
+    real = SqliteStore.newest_session_event
+
+    def counted(self: Any, project_id: str, session_id: str, kind: str, **kw: Any) -> Any:
+        asked.append((session_id, kind))
+        return real(self, project_id, session_id, kind, **kw)
+
+    monkeypatch.setattr(SqliteStore, "newest_session_event", counted)
+    return asked
+
+
+def test_the_live_sources_keep_a_dialogs_and_a_limits_cards_past_a_busy_board(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the store and the fleet's listing: a dialog and a parked limit are named by
+    their sessions' own ``attention`` and ``limited`` events. The window of the newest
+    events holds them, and the store is asked for neither; 300 notes later the window
+    no longer does, and the store's own read of each session finds them, so both cards
+    keep their ids and their words. Every other test of this hands the scan fakes: the
+    live window, the session read and their arguments could each be stubbed out with the
+    suite green, and a card that changed its id was pushed again, its dismissal lost
+    (review of #243, sweep 3)."""
+    now = datetime.now(UTC)
+    root = tmp_path / "alpha"
+    said = {
+        "type": "assistant",
+        "uuid": "a1",
+        "timestamp": (now - timedelta(minutes=2)).isoformat(),
+        "message": {"id": "m1", "role": "assistant", "content": [{"type": "text", "text": "OK"}]},
+    }
+    words = "Claude needs your permission to use the deploy MCP tool"
+    with store_session() as store:
+        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        asking = _live_agent(
+            store, project, "coder-1", state="attention", seen=now - timedelta(minutes=1),
+            born=now - timedelta(hours=1), transcript=_transcript(tmp_path / "c1.jsonl", said),
+        )  # fmt: skip
+        parked = _live_agent(
+            store, project, "coder-2", state="limited", seen=now - timedelta(hours=2),
+            born=now - timedelta(hours=3), resets=now + timedelta(hours=3),
+        )  # fmt: skip
+        for session, kind, text, at in (  # in the order they were written: seq is time
+            (parked, "limited", "coder-2 hit its usage limit", now - timedelta(hours=2)),
+            (asking, "attention", words, now - timedelta(minutes=1)),
+        ):
+            store.add_team_event(
+                TeamEvent(
+                    id=f"evt_{kind}", project_id=project.id, session_id=session.id, kind=kind,
+                    text=text, created_at=at,
+                )
+            )  # fmt: skip
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    asked = _counted_session_events(monkeypatch)
+
+    def cards() -> dict[str, tuple[str, str, object]]:
+        items = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+        return {item.agent or "": (item.kind, item.id, item.detail.get("text")) for item in items}
+
+    before = cards()
+    assert before == {
+        "coder-1": ("permission", before["coder-1"][1], words),
+        "coder-2": ("limited", before["coder-2"][1], "coder-2 hit its usage limit"),
+    }
+    assert asked == [], "the window held both events: no read of a session of its own"
+    with store_session() as store:
+        for n in range(remote_needs.NEEDS_BOARD_EVENTS):
+            store.add_team_event(
+                TeamEvent(
+                    id=f"evt_note_{n}", project_id=project.id, kind="note", text=f"note {n}",
+                    created_at=now - timedelta(seconds=30),
+                )
+            )  # fmt: skip
+    assert cards() == before, "the same cards, under the same ids, with the same words"
+    assert sorted(asked) == [("ses_coder-1", "attention"), ("ses_coder-2", "limited")]
+    snap = needs_agent_now(project, "coder-1", now=now)
+    assert [(item.kind, item.id) for item in snap.items] == [("permission", before["coder-1"][1])]
+
+
 def test_the_live_sources_ask_tmux_when_a_sub_agents_pane_last_printed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

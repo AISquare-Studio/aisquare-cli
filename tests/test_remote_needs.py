@@ -4042,6 +4042,38 @@ def test_an_answer_asks_the_gates_again_in_the_thread_that_types_it(
     assert not any(" needs/answer " in line for line in live.audit())
 
 
+def test_an_answer_is_a_write_on_the_write_pool_counted_and_named_while_it_runs(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It ran on the loop's shared pool, which every read, frame and unlock waits on, its
+    re-derivation a scan of the project with tmux, while it held the agent's lock: with
+    tmux not answering, a few taps stalled every phone. It was past the per-device cap of
+    writes waiting, and a quit or a Remote off meanwhile did not name it among the writes
+    still running (review of #243, round 6)."""
+    from aisquare.services import remote_server
+
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    derive = remote_needs.needs_agent_now
+    seen: list[tuple[str, list[str]]] = []
+
+    def derived_where(project: ProjectInfo, label: str) -> Any:
+        seen.append((threading.current_thread().name, remote_server.remote_writes_running()))
+        return derive(project, label)
+
+    monkeypatch.setattr(remote_needs, "needs_agent_now", derived_where)
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert response.status_code == 200, response.text
+    ((thread, running),) = seen
+    assert thread.startswith("asq-remote-write"), thread
+    assert running == ["needs/answer for coder-1"]
+    assert remote_server.remote_writes_running() == []
+    monkeypatch.setattr(remote_server, "WRITE_WAITING_PER_DEVICE", 0)
+    again = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert (again.status_code, again.json()["error"]) == (409, "busy"), again.text
+    assert live.tmux.typed == [("keys", "%7", "1")], "the one past the cap was never typed"
+
+
 def test_an_answer_types_into_the_agent_is_audited_and_clears_its_card(live: Live) -> None:
     live.runtime.set_allow_write(True)
     card = live.card("permission")

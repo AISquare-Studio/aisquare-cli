@@ -47,6 +47,7 @@ import math
 import os
 import re
 import threading
+import time
 import unicodedata
 from collections.abc import Callable, Collection, Mapping, MutableMapping, MutableSet, Sequence
 from dataclasses import dataclass, replace
@@ -3024,14 +3025,73 @@ def _needs_send(agent: FleetAgent, keys: Sequence[str], text: str, enter: bool) 
         server.send_keys(agent.pane_id, "Enter")
 
 
+def _needs_answer_now(
+    kit: RemoteKit,
+    device: Device,
+    item: NeedsItem,
+    project: ProjectInfo,
+    keys: list[str],
+    text: str,
+    enter: bool,
+) -> tuple[dict[str, object], str]:
+    """Type a quick answer into the agent ``item`` is about, in a thread of the write pool:
+    its response and its audit summary, or :class:`RequestError`.
+
+    Under the agent's action lock, taken without waiting (409 ``busy``). The agent is
+    re-derived first (:func:`needs_agent_now`), and a card no longer current is a 409
+    ``stale`` carrying what is current instead. The gates are asked again right before
+    typing (:meth:`RemoteKit.kit_write_still_allowed`): the re-derivation came between
+    them and the keys. A tmux that fails mid-answer is a 503 whose ``audit`` says it was
+    tried, as part of it may have reached the pane.
+    """
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services.remote_server import RequestError, _audit_keys, remote_agent_lock
+
+    label = item.agent or ""
+    lock = remote_agent_lock(project.id, label)
+    if not lock.acquire(blocking=False):
+        raise RequestError(409, "busy", f"another action on {label} is still running")
+    try:
+        try:
+            snap = needs_agent_now(project, label)
+        except fleet_service.NoSuchAgent:
+            raise RequestError(409, "stale", f"{label} is gone", current=[]) from None
+        except fleet_service.FleetUnavailable as exc:
+            raise RequestError(503, "fleet_unavailable", str(exc)) from None
+        except fleet_service.FleetError as exc:
+            raise RequestError(409, "fleet_error", str(exc)) from None
+        except Exception as exc:  # the store, mid-read: as a failed scan is, not a bare 500
+            log.warning("remote: a needs answer could not read %s: %s", label, exc)
+            raise RequestError(503, "unavailable", str(exc)) from None
+        if not needs_item_current(snap, item.id):
+            current = [now_item.needs_item_json() for now_item in snap.items]
+            gone = f"{label} no longer shows that {item.kind}"
+            raise RequestError(409, "stale", gone, current=current)
+        if snap.status is None or not snap.pane_is_agent:
+            why = f"{label}'s pane is not running the agent — nothing was sent"
+            raise RequestError(409, "not_agent", why)
+        summary = (
+            f"answer {item.id} {item.kind} {label}@{project.id} keys={_audit_keys(keys)} "
+            f"text={len(text)}ch enter={enter}"
+        )
+        kit.kit_write_still_allowed(device)
+        try:
+            _needs_send(snap.status.agent, keys, text, enter)
+        except Exception as exc:
+            said = f"tmux could not type it: {exc}"
+            raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} failed") from None
+        return {"answered": item.id, "agent": label, "project": project.id, "sent": True}, summary
+    finally:
+        lock.release()
+
+
 def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
     """``GET api/needs``, ``POST api/needs/dismiss``, ``POST api/needs/answer`` (SPEC §1.3)."""
     import asyncio
 
     from starlette.responses import JSONResponse
 
-    from aisquare.services import fleet as fleet_service
-    from aisquare.services.remote_server import RequestError, _audit_keys, remote_agent_lock
+    from aisquare.services.remote_server import RequestError, _remote_write_tracked
 
     async def needs_scanned_here(watcher: RemoteNeedsWatcher) -> Response | None:
         """One scan for a request that has none to read; ``None``, or the 503 its failure is.
@@ -3084,13 +3144,16 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
     ) -> Response:
         """Answer a card on the agent it is about, only while the card is still true.
 
-        The item comes from the latest scan; the agent is re-derived right
-        before typing, under the agent's action lock, and a card that is no
-        longer current is a 409 ``stale`` that carries what is current instead.
-        The thread that types asks the gates again first
-        (:meth:`RemoteKit.kit_write_still_allowed`): a scan, the agent's re-derivation
-        and the wait for a thread of the shared pool came between them and it.
+        The item comes from the latest scan; the rest is a write like every other
+        (:meth:`RemoteKit.kit_run_write`), on the write pool, counted among the device's
+        writes waiting and among the writes running: the agent re-derived under its action
+        lock (:func:`_needs_answer_now`), and typed into. It ran on the shared pool, its
+        re-derivation a scan of the whole project with tmux, while its lock was held: with
+        tmux not answering, each tap held a thread of the pool every read, frame and
+        unlock waits on, past the per-device cap, and a quit or a Remote off that came
+        meanwhile did not name it (review of #243, round 6).
         """
+        arrived = time.monotonic()
         item_id, keys, text, enter = _needs_answer_body(body)
         watcher = _needs_watcher(kit)
         unread = watcher.needs_scanned_at() is None
@@ -3100,58 +3163,26 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
         if found is None:
             return kit.kit_refuse(409, "stale", "that card no longer needs you", current=[])
         item, project = found
-        label = item.agent
-        if item.kind not in _NEEDS_ANSWERABLE or label is None:
+        if item.kind not in _NEEDS_ANSWERABLE or item.agent is None:
             board = item.kind in _NEEDS_BOARD_KINDS
             why = "reply on the board instead" if board else f"a {item.kind} card takes its actions"
             return kit.kit_refuse(400, "not_answerable", why)
-        lock = remote_agent_lock(project.id, label)
-        if not lock.acquire(blocking=False):
-            return kit.kit_refuse(409, "busy", f"another action on {label} is still running")
+
+        def answer_now(_named: dict[str, Any]) -> tuple[dict[str, object], str]:
+            return _needs_answer_now(kit, device, item, project, keys, text, enter)
+
+        tracked = _remote_write_tracked("needs/answer", answer_now)
         try:
-            try:
-                snap = await asyncio.to_thread(needs_agent_now, project, label)
-            except fleet_service.NoSuchAgent:
-                return kit.kit_refuse(409, "stale", f"{label} is gone", current=[])
-            except fleet_service.FleetUnavailable as exc:
-                return kit.kit_refuse(503, "fleet_unavailable", str(exc))
-            except fleet_service.FleetError as exc:
-                return kit.kit_refuse(409, "fleet_error", str(exc))
-            except Exception as exc:  # the store, mid-read: as a failed scan is, not a bare 500
-                log.warning("remote: a needs answer could not read %s: %s", label, exc)
-                return kit.kit_refuse(503, "unavailable", str(exc))
-            if not needs_item_current(snap, item.id):
-                current = [now_item.needs_item_json() for now_item in snap.items]
-                gone = f"{label} no longer shows that {item.kind}"
-                return kit.kit_refuse(409, "stale", gone, current=current)
-            if snap.status is None or not snap.pane_is_agent:
-                why = f"{label}'s pane is not running the agent — nothing was sent"
-                return kit.kit_refuse(409, "not_agent", why)
-            summary = (
-                f"answer {item.id} {item.kind} {label}@{project.id} keys={_audit_keys(keys)} "
-                f"text={len(text)}ch enter={enter}"
+            result, summary = await kit.kit_run_write(
+                tracked, {"agent": item.agent}, arrived, device
             )
-            agent = snap.status.agent
-
-            def answer_now() -> None:
-                kit.kit_write_still_allowed(device)
-                _needs_send(agent, keys, text, enter)
-
-            try:
-                await asyncio.to_thread(answer_now)
-            except RequestError:
-                raise  # refused before anything was typed: answered as the gate answers
-            except Exception as exc:
-                # Part of it may have reached the pane: the trail says it was tried.
-                await asyncio.to_thread(kit.kit_audit, device, "needs/answer", f"{summary} failed")
-                return kit.kit_refuse(503, "fleet_unavailable", f"tmux could not type it: {exc}")
-            await asyncio.to_thread(kit.kit_audit, device, "needs/answer", summary)
-        finally:
-            lock.release()
+        except RequestError as exc:
+            if exc.audit is not None:  # part of it may have reached the pane
+                await asyncio.to_thread(kit.kit_audit, device, "needs/answer", exc.audit)
+            raise
+        await asyncio.to_thread(kit.kit_audit, device, "needs/answer", summary)
         watcher.needs_rescan_soon()
-        return JSONResponse(
-            {"answered": item.id, "agent": label, "project": project.id, "sent": True}
-        )
+        return JSONResponse(result)
 
     return [
         kit.kit_route("/api/needs", needs_list_endpoint, methods=["GET"], write_gated=False),

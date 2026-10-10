@@ -2432,12 +2432,13 @@ def record_needs_dismissal(item_id: str) -> None:
     """
     from aisquare.core.atomic import write_replacing
     from aisquare.core.paths import remote_needs_path
+    from aisquare.services.remote_server import _remote_instant
 
     now = _needs_now()
     with _dismissals_lock:
         kept: dict[str, datetime] = {}
         for key, stamp in load_needs_dismissals().items():
-            when = _needs_stamp(stamp)
+            when = _remote_instant(stamp)
             if when is not None and now - when <= _DISMISSALS_AGE:
                 kept[key] = when
         kept[item_id] = now
@@ -2446,14 +2447,6 @@ def record_needs_dismissal(item_id: str) -> None:
         path = remote_needs_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         write_replacing(path, json.dumps(body, indent=2), owner_only=True)
-
-
-def _needs_stamp(raw: str) -> datetime | None:
-    try:
-        when = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
 
 
 # --- the watcher --------------------------------------------------------------------------

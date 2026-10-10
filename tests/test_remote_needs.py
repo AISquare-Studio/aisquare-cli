@@ -2030,6 +2030,36 @@ def test_an_unreadable_dismissals_file_dismisses_nothing(body: str) -> None:
     assert load_needs_dismissals() == {}
 
 
+def test_a_dismissals_stamp_and_asq_remote_needs_age_are_read_as_the_server_reads_a_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both read an ISO stamp with copies of the rule ``remote_server._remote_instant`` is the
+    one reader of: with an offset as it says, without one as UTC. A copy that drifted read
+    stamps unlike the server that wrote them, as the push sender's once read a device's
+    expiry as local time (review of #243, round 3): the next change to the rule is made in
+    one place, and both read through it."""
+    from aisquare.cli.remote import _needs_age
+    from aisquare.services import remote_server
+
+    read: list[object] = []
+    real = remote_server._remote_instant
+
+    def reading(text: object, *, naive_is_local: bool = False) -> datetime | None:
+        read.append(text)
+        return real(text, naive_is_local=naive_is_local)
+
+    monkeypatch.setattr(remote_server, "_remote_instant", reading)
+    naive = (datetime.now(UTC) - timedelta(days=6)).replace(tzinfo=None).isoformat()
+    _seed_dismissals({"ny_naive": naive, "ny_garbled": "last tuesday"})
+    record_needs_dismissal("ny_newest")
+    assert set(load_needs_dismissals()) == {"ny_naive", "ny_newest"}, "naive is UTC: 6 days"
+    assert naive in read and "last tuesday" in read
+    assert _needs_age("2026-10-07T10:55:00", NOW) == "1h05m"
+    assert _needs_age("2026-10-07T13:55:00+02:00", NOW) == "5m"
+    assert _needs_age(None, NOW) == _needs_age("soon", NOW) == "?"
+    assert {"2026-10-07T10:55:00", "2026-10-07T13:55:00+02:00", None, "soon"} <= set(read)
+
+
 # --- one agent, now: the predicates actions rely on ---------------------------------------
 
 

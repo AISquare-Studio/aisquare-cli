@@ -204,8 +204,13 @@ function sgrCode(state, code) {
   else if (code >= 100 && code <= 107) state.bg = { n: code - 92 };
 }
 
-/* 38/48 in the colon form: 38:5:n, 38:2:r:g:b, or 38:2:<colour space>:r:g:b. */
+/* 38/48 in the colon form: 38:5:n, 38:2:r:g:b, or 38:2:<colour space>:r:g:b; 4:n, an
+ * underline's style, 4:0 none. */
 function colonColour(state, sub) {
+  if (sub[0] === 4 && sub.length > 1) {
+    state.u = sub[1] !== 0;
+    return undefined;
+  }
   const target = sub[0] === 38 ? "fg" : sub[0] === 48 ? "bg" : null;
   if (!target) return sgrCode(state, sub[0]);
   if (sub[1] === 5 && sub.length >= 3) state[target] = xterm256(sub[2]);
@@ -224,18 +229,20 @@ function applySgr(state, params) {
       continue;
     }
     const code = toInt(parts[k]);
-    if (code === 38 || code === 48) {
-      const target = code === 38 ? "fg" : "bg";
+    // 58 (an underline's colour) is skipped: read as codes, 58;5;7 inverted the row.
+    if (code === 38 || code === 48 || code === 58) {
       const mode = toInt(parts[k + 1]);
+      let colour = null;
       if (mode === 5 && k + 2 < parts.length) {
-        state[target] = xterm256(toInt(parts[k + 2]));
+        colour = xterm256(toInt(parts[k + 2]));
         k += 2;
       } else if (mode === 2 && k + 4 < parts.length) {
-        state[target] = rgb(toInt(parts[k + 2]), toInt(parts[k + 3]), toInt(parts[k + 4]));
+        colour = rgb(toInt(parts[k + 2]), toInt(parts[k + 3]), toInt(parts[k + 4]));
         k += 4;
       } else {
         k = parts.length; // a colour with no value: the rest of this sequence means nothing
       }
+      if (colour && code !== 58) state[code === 38 ? "fg" : "bg"] = colour;
       continue;
     }
     sgrCode(state, code);

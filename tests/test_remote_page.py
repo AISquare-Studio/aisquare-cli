@@ -1016,6 +1016,27 @@ def test_colours_are_clamped_integers_and_the_cursor_cell_is_marked(
     ]
 
 
+def test_an_underlines_colour_or_style_changes_nothing_else_on_the_row(
+    node_report: dict[str, Any],
+) -> None:
+    """tmux's capture writes an underline's colour as ``58;2;r;g;b`` or ``58;5;n``, whatever
+    form the app drew it in, and the page read each number after the 58 as a code of its own:
+    ``58;5;7`` inverted the cell, ``58;5;31`` turned it red, and the 0 in ``58;2;0;255;0``
+    undid the bold red underline it came with. A style of none, ``4:0``, underlined."""
+    assert node_report["underlines"] == {
+        "rgb": [
+            {"text": "RED", "classes": ["b", "f1"]},
+            {"text": "UNDER", "classes": ["b", "u", "f1"]},
+            {"text": "after", "classes": ["b", "f1"]},
+        ],
+        "indexed": [{"text": "spell ok", "classes": []}],
+        "red": [{"text": "xy", "classes": []}],
+        "ones": [{"text": "X", "classes": []}],
+        "none": [{"text": "a", "classes": ["u"]}, {"text": "b", "classes": []}],
+        "curly": [{"text": "a", "classes": []}, {"text": "b", "classes": ["u"]}],
+    }
+
+
 def test_a_card_says_once_what_its_detail_shows_in_full(node_report: dict[str, Any]) -> None:
     """Asked-you, interrupted and board cards said their text twice, as the excerpt and in
     the detail, and on a phone that doubled the card. An excerpt from the end of a long

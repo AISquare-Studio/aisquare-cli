@@ -278,6 +278,8 @@ def install_page(
         )
     try:
         destination = remote_server.install_page(source)
+    except remote_server.NoRemotePage as exc:  # a web project's own directory, not its build
+        fail(str(exc), error="invalid_dist", ref=str(source))
     except OSError as exc:  # as remote.json's writes: a clean failure, never a traceback
         target = remote_dist_dir()
         fail(

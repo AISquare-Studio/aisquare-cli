@@ -3307,20 +3307,43 @@ def _width_param(raw: str | None) -> int | None:
 
 def _built_page_file(dist: Path, rel: str) -> Path | None:
     """The file of an installed or ``--dist`` build that ``rel`` names, or ``None``: one
-    inside ``dist`` that the system will look up.
+    inside ``dist``, no part of it hidden, that the system will look up.
 
     A path the system refuses, a NUL byte (``ValueError``) or a name past its limit
     (``ENAMETOOLONG``), is a file this build does not have, and the request goes on to
     the 404 or the document as any other miss does: it raised, and the page answered a
     bare 500 with a traceback in the log for each, to anyone with the link (sweep 3 of
     #243).
+
+    A hidden file is not the page's either, as the bundled page leaves its dotfiles out
+    (:func:`remote_page.bundled_page_files`), judged as asked and where it resolves:
+    every file below the directory was served without the passphrase, and a project's
+    own directory installed or served in place of its ``dist/`` gave out its ``.env``
+    and ``.git/config`` (sweep 3 of #243).
     """
+    if any(part.startswith(".") for part in PurePosixPath(rel).parts):
+        return None
+    candidate = _built_page_target(dist, dist / rel)
     try:
-        candidate = (dist / rel).resolve()
-        found = candidate.is_relative_to(dist) and candidate.is_file()
+        return candidate if candidate is not None and candidate.is_file() else None
     except (OSError, ValueError):
         return None
-    return candidate if found else None
+
+
+def _built_page_target(dist: Path, path: Path) -> Path | None:
+    """Where ``path`` resolves when a build in ``dist`` may serve what is there: inside
+    ``dist``, with no hidden part; else ``None``, a path the system refuses included.
+    The one rule for what is served (:func:`_built_page_file`) and what ``install-page``
+    copies (:func:`_page_copy_skips`)."""
+    try:
+        resolved = path.resolve()
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_relative_to(dist):
+        return None
+    if any(part.startswith(".") for part in resolved.relative_to(dist).parts):
+        return None
+    return resolved
 
 
 def _is_navigation(rel: str, accept: str) -> bool:
@@ -5559,11 +5582,14 @@ def _page_missing(dist_dir: Path | None) -> str | None:
     (:func:`install_page`) is served, else the page aisquare-cli bundles, so a
     fresh machine's first ``R`` press just works. Only an install that lost its
     bundled page gets :data:`NO_PAGE_HINT` instead of a server that answers every
-    request with nothing.
+    request with nothing. A ``--dist`` that is a web project's own directory, not its
+    build, is refused as ``install-page`` refuses it (:func:`_page_project_not_build`).
     """
     if dist_dir is not None:
         dist = dist_dir.resolve()
-        return None if (dist / "index.html").is_file() else f"no index.html in {dist}"
+        if not (dist / "index.html").is_file():
+            return f"no index.html in {dist}"
+        return _page_project_not_build(dist)
     if (remote_dist_dir().resolve() / "index.html").is_file():
         return None
     from aisquare.services import remote_page
@@ -5571,24 +5597,68 @@ def _page_missing(dist_dir: Path | None) -> str | None:
     return None if remote_page.bundled_page_present() else NO_PAGE_HINT
 
 
+_PAGE_PROJECT_FILES = ("package.json", "node_modules")
+"""What a web project's own directory holds beside its source ``index.html``, and its built
+``dist/`` never does."""
+
+
+def _page_project_not_build(source: Path) -> str | None:
+    """The refusal of ``source`` when it is a web project's own directory, not its build;
+    ``None`` otherwise.
+
+    Its ``index.html`` is the source the build starts from, so it passed for a page,
+    and the whole project was then copied or served: ``node_modules``, the sources,
+    whatever else the project keeps there (sweep 3 of #243).
+    """
+    held = next((name for name in _PAGE_PROJECT_FILES if (source / name).exists()), None)
+    if held is None:
+        return None
+    return (
+        f"{source} holds {held}: it is the project, not its build — point at its dist/ "
+        "after npm run build"
+    )
+
+
+def _page_copy_skips(source: Path, directory: str, names: list[str]) -> set[str]:
+    """What :func:`install_page` leaves behind of ``names`` in ``directory`` of ``source``,
+    what a server would not serve from ``source`` (:func:`_built_page_target`): a hidden
+    name, and a link that leads out of ``source`` or to a hidden file there."""
+    return {
+        name
+        for name in names
+        if name.startswith(".")
+        or (
+            (Path(directory) / name).is_symlink()
+            and _built_page_target(source, Path(directory) / name) is None
+        )
+    }
+
+
 def install_page(source: Path) -> Path:
     """Copy a built ``aisquare-remote`` dist into :func:`remote_dist_dir`, atomically.
 
     ``source`` must contain ``index.html`` (re-checked here even though the CLI
-    command already does, so a direct caller gets the same guard). The copy
-    lands in a staging directory beside the destination and is swapped in with
-    two renames — same filesystem, so each rename is atomic — rather than
-    removing the destination first, so a server reading the old page mid-swap
-    never sees a half-written one.
+    command already does, so a direct caller gets the same guard), and be no web
+    project's own directory (:func:`_page_project_not_build`). What a server would not
+    serve from ``source`` stays behind (:func:`_built_page_file`): its hidden files, as
+    the bundled page's do, which is where a project keeps ``.env`` and ``.git``, and a
+    link that leads out of it or to a hidden file, whose content the copy would
+    otherwise hold under the link's own name. The copy lands in a staging directory
+    beside the destination and is swapped in with two renames — same filesystem, so
+    each rename is atomic — rather than removing the destination first, so a server
+    reading the old page mid-swap never sees a half-written one.
     """
     source = source.resolve()
     if not (source / "index.html").is_file():
         raise NoRemotePage(f"no index.html in {source} — build aisquare-remote first")
+    project = _page_project_not_build(source)
+    if project is not None:
+        raise NoRemotePage(project)
     ensure_home()
     destination = remote_dist_dir()
     staging = destination.with_name(f".{destination.name}.staging-{os.getpid()}")
     shutil.rmtree(staging, ignore_errors=True)
-    shutil.copytree(source, staging)
+    shutil.copytree(source, staging, ignore=functools.partial(_page_copy_skips, source))
     previous = destination.with_name(f".{destination.name}.previous-{os.getpid()}")
     shutil.rmtree(previous, ignore_errors=True)
     if destination.exists():

@@ -105,8 +105,11 @@ and ngrok to stop, then for the write, and a Ctrl-C in either wait quits at once
 
 The page is part of aisquare-cli, so a fresh machine needs no other step.
 `aisquare remote install-page <dist>` installs another build over it (it lands in
-`~/.aisquare/remote-dist`), and `--dist` overrides both. To go back to the
-bundled page:
+`~/.aisquare/remote-dist`), and `--dist` overrides both. Each takes the build's
+`dist/`, never the project that builds it (a directory holding `package.json` or
+`node_modules`), and neither copies nor serves a hidden file such as `.env` or
+`.git`: what is served is open to anyone with the link, before the passphrase. To
+go back to the bundled page:
 
 ```sh
 rm -rf ~/.aisquare/remote-dist

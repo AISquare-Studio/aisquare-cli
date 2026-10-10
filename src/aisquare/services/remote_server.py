@@ -284,8 +284,17 @@ Marking an unhashed file immutable for a year would create exactly the bug this
 fixes, one build later and with no way to flush it.
 """
 
-_HASHED_ASSET = re.compile(r"-[A-Za-z0-9_-]{8,}$")
-"""Vite's content hash — ``index-DfFvQnFu.js`` — matched on the stem."""
+_HASHED_ASSET = re.compile(r"-(?=[A-Za-z0-9_]{0,7}[0-9A-Z])[A-Za-z0-9_]{8}\Z")
+"""Vite's content hash — ``index-DfFvQnFu.js`` — matched on the stem: a hyphen, then eight
+letters, digits or ``_`` to the end, a digit or a capital among them, as Rollup writes them.
+
+Any eight or more of those or ``-`` after a hyphen read as a hash, so ``runtime-polyfills``,
+``vendor-libraries``, ``apple-touch-icon`` and ``manifest-icon-512``, which Vite copies from
+``public/`` as they are named, were cached for a year, and the next ``install-page`` changed
+them for nobody who had them (sweep 4 of #243). Rollup's hash may hold a ``-`` too; such a
+chunk is revalidated (:data:`MUTABLE_CACHE_CONTROL`), and since ``FileResponse`` answers no
+revalidation with a 304 it is sent again on every load. That is the side to miss on: a chunk
+sent again costs its bytes, a name taken for a hash costs the fix."""
 
 HISTORY_CAP = 5000
 """Most scrollback lines one ``?history=`` request may return (PLAN §4-L).

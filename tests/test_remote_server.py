@@ -1437,7 +1437,22 @@ def built(tmp_path: Path) -> Path:
     )
     (root / "assets" / "index-NEWHASH1.js").write_text("console.log('current build')")
     (root / "assets" / "logo.svg").write_text("<svg/>")
+    for name in (*UNHASHED_ASSETS, *HASHED_ASSETS):
+        (root / "assets" / name).write_text(name)
     return root
+
+
+UNHASHED_ASSETS = (
+    "runtime-polyfills.js",
+    "vendor-libraries.js",
+    "vendor-polyfill.js",
+    "apple-touch-icon.png",
+    "android-chrome-192x192.png",
+    "manifest-icon-512.png",
+)
+"""Names a build keeps as ``public/`` named them: a hyphen, then a word, never a hash."""
+HASHED_ASSETS = ("index-DfFvQnFu.css", "index-4f3e2a1b.js", "vendor-CN3_Ilrz.js")
+"""Rollup's ``[name]-[hash]``: eight letters, digits or ``_``, a digit or a capital among them."""
 
 
 @pytest.fixture
@@ -1464,12 +1479,26 @@ def test_a_content_hashed_chunk_is_cached_hard(site: TestClient, runtime: Runtim
     assert "immutable" in response.headers["cache-control"]
 
 
-def test_an_unhashed_asset_is_not_frozen_for_a_year(site: TestClient, runtime: Runtime) -> None:
-    """Marking it immutable would recreate this very bug, one build later."""
-    response = site.get(f"{base(runtime)}/assets/logo.svg")
+@pytest.mark.parametrize("name", ["logo.svg", *UNHASHED_ASSETS])
+def test_an_unhashed_asset_is_not_frozen_for_a_year(
+    site: TestClient, runtime: Runtime, name: str
+) -> None:
+    """Marking it immutable would recreate this very bug, one build later. A hyphen and a
+    word of eight or more letters read as a hash (sweep 4 of #243)."""
+    response = site.get(f"{base(runtime)}/assets/{name}")
     assert response.status_code == 200
     assert "immutable" not in response.headers["cache-control"]
     assert "no-cache" in response.headers["cache-control"]
+
+
+@pytest.mark.parametrize("name", HASHED_ASSETS)
+def test_every_shape_of_rollups_hash_is_cached_hard(
+    site: TestClient, runtime: Runtime, name: str
+) -> None:
+    """The control for the unhashed names: a tighter pattern must still know a hash."""
+    response = site.get(f"{base(runtime)}/assets/{name}")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == remote_server.ASSET_CACHE_CONTROL
 
 
 def test_a_dead_chunk_is_a_404_and_never_html(site: TestClient, runtime: Runtime) -> None:

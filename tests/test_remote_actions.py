@@ -1669,6 +1669,80 @@ def test_an_unexpected_failure_of_the_fleet_call_is_a_400_on_the_trail(
     ]
 
 
+@pytest.mark.parametrize(
+    ("name", "body"),
+    [
+        ("agent/tell", {"agent": LABEL, "agent_id": "agt_one", "text": "carry on"}),
+        ("agent/stop", PINNED),
+        ("agent/switch", PINNED),
+    ],
+)
+def test_a_pinned_action_in_a_hand_overs_gap_is_stale_not_a_gone_agent(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    body: dict[str, object],
+) -> None:
+    """Sweep 4 of #243: the hand-over ended agt_one, the row the phone showed, and had not
+    yet made its replacement's. The lock's check passed (the ended row is the label's
+    newest), and the fleet itself, run here as it is, found no live row: 404
+    ``no_such_agent``, which the page reads as "That agent is gone." and leaves the
+    agent's screen for the fleet, where coder-1 came back a moment later. Pinned keys
+    answer that gap ``stale``, and so does every pinned action now. A tell that named no
+    agent is still 404: it asked for whoever holds the label."""
+    _row(project, ended=True)
+    needs.window_gone = True  # and its window went with it
+    monkeypatch.setattr(fleet_service, "_kill_lingering_window", lambda *args: False)
+    response = phone.post(name, **body)
+    assert response.status_code == 409, response.text
+    assert response.json() == {
+        "error": "stale",
+        "message": "no live agent 'coder-1' in api — `aisquare fleet ls` shows who is running",
+        "current": {"agent_id": None},
+    }
+    assert pane.sent == []
+    unpinned = phone.post("agent/tell", agent=LABEL, text="carry on")
+    assert (unpinned.status_code, unpinned.json()["error"]) == (404, "no_such_agent")
+
+
+@pytest.mark.parametrize("name", ["agent/tell", *PINNED_ACTIONS])
+def test_a_pinned_action_whose_label_was_handed_on_during_the_fleet_call_is_stale(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    """The replacement was recorded just after the lock's check, and the fleet's own pin
+    refused it: the same state as a replacement seen at the check, which is ``stale``
+    naming it, and so is this now, with the fleet's sentence. It was 404, and the page
+    said the agent was gone over the server's "is another agent now"."""
+    _row(project)
+
+    def handed_on(*args: object, **kwargs: object) -> object:
+        _replaced(project)
+        with store_session() as store:
+            new = store.get_fleet_agent("agt_new")
+        assert new is not None
+        raise fleet_service._replaced(LABEL, new, "agt_one")
+
+    monkeypatch.setattr(fleet_service, name.removeprefix("agent/"), handed_on)
+    body = {"text": "carry on"} if name == "agent/tell" else {"confirm": LABEL}
+    response = phone.post(name, agent=LABEL, agent_id="agt_one", **body)
+    assert response.status_code == 409, response.text
+    assert response.json() == {
+        "error": "stale",
+        "message": "'coder-1' is another agent now (agt_new) — agt_one ended and was "
+        "replaced since; nothing was done to either (`aisquare fleet ls` shows who is running)",
+        "current": {"agent_id": "agt_new"},
+    }
+    assert pane.sent == []
+
+
 def test_fleet_refusal_maps_the_servers_own_lookups_too() -> None:
     """needs-you may say an agent or project is unknown in the server's own words."""
     agent = fleet_refusal(remote_server.NoSuchAgent("no agent 'coder-1'"))
@@ -2893,7 +2967,9 @@ def test_a_switch_leaves_alone_the_replacement_that_took_the_label_after_the_loc
     agt_one and was recording its replacement while the phone's Switch, pinned to agt_one,
     took the lock. The pin held there, against the ended row, and ``fleet.switch`` read the
     label again: it sent the replacement ``/exit`` and moved it to a third account. The
-    pin goes with the call now, and the replacement is not touched."""
+    pin goes with the call now, and the replacement is not touched. Its refusal is
+    ``stale``, naming the replacement, as one seen at the lock's check is: as 404 it read
+    "That agent is gone." on the phone (sweep 4 of #243)."""
     _row(project, ended=True)
     stopped = _fleet_switch_itself(monkeypatch, AccountChoice(_account(3), "headroom", []))
     newest_row = remote_actions.action_newest_row
@@ -2910,7 +2986,8 @@ def test_a_switch_leaves_alone_the_replacement_that_took_the_label_after_the_loc
     response = phone.post("agent/switch", **PINNED)
     assert reads == ["agt_one", "agt_one"], "the pin held under the lock"
     assert stopped == [] and pane.sent == [], "the replacement was not stopped"
-    assert (response.status_code, response.json()["error"]) == (404, "no_such_agent")
+    assert (response.status_code, response.json()["error"]) == (409, "stale")
+    assert response.json()["current"] == {"agent_id": "agt_new"}
     assert "'coder-1' is another agent now (agt_new)" in response.json()["message"]
 
 

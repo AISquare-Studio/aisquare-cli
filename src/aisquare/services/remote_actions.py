@@ -33,8 +33,10 @@ the rest is here:
   taken without waiting, and the needs card's quick answers take it too (409
   ``busy``).
 * **The fleet's own refusals**, mapped as ``asq fleet`` maps them
-  (:func:`fleet_refusal`). A 200 body is the CLI's ``--json`` payload plus
-  ``project``; a tell's also says its ``mode``.
+  (:func:`fleet_refusal`), save a pinned call's ``NoSuchAgent`` once the row it
+  names is not the live one, which is ``stale`` (:func:`action_pinned_call`). A
+  200 body is the CLI's ``--json`` payload plus ``project``; a tell's also says
+  its ``mode``.
 * **The trail.** The dispatcher audits what went through. A refusal that comes
   after something reached the agent, or may have, is audited too: one after an
   Escape went to its pane, and every fleet call that fails, which may have done
@@ -536,6 +538,43 @@ def action_fleet_call(call: Callable[[], _Result]) -> _Result:
         ValueError,
     ) as exc:
         raise fleet_refusal(exc) from exc
+
+
+def action_pinned_call(
+    target: ProjectInfo, label: str, agent_id: str | None, call: Callable[[], _Result]
+) -> _Result:
+    """:func:`action_fleet_call` of a fleet call the body pinned to ``agent_id``: refused
+    ``NoSuchAgent`` once that row is not the live one holding the label, it is 409
+    ``stale`` with the fleet's own sentence, ``current`` naming the live row or none.
+
+    The lock's check passes a pinned row that has ended, the label's newest still: the
+    gap of a hand-over, after the old row ended and before the replacement's was made,
+    or an agent that exited. The fleet then found no live row, or the replacement
+    recorded just after the check, and its ``NoSuchAgent`` was 404 ``no_such_agent``:
+    the page said "That agent is gone." and left the agent's screen for the fleet,
+    where coder-1 came back a moment later (sweep 4 of #243). Pinned, it is ``stale``,
+    as the lock's own check (:func:`action_gone`) and pinned keys answer it. A refusal
+    while the pinned row is still the live one is the fleet's, and keeps its mapping.
+    """
+    from aisquare.core.store import store_session
+    from aisquare.services import fleet as fleet_service
+
+    try:
+        return action_fleet_call(call)
+    except RequestError as refusal:
+        cause = refusal.__cause__
+        if agent_id is None or not isinstance(cause, fleet_service.NoSuchAgent):
+            raise
+        with store_session() as store:
+            live = store.fleet_agent_by_label(target.id, label, live_only=True)
+        if live is not None and live.id == agent_id:
+            raise
+        raise RequestError(
+            409,
+            "stale",
+            refusal.message,
+            current={"agent_id": None if live is None else live.id},
+        ) from cause
 
 
 # --- which agent: the project, the pin, the lock ---------------------------------------------
@@ -1063,10 +1102,12 @@ def action_tell_auto(
     snap: AgentNow | None,
     *,
     pin: str,
+    agent_id: str | None,
     trail: Callable[[str], str],
 ) -> tuple[bool, str]:
     """``auto``: ``fleet tell`` of the pinned row, or a board note while the agent may be
-    showing a dialog.
+    showing a dialog. ``agent_id`` is the body's: a row it named that is no longer the
+    live one is ``stale`` (:func:`action_pinned_call`).
 
     ``fleet tell`` types into a row that derives ``waiting``, and a permission prompt
     left unanswered for 30 minutes derives it too. The session still says
@@ -1095,8 +1136,11 @@ def action_tell_auto(
         filed = action_fleet_call(lambda: fleet_service._file_note(target, label, text, None))
         return False, f"{why} — {filed}"
     with action_audited(lambda error: trail(f"delivered=no failed={error}")):
-        told = action_fleet_call(
-            lambda: fleet_service.tell(target, label, text, sender=None, agent_id=pin)
+        told = action_pinned_call(
+            target,
+            label,
+            agent_id,
+            lambda: fleet_service.tell(target, label, text, sender=None, agent_id=pin),
         )
     return told.delivered, told.how
 
@@ -1127,7 +1171,9 @@ def action_tell(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     with action_locked(target, label, agent_id) as row:
         snap = action_check_needs(target, label, row.id, needs_id)
         if mode == "auto":
-            delivered, how = action_tell_auto(target, label, text, snap, pin=row.id, trail=trail)
+            delivered, how = action_tell_auto(
+                target, label, text, snap, pin=row.id, agent_id=agent_id, trail=trail
+            )
         else:
             delivered, how = action_type_now(
                 target,
@@ -1182,8 +1228,11 @@ def action_stop(body: dict[str, Any]) -> tuple[dict[str, object], str]:
             lambda error: f"{audit_start} dismissed={action_yes_no(dismissed)} failed={error}",
             escaped=lambda: dismissed,
         ):
-            receipt = action_fleet_call(
-                lambda: fleet_service.stop(target, label, force=force, agent_id=agent_id)
+            receipt = action_pinned_call(
+                target,
+                label,
+                agent_id,
+                lambda: fleet_service.stop(target, label, force=force, agent_id=agent_id),
             )
     released = [task.id for task in receipt.released]
     result: dict[str, object] = {
@@ -1237,7 +1286,10 @@ def action_restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
             reached=guard.action_guard_asked,
             escaped=guard.action_guard_escaped,
         ):
-            receipt = action_fleet_call(
+            receipt = action_pinned_call(
+                target,
+                label,
+                agent_id,
                 lambda: fleet_service.restart(
                     target,
                     label,
@@ -1245,7 +1297,7 @@ def action_restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
                     spawned_by="user",
                     agent_id=agent_id,
                     before_stop=guard,
-                )
+                ),
             )
     result: dict[str, object] = {
         "replaced": receipt.replaced.model_dump(mode="json"),
@@ -1313,7 +1365,10 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
             reached=guard.action_guard_asked,
             escaped=guard.action_guard_escaped,
         ):
-            receipt = action_fleet_call(
+            receipt = action_pinned_call(
+                target,
+                label,
+                agent_id,
                 lambda: fleet_service.switch(
                     target,
                     label,
@@ -1323,7 +1378,7 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
                     spawned_by="user",
                     agent_id=agent_id,
                     before_stop=guard,
-                )
+                ),
             )
     result: dict[str, object] = {
         "stopped": receipt.stopped.model_dump(mode="json"),

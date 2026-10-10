@@ -339,10 +339,11 @@ def remedies(name: str, directory: Path, refusal: Refusal, *, also: str | None =
     found: list[str] = []
     if refusal.repairable:
         # A folder on the way repaired, connect makes only the directory sessions from this
-        # shell read, with `claude` on PATH: any other that is not there must be again.
+        # shell read, with `claude` on PATH: any other not known to be there must be again
+        # (behind a folder this user cannot enter, it may not be: delta review 8 of #257).
         there = ""
         made = refusal.this_shell and agent_core.claude_on_path() is not None
-        if refusal.path in directory.parents and not (made or agent_core.present(directory)):
+        if refusal.path in directory.parents and not (made or os.path.isdir(directory)):
             there = f" so that {directory} is there"
         found.append(f"repair {refusal.path} ({refusal.fact}){there}, then connect again")
         if also is not None and spec is not None and refusal.path == spec.settings_path:

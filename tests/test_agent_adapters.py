@@ -972,6 +972,11 @@ _NOT_A_DIRECTORY_TO_READ = [
         id="unenterable, no claude",
         marks=_NEEDS_DENIED_READS,
     ),
+    pytest.param(
+        f"in a folder this user cannot enter, nothing beneath, {_BESIDE_NO_CLAUDE}",
+        id="unenterable, empty, no claude",
+        marks=_NEEDS_DENIED_READS,
+    ),
     pytest.param(f"a link to nothing, {_BESIDE_NO_CLAUDE}", id="dangling, no claude"),
     pytest.param(f"a link loop, {_BESIDE_NO_CLAUDE}", id="loop, no claude"),
     pytest.param(f"under a file, {_BESIDE_NO_CLAUDE}", id="under a file, no claude"),
@@ -1010,9 +1015,8 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
         _connect(runner)
     locked = home / "locked"
     if "enter" in shape:
-        where = blocking = locked / "claude"
-        where.mkdir(parents=True)
-        blocking = locked
+        where, blocking = locked / "claude", locked
+        (where if "nothing beneath" not in shape else locked).mkdir(parents=True)
     elif "state file" in shape:
         where = blocking = home / ".claude.json"
         where.write_text('{"numStartups": 7}', encoding="utf-8")
@@ -1040,6 +1044,9 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
         made = paths.db_path().exists() != built
         doctor = runner.invoke(app, ["--json", "doctor"])
         uninstall = runner.invoke(app, ["--json", "uninstall", "--dry-run"])
+        # With no `claude` on PATH and nothing Claude Code made there, connect says it is
+        # not installed; the doctor names what stands in the way all the same.
+        unmade = on_path is None and not agent_core.present(where)
         if "enter" in shape:
             fact = f"this user may not enter {locked}"
         elif os.path.islink(blocking):
@@ -1054,12 +1061,7 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
     a_file = os.path.isfile(blocking) and not os.path.islink(blocking)
     # A folder on the way repaired, connect with no `claude` on PATH makes nothing there.
     there = f" so that {where} is there" if blocking != where and on_path is None else ""
-    if "enter" in shape:
-        there = ""  # it is there, beyond the folder this user cannot enter
     repair = None if a_file else f"repair {blocking} ({fact}){there}, then connect again"
-    # With no `claude` on PATH and nothing Claude Code made there, connect says it is not
-    # installed; the doctor names what stands in the way all the same.
-    unmade = on_path is None and not agent_core.present(where)
     clicked_said = json.loads(clicked.stdout)
     assert clicked.exit_code == 1, clicked.stdout
     if unmade:
@@ -1087,6 +1089,7 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(where))
         if "enter" in shape:
             locked.chmod(0o755)  # already, above: a folder this user may enter
+            where.mkdir(exist_ok=True)  # so that it is there
         elif "loop" in shape:
             blocking.unlink()
             blocking.mkdir()
@@ -1307,6 +1310,36 @@ def test_a_recorded_profile_under_a_link_to_nothing_is_repaired_as_worded(
     rows.append(diagnostics._check_claude_code())
     assert (forgot.exit_code, connected.exit_code) == (0, 0), (forgot.output, connected.output)
     assert all(r.status is CheckStatus.ok for r in rows), rows
+
+
+@_NEEDS_DENIED_READS
+def test_a_recorded_profile_gone_behind_a_folder_this_user_cannot_enter_is_repaired_as_worded(
+    runner: CliRunner, claude_home: Path
+) -> None:
+    """A profile connected with `--config-dir`, then removed, in a folder later made mode
+    000: "repair the folder, then connect again" said nothing of the profile, which an
+    existence check behind that folder read as there; done as worded, connect still
+    refused (delta review 8 of #257). The repair says it must be there again."""
+    _connect(runner)
+    volume = claude_home.parent / "vol"
+    profile = volume / "claude"
+    profile.mkdir(parents=True)
+    _connect(runner, profile)
+    shutil.rmtree(profile)
+    volume.chmod(0)
+    try:
+        row = diagnostics._check_claude_code()
+    finally:
+        volume.chmod(0o755)
+    profile.mkdir()  # repaired as worded: the folder entered, the profile there again
+    connected = runner.invoke(
+        app, ["agents", "connect", "claude-code", "--config-dir", str(profile)]
+    )
+
+    repair = f"repair {volume} (this user may not enter {volume}) so that {profile} is there"
+    assert row.fix == f"{repair}, then connect again", row.fix
+    assert connected.exit_code == 0, connected.output
+    assert diagnostics._check_claude_code().status is CheckStatus.ok
 
 
 def test_the_doctor_welcome_and_agents_list_give_one_remedy_list_for_0_7_0_hooks_read_only(

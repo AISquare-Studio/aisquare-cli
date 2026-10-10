@@ -1943,6 +1943,17 @@ def test_a_long_line_of_asides_or_links_is_read_in_one_pass(text: str, asks: boo
     assert time.perf_counter() - started < 0.5
 
 
+def test_a_long_line_of_backtick_runs_is_read_in_one_pass() -> None:
+    """Pairing each run of backticks against the rest of its line took over a second on a
+    256 KiB line of runs of different lengths, none closed (review of #243, round 5). Each run
+    is paired with the next of its length now, in one pass."""
+    text = " ".join("`" * size for size in range(1, 720)) + " — keep these?"
+    assert len(text) > 250_000
+    started = time.perf_counter()
+    assert looks_like_a_question(text)
+    assert time.perf_counter() - started < 0.5
+
+
 @pytest.mark.parametrize(
     "text",
     [

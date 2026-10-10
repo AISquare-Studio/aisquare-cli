@@ -517,8 +517,8 @@ _NEEDS_FENCE = re.compile(r"[ \t>]*(`{3,}|~{3,})")
 """A line that opens or closes a fenced code block: three backticks or tildes or more, after
 an indent or a blockquote's marks."""
 
-_NEEDS_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`).+?(?<!`)\1(?!`)")
-"""An inline code span: a run of backticks, to the next run of as many."""
+_NEEDS_TICK_RUN = re.compile(r"`+")
+"""A run of backticks, which opens or closes an inline code span."""
 
 _NEEDS_LIST_ITEM = re.compile(r"( *)([-*+]|\d{1,9}[.)])( +|$)")
 """A list item's first line: its marker, after an indent, and the spaces to its content."""
@@ -589,8 +589,39 @@ def _needs_prose(lines: Sequence[str]) -> list[str | None]:
                     items.pop()
                 gap = len(item.group(3))
                 items.append(item.end(2) + (gap if 1 <= gap <= 4 else 1))
-            prose.append(_NEEDS_CODE_SPAN.sub("", line))
+            prose.append(_needs_without_spans(line))
     return prose
+
+
+def _needs_without_spans(line: str) -> str:
+    """``line`` without its inline code spans: each a run of backticks, to the next run of as
+    many.
+
+    Each run is found once and paired with the next of its length. A pattern that tried
+    each run against the rest of the line took over a second on one long line of runs of
+    different lengths, an unclosed one each (review of #243, round 5).
+    """
+    runs = [(found.start(), found.end()) for found in _NEEDS_TICK_RUN.finditer(line)]
+    closes: dict[int, int] = {}  # a run → the next run of its length
+    nearest: dict[int, int] = {}  # a length → the run of it nearest after this one
+    for index in range(len(runs) - 1, -1, -1):
+        size = runs[index][1] - runs[index][0]
+        if size in nearest:
+            closes[index] = nearest[size]
+        nearest[size] = index
+    kept: list[str] = []
+    copied = 0
+    index = 0
+    while index < len(runs):
+        close = closes.get(index)
+        if close is None:
+            index += 1
+            continue
+        kept.append(line[copied : runs[index][0]])
+        copied = runs[close][1]
+        index = close + 1
+    kept.append(line[copied:])
+    return "".join(kept)
 
 
 def _needs_line_asks(line: str) -> bool:

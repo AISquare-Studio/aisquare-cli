@@ -3614,6 +3614,78 @@ def test_a_dismissal_holds_for_as_long_as_its_card_would_show(
     assert card.id not in load_needs_dismissals(), "unneeded for a week: dropped"
 
 
+def test_tmux_not_answering_is_one_card_through_a_restart_of_remote(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``fleet_down``'s id is the first scan that saw tmux stop answering, and the watcher
+    kept that in memory alone: every Remote toggle, TUI restart or ``serve`` restart made the
+    same outage a new card, its dismissal lost and the phone pushed again, and ``asq remote
+    needs`` gave it an id and an age of its own each run (review of #243, sweep 3). The
+    sighting is kept on disk, read by the next watcher and by the command, and let go when
+    tmux answers again; one from before a live row was made is another outage's."""
+    from aisquare.services.remote_server import RemoteKit
+
+    one, two = _row("coder-1"), _row("coder-2")
+    fleet = Fleet(agents=[_status(one, "unknown"), _status(two, "unknown")])
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: _sources(fleet))
+
+    def watcher_at(at: datetime) -> RemoteNeedsWatcher:
+        return RemoteNeedsWatcher(
+            RemoteKit(runtime), sources=lambda: _sources(fleet), clock=lambda: at
+        )
+
+    elsewhere = timezone(timedelta(hours=-7))  # the id is the same whatever zone a clock reads
+    (down,) = watcher_at(NOW.astimezone(elsewhere)).scan_needs_now()
+    assert down.kind == "fleet_down"
+    monkeypatch.setattr(remote_needs, "_needs_now", lambda: NOW + timedelta(minutes=5))
+    items = remote_needs.needs_cli_payload()["items"]
+    assert isinstance(items, list)
+    (said,) = items
+    assert (said["id"], said["since"]) == (down.id, "2026-10-07T12:00:00+00:00")
+    record_needs_dismissal(down.id)
+    restarted = watcher_at(NOW + timedelta(minutes=10))
+    assert restarted.scan_needs_now() == [], "the same outage, still dismissed"
+    fleet.agents = [_status(row, "waiting", _session(row, state="waiting")) for row in (one, two)]
+    assert restarted.scan_needs_now() == []
+    assert remote_needs._needs_first_seen_kept() == {}, "tmux answers: let go on disk too"
+    fleet.agents = [_status(one, "unknown"), _status(two, "unknown")]
+    (again,) = watcher_at(NOW + timedelta(minutes=12)).scan_needs_now()
+    assert again.id != down.id, "tmux answered in between: a new outage, a new card"
+    spawned = _row("coder-3", created=NOW + timedelta(minutes=20))
+    fleet.agents.append(_status(spawned, "unknown"))
+    (later,) = watcher_at(NOW + timedelta(minutes=30)).scan_needs_now()
+    assert later.id != again.id and later.since == NOW + timedelta(minutes=30), (
+        "a row made since the kept sighting: tmux answered while no watcher looked"
+    )
+
+
+def test_a_lost_panes_card_keeps_its_date_through_a_restart_and_in_asq_remote_needs(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pane gone has no date of its own, so its card is dated by the first scan that saw
+    it, in the same memory as ``fleet_down``'s: a restart of Remote said it had just gone,
+    and ``asq remote needs`` said so every run (sweep of #243, the instance of round 5's
+    ``fleet_down`` in the same memory)."""
+    from aisquare.services.remote_server import RemoteKit
+
+    lost = _row()
+    fleet = Fleet(agents=[_status(lost, "lost", _session(lost))])
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: _sources(fleet))
+
+    def watcher_at(at: datetime) -> RemoteNeedsWatcher:
+        return RemoteNeedsWatcher(
+            RemoteKit(runtime), sources=lambda: _sources(fleet), clock=lambda: at
+        )
+
+    (card,) = watcher_at(NOW).scan_needs_now()
+    (again,) = watcher_at(NOW + timedelta(minutes=10)).scan_needs_now()
+    assert (again.id, again.since) == (card.id, NOW)
+    monkeypatch.setattr(remote_needs, "_needs_now", lambda: NOW + timedelta(minutes=15))
+    items = remote_needs.needs_cli_payload()["items"]
+    assert isinstance(items, list)
+    assert [item["since"] for item in items] == ["2026-10-07T12:00:00+00:00"]
+
+
 # --- the routes (SPEC §4.6) ---------------------------------------------------------------
 
 

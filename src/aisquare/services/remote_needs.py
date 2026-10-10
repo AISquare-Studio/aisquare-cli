@@ -1965,18 +1965,26 @@ def _needs_fleet_down(
     ``statuses`` has been through :func:`_needs_unheard`, so a fresh board row on a
     server that is gone reads ``unknown`` too. The subject is the first scan that
     saw it, so it is one item until the condition clears and a new one if it comes
-    back.
+    back. The watcher keeps that sighting on disk, so a restart of Remote, and
+    ``asq remote needs``, give the same outage the same id.
     """
+    from aisquare.services.remote_server import _iso_seconds
+
     live = [status for status in statuses if status.agent.ended_at is None]
     if not live or any(status.state != "unknown" for status in live):
         return []
     key = _needs_memory_key(project.id, "fleet_down")
     seen.add(key)
-    first = first_seen.setdefault(key, now)
+    first = first_seen.get(key)
+    # Kept on disk, a sighting from before one of these rows was made is another outage's,
+    # cleared while no watcher looked: a row is made only while its tmux answers.
+    newest = max(status.agent.created_at for status in live).replace(microsecond=0)
+    if first is None or first < newest:
+        first = first_seen[key] = now
     return [
         _needs_item(
             "fleet_down",
-            f"{project.id}:{first.isoformat(timespec='seconds')}",
+            f"{project.id}:{_iso_seconds(first)}",  # in UTC: as the kept sighting reads back
             project=project,
             agent=None,
             reason=f"tmux is not answering for {needs_push_safe(project.root.name or project.id)}",
@@ -2476,11 +2484,12 @@ def _needs_cached_tail(path: str) -> TranscriptTail | None:
     return tail
 
 
-# --- what is kept on disk: dismissals -----------------------------------------------------
+# --- what is kept on disk: dismissals, and first sightings --------------------------------
 
 
-_NEEDS_KEPT_PARTS = ("dismissed",)
-"""The parts of ``remote-needs.json``: item id → when a dismissal was last needed."""
+_NEEDS_KEPT_PARTS = ("dismissed", "first_seen")
+"""The parts of ``remote-needs.json``: item id → when a dismissal was last needed, and the
+watcher's memory key → when a scan first saw what it dates (:func:`_needs_dated`)."""
 
 
 def _needs_kept() -> dict[str, dict[str, str]]:
@@ -2558,6 +2567,20 @@ def _needs_still_hidden(item_ids: Collection[str], now: datetime) -> None:
     _needs_keep(seen)
 
 
+def _needs_first_seen_kept() -> dict[str, datetime]:
+    """The first sightings the watcher kept, for the next watcher and ``asq remote needs``."""
+    from aisquare.services.remote_server import _remote_instant
+
+    kept = {key: _remote_instant(stamp) for key, stamp in _needs_kept()["first_seen"].items()}
+    return {key: when for key, when in kept.items() if when is not None}
+
+
+def _needs_stamps(memory: Mapping[str, datetime]) -> dict[str, str]:
+    from aisquare.services.remote_server import _iso_seconds
+
+    return {key: _iso_seconds(when) for key, when in memory.items()}
+
+
 # --- the watcher --------------------------------------------------------------------------
 
 
@@ -2592,6 +2615,9 @@ class RemoteNeedsWatcher:
         self._scanned_at: datetime | None = None
         self._projects: dict[str, ProjectInfo] = {}
         self._first_seen: dict[str, datetime] = {}
+        self._first_seen_kept: dict[str, str] | None = None
+        """What ``remote-needs.json`` holds of ``_first_seen``; ``None`` until the first scan
+        reads it."""
         self._forgotten: set[str] = set()
         """Ids :meth:`needs_forget` dropped that no scan has read from the dismissals file yet."""
         self._failing: set[object] = set()
@@ -2664,6 +2690,10 @@ class RemoteNeedsWatcher:
             now = self._clock()
             sources = self._sources()
             projects = sources.list_projects()
+            if self._first_seen_kept is None:
+                kept = _needs_first_seen_kept()
+                self._first_seen = {**kept, **self._first_seen}
+                self._first_seen_kept = _needs_stamps(kept)
             dismissed = load_needs_dismissals()
             everything = scan_needs_you(
                 replace(sources, list_projects=lambda: projects),
@@ -2692,8 +2722,14 @@ class RemoteNeedsWatcher:
     def _needs_keep_what_it_saw(
         self, items: Sequence[NeedsItem], dismissed: Mapping[str, str], now: datetime
     ) -> None:
-        """Date again, once a day, the dismissals of the items this scan still found: a week
-        counts from when a card was last there, not from its dismissal."""
+        """Keep on disk what a restart must not lose: the first sightings that date items, and
+        the dismissals of items still there, dated now once a day.
+
+        The watcher's memory of when it first saw tmux stop answering is ``fleet_down``'s
+        id. Kept in memory alone, every Remote toggle, TUI restart or ``serve`` restart
+        made the same outage a new item: its dismissal lost, the phone pushed again, and
+        ``asq remote needs`` gave it an id of its own each run (review of #243, sweep 3).
+        """
         from aisquare.services.remote_server import _remote_instant
 
         stale = now - _DISMISSALS_REDATED
@@ -2703,9 +2739,17 @@ class RemoteNeedsWatcher:
             if item.id in dismissed
             and ((when := _remote_instant(dismissed[item.id])) is None or when <= stale)
         ]
+        stamps = _needs_stamps(self._first_seen)
         try:
             if hidden:
                 _needs_still_hidden(hidden, now)
+            if stamps != self._first_seen_kept:
+
+                def first_seen(parts: dict[str, dict[str, str]]) -> None:
+                    parts["first_seen"] = stamps
+
+                _needs_keep(first_seen)
+                self._first_seen_kept = stamps
         except OSError as exc:
             _needs_failed("keeping what the needs scan saw", exc, self._failing, "kept")
         else:
@@ -3025,7 +3069,12 @@ def needs_cli_payload() -> dict[str, object]:
     from aisquare.services.remote_server import _iso_seconds
 
     now = _needs_now()
-    items = scan_needs_you(live_needs_sources(), now=now, dismissed=load_needs_dismissals())
+    items = scan_needs_you(
+        live_needs_sources(),
+        now=now,
+        dismissed=load_needs_dismissals(),
+        first_seen=_needs_first_seen_kept(),  # the phone's dates and ids, not this run's
+    )
     return {
         "items": [item.needs_item_json() for item in items],
         "scanned_at": _iso_seconds(now),

@@ -459,7 +459,8 @@ def remote_dist_dir() -> Path:
 
 
 def remote_needs_path() -> Path:
-    """``remote-needs.json`` — the needs-you items a phone dismissed, and when."""
+    """``remote-needs.json`` — the needs-you items a phone dismissed, and when the watcher
+    first saw the ones it dates itself (a pane gone, tmux not answering)."""
     return aisquare_home() / "remote-needs.json"
 
 

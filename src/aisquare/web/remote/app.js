@@ -1601,8 +1601,9 @@ function lookAgain(any) {
   start();
 }
 
-/* Visible again, back on the page, or back online: the socket may be a dead
- * one a sleeping phone left behind, so replace it and read everything again. */
+/* Visible again, back on the page, or back online: the socket may be a dead one a sleeping
+ * phone left behind, so replace it and read everything again. force skips the second between
+ * wakes, never the wait of a tab another took the socket from (4409) to be shown. */
 function wake(force) {
   const now = Date.now();
   if (!force && now - S.lastWake < 1000) return;
@@ -1611,7 +1612,7 @@ function wake(force) {
   if (S.off) return lookAgain();
   // Nothing to wake before the first answer: a page still booting, or one not unlocked.
   if (S.locked || S.booting) return;
-  if (S.sockState === "replaced" && !force && document.visibilityState !== "visible") return;
+  if (S.sockState === "replaced" && document.visibilityState !== "visible") return;
   connect();
   drawBanner();
   refreshNeeds();

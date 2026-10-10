@@ -2571,10 +2571,10 @@ async function writesReachTheirRoutes() {
   return { board: writes(board), reply: writes(feed), agent: writes(agent), refused };
 }
 
-/* Waking and reconnecting (SPEC §6.4): a 4409 while the tab is hidden, then pageshow still
- * hidden, then the tab shown; each of visibilitychange, pageshow and online on a shown tab;
- * and what a new socket asks for after a wake (on the Board tab) and after a dropped
- * connection (on an agent's Live tab). */
+/* Waking and reconnecting (SPEC §6.4): a 4409 while the tab is hidden, then pageshow and
+ * online (a network flap reaches every tab) still hidden, then the tab shown; each of
+ * visibilitychange, pageshow and online on a shown tab; and what a new socket asks for after
+ * a wake (on the Board tab) and after a dropped connection (on an agent's Live tab). */
 async function wakes() {
   const reads = (page, from) => page.requests.slice(from).filter((one) => one.method === "GET").map((one) => one.path).sort();
   const page = bootPage("#/", signedIn());
@@ -2589,7 +2589,11 @@ async function wakes() {
   fire(page, "window", "pageshow");
   await settle();
   const hiddenShow = page.sockets.length;
-  const from = page.requests.length;
+  let from = page.requests.length;
+  fire(page, "window", "online");
+  await settle();
+  const hiddenOnline = { sockets: page.sockets.length, state: page.run("S.sockState"), reads: reads(page, from) };
+  from = page.requests.length;
   page.run("document.visibilityState = 'visible'");
   fire(page, "document", "visibilitychange");
   await settle();
@@ -2621,7 +2625,7 @@ async function wakes() {
     await settle();
     asks[how] = { sockets: one.sockets.length, sent: one.live().sent.map((message) => Object.keys(message).filter((key) => key !== "project").map((key) => key + " " + message[key]).join()) };
   }
-  return { replaced, hiddenShow, shown, each, asks };
+  return { replaced, hiddenShow, hiddenOnline, shown, each, asks };
 }
 
 /* Cards dismissed: by hand (answered 200, and 404 for one already gone); after a Tell from

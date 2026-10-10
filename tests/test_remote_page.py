@@ -2356,6 +2356,19 @@ def test_the_page_reconnects_and_reads_again_when_the_phone_wakes(
     assert wakes["asks"]["drop"] == {"sockets": 2, "sent": pane}
 
 
+def test_a_hidden_tab_another_took_the_socket_from_stays_off_it_when_the_network_returns(
+    boot_report: dict[str, Any],
+) -> None:
+    """SPEC §6.4: after a 4409 the page reconnects only once its tab is visible again. The
+    online listener forced its wake, and forcing skipped that check too, so a network flap
+    gave a hidden tab a socket of its own again. A device keeps four, so that one closed the
+    oldest of the others with 4409: the tab in view said another tab took over and stopped
+    updating. The wake with no socket also made no reads."""
+    wakes = boot_report["wakes"]
+    assert wakes["hiddenOnline"] == {"sockets": 1, "state": "replaced", "reads": []}
+    assert wakes["shown"]["sockets"] == 2, "shown, the same tab takes its socket back"
+
+
 def test_a_card_is_dismissed_by_hand_and_after_a_tell_only_once_it_was_typed_in(
     boot_report: dict[str, Any],
 ) -> None:

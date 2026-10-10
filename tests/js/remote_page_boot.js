@@ -1033,6 +1033,37 @@ async function refusedReadOnly() {
   };
 }
 
+/* The Settings screen's line on this page while the machine's word changes under it: a
+ * `remote` frame turning writes off and naming a version, one turning them on again, and a
+ * pad key's 403 read_only answered after the human went on to Settings. */
+async function settingsFacts() {
+  const facts = (page) => {
+    const panel = page.main().querySelectorAll("section.panel").find((one) => one.firstChild.textContent === "This page");
+    return panel.querySelectorAll("p.muted")[0].textContent;
+  };
+  const page = bootPage("#/settings", signedIn());
+  await settle();
+  page.acceptSockets();
+  await settle();
+  const before = facts(page);
+  page.live().frame("remote", { allow_write: false, auto_off_at: null, version: "0.7.0" });
+  await settle();
+  const off = { line: facts(page), pill: !page.run("UI.ro.hidden") };
+  page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "0.7.0" });
+  await settle();
+  const on = facts(page);
+  const answer = deferred();
+  const late = await agentView({ "POST api/send-keys": () => answer.promise });
+  click(buttonNamed(late.main(), "1"));
+  await settle();
+  late.location.hash = "#/settings";
+  await settle();
+  const left = facts(late);
+  answer.settle({ status: 403, json: { error: "read_only", message: "writes are off" } });
+  await settle();
+  return { before, off, on, left, refused: facts(late) };
+}
+
 /* The live tab's scroll: after a pane that could not be read, after the first screen,
  * and after another screen once the human scrolled up to read. */
 async function liveScroll() {
@@ -3414,6 +3445,7 @@ async function main() {
     paneCursor: await paneCursor(),
     stopAtAPrompt: await stopAtAPrompt(),
     refusedReadOnly: await refusedReadOnly(),
+    settingsFacts: await settingsFacts(),
     keyNames: await keyNames(),
     liveScroll: await liveScroll(),
     padScroll: await padScroll(),

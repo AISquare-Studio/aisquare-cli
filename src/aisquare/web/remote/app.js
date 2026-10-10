@@ -950,6 +950,7 @@ function afterFailure(res, route, sheet) {
       S.remote = Object.assign({}, S.remote, { allow_write: false });
       drawStatus();
       gateButtons();
+      viewCall("remote");
     }
     if (!sheetOpen() || (sheet && sheet.isOpen())) readOnlySheet(res.message);
   }
@@ -1169,6 +1170,7 @@ function setRemote(payload) {
   }
   drawStatus();
   gateButtons();
+  viewCall("remote");
 }
 
 function setNeeds(items) {
@@ -2994,7 +2996,11 @@ VIEWS.settings = (route, main) => {
   draw();
   const about = el("section", "panel");
   about.appendChild(el("h3", null, "This page"));
-  about.appendChild(el("p", "muted", "aisquare " + plainText(S.remote && S.remote.version ? S.remote.version : "") + " · writes " + (writable() ? "on" : "off")));
+  const facts = about.appendChild(el("p", "muted"));
+  const tellFacts = () => {
+    facts.textContent = "aisquare " + plainText(S.remote && S.remote.version ? S.remote.version : "") + " · writes " + (writable() ? "on" : "off");
+  };
+  tellFacts();
   about.appendChild(button(null, "Sign out", async () => {
     if (!S.me) {
       const res = await apiCall("GET", API.devices);
@@ -3004,7 +3010,7 @@ VIEWS.settings = (route, main) => {
     signOut(S.me);
   }));
   main.appendChild(about);
-  return {};
+  return { remote: tellFacts };
 };
 
 // --- auto-off ---

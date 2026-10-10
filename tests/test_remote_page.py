@@ -1679,6 +1679,21 @@ def test_a_write_refused_read_only_shuts_every_write_button_at_once(
     assert "can watch but not act" in refused["sheet"]
 
 
+def test_settings_says_whether_writes_are_on_as_the_machine_says_it_now(
+    boot_report: dict[str, Any],
+) -> None:
+    """Settings wrote its "writes on" line once, as the screen was built, and nothing drew it
+    again: after allow-write off it said "writes on" beside the READ-ONLY pill, and the
+    version the frame named never replaced the one before. A frame, and a 403
+    ``read_only`` that came after the human went on to Settings, now tell it again."""
+    facts = boot_report["settingsFacts"]
+    assert facts["before"] == "aisquare test · writes on"
+    assert facts["off"] == {"line": "aisquare 0.7.0 · writes off", "pill": True}
+    assert facts["on"] == "aisquare 0.7.0 · writes on"
+    assert facts["left"] == "aisquare test · writes on"
+    assert facts["refused"] == "aisquare test · writes off"
+
+
 def test_every_key_of_the_pad_has_a_name_a_screen_reader_can_say(
     boot_report: dict[str, Any],
 ) -> None:

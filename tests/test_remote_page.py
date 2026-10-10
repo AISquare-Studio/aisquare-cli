@@ -2458,6 +2458,29 @@ def test_a_cards_tell_refused_stale_keeps_its_sheet_and_what_was_typed(
     }
 
 
+def test_a_tell_refused_because_the_agent_was_replaced_goes_to_the_new_one_when_told_again(
+    boot_report: dict[str, Any],
+) -> None:
+    """Sweep 5 of #243: a restart replaced coder-1 while a card's Tell sheet was open, and the
+    pin's refusal (``current: {"agent_id": ...}``) was read as the card's: "nothing waits on
+    coder-1 now. Tell again to send it anyway", but Tell again stayed pinned to the row
+    gone and was refused the same way, every time. The sheet says the machine's words and
+    that Tell again goes to the new agent, and it does, from a card and from the agent's
+    own menu alike. When no row holds the label, nothing is promised."""
+    report = boot_report["pinnedTell"]
+    new = ". Tell again to send it to the new coder-1."
+    assert report["fromCard"] == {
+        "said": [f"'coder-1' is another agent now (agt_2) — nothing was done{new}", None],
+        "sent": [["agt_1", "ny_0123456789abcdef"], ["agt_2", None]],
+    }
+    assert report["fromMenu"] == {
+        "said": [f"'coder-1' is another agent now (agt_3) — nothing was done{new}"],
+        "sent": [["agt_1", None]],
+    }
+    gone = "there is no agent 'coder-1' in x now — nothing was done"
+    assert report["noneNow"] == {"said": [gone, gone], "sent": [["agt_1", None]] * 2}
+
+
 def test_each_refusal_is_said_in_the_sentence_the_spec_gives_it(
     boot_report: dict[str, Any],
 ) -> None:

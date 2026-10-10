@@ -2010,13 +2010,18 @@ function tellSheet(ctx, mode) {
         if (delivered && ctx.needsId) dismissItem({ id: ctx.needsId });
         return;
       }
-      if (res.status === 409 && res.error === "stale" && ctx.item) {
+      const now = res.status === 409 && res.error === "stale" ? (res.data && res.data.current) || [] : null;
+      if (now && ctx.item) {
         // The card gives way, the words stay: Tell again is a Tell with no card.
         const item = ctx.item;
         ctx.item = ctx.needsId = null;
-        noLonger(item, res.data && res.data.current);
-        sheet.say(noLongerText(item, res.data && res.data.current) + " Tell again to send it anyway.");
-        return;
+        noLonger(item, now);
+        if (Array.isArray(now)) return sheet.say(noLongerText(item, now) + " Tell again to send it anyway.");
+      }
+      // A pin's refusal (a restart since) names the new row, which Tell again tells.
+      if (now && REF.test(now.agent_id || "")) {
+        ctx.agentId = now.agent_id;
+        return sheet.say(failText(res) + ". Tell again to send it to the new " + label + ".");
       }
       sheet.say(failText(res, TEXT_MAX.tell));
       if (res.status === 409 && res.error === "agent_busy" && current !== "interrupt") {

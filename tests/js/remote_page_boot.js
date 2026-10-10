@@ -3421,6 +3421,57 @@ async function staleCards() {
   };
 }
 
+/* A Tell refused stale for its pin: a restart replaced the agent, and the refusal names the
+ * row that holds the label now. From a card, and from the agent's own Actions menu: what
+ * the sheet says, and what Tell again sends. Then one whose label no row holds now. */
+async function pinnedTell() {
+  const replaced = (agent) => ({
+    status: 409,
+    json: { error: "stale", message: "'coder-1' is another agent now (" + agent + ") — nothing was done", current: { agent_id: agent } },
+  });
+  const typed = { status: 200, json: { label: "coder-1", delivered: true, how: "typed", mode: "prompt", project: PROJECT } };
+  const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell"] });
+  const tells = (page, answers) => {
+    const said = [];
+    const sheet = () => page.run("UI.sheet");
+    return async (open) => {
+      await open();
+      find(sheet(), (node) => node.tagName === "TEXTAREA").value = "merge it";
+      for (let n = 0; n < answers; n++) {
+        click(buttonNamed(sheet(), "Tell"));
+        await settle();
+        const status = find(sheet(), (node) => node.className === "status");
+        said.push(sheetTitle(page) ? status.textContent : null);
+      }
+      return { said, sent: page.requests.filter((one) => one.path === "api/agent/tell").map((one) => [one.body.agent_id || null, one.body.needs_id || null]) };
+    };
+  };
+  let n = 0;
+  const card = bootPage("#/", signedIn({
+    "GET api/needs": () => ({ status: 200, json: { items: [asked] } }),
+    "POST api/agent/tell": () => (++n > 1 ? typed : replaced("agt_2")),
+  }));
+  await settle();
+  card.acceptSockets();
+  await settle();
+  const fromCard = await tells(card, 2)(async () => click(buttonNamed(card.main(), "Tell…")));
+  const view = await agentView({ "POST api/agent/tell": () => replaced("agt_3") });
+  view.live().frame("fleet", FLEET);
+  await settle();
+  const fromMenu = await tells(view, 1)(async () => {
+    click(buttonNamed(view.main(), "Actions…"));
+    click(buttonNamed(view.run("UI.sheet"), "Tell…"));
+  });
+  const gone = await agentView({ "POST api/agent/tell": () => ({ status: 409, json: { error: "stale", message: "there is no agent 'coder-1' in x now — nothing was done", current: { agent_id: null } } }) });
+  gone.live().frame("fleet", FLEET);
+  await settle();
+  const noneNow = await tells(gone, 2)(async () => {
+    click(buttonNamed(gone.main(), "Actions…"));
+    click(buttonNamed(gone.run("UI.sheet"), "Tell…"));
+  });
+  return { fromCard, fromMenu, noneNow };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -3507,6 +3558,7 @@ async function main() {
     writeBodies: await writeBodies(),
     padOrKeyboard: await padOrKeyboard(),
     staleCards: await staleCards(),
+    pinnedTell: await pinnedTell(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

@@ -127,6 +127,7 @@ _UV_OPTION_FLAGS = {
     "link-mode": "--link-mode",
     "compile-bytecode": "--compile-bytecode",
     "no-sources": "--no-sources",
+    "no-sources-package": "--no-sources-package",
     "no-build": "--no-build",
     "no-binary": "--no-binary",
     "no-build-package": "--no-build-package",
@@ -377,8 +378,10 @@ class UvReceipt:
     """Where uv put the ``aisquare`` executable — so a reinstall puts it there again."""
     unrestatable: tuple[str, ...] = ()
     holds: tuple[str, ...] = ()
-    """The settings uv recorded that may change which aisquare-cli release it resolves, by
-    their receipt keys: every ``[tool.options]`` key but :data:`_BUILD_ONLY`'s."""
+    """What may change which aisquare-cli release uv resolves, named as recorded: ``--with``
+    requirements with a version specifier (or from a source a command cannot name), the
+    receipt's ``constraints`` and ``overrides``, and every ``[tool.options]`` key set to
+    something (not ``false`` or empty) but :data:`_BUILD_ONLY`'s."""
     unreadable: str | None = None
     """``<path>: <reason>`` when the receipt could not be read for what it records."""
 
@@ -522,9 +525,10 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
             held_by_withs.append(f"--with {requirement.get('name')}")
         else:
             withs.append(text)
-            if requirement.get("specifier") or requirement.get("marker"):
+            if requirement.get("specifier"):
                 # `--with 'rich<14.3'` held 0.7.0 back, which needs rich>=14.3 (measured, uv
-                # 0.12.19), while --check said an update is available (review of #257).
+                # 0.12.19), while --check said an update is available (review of #257). A
+                # marker alone says only when it is installed; it resolves as a bare one does.
                 held_by_withs.append(f"--with {text}")
     extras: tuple[str, ...] = ()
     source: tuple[str, str] | None = None
@@ -576,8 +580,9 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
 
 
 #: Recorded options that change only how a release is built or installed, never which one
-#: uv resolves. Every other key holds, unknown ones included, so a setting uv adds later
-#: is never compared by mistake (review of #257's fixes).
+#: uv resolves. Every other key that is set (not ``false`` or empty) holds, unknown ones
+#: included, so a setting uv adds later is never compared by mistake (review of #257's
+#: fixes).
 _BUILD_ONLY = frozenset(
     {
         "torch-backend",
@@ -595,6 +600,7 @@ _BUILD_ONLY = frozenset(
         # aisquare-cli release an index offers (review of #257).
         "keyring-provider",
         "no-sources",
+        "no-sources-package",
     }
 )
 #: The receipt's own lists that constrain the resolution.

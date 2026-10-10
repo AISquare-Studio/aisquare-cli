@@ -545,6 +545,7 @@ def test_index_options_are_restated_so_a_mirror_stays_the_mirror(tmp_path: Path)
         'prerelease = "allow"\n'
         "compile-bytecode = true\n"
         "no-sources = false\n"
+        'no-sources-package = ["rich", "six"]\n'
     )
     route = _uv_route(tmp_path, _receipt(_OURS_PINNED, tail=options))
 
@@ -556,6 +557,9 @@ def test_index_options_are_restated_so_a_mirror_stays_the_mirror(tmp_path: Path)
     assert argv[argv.index("--prerelease") + 1] == "allow"
     assert "--compile-bytecode" in argv
     assert "--no-sources" not in argv, "a false switch is uv's default, not a flag"
+    # uv.toml's `no-sources-package` lands in every receipt (measured): one flag per package.
+    unsourced = [argv[i + 1] for i, part in enumerate(argv) if part == "--no-sources-package"]
+    assert unsourced == ["rich", "six"], argv
 
 
 def test_index_tables_are_restated_as_index_flags(tmp_path: Path) -> None:
@@ -676,7 +680,9 @@ def test_an_unreadable_receipt_is_still_a_uv_tool_but_is_not_run(
     reason = install_route.not_automated(route)
 
     assert route.kind == install_route.UV_TOOL
-    assert reason is not None and "unreadable" in reason
+    # The message itself: pytest's tmp path is named after this test, "unreadable" included.
+    assert reason is not None and reason.startswith("its uv receipt could not be read ("), reason
+    assert reason.endswith(")"), reason
 
 
 @pytest.mark.parametrize(
@@ -1854,18 +1860,27 @@ def test_an_unchanged_version_after_success_is_the_silent_no_op_and_fails(
     assert machine.connects() == [], "an unconfirmed upgrade refreshes no hooks"
 
 
+@pytest.mark.parametrize(
+    "setting",
+    ['torch-backend = "cpu"', 'no-sources-package = ["rich"]'],
+    ids=["torch-backend", "no-sources-package"],
+)
 def test_a_build_only_setting_does_not_excuse_an_unchanged_version(
-    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str,
 ) -> None:
-    """`torch-backend` from uv.toml, recorded in the receipt uv writes, cannot change the
-    release uv takes: counted as one that can, an unchanged version passed as no silent
-    no-op (review of #257's fixes). It still fails as §3.9.1's."""
+    """`torch-backend` or `no-sources-package` from uv.toml, recorded in the receipt uv
+    writes, cannot change the release uv takes: counted as one that can, an unchanged
+    version passed as no silent no-op (review of #257's fixes). It still fails as §3.9.1's."""
     machine.new_version = "0.9.0"
     installer = install_route.run_installer
 
     def install_with_a_build_setting(argv: Any, *, env: Any, to_stderr: bool) -> int:
         (tool.prefix / install_route.RECEIPT_NAME).write_text(
-            _receipt(_OURS_PINNED, _TIKTOKEN, tail='\n[tool.options]\ntorch-backend = "cpu"\n'),
+            _receipt(_OURS_PINNED, _TIKTOKEN, tail=f"\n[tool.options]\n{setting}\n"),
             encoding="utf-8",
         )
         return installer(argv, env=env, to_stderr=to_stderr)
@@ -2616,12 +2631,12 @@ def test_settings_that_can_hold_a_release_back_are_named_as_recorded_and_not_com
             "--with rich<14.3, exclude-newer, exclude-newer-span",
         ),
         (
-            '{ name = "truststore", marker = "sys_platform == \'linux\'" }',
+            '{ name = "rich", specifier = "<14.3", marker = "sys_platform == \'linux\'" }',
             "",
-            "--with truststore; sys_platform == 'linux'",
+            "--with rich<14.3; sys_platform == 'linux'",
         ),
     ],
-    ids=["a-pin", "a-pin-beside-a-cutoff", "a-marker"],
+    ids=["a-pin", "a-pin-beside-a-cutoff", "a-pin-with-a-marker"],
 )
 def test_a_with_requirement_that_carries_a_specifier_holds_the_release_back(
     runner: CliRunner, tool: Tool, machine: Machine, withs: str, options: str, keys: str
@@ -2629,7 +2644,8 @@ def test_a_with_requirement_that_carries_a_specifier_holds_the_release_back(
     """`--with 'rich<14.3'` keeps 0.7.0, which needs rich>=14.3, out of reach (measured, uv
     0.12.19). Not counted, --check said "an update is available" and the run failed as the
     silent no-op, a true ✓ beside a compared cutoff included (review of #257's fixes). A
-    bare `--with tiktoken` (every other test here) is still compared."""
+    bare `--with tiktoken` (every other test here), or one with only a marker, is still
+    compared."""
     tail = f"\n[tool.options]\n{options}\n" if options else ""
     (tool.prefix / install_route.RECEIPT_NAME).write_text(
         _receipt(_OURS_PINNED, withs, tail=tail), encoding="utf-8"
@@ -2678,15 +2694,17 @@ def test_a_receipt_that_cannot_say_what_holds_it_back_is_not_compared(
 
 
 @pytest.mark.parametrize(
-    ("options", "cutoff"),
+    ("withs", "options", "cutoff"),
     [
-        ('torch-backend = "cpu"', None),
-        ('config-settings = { foo = "bar" }', None),
-        ('build-isolation = "shared"', None),
-        ('extra-build-dependencies = { pkg = ["setuptools"] }', None),
-        ('keyring-provider = "subprocess"\nno-sources = true', None),
-        ("no-index = false\nno-build = false\nno-binary = false\nno-sources = false", None),
-        (_GLOBAL_COOLDOWN + 'torch-backend = "cpu"', "--exclude-newer P30D"),
+        ((), 'torch-backend = "cpu"', None),
+        ((), 'config-settings = { foo = "bar" }', None),
+        ((), 'build-isolation = "shared"', None),
+        ((), 'extra-build-dependencies = { pkg = ["setuptools"] }', None),
+        ((), 'keyring-provider = "subprocess"\nno-sources = true', None),
+        ((), 'no-sources-package = ["rich"]', None),
+        ((), "no-index = false\nno-build = false\nno-binary = false\nno-sources = false", None),
+        ((), _GLOBAL_COOLDOWN + 'torch-backend = "cpu"', "--exclude-newer P30D"),
+        (('{ name = "six", marker = "sys_platform == \'linux\'" }',), "", None),
     ],
     ids=[
         "torch-backend",
@@ -2694,19 +2712,27 @@ def test_a_receipt_that_cannot_say_what_holds_it_back_is_not_compared(
         "build-isolation",
         "extra-build-dependencies",
         "keyring-provider-and-no-sources",
+        "no-sources-package",
         "defaults-written-as-false",
         "a-build-setting-beside-a-cutoff",
+        "a-with-with-only-a-marker",
     ],
 )
 def test_settings_that_cannot_change_the_release_leave_pypis_word_to_compare(
-    runner: CliRunner, tool: Tool, machine: Machine, options: str, cutoff: str | None
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    withs: tuple[str, ...],
+    options: str,
+    cutoff: str | None,
 ) -> None:
     """Options that change only how a release is built or installed counted as holding one
     back, so a true "an update is available" read "unknown" and an unchanged version passed
     as no silent no-op (review of #257's fixes). Beside a global cutoff alone, the cutoff is
-    compared as if alone."""
+    compared as if alone. A `--with` with only a marker resolves as a bare one does."""
+    tail = f"\n[tool.options]\n{options}\n" if options else ""
     (tool.prefix / install_route.RECEIPT_NAME).write_text(
-        _receipt(_OURS_PINNED, tail=f"\n[tool.options]\n{options}\n"), encoding="utf-8"
+        _receipt(_OURS_PINNED, *withs, tail=tail), encoding="utf-8"
     )
 
     report = _one_object(runner.invoke(app, ["--json", "upgrade", "--check"]).stdout)

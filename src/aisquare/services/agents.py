@@ -293,8 +293,9 @@ _READING: contextvars.ContextVar[dict[tuple[str, Path | None], DirAccess] | None
 
 @contextlib.contextmanager
 def one_reading() -> Iterator[None]:
-    """Within it, :func:`access` reads each config dir once: the doctor read one dir's
-    settings.json some thirty times a run (review of #257). Never across readings."""
+    """Within it, :func:`access` works out each config dir's connect and disconnect answers
+    once: the doctor asked for one directory's from five places a run (review of #257).
+    Only those answers: every other reader reads the files again. Never across readings."""
     token = _READING.set({})
     try:
         yield

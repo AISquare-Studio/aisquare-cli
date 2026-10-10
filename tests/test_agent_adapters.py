@@ -1481,6 +1481,38 @@ def test_a_printed_command_reads_back_as_its_arguments(
         install_route.split_line("--config-dir '/no/closing" if platform == "linux" else '"C:\\x')
 
 
+def test_a_sibling_that_enables_the_plugin_is_found_with_one_read_of_its_settings(
+    claude_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whether a ~/.claude* enables the aisquare plugin was asked twice of its settings.json,
+    once directly and once more through `claude_plugin` (review of #257): one read, and
+    the install records asked of only where the plugin is enabled."""
+    import io
+
+    if not agent_core.plugin_route_supported():
+        pytest.skip("the plugin route does not run on native Windows")
+    work = claude_home.parent / ".claude-work"
+    (work / "plugins").mkdir(parents=True)
+    plugin = {agent_core.CLAUDE_PLUGIN_ID: True}
+    (work / "settings.json").write_text(json.dumps({"enabledPlugins": plugin}), encoding="utf-8")
+    records = {"version": 2, "plugins": {agent_core.CLAUDE_PLUGIN_ID: [{"scope": "user"}]}}
+    (work / "plugins" / "installed_plugins.json").write_text(json.dumps(records))
+    reads: list[str] = []
+    real = io.open
+
+    def counted(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if not isinstance(file, int):
+            reads.append(os.fsdecode(file))
+        return real(file, *args, **kwargs)
+
+    monkeypatch.setattr(io, "open", counted)
+    found = agent_core.found_on_disk(work)
+
+    assert found, "the plugin is enabled and installed there"
+    assert reads.count(str(work / "settings.json")) == 1, reads
+    assert reads.count(str(work / "plugins" / "installed_plugins.json")) == 1, reads
+
+
 def test_a_welcome_tick_reads_settings_json_fewer_times(
     claude_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

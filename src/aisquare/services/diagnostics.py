@@ -910,8 +910,9 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     repository (project or local scope): it runs there alone, so the directory's
     hooks, which every other repository runs on, are not doubled but graded.
 
-    Read-only, like every check here: doctor never rewrites ``settings.json``. Each
-    directory is read once per run (``agents_service.one_reading``).
+    Read-only, like every check here: doctor never rewrites ``settings.json``. Connect's
+    and disconnect's answers for each directory are worked out once per run
+    (``agents_service.one_reading``); the row's other readers read the files as they go.
     """
     info = agent_core.detect("claude-code")
     sites = agent_core.hook_sites("claude-code", cwd=cwd)

@@ -1432,14 +1432,16 @@ def _claude_dirs_on_disk() -> list[Path]:
 
 def _holds_aisquare(config_dir: Path) -> bool:
     """Whether ``config_dir``'s settings.json holds an aisquare hook or enables the aisquare
-    plugin, read once; one that cannot be read holds neither (:func:`read_json`)."""
-    settings = read_json(config_dir / "settings.json")
+    plugin that is installed there (:func:`claude_plugin`'s two halves), reading it once;
+    one that cannot be read holds neither (:func:`read_json`)."""
+    home = _claude_home(config_dir)
+    settings = read_json(home / "settings.json")
     enabled = settings.get("enabledPlugins")
     return bool(_aisquare_commands(settings.get("hooks"))) or (
         plugin_route_supported()
         and isinstance(enabled, dict)
         and bool(enabled.get(CLAUDE_PLUGIN_ID))
-        and claude_plugin(config_dir) is not None
+        and bool(_plugin_records(home))
     )
 
 

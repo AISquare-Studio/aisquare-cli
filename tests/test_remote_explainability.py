@@ -324,8 +324,15 @@ def fleet_home(isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPa
     return project.id
 
 
-def test_live_lookup_on_this_machine_is_red_and_still_shows_fleet_facts(fleet_home: str) -> None:
-    """The SDK is not installed here (the machine the demo runs on): available:false, no raise."""
+def test_live_lookup_without_the_sdk_is_red_and_still_shows_fleet_facts(
+    fleet_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the SDK: available:false, no raise, and the fleet's facts all the same.
+
+    No SDK is the premise, so it is set, not read off the machine: read, the test failed
+    wherever ``explainability-doctor`` is on PATH, as the explainability guide's own
+    install puts it there (sweep 4 of #243)."""
+    monkeypatch.setattr(ops, "sdk_presence", lambda: ops.SdkPresence(False, None, None, False))
     card = remote_server.live_sources().explainability("coder-1", None)
     assert card["available"] is False
     assert isinstance(card["reason"], str) and "SDK not installed" in card["reason"]

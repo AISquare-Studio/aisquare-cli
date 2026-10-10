@@ -3053,10 +3053,12 @@ def live_writes() -> Writes:
         exists for what a device did to a live agent, finished or not.
 
         ``dialog_guard`` is for a sender that does not see the pane, the page's
-        Transcript tab: nothing is typed while the agent may be showing a dialog,
-        which the text and its Enter would answer (409 ``dialog_open``,
-        ``remote_actions.action_keys_guard``). The Live tab shows the dialog, and
-        its keys are how one is answered, so they go without it.
+        Transcript tab: nothing is typed unless the agent is at rest at its prompt
+        (``remote_actions.action_keys_guard``). 409 ``dialog_open`` while it may be
+        showing a dialog, which the text and its Enter would answer; ``agent_busy`` while
+        it is at work, its pane not yet quiet, or parked on its usage limit; ``not_agent``
+        for a pane that is not running it. The Live tab shows the dialog, and its keys
+        are how one is answered, so they go without it.
 
         ``agent_id`` pins the keys to the row whose screen they were typed at, which a
         pane frame and a transcript page name: once another row holds the label, or none

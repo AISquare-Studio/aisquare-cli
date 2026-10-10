@@ -362,7 +362,9 @@ they go to.
 Every action, and every key or line you type, is pinned to the agent you
 looked at: if a manager restarted or switched it in the meantime, it is refused
 as `stale` rather than applied to the replacement, also when that happens while
-the request runs, or the replacement has not started yet.
+the request runs. In the moment before the replacement has started, a key, the
+menu's Tell, Stop and Switch account are refused as `stale` too, and a Tell that
+types into the pane is refused before it types anything.
 
 On a phone wide enough for eight keys (412 px is, 390 px is not) the key pad is
 one row, `Esc 1 2 3 ⏎ ↑ ↓ More` (⏎ being Enter), with the rest under More. On

@@ -178,6 +178,7 @@ def serve_remote(
 ) -> None:
     """Serve the page, the JSON API and the live stream on 127.0.0.1 until Ctrl-C or auto-off."""
     from aisquare.services import remote_server
+    from aisquare.services.ngrok_tunnel import ngrok_static_host
 
     _fail_if_missing()
     _fail_if_no_page(dist)
@@ -227,8 +228,8 @@ def serve_remote(
             console.print(
                 f"auto-off: at {local:%H:%M} (in {auto_off} min) · {extend}", markup=False
             )
-        if public_url is not None:
-            origin = remote_server.check_public_origin(public_url)
+        origin = None if public_url is None else remote_server.check_public_origin(public_url)
+        if origin is not None:
             console.print(f"public link: {origin}/r/{info.token}/", markup=False)
         else:  # never learned from ngrok's local API, which anyone here can answer first
             console.print(
@@ -240,10 +241,14 @@ def serve_remote(
         # web interface that any user of this machine can read, and the agent API there,
         # which starts and stops tunnels for anyone, off too (ngrok_tunnel says more). And
         # to 127.0.0.1, where this listens: the port alone is localhost to ngrok, ::1 first,
-        # which any account here can listen on (ngrok_tunnel.UPSTREAM_HOST).
-        console.print(
-            f"expose with: ngrok http {address} --inspect=false   · Ctrl-C stops", markup=False
-        )
+        # which any account here can listen on (ngrok_tunnel.UPSTREAM_HOST). And on the
+        # public link's domain (``--url``), as the docs give it: without it ngrok serves on
+        # another, and the link, and every notification, opened ngrok's offline page.
+        if origin is None:
+            expose = f"ngrok http {address} --inspect=false"
+        else:
+            expose = f"ngrok http --url={ngrok_static_host(origin)} --inspect=false {address}"
+        console.print(f"expose with: {expose}   · Ctrl-C stops", markup=False)
         console.print(f"  stop that ngrok when this stops: {left_up}", markup=False)
         console.print(
             "  on a machine others use, also web_addr: false in ngrok.yml (ngrok config edit):"

@@ -3097,6 +3097,33 @@ def test_serve_says_to_turn_a_hand_started_ngroks_local_api_off(
     assert "web_addr: false in ngrok.yml" in result.output
 
 
+def test_serves_ngrok_command_is_on_the_static_domain_its_public_link_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``AISQUARE_REMOTE_NGROK_URL`` set, the banner gave the public link on that domain
+    and an ngrok command without ``--url``: run as given, ngrok served on another domain, and
+    the link, and every notification, opened ngrok's offline page (sweep 5 of #243). The
+    command is the docs' own, on the domain the link names."""
+
+    def served(dist: object, port: int, auto_off: int, *args: object, **kwargs: Any) -> bool:
+        kwargs["ready"]()
+        return False
+
+    monkeypatch.setattr(remote_server, "run_foreground", served)
+    domain = "https://My-Reserved.example-domain.com/"
+    result = CliRunner().invoke(
+        cli, ["remote", "serve", "--port", "9005"], env={ngrok_tunnel.NGROK_URL_ENV: domain}
+    )
+    assert result.exit_code == 0, result.output
+    assert "public link: https://my-reserved.example-domain.com/r/" in result.output
+    expose = "ngrok http --url=my-reserved.example-domain.com --inspect=false 127.0.0.1:9005"
+    assert f"expose with: {expose}" in result.output
+    flagged = CliRunner().invoke(
+        cli, ["remote", "serve", "--port", "9005", "--public-url", "remote-anmol.ngrok-free.app"]
+    )
+    assert "ngrok http --url=remote-anmol.ngrok-free.app --inspect=false" in flagged.output
+
+
 @pytest.mark.parametrize(
     "ended", ["ctrl-c", "auto-off", "auto-off, not all of it done"], ids=lambda ended: ended
 )

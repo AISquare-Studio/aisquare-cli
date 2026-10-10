@@ -21,6 +21,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tomllib
 from collections.abc import Sequence
 from pathlib import Path
@@ -1417,6 +1418,67 @@ def test_welcome_step_two_ends_on_the_command_it_names_as_printed(
     assert step_two.endswith(f"--config-dir {claude_home}"), step_two
     assert done.exit_code == 0, done.output
     assert agent_core.connected_dirs("claude-code") == [], "the record is gone, as worded"
+
+
+@pytest.mark.parametrize("folder", ["Claude Profiles", "claude-$work"], ids=["space", "dollar"])
+def test_a_config_dir_with_a_space_or_a_dollar_is_quoted_and_its_button_names_it(
+    runner: CliRunner, claude_home: Path, folder: str
+) -> None:
+    """The doctor, Welcome and `agents list` printed `--config-dir <dir>` bare: pasted, a
+    space split the path into extra arguments and a `$` was expanded by the shell (review
+    of #257). Quoted for this shell (``install_route.command_line``); a Connect button
+    reads it back as the shell would, so it runs on the directory itself."""
+    from aisquare.services import install_route
+
+    _connect(runner)
+    profile = claude_home.parent / folder / "work"
+    profile.mkdir(parents=True)
+    _connect(runner, profile)
+    (profile / "settings.json").write_text("{}", encoding="utf-8")  # hooks taken out
+    row = diagnostics._check_claude_code()
+    buttons = [fix.argv for fix in fix_commands([row])]
+    pressed = runner.invoke(app, list(buttons[0])) if buttons else None
+    shutil.rmtree(profile)  # now gone: forget it, as printed
+    gone = diagnostics._check_claude_code()
+    printed = str(gone.fix).rsplit("forget it: ", 1)[-1]
+    forgot = runner.invoke(app, install_route.split_line(printed)[1:])
+
+    connect = ["agents", "connect", "claude-code", "--config-dir", str(profile)]
+    assert install_route.command_line(["aisquare", *connect]) in str(row.fix), row.fix
+    assert buttons == [tuple(connect)], buttons
+    assert pressed is not None and pressed.exit_code == 0, pressed
+    assert install_route.split_line(printed) == [
+        "aisquare",
+        "agents",
+        "disconnect",
+        "claude-code",
+        "--config-dir",
+        str(profile),
+    ], printed
+    assert forgot.exit_code == 0, forgot.output
+    assert str(profile) not in [str(p) for p in agent_core.connected_dirs("claude-code")]
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_a_printed_command_reads_back_as_its_arguments(
+    monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    """What a Connect button runs is the printed fix read back as the shell would read it
+    (``install_route.split_line``), on POSIX and on Windows' cmd/PowerShell quoting alike."""
+    from aisquare.services import install_route
+
+    monkeypatch.setattr(sys, "platform", platform)  # what install_route asks, at call time
+    for directory in (
+        "/home/u/Claude Profiles/work",
+        "/home/u/claude-$HOME`id`/c",
+        r"C:\Users\Me Too\.claude",
+        'C:\\a "quoted" dir\\',
+        "/plain/path",
+    ):
+        argv = ["aisquare", "agents", "disconnect", "claude-code", "--config-dir", directory]
+        assert install_route.split_line(install_route.command_line(argv)) == argv, directory
+    with pytest.raises(ValueError):
+        install_route.split_line("--config-dir '/no/closing" if platform == "linux" else '"C:\\x')
 
 
 def test_a_welcome_tick_reads_settings_json_fewer_times(

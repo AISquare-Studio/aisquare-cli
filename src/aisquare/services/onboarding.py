@@ -39,6 +39,7 @@ from aisquare.core.selfcli import CliResult
 from aisquare.core.store import store_session
 from aisquare.core.workspace import find_project_root, git_common_root, project_id_for
 from aisquare.models import CheckStatus, DoctorCheck, ProjectInfo, SetupReport
+from aisquare.services import install_route
 
 
 class Runner(Protocol):
@@ -488,8 +489,13 @@ class FixCommand:
 
 
 def _argv_for(known: _KnownFix, rest: str) -> tuple[str, ...] | None:
-    """The argv for one mention, or None when the hint carries something we will not run."""
-    tokens = rest.strip().rstrip(".,:").split()
+    """The argv for one mention, or None when the hint carries something we will not run.
+    Read as the shell reads the hint (``install_route.split_line``), so a quoted
+    ``--config-dir`` is the directory itself, as a pasted command would name it."""
+    try:
+        tokens = install_route.split_line(rest.strip().rstrip(".,:"))
+    except ValueError:
+        return None
     argv = list(known.argv)
     index = 0
     while index < len(tokens):

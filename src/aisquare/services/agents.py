@@ -16,6 +16,7 @@ from aisquare.core import paths
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
 from aisquare.models import AgentConnection, AgentInfo
+from aisquare.services import install_route
 
 
 def list_agents() -> list[AgentInfo]:
@@ -354,7 +355,7 @@ def remedies(name: str, directory: Path, refusal: Refusal, *, also: str | None =
             found[0] += f", or {also} where that file is generated"
     key = agent_core.dir_identity(directory)
     recorded = key in {agent_core.dir_identity(p) for p in agent_core.connected_dirs(name)}
-    disconnect = f"aisquare agents disconnect {name} --config-dir {directory}"
+    disconnect = config_dir_command("disconnect", name, directory)
     if refusal.this_shell and not (recorded or agent_core.found_on_disk(directory)):
         found.append(_REPOINT)
     elif (
@@ -366,6 +367,15 @@ def remedies(name: str, directory: Path, refusal: Refusal, *, also: str | None =
         this = f"{_REPOINT}, and disconnect this one: {disconnect}"
         found.append(this if refusal.this_shell else f"forget it: {disconnect}")
     return found
+
+
+def config_dir_command(verb: str, name: str, directory: Path) -> str:
+    """``aisquare agents <verb> <name> --config-dir <directory>`` as a line to paste, the path
+    quoted for this shell (``install_route.command_line``): a space or a ``$`` in it broke
+    the command, or named another directory (review of #257)."""
+    return install_route.command_line(
+        ["aisquare", "agents", verb, name, "--config-dir", str(directory)]
+    )
 
 
 def _connect_refusal(name: str, config_dir: Path | None) -> Refusal | None:

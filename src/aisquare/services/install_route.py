@@ -1325,6 +1325,27 @@ def command_line(argv: Sequence[str]) -> str:
     return shlex.join(argv)
 
 
+def split_line(text: str) -> list[str]:
+    """The arguments of one :func:`command_line`, read back as the shell it was written for
+    reads them, so a fix printed for pasting is also the command a button runs. Raises
+    ``ValueError`` for a quote it does not close."""
+    if sys.platform != "win32":
+        return shlex.split(text)
+    tokens = re.findall(r'"(?:[^"\\]|\\.)*"|[^\s"]+|"', text)
+    if '"' in tokens:
+        raise ValueError(f"no closing quotation in {text!r}")
+    return [_windows_unquoted(token) for token in tokens]
+
+
+def _windows_unquoted(token: str) -> str:
+    """``token`` as :func:`_windows_quoted` was given it: its outer quotes taken off, and the
+    backslashes it doubled before a quote or at the end halved."""
+    if len(token) < 2 or token[0] != '"' or token[-1] != '"':
+        return token
+    inner = re.sub(r'(\\*)\\"', lambda m: m.group(1)[: len(m.group(1)) // 2] + '"', token[1:-1])
+    return re.sub(r"(\\+)\Z", lambda m: m.group(1)[: len(m.group(1)) // 2], inner)
+
+
 def _windows_quoted(arg: str) -> str:
     """``arg`` in double quotes, escaped by the C runtime's rules (``list2cmdline``'s): its
     own quotes, and the backslashes before them or before the closing quote, doubled."""

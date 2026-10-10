@@ -1104,7 +1104,7 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
             continue
         if site in unhooked or site in wrong_binary:
             broken.append(site.config_dir)
-    fixes.extend(f"aisquare agents connect claude-code --config-dir {p}" for p in broken)
+    fixes.extend(agents_service.config_dir_command("connect", "claude-code", p) for p in broken)
     if unmade is not None:
         # Bare: the directory a session from this shell reads, which connect makes. A
         # --config-dir naming any other it never makes, so that form refuses as not installed.
@@ -1140,7 +1140,7 @@ def _coders_missed(
     connects = [
         "aisquare agents connect claude-code"
         if agent_core.dir_identity(directory) == here
-        else f"aisquare agents connect claude-code --config-dir {directory}"
+        else agents_service.config_dir_command("connect", "claude-code", directory)
         for directory, refusal in missed.items()
         if refusal is None
     ]
@@ -1198,7 +1198,7 @@ def _short_timeouts(
     for directory, events in short.items():
         refusal = agents_service.access("claude-code", directory).connect
         if refusal is None:
-            fixes.append(f"aisquare agents connect claude-code --config-dir {directory}")
+            fixes.append(agents_service.config_dir_command("connect", "claude-code", directory))
             continue
         problems.append(f"hooks cannot be written in {directory}: {refusal.why}")
         timeout = f"give its {' and '.join(events)} hooks a timeout of at least {ceiling}"
@@ -1222,7 +1222,7 @@ def _disconnect_fix(directory: Path, lead: str) -> str:
     remedy: a fix never names a command that would refuse (review of #257)."""
     refusal = agents_service.access("claude-code", directory).disconnect
     if refusal is None:
-        return f"{lead}aisquare agents disconnect claude-code --config-dir {directory}"
+        return f"{lead}{agents_service.config_dir_command('disconnect', 'claude-code', directory)}"
     return f"{lead}{refusal.why}"
 
 

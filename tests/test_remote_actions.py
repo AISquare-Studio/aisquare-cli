@@ -3001,6 +3001,50 @@ def test_a_prompt_behind_a_result_too_long_to_read_is_never_answered_by_a_stop(
     assert exits.calls == [] and pane.sent == [] and pane.answered == []
 
 
+def test_a_local_command_after_an_esc_leaves_the_agent_at_its_prompt_for_a_tell(
+    phone: Phone, own_predicates: FakeNeeds, pane: FakePane, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Sweep 5 of #243: coder-1's Bash prompt was answered with Esc, which fires no Stop, so
+    its session stayed ``attention``, and a ``/model`` typed at its prompt after it fired no
+    hook either. The ``/model`` records hid the interruption: the idle agent read as one
+    showing a dialog, and a card's Tell was refused ``dialog_open``, as was every action
+    until someone typed at the machine. It sits at its prompt, and the tell is typed."""
+    _row(project)
+
+    def said(uuid: str, minute: int, content: object, role: str = "user") -> dict[str, object]:
+        message: dict[str, object] = {"role": role, "content": content}
+        if role == "assistant":
+            message["id"] = "m1"
+        stamp = (T0 + timedelta(minutes=minute)).isoformat()
+        return {"type": role, "uuid": uuid, "timestamp": stamp, "message": message}
+
+    push = {"type": "tool_use", "id": "toolu_push", "name": "Bash", "input": {"command": "x"}}
+    rejected = {
+        "type": "tool_result",
+        "tool_use_id": "toolu_push",
+        "is_error": True,
+        "content": "The user doesn't want to proceed with this tool use.",
+    }
+    records = [
+        said("u1", 1, "push it"),
+        said("a1", 2, [push], role="assistant"),
+        said("r1", 5, [rejected]),
+        said("esc", 5, "[Request interrupted by user for tool use]"),
+        said("o1", 7, "<command-name>/model</command-name>\n<command-args></command-args>"),
+        said("o2", 7, "<local-command-stdout>Set model to opus</local-command-stdout>"),
+    ]
+    path = tmp_path / "esc-then-model.jsonl"
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    own_predicates.tail = read_transcript_tail(path)
+    own_predicates.state = "attention"
+    own_predicates.session = _HOOKED.model_copy(
+        update={"state": "attention", "last_seen_at": T0 + timedelta(minutes=3)}
+    )
+    response = phone.post("agent/tell", agent=LABEL, text="carry on", mode="prompt")
+    assert response.status_code == 200, response.text
+    assert pane.sent == [("%7", "paste", "carry on"), ("%7", "key", "Enter")]
+
+
 # --- an agent nothing here reads -----------------------------------------------------------------
 #
 # Review of #243, round 7: a row with no board session (``fleet spawn --bin``, a Claude Code

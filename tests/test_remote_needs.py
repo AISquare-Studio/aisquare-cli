@@ -2563,6 +2563,42 @@ def test_attention_is_a_dialog_until_an_interruption_follows_it(
     )
 
 
+@pytest.mark.parametrize("state", ["attention", "waiting"])
+def test_an_interruption_behind_a_local_command_is_still_where_the_agent_sits(
+    state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sweep 5 of #243: a prompt answered with Esc fires no Stop, so the session stays
+    ``attention``, and a ``/model`` or a ``!`` command typed at the prompt after it fires
+    no hook either. Its records were the newest, the interruption under them unseen: the
+    idle agent was a "shows a dialog" card, pushed at once, and Prompt, Tell, Send, Stop,
+    Restart and Switch were each refused ``dialog_open`` until someone typed at the
+    machine. It is the interruption's card still, under the same id, and at its prompt.
+    ``waiting`` is the row 30 minutes on, the session still marked ``attention``."""
+    row = _row()
+    escaped_at = NOW - timedelta(minutes=1)
+    plain = _tail(newest="interrupted", at=escaped_at, text="Pushing now.", key="rec-esc")
+    behind = replace(
+        _tail(newest="own", at=NOW - timedelta(seconds=20), text="Pushing now.", key="rec-model"),
+        under_own="interrupted",
+        under_own_at=escaped_at,
+        under_own_key="rec-esc",
+    )
+    cards = []
+    for tail in (plain, behind):
+        fleet = Fleet(agents=[_status(row, state, _session(row, state="attention"))])
+        fleet.tails[f"/transcripts/{row.label}.jsonl"] = tail
+        snap = _now_of(fleet, FakeTmux(reference=NOW), monkeypatch)
+        assert not needs_dialog_open(snap) and needs_at_input_prompt(snap)
+        cards.append([(item.kind, item.id, item.since) for item in snap.items])
+    assert cards[0] == cards[1] and cards[0][0][0] == "interrupted"
+    assert cards[0][0][2] == escaped_at
+    unmarked = replace(behind, under_own="none", under_own_at=None, under_own_key=None)
+    fleet = Fleet(agents=[_status(row, state, _session(row, state="attention"))])
+    fleet.tails[f"/transcripts/{row.label}.jsonl"] = unmarked
+    snap = _now_of(fleet, FakeTmux(reference=NOW), monkeypatch)
+    assert needs_dialog_open(snap), "the control: no interruption, a dialog may be up"
+
+
 def _printed_since_the_notice(tail: TranscriptTail | None, *, printed: datetime) -> Fleet:
     """coder-1 at a dialog with no tool behind it, notified a minute ago, its row as the real
     ``fleet._derive`` reads it once the pane printed at ``printed``; ``tail`` ``None`` is a

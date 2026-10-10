@@ -489,6 +489,70 @@ def test_a_rejected_tool_use_is_an_interruption(tmp_path: Path) -> None:
     assert marker is not None and (marker.newest, marker.marker_key) == ("interrupted", "esc")
 
 
+def test_an_interruption_that_only_local_commands_follow_is_still_read(tmp_path: Path) -> None:
+    """Sweep 5 of #243: a ``/model`` or a ``!`` command typed at the prompt an Esc left runs no
+    turn and fires no hook. Its records are the newest, and the walk went past the
+    interruption under them without a word: a session still marked ``attention`` read as
+    a dialog up. The record they follow is kept, the interruption, its time and its
+    marker; once a turn ran after it, what the agent said since."""
+    rejection = "The user doesn't want to proceed with this tool use. STOP what you are doing."
+    records = [
+        _prompt("push it", uuid="u1"),
+        _said(
+            _tool("toolu_push", "Bash", command="git push --force"),
+            uuid="a1",
+            message="m1",
+            second=2,
+        ),
+        _result("toolu_push", rejection, uuid="r1", second=9, is_error=True),
+        _prompt("[Request interrupted by user for tool use]", uuid="esc", second=9),
+    ]
+    model = [
+        _prompt(
+            "<command-name>/model</command-name>\n<command-args></command-args>",
+            uuid="o1",
+            second=20,
+        ),
+        _prompt(
+            "<local-command-stdout>Set model to opus</local-command-stdout>", uuid="o2", second=21
+        ),
+    ]
+    shell = [
+        _prompt("<bash-input>git status</bash-input>", uuid="b1", second=30),
+        _prompt("<bash-stdout>main</bash-stdout><bash-stderr></bash-stderr>", uuid="b2", second=31),
+    ]
+    for after, newest in ((model, "o2"), (shell, "b2"), ([*model, *shell], "b2")):
+        tail = read_transcript_tail(_write(tmp_path / "t.jsonl", [*records, *after]))
+        assert tail is not None and (tail.newest, tail.marker_key) == ("own", newest)
+        assert (tail.under_own, tail.under_own_at, tail.under_own_key) == (
+            "interrupted",
+            _at(9),
+            "esc",
+        )
+    turn = [
+        _prompt("go on", uuid="u2", second=40),
+        _said(_text("Done."), uuid="a2", message="m2", second=41),
+        *model,
+    ]
+    tail = read_transcript_tail(_write(tmp_path / "t.jsonl", [*records, *turn]))
+    assert tail is not None and tail.newest == "own"
+    assert (tail.under_own, tail.under_own_at, tail.under_own_key) == (
+        "assistant_text",
+        _at(41),
+        "a2",
+    )
+    plain = read_transcript_tail(_write(tmp_path / "t.jsonl", records))
+    assert plain is not None and (plain.newest, plain.marker_key) == ("interrupted", "esc")
+    assert plain.under_own == "none", "the newest record says it"
+    escaped = _prompt("[Request interrupted by user for tool use]", uuid="esc", second=9)
+    long = read_transcript_tail(
+        _write(tmp_path / "t.jsonl", [*_two_calls(700_000), escaped, *model])
+    )
+    assert long is not None and (long.under_own, long.cut_at) == ("interrupted", None), (
+        "a walk cut short under an interruption: nothing before it waits"
+    )
+
+
 REJECTED_WITH_WORDS = (
     "The user doesn't want to proceed with this tool use. The tool use was rejected "
     "(eg. if it was a file edit, the new_string was NOT written to the file). To tell you "

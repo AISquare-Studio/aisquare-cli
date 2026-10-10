@@ -575,6 +575,17 @@ class TranscriptTail:
     its prompt, is such a walk: the budget ends inside it, ``pending`` is empty, and the
     agent read as one at rest (review of #243, round 7). ``None`` when the walk saw what
     it needed."""
+    under_own: str = "none"
+    """When ``newest`` is ``own``: the newest record that is not, in ``newest``'s words, or
+    ``none`` when the walk met none. A local command or a ``!`` command typed at the
+    agent's prompt runs no turn and fires no hook, so the record under it still says where
+    the agent is: at an interruption, at its own words. Read as the newest, such records
+    hid an interruption, and a session still ``attention`` after a prompt answered with
+    Esc read as a dialog up (sweep 5 of #243)."""
+    under_own_at: datetime | None = None
+    under_own_key: str | None = None
+    """That record's time, and its ``uuid`` (else its byte offset), as ``newest_at`` and
+    ``marker_key`` are the newest's."""
 
 
 _TAIL_NOTHING = TranscriptTail(
@@ -648,6 +659,10 @@ def _tail_walk(file: Path, size: int, budget: int, written: datetime) -> Transcr
     past_message = False  # ...and a user record older than it (records without an id)
     examined = 0
     cut = False  # the walk ran out before it could stop where nothing older waits
+    own_only = True  # every record walked so far is one Claude Code wrote itself
+    under_own = "none"
+    under_own_at: datetime | None = None
+    under_own_key: str | None = None
     for offset, raw in _lines_backwards(file, size, budget=budget):
         if len(raw) > MAX_LINE:
             at = written if newest == "none" else None
@@ -656,6 +671,9 @@ def _tail_walk(file: Path, size: int, budget: int, written: datetime) -> Transcr
                 tools.append(unparsed_tools)
                 if newest == "none":
                     newest, newest_at, marker_key = said, at, str(offset)
+                elif own_only:
+                    under_own, under_own_key = said, str(offset)
+                own_only = False
             continue
         record = _parse_transcript_line(raw)
         if record is None or record.get("isSidechain") is True or record.get("isMeta") is True:
@@ -680,6 +698,9 @@ def _tail_walk(file: Path, size: int, budget: int, written: datetime) -> Transcr
             said = _tail_user_kind(message.get("content"), blocks, record)
             if newest == "none":
                 newest, newest_at, marker_key = said, at, key
+            elif own_only and said != "own":
+                under_own, under_own_at, under_own_key = said, at, key
+            own_only = own_only and said == "own"
             if said == "user_prompt":
                 break  # the human's own prompt: nothing before it waits on anyone
             if in_message:
@@ -708,18 +729,25 @@ def _tail_walk(file: Path, size: int, budget: int, written: datetime) -> Transcr
         if record_text and (message_id is not None or not past_message):
             texts.append("\n\n".join(record_text))
             text_at = text_at or at
-        if newest == "none":
-            if any(block.get("type") == "tool_use" for block in blocks):
-                newest, newest_at, marker_key = "assistant_tool", at, key
-            elif record_text:
-                newest, newest_at, marker_key = "assistant_text", at, key
+        if any(block.get("type") == "tool_use" for block in blocks):
+            said = "assistant_tool"
+        elif record_text:
+            said = "assistant_text"
+        else:
             # A record of thinking alone is a message still streaming: the record
             # before it says what the agent is doing.
+            continue
+        if newest == "none":
+            newest, newest_at, marker_key = said, at, key
+        elif own_only:
+            under_own, under_own_at, under_own_key = said, at, key
+        own_only = False
     else:
         cut = size > budget  # the reader stopped on its budget, short of the file's start
     # An interruption ends the turn: nothing before it waits, however much was not read.
     unseen = not in_message or message_id is None
-    cut_at = written if cut and unseen and newest != "interrupted" else None
+    settled = under_own if newest == "own" and under_own != "none" else newest
+    cut_at = written if cut and unseen and settled != "interrupted" else None
     pending: list[PendingTool] = []
     for record_tools in reversed(tools):
         for tool in record_tools:
@@ -733,6 +761,9 @@ def _tail_walk(file: Path, size: int, budget: int, written: datetime) -> Transcr
         last_text_at=text_at,
         marker_key=marker_key,
         cut_at=cut_at,
+        under_own=under_own,
+        under_own_at=under_own_at,
+        under_own_key=under_own_key,
     )
 
 

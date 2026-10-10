@@ -823,8 +823,10 @@ def needs_from_agent(
        one's words are not on the board, and nothing tells a form asked then from its
        tool's own prompt: it reads as the prompt, whose digits would go into the form;
     6. no pending tool, and the newest record an interruption later than the session's last
-       hook → ``interrupted``, whatever the row reads (Esc fires no Stop, so a dismissed
-       prompt still reads ``attention`` and an interrupted turn ``working``);
+       hook, or one only Claude Code's own records follow (a local or ``!`` command run at
+       the prompt since, which fires no hook either) → ``interrupted``, whatever the row
+       reads (Esc fires no Stop, so a dismissed prompt still reads ``attention`` and an
+       interrupted turn ``working``);
     7. attention, and its notification is the usage-limit dialog → ``limited``;
     8. attention → ``permission``, the dialog form: an MCP elicitation, Claude Code's own;
     9. ``waiting`` on its own words, which end on a question → ``asked``;
@@ -1079,13 +1081,27 @@ def _needs_unanswered(
     return tail.newest_at <= session.last_seen_at
 
 
+def _needs_settled(tail: TranscriptTail) -> tuple[str, datetime | None, str | None]:
+    """Where the agent is by its transcript, as a record's kind, time and key: the newest,
+    or, under Claude Code's own records (``own``), the one they follow.
+
+    A local command or a ``!`` command typed at the agent's prompt runs no turn and fires
+    no hook. Taken for where the agent is, it hid an interruption: the session, still
+    ``attention`` from the prompt an Esc answered, read as a dialog up, a card pushed at
+    once, and every action refused ``dialog_open`` (sweep 5 of #243).
+    """
+    if tail.newest == "own" and tail.under_own != "none":
+        return tail.under_own, tail.under_own_at, tail.under_own_key
+    return tail.newest, tail.newest_at, tail.marker_key
+
+
 def _needs_marker_later(status: FleetAgentStatus, tail: TranscriptTail) -> bool:
-    """The newest record is an interruption this process made after its session's last hook."""
-    if tail.newest != "interrupted" or tail.newest_at is None:
+    """The agent sits at an interruption this process made after its session's last hook
+    (:func:`_needs_settled`)."""
+    kind, at, _key = _needs_settled(tail)
+    if kind != "interrupted" or at is None or at < status.agent.created_at:
         return False
-    if tail.newest_at < status.agent.created_at:
-        return False
-    return status.session is None or tail.newest_at > status.session.last_seen_at
+    return status.session is None or at > status.session.last_seen_at
 
 
 def _needs_pending(tail: TranscriptTail | None, agent: FleetAgent) -> tuple[PendingTool, ...]:
@@ -1492,13 +1508,15 @@ def _needs_failed_item(
 def _needs_interrupted_item(
     tail: TranscriptTail, *, project: ProjectInfo, agent: FleetAgent, name: str, now: datetime
 ) -> NeedsItem:
-    """An agent stopped by an Esc (or a rejected prompt), back at its prompt waiting."""
+    """An agent stopped by an Esc (or a rejected prompt), back at its prompt waiting: about
+    its marker, also when a local command run since is the newest record."""
     text = tail.last_text or ""
     paragraphs = [part for part in re.split(r"\n\s*\n", text.strip()) if part.strip()]
-    since = tail.newest_at or now
+    _kind, at, key = _needs_settled(tail)
+    since = at or now
     return _needs_item(
         "interrupted",
-        tail.marker_key or since.isoformat(),
+        key or since.isoformat(),
         project=project,
         agent=agent,
         reason=f"{name} was interrupted and waits for you",

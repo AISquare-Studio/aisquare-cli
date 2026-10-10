@@ -58,11 +58,14 @@ def _plan_json(plan: lifecycle_service.UpgradePlan) -> dict[str, Any]:
         "latest_error": plan.latest.error if plan.latest is not None else None,
         # Set when "latest" is the newest release under this uv cutoff, not PyPI's newest.
         "latest_cutoff": plan.latest.cutoff if plan.latest is not None else None,
+        # Set when "latest" is the newest release for this Python, which a newer one needs not.
+        "latest_python": plan.latest.for_python if plan.latest is not None else None,
         "update_available": plan.update_available,
         "route": plan.route.kind,
         "install": plan.route.describe(),
         "runnable": plan.runnable,
         "reason": plan.reason,
+        "pin_unmet": plan.pin_unmet,
         "command": plan.command,
         "argv": list(plan.argv),
         "refresh_hooks": [str(site.config_dir) for site in plan.refresh],
@@ -90,10 +93,12 @@ def _latest_line(plan: lifecycle_service.UpgradePlan) -> str:
         # PyPI's newest is older than what runs (a release not yet published, a
         # pre-release): "you have it" said otherwise (sweep of #257).
         verdict = "yours is newer"
+    held = "latest"
     if plan.latest.cutoff is not None:
         held = f"latest your uv cutoff allows ({plan.latest.cutoff})"
-        return f"{held}: {plan.latest.version} ({verdict})"
-    return f"latest: {plan.latest.version} ({verdict})"
+    if plan.latest.for_python is not None:
+        held += f" for Python {plan.latest.for_python}"
+    return f"{held}: {plan.latest.version} ({verdict})"
 
 
 def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
@@ -102,9 +107,9 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
         return
     _say(f"aisquare {plan.current} — {plan.route.describe()}")
     _say(_latest_line(plan))
-    if plan.pin_unmet:
-        # Not "upgrade with" that pin, which uv refuses on this Python (review of #257's fixes).
-        _say(f"`aisquare upgrade --version {plan.target}` cannot install it: {plan.reason}")
+    if plan.pin_unmet is not None and plan.reason == plan.pin_unmet:
+        # Not "upgrade with" a pin uv refuses here (review of #257's fixes).
+        _say(f"`aisquare upgrade --version {plan.target}` cannot install it: {plan.pin_unmet}")
         return
     if plan.runnable:
         if plan.up_to_date:
@@ -133,6 +138,8 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
             return
         _say(f"upgrade with: {plan.command}")
         _say(f"(`aisquare upgrade` does not run it: {plan.reason})")
+        if plan.pin_unmet is not None:
+            _say(f"({plan.pin_unmet})")
 
 
 def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
@@ -141,8 +148,12 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
         return
     where = plan.destination
     if plan.target is None and plan.latest is not None and plan.latest.version is not None:
-        held = plan.latest.cutoff is not None
-        where += " (the newest your uv cutoff allows)" if held else " (latest on PyPI)"
+        python = plan.latest.for_python
+        if plan.latest.cutoff is not None:
+            held = "the newest your uv cutoff allows"
+        else:
+            held = "latest on PyPI" if python is None else "the newest"
+        where += f" ({held} for Python {python})" if python else f" ({held})"
     _say(f"aisquare {plan.current} → {where}")
     if plan.target is None and plan.latest is not None and plan.latest.version is None:
         _say(
@@ -183,6 +194,7 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
                 "version": report.version,
                 "latest": plan.latest_version,
                 "latest_cutoff": plan.latest.cutoff if plan.latest is not None else None,
+                "latest_python": plan.latest.for_python if plan.latest is not None else None,
                 "route": plan.route.kind,
                 "command": plan.command,
                 "hooks": [
@@ -329,9 +341,17 @@ def upgrade(
         elif plan.target is not None:
             _say(f"aisquare {plan.current} is already the version asked for — nothing to do")
         elif plan.latest is not None and plan.latest.cutoff is not None:
+            python = plan.latest.for_python
+            held = f" for Python {python}" if python else ""
             _say(
                 f"aisquare {plan.current} is up to date ({plan.latest_version} is the newest "
-                f"release your uv cutoff allows: {plan.latest.cutoff}) — nothing to do"
+                f"release your uv cutoff allows{held}: {plan.latest.cutoff}) — nothing to do"
+            )
+        elif plan.latest is not None and plan.latest.for_python is not None:
+            _say(
+                f"aisquare {plan.current} is up to date (PyPI's latest is "
+                f"{plan.latest.passed_over}; {plan.latest_version} is the newest for Python "
+                f"{plan.latest.for_python}) — nothing to do"
             )
         else:
             _say(

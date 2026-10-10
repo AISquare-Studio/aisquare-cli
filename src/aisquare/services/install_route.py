@@ -310,9 +310,18 @@ class LatestRelease:
     cutoff: str | None = None
     """The uv cutoff (``--exclude-newer P14D``) ``version`` is the newest release under, when
     it is that rather than PyPI's newest."""
+    for_python: str | None = None
+    """The Python ``version`` is the newest release for, when a newer one (``passed_over``)
+    needs another: uv passes over that one there."""
+    passed_over: str | None = None
+    """The newest release otherwise (PyPI's, or the newest the cutoff allows), when it needs
+    another Python than ``for_python``."""
     pin_requires: str | None = None
     """The Requires-Python of the release pinned (``--version``), when it is one the
     reinstall's Python cannot take: uv refuses that pin there."""
+    pin_after_cutoff: bool = False
+    """Whether every file of the release pinned was uploaded after the cutoff: uv's
+    ``--exclude-newer`` refuses a pin too."""
 
 
 def fetch_latest(
@@ -337,12 +346,13 @@ def fetch_latest(
     have installed a newer pre-release (sweep of #257). With ``uploaded_before``, for an
     install under a uv cutoff (:func:`cutoff_time`), it is the newest such release with a
     file uploaded before then, as uv's ``--exclude-newer`` filters them. With ``python``
-    (:func:`reinstall_python`), a release none of whose files' Requires-Python admits it is
-    not an answer: uv passes over it, and the run that changed nothing failed as §3.9.1's
-    silent no-op (review of #257). With ``pin`` too, the pin's Requires-Python is
-    ``pin_requires`` when it cannot be met there: "upgrade with: aisquare upgrade --version
-    0.9.0" was advised under the line that said 0.9.0 needs a newer Python, and uv refused it
-    (review of #257's fixes).
+    (:func:`reinstall_python`), it is the newest such release with a file whose
+    Requires-Python admits that Python, as uv passes over the others (``for_python``): taken
+    as the target, a release uv passed over failed the run as §3.9.1's silent no-op, and
+    then, not compared, nothing was ever up to date (reviews of #257). With ``pin``, whether
+    the pin is one uv refuses there (``pin_requires``) or under the cutoff
+    (``pin_after_cutoff``): "upgrade with: aisquare upgrade --version 0.9.0" was advised for
+    either, and uv refused it.
     """
     # Here, not at module top: see the module docstring's one exception.
     from http.client import HTTPException
@@ -362,9 +372,14 @@ def fetch_latest(
     releases = payload.get("releases") if isinstance(payload, dict) else None
     info = payload.get("info") if isinstance(payload, dict) else None
     found = _newest(releases, info, prereleases, uploaded_before, python)
-    if pin is None or python is None:
+    if pin is None:
         return found
-    return replace(found, pin_requires=_unmet(pin, python, releases, info))
+    if uploaded_before is not None and _after(_files(pin, releases), uploaded_before):
+        return replace(found, pin_after_cutoff=True)
+    if python is None:
+        return found
+    verdict, shown = _verdict(_requires(pin, releases, info, uploaded_before), python)
+    return replace(found, pin_requires=shown) if verdict is False else found
 
 
 def _newest(
@@ -384,53 +399,67 @@ def _newest(
         if not isinstance(version, str) or version_key(version) is None:
             return LatestRelease(None, "PyPI's answer named no version")
         if prereleases:
-            listed = _newest_listed(releases)
-            if listed is not None and is_newer(listed, version):
-                version = listed
+            newer = _newest_listed(releases)
+            if newer is not None and is_newer(newer, version):
+                version = newer
     if python is None:
         return LatestRelease(version)
-    return _for_python(version, python, releases, info, uploaded_before)
-
-
-def _for_python(
-    version: str, python: str, releases: object, info: object, before: datetime | None
-) -> LatestRelease:
-    """``version`` when a file of it uv would take admits ``python`` by its Requires-Python,
-    else why it is no answer."""
-    specs = _requires(version, releases, info, before)
-    verdicts = [admits_python(spec, python) for spec in specs]
-    if not verdicts or True in verdicts:
-        return LatestRelease(version)
-    shown = ", ".join(sorted({str(spec) for spec in specs}))
-    if None in verdicts:
-        return LatestRelease(
-            None, f"can't tell whether Python {python} meets {version}'s Requires-Python ({shown})"
-        )
+    # Down from ``version``, as uv walks: the newest release it can take on that Python.
+    listed = _listed(releases, finals_only=not prereleases, before=uploaded_before)
+    first = ""
+    for candidate in [version, *(older for older in listed if is_newer(version, older))]:
+        verdict, shown = _verdict(_requires(candidate, releases, info, uploaded_before), python)
+        first = first or shown
+        if verdict is None:
+            return LatestRelease(
+                None,
+                f"can't tell whether Python {python} meets {candidate}'s Requires-Python ({shown})",
+            )
+        if verdict and candidate == version:
+            return LatestRelease(version)
+        if verdict:
+            return LatestRelease(candidate, for_python=python, passed_over=version)
     return LatestRelease(
-        None,
-        f"{version} on PyPI requires Python {shown}, and this install's upgrade runs on "
-        f"Python {python}",
+        None, f"PyPI lists no release for Python {python} ({version} requires Python {first})"
     )
 
 
-def _unmet(release: str, python: str, releases: object, info: object) -> str | None:
-    """``release``'s Requires-Python when no file of it uv would take admits ``python``;
-    ``None`` when one does, when none is listed, or when it cannot be told: uv decides."""
-    specs = _requires(release, releases, info, None)
+def _verdict(specs: list[object], python: str) -> tuple[bool | None, str]:
+    """Whether one of a release's files admits ``python`` (``None``: cannot be told, and
+    none does), with their Requires-Python as said. A release with none admits every one."""
     verdicts = [admits_python(spec, python) for spec in specs]
-    if not verdicts or any(verdict is not False for verdict in verdicts):
-        return None
-    return ", ".join(sorted({str(spec) for spec in specs}))
+    shown = ", ".join(sorted({str(spec) for spec in specs}))
+    if not verdicts or True in verdicts:
+        return True, shown
+    return (None if None in verdicts else False), shown
+
+
+def _files(version: str, releases: object) -> list[Any] | None:
+    """The files PyPI's ``releases`` lists for ``version`` (``0.9`` is ``0.9.0``), if any."""
+    listed = releases.items() if isinstance(releases, dict) else ()
+    files = next((f for name, f in listed if same_version(str(name), version)), None)
+    return files if isinstance(files, list) else None
+
+
+def _after(files: list[Any] | None, before: datetime) -> bool:
+    """Whether every one of ``files`` was uploaded at or after ``before``, each time read:
+    a cutoff then leaves none of them (``_installable``)."""
+    if not files:
+        return False
+    times = [
+        _instant(file.get("upload_time_iso_8601")) if isinstance(file, dict) else None
+        for file in files
+    ]
+    return all(when is not None and when >= before for when in times)
 
 
 def _requires(
     version: str, releases: object, info: object, before: datetime | None
 ) -> list[object]:
-    """The Requires-Python of each file of ``version`` (``0.9`` is ``0.9.0``) uv would take;
-    with no file listed, ``info``'s, which describes the newest release."""
-    listed = releases.items() if isinstance(releases, dict) else ()
-    files = next((f for name, f in listed if same_version(str(name), version)), None)
-    if isinstance(files, list) and files:
+    """The Requires-Python of each file of ``version`` uv would take; with no file listed,
+    ``info``'s, which describes the newest release."""
+    files = _files(version, releases)
+    if files:
         return [file.get("requires_python") for file in files if _installable(file, before)]
     newest = info.get("version") if isinstance(info, dict) else None
     if isinstance(info, dict) and isinstance(newest, str) and same_version(newest, version):
@@ -438,24 +467,31 @@ def _requires(
     return []
 
 
+def _listed(
+    releases: object, *, finals_only: bool = False, before: datetime | None = None
+) -> list[str]:
+    """The versions in PyPI's ``releases`` with a file not yanked (and, with ``before``,
+    uploaded before then), pre-releases left out with ``finals_only``, newest first."""
+    if not isinstance(releases, dict):
+        return []
+    listed = [
+        version
+        for version, files in releases.items()
+        if isinstance(version, str)
+        and isinstance(files, list)
+        and version_key(version) is not None
+        and not (finals_only and is_prerelease(version))
+        and any(_installable(file, before) for file in files)
+    ]
+    return sorted(listed, key=lambda version: version_key(version) or (), reverse=True)
+
+
 def _newest_listed(
     releases: object, *, finals_only: bool = False, before: datetime | None = None
 ) -> str | None:
-    """The newest version in PyPI's ``releases`` that has a file not yanked (and, with
-    ``before``, uploaded before then), pre-releases left out with ``finals_only``."""
-    if not isinstance(releases, dict):
-        return None
-    newest: str | None = None
-    for version, files in releases.items():
-        if not isinstance(version, str) or not isinstance(files, list):
-            continue
-        if version_key(version) is None or (finals_only and is_prerelease(version)):
-            continue
-        if not any(_installable(file, before) for file in files):
-            continue
-        if newest is None or is_newer(version, newest):
-            newest = version
-    return newest
+    """The newest of :func:`_listed`."""
+    listed = _listed(releases, finals_only=finals_only, before=before)
+    return listed[0] if listed else None
 
 
 def _installable(file: object, before: datetime | None) -> bool:

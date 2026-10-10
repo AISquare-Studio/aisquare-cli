@@ -21,8 +21,8 @@ import json
 import os
 import re
 import sys
-from collections.abc import Iterator
-from dataclasses import dataclass, field
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
@@ -1128,12 +1128,19 @@ def test_an_upgrade_takes_pre_releases_where_uv_does(
 #: PyPI's JSON when a release raises Requires-Python: one wheel and one sdist per release,
 #: each with the ``requires_python`` PyPI serves (measured: ">=3.11" on every aisquare-cli
 #: file), and ``info`` describing the newest, as PyPI's does.
-def _pypi_requiring(requires: dict[str, str | None], uploaded: datetime | None = None) -> bytes:
-    newest = max(requires, key=lambda version: install_route.version_key(version) or ())
-    when = {} if uploaded is None else {"upload_time_iso_8601": uploaded.isoformat()}
+def _pypi_requiring(
+    requires: Mapping[str, str | None], uploaded: datetime | dict[str, datetime] | None = None
+) -> bytes:
+    finals = [version for version in requires if not install_route.is_prerelease(version)]
+    newest = max(finals or requires, key=lambda version: install_route.version_key(version) or ())
+
+    def when(version: str) -> dict[str, str]:
+        at = uploaded.get(version) if isinstance(uploaded, dict) else uploaded
+        return {} if at is None else {"upload_time_iso_8601": at.isoformat()}
+
     releases = {
         version: [
-            {"packagetype": kind, "requires_python": spec, "yanked": False, **when}
+            {"packagetype": kind, "requires_python": spec, "yanked": False, **when(version)}
             for kind in ("bdist_wheel", "sdist")
         ]
         for version, spec in requires.items()
@@ -1171,29 +1178,45 @@ def test_a_requires_python_is_read_for_every_python_the_reinstall_may_run(
     assert install_route.admits_python(requires, python) is admits
 
 
-def test_the_lookup_compares_only_a_release_the_reinstalls_python_can_take(
+def test_the_lookup_compares_the_newest_release_the_reinstalls_python_can_take(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PyPI's newest needing a newer Python read "an update is available", and every run
-    failed as §3.9.1's silent no-op while uv rightly kept the release (review of #257). Such
-    a release is not compared, under a cutoff too; one whose bound cannot be told is said."""
+    failed as §3.9.1's silent no-op (review of #257); then "can't tell", so nothing was ever
+    up to date and every run reinstalled (a later review). uv takes the newest release
+    that admits the Python, finals only and before the cutoff as it filters them, and so
+    does the lookup; a bound it cannot tell on the way down is said."""
     cutoff = datetime(2026, 10, 1, tzinfo=UTC)
-    raised = _pypi_requiring({"0.8.0": ">=3.11", "0.9.0": ">=3.12"}, cutoff - timedelta(days=1))
-    told = _pypi_requiring({"0.8.0": ">=3.11", "0.9.0": ">=3.11.4"})
-    body = {"body": raised}
+    early, late = cutoff - timedelta(days=9), cutoff + timedelta(days=1)
+    walk = {
+        "0.8.0": ">=3.11",
+        "0.8.5": ">=3.11",
+        "0.8.6rc1": ">=3.11",
+        "0.9.0": ">=3.12",
+        "1.0.0rc1": ">=3.11",
+    }
+    body = {"body": _pypi_requiring(walk, early)}
     monkeypatch.setattr(install_route, "open_url", lambda _r, timeout: _Response(body["body"]))
-    needs = "0.9.0 on PyPI requires Python >=3.12, and this install's upgrade runs on Python 3.11"
+    for_311 = LatestRelease("0.8.5", for_python="3.11", passed_over="0.9.0")
 
-    assert _REAL_FETCH_LATEST(python="3.11") == LatestRelease(None, needs)
-    assert _REAL_FETCH_LATEST(python="3.11", uploaded_before=cutoff) == LatestRelease(None, needs)
+    assert _REAL_FETCH_LATEST(python="3.11") == for_311, "finals only"
+    assert _REAL_FETCH_LATEST(python="3.11", uploaded_before=cutoff) == for_311
+    assert _REAL_FETCH_LATEST(python="3.11", prereleases=True) == LatestRelease("1.0.0rc1")
     assert _REAL_FETCH_LATEST(python="3.12") == LatestRelease("0.9.0"), "control: it can"
     assert _REAL_FETCH_LATEST() == LatestRelease("0.9.0"), "control: no Python, no filter"
-    body["body"] = told
+    body["body"] = _pypi_requiring(walk, {**dict.fromkeys(walk, early), "0.8.5": late})
+    under = _REAL_FETCH_LATEST(python="3.11", uploaded_before=cutoff)
+    assert under == LatestRelease("0.8.0", for_python="3.11", passed_over="0.9.0"), under
+    body["body"] = _pypi_requiring({"0.8.0": ">=3.11", "0.8.5": ">=3.11.4", "0.9.0": ">=3.12"})
     unknown = _REAL_FETCH_LATEST(python="3.11")
-    assert unknown.version is None, unknown
-    assert unknown.error == (
-        "can't tell whether Python 3.11 meets 0.9.0's Requires-Python (>=3.11.4)"
+    assert unknown == LatestRelease(
+        None, "can't tell whether Python 3.11 meets 0.8.5's Requires-Python (>=3.11.4)"
     ), unknown
+    body["body"] = _pypi_requiring({"0.9.0": ">=3.12"})
+    none = _REAL_FETCH_LATEST(python="3.11")
+    assert none.version is None and none.error == (
+        "PyPI lists no release for Python 3.11 (0.9.0 requires Python >=3.12)"
+    ), none
 
 
 @pytest.mark.parametrize(
@@ -2604,7 +2627,7 @@ def test_an_install_under_a_uv_cutoff_is_compared_with_the_newest_release_it_all
 
 
 @pytest.mark.parametrize("python", ["3.11", "3.12"], ids=["older-python", "control"])
-def test_a_release_this_installs_python_cannot_take_is_not_an_update(
+def test_the_newest_release_this_installs_python_can_take_is_the_one_compared(
     runner: CliRunner,
     tool: Tool,
     machine: Machine,
@@ -2612,34 +2635,68 @@ def test_a_release_this_installs_python_cannot_take_is_not_an_update(
     python: str,
 ) -> None:
     """A receipt that records Python 3.11, and a 0.9.0 that needs 3.12: --check said "an
-    update is available" and every `aisquare upgrade` failed as §3.9.1's silent no-op over
-    the 0.8.0 uv rightly kept (review of #257). It is said instead, and uv picks."""
+    update is available" and every run failed as §3.9.1's silent no-op (review of #257);
+    then it said "can't tell", and every run and asq's Update reinstalled for nothing (a
+    later review). It compares 0.8.5, which uv takes, and says for which Python."""
     (tool.prefix / install_route.RECEIPT_NAME).write_text(
         _receipt(_OURS_PINNED, python=python), encoding="utf-8"
     )
     monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
-    body = _pypi_requiring({"0.8.0": ">=3.11", "0.9.0": ">=3.12"})
+    body = _pypi_requiring({"0.8.0": ">=3.11", "0.8.5": ">=3.11", "0.9.0": ">=3.12"})
     monkeypatch.setattr(install_route, "fetch_latest", _REAL_FETCH_LATEST)
     monkeypatch.setattr(install_route, "open_url", lambda _request, timeout: _Response(body))
     older = python == "3.11"
-    machine.new_version = "0.8.0" if older else "0.9.0"
+    picked = "0.8.5" if older else "0.9.0"
+    machine.new_version = picked
 
     check = runner.invoke(app, ["upgrade", "--check"])
     planned = _one_object(runner.invoke(app, ["--json", "upgrade", "--check"]).stdout)
+    plan = runner.invoke(app, ["upgrade", "--dry-run"])
     run = runner.invoke(app, ["upgrade", "--yes"])
 
     assert run.exit_code == 0, run.output
     argv = machine.installs[0][0]
     assert argv[argv.index("--python") + 1] == python, argv
+    assert planned["latest"] == picked and planned["update_available"] is True, planned
+    assert f"✓ aisquare {picked} (was 0.8.0)" in run.stdout, run.stdout
     if older:
-        needs = "0.9.0 on PyPI requires Python >=3.12, and this install's upgrade runs on "
-        assert planned["latest"] is None and planned["update_available"] is None, planned
-        assert planned["latest_error"] == f"{needs}Python 3.11", planned
-        assert "can't tell whether anything is newer" in check.stdout, check.stdout
-        assert "✓ aisquare 0.8.0 is the release uv picks for this install" in run.stdout
+        assert planned["latest_python"] == "3.11", planned
+        assert "latest for Python 3.11: 0.8.5 (an update is available)" in check.stdout
+        assert "aisquare 0.8.0 → 0.8.5 (the newest for Python 3.11)" in plan.stdout, plan.stdout
+        assert "PyPI's latest is 0.8.5" not in run.stdout + check.stdout + plan.stdout
     else:
-        assert planned["latest"] == "0.9.0" and planned["update_available"] is True, planned
-        assert "✓ aisquare 0.9.0 (was 0.8.0)" in run.stdout, run.stdout
+        assert planned["latest_python"] is None, planned
+        assert "latest: 0.9.0 (an update is available)" in check.stdout, check.stdout
+        assert "aisquare 0.8.0 → 0.9.0 (latest on PyPI)" in plan.stdout, plan.stdout
+
+    monkeypatch.setattr(lifecycle, "__version__", picked)
+    again = runner.invoke(app, ["upgrade", "--yes"])
+
+    assert again.exit_code == 0 and len(machine.installs) == 1, "up to date: no reinstall"
+    held = "PyPI's latest is 0.9.0; 0.8.5 is the newest for Python 3.11" if older else ""
+    assert f"aisquare {picked} is up to date (" in again.stdout, again.stdout
+    assert held in again.stdout, again.stdout
+
+
+def test_a_release_uv_picks_below_the_newest_for_the_python_names_that_python(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The note said "PyPI's latest is 0.8.5" where PyPI's latest is 0.9.0, which this
+    install's Python cannot take (a later review of #257)."""
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        _receipt(_OURS_PINNED, python="3.11"), encoding="utf-8"
+    )
+    monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
+    body = _pypi_requiring({"0.8.0": ">=3.11", "0.8.5": ">=3.11", "0.9.0": ">=3.12"})
+    monkeypatch.setattr(install_route, "fetch_latest", _REAL_FETCH_LATEST)
+    monkeypatch.setattr(install_route, "open_url", lambda _request, timeout: _Response(body))
+    machine.new_version = "0.8.3"
+
+    result = runner.invoke(app, ["upgrade", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "PyPI's latest for Python 3.11 is 0.8.5; uv picks 0.8.3 here" in result.stdout
+    assert "PyPI's latest is 0.8.5" not in result.stdout, result.stdout
 
 
 @pytest.mark.parametrize("python", ["3.11", "3.12"], ids=["older-python", "control"])
@@ -2678,6 +2735,64 @@ def test_a_pin_this_installs_python_cannot_take_is_said_not_advised(
     else:
         assert "upgrade with: aisquare upgrade --version 0.9.0" in check.stdout, check.stdout
         assert planned["runnable"] is True and planned["reason"] is None, planned
+
+
+def test_a_route_aisquare_does_not_run_keeps_its_command_beside_the_python_clause(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unmet Requires-Python replaced a pipx install's reason and dropped `pipx install
+    --force`, which pipx may run on a newer Python (a later review of #257)."""
+    pipx = install_route.InstallRoute(
+        install_route.PIPX, replace(tool.facts, python_version="3.11")
+    )
+    monkeypatch.setattr(install_route, "detect", lambda: pipx)
+    monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
+    body = _pypi_requiring({"0.8.0": ">=3.11", "0.9.0": ">=3.12"})
+    monkeypatch.setattr(install_route, "fetch_latest", _REAL_FETCH_LATEST)
+    monkeypatch.setattr(install_route, "open_url", lambda _request, timeout: _Response(body))
+
+    check = runner.invoke(app, ["upgrade", "--check", "--version", "0.9.0"])
+    planned = _one_object(
+        runner.invoke(app, ["--json", "upgrade", "--check", "--version", "0.9.0"]).stdout
+    )
+
+    clause = (
+        "0.9.0 requires Python >=3.12, and this install runs on Python 3.11; installing it "
+        "needs a Python that meets >=3.12"
+    )
+    assert planned["reason"] == install_route.not_automated(pipx), planned
+    assert planned["pin_unmet"] == clause, planned
+    assert "upgrade with: pipx install --force aisquare-cli==0.9.0" in check.stdout
+    assert f"({clause})" in check.stdout, check.stdout
+    assert "cannot install it" not in check.stdout, "no command that never runs for pipx"
+
+
+def test_a_pin_the_uv_cutoff_excludes_is_said_not_advised(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """uv applies `--exclude-newer` to a pin too: `--check --version 0.8.1` advised a pin
+    uploaded after the cutoff, which uv refuses (a later review of #257)."""
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        _receipt(_OURS_PINNED, tail=_COOLDOWN), encoding="utf-8"
+    )
+    monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
+    now = datetime.now(UTC)
+    uploads = {"0.8.0": now - timedelta(days=30), "0.8.1": now - timedelta(days=3)}
+    body = _pypi_requiring({"0.8.0": ">=3.11", "0.8.1": ">=3.11"}, uploads)
+    monkeypatch.setattr(install_route, "fetch_latest", _REAL_FETCH_LATEST)
+    monkeypatch.setattr(install_route, "open_url", lambda _request, timeout: _Response(body))
+
+    pinned = runner.invoke(app, ["upgrade", "--check", "--version", "0.8.1"])
+    planned = _one_object(
+        runner.invoke(app, ["--json", "upgrade", "--check", "--version", "0.8.1"]).stdout
+    )
+    allowed = runner.invoke(app, ["upgrade", "--check", "--version", "0.8.0"])
+
+    why = "your uv cutoff (--exclude-newer P7D) excludes 0.8.1, uploaded after it"
+    assert "upgrade with" not in pinned.stdout, pinned.stdout
+    assert f"`aisquare upgrade --version 0.8.1` cannot install it: {why}" in pinned.stdout
+    assert planned["runnable"] is False and planned["reason"] == why, planned
+    assert "cannot install it" not in allowed.stdout, "control: one before the cutoff"
 
 
 def test_a_no_op_under_a_cooldown_the_plan_compared_fails(

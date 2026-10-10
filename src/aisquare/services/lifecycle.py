@@ -320,6 +320,10 @@ class UpgradePlan:
     """Live fleet agents, counted as uninstall counts them (:func:`running_fleet`)."""
     fleet_error: str | None = None
     """Why the fleet's live agents could not be counted, when they could not."""
+    pin_unmet: str | None = None
+    """Why ``--version``'s release cannot be installed here, when ``--check`` found so: the
+    reinstall's Python, or the uv cutoff, excludes it. It is :attr:`reason` too when the
+    route is otherwise one ``aisquare upgrade`` runs."""
 
     @property
     def runnable(self) -> bool:
@@ -353,13 +357,6 @@ class UpgradePlan:
     @property
     def command(self) -> str:
         return install_route.command_line(self.argv)
-
-    @property
-    def pin_unmet(self) -> bool:
-        """Whether ``--version`` names a release the reinstall's Python cannot take
-        (``LatestRelease.pin_requires``); :attr:`reason` then says so."""
-        latest = self.latest
-        return self.target is not None and latest is not None and latest.pin_requires is not None
 
     @property
     def latest_version(self) -> str | None:
@@ -444,16 +441,14 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
     route = install_route.detect()
     reason = install_route.not_automated(route)
     latest: install_route.LatestRelease | None = None
+    pin_unmet: str | None = None
     if check or (reason is None and target is None):
         latest = _latest_for(route, target)
-        if target is not None and latest.pin_requires is not None:
-            # uv refuses the pin on this Python, and the run named it again (#257's fixes).
-            python = install_route.reinstall_python(route)
-            reason = (
-                f"{target} requires Python {latest.pin_requires}, and this install's upgrade "
-                f"runs on Python {python}; installing it needs a Python that meets "
-                f"{latest.pin_requires}"
-            )
+        if target is not None:
+            pin_unmet = _pin_unmet(route, target, latest)
+        # uv refuses that pin, and the run named it again (review of #257's fixes). A route
+        # aisquare does not run keeps its own reason and command (a later review).
+        reason = reason or pin_unmet
     refresh: tuple[HookSite, ...] = ()
     left: tuple[HookSite, ...] = ()
     live: tuple[str, ...] = ()
@@ -473,6 +468,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         current=__version__,
         target=target,
         latest=latest,
+        pin_unmet=pin_unmet,
         argv=tuple(install_route.upgrade_argv(route, target, current=__version__)),
         env=install_route.installer_env(route),
         reason=reason,
@@ -480,6 +476,24 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         left=left,
         live_agents=live,
         fleet_error=fleet_error,
+    )
+
+
+def _pin_unmet(
+    route: install_route.InstallRoute, target: str, latest: install_route.LatestRelease
+) -> str | None:
+    """Why uv would refuse ``--version``'s ``target`` here, from the lookup, or ``None``."""
+    if latest.pin_after_cutoff:
+        held = install_route.cutoff(route) or "--exclude-newer"
+        return f"your uv cutoff ({held}) excludes {target}, uploaded after it"
+    if latest.pin_requires is None:
+        return None
+    # A uv tool's reinstall restates its Python; another route's need not run on this one.
+    runs = "this install's upgrade runs on" if route.receipt is not None else "this install runs on"
+    return (
+        f"{target} requires Python {latest.pin_requires}, and {runs} Python "
+        f"{install_route.reinstall_python(route)}; installing it needs a Python that meets "
+        f"{latest.pin_requires}"
     )
 
 
@@ -800,7 +814,9 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
     if plan.target is None and version is not None and moved_elsewhere and (pypis or unseen):
         # Not why: "your package index served" named an index that had served the newer one,
         # and "newest" was false where a setting picks (`resolution = "lowest"`).
-        held = f"PyPI's latest is {latest}; " if pypis else ""
+        python = plan.latest.for_python if plan.latest is not None else None
+        which = f"PyPI's latest for Python {python}" if python else "PyPI's latest"
+        held = f"{which} is {latest}; " if pypis else ""
         notes.append(f"{held}uv picks {version} here{now}")
     notes.append(
         f"asq and `aisquare serve` processes that were already running keep {plan.current} "

@@ -85,8 +85,9 @@ main:focus, h2:focus { outline: none; } /* where focus lands for a screen reader
 h2 { font-size: 20px; }
 h3 { font-size: 16px; margin: 12px 0 4px; }
 .muted { color: var(--muted); font-size: 14px; margin: 2px 0; overflow-wrap: anywhere; }
-.empty { color: var(--muted); text-align: center; padding: 32px 8px; }
-.status { color: var(--muted); font-size: 14px; min-height: 1em; }
+/* A word too long for its line (a path) breaks in each box a sentence lands in */
+.empty { color: var(--muted); text-align: center; padding: 32px 8px; overflow-wrap: anywhere; }
+.status { color: var(--muted); font-size: 14px; min-height: 1em; overflow-wrap: anywhere; }
 .lead { margin: 4px 0 12px; }
 
 /* the bottom nav */
@@ -131,7 +132,7 @@ body.kb .bottom { display: none; }
 /* the needs feed and its cards */
 .notice-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 8px 12px; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 12px; font-size: 14px; }
 .notice-line span { flex: 1 1 60%; }
-.card { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--muted); border-radius: 12px; padding: 12px; margin: 0 0 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--muted); border-radius: 12px; padding: 12px; margin: 0 0 12px; overflow-wrap: anywhere; }
 .card.k-urgent { border-left-color: var(--alarm); }
 .card.k-alarm { border-left-color: var(--alarm); }
 .card.k-warn { border-left-color: var(--warn); }
@@ -139,10 +140,10 @@ body.kb .bottom { display: none; }
 .card.k-urgent, .card.k-ask { background: var(--panel); color: var(--fg); }
 .card.gone { color: var(--muted); border-left-color: var(--line); }
 .card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13px; color: var(--muted); }
-.card-head .where { font-weight: 600; color: var(--fg); overflow-wrap: anywhere; }
+.card-head .where { font-weight: 600; color: var(--fg); }
 .card-head .since { margin-left: auto; }
-.reason { font-weight: 600; margin: 8px 0 4px; overflow-wrap: anywhere; }
-.excerpt { margin: 4px 0; color: var(--muted); overflow-wrap: anywhere; }
+.reason { font-weight: 600; margin: 8px 0 4px; }
+.excerpt { margin: 4px 0; color: var(--muted); }
 .detail { margin: 8px 0; }
 .detail .q { margin: 2px 0 4px; }
 .detail .options { margin: 4px 0 8px; padding-left: 18px; }
@@ -222,16 +223,16 @@ pre.pane.fit {
 .sheet-wrap { position: fixed; inset: 0; z-index: 20; display: none; align-items: flex-end; background: rgba(0, 0, 0, .55); }
 .sheet-wrap.open { display: flex; }
 .sheet {
-  width: 100%; max-height: 88%; overflow: auto; background: var(--panel); border-radius: 16px 16px 0 0;
+  width: 100%; max-height: 88%; overflow: auto; overflow-wrap: anywhere; background: var(--panel); border-radius: 16px 16px 0 0;
   padding: 16px calc(16px + env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
 }
-.sheet h2 { margin: 0 0 8px; overflow-wrap: anywhere; }
+.sheet h2 { margin: 0 0 8px; }
 .sheet .row { margin-bottom: 8px; }
 .sheet-bar { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 8px; }
 .toast {
   position: fixed; z-index: 30; left: 50%; bottom: calc(72px + env(safe-area-inset-bottom)); transform: translateX(-50%);
   max-width: min(92vw, 520px); padding: 10px 16px; border-radius: 12px; background: var(--fg); color: var(--bg);
-  font-size: 15px; opacity: 0; pointer-events: none; transition: opacity .2s;
+  font-size: 15px; opacity: 0; pointer-events: none; transition: opacity .2s; overflow-wrap: anywhere;
 }
 .toast.show { opacity: 1; }
 

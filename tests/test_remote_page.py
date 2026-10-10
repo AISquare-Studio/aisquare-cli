@@ -849,6 +849,23 @@ def test_the_status_strip_and_the_bottom_nav_keep_to_one_line_on_a_phone() -> No
     assert _css_px(css, ".bottom .tab", "padding") == [8, 2]
 
 
+def test_every_box_a_sentence_lands_in_breaks_a_word_too_long_for_its_line() -> None:
+    """A question card's question and options set no overflow-wrap: an absolute path in
+    either ran past the card and pushed the Needs screen sideways, 584 px wide on a 390 px
+    phone with the question cut at the screen's edge, as headless Chromium measured. So did
+    a quick answer's button naming one, a refusal's sentence naming one in a toast, a
+    sheet's status, or a screen's empty line, and the sheet's own lead: a whole card wraps
+    such a word where it must now, and so does every other box a machine's sentence or a
+    typed one lands in, as Chromium measured at 360 px."""
+    css = _text("app.css")
+    for selector in (".card", ".sheet", ".toast", ".empty", ".status", ".muted", ".title"):
+        assert _css_value(css, selector, "overflow-wrap") == "anywhere", selector
+    script = _text("app.js")
+    assert 'mk(doc, "div", "card " + look[1])' in script, "a card is one box, its detail in it"
+    for drawn in ('el("p", "empty", failText(res))', 'el("p", "status")', 'el("div", "toast")'):
+        assert drawn in script, drawn
+
+
 def test_fit_width_sizes_the_pane_inside_the_screens_side_insets() -> None:
     """Fit width scaled the font to the screen's width less 48 px, but in landscape a phone's
     sides give up their safe-area insets too, 59 px a side on an iPhone 15 Pro: the pane ran

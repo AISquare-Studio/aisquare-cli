@@ -1,22 +1,21 @@
 /* aisquare remote: the phone page aisquare-cli bundles (SPEC §6).
  *
- * One classic deferred script, ES2020, no build step, no framework, nothing
- * from another origin. It lives at /r/<token>/, so every URL here is
- * relative, routing is by hash, and the server only ever serves the top.
+ * One classic deferred script, ES2020, no build step, no framework, nothing from another
+ * origin. It lives at /r/<token>/, so every URL here is relative, routing is by hash, and
+ * the server only ever serves the top.
  *
  * Rendering rules (SPEC §6.6), held by tests/test_remote_page.py:
- * - every server string reaches the DOM as text (textContent or a text node),
- *   after plainText() drops escape sequences and controls;
- * - no server string is written to an attribute, a URL or a style, but two
- *   numbers the page parses and clamps itself: an ANSI colour (0-255, as rgb()
- *   through el.style) and a pane's width (20-400, the --cols Fit width uses);
- * - setAttribute takes only literal names from a short list, handlers are
- *   added with addEventListener, and navigation goes through pageGo(), the
- *   one place location.hash is set (or replaced), from ids it validated.
+ * - every server string reaches the DOM as text (textContent or a text node), after
+ *   plainText() drops escape sequences and controls;
+ * - no server string is written to an attribute, a URL or a style, but two numbers the
+ *   page parses and clamps itself: an ANSI colour (0-255, as rgb() through el.style) and a
+ *   pane's width (20-400, the --cols Fit width uses);
+ * - setAttribute takes only literal names from a short list, handlers are added with
+ *   addEventListener, and navigation goes through pageGo(), the one place location.hash is
+ *   set (or replaced), from ids it validated.
  *
- * ansiToRuns, renderRuns and renderNeedsCard are pure: node runs them against
- * a recording fake document (tests/js/remote_page_check.js). The page boots
- * only where there is a document.
+ * ansiToRuns, renderRuns and renderNeedsCard are pure: node runs them against a recording
+ * fake document (tests/js/remote_page_check.js). The page boots only where there is one.
  */
 "use strict";
 
@@ -788,11 +787,10 @@ async function apiCall(method, path, options) {
   return res;
 }
 
-/* A write: a fresh request_id, and one retry with the SAME id after the next
- * reconnect when the phone lost the request, if that comes soon enough
- * (flushRetries). The server's ledger answers a retried id from what it
- * recorded, so a restart never runs twice. onWait hears when the answer has
- * to wait for the phone to be back; at is when it was tapped, if not now. */
+/* A write: a fresh request_id, and one retry with the SAME id after the next reconnect when
+ * the phone lost the request, if that comes soon enough (flushRetries). The server's ledger
+ * answers a retried id from what it recorded, so a restart never runs twice. onWait hears
+ * when the answer waits for the phone to be back; at is when it was tapped, if not now. */
 async function apiWrite(path, body, verb, onWait, at) {
   const id = newRequestId();
   const pending = {
@@ -819,21 +817,19 @@ async function apiWrite(path, body, verb, onWait, at) {
     clearTimeout(late);
     if (res.network) res = Object.assign({}, res, { unconfirmed: true });
   }
-  // A retry lost too may still have run on the machine, and a retry answered
-  // in_progress is the first one still running: either way the ledger reports
-  // the result later, and the action frame then toasts it.
+  // A retry lost too may still have run on the machine, and one answered in_progress is the
+  // first still running: either way the ledger reports the result, and the action frame toasts it.
   if (res.unconfirmed || (res.status === 409 && res.error === "in_progress")) S.orphans.set(id, { verb, at: Date.now() });
   S.pending.delete(id);
   savePending();
   return res;
 }
 
-/* A new socket is open: each write whose request was lost goes out again with its
- * request_id, within RETRY_WITHIN_MS of its tap. An id the machine received is answered
- * from its ledger; one it never received runs now, and an older key would land on
- * whatever the agent shows by then (a "1" answering a prompt that came up since), so an
- * older write is not sent again; nor is one from before an unlock, whose device's ledger
- * may know none of its ids. The page says so, and shows the result if the machine had it. */
+/* A new socket is open: each write whose request was lost goes out again with its request_id,
+ * within RETRY_WITHIN_MS of its tap. An id the machine received is answered from its ledger;
+ * one it never received runs now, and an older key would land on whatever the agent shows by
+ * then, so an older write is not sent again, nor one from before an unlock, whose device's
+ * ledger may know none of its ids. The page says so, and shows the result if the machine had it. */
 function flushRetries() {
   const now = Date.now();
   for (const pending of S.pending.values()) {
@@ -857,10 +853,9 @@ function dropRetries() {
   }
 }
 
-/* Keys to one agent go one at a time, each once the one before it was answered: sent
- * together (two quick taps, or two lost ones resent), the machine could type a later one
- * first. A key behind one that did not go through, or that waited past RETRY_WITHIN_MS,
- * is not sent ("held"). send(at) sends it, at being when it was tapped. */
+/* Keys to one agent go one at a time, each once the one before it was answered, so the
+ * machine never types a later one first. A key behind one that did not go through, or that
+ * waited past RETRY_WITHIN_MS, is not sent ("held"). send(at) sends it, tapped at at. */
 const keyTurns = new Map();
 
 function keysInTurn(pid, label, send) {
@@ -1585,9 +1580,9 @@ function toUnlock() {
   S.sockState = "idle";
   if (sock) sock.close(1000);
   if (!S.route || S.route.name !== "unlock") pageGo("#/unlock", true);
-  // Already at #/unlock, as a page (re)loaded there is: its route was drawn while
-  // the boot still asked who this is, so no form is on screen and no hashchange
-  // will come. Draw it now. A form already shown keeps what is typed in it.
+  // Already at #/unlock, as a page (re)loaded there is: its route was drawn while the boot
+  // still asked who this is, so no form is on screen and no hashchange will come. Draw it
+  // now. A form already shown keeps what is typed in it.
   else if (!S.view) renderRoute();
 }
 
@@ -1916,9 +1911,8 @@ VIEWS.card = (route, main) => {
   return { needs: draw, cleanup: () => { if (entry) entry.drop(); } };
 };
 
-/* A quick answer. Its row waits while it is in flight: a second tap would go out
- * under a second request_id, and the server's re-check would answer it "no longer
- * needs you" because the first one worked. */
+/* A quick answer. Its row waits while it is in flight: a second tap, under a second
+ * request_id, would be answered "no longer needs you" as the first one worked. */
 async function answerCard(item, answer, row) {
   const keys = Array.isArray(answer.keys) ? answer.keys.filter((key) => typeof key === "string") : [];
   if (!keys.length) return;
@@ -2430,9 +2424,8 @@ function noteComposer(pid) {
 
 // --- one agent: live pane, transcript, card, input bar and key pad (SPEC §6.3) ---
 
-/* Draws pane frames into a pre, replacing only the rows that changed, so the
- * scroll position holds; the cursor's cell is inverted, unless the program hid
- * its cursor (Claude Code does): drawn anyway, it was a stray block. */
+/* Draws pane frames into a pre, replacing only the rows that changed, so the scroll
+ * position holds; the cursor's cell is inverted, unless the program hid it (Claude Code does). */
 function paneRenderer(pre) {
   const rows = [];
   return (payload) => {
@@ -2483,8 +2476,7 @@ const PAD_MORE = [
   ["F8", "F8"], ["F9", "F9"], ["F10", "F10"], ["F11", "F11"], ["F12", "F12"],
   ["^L", "C-l"], ["^R", "C-r"], ["^U", "C-u"], ["^O", "C-o"], ["^C", "C-c"], ["^D", "C-d"],
 ];
-/* What a screen reader says for a key whose label is a glyph or a short form: "⏎" was
- * read out as a symbol, or not at all, never as the Enter it sends. */
+/* What a screen reader says for a key whose label is a glyph or a short form ("⏎" is Enter). */
 const KEY_SPOKEN = Object.freeze({
   Escape: "Escape", Enter: "Enter", Up: "Up arrow", Down: "Down arrow", Left: "Left arrow", Right: "Right arrow",
   BTab: "Shift Tab", BSpace: "Backspace", PageUp: "Page up", PageDown: "Page down",
@@ -2519,7 +2511,7 @@ VIEWS.agent = (route, main) => {
     const current = row();
     return current && typeof current.agent.id === "string" ? current.agent.id : null;
   };
-  // idNow: a sheet opened before the fleet came looks again at its tap; it kept that null.
+  // idNow: a sheet opened before the fleet came looks again at its tap.
   const ctx = () => ({ pid, label, agentId: idNow(), needsId: null, item: null, idNow });
   const actionsMenu = () => {
     const current = row();
@@ -2571,9 +2563,8 @@ VIEWS.agent = (route, main) => {
     let cursor = null;
     let loads = 0;
     older.hidden = true;
-    // The newest read is the one drawn: Load older waits while one is out (a second tap put
-    // the same page in twice), a Refresh drops an older read still out (spliced onto the
-    // newest page, it left a gap Load older never filled), and so does leaving the tab.
+    // The newest read is the one drawn: Load older waits while one is out, and a Refresh, or
+    // leaving the tab, drops an older read still out, which would leave a gap in the pages.
     const load = async (before) => {
       const seq = ++loads;
       older.disabled = true;
@@ -2643,11 +2634,10 @@ function drawExplainability(body, card) {
   body.appendChild(el("pre", "mono", lines.join("\n")));
 }
 
-/* The bar under the pane: a growing textarea, ⏎ on by default (text left in
- * Claude Code's input box holds back its next question), Send, and the key
- * pad, which the soft keyboard and it never share the screen with. blind: no pane
- * (Transcript), so Send types nothing while a prompt may be up. pin(): the agent_id of
- * what the tab shows, which each tap carries. */
+/* The bar under the pane: a growing textarea, ⏎ on by default (text left in Claude Code's
+ * input box holds back its next question), Send, and the key pad, which the soft keyboard
+ * and it never share the screen with. blind: no pane (Transcript), so Send types nothing
+ * while a prompt may be up. pin(): the agent_id of what the tab shows, each tap carries. */
 function inputBar(pid, label, cleanups, blind, pin) {
   const bar = el("div", "inputbar");
   const line = el("div", "row-inline");
@@ -2696,7 +2686,7 @@ function inputBar(pid, label, cleanups, blind, pin) {
   }
   let lastEsc = 0;
   // A pad key says "sending" until every tap of it was answered, and stays live: keys go one
-  // at a time (keysInTurn), and a tap behind a slow one showed nothing until its toast.
+  // at a time (keysInTurn), so a tap behind a slow one would show nothing until its toast.
   const sending = (tapped, by) => {
     if (!tapped) return;
     tapped.sending = (tapped.sending || 0) + by;
@@ -2708,9 +2698,8 @@ function inputBar(pid, label, cleanups, blind, pin) {
     sending(tapped, -1);
     if (res.ok) return true;
     if (res.status === 409 && res.error === "double_press") {
-      // Asked on this agent's own screen, over no other sheet: the answer can come after
-      // the human moved on, and a sheet in its place would put Send and exit where
-      // another agent's button was. what: Ctrl-C or Ctrl-D.
+      // Asked on this agent's own screen, over no other sheet: the answer can come after the
+      // human moved on, where Send and exit would sit on another's button. what: Ctrl-C or Ctrl-D.
       if (onAgent({ pid, label }) && !sheetOpen()) {
         confirmSheet("Send " + what + " to " + label + " again?", "A second " + what + " within 3 s exits Claude Code, and " + label + " with it.",
           "Send and exit", () => post(Object.assign({}, body, { confirm_exit: true }), what, tapped));
@@ -2744,8 +2733,7 @@ function inputBar(pid, label, cleanups, blind, pin) {
     }
     post(body, "Key " + key, tapped);
   };
-  // Send needs words. An empty box with ⏎ on was a bare Enter into the pane, which
-  // picks a dialog's highlighted option ("1. Yes"); Enter on its own is the pad's.
+  // Send needs words: a bare Enter picks a dialog's highlighted option ("1. Yes"), and is the pad's.
   const sendText = async () => {
     const value = text.value;
     if (!value) {

@@ -1155,6 +1155,32 @@ def test_past_the_device_cap_with_every_device_signed_in_an_unlock_is_refused_40
     assert all(phone.get(f"{base(runtime)}/api/board").status_code == 200 for phone in phones[:3])
 
 
+def test_a_device_removed_to_make_room_is_named_on_the_audit_trail_and_in_the_log(
+    app: Any, runtime: Runtime, clock: Clock, monkeypatch: pytest.MonkeyPatch, caplog: Any
+) -> None:
+    """The cap's removal took a device and its push subscription with nothing on the trail,
+    writes off too: the owner saw the device go, its notifications stop, and no line said
+    why, where a revoke and a known device's last wrong guess are both recorded (sweep 5 of
+    #243). The unlock that made room says which device it removed, before the free text."""
+    monkeypatch.setattr(remote_server, "DEVICES_MAX", 2)
+    owner, reader, third = (_from(app, f"198.51.100.{90 + n}") for n in range(3))
+    assert unlock(owner, runtime).status_code == 200
+    (owned,) = runtime.device_ids()
+    clock.advance(hours=2)
+    assert unlock(reader, runtime).status_code == 200
+    clock.advance(hours=23)  # the owner's device is signed out; the reader's is used
+    assert reader.get(f"{base(runtime)}/api/board").status_code == 200
+    with caplog.at_level("INFO", logger="aisquare.services.remote_server"):
+        made = unlock(third, runtime)
+    assert made.status_code == 200, made.text
+    kept, newest = runtime.device_ids()
+    assert owned not in (kept, newest) and _devices_on_disk() == [kept, newest]
+    _ts, device, endpoint, summary = _audit_lines()[-1]
+    assert (device, endpoint) == (newest, "unlock")
+    assert summary.startswith(f"device {newest} evicted {owned} ua="), summary
+    assert any(owned in record.getMessage() for record in caplog.records)
+
+
 def test_an_open_socket_closes_4401_when_its_device_goes(
     app: Any, runtime: Runtime, clock: Clock
 ) -> None:

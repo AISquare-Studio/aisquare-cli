@@ -1390,12 +1390,16 @@ class Runtime:
                     found = device
         return found
 
-    def unlock_device(self, password: str, ua: str) -> tuple[str, Device] | None:
+    def unlock_device(
+        self, password: str, ua: str, *, evicted: list[str] | None = None
+    ) -> tuple[str, Device] | None:
         """A new device and its cookie's secret when ``password`` is right, else ``None``.
 
         Compared before ``remote.json.lock`` is taken, so a wrong guess, the common
         case while someone is guessing, waits on no other process here; and compared
-        again under the lock, since a ``regenerate-password`` may land in between.
+        again under the lock, since a ``regenerate-password`` may land in between. The
+        id of a device it removed to make room (:meth:`_make_room_for_a_device`) is
+        appended to ``evicted``, for the caller to put on the audit trail.
         """
         import secrets
 
@@ -1420,28 +1424,31 @@ class Runtime:
                 expires_at=_iso_seconds(now + DEVICE_LIFETIME),
             )
             state = self._state
-            self._make_room_for_a_device(now)  # a drop, as a revoke: no undo (_write_state)
+            room = self._make_room_for_a_device(now)  # a drop, as a revoke: no undo
             state.devices.append(device)
 
             def unmade() -> None:
                 state.devices = [kept for kept in state.devices if kept is not device]
 
             self._write_state(state, undo=unmade)
+            if room is not None and evicted is not None:
+                evicted.append(room)
             return secret, device
 
-    def _make_room_for_a_device(self, now: datetime) -> None:
+    def _make_room_for_a_device(self, now: datetime) -> str | None:
         """Under the file lock, before an unlock adds a device: past :data:`DEVICES_MAX`,
         drop the one unused longest of those signed out or expired, as a revoke would (its
-        push subscription goes at the next push); with every one signed in, 409
-        ``too_many_devices`` and nothing changes."""
+        push subscription goes at the next push), and give its id; with every one signed
+        in, 409 ``too_many_devices`` and nothing changes."""
         if len(self._state.devices) < DEVICES_MAX:
-            return
+            return None
         idle = [device for device in self._state.devices if not device.device_signed_in(now)]
         if not idle:
             raise RequestError(409, "too_many_devices", TOO_MANY_DEVICES)
         never = datetime.min.replace(tzinfo=UTC)  # a stamp that does not read: unused longest
         oldest = min(idle, key=lambda device: _remote_instant(device.last_seen) or never)
         self._drop(oldest.id, WS_CLOSE_UNAUTHORIZED)
+        return oldest.id
 
     def device_for_cookie(self, secret: str | None) -> Device | None:
         """The SIGNED-IN device behind a cookie, its ``last_seen`` refreshed; ``None`` otherwise.
@@ -4572,8 +4579,12 @@ def build_remote_app(
         a CLI command held it stalled every socket and every read for seconds. A known
         device's last allowed wrong guess revokes it, and says so in the log and on
         the audit trail: that is most likely a stolen cookie, and its owner would
-        otherwise find only a device gone.
+        otherwise find only a device gone. So does an unlock that removed a signed-out
+        device to make room (:data:`DEVICES_MAX`): it took that device's push
+        subscription with it, and was the one removal of a device nothing recorded,
+        while writes are off too (sweep 5 of #243).
         """
+        evicted: list[str] = []
         with unlock_turn:
             known = next(
                 (found for found in map(runtime.known_device_for_cookie, cookies) if found), None
@@ -4581,11 +4592,11 @@ def build_remote_app(
             if known is None and not budget.unlock_budget_allows(direct):
                 return budget.budget_exhausted_until() or _remote_now()
             if known is None:
-                unlocked = runtime.unlock_device(password, ua)
+                unlocked = runtime.unlock_device(password, ua, evicted=evicted)
             elif runtime.password_matches(password):
                 # Its own device again; one revoked or expired since the lookup is a new one.
                 unlocked = runtime.reactivate_device(known.id, ua) or runtime.unlock_device(
-                    password, ua
+                    password, ua, evicted=evicted
                 )
             else:
                 unlocked = None
@@ -4604,6 +4615,10 @@ def build_remote_app(
             secret, device = unlocked
             reactivated = known is not None and device.id == known.id
             summary = f"device {device.id} " + ("reactivated" if reactivated else f"ua={ua[:60]}")
+            if evicted:
+                made_room = f"device {evicted[0]} removed for {device.id}: {DEVICES_MAX} at most"
+                log.info("remote: %s", made_room)
+                summary = f"device {device.id} evicted {evicted[0]} ua={ua[:60]}"
             kit.kit_audit(device, "unlock", summary)
             return secret, device, reactivated
 

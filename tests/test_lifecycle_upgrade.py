@@ -2607,6 +2607,42 @@ def test_settings_that_can_hold_a_release_back_are_named_as_recorded_and_not_com
 
 
 @pytest.mark.parametrize(
+    ("withs", "options", "keys"),
+    [
+        ('{ name = "rich", specifier = "<14.3" }', "", "--with rich<14.3"),
+        (
+            '{ name = "rich", specifier = "<14.3" }',
+            _GLOBAL_COOLDOWN,
+            "--with rich<14.3, exclude-newer, exclude-newer-span",
+        ),
+        (
+            '{ name = "truststore", marker = "sys_platform == \'linux\'" }',
+            "",
+            "--with truststore; sys_platform == 'linux'",
+        ),
+    ],
+    ids=["a-pin", "a-pin-beside-a-cutoff", "a-marker"],
+)
+def test_a_with_requirement_that_carries_a_specifier_holds_the_release_back(
+    runner: CliRunner, tool: Tool, machine: Machine, withs: str, options: str, keys: str
+) -> None:
+    """`--with 'rich<14.3'` keeps 0.7.0, which needs rich>=14.3, out of reach (measured, uv
+    0.12.19). Not counted, --check said "an update is available" and the run failed as the
+    silent no-op, a true ✓ beside a compared cutoff included (review of #257's fixes). A
+    bare `--with tiktoken` (every other test here) is still compared."""
+    tail = f"\n[tool.options]\n{options}\n" if options else ""
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        _receipt(_OURS_PINNED, withs, tail=tail), encoding="utf-8"
+    )
+
+    report = _one_object(runner.invoke(app, ["--json", "upgrade", "--check"]).stdout)
+
+    said = f"PyPI was not asked: this install's uv settings can hold releases back ({keys})"
+    assert machine.lookups == 0 and report["latest_error"] == said, report
+    assert "--with" in " ".join(report["argv"]), "and it is restated, so the route still runs"
+
+
+@pytest.mark.parametrize(
     "receipt",
     ["[tool\nrequirements = [", "[something]\nelse = 1\n", None],
     ids=["unreadable", "no-tool-table", "constraints"],
@@ -2633,6 +2669,12 @@ def test_a_receipt_that_cannot_say_what_holds_it_back_is_not_compared(
     unread = f"PyPI was not asked: this install's uv receipt could not be read ({tool.prefix}"
     held = "PyPI was not asked: this install's uv settings can hold releases back (constraints)"
     assert report["latest_error"].startswith(unread if receipt else held), report
+    if receipt:
+        # Every line about it, the refusal's included, says it could not be read.
+        assert report["reason"].startswith(f"its uv receipt could not be read ({tool.prefix}"), (
+            report
+        )
+        assert "records an unreadable" not in json.dumps(report), report
 
 
 @pytest.mark.parametrize(
@@ -2642,6 +2684,8 @@ def test_a_receipt_that_cannot_say_what_holds_it_back_is_not_compared(
         ('config-settings = { foo = "bar" }', None),
         ('build-isolation = "shared"', None),
         ('extra-build-dependencies = { pkg = ["setuptools"] }', None),
+        ('keyring-provider = "subprocess"\nno-sources = true', None),
+        ("no-index = false\nno-build = false\nno-binary = false\nno-sources = false", None),
         (_GLOBAL_COOLDOWN + 'torch-backend = "cpu"', "--exclude-newer P30D"),
     ],
     ids=[
@@ -2649,6 +2693,8 @@ def test_a_receipt_that_cannot_say_what_holds_it_back_is_not_compared(
         "config-settings",
         "build-isolation",
         "extra-build-dependencies",
+        "keyring-provider-and-no-sources",
+        "defaults-written-as-false",
         "a-build-setting-beside-a-cutoff",
     ],
 )

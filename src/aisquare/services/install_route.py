@@ -508,6 +508,7 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
         requirements = []
     ours: dict[str, Any] | None = None
     withs: list[str] = []
+    held_by_withs: list[str] = []
     for requirement in requirements:
         if not isinstance(requirement, dict):
             refused.append("a requirement uv wrote in a shape this CLI does not know")
@@ -518,8 +519,13 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
         text = _requirement_string(requirement)
         if text is None:
             refused.append(f"--with {requirement.get('name')} from a source a command cannot name")
+            held_by_withs.append(f"--with {requirement.get('name')}")
         else:
             withs.append(text)
+            if requirement.get("specifier") or requirement.get("marker"):
+                # `--with 'rich<14.3'` held 0.7.0 back, which needs rich>=14.3 (measured, uv
+                # 0.12.19), while --check said an update is available (review of #257).
+                held_by_withs.append(f"--with {text}")
     extras: tuple[str, ...] = ()
     source: tuple[str, str] | None = None
     subdirectory: str | None = None
@@ -545,11 +551,16 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
             refused.append(f"{key} (uv takes those only as files)")
     options = tool.get("options")
     flags: list[str] = []
-    holds = [key for key in _HOLDING_LISTS if tool.get(key)]
+    holds = [*held_by_withs, *(key for key in _HOLDING_LISTS if tool.get(key))]
     if isinstance(options, dict):
         flags, refused_options = _option_flags(options)
         refused.extend(refused_options)
-        holds.extend(key for key in options if key not in _BUILD_ONLY)
+        # A key recorded as `false` or empty sets nothing (`no-index = false`, measured).
+        holds.extend(
+            key
+            for key, value in options.items()
+            if key not in _BUILD_ONLY and value not in (False, "", [], {})
+        )
     python = tool.get("python")
     return UvReceipt(
         extras=extras,
@@ -579,6 +590,11 @@ _BUILD_ONLY = frozenset(
         "extra-build-variables",
         "link-mode",
         "compile-bytecode",
+        # Copied from a user's uv.toml into every receipt (measured): how an index is
+        # authenticated, and whether a project's [tool.uv.sources] apply, not which
+        # aisquare-cli release an index offers (review of #257).
+        "keyring-provider",
+        "no-sources",
     }
 )
 #: The receipt's own lists that constrain the resolution.
@@ -1029,6 +1045,8 @@ def not_automated(route: InstallRoute) -> str | None:
     if route.kind != UV_TOOL:
         return _NOT_AUTOMATED.get(route.kind, "this install is not one aisquare manages")
     receipt = route.receipt or UvReceipt()
+    if receipt.unreadable is not None:
+        return f"its uv receipt could not be read ({receipt.unreadable})"
     if receipt.unrestatable:
         return (
             f"its uv receipt records {'; '.join(receipt.unrestatable)}, which a reinstall "

@@ -2074,9 +2074,42 @@ def _remote_facts_refusal(agent: FleetAgent, facts: PaneFacts | None) -> str | N
     return None
 
 
+def _remote_keys_row(target: ProjectInfo, label: str, pin: str | None) -> FleetAgent:
+    """The live row holding ``label`` (:func:`_remote_live_row`), which keys pinned to
+    ``pin`` (``send-keys``' ``agent_id``) go to only when it is that row: 409 ``stale``
+    otherwise, ``current`` naming the row that holds the label now, or none.
+
+    A pinned key that finds no live row is ``stale`` as well, as a pinned action is
+    (``remote_actions.action_gone``): in the gap of a restart's hand-over, after the old
+    row ended and before the new one was made, it was 404 ``no_such_agent``, and the page
+    left the agent's screen for the fleet it was about to come back to (merge of round 5
+    of #243). Unpinned, it is still ``no_such_agent``.
+    """
+    try:
+        agent = _remote_live_row(target, label)
+    except NoSuchAgent:
+        if pin is None:
+            raise
+        said = f"there is no agent {label!r} in {target.root.name or target.id} now"
+        raise RequestError(
+            409, "stale", f"{said} — nothing was sent", current={"agent_id": None}
+        ) from None
+    if pin is not None and agent.id != pin:
+        raise RequestError(
+            409,
+            "stale",
+            f"{label!r} is another agent now ({agent.id}) — nothing was sent",
+            current={"agent_id": agent.id},
+        )
+    return agent
+
+
 @contextlib.contextmanager
-def _remote_keys_turn(target: ProjectInfo, label: str) -> Iterator[FleetAgent]:
-    """Hold the agent's action lock while keys go to its pane; the row, read under it.
+def _remote_keys_turn(
+    target: ProjectInfo, label: str, pin: str | None = None
+) -> Iterator[FleetAgent]:
+    """Hold the agent's action lock while keys go to its pane; the row, read under it and
+    judged against ``pin`` there (:func:`_remote_keys_row`).
 
     :func:`remote_agent_lock` is the one lock for every action on one agent, and keys
     typed while an action is half done land in the middle of it: in an Interrupt &
@@ -2097,7 +2130,7 @@ def _remote_keys_turn(target: ProjectInfo, label: str) -> Iterator[FleetAgent]:
     showed by then, the replacement a restart had started when that action was on it
     (review of #243, round 3).
     """
-    _remote_live_row(target, label)
+    _remote_keys_row(target, label, pin)
     lock = remote_agent_lock(target.id, label)
     arrived = _WRITE_ARRIVED.get()
     wait = SEND_KEYS_LOCK_WAIT_SECONDS
@@ -2111,7 +2144,7 @@ def _remote_keys_turn(target: ProjectInfo, label: str) -> Iterator[FleetAgent]:
             409, "busy", f"another action on {label} is still running — nothing was sent"
         )
     try:
-        yield _remote_live_row(target, label)
+        yield _remote_keys_row(target, label, pin)
     finally:
         lock.release()
 
@@ -2904,9 +2937,10 @@ def live_writes() -> Writes:
         its keys are how one is answered, so they go without it.
 
         ``agent_id`` pins the keys to the row whose screen they were typed at, which a
-        pane frame and a transcript page name: once another row holds the label,
-        nothing is sent (409 ``stale``, ``current`` naming that row), as for every
-        other write that types into an agent. Unpinned, a key tapped at the prompt the
+        pane frame and a transcript page name: once another row holds the label, or none
+        does, nothing is sent (409 ``stale``, ``current`` naming that row or none,
+        :func:`_remote_keys_row`), as for every other write that types into an agent.
+        Unpinned, a key tapped at the prompt the
         phone showed went into the replacement a ``fleet restart`` or a usage-limit
         hand-over had started since, neither of which takes the agent's lock: into its
         input box, ahead of the line the fleet types into a resumed agent, or into its
@@ -2940,14 +2974,7 @@ def live_writes() -> Writes:
         summary = (
             f"{label}@{target.id} text={len(text or '')}ch keys={_audit_keys(keys)} enter={enter}"
         )
-        with _remote_keys_turn(target, label) as agent:
-            if pin is not None and agent.id != pin:
-                raise RequestError(
-                    409,
-                    "stale",
-                    f"{label!r} is another agent now ({agent.id}) — nothing was sent",
-                    current={"agent_id": agent.id},
-                )
+        with _remote_keys_turn(target, label, pin) as agent:
             server = fleet_service.server_for(agent.tmux_socket)
             refusal = _remote_pane_refusal(server, agent)
             if refusal is not None:

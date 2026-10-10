@@ -568,8 +568,8 @@ that cannot see the pane adds `"dialog_guard": true`, as the Transcript tab
 does, and nothing is typed while the agent may be showing a prompt (409
 `dialog_open`). A pane frame, `api/panes` and a transcript page name the agent
 they were read from (`agent_id`); sent with the keys, as the page sends it,
-nothing is typed once another agent holds the label, after a restart or a
-switch (409 `stale`).
+nothing is typed once another agent holds the label, or none does yet, after a
+restart or a switch (409 `stale`).
 
 The code is `src/aisquare/services/remote_server.py` (the server and its gates)
 and `src/aisquare/services/remote_page.py` (the bundled page, whose files are in

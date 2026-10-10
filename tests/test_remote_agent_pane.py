@@ -667,6 +667,32 @@ def test_keys_pinned_to_the_row_that_holds_the_label_are_typed(
     assert tmux.sent == [("keys", "%2", "1"), ("keys", "%5", "2")]
 
 
+def test_keys_pinned_to_a_row_that_ended_with_no_replacement_yet_are_stale_not_a_gone_agent(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In the gap of a restart's hand-over the old row has ended and the new one is not made
+    yet. A pinned key there was 404 ``no_such_agent``, and the page left the agent's screen
+    for the fleet; a pinned action answers that gap 409 ``stale`` naming no agent
+    (``remote_actions.action_gone``), and the page stays where the replacement will show
+    (merge of round 5 of #243). Unpinned, no row is still a gone agent."""
+    tmux = _serving(monkeypatch, Tmux(OLDER))
+    with store_session() as store:
+        store.end_fleet_agent("agt_coder-1")
+    send = live_writes().handlers["send-keys"]
+    with pytest.raises(RequestError) as refused:
+        send({"agent": "coder-1", "agent_id": "agt_coder-1", "keys": ["1"]})
+    assert (refused.value.status, refused.value.error, refused.value.extra) == (
+        409,
+        "stale",
+        {"current": {"agent_id": None}},
+    )
+    assert refused.value.message == "there is no agent 'coder-1' in proj now — nothing was sent"
+    with pytest.raises(NoSuchAgent):
+        send({"agent": "coder-1", "keys": ["1"]})
+    assert tmux.sent == []
+    assert (project.id, "coder-1") not in remote_server._agent_locks, "no row, no lock"
+
+
 def test_a_row_replaced_while_its_key_waits_for_the_agents_lock_gets_nothing(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

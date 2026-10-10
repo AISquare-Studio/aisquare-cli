@@ -376,15 +376,9 @@ class UvReceipt:
     bin_dir: Path | None = None
     """Where uv put the ``aisquare`` executable — so a reinstall puts it there again."""
     unrestatable: tuple[str, ...] = ()
-    package_cutoff: bool = False
-    """Whether uv recorded an upload-date cutoff of ``aisquare-cli``'s own
-    (``exclude-newer-package``: a timestamp or a span), in place of the global one."""
-    package_exempt: bool = False
-    """Whether uv recorded ``aisquare-cli = false`` there: no cutoff on aisquare-cli itself,
-    while the packages it needs stay under the global one."""
-    unstated: tuple[str, ...] = ()
-    """What of :attr:`unrestatable` may change which aisquare-cli release uv takes: all of
-    it but the per-package entries that cannot (``false`` for another package)."""
+    holds: tuple[str, ...] = ()
+    """The settings uv recorded that can change which aisquare-cli release it resolves, by
+    their receipt keys (:data:`_RELEASE_SETTINGS`), or why the receipt says nothing."""
 
 
 def _canonical(name: object) -> str:
@@ -496,10 +490,14 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        return UvReceipt(unrestatable=(f"an unreadable {RECEIPT_NAME} ({exc})",))
+        return UvReceipt(
+            unrestatable=(f"an unreadable {RECEIPT_NAME} ({exc})",),
+            holds=(f"an unreadable {RECEIPT_NAME}",),
+        )
     tool = data.get("tool")
     if not isinstance(tool, dict):
-        return UvReceipt(unrestatable=(f"a {RECEIPT_NAME} with no [tool] table",))
+        missing = f"a {RECEIPT_NAME} with no [tool] table"
+        return UvReceipt(unrestatable=(missing,), holds=(missing,))
     refused: list[str] = []
     requirements = tool.get("requirements")
     if not isinstance(requirements, list):
@@ -543,12 +541,11 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
             refused.append(f"{key} (uv takes those only as files)")
     options = tool.get("options")
     flags: list[str] = []
-    own_cutoff, exempt = False, False
-    others: tuple[str, ...] = ()
+    holds = [key for key in _HOLDING_LISTS if tool.get(key)]
     if isinstance(options, dict):
         flags, refused_options = _option_flags(options)
         refused.extend(refused_options)
-        own_cutoff, exempt, others = _per_package(options.get("exclude-newer-package"))
+        holds.extend(key for key, value in options.items() if _holds(key, value))
     python = tool.get("python")
     return UvReceipt(
         extras=extras,
@@ -559,39 +556,49 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
         subdirectory=subdirectory,
         bin_dir=_bin_dir(tool.get("entrypoints")),
         unrestatable=tuple(refused),
-        package_cutoff=own_cutoff,
-        package_exempt=exempt,
-        unstated=(
-            *(item for item in refused if item != _PER_PACKAGE_REFUSED),
-            *(f"a uv cutoff for {name} (exclude-newer-package)" for name in others),
-        ),
+        holds=tuple(holds),
     )
 
 
-#: How :func:`_option_flags` refuses uv's per-package cutoffs, which :func:`_per_package`
-#: reads entry by entry.
-_PER_PACKAGE_REFUSED = "uv option exclude-newer-package"
+#: What a receipt can record that changes which aisquare-cli release uv resolves, listed
+#: conservatively: where releases come from, which of them count, and upload-date cutoffs.
+#: Every other option uv records (torch-backend, config-settings, build isolation, link
+#: mode …) changes only how a release is built or installed (review of #257).
+_RELEASE_SETTINGS = frozenset(
+    {
+        "index-url",
+        "extra-index-url",
+        "find-links",
+        "no-index",
+        "index-strategy",
+        "index",
+        "prerelease",
+        "resolution",
+        "fork-strategy",
+        "exclude-newer",
+        "exclude-newer-span",
+        "exclude-newer-package",
+        "no-build",
+        "no-binary",
+        "no-build-package",
+        "no-binary-package",
+    }
+)
+#: The receipt's own lists that constrain the resolution.
+_HOLDING_LISTS = ("constraints", "overrides")
 
 
-def _per_package(table: object) -> tuple[bool, bool, tuple[str, ...]]:
-    """``(ours, exempt, others)`` from uv's ``exclude-newer-package`` table: whether
-    aisquare-cli has a cutoff of its own, whether it is exempt from every cutoff
-    (``false``), and the other packages that have one. uv writes ``false``, a timestamp or
-    ``{ timestamp, span }`` (measured, uv 0.12.19). An entry or a table of any other shape
-    cannot be shown not to hold a release back, so it counts as a cutoff."""
-    if table is None:
-        return False, False, ()
-    if not isinstance(table, dict):
-        return True, False, ()
-    ours = exempt = False
-    others: list[str] = []
-    for name, entry in table.items():
-        if _canonical(name) == DISTRIBUTION:
-            exempt = exempt or entry is False
-            ours = ours or entry is not False
-        elif entry is not False:
-            others.append(str(name))
-    return ours, exempt and not ours, tuple(others)
+def _holds(key: str, value: object) -> bool:
+    """Whether the recorded option ``key`` can hold an aisquare-cli release back. Of
+    :data:`_RELEASE_SETTINGS`, only an ``exclude-newer-package`` whose every entry is
+    another package's ``false`` cannot: that lifts a cutoff, from that package alone."""
+    if key not in _RELEASE_SETTINGS or value is False:
+        return False
+    if key == "exclude-newer-package" and isinstance(value, dict):
+        return any(
+            _canonical(name) == DISTRIBUTION or entry is not False for name, entry in value.items()
+        )
+    return True
 
 
 def _bin_dir(entrypoints: object) -> Path | None:
@@ -1070,23 +1077,6 @@ def _uv_tool_blocker(route: InstallRoute) -> str | None:
     return None
 
 
-#: Receipt flags that put an index other than PyPI in front of ``@latest``. With
-#: any of them, uv resolves "latest" against that index — extra indexes and
-#: find-links are searched BEFORE the default one — so PyPI's newest number says
-#: nothing about what this install would get.
-_INDEX_FLAGS = frozenset(
-    {"--index-url", "--default-index", "--extra-index-url", "--index", "--find-links", "--no-index"}
-)
-
-
-def own_index(route: InstallRoute) -> str | None:
-    """The index options this install resolves through, or ``None`` when that is PyPI."""
-    if route.receipt is None:
-        return None
-    named = [flag for flag in route.receipt.options if flag in _INDEX_FLAGS]
-    return ", ".join(dict.fromkeys(named)) or None
-
-
 #: The receipt flag that holds ``@latest`` back by upload date: uv takes no release
 #: uploaded after the cutoff (a date, or a span before now), so PyPI's newest may be
 #: one this install would never get, and an unchanged version is no silent no-op.
@@ -1132,29 +1122,12 @@ def cutoff_time(route: InstallRoute, now: datetime) -> datetime | None:
     return _instant(value)
 
 
-def cutoff_of_ours(route: InstallRoute) -> str | None:
-    """The uv cutoff aisquare-cli itself resolves under, as a person reads it: its own
-    (``exclude-newer-package``) when the receipt records one, none when it exempts it,
-    else the global one (:func:`cutoff`)."""
-    receipt = route.receipt or UvReceipt()
-    if receipt.package_cutoff:
-        return f"exclude-newer-package for {DISTRIBUTION}"
-    return None if receipt.package_exempt else cutoff(route)
-
-
 def takes_prereleases(route: InstallRoute, current: str) -> bool:
-    """Whether uv takes pre-releases when this install upgrades to the latest release.
-
-    Then PyPI's ``info.version``, its newest FINAL release, is not what the install gets.
-    uv takes them when the receipt restates ``--prerelease allow``, or when the running
-    release ``current`` is itself one, which the command's ``>=`` names, under any mode
-    but ``disallow`` (measured, uv 0.12.19). Only a uv tool's command asks for ``>=``.
-    """
-    if route.kind != UV_TOOL or route.receipt is None:
-        return False
-    options = route.receipt.options
-    mode = options[options.index("--prerelease") + 1] if "--prerelease" in options[:-1] else None
-    return mode == "allow" or (mode != "disallow" and is_prerelease(current))
+    """Whether uv takes pre-releases when this install upgrades to the latest release, so
+    PyPI's ``info.version``, its newest FINAL release, is not what it gets: when the release
+    that runs, ``current``, is itself one, which a uv tool's ``>=`` names (measured, uv
+    0.12.19). A recorded ``prerelease`` setting is never compared (:data:`_RELEASE_SETTINGS`)."""
+    return route.kind == UV_TOOL and is_prerelease(current)
 
 
 def find_uv() -> str | None:

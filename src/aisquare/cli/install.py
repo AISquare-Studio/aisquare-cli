@@ -110,10 +110,9 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
         if plan.target is None and plan.update_available is None:
             # Nothing to compare (an index of its own, PyPI out of reach): "upgrade with"
             # sent every run to a reinstall that changed nothing (review of #257).
-            newest = _newest(install_route.cutoff_of_ours(plan.route))
             _say(
                 "can't tell whether anything is newer: `aisquare upgrade` reinstalls the "
-                f"newest release {newest}, which may be the one you have"
+                "newest release uv allows this install, which may be the one you have"
             )
             return
         pin = f" --version {plan.target}" if plan.target else ""
@@ -132,12 +131,6 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
         _say(f"(`aisquare upgrade` does not run it: {plan.reason})")
 
 
-def _newest(cutoff: str | None) -> str:
-    """What holds the latest release back when PyPI's word is not used: a uv cutoff, else
-    the install's index."""
-    return "your uv cutoff allows" if cutoff is not None else "your package index serves"
-
-
 def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
     if get_state().json_output:
         _echo_json({"dry_run": True, **_plan_json(plan)})
@@ -148,10 +141,9 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
         where += " (the newest your uv cutoff allows)" if held else " (latest on PyPI)"
     _say(f"aisquare {plan.current} → {where}")
     if plan.target is None and plan.latest is not None and plan.latest.version is None:
-        newest = _newest(install_route.cutoff_of_ours(plan.route))
         _say(
-            f"  {plan.latest.error}; uv will install the newest release {newest}, "
-            "which may be the one you have"
+            f"  {plan.latest.error}; uv will install the newest release it allows this "
+            "install, which may be the one you have"
         )
     _say(f"  install: {plan.route.describe()}")
     _say(f"  runs:    {plan.command}")
@@ -206,10 +198,9 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
         return
     if report.version is not None and install_route.same_version(report.version, plan.current):
         # Only reachable when PyPI was not asked or could not answer, or when the receipt uv
-        # wrote shows a cutoff or an index from uv's own settings: otherwise an unchanged
-        # version is a failure (lifecycle._verify).
-        named = f" ({report.cutoff})" if report.cutoff is not None else ""
-        _say(f"✓ aisquare {report.version} is the newest release {_newest(report.cutoff)}{named}")
+        # wrote records a setting that can hold releases back: otherwise an unchanged
+        # version is a failure (lifecycle._verify). Which setting did, it does not guess.
+        _say(f"✓ aisquare {report.version} is the newest release uv allows this install")
     else:
         _say(f"✓ aisquare {report.version} (was {plan.current}) — checked in a new process")
     for hook in report.hooks:

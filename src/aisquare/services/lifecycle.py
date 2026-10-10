@@ -37,7 +37,7 @@ from aisquare.core.config import (
 )
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxServer, TmuxUnavailable
-from aisquare.core.version import DISTRIBUTION, __version__
+from aisquare.core.version import __version__
 from aisquare.core.workspace import current_project
 from aisquare.models import SetupReport
 from aisquare.services import agents as agents_service
@@ -408,9 +408,6 @@ class UpgradeReport:
     problem: str | None = None
     hooks: tuple[HookRefresh, ...] = ()
     notes: tuple[str, ...] = ()
-    cutoff: str | None = None
-    """The uv cutoff the install ran under (``--exclude-newer P14D``), from the receipt uv
-    wrote for it, or ``None``."""
 
     @property
     def installed(self) -> bool:
@@ -482,69 +479,41 @@ def _left_by_move_back(site: HookSite, target: str) -> HookSite:
     return HookSite(site.config_dir, site.programs, why)
 
 
-def _beyond_pypi(route: install_route.InstallRoute) -> str | None:
-    """Why PyPI's newest says nothing about what this install's upgrade gets, or ``None``.
+def _held_back(route: install_route.InstallRoute) -> str | None:
+    """Why PyPI's newest may not be what uv takes for this install, or ``None``.
 
-    In order: it resolves from its own index; its receipt records what may change the
-    release uv takes and a command line cannot restate (an index, constraints, another
-    package's cutoff: ``UvReceipt.unstated``); aisquare-cli has a uv cutoff of its own;
-    aisquare-cli is exempt from the global cutoff, which still holds the packages it needs;
-    or it takes nothing uploaded after the global cutoff, the one case PyPI's upload times
-    answer (:func:`_latest_for`). An exemption with no global cutoff, or another package's,
-    filters nothing aisquare-cli gets: PyPI's newest is what uv takes (review of #257).
+    The settings its uv receipt records that can hold a release back
+    (``UvReceipt.holds``), named as recorded. Nothing more is claimed: three reviews in a
+    row found each finer account of WHY (an index, a cutoff of aisquare-cli's own, an
+    exemption) false for some combination of uv settings (#257).
     """
-    own = install_route.own_index(route)
-    if own is not None:
-        return f"this install resolves from its own index ({own})"
-    receipt = route.receipt or install_route.UvReceipt()
-    if receipt.unstated:
-        return (
-            "its uv receipt records what a command line cannot restate: "
-            f"{'; '.join(receipt.unstated)}"
-        )
-    if receipt.package_cutoff:
-        return f"this install has a uv cutoff of {DISTRIBUTION}'s own (exclude-newer-package)"
-    cutoff = install_route.cutoff(route)
-    if cutoff is not None and receipt.package_exempt:
-        return (
-            f"this install exempts {DISTRIBUTION} from its uv cutoff ({cutoff}), "
-            f"not the packages {DISTRIBUTION} needs"
-        )
-    if cutoff is not None:
-        return f"this install takes no release uploaded after its uv cutoff ({cutoff})"
-    return None
+    holds = route.receipt.holds if route.receipt is not None else ()
+    if not holds:
+        return None
+    return f"this install's uv settings can hold releases back ({', '.join(holds)})"
 
 
-def _global_cutoff_alone(route: install_route.InstallRoute) -> bool:
-    """Whether the global uv cutoff is all that stands between this install and PyPI's
-    newest: :func:`_beyond_pypi`'s last case, the one PyPI's upload times answer."""
-    receipt = route.receipt or install_route.UvReceipt()
-    return (
-        install_route.cutoff(route) is not None
-        and install_route.own_index(route) is None
-        and not receipt.unstated
-        and not receipt.package_cutoff
-        and not receipt.package_exempt
-    )
+def _cutoff_alone(route: install_route.InstallRoute) -> bool:
+    """Whether a global uv cutoff is the only such setting: the one case PyPI's upload times
+    answer, measured with real uv (:func:`_latest_for`)."""
+    holds = route.receipt.holds if route.receipt is not None else ()
+    return bool(holds) and set(holds) <= {"exclude-newer", "exclude-newer-span"}
 
 
 def _latest_for(route: install_route.InstallRoute) -> install_route.LatestRelease:
     """PyPI's newest release, pre-releases counted when this install's upgrade takes them
-    (``install_route.takes_prereleases``); under a uv cutoff, the newest uploaded before it.
+    (``install_route.takes_prereleases``); under a global uv cutoff alone, the newest
+    uploaded before it. Under any other setting that can hold a release back, PyPI's word
+    says nothing about what uv takes, so it is not asked (:func:`_held_back`).
 
-    PyPI is not asked for an install that resolves from its own index, or under a cutoff
-    the receipt does not state in full or that cannot be read: its word says nothing about
-    what that install gets (:func:`_beyond_pypi`). Taken as the target under a cutoff,
-    PyPI's newest failed the unchanged version uv rightly left as §3.9.1's silent no-op;
-    then, not asked, every run and --check found something to do, and each reinstall
-    changed nothing (#257). Compared under the global cutoff beside an override of
-    aisquare-cli's own, --check said "nothing to upgrade" where uv took a newer release.
+    Taken as the target under a cutoff, PyPI's newest failed the unchanged version uv
+    rightly left as §3.9.1's silent no-op; then, not asked, every run and --check found
+    something to do, and each reinstall changed nothing (#257).
     """
-    cutoff = install_route.cutoff(route)
-    why = _beyond_pypi(route)
+    why = _held_back(route)
     before = None
     if why is not None:
-        if _global_cutoff_alone(route):
+        if _cutoff_alone(route):
             before = install_route.cutoff_time(route, datetime.now(UTC))
         if before is None:
             return install_route.LatestRelease(None, f"PyPI was not asked: {why}")
@@ -556,9 +525,9 @@ def _latest_for(route: install_route.InstallRoute) -> install_route.LatestReleas
     if before is not None:
         asked["uploaded_before"] = before
     found = install_route.fetch_latest(**asked)
-    if cutoff is None or found.version is None:
+    if before is None or found.version is None:
         return found
-    return replace(found, cutoff=cutoff)
+    return replace(found, cutoff=install_route.cutoff(route))
 
 
 def runs_this_install(binary: agent_core.HookBinary, found: install_route.Facts) -> bool:
@@ -787,19 +756,16 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
             plan, exit_code=code, version=kept, problem=f"{plan.argv[0]} exited {code}"
         )
     ran = _as_recorded(plan.route)
-    # What held aisquare-cli back, as `_verify` judges it: a cutoff of its own from uv's
-    # settings was reported as "your package index served" (review of #257).
-    cutoff = install_route.cutoff_of_ours(ran) or install_route.cutoff_of_ours(plan.route)
     version, problem = _verify(plan, ran)
     if problem is not None:
-        return UpgradeReport(plan, exit_code=code, version=version, problem=problem, cutoff=cutoff)
+        return UpgradeReport(plan, exit_code=code, version=version, problem=problem)
     notes: list[str] = []
     latest = plan.latest_version
     moved_elsewhere = latest is not None and not install_route.same_version(version or "", latest)
     pypis = plan.latest is not None and plan.latest.cutoff is None
     if plan.target is None and version is not None and moved_elsewhere and pypis:
-        held = "your uv cutoff allows" if cutoff is not None else "your package index served"
-        notes.append(f"PyPI's latest is {latest}; {held} {version}")
+        # Not why: "your package index served" named an index that had served the newer one.
+        notes.append(f"PyPI's latest is {latest}; uv allows {version} here")
     notes.append(
         f"asq and `aisquare serve` processes that were already running keep {plan.current} "
         "until they are restarted"
@@ -807,13 +773,9 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
     if version is not None and install_route.is_newer(plan.current, version):
         # A move BACK lands on a release that may predate `agents refresh-hooks` (0.7 and
         # earlier do): the plan left every site, each saying so with its remedy.
-        return UpgradeReport(
-            plan, exit_code=code, version=version, notes=tuple(notes), cutoff=cutoff
-        )
+        return UpgradeReport(plan, exit_code=code, version=version, notes=tuple(notes))
     hooks = tuple(_refresh(site, plan.route.facts) for site in plan.refresh)
-    return UpgradeReport(
-        plan, exit_code=code, version=version, hooks=hooks, notes=tuple(notes), cutoff=cutoff
-    )
+    return UpgradeReport(plan, exit_code=code, version=version, hooks=hooks, notes=tuple(notes))
 
 
 def _as_recorded(route: install_route.InstallRoute) -> install_route.InstallRoute:
@@ -868,9 +830,9 @@ def _verify(plan: UpgradePlan, ran: install_route.InstallRoute) -> tuple[str | N
     process reports — the pin when one was asked for, otherwise any move that is
     not BACK: a downgrade is only done by asking for one with ``--version``. An
     unchanged version is a failure exactly when PyPI said there is something
-    newer; when PyPI was not asked or could not answer, or the install ``ran``
-    under (:func:`_as_recorded`) has its own index or a uv cutoff, it is the newest
-    release the index serves, or the cutoff allows (:func:`_beyond_pypi`).
+    newer; when PyPI was not asked or could not answer, or the receipt uv wrote for the
+    install that ``ran`` (:func:`_as_recorded`) records a setting that can hold releases
+    back (:func:`_held_back`), it is the newest release uv allows this install.
     """
     found, problem = _installed_version(plan)
     if found is None:
@@ -887,9 +849,9 @@ def _verify(plan: UpgradePlan, ran: install_route.InstallRoute) -> tuple[str | N
     latest = plan.latest_version
     if not install_route.same_version(found, plan.current) or latest is None:
         return found, None
-    if _beyond_pypi(ran) is not None:
-        # A cutoff or an index in uv's own settings, which only the receipt uv just wrote
-        # shows: blamed on §3.9.1, the newest release it allows failed (sweep of #257).
+    if _held_back(ran) is not None:
+        # A setting from uv's own config, which only the receipt uv just wrote shows:
+        # blamed on §3.9.1, the newest release it allows failed (sweep of #257).
         return found, None
     return found, (
         f"uv reported success but aisquare still reports {found}, not {latest} — the "

@@ -1215,6 +1215,7 @@ class RemotePushSender:
         now = self._clock()
         if self._kit.runtime.auto_off_passed(now):
             self._window, self._window_closes, self._owed = set(), None, {}
+            self._untaken, self._system_sends = {}, {}
             return PUSH_SYSTEM_CHECK_SECONDS
         if self._window_closes is not None and now >= self._window_closes:
             self._push_close_window(now)
@@ -1275,7 +1276,8 @@ class RemotePushSender:
         most :data:`PUSH_RETRIES_MAX` times; after that it is recorded all the same, so a
         service that stays down costs a few sends, never one every turn. Recorded before
         the device's turn came again, it is still owed to it: what another device's
-        service took is that device's.
+        service took is that device's. Owed nothing any more, a device's next notification,
+        of whatever comes next, has its whole 20 s turn and every try again.
         """
         subscriptions = self._push_live_subscriptions()
         feed = self._push_feed()
@@ -1283,6 +1285,7 @@ class RemotePushSender:
             record = subscriptions.get(device_id)
             if record is None:  # unsubscribed, or gone, since: owed nothing any more
                 del self._owed[device_id]
+                self._untaken.pop(device_id, None)
                 continue
             last = self._last_sent.get(device_id)
             if last is not None and now - last < self._push_gap(device_id):
@@ -1290,6 +1293,7 @@ class RemotePushSender:
             owed = self._owed.pop(device_id)
             items = [item for item in feed if item.id in owed]
             if not items:  # every one of them cleared while the throttle ran
+                self._untaken.pop(device_id, None)
                 continue
             base = self._kit.kit_public_url()
             message = push_needs_message(items, total=len(feed), base_url=base)
@@ -1310,40 +1314,49 @@ class RemotePushSender:
         return timedelta(seconds=PUSH_MIN_INTERVAL_SECONDS * 2 ** self._untaken.get(device_id, 0))
 
     def _push_system_checks(self, now: datetime) -> None:
+        """Each warning that is due now. One still being tried that no longer is (a deadline
+        extended or passed, a phone signed in again, unsubscribed or gone) is let go."""
         subscriptions = self._push_live_subscriptions()
+        due: set[str] = set()
         if subscriptions:
-            self._push_auto_off_warning(now, subscriptions)
-            self._push_expiry_warnings(now, subscriptions)
+            due |= self._push_auto_off_warning(now, subscriptions)
+            due |= self._push_expiry_warnings(now, subscriptions)
+        for key in set(self._system_sends) - due:
+            del self._system_sends[key]
 
     def _push_auto_off_warning(
         self, now: datetime, subscriptions: Mapping[str, PushSubscriptionRecord]
-    ) -> None:
+    ) -> set[str]:
         """Ten minutes before auto-off, once per deadline: an extension arms it again.
 
         The title says the minutes really left: a deadline nearer than ten minutes
         from the start (``serve --auto-off 5``) is warned of at once, with five.
         The line offers the extension only while writes are on, as they are when
         it is sent: with writes off no phone can extend, and every phone was told
-        to open and do it (review of #243, round 3, 12/13).
+        to open and do it (review of #243, round 3, 12/13). Returns its key while it
+        is due.
         """
         remote = self._kit.runtime.remote_json()
         raw = remote.get("auto_off_at")
         deadline = _push_parse_time(raw, naive_is_local=True) if isinstance(raw, str) else None
         if deadline is None or not timedelta(0) < deadline - now <= AUTO_OFF_WARNING:
-            return
+            return set()
         key = f"sys:auto-off:{raw}"
         if key in self._push_pushed():
-            return
+            return {key}
         base = self._kit.kit_public_url()
         title = AUTO_OFF_TITLE.format(minutes=math.ceil((deadline - now).total_seconds() / 60))
         body = AUTO_OFF_BODY if remote.get("allow_write") is True else AUTO_OFF_READ_ONLY_BODY
         message = push_system_message(title, body, base, tag="asq-auto-off")
         self._push_system_send(key, subscriptions, message, now)
+        return {key}
 
     def _push_expiry_warnings(
         self, now: datetime, subscriptions: Mapping[str, PushSubscriptionRecord]
-    ) -> None:
-        """A day before a device's 7-day sign-in ends, to that device alone."""
+    ) -> set[str]:
+        """A day before a device's 7-day sign-in ends, to that device alone. Returns the keys
+        of those due."""
+        due: set[str] = set()
         for row in self._kit.runtime.device_rows():
             device_id, expires = row.get("id"), row.get("expires_at")
             if not isinstance(device_id, str) or not isinstance(expires, str):
@@ -1353,11 +1366,13 @@ class RemotePushSender:
             if record is None or at is None or not timedelta(0) < at - now <= EXPIRY_WARNING:
                 continue
             key = f"sys:expiry:{device_id}:{expires}"
+            due.add(key)
             if key in self._push_pushed():
                 continue
             base = self._kit.kit_public_url()
             message = push_system_message(EXPIRY_TITLE, EXPIRY_BODY, base, tag="asq-expiry")
             self._push_system_send(key, {device_id: record}, message, now)
+        return due
 
     def _push_system_send(
         self,

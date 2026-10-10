@@ -1081,6 +1081,60 @@ def test_a_new_item_waits_out_a_failing_phones_longer_turn_and_goes_with_the_old
     assert payload["title"] == "2 things need you" and payload["ids"] == [first.id, second.id]
 
 
+@pytest.mark.parametrize("gone", ["cleared", "unsubscribed", "auto-off"])
+def test_a_phone_owed_nothing_any_more_has_every_try_again_for_what_comes_next(
+    world: World, gone: str
+) -> None:
+    """The count of a phone's notifications its service did not take outlived what they
+    covered: cleared from the feed before the next try, the phone unsubscribed, Remote past
+    its auto-off. The next notification, of something else, then had a try fewer, each
+    turn twice as far off (verifier of round 6's 1/6 on #243). It has all of them again."""
+    phone, _other = DEVICES
+    services = world.answering({phone: [503] * 50})
+    first, second = needs_item(1), needs_item(2, agent="coder-db")
+    world.scan(first)
+    world.scan(first)
+    world.later(5)  # T0 + 5 s: the 503, owed again at T0 + 45 s
+    if gone == "cleared":
+        world.scanning(45)
+    elif gone == "unsubscribed":
+        push_unsubscribe_device(phone, world.roster)
+        world.later(41)
+        push_subscribe_device(phone, world.browsers[phone].record(), world.roster)
+    else:
+        world.kit.runtime.set_auto_off(world.clock.now)
+        world.later(1)
+        world.kit.runtime.set_auto_off(None)
+        world.later(40)
+    start = (world.clock.now - T0).total_seconds()
+    world.scan(second)
+    world.scan(second)
+    world.later(5)
+    world.scanning(600, second)
+    went = [at - start for at in world.sent_to(services, phone) if at > start]
+    assert went == [5.0, 45.0, 125.0, 285.0]
+
+
+def test_a_warning_no_longer_due_is_not_kept_for_another_try(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warning a phone's service did not take is kept to go again at the next check. One
+    whose deadline was extended, or whose sign-in was renewed, is never due again, and its
+    entry was kept for the life of the server."""
+    phone, _other = DEVICES
+    rows = [{"id": phone, "expires_at": (T0 + timedelta(hours=23)).isoformat()}]
+    monkeypatch.setattr(world.kit.runtime, "device_rows", lambda: rows)
+    world.kit.runtime.set_auto_off(T0 + timedelta(minutes=8))
+    services = world.answering({phone: [503, 503]})
+    assert world.sent_to(services, phone) == [0.0, 0.0]
+    assert len(world.sender._system_sends) == 2, "both to go again"
+    world.kit.runtime.set_auto_off(T0 + timedelta(hours=2))
+    rows[0]["expires_at"] = (T0 + timedelta(days=7)).isoformat()
+    world.later(30)
+    assert world.sent_to(services, phone) == [0.0, 0.0]
+    assert world.sender._system_sends == {}
+
+
 def test_the_title_counts_what_is_open_beyond_the_push(world: World) -> None:
     pushable = needs_item(1)
     feed_only = [needs_item(2, push_after=None), needs_item(3, push_after=None)]

@@ -450,8 +450,8 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
             # upgrade() leaves the hooks alone on a move back, to a release that may
             # predate `agents refresh-hooks`, so the plan must not promise a re-connect:
             # the plan, its --json, the question and the report agree (review of #257).
-            why = f"{target} is older than {__version__}: a move back leaves the hooks as they are"
-            left = (*left, *(HookSite(site.config_dir, site.programs, why) for site in refresh))
+            # Said once, here, with the remedy: a note in the report said it again.
+            left = (*left, *(_left_by_move_back(site, target) for site in refresh))
             refresh = ()
         live, _unlistened, fleet_error = running_fleet()
     return UpgradePlan(
@@ -467,6 +467,19 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         live_agents=live,
         fleet_error=fleet_error,
     )
+
+
+def _left_by_move_back(site: HookSite, target: str) -> HookSite:
+    """``site`` left as it is by a move back to ``target``, with the command that rewrites
+    its hooks for that release (0.7 and earlier have no `agents refresh-hooks`)."""
+    rewrite = install_route.command_line(
+        ["aisquare", "agents", "connect", HOOK_AGENT, "--config-dir", str(site.config_dir)]
+    )
+    why = (
+        f"{target} is older than {__version__}: a move back leaves the hooks as they are; "
+        f"`{rewrite}` rewrites them for {target}"
+    )
+    return HookSite(site.config_dir, site.programs, why)
 
 
 def _beyond_pypi(route: install_route.InstallRoute) -> str | None:
@@ -750,12 +763,8 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
         "until they are restarted"
     )
     if version is not None and install_route.is_newer(plan.current, version):
-        # A move BACK lands on a release that may predate `agents refresh-hooks`
-        # (0.7 and earlier do), and the hooks the newer version wrote still run it.
-        notes.append(
-            f"{version} is older than {plan.current}, so the hooks were left as they were; "
-            f"`aisquare agents connect {HOOK_AGENT}` rewrites them for {version}"
-        )
+        # A move BACK lands on a release that may predate `agents refresh-hooks` (0.7 and
+        # earlier do): the plan left every site, each saying so with its remedy.
         return UpgradeReport(
             plan, exit_code=code, version=version, notes=tuple(notes), cutoff=cutoff
         )

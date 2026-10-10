@@ -2217,11 +2217,22 @@ def test_a_move_back_leaves_the_hooks_and_says_how_to_rewrite_them(
     _record(_hooked(tmp_path / "claude", tool.script))
     machine.new_version = "0.7.0"
 
+    site = tmp_path / "claude"
     result = runner.invoke(app, ["upgrade", "--version", "0.7.0", "--yes"])
+    report = _one_object(
+        runner.invoke(app, ["--json", "upgrade", "--version", "0.7.0", "--yes"]).stdout
+    )
 
+    rewrite = install_route.command_line(
+        ["aisquare", "agents", "connect", "claude-code", "--config-dir", str(site)]
+    )
     assert result.exit_code == 0, result.output
     assert machine.connects() == [], "no refresh on a downgrade"
-    assert "0.7.0 is older than 0.9.0, so the hooks were left as they were" in result.stdout
+    assert f"`{rewrite}` rewrites them for 0.7.0" in result.stdout, result.stdout
+    assert result.stdout.count("older than 0.9.0") == 1, "said once (review of #257)"
+    [left] = report["hooks_left"]
+    assert left["reason"].endswith(f"`{rewrite}` rewrites them for 0.7.0"), left
+    assert not any("older than" in note for note in report["notes"]), report["notes"]
 
 
 @pytest.mark.parametrize(

@@ -2551,7 +2551,75 @@ async function refusalSentences() {
     tooLong: said({ status: 413, error: "too_large", message: "the body is too large" }, 8000),
     tooMany: said({ status: 429, error: "rate_limited", retryAfter: 30 }),
     unavailable: said({ status: 503, error: "fleet_unavailable", message: "tmux did not answer" }),
+    unavailableBare: said({ status: 503, error: "unavailable" }),
+    unwritable: said({
+      status: 503, error: "remote_state_unwritable",
+      message: "the machine could not save that: its ~/.aisquare/remote.json would not write (a full disk, or a home it may not write) — nothing was changed; fix that on the machine, then try again",
+    }),
     notJson: said({ status: 200, notJson: true }),
+  };
+}
+
+/* The machine's 503 sentence for a revoke it holds on the running Remote but could not save
+ * (remote.json would not write), as remote_server.REVOKE_UNSAVED words it for `id`. */
+function unsavedRevoke(id) {
+  return {
+    status: 503,
+    json: {
+      error: "remote_state_unwritable",
+      message: "revoked on the running Remote, but the machine's ~/.aisquare/remote.json would not write (a full disk, or a home " +
+        "it may not write): once it can, run  aisquare remote revoke " + id + "  on the machine, as until it is saved a change " +
+        "to that file from a shell, or a Remote turned on again, would take the device back",
+    },
+  };
+}
+
+/* 503s whose reason the machine gives: Revoke of another device that held but was not saved,
+ * then this device's own Sign out the same way; a revoke answered 404 (another tab revoked it
+ * first); and the Tasks tab of a machine with Team off. What each says, the device rows after,
+ * how often the list was read, and where the page went. */
+async function reasonsGiven() {
+  let listed = TWO_DEVICES;
+  const devices = bootPage("#/devices", signedIn({
+    "GET api/devices": () => ({ status: 200, json: listed }),
+    "DELETE api/devices/dev_4e5f6a7b": () => {
+      listed = TWO_DEVICES.slice(0, 1);
+      return unsavedRevoke("dev_4e5f6a7b");
+    },
+    "DELETE api/devices/dev_0a1b2c3d": () => unsavedRevoke("dev_0a1b2c3d"),
+  }));
+  await settle();
+  devices.acceptSockets();
+  await settle();
+  const rows = () => textsOf(devices.main().querySelectorAll("span.name"));
+  const reads = () => devices.requests.filter((one) => one.method === "GET" && one.path === "api/devices").length;
+  click(buttonNamed(devices.main(), "Revoke"));
+  await settle();
+  const revoked = { toast: devices.toast(), rows: rows(), reads: reads() };
+  click(buttonNamed(devices.main(), "Sign out"));
+  await settle();
+  const signedOut = { toast: devices.toast(), hash: devices.location.hash };
+  let gone = TWO_DEVICES;
+  const twice = bootPage("#/devices", signedIn({
+    "GET api/devices": () => ({ status: 200, json: gone }),
+    "DELETE api/devices/dev_4e5f6a7b": () => {
+      gone = TWO_DEVICES.slice(0, 1);
+      return { status: 404, json: { error: "not_found", message: "no such device" } };
+    },
+  }));
+  await settle();
+  twice.acceptSockets();
+  await settle();
+  click(buttonNamed(twice.main(), "Revoke"));
+  await settle();
+  const tasks = bootPage("#/p/" + PROJECT + "/tasks", signedIn({
+    "GET api/tasks": () => ({ status: 503, json: { error: "unavailable", message: "the agent orchestrator is disabled (AISQUARE_TEAM=0)" } }),
+  }));
+  await settle();
+  return {
+    revoked, signedOut,
+    revokedElsewhere: { toast: twice.toast(), rows: textsOf(twice.main().querySelectorAll("span.name")) },
+    tasks: textsOf(tasks.main().querySelectorAll("div.data")[0].childNodes),
   };
 }
 
@@ -3103,6 +3171,7 @@ async function main() {
     dismissals: await dismissals(),
     afterLeaving: await afterLeaving(),
     refusalSentences: await refusalSentences(),
+    reasonsGiven: await reasonsGiven(),
     socketCloses: await socketCloses(),
     unlockWait: await unlockAnswered(429, { error: "rate_limited", message: "too many tries" }),
     statusStrip: await statusStrip(),

@@ -574,8 +574,8 @@ one beside it.
 **`serve` says the port is in use.** Something else took 8750. Pass `--port` and
 give ngrok (and `status`) the same port.
 
-**Unlocking, extending or revoking fails with `remote_state_unwritable`** (503;
-the page says the machine could not answer). `~/.aisquare/remote.json` would not
+**Unlocking, extending or revoking fails with `remote_state_unwritable`** (503,
+and the page shows the machine's sentence). `~/.aisquare/remote.json` would not
 write: the disk is full, or the home is not writable, and the log says which.
 Nothing was changed but a revoke, which holds on the running Remote and is saved
 by its next write that works, unless a change to the file from a shell is read

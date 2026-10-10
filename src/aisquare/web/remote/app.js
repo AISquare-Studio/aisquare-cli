@@ -960,7 +960,9 @@ function failText(res, max) {
   if (res.status === 409 && (res.error === "busy" || res.error === "in_progress")) return "Still running — " + (message || "the result shows here when it finishes.");
   if (res.status === 413) return "Too long (max " + (max || "the limit") + " characters).";
   if (res.status === 429) return "Too many tries — wait " + (res.retryAfter || "a few") + " s.";
-  if (res.status === 503) return "The machine could not answer — try again in a moment.";
+  // A 503 says why: a home it cannot write, Team off, a revoke held unsaved.
+  if (res.status === 503 && !message) return "The machine could not answer — try again in a moment.";
+  if (res.status === 503 && res.error !== "remote_state_unwritable") return "The machine could not answer: " + message;
   return message || plainText(res.error) || "That did not work (" + res.status + ").";
 }
 
@@ -2798,8 +2800,9 @@ VIEWS.devices = (route, main) => {
           const out = await apiCall("DELETE", apiPath(API.device, { id }));
           revoke.classList.remove("busy");
           gateButtons();
-          if (out.ok) load();
-          else {
+          // A revoke held unsaved (503), or a device gone (404): read the list again.
+          if (out.ok || out.status === 404 || out.error === "remote_state_unwritable") load();
+          if (!out.ok) {
             toast(failText(out));
             afterFailure(out);
           }
@@ -2820,12 +2823,10 @@ VIEWS.devices = (route, main) => {
 async function signOut(id) {
   if (!DEVICE_ID.test(id || "")) return;
   const res = await apiCall("DELETE", apiPath(API.device, { id }));
-  if (!res.ok) {
-    toast(failText(res));
-    return;
-  }
+  const held = res.ok || res.error === "remote_state_unwritable"; // unsaved, but signed out
+  toast(res.ok ? "Signed out" : failText(res));
+  if (!held) return;
   S.me = null;
-  toast("Signed out");
   toUnlock();
 }
 

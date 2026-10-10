@@ -687,7 +687,7 @@ def test_an_exported_config_dir_in_a_home_this_machine_lacks_is_never_offered_co
     assert f"hooks cannot be written in {homeless}: {reason}" in row.detail, row
     assert [f.argv for f in fix_commands([row]) if f.argv[:2] == ("agents", "connect")] == []
     refusal = agents_service.access("claude-code").connect
-    assert row.fix == f"{_repair(refusal)}; or {_REPOINT_FIX}", row.fix
+    assert row.fix == _REPOINT_FIX, "no repair of a home this machine does not have"
     assert welcome.refused == reason, welcome
     assert json.loads(clicked.stdout)["detail"] == reason, clicked.stdout
     assert paths.aisquare_home().exists() == built, "a refusal builds no aisquare home"
@@ -708,6 +708,33 @@ def test_an_exported_config_dir_in_a_home_this_machine_lacks_is_never_offered_co
     after = diagnostics._check_claude_code()
     assert repointed.exit_code == 0, repointed.output
     assert homeless not in after.detail and after.status is CheckStatus.ok, after
+
+
+def test_a_recorded_dir_in_a_home_this_machine_lacks_is_offered_forget_it_alone(
+    runner: CliRunner, claude_home: Path
+) -> None:
+    """A config dir recorded as ``~olduser/.claude`` for a user this machine does not have:
+    the first remedy the doctor and `agents list` gave was to repair it, "no such home on
+    this machine", which nothing can do (review of #257). Forget it comes alone, and done
+    as printed, the record goes and the row clears."""
+    from aisquare.services import install_route
+
+    if os.name == "nt":
+        pytest.skip("Windows guesses a ~user's home instead of failing to expand it")
+    _connect(runner)
+    homeless = Path("~aisquare-no-such-user/.claude")
+    agent_core.set_connected("claude-code", True, homeless)
+    row = diagnostics._check_claude_code()
+    listed = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
+    site = next(s for s in listed[0]["sites"] if s["config_dir"] == str(homeless))
+    printed = str(row.fix).removeprefix("forget it: ")
+    forgot = runner.invoke(app, install_route.split_line(printed)[1:])
+
+    forget = agents_service.config_dir_command("disconnect", "claude-code", homeless)
+    assert row.fix == f"forget it: {forget}", row.fix
+    assert site["remedies"] == [f"forget it: {forget}"], site
+    assert forgot.exit_code == 0, forgot.output
+    assert diagnostics._check_claude_code().status is CheckStatus.ok
 
 
 #: Config dirs connect cannot make. "the default dir" is ~/.claude with CLAUDE_CONFIG_DIR

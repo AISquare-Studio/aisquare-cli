@@ -414,11 +414,14 @@ def _connect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
 def _refused(spec: agent_core.AgentSpec, why: str, path: Path, here: bool) -> Refusal:
     """Connect's refusal ``why``, naming the first path that blocks: what stands in the way
     of the config dir itself (:func:`in_the_way`), else ``path``, the file it names. A
-    settings.json inside ~/.claude.json was named, and its repair destroyed that file."""
+    settings.json inside ~/.claude.json was named, and its repair destroyed that file;
+    one under a ``~user`` this machine does not have was told to be repaired, which
+    nothing can do (review of #257)."""
     blocked = in_the_way(spec.home)
     if blocked is not None:
         return _blocked(why, *blocked, here)
-    return Refusal(path, why, why.partition(f"{path}: ")[2] or why, here)
+    fact = why.partition(f"{path}: ")[2] or why
+    return Refusal(path, why, fact, here, repairable=not paths.names_no_home(path))
 
 
 def _blocked(why: str, blocking: Path, fact: str, here: bool) -> Refusal:

@@ -1730,12 +1730,16 @@ is_expected_amber() {
 # Under --no-agent the script wires nothing, so claude-code stays this folder's
 # too: the row `aisquare doctor` shows here.
 #
+# `/` is asked only where this folder's answer could differ from it, and that is
+# a second full doctor otherwise spent on one row it already has (review of #257):
+# see _folder_may_load_a_repo_plugin.
+#
 # Empty when `/` gives no claude-code row though this folder did, which every
 # caller reads as "cannot verify", never as health.
 doctor_json() {
     _dj_here=$(aisquare --json doctor 2>/dev/null | tr '{' '\n' || true)
     _dj_row=$(printf '%s\n' "$_dj_here" | grep '"name": *"claude-code"' || true)
-    if [ -z "$_dj_row" ] || [ "$WANT_AGENT" = 0 ]; then
+    if [ -z "$_dj_row" ] || [ "$WANT_AGENT" = 0 ] || ! _folder_may_load_a_repo_plugin; then
         printf '%s' "$_dj_here"
         return 0
     fi
@@ -1746,6 +1750,30 @@ doctor_json() {
     [ -n "$_dj_row" ] || return 0
     printf '%s\n' "$_dj_here" | grep -v '"name": *"claude-code"' || true
     printf '%s' "$_dj_row"
+}
+
+# True when the folder this runs in could change the doctor's claude-code row.
+#
+# It does so in one way only: the aisquare plugin installed for a repository a
+# session started here loads (core/agents.py claude_repo_plugin_here). Claude Code
+# enables a project-scope install in .claude/settings.json of the folder a session
+# starts in, never a parent, and a local-scope one in .claude/settings.local.json of
+# that folder or the repository above it. With neither file there, this folder's
+# row is the one `/` gives. The home's own .claude/settings.json is Claude Code's
+# user settings, which every folder reads alike. Physical paths, as the doctor
+# resolves them. A false "may" costs one doctor run; a false "may not" would be
+# S2-C19 again, so a folder whose own path cannot be read answers "may".
+_folder_may_load_a_repo_plugin() {
+    _rp_dir=$(pwd -P 2>/dev/null) || return 0
+    _rp_home=$(cd "$HOME" 2>/dev/null && pwd -P) || _rp_home=""
+    if [ "$_rp_dir" != "$_rp_home" ] && [ -e "$_rp_dir/.claude/settings.json" ]; then
+        return 0
+    fi
+    while :; do
+        [ -e "$_rp_dir/.claude/settings.local.json" ] && return 0
+        [ "$_rp_dir" = / ] && return 1
+        _rp_dir=$(dirname "$_rp_dir")
+    done
 }
 
 # The names of every check that is not ok, SORTED and space-separated.

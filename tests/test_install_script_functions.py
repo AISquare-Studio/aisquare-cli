@@ -2305,19 +2305,22 @@ _ONLY_BRAIN = "doctor: everything ok except brain (gbrain is out of scope)"
 
 
 @pytest.mark.parametrize(
-    ("want_agent", "here", "from_root", "doctor_line"),
+    ("want_agent", "plugin_file", "here", "from_root", "doctor_line"),
     [
-        (1, _CONNECTED, _MISSING, None),
-        (1, _CONNECTED, _CONNECTED, _ONLY_BRAIN),
+        (1, "settings.json", _CONNECTED, _MISSING, None),
+        (1, "settings.json", _CONNECTED, _CONNECTED, _ONLY_BRAIN),
+        # No repository plugin can load here, so this folder's row is `/`'s: not asked.
+        (1, None, _CONNECTED, _MISSING, _ONLY_BRAIN),
         # --no-agent wires nothing, so `/` is not asked: its row would be listed here.
-        (0, _CONNECTED, _SWITCHED_OFF, _ONLY_BRAIN),
-        (0, _MISSING, _MISSING, _LEFT_ALONE),
-        (0, _SWITCHED_OFF, _SWITCHED_OFF, _LEFT_ALONE),
-        (0, _REFUSED, _REFUSED, _LEFT_ALONE),
+        (0, "settings.json", _CONNECTED, _SWITCHED_OFF, _ONLY_BRAIN),
+        (0, "settings.json", _MISSING, _MISSING, _LEFT_ALONE),
+        (0, "settings.json", _SWITCHED_OFF, _SWITCHED_OFF, _LEFT_ALONE),
+        (0, "settings.json", _REFUSED, _REFUSED, _LEFT_ALONE),
     ],
     ids=[
         "agent-root-missing",
         "agent-root-connected",
+        "agent-no-repo-plugin-root-not-asked",
         "no-agent-root-not-asked",
         "no-agent-not-connected",
         "no-agent-switched-off",
@@ -2325,7 +2328,12 @@ _ONLY_BRAIN = "doctor: everything ok except brain (gbrain is out of scope)"
     ],
 )
 def test_the_short_circuit_takes_claude_code_from_where_the_run_wires_it(
-    tmp_path: Path, want_agent: int, here: str, from_root: str, doctor_line: str | None
+    tmp_path: Path,
+    want_agent: int,
+    plugin_file: str | None,
+    here: str,
+    from_root: str,
+    doctor_line: str | None,
 ) -> None:
     """`short_circuit` printed "claude-code hooks installed" and did nothing whenever the
     folder it ran in answered green. With the agent wanted it goes by `/`'s answer, and
@@ -2359,7 +2367,10 @@ def test_the_short_circuit_takes_claude_code_from_where_the_run_wires_it(
         ),
     )
     repo = tmp_path / "repo"
-    repo.mkdir()
+    (repo / ".claude").mkdir(parents=True)
+    if plugin_file is not None:
+        # Where a project-scope plugin is enabled: why this folder's answer may differ.
+        (repo / ".claude" / plugin_file).write_text("{}", encoding="utf-8")
 
     result = sh(
         f"WANT_AGENT={want_agent}; WANT_PROJECT=0; OFFLINE=1; "
@@ -2375,6 +2386,63 @@ def test_the_short_circuit_takes_claude_code_from_where_the_run_wires_it(
     assert not fired or f"  {doctor_line}\n" in result.stdout, result.stdout
     hooks = "claude-code hooks installed" if want_agent else "(--no-agent: no agent hooks)"
     assert not fired or hooks in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    ("layout", "want_agent", "asked_from_root"),
+    [
+        ("plain", 1, False),
+        ("project-scope file here", 1, True),
+        ("local-scope file above", 1, True),
+        ("the home's own settings", 1, False),
+        ("project-scope file here", 0, False),
+    ],
+    ids=["plain", "project-here", "local-above", "home-settings", "no-agent"],
+)
+def test_the_doctor_runs_from_root_only_where_this_folder_could_answer_differently(
+    tmp_path: Path, layout: str, want_agent: int, asked_from_root: bool
+) -> None:
+    """`doctor_json` ran a second full doctor from `/` for its claude-code row on every
+    call, so a run started four doctors where it used to start two (review of #257,
+    round 14). This folder changes that row only through a repository's aisquare plugin,
+    enabled in .claude/settings.json of the folder a session starts in or in
+    .claude/settings.local.json of it or a repository above; the home's own
+    settings.json is Claude Code's user settings. Only there is `/` asked."""
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text("{}", encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / "src" / ".claude").mkdir(parents=True)
+    here = {
+        "plain": repo / "src",
+        "project-scope file here": repo / "src",
+        "local-scope file above": repo / "src",
+        "the home's own settings": home,
+    }[layout]
+    if layout == "project-scope file here":
+        (repo / "src" / ".claude" / "settings.json").write_text("{}", encoding="utf-8")
+    if layout == "local-scope file above":
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "settings.local.json").write_text("{}", encoding="utf-8")
+    log = tmp_path / "doctor-runs.log"
+    row = '{"name": "claude-code", "status": "ok", "detail": "d", "fix": null}'
+    cli = stub_dir(
+        tmp_path,
+        "cli",
+        "aisquare",
+        body=f"""[ "$1" = --json ] && pwd -P >>"{log}"\nprintf '[%s]' '{row}'""",
+    )
+
+    result = sh(
+        f"WANT_AGENT={want_agent}; doctor_json >/dev/null",
+        cwd=here,
+        env={"HOME": str(home)},
+        path=f"{cli}:{base_path(tmp_path)}",
+    )
+
+    runs = log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == 0, result.stderr
+    assert runs == ([str(here.resolve()), "/"] if asked_from_root else [str(here.resolve())]), runs
 
 
 def test_the_gh_advice_matches_whether_gh_exists(tmp_path: Path) -> None:

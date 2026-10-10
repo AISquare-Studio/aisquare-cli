@@ -2231,6 +2231,55 @@ async function silentSocket() {
   return { steps, taken: { sockets: taken.sockets.length, stale: taken.run("S.stale"), state: taken.run("S.sockState") } };
 }
 
+/* A socket made once the page had gone stale, as each second's tick finds it: an unlock after a
+ * minute at the lock (4401), Retry after a minute on the off screen (4410), and the backoff's
+ * reconnect after a minute cut off (1006). After each: once the socket is made; a second on, its
+ * handshake still out; and 26 s on, it still silent. Each step is the sockets opened, whether the
+ * newest is still connecting, stale, and the reads made since the socket was. */
+async function staleBeforeASocket() {
+  const made = async (how) => {
+    let signedOut = false;
+    const page = bootPage("#/", (method, where, body) => {
+      if (method === "POST" && where === "api/unlock") {
+        signedOut = false;
+        return { status: 200, json: { ok: true, device: { id: "dev_0a1b2c3d" } } };
+      }
+      return signedOut ? { status: 401, json: { error: "unauthorized" } } : signedIn()(method, where, body);
+    });
+    await settle();
+    page.acceptSockets();
+    page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+    await settle();
+    signedOut = how === 4401;
+    if (how === 1006) page.live().readyState = 3;
+    page.live().fire("close", { code: how });
+    await settle();
+    const later = (ms) => page.run("Date.now = ((then) => () => then + " + ms + ")(Date.now());");
+    later(60000);
+    page.fireTimer("onSecond");
+    if (how === 4401) {
+      const { input, form } = unlockForm(page);
+      input.value = PASSPHRASE;
+      form.dispatch("submit");
+    } else if (how === 4410) click(buttonNamed(page.main(), "Retry"));
+    else page.fireTimer("connect");
+    await settle();
+    const before = page.requests.length;
+    const state = () => ({
+      sockets: page.sockets.length, connecting: page.live().readyState === 0, stale: page.run("S.stale"), reads: page.requests.length - before,
+    });
+    const steps = [state()];
+    for (const ms of [1000, 26000]) {
+      later(ms);
+      page.fireTimer("onSecond");
+      await settle();
+      steps.push(state());
+    }
+    return steps;
+  };
+  return { unlock: await made(4401), retry: await made(4410), reconnect: await made(1006) };
+}
+
 /* The columns the Transcript asks the machine to wrap to, on 360, 390 and 412 px phones,
  * whose transcript box is 334, 364 and 386 px inside its border; and a 340 px box, exactly 45
  * columns inside its padding by clientWidth, which is whole pixels and may have rounded up. */
@@ -3293,6 +3342,7 @@ async function main() {
     staleAcrossAWake: await staleAcrossAWake(),
     heldBetweenSockets: await heldBetweenSockets(),
     silentSocket: await silentSocket(),
+    staleBeforeASocket: await staleBeforeASocket(),
     transcriptSend: await transcriptSend(),
     transcriptSendGuarded: await transcriptSendGuarded(),
     pinnedKeys: await pinnedKeys(),

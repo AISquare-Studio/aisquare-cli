@@ -616,7 +616,7 @@ const S = {
   wantFleet: null, wantBoard: null, panes: new Map(), sock: null, sockState: "idle",
   opened: false, backoff: 0, retryTimer: 0, lastFrameAt: 0, stale: false, offline: false, away: null,
   off: null, locked: false, booting: false, view: null, route: null, pending: new Map(), orphans: new Map(),
-  gone: new Map(), since: new Set(), push: null, padOnOpen: false, lastWake: 0, me: null, names: new Map(), scannedBehind: "",
+  gone: new Map(), since: new Set(), push: null, padOnOpen: false, lastWake: 0, lastConnect: 0, me: null, names: new Map(), scannedBehind: "",
   heard: { remote: 0, needs: 0 },
 };
 const UI = {};
@@ -986,6 +986,7 @@ function wsSend(kind, value, project) {
 function connect() {
   clearTimeout(S.retryTimer);
   if (S.off || S.locked) return;
+  S.lastConnect = Date.now();
   const old = S.sock;
   S.sock = null;
   unconfirmPanes();
@@ -3064,10 +3065,11 @@ function trackViewport() {
 }
 
 /* Each second. A socket that died with no close (a network switch) never closes: once the page
- * is stale it is replaced, at most once a stale span, and never after 4409. */
+ * is stale it is replaced a stale span after its connect (an unlock's, Retry's or the backoff's
+ * has its own), and never after 4409. */
 function onSecond() {
   checkStale();
-  if (S.stale && (S.sockState === "open" || S.sockState === "connecting") && Date.now() - S.lastWake > STALE_AFTER_MS) wake(true);
+  if (S.stale && (S.sockState === "open" || S.sockState === "connecting") && Date.now() - S.lastConnect > STALE_AFTER_MS) wake(true);
   drawStatus();
   const now = Date.now();
   for (const pair of S.since) {

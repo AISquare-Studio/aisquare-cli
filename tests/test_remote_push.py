@@ -1138,6 +1138,28 @@ def test_a_hostile_role_reaches_the_title_as_at_most_40_printable_characters(
     assert len(body) <= 160 and body.isprintable()
 
 
+@pytest.mark.parametrize("agent", ["coder-auth", None])
+def test_a_hostile_project_name_reaches_the_title_as_at_most_40_printable_characters(
+    world: World, agent: str | None
+) -> None:
+    """A project's name is its directory's, up to 255 bytes and never cleaned on its way
+    here: the title is all a lock screen shows, and a long one pushed out who needs you.
+    The docs promise every name cut to 40 plain characters, and no test held the
+    project's to it (sweep 4 of #243)."""
+    project = "‮\x1b[31mproj\n" + "p" * 300
+    kind = "question" if agent else "fleet_down"
+    world.scan(needs_item(1, kind=kind, agent=agent, project_name=project))
+    world.scan(needs_item(1, kind=kind, agent=agent, project_name=project))
+    world.later(5)
+    title = world.pushes()[0][1]["title"]
+    tail = ": coder-auth needs you" if agent else " needs you"
+    assert title.endswith(tail)
+    name = title.removesuffix(tail)
+    assert name == "proj " + "p" * 34 + "…"
+    assert len(name) <= 40 and name.isprintable()
+    assert not any(unicodedata.category(ch) in {"Cc", "Cf"} for ch in title)
+
+
 def test_card_links_lead_to_the_item_its_project_or_the_feed(world: World) -> None:
     world.kit.runtime.note_public_origin(PUBLIC_ORIGIN)
     link = f"{PUBLIC_ORIGIN}/r/{world.kit.runtime.token}/"

@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -33,7 +34,8 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
 from aisquare.core import snapshot as snapshot_core
-from aisquare.models import CheckStatus, DoctorCheck
+from aisquare.core.workspace import project_id_for
+from aisquare.models import CheckStatus, DoctorCheck, Snapshot
 from aisquare.services import diagnostics
 from aisquare.services.onboarding import fix_commands
 
@@ -162,6 +164,73 @@ def test_with_node_a_missing_snapshot_still_warns_and_keeps_its_button(runner: C
     assert rows["snapshot"].fix == "Pack one: aisquare project onboard"
     assert rows["tiktoken"].status is CheckStatus.warn
     assert _onboard_buttons(checks) == [("project", "onboard", "--refresh")]
+
+
+def _too_large_verdict(work_dir: Path) -> Snapshot:
+    """A ``too_large`` snapshot.json for ``work_dir``, as one written before ``skeleton_only``."""
+    project_id = project_id_for(work_dir.resolve())
+    snapshot_core.snapshot_dir(project_id).mkdir(parents=True, exist_ok=True)
+    verdict = Snapshot(
+        project_id=project_id,
+        generated_at=datetime.now(tz=UTC),
+        pack_path=snapshot_core.pack_path(project_id),
+        skeleton_path=snapshot_core.skeleton_path(project_id),
+        index_path=snapshot_core.index_path(project_id),
+        token_count=203_991,
+        compressed=True,
+        status="too_large",
+        full_token_count=412_318,
+        max_tokens=150_000,
+    )
+    snapshot_core.meta_path(project_id).write_text(verdict.model_dump_json(), encoding="utf-8")
+    return verdict
+
+
+@pytest.mark.parametrize("machine", ["no_node", "node_without_npm"])
+def test_a_too_large_verdict_reads_off_with_nothing_to_click_where_nothing_can_pack(
+    runner: CliRunner, work_dir: Path, request: pytest.FixtureRequest, machine: str
+) -> None:
+    """A verdict stores nothing agents get, and nothing here can re-pack it (review of #257).
+
+    The doctor's row kept its warning and ``Re-pack: aisquare project onboard
+    --refresh``, a one-click button that packs nothing on this machine, so the row
+    came back unchanged however often it was pressed. ``project onboard`` told the
+    same person to raise ``max_tokens`` and re-pack. Both now say off, as they do for
+    a project with no snapshot.
+    """
+    request.getfixturevalue(machine)
+    _too_large_verdict(work_dir)
+
+    onboard = runner.invoke(app, ["project", "onboard"])
+    checks = diagnostics.doctor()
+    row = _rows(checks)["snapshot"]
+
+    assert onboard.exit_code == 0, onboard.output
+    assert row.fix is None, row
+    assert _onboard_buttons(checks) == []
+    assert row.status is CheckStatus.ok
+    assert row.detail == snapshot_core.off_detail()
+    assert onboard.stdout.strip() == f"snapshot: {snapshot_core.off_detail()}"
+
+
+@pytest.mark.usefixtures("with_node")
+def test_with_node_a_too_large_verdict_keeps_its_numbers_and_its_re_pack(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """The control: where something can pack, the verdict reads as #82 made it."""
+    verdict = _too_large_verdict(work_dir)
+
+    onboard = runner.invoke(app, ["project", "onboard"])
+    checks = diagnostics.doctor()
+    row = _rows(checks)["snapshot"]
+
+    assert onboard.exit_code == 0, onboard.output
+    assert row.status is CheckStatus.warn
+    assert row.detail == snapshot_core.too_large_detail(verdict)
+    assert row.fix == snapshot_core.REPACK_HINT
+    assert _onboard_buttons(checks) == [("project", "onboard", "--refresh")]
+    line = f"snapshot: {snapshot_core.too_large_detail(verdict)} {snapshot_core.REPACK_HINT}"
+    assert line in onboard.stdout
 
 
 @pytest.mark.usefixtures("no_node")

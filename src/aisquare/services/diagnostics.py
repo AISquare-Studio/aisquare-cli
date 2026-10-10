@@ -2417,19 +2417,21 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
             "snapshot",
             snapshot_core.skeleton_only_detail(snap) + snapshot_core.unrefreshable_note(snap),
         )
-    if snap is not None and snap.status == "too_large":
-        # Not "no snapshot": there IS a verdict, and it names its numbers (#82).
-        # The fix is `--refresh` because a plain `onboard` only reloads this
-        # verdict — which is how the line stayed a warning forever.
-        return _warn("snapshot", snapshot_core.too_large_detail(snap), snapshot_core.REPACK_HINT)
     if not snapshot_core.can_pack():
         # No fix, deliberately: `Pack one: aisquare project onboard` is a one-click
         # button in the UI (services/onboarding.KNOWN_FIXES), and with nothing to
         # run repomix it can never turn green. When something of the toolchain IS
         # here, the repomix row warns and names what is missing. A Node that is
         # there but too old still packs-and-fails, so it keeps this row's warning:
-        # can_pack() reads PATH only (snapshot_core.can_pack).
+        # can_pack() reads PATH only (snapshot_core.can_pack). Asked before a
+        # `too_large` verdict too: it stores nothing agents get, and its Re-pack
+        # button could no more turn green here (review of #257).
         return _ok("snapshot", snapshot_core.off_detail())
+    if snap is not None and snap.status == "too_large":
+        # Not "no snapshot": there IS a verdict, and it names its numbers (#82).
+        # The fix is `--refresh` because a plain `onboard` only reloads this
+        # verdict — which is how the line stayed a warning forever.
+        return _warn("snapshot", snapshot_core.too_large_detail(snap), snapshot_core.REPACK_HINT)
     return _warn(
         "snapshot",
         "no codebase snapshot for the active project",

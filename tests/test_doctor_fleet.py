@@ -858,6 +858,9 @@ def test_doctor_reports_an_over_budget_snapshot_with_its_numbers_and_a_re_pack(
     monkeypatch.chdir(root)
     monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
     monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    # A machine that can pack. Where nothing can, the verdict reads off with no fix
+    # (test_snapshot_optional_without_node.py), whatever is on PATH.
+    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     verdict = _too_large_snapshot(_seed(root).id)
 
     check = _by_name(diagnostics.doctor())["snapshot"]

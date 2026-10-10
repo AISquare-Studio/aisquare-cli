@@ -583,9 +583,11 @@ def emit_onboard(report: OnboardReport) -> None:
         console.print(line)
     elif snapshot is not None and snapshot.status == "skeleton_only":
         console.print(f"snapshot: {snapshot_core.skeleton_only_detail(snapshot)}")
-    elif snapshot is not None and snapshot.status == "too_large":
+    elif snapshot is not None and snapshot.status == "too_large" and snapshot_core.can_pack():
         # The same sentence the doctor prints (one definition, so the two never
         # disagree on the numbers), plus what to run once a remedy is in place.
+        # Where nothing can pack, no remedy can run: the verdict reads off below,
+        # as the doctor's row does.
         console.print(
             f"snapshot: {snapshot_core.too_large_detail(snapshot)} {snapshot_core.REPACK_HINT}"
         )

@@ -176,17 +176,19 @@ def test_onboard_over_budget_keeps_a_skeleton_and_the_knob_is_what_it_measures_a
 
 
 def test_onboard_reports_a_legacy_too_large_verdict_with_its_numbers(
-    runner: CliRunner, work_dir: Path
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A snapshot.json written before ``skeleton_only`` existed: a plain `onboard` reloads it.
 
     The line names all three numbers and both knobs — ``[snapshot]`` is bracketed
     text Rich would eat with markup on, so this reads the RENDERED output — and
-    ends with the ``--refresh`` that turns the verdict into a skeleton.
+    ends with the ``--refresh`` that turns the verdict into a skeleton. On a machine
+    that can pack: where nothing can, it reads off (test_snapshot_optional_without_node.py).
     """
     from aisquare.core import snapshot
     from aisquare.core.workspace import project_id_for
 
+    monkeypatch.setattr(snapshot, "can_pack", lambda: True)
     project_id = project_id_for(work_dir.resolve())
     snapshot.snapshot_dir(project_id).mkdir(parents=True, exist_ok=True)
     verdict = Snapshot(

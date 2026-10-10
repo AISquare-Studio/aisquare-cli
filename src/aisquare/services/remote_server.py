@@ -6023,6 +6023,26 @@ def _page_copy_skips(source: Path, directory: str, names: list[str]) -> set[str]
     }
 
 
+def _page_copy_narrowed(root: Path) -> None:
+    """Take group and other write off every directory and file of an installed copy.
+
+    ``copytree`` keeps the build's own modes (``copy2`` for each file, ``copystat`` for each
+    directory) and the umask never applies: a build made on a FAT or exFAT drive, on a WSL
+    ``/mnt/c`` path, or out of an archive that kept its modes, all 0777 and 0666, was
+    installed world-writable, under a home other accounts may traverse (macOS's is 0755).
+    Any of them could then replace ``index.html`` or its script, which are served before
+    the passphrase, and take the passphrase and the device's cookie with them (sweep 5 of
+    #243). The copy holds no link to look past: ``copytree`` copied what each one names.
+    """
+    import stat
+
+    for directory, _subdirectories, files in os.walk(root):
+        for path in (directory, *(os.path.join(directory, name) for name in files)):
+            mode = stat.S_IMODE(os.lstat(path).st_mode)
+            if mode & 0o022:
+                os.chmod(path, mode & ~0o022)
+
+
 def install_page(source: Path) -> Path:
     """Copy a built ``aisquare-remote`` dist into :func:`remote_dist_dir`, atomically.
 
@@ -6032,10 +6052,11 @@ def install_page(source: Path) -> Path:
     serve from ``source`` stays behind (:func:`_built_page_file`): its hidden files, as
     the bundled page's do, which is where a project keeps ``.env`` and ``.git``, and a
     link that leads out of it or to a hidden file, whose content the copy would
-    otherwise hold under the link's own name. The copy lands in a staging directory
-    beside the destination and is swapped in with two renames — same filesystem, so
-    each rename is atomic — rather than removing the destination first, so a server
-    reading the old page mid-swap never sees a half-written one.
+    otherwise hold under the link's own name. Nothing in the copy is writable by group or
+    others, whatever the build's modes were (:func:`_page_copy_narrowed`). The copy lands
+    in a staging directory beside the destination and is swapped in with two renames —
+    same filesystem, so each rename is atomic — rather than removing the destination
+    first, so a server reading the old page mid-swap never sees a half-written one.
     """
     resolved = _remote_resolved(source)
     if resolved is None:
@@ -6053,6 +6074,7 @@ def install_page(source: Path) -> Path:
     previous = destination.with_name(f".{destination.name}.previous-{os.getpid()}")
     try:
         shutil.copytree(source, staging, ignore=functools.partial(_page_copy_skips, source))
+        _page_copy_narrowed(staging)
         shutil.rmtree(previous, ignore_errors=True)
         if destination.exists():
             destination.rename(previous)

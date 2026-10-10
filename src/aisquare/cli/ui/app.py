@@ -1120,14 +1120,28 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def on_doctor_view_hand_off(self, event: DoctorView.HandOff) -> None:
         """Update or Uninstall in the Doctor view: quit, and let ``run_ui`` hand over.
 
-        Never under a fix that is still writing, in ANY Doctor view: the Project
-        tab's and Onboard's run their own, and quitting would cut them off.
+        Never under work that is still writing, which quitting would cut off (asyncio.run
+        then joins its thread with the terminal blank, and the hand-over can replace the
+        install under it): a fix in ANY Doctor view (the Project tab's and Onboard's run
+        their own), Welcome's setup, Connect or fleet start, or the Onboard view's init
+        (round 15 of #257).
         """
-        if any(view.busy for view in self.query(DoctorView)):
-            self.notify("a fix is still running — try again when it ends", severity="warning")
+        if self._work_running():
+            self.notify(
+                "a fix, a setup or a start is still running — try again when it ends",
+                severity="warning",
+            )
             return
         self.hand_off = event.args
         self.exit()
+
+    def _work_running(self) -> bool:
+        """Whether a view runs work a quit would cut off (see ``on_doctor_view_hand_off``)."""
+        return (
+            any(view.busy for view in self.query(DoctorView))
+            or any(view.busy for view in self.query(WelcomeView))
+            or any(view.running for view in self.query(OnboardView))
+        )
 
     def on_doctor_refreshed(self, event: DoctorRefreshed) -> None:
         """A view re-ran the doctor after a one-click fix — follow it.

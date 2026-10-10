@@ -30,6 +30,8 @@ from aisquare.cli.app import app as cli_app
 from aisquare.cli.ui import app as ui_app
 from aisquare.cli.ui.sidebar import AddProject, ProjectSelected
 from aisquare.cli.ui.views.doctor import DoctorView
+from aisquare.cli.ui.views.onboard import OnboardView
+from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core import selfcli
 from aisquare.services.install_route import LatestRelease
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
@@ -146,6 +148,52 @@ def test_only_asqs_own_doctor_is_machine_wide_and_no_doctor_may_be_busy(
     assert doctors == {"doctor": True, "project-doctor": False, "onboard-doctor": False}
     assert while_busy is None, "a project tab's fix is still writing"
     assert after == ("upgrade", "--reopen"), "control: with no fix running it quits"
+
+
+@pytest.mark.parametrize(
+    "work",
+    ["welcome-onboard", "welcome-connect", "welcome-manager", "welcome-coders", "onboard-init"],
+)
+def test_update_waits_for_welcome_and_onboard_work_as_for_a_fix(
+    isolated_home: Path,
+    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    monkeypatch: pytest.MonkeyPatch,
+    work: str,
+) -> None:
+    """Update and Uninstall waited only for Doctor-view fixes. Welcome's setup (init, then
+    doctor), its Connect and its fleet starts, and the Onboard view's init, were cut off:
+    asq quit, asyncio.run joined their thread with the terminal blank, their outcome was
+    never shown, and the hand-over could replace the install under a running init (round
+    15 of #257). Each is waited for, with the toast saying so."""
+    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
+
+    async def fn(pilot: Pilot[None]) -> tuple[Any, list[str], Any]:
+        app = pilot.app
+        assert isinstance(app, ui_app.FleetApp)
+        await app.on_add_project(AddProject())  # the Onboard view, really open
+        await settle_page(app)
+        said: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda message, **_: said.append(str(message)))
+        welcome = app.query_one(WelcomeView)
+        onboard = app.query_one(OnboardView)
+        if work == "onboard-init":
+            onboard.running = True
+        else:
+            welcome.busy.add(work.removeprefix("welcome-"))
+        app.query_one("#doctor-update", Button).press()
+        await settle_page(app)
+        refused = app.hand_off
+        onboard.running = False
+        welcome.busy.clear()
+        app.query_one("#doctor-update", Button).press()
+        await settle_page(app)
+        return refused, said, app.hand_off
+
+    while_busy, said, after = drive(fn)
+
+    assert while_busy is None, f"{work} is still running"
+    assert said == ["a fix, a setup or a start is still running — try again when it ends"]
+    assert after == ("upgrade", "--reopen"), "control: once it has ended, Update quits"
 
 
 class _FakeApp:

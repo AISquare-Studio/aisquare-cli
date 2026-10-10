@@ -1111,7 +1111,8 @@ def test_past_the_device_cap_the_signed_out_device_unused_longest_makes_room(
     """Every unlock without a known cookie added a device kept for 7 days, and only the
     per-client limit bounded them: about 7,200 a day from one address, each one more record
     for every request's cookie check, every save of ``remote.json`` and the R panel to go
-    through (sweep 4 of #243). A signed-in device is never the one dropped."""
+    through (sweep 4 of #243). A signed-in device is never the one dropped, and of the
+    signed-out ones the one unused longest goes, wherever it is in the list."""
     monkeypatch.setattr(remote_server, "DEVICES_MAX", 3)
     made: list[tuple[str, str]] = []
     for _ in range(3):
@@ -1119,13 +1120,15 @@ def test_past_the_device_cap_the_signed_out_device_unused_longest_makes_room(
         assert unlocked is not None
         made.append((unlocked[0], unlocked[1].id))
         clock.advance(hours=1)
-    (_, first), (_, second), (third_secret, third) = made
+    (first_secret, first), (_, second), (third_secret, third) = made
     assert runtime.device_ids() == [first, second, third]
-    clock.advance(hours=22)  # a day since the first two were used: they are signed out
-    assert runtime.device_for_cookie(third_secret) is not None, "and the third is used"
+    assert runtime.device_for_cookie(first_secret) is not None, "the first is used last"
+    clock.advance(hours=22)
+    assert runtime.device_for_cookie(third_secret) is not None, "and the third is used again"
+    clock.advance(hours=3)  # the first and second unused for a day or more: signed out
     fourth = runtime.unlock_device(PASSWORD, "phone")
     assert fourth is not None
-    assert runtime.device_ids() == [second, third, fourth[1].id], "the one unused longest went"
+    assert runtime.device_ids() == [first, third, fourth[1].id], "the one unused longest went"
     fifth = runtime.unlock_device(PASSWORD, "phone")
     assert fifth is not None
     assert runtime.device_ids() == [third, fourth[1].id, fifth[1].id]

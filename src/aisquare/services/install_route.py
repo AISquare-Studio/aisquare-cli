@@ -376,6 +376,9 @@ class UvReceipt:
     bin_dir: Path | None = None
     """Where uv put the ``aisquare`` executable — so a reinstall puts it there again."""
     unrestatable: tuple[str, ...] = ()
+    package_cutoff: bool = False
+    """Whether uv recorded an upload-date cutoff of ``aisquare-cli``'s own
+    (``exclude-newer-package``), beside or in place of the global one."""
 
 
 def _canonical(name: object) -> str:
@@ -541,7 +544,21 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
         subdirectory=subdirectory,
         bin_dir=_bin_dir(tool.get("entrypoints")),
         unrestatable=tuple(refused),
+        package_cutoff=_names_us(options.get("exclude-newer-package"))
+        if isinstance(options, dict)
+        else False,
     )
+
+
+def _names_us(per_package: object) -> bool:
+    """Whether uv's ``exclude-newer-package`` table holds an entry for ``aisquare-cli``:
+    ``false``, a timestamp, or ``{ timestamp, span }`` (measured). One of another shape
+    cannot be shown not to, so it counts."""
+    if per_package is None:
+        return False
+    if not isinstance(per_package, dict):
+        return True
+    return any(_canonical(name) == DISTRIBUTION for name in per_package)
 
 
 def _bin_dir(entrypoints: object) -> Path | None:

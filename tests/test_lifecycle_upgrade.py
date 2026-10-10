@@ -1133,8 +1133,10 @@ class Tool:
 def machine(monkeypatch: pytest.MonkeyPatch) -> Machine:
     world = Machine()
 
-    def fetch_latest(timeout: float = 5.0, *, prereleases: bool = False) -> LatestRelease:
-        # `prereleases` changes what the REAL lookup reads; its tests drive it through open_url.
+    def fetch_latest(
+        timeout: float = 5.0, *, prereleases: bool = False, uploaded_before: Any = None
+    ) -> LatestRelease:
+        # Both keywords change what the REAL lookup reads; its tests drive it through open_url.
         world.lookups += 1
         return world.latest
 
@@ -2419,6 +2421,64 @@ def test_a_cooldown_falls_its_span_back_from_now(
     now = datetime(2026, 10, 9, 12, tzinfo=UTC)
 
     assert install_route.cutoff_time(route, now) == now - back
+
+
+#: A global cooldown as uv records it, for the per-package shapes below.
+_GLOBAL_COOLDOWN = 'exclude-newer = "2026-09-10T04:00:18Z"\nexclude-newer-span = "P30D"\n'
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        _GLOBAL_COOLDOWN + "exclude-newer-package = { aisquare-cli = false }",
+        _GLOBAL_COOLDOWN + "exclude-newer-package = { aisquare-cli = { timestamp = "
+        '"2026-10-09T04:00:18Z", span = "P1D" } }',
+        'exclude-newer-package = { aisquare-cli = "2026-10-01T04:00:00Z" }',
+        _GLOBAL_COOLDOWN + "exclude-newer-package = { tiktoken = false }",
+    ],
+    ids=["exempt", "its-own-span", "its-own-date", "another-package-beside-a-cutoff"],
+)
+def test_a_cutoff_the_receipt_does_not_state_in_full_is_not_compared(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch, options: str
+) -> None:
+    """uv records an `exclude-newer-package` override in the shapes measured here (uv
+    0.12.19, from the flag or uv.toml). Compared under the global cutoff beside one for
+    aisquare-cli, --check said "nothing to upgrade" while the install's own uv command took
+    a newer release (review of #257). Not every cutoff is restated, so none is compared."""
+    monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
+    machine.latest = LatestRelease("0.8.0")
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        _receipt(
+            _OURS_PINNED,
+            tail=f"\n[tool.options]\n{options}\n",
+        ),
+        encoding="utf-8",
+    )
+
+    check = runner.invoke(app, ["upgrade", "--check"])
+    report = _one_object(runner.invoke(app, ["--json", "upgrade", "--check"]).stdout)
+
+    assert machine.lookups == 0, "PyPI says nothing about what this install gets"
+    assert "PyPI was not asked" in check.stdout, check.stdout
+    assert "nothing to upgrade" not in check.stdout, check.stdout
+    assert report["latest"] is None and report["update_available"] is None, report
+
+
+def test_an_override_for_another_package_alone_leaves_pypis_word_to_compare(
+    runner: CliRunner, tool: Tool, machine: Machine
+) -> None:
+    """Control for the one above: with no global cutoff, an override for another package
+    says nothing about aisquare-cli, so PyPI's newest is read as for any install."""
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        _receipt(
+            _OURS_PINNED, tail="\n[tool.options]\nexclude-newer-package = { tiktoken = false }\n"
+        ),
+        encoding="utf-8",
+    )
+
+    report = _one_object(runner.invoke(app, ["--json", "upgrade", "--check"]).stdout)
+
+    assert machine.lookups == 1 and report["latest"] == "0.9.1", report
 
 
 @pytest.mark.parametrize(

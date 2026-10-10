@@ -37,7 +37,7 @@ from aisquare.core.config import (
 )
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxServer, TmuxUnavailable
-from aisquare.core.version import __version__
+from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import current_project
 from aisquare.models import SetupReport
 from aisquare.services import agents as agents_service
@@ -484,10 +484,13 @@ def _left_by_move_back(site: HookSite, target: str) -> HookSite:
 
 def _beyond_pypi(route: install_route.InstallRoute) -> str | None:
     """Why PyPI's newest says nothing about what this install's upgrade gets, or ``None``:
-    it resolves from its own index, or takes nothing uploaded after a uv cutoff."""
+    it resolves from its own index, or takes nothing uploaded after a uv cutoff, its own
+    for aisquare-cli (``exclude-newer-package``) or the global one."""
     own = install_route.own_index(route)
     if own is not None:
         return f"this install resolves from its own index ({own})"
+    if route.receipt is not None and route.receipt.package_cutoff:
+        return f"this install has a uv cutoff of {DISTRIBUTION}'s own (exclude-newer-package)"
     cutoff = install_route.cutoff(route)
     if cutoff is not None:
         return f"this install takes no release uploaded after its uv cutoff ({cutoff})"
@@ -499,15 +502,24 @@ def _latest_for(route: install_route.InstallRoute) -> install_route.LatestReleas
     (``install_route.takes_prereleases``); under a uv cutoff, the newest uploaded before it.
 
     PyPI is not asked for an install that resolves from its own index, or under a cutoff
-    that cannot be read: its word says nothing about what that install gets
-    (:func:`_beyond_pypi`). Taken as the target under a cutoff, PyPI's newest failed the
-    unchanged version uv rightly left as §3.9.1's silent no-op; then, not asked, every run
-    and --check found something to do, and each reinstall changed nothing (#257).
+    the receipt does not state in full or that cannot be read: its word says nothing about
+    what that install gets (:func:`_beyond_pypi`). Taken as the target under a cutoff,
+    PyPI's newest failed the unchanged version uv rightly left as §3.9.1's silent no-op;
+    then, not asked, every run and --check found something to do, and each reinstall
+    changed nothing (#257). Compared under the global cutoff beside an override of
+    aisquare-cli's own, --check said "nothing to upgrade" where uv took a newer release.
     """
     cutoff = install_route.cutoff(route)
-    before = install_route.cutoff_time(route, datetime.now(UTC))
-    if install_route.own_index(route) is not None or (cutoff is not None and before is None):
-        return install_route.LatestRelease(None, f"PyPI was not asked: {_beyond_pypi(route)}")
+    why = _beyond_pypi(route)
+    before = None
+    if why is not None:
+        # Only a cutoff the receipt states in full, one a command line restates, is compared.
+        receipt = route.receipt or install_route.UvReceipt()
+        alone = install_route.own_index(route) is None and not receipt.package_cutoff
+        if alone and not receipt.unrestatable:
+            before = install_route.cutoff_time(route, datetime.now(UTC))
+        if before is None:
+            return install_route.LatestRelease(None, f"PyPI was not asked: {why}")
     # Only what is asked for is passed, so a stand-in for the lookup that takes neither
     # keyword (the damaged-store census) still answers.
     asked: dict[str, Any] = {}

@@ -2088,6 +2088,32 @@ def test_send_on_the_transcript_tab_types_nothing_while_a_prompt_may_be_up(
     assert guarded["typed"] == "", "sent, so the box is cleared"
 
 
+def test_the_transcript_tabs_key_pad_types_nothing_while_a_prompt_may_be_up(
+    boot_report: dict[str, Any],
+) -> None:
+    """Sweep 5 of #243: the round-4 fix guarded the Transcript tab's Send, and its pad posted
+    ``1``, ⏎ and ``y`` with no ``dialog_guard``. Into a Bash prompt the tab does not draw,
+    ⏎ or ``1`` took "1. Yes" and ran the command blind. Each such key asks the machine to
+    type nothing while a prompt may be up, and a refusal says where to look. Esc answers a
+    prompt only No and stops a turn, so it goes as it does from Live, but a second Esc
+    straight after it, which opens Claude Code's Rewind selector, is not sent from here."""
+    pad = boot_report["transcriptPad"]
+    assert pad["bodies"] == [
+        [["1"], True],
+        [["Enter"], True],
+        [["y"], True],
+        [["Escape"], False],
+    ]
+    assert pad["refused"] == (
+        "Not sent — coder-1 may be showing a prompt that this would answer. "
+        "Look at it on Live first."
+    )
+    assert pad["twice"] == {
+        "toast": "Not sent — two Esc open the Rewind selector. Send it from Live.",
+        "sheet": None,
+    }
+
+
 def test_keys_and_send_carry_the_agent_id_of_the_screen_they_were_typed_at(
     boot_report: dict[str, Any],
 ) -> None:

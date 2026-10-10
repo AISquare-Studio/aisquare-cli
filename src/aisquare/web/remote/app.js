@@ -2636,8 +2636,8 @@ function drawExplainability(body, card) {
 
 /* The bar under the pane: a growing textarea, ⏎ on by default (text left in Claude Code's
  * input box holds back its next question), Send, and the key pad, which the soft keyboard
- * and it never share the screen with. blind: no pane (Transcript), so Send types nothing
- * while a prompt may be up. pin(): the agent_id of what the tab shows, each tap carries. */
+ * and it never share the screen with. blind: no pane (Transcript), so Send and keys but Esc
+ * (a No) type nothing while a prompt may be up. pin(): the agent_id each tap carries. */
 function inputBar(pid, label, cleanups, blind, pin) {
   const bar = el("div", "inputbar");
   const line = el("div", "row-inline");
@@ -2716,10 +2716,12 @@ function inputBar(pid, label, cleanups, blind, pin) {
   };
   const sendKey = (key, tapped) => {
     const body = { keys: [key], agent_id: pin() };
+    if (blind && key !== "Escape") body.dialog_guard = true;
     if (key === "Escape") {
       const now = Date.now();
       if (now - lastEsc < ESC_REPEAT_MS) {
         lastEsc = 0;
+        if (blind) return toast("Not sent — two Esc open the Rewind selector. Send it from Live.");
         confirmSheet("Press Esc again?", "Two Esc in a row open Claude Code's Rewind selector.", "Send Esc", () => post(body, "Esc", tapped));
         return;
       }

@@ -1841,6 +1841,35 @@ async function transcriptSendGuarded() {
   return { bodies, refused, typed: say.value };
 }
 
+/* The key pad on the Transcript tab, which draws no pane: 1, ⏎ and More's y each ask the
+ * machine to type nothing while a prompt may be up (dialog_guard), as Send does; the first is
+ * refused dialog_open, and what the page says then. Esc goes as it does from Live, and a
+ * second Esc straight after it is not sent at all. Each body as [keys, dialog_guard]. */
+async function transcriptPad() {
+  let answer = { status: 409, json: { error: "dialog_open", message: "coder-1 is showing a prompt" } };
+  const page = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
+    "GET api/transcript/coder-1": () => transcriptPage([], null, false),
+    "POST api/send-keys": () => answer,
+  }));
+  await settle();
+  page.acceptSockets();
+  page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  await settle();
+  click(buttonNamed(page.main(), "1"));
+  await settle();
+  const refused = page.toast();
+  answer = { status: 200, json: { sent: true } };
+  for (const name of ["⏎", "y", "Esc", "Esc"]) {
+    click(buttonNamed(page.main(), name));
+    await settle();
+  }
+  return {
+    bodies: page.sent("api/send-keys").map((body) => [body.keys, body.dialog_guard === true]),
+    refused,
+    twice: { toast: page.toast(), sheet: sheetTitle(page) },
+  };
+}
+
 /* Keys and Send carry the agent_id of the screen they were typed at. On Live: a pad key at
  * one row's frame; a ^C asked on its sheet there and confirmed after a replacement's frame
  * came (still the first row's: the tap was at its screen); Send at the replacement's frame;
@@ -3400,6 +3429,7 @@ async function main() {
     backoffAcrossAnUnlock: await backoffAcrossAnUnlock(),
     transcriptSend: await transcriptSend(),
     transcriptSendGuarded: await transcriptSendGuarded(),
+    transcriptPad: await transcriptPad(),
     pinnedKeys: await pinnedKeys(),
     sheetFocus: await sheetFocus(),
     focusLands: await focusLands(),

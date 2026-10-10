@@ -356,12 +356,13 @@ agent is on, none with room) is refused before any Esc. A card's Tell and
 Interrupt & tell refuse a dialog the same way. The menu's plain Tell types only
 into an agent waiting at its prompt: while the agent may be showing a prompt,
 even one left unanswered for hours, the message is left as a board note instead.
-Send on the Transcript tab, which does not show the pane, types only into an
-agent still at its prompt: nothing while it may be showing a prompt, a tool with
-no result yet included, or is at work or parked on its usage limit
-(`agent_busy`); send from Live, where the pane shows what the keys would answer.
-Its Send and keys wait until the transcript has loaded, which names the agent
-they go to.
+Send and the key pad on the Transcript tab, which does not show the pane, type
+only into an agent still at its prompt: nothing while it may be showing a
+prompt, a tool with no result yet included, or is at work or parked on its usage
+limit (`agent_busy`); send from Live, where the pane shows what the keys would
+answer. Esc, which answers a prompt only No, goes from there as from Live, but
+not twice in a row. Its Send and keys wait until the transcript has loaded,
+which names the agent they go to.
 
 An agent the machine cannot read, one started without aisquare's hooks (`no
 hooks` in `fleet ls`, as `fleet spawn --bin` can start one) or whose transcript
@@ -385,7 +386,8 @@ a narrower phone More takes the line under the seven, and below 360 px the
 eight are two rows of four, More last.
 Ctrl-C and Ctrl-D ask first, and a second one within 3 seconds asks again,
 because Claude Code exits on it. A second Esc within a second and a half asks
-too: two in a row open Claude Code's Rewind selector. The pad and the phone's
+too, and from the Transcript tab is not sent: two in a row open Claude Code's
+Rewind selector. The pad and the phone's
 keyboard never share the screen. Keys reach an agent one at a time, in the order
 they were tapped, and a key shows in the accent colour until the machine has
 answered it; one that waits behind a key that did not get through, or for longer

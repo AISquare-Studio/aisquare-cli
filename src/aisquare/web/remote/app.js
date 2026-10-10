@@ -926,7 +926,8 @@ function settleFromLedger(entries) {
       const verb = S.orphans.get(entry.request_id).verb;
       S.orphans.delete(entry.request_id);
       savePending();
-      toast(verb + ": " + (res.ok ? "done" + (untold(res.data) && " — " + untold(res.data)) : failText(res)));
+      const not = res.ok && untold(res.data);
+      toast(verb + ": " + (res.ok ? "done" + (not && " — " + not) : failText(res)));
     }
   }
 }
@@ -2004,9 +2005,7 @@ function tellSheet(ctx, mode) {
         const told = res.data && typeof res.data === "object" ? res.data : {};
         const delivered = told.delivered === true;
         // Not typed: the machine says what came of it (a board note, unsent text).
-        if (delivered) toast("Typed into " + label);
-        else if (isText(told.how)) toast(label + ": " + plainText(told.how));
-        else toast(current === "auto" ? "Left a note for " + label + " — it reads it at its next prompt" : "Not typed into " + label + " — look at its pane");
+        toast(delivered ? "Typed into " + label : label + ": " + (untold(told) || "not typed — look at its pane"));
         if (delivered && ctx.needsId) dismissItem({ id: ctx.needsId });
         return;
       }
@@ -2083,17 +2082,19 @@ function effectSentence(kind, label, o) {
   return o.dismiss ? text + " Its prompt is dismissed (No) first." : text;
 }
 
-/* What a restart or switch left undone: an untyped first line idles the replacement. */
+/* What a write to an agent left undone: a Tell not typed, the claims a stop kept, what a
+ * restart or switch did not do (an untyped first line idles the replacement). */
 function untold(d) {
+  if (d.delivered === false) return plainText(d.how);
+  if (isText(d.release_failed)) return "its claims were not released: " + plainText(d.release_failed);
   const why = Array.isArray(d.failures) ? plainText(d.failures.join("; ")) : "";
   return d.prompt_typed === false ? plainText(d.how) + (why && " — " + why) + ". Tell it what to do" : why;
 }
 
 function doneSentence(kind, label, data) {
   const d = data && typeof data === "object" ? data : {};
-  if (kind === "stop" && isText(d.release_failed)) return "Stopped " + label + ", but its claims were not released: " + plainText(d.release_failed);
-  const done = AGENT_ACTIONS[kind].done + " " + label;
-  if (untold(d)) return done + (d.prompt_typed === false ? ": " : ", but not all of it: ") + untold(d);
+  const done = AGENT_ACTIONS[kind].done + " " + label, not = untold(d);
+  if (not) return done + (d.prompt_typed === false ? ": " : isText(d.release_failed) ? ", but " : ", but not all of it: ") + not;
   return kind === "restart" && d.resumed === true ? done + " on its own conversation" : done;
 }
 

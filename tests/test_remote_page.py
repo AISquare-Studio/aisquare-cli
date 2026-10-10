@@ -1655,6 +1655,26 @@ def test_a_replacement_whose_first_line_was_not_typed_is_said_and_told_to_be_tol
     assert report["ledger"] == f"Switch account coder-1: done — {said}"
 
 
+def test_what_a_stop_or_a_tell_left_undone_is_said_also_when_only_the_ledger_answers(
+    boot_report: dict[str, Any],
+) -> None:
+    """The class of sweep5-14 (a result fact the page drops), on the ledger's toast: a stop
+    that could not release its agent's claims, and a Tell left as a board note because the
+    agent was working, read "Stop coder-1: done" and "Tell coder-1: done" once the phone
+    woke to them, and the human took the claims for released and the words for typed. The
+    page says what was not done there as it does when the answer comes at once."""
+    report = boot_report["ledgerUndone"]
+    assert report["stopped"] == (
+        "Stopped coder-1, but its claims were not released: database is locked"
+    )
+    assert report["stopLedger"] == (
+        "Stop coder-1: done — its claims were not released: database is locked"
+    )
+    assert report["toldLedger"] == (
+        "Tell coder-1: done — it is working — filed as board note #12 to coder-1"
+    )
+
+
 def test_a_stop_refused_at_a_prompt_is_explained_in_the_pages_own_words(
     boot_report: dict[str, Any],
 ) -> None:

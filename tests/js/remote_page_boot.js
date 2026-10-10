@@ -1003,6 +1003,39 @@ async function notTyped() {
   return { switched, restarted, unreleased, ledger: lost.toast() };
 }
 
+/* A stop that could not release its agent's claims, and a Tell the machine left as a board
+ * note, each answered only by the ledger after its request and the retry were lost: what
+ * the page says of each. And the same stop answered at once. */
+async function ledgerUndone() {
+  const kept = { agent: { id: "agt_1", label: "coder-1" }, claims_released: [], release_failed: "database is locked", project: PROJECT };
+  const noted = { label: "coder-1", delivered: false, how: "it is working — filed as board note #12 to coder-1", mode: "auto", project: PROJECT };
+  const act = async (endpoint, answer, item, go) => {
+    const page = await agentView({ ["POST api/" + endpoint]: () => answer });
+    page.live().frame("fleet", FLEET);
+    await settle();
+    click(buttonNamed(page.main(), "Actions…"));
+    click(buttonNamed(page.run("UI.sheet"), item));
+    const text = find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA");
+    if (text) text.value = "merge it";
+    click(buttonNamed(page.run("UI.sheet"), go));
+    await settle();
+    if (answer !== "network") return page.toast();
+    page.acceptSockets();
+    paneCame(page);
+    await settle();
+    const id = page.sent("api/" + endpoint)[0].request_id;
+    const body = endpoint === "agent/stop" ? kept : noted;
+    page.live().frame("action", { actions: [{ request_id: id, endpoint, status: 200, body, at: "2026-10-07T10:13:00+00:00" }] });
+    await settle();
+    return page.toast();
+  };
+  return {
+    stopped: await act("agent/stop", { status: 200, json: kept }, "Stop…", "Stop"),
+    stopLedger: await act("agent/stop", "network", "Stop…", "Stop"),
+    toldLedger: await act("agent/tell", "network", "Tell…", "Tell"),
+  };
+}
+
 /* Stop, on an agent that shows a prompt: the machine refuses in its API's words, the
  * sheet says why in its own and adds the dismissal to what Stop will do, and the next tap
  * sends dismiss_dialog. */
@@ -3503,6 +3536,7 @@ async function main() {
     paneCursor: await paneCursor(),
     stopAtAPrompt: await stopAtAPrompt(),
     notTyped: await notTyped(),
+    ledgerUndone: await ledgerUndone(),
     refusedReadOnly: await refusedReadOnly(),
     keyNames: await keyNames(),
     liveScroll: await liveScroll(),

@@ -609,3 +609,173 @@ def test_a_label_no_row_holds_makes_no_lock(
     with pytest.raises(NoSuchAgent):
         live_writes().handlers["send-keys"]({"agent": "ghost", "keys": ["Up"]})
     assert (project.id, "ghost") not in remote_server._agent_locks
+
+
+# --- keys go to the row whose screen they were typed at ----------------------------------------
+
+
+def _replace(project: ProjectInfo, pane_id: str = "%2") -> FleetAgent:
+    """What a ``fleet restart`` or a usage-limit hand-over in another process leaves: the
+    row ended, and a younger one holding the label. Neither takes the agent's lock."""
+    with store_session() as store:
+        store.end_fleet_agent("agt_coder-1")
+    row = FleetAgent(
+        id="agt_coder-1-2",
+        project_id=project.id,
+        label="coder-1",
+        role="coder",
+        pane_id=pane_id,
+        cwd=project.root,
+        created_at=BORN + timedelta(minutes=1),
+    )
+    with store_session() as store:
+        store.upsert_fleet_agent(row)
+    return row
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"keys": ["1"]}, {"keys": ["Enter"]}, {"text": "yes", "enter": True}],
+    ids=["a digit", "Enter", "typed text"],
+)
+def test_keys_pinned_to_a_row_another_one_replaced_are_not_typed_into_the_replacement(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, body: dict[str, Any]
+) -> None:
+    """Review of #243, round 5: the phone drew coder-1's permission prompt, a restart in
+    another process replaced coder-1 before the next frame, and the ``1`` tapped at that
+    prompt went into the replacement: its input box, or its first dialog."""
+    tmux = _serving(monkeypatch, Tmux(OLDER))
+    _replace(project)
+    with pytest.raises(RequestError) as refused:
+        live_writes().handlers["send-keys"]({"agent": "coder-1", "agent_id": "agt_coder-1", **body})
+    assert (refused.value.status, refused.value.error) == (409, "stale")
+    assert refused.value.message == (
+        "'coder-1' is another agent now (agt_coder-1-2) — nothing was sent"
+    )
+    assert refused.value.extra == {"current": {"agent_id": "agt_coder-1-2"}}
+    assert tmux.sent == []
+
+
+def test_keys_pinned_to_the_row_that_holds_the_label_are_typed(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tmux = _serving(monkeypatch, Tmux(OLDER))
+    send = live_writes().handlers["send-keys"]
+    assert send({"agent": "coder-1", "agent_id": "agt_coder-1", "keys": ["1"]})[0]["sent"] is True
+    replacement = _replace(project, pane_id="%5")
+    assert send({"agent": "coder-1", "agent_id": replacement.id, "keys": ["2"]})[0]["sent"] is True
+    assert tmux.sent == [("keys", "%2", "1"), ("keys", "%5", "2")]
+
+
+def test_a_row_replaced_while_its_key_waits_for_the_agents_lock_gets_nothing(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pin is judged against the row read under the lock, where the key is typed: the
+    row read before it may be replaced while the key waits out an action."""
+    tmux = _serving(monkeypatch, Tmux(OLDER))
+    action = remote_agent_lock(project.id, "coder-1")
+    assert action.acquire(blocking=False)
+    outcome: list[object] = []
+
+    def tap() -> None:
+        try:
+            body = {"agent": "coder-1", "agent_id": "agt_coder-1", "keys": ["1"]}
+            outcome.append(live_writes().handlers["send-keys"](body))
+        except RequestError as exc:
+            outcome.append(exc)
+
+    tapper = threading.Thread(target=tap)
+    try:
+        tapper.start()
+        time.sleep(0.3)  # the key read coder-1's row, and waits for the lock
+        _replace(project)
+    finally:
+        action.release()
+        tapper.join(10)
+    assert [getattr(one, "error", one) for one in outcome] == ["stale"]
+    assert tmux.sent == []
+
+
+def test_a_ctrl_c_refused_stale_is_no_first_press_for_the_double_press_guard(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pin is judged before the guard notes a press, as the pane is: a Ctrl-C that never
+    left the machine must not turn the next one into a 409 ``double_press``."""
+    tmux = _serving(monkeypatch, Tmux(OLDER))
+    send = live_writes().handlers["send-keys"]
+    replacement = _replace(project)
+    with pytest.raises(RequestError) as refused:
+        send({"agent": "coder-1", "agent_id": "agt_coder-1", "keys": ["C-c"]})
+    assert refused.value.error == "stale"
+    send({"agent": "coder-1", "agent_id": replacement.id, "keys": ["C-c"]})
+    assert tmux.sent == [("keys", "%2", "C-c")]
+
+
+@pytest.mark.parametrize(
+    ("value", "said"),
+    [
+        (7, "'agent_id' must be a string"),
+        ("  ", "'agent_id' is blank: send the id, or leave it out"),
+    ],
+    ids=["a number", "blank"],
+)
+def test_an_agent_id_that_names_no_row_is_refused_never_read_as_no_pin(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, value: object, said: str
+) -> None:
+    """Read as absent, a pin the page sent wrong would turn the pin off and type anyway."""
+    tmux = _serving(monkeypatch, Tmux(OLDER))
+    send = live_writes().handlers["send-keys"]
+    with pytest.raises(RequestError) as refused:
+        send({"agent": "coder-1", "agent_id": value, "keys": ["1"]})
+    assert (refused.value.status, refused.value.error, refused.value.message) == (
+        400,
+        "invalid",
+        said,
+    )
+    assert tmux.sent == []
+    send({"agent": "coder-1", "agent_id": None, "keys": ["1"]})
+    assert tmux.sent == [("keys", "%2", "1")], "null is no pin, as an absent one"
+
+
+def test_a_frame_a_page_and_a_pane_read_name_their_row_and_a_replacements_frame_goes_out(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The page sends the id of the row whose frame it drew, so every frame names it. A
+    replacement in the same pane can show the same screen: its frame must still go out, or
+    the page would keep the old id and every key would be refused stale."""
+    tmux = _serving(monkeypatch, Tmux(OLDER))
+    runtime = make_runtime()
+    app = build_app(runtime, sources=_sources(), writes=live_writes(), dist_dir=tmp_path, tick=0.05)
+    client = make_client(app)
+    assert unlock(client, runtime).status_code == 200
+    runtime.set_allow_write(True)
+    url = f"{base(runtime)}/api"
+    assert client.get(f"{url}/panes/coder-1").json()["agent_id"] == "agt_coder-1"
+    assert client.get(f"{url}/transcript/coder-1").json()["agent_id"] == "agt_coder-1"
+    frames: list[dict[str, Any]] = []
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        ws.send_text(json.dumps({"subscribe": "coder-1"}))
+        while not frames:
+            frame = frame_within(ws)
+            if frame["type"] == "pane":
+                frames.append(frame["payload"])
+        _replace(project)
+        while frames[-1].get("agent_id") != "agt_coder-1-2":
+            frame = frame_within(ws, 3.0)
+            if frame["type"] == "pane":
+                frames.append(frame["payload"])
+    # A tick between the row's end and its replacement reads no agent: an error frame.
+    first, *between, last = frames
+    assert (first["agent_id"], last["agent_id"]) == ("agt_coder-1", "agt_coder-1-2")
+    assert first["rows"] == last["rows"] == ["the screen of %2"], "the same screen"
+    assert all("agent_id" not in frame and frame["error"] for frame in between), between
+    typed = client.post(
+        f"{url}/send-keys", json={"agent": "coder-1", "agent_id": "agt_coder-1", "keys": ["1"]}
+    )
+    assert typed.status_code == 409
+    assert typed.json() == {
+        "error": "stale",
+        "message": "'coder-1' is another agent now (agt_coder-1-2) — nothing was sent",
+        "current": {"agent_id": "agt_coder-1-2"},
+    }
+    assert tmux.sent == []

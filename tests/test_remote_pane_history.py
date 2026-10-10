@@ -239,13 +239,15 @@ def _project_stub(ref: str | None) -> Any:
     return _P()
 
 
-LIVE_KEYS = {"rows", "cursor", "width", "height", "cursor_visible"}
-"""What the live stream's frame holds: §4-D's four keys, and whether the cursor shows."""
+LIVE_KEYS = {"rows", "cursor", "width", "height", "cursor_visible", "agent_id"}
+"""What the live stream's frame holds: §4-D's four keys, whether the cursor shows, and the row
+it was captured from, which keys typed at it carry."""
 
 
 @requires_tmux
-def test_omitted_history_is_byte_identical_to_today(live_panes: Any) -> None:
-    """§4-L: nothing existing changes — the live frame's keys, no history keys at all."""
+def test_omitted_history_is_the_live_frame_with_no_history_keys(live_panes: Any) -> None:
+    """§4-L: history 0 is the live frame: its keys, the row's ``agent_id`` among them, and no
+    history keys at all."""
     today = live_panes("coder-1", None, 0)
     assert set(today) == LIVE_KEYS
     assert "history" not in today and "history_size" not in today

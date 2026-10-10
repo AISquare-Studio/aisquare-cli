@@ -2084,9 +2084,14 @@ def _remote_keys_turn(target: ProjectInfo, label: str) -> Iterator[FleetAgent]:
 def _live_panes(label: str, project: str | None = None, history: int = 0) -> dict[str, object]:
     """One pane frame: the live screen, or scrollback and the screen together (§4-L).
 
-    ``history`` of 0 takes the SAME call today took and returns the live keys
-    alone (:func:`_pane_payload`), so the live stream and every existing client
-    are untouched — the history keys appear only when history was asked for.
+    ``history`` of 0 takes the same call the live stream always took and returns
+    :func:`_pane_payload`'s keys and the row's ``agent_id``, with no history keys:
+    those appear only when history was asked for.
+
+    Every frame names the row it was captured from (``agent_id``), which the page
+    sends with the keys typed at it (``send-keys``): a replacement that took the
+    label since gets none of them. It also makes the replacement's first frame a
+    change the stream sends, however like the last one its screen is.
 
     Never another agent's screen: a row whose pane id the next tmux server gave
     away is 409 ``not_agent`` (``fleet._outlived``, FLEET-1). The server says
@@ -2106,6 +2111,7 @@ def _live_panes(label: str, project: str | None = None, history: int = 0) -> dic
     if fleet_service._outlived(agent, capture.facts.server_started):
         raise RequestError(409, "not_agent", PANE_OUTLIVED.format(label=label))
     payload = _pane_payload(capture)
+    payload["agent_id"] = agent.id
     if history <= 0:
         return payload
     payload["history_size"] = capture.facts.history_size
@@ -2137,6 +2143,10 @@ def _live_transcript(
     from there, and Load older put the new conversation above the old one as its
     past (review of #243, sweep of round 4). A cursor of another conversation, or
     of none this server made, is a 409 ``stale_cursor``.
+
+    A page names the row it was read for (``agent_id``), as a pane frame does: the
+    Transcript tab's Send carries it, so a reply to this conversation is typed into
+    no replacement that took the label since (``send-keys``).
     """
     from aisquare.core.store import store_session
     from aisquare.services import transcript as transcript_service
@@ -2164,6 +2174,7 @@ def _live_transcript(
     payload = page.page_json()
     if page.cursor is not None and session is not None:
         payload["cursor"] = f"{session.id}:{page.cursor}"
+    payload["agent_id"] = agent.id
     return payload
 
 
@@ -2857,6 +2868,15 @@ def live_writes() -> Writes:
         which the text and its Enter would answer (409 ``dialog_open``,
         ``remote_actions.action_keys_guard``). The Live tab shows the dialog, and
         its keys are how one is answered, so they go without it.
+
+        ``agent_id`` pins the keys to the row whose screen they were typed at, which a
+        pane frame and a transcript page name: once another row holds the label,
+        nothing is sent (409 ``stale``, ``current`` naming that row), as for every
+        other write that types into an agent. Unpinned, a key tapped at the prompt the
+        phone showed went into the replacement a ``fleet restart`` or a usage-limit
+        hand-over had started since, neither of which takes the agent's lock: into its
+        input box, ahead of the line the fleet types into a resumed agent, or into its
+        first dialog (review of #243, round 5).
         """
         from aisquare.services import fleet as fleet_service
 
@@ -2866,6 +2886,7 @@ def live_writes() -> Writes:
         enter = _remote_flag(body, "enter")
         confirmed = _remote_flag(body, "confirm_exit")
         guarded = _remote_flag(body, "dialog_guard")
+        pin = _optional_ref(body, "agent_id", guard=True)
         project = _optional_ref(body, "project")
         if text and len(text) > SEND_KEYS_TEXT_MAX:
             raise RequestError(
@@ -2886,6 +2907,13 @@ def live_writes() -> Writes:
             f"{label}@{target.id} text={len(text or '')}ch keys={_audit_keys(keys)} enter={enter}"
         )
         with _remote_keys_turn(target, label) as agent:
+            if pin is not None and agent.id != pin:
+                raise RequestError(
+                    409,
+                    "stale",
+                    f"{label!r} is another agent now ({agent.id}) — nothing was sent",
+                    current={"agent_id": agent.id},
+                )
             server = fleet_service.server_for(agent.tmux_socket)
             refusal = _remote_pane_refusal(server, agent)
             if refusal is not None:
@@ -3032,6 +3060,15 @@ class _Cache:
     thread. Each caller waited in a thread of the loop's default pool, which
     also runs every unlock, write and transcript read, so a few sockets waiting
     on one slow kind held all of it.
+
+    An outcome is as old as its read: its age counts from when its compute was
+    claimed, not from when it came back. Counted from its end, a socket's own
+    read was still within the ttl at its next tick, a tick after it began,
+    whenever it took more than a tenth of one: the socket took its own last
+    snapshot back, the frame was the same, none went out, and a board, a fleet or
+    a pane that slow came every two ticks (sweep of #243, round 5). Sockets out of
+    step still share one read within the tick, and an outcome whose read took the
+    whole ttl answers the callers that waited on it and is kept for none after.
     """
 
     def __init__(self, ttl: float, *, clock: Callable[[], float] = time.monotonic) -> None:
@@ -3040,24 +3077,26 @@ class _Cache:
         self._lock = threading.Lock()
         """Guards the two tables, and is never held while a snapshot is computed."""
         self._values: dict[str, tuple[float, object]] = {}
-        """Each kind's outcome within the tick: its snapshot, or :class:`_Failed`."""
-        self._flights: dict[str, Future[object]] = {}
-        """The kinds being computed now, each to the future its callers wait on. A flight
-        goes when its compute ends, so this holds the kinds in flight and no more,
-        whatever kinds are asked for."""
+        """Each kind's outcome within the tick, with when its compute was claimed: its
+        snapshot, or :class:`_Failed`."""
+        self._flights: dict[str, tuple[Future[object], float]] = {}
+        """The kinds being computed now, each to the future its callers wait on and when it
+        was claimed. A flight goes when its compute ends, so this holds the kinds in flight
+        and no more, whatever kinds are asked for."""
 
     def _cache_fresh(self, kind: str) -> tuple[float, object] | None:
         """``kind``'s outcome while it is younger than the ttl; call it holding ``_lock``."""
         hit = self._values.get(kind)
         return hit if hit is not None and self._clock() - hit[0] < self._ttl else None
 
-    def _cache_store(self, kind: str, outcome: object) -> None:
-        """Keep ``outcome`` as ``kind``'s, once what expired is dropped; hold ``_lock``."""
+    def _cache_store(self, kind: str, outcome: object, began: float) -> None:
+        """Keep ``outcome`` as ``kind``'s, as old as its compute (``began``), and drop what
+        expired, the outcome itself if its compute took the whole ttl; hold ``_lock``."""
+        self._values.pop(kind, None)  # stored anew, so the dict stays in the order stored
+        self._values[kind] = (began, outcome)
         now = self._clock()
         for stale in [k for k, (at, _kept) in self._values.items() if now - at >= self._ttl]:
             del self._values[stale]
-        self._values.pop(kind, None)  # stored anew, so the dict stays oldest first
-        self._values[kind] = (now, outcome)
         while len(self._values) > CACHE_KINDS_MAX:
             del self._values[next(iter(self._values))]
 
@@ -3070,10 +3109,11 @@ class _Cache:
         with self._lock:
             hit = self._cache_fresh(kind)
             if hit is None:
-                flight = self._flights.get(kind)
-                if flight is not None:
-                    return flight, False
-                flight = self._flights[kind] = Future()
+                flying = self._flights.get(kind)
+                if flying is not None:
+                    return flying[0], False
+                flight: Future[object] = Future()
+                self._flights[kind] = (flight, self._clock())
                 # Running, so a waiter that is cancelled (its socket closed) ends its own
                 # wait and never the flight the other callers wait on.
                 flight.set_running_or_notify_cancel()
@@ -3100,11 +3140,12 @@ class _Cache:
         """End ``kind``'s flight with ``outcome``, kept as the tick's when ``keep``; a flight
         ends once, and a later ending changes nothing."""
         with self._lock:
-            if self._flights.get(kind) is not flight:
+            flying = self._flights.get(kind)
+            if flying is None or flying[0] is not flight:
                 return
             del self._flights[kind]
             if keep:
-                self._cache_store(kind, outcome)
+                self._cache_store(kind, outcome, flying[1])
         flight.set_result(outcome)
 
     def _cache_job_done(self, kind: str, flight: Future[object]) -> None:
@@ -4651,6 +4692,12 @@ def build_remote_app(
         most for them. A snapshot still being read after that sends its frame on a later
         tick, and the frames that need no read (``remote``, ``needs_you``, ``action``,
         the heartbeat) and the snapshots that came back go out without it.
+
+        A tick is one tick, the wait for its reads included: the next begins a tick after
+        this one began. The wait for the reads and the pause after the frames each took a
+        whole tick, so while one read hung (a fleet waiting out tmux's 30 s, a store kept
+        busy) every frame of the socket came every two ticks, and an auto-off or a device
+        signed out elsewhere closed it up to two ticks late (sweep of #243, round 5).
         """
         device = kit.kit_device(websocket)  # the gate refused a socket without one
         await websocket.accept()
@@ -4749,7 +4796,7 @@ def build_remote_app(
             del pending[kind]
             return _read_outcome(began)
 
-        async def tick_once() -> None:
+        async def tick_once(ends: float) -> None:
             nonlocal next_heartbeat, first_tick
             # Every snapshot is read at once and waited for a tick at most. Read in turn and
             # awaited, one that hung held every frame behind it: a tmux that stops answering
@@ -4777,7 +4824,7 @@ def build_remote_app(
             for kind in [kind for kind in pending if kind not in wanted_kinds]:
                 _let_read_go(pending.pop(kind))  # switched away from, or unsubscribed
             if not all(began.done() for began in in_flight):
-                await asyncio.wait(in_flight, timeout=tick)
+                await asyncio.wait(in_flight, timeout=max(0.0, ends - loop.time()))
             board = remote_taken(board_kind)
             if board is not _UNREAD and board_wanted and board_ref == board_project:
                 if isinstance(board, Exception):  # said on the Board tab, not "Loading…" for good
@@ -4882,6 +4929,7 @@ def build_remote_app(
         reading = asyncio.ensure_future(reader())
         try:
             while not reading.done():
+                ends = loop.time() + tick
                 # One check of remote.json a tick, for everything the tick reads of it.
                 with runtime.remote_state_checked():
                     # By id, every tick: Remote off (auto-off included) is 4410, a device that
@@ -4892,8 +4940,8 @@ def build_remote_app(
                     if not runtime.device_is_live(device.id):
                         await close_with(WS_CLOSE_UNAUTHORIZED)
                         break
-                    await tick_once()
-                await asyncio.wait([reading], timeout=tick)
+                    await tick_once(ends)
+                await asyncio.wait([reading], timeout=max(0.0, ends - loop.time()))
         except WebSocketDisconnect:
             pass
         except Exception as exc:

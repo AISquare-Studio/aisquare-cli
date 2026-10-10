@@ -1884,7 +1884,13 @@ def test_send_on_the_transcript_tab_types_nothing_while_a_prompt_may_be_up(
     (``dialog_guard``), and a refusal keeps the text and says where to look. The Live
     tab's Send, beside the prompt, goes without it (the write bodies' test)."""
     guarded = boot_report["transcriptSendGuarded"]
-    sent = {"agent": "coder-1", "project": "prj_x", "enter": True, "dialog_guard": True}
+    sent = {
+        "agent": "coder-1",
+        "project": "prj_x",
+        "enter": True,
+        "dialog_guard": True,
+        "agent_id": "agt_1",
+    }
     assert guarded["bodies"] == [
         {**sent, "text": "no - run the tests instead"},
         {**sent, "text": "run the tests"},
@@ -1895,6 +1901,37 @@ def test_send_on_the_transcript_tab_types_nothing_while_a_prompt_may_be_up(
         "typed": "no - run the tests instead",
     }
     assert guarded["typed"] == "", "sent, so the box is cleared"
+
+
+def test_keys_and_send_carry_the_agent_id_of_the_screen_they_were_typed_at(
+    boot_report: dict[str, Any],
+) -> None:
+    """Review of #243, round 5: a key carried no agent, so a ``1`` tapped at the permission
+    prompt the Live tab showed went into the replacement a restart or a hand-over had started
+    on the machine before the next frame came. Each key and line carries the ``agent_id``
+    of the frame drawn when it was tapped, a ^C confirmed on its sheet after the next
+    frame came included, and the Transcript tab's Send that of the page it read. A frame
+    that could not be read shows no agent to type at: the pad and Send wait for a screen,
+    as they wait for the first one on a new socket. Nor does the Transcript tab before a
+    page of it came, or while none could be read: Send and the pad there wait for one, as
+    a line sent with no id went to whichever agent held the label by then."""
+    pinned = boot_report["pinnedKeys"]
+    assert pinned["live"] == [
+        [["1"], "agt_1"],
+        [["C-c"], "agt_1"],  # asked at agt_1's screen, confirmed once agt_2's came
+        ["hello", "agt_2"],
+        [["2"], "agt_2"],  # refused stale
+        [["4"], "agt_3"],  # the "3" tapped at the unread frame never went
+    ]
+    assert pinned["staleSaid"] == "'coder-1' is another agent now (agt_3) — nothing was sent"
+    assert pinned["unread"] == [True, True, True], "Send, the pad, and the pane greyed"
+    assert pinned["read"] == [False, False, False]
+    assert pinned["transcriptHeld"] == {
+        "unpaged": [True, True],
+        "failed": [True, True],
+        "paged": [False, False],
+    }
+    assert pinned["transcript"] == [["yes", "agt_1", True]], "nothing went before the page"
 
 
 def test_a_sheet_keeps_focus_where_it_put_it_and_closes_onto_the_screen_once_its_opener_went(

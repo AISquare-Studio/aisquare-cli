@@ -2477,6 +2477,26 @@ def test_the_doctor_runs_from_root_only_where_this_folder_could_answer_different
     assert runs == ([str(here.resolve()), "/"] if asked_from_root else [str(here.resolve())]), runs
 
 
+def test_a_path_in_the_plan_prints_as_written(tmp_path: Path) -> None:
+    """The plan is printed as text. As the printf format a % in a path was a conversion
+    (round 15), and under %b a \\c in one ended the banner there, and \\t or \\0NNN were
+    rewritten (review of #257, round 16). Every backslash and % prints as written, under
+    whichever sh runs the suite."""
+    project = "/tmp/we\\cird\\tx\\0101 100%sure"
+    home_dir = "/data/a\\cq%d"
+    result = sh(
+        'WANT_AGENT=1; WANT_PROJECT=1; PROJECT_DIR=$P; CLI_ACTION=install; UV_VERSION=""; '
+        'CLAUDE_ACTION=install; CLAUDE_VERSION=""; banner',
+        env={"P": project, "AISQUARE_HOME": home_dir, "CLAUDE_CONFIG_DIR": ""},
+        path=base_path(tmp_path),
+    )
+
+    assert "\\c" in project and "%" in project, "control: the path holds both"
+    assert f"  register {project} as a project\n" in result.stdout, result.stdout
+    assert "  connect  claude-code's hooks\n" in result.stdout, result.stdout
+    assert f"  {home_dir + '/':<33} config.toml" in result.stdout, result.stdout
+
+
 @pytest.mark.parametrize(
     ("environment", "home_shown", "settings_shown"),
     [

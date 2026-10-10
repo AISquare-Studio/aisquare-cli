@@ -881,43 +881,47 @@ banner() {
     say ""
     say "${C_BOLD}aisquare installer${C_RESET} — this will:"
 
+    # A real newline between entries, never an escape a printf expands: the plan
+    # holds paths (PROJECT_DIR, AISQUARE_HOME), and a % or a backslash in one is text.
+    _bn_nl='
+'
     _plan=""
-    [ "$CLI_ACTION" = install ] && _plan="$_plan\n  install  Python $PYTHON_VERSION + $PYPI_PACKAGE + tiktoken (via uv, into its own venv)"
-    [ "$CLI_ACTION" = upgrade ] && _plan="$_plan\n  upgrade  $PYPI_PACKAGE $CLI_VERSION -> ${LATEST_VERSION:-latest}"
-    [ "$CLI_ACTION" = current ] && _plan="$_plan\n  keep     $PYPI_PACKAGE $CLI_VERSION"
-    [ -z "$UV_VERSION" ] && _plan="$_plan\n  install  uv (the bootstrap: a static binary that brings its own Python)"
+    [ "$CLI_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Python $PYTHON_VERSION + $PYPI_PACKAGE + tiktoken (via uv, into its own venv)"
+    [ "$CLI_ACTION" = upgrade ] && _plan="$_plan$_bn_nl  upgrade  $PYPI_PACKAGE $CLI_VERSION -> ${LATEST_VERSION:-latest}"
+    [ "$CLI_ACTION" = current ] && _plan="$_plan$_bn_nl  keep     $PYPI_PACKAGE $CLI_VERSION"
+    [ -z "$UV_VERSION" ] && _plan="$_plan$_bn_nl  install  uv (the bootstrap: a static binary that brings its own Python)"
     # Named like Claude Code's own updater below: `uv self update` replaces uv
     # wherever uv put itself, and refuses for a package manager's uv.
-    [ -n "$UV_VERSION" ] && [ "$UPGRADE_ALL" = 1 ] && _plan="$_plan\n  update   uv $UV_VERSION (uv self update, --upgrade-all)"
+    [ -n "$UV_VERSION" ] && [ "$UPGRADE_ALL" = 1 ] && _plan="$_plan$_bn_nl  update   uv $UV_VERSION (uv self update, --upgrade-all)"
 
     if [ "$WANT_SYSTEM_DEPS" = 1 ]; then
-        [ "$TMUX_ACTION" = install ] && _plan="$_plan\n  install  tmux (the fleet's substrate)"
-        [ "$GH_ACTION" = install ] && _plan="$_plan\n  install  gh (the fleet's PR flow)"
-        [ "$GIT_ACTION" = install ] && _plan="$_plan\n  install  git (the fleet's per-agent worktrees)"
-        [ "$NODE_ACTION" = install ] && _plan="$_plan\n  install  Node $MIN_NODE_MAJOR+ (Repomix snapshots)"
+        [ "$TMUX_ACTION" = install ] && _plan="$_plan$_bn_nl  install  tmux (the fleet's substrate)"
+        [ "$GH_ACTION" = install ] && _plan="$_plan$_bn_nl  install  gh (the fleet's PR flow)"
+        [ "$GIT_ACTION" = install ] && _plan="$_plan$_bn_nl  install  git (the fleet's per-agent worktrees)"
+        [ "$NODE_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Node $MIN_NODE_MAJOR+ (Repomix snapshots)"
     else
-        _plan="$_plan\n  skip     tmux/gh/Node (--no-system-deps)"
+        _plan="$_plan$_bn_nl  skip     tmux/gh/Node (--no-system-deps)"
     fi
 
     if [ "$WANT_AGENT" = 1 ]; then
-        [ "$CLAUDE_ACTION" = install ] && _plan="$_plan\n  install  Claude Code"
-        [ "$CLAUDE_ACTION" = update ] && _plan="$_plan\n  update   Claude Code $CLAUDE_VERSION (via its own updater)"
+        [ "$CLAUDE_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Claude Code"
+        [ "$CLAUDE_ACTION" = update ] && _plan="$_plan$_bn_nl  update   Claude Code $CLAUDE_VERSION (via its own updater)"
     else
-        _plan="$_plan\n  skip     Claude Code (--no-agent)"
+        _plan="$_plan$_bn_nl  skip     Claude Code (--no-agent)"
     fi
 
     if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
-        _plan="$_plan\n  register $PROJECT_DIR as a project"
+        _plan="$_plan$_bn_nl  register $PROJECT_DIR as a project"
     else
-        _plan="$_plan\n  set up   $(aisquare_home_shown) (no project registered)"
+        _plan="$_plan$_bn_nl  set up   $(aisquare_home_shown) (no project registered)"
     fi
     # Its own line: init connects the hooks with or without a project, and not
     # at all under --no-agent.
-    [ "$WANT_AGENT" = 1 ] && _plan="$_plan\n  connect  claude-code's hooks"
+    [ "$WANT_AGENT" = 1 ] && _plan="$_plan$_bn_nl  connect  claude-code's hooks"
 
-    # %b, not the plan as the format: it holds paths (PROJECT_DIR, AISQUARE_HOME),
-    # and a % in one was read as a conversion.
-    printf '%b\n' "$_plan"
+    # As text: as the format a % in a path was a conversion, and under %b a \c
+    # ended the banner there and \t or \0NNN were rewritten (review of #257).
+    printf '%s\n' "$_plan"
 
     # Only what THIS run's own steps write, from the same decisions as the plan
     # above: uv when it installs uv, aisquare and asq when it installs or upgrades

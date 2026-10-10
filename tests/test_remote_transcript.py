@@ -742,3 +742,25 @@ def test_a_cursor_reads_on_only_in_the_conversation_it_came_from(
         params={"project": "prj_alpha", "before": cursor, "width": 60},
     )
     assert response.status_code == 409 and response.json()["error"] == "stale_cursor"
+
+
+def test_a_cursor_whose_offset_no_file_has_is_stale_however_long_it_is(
+    runtime: Runtime, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``int`` raises past 4 300 digits, so an offset that long in a cursor naming the agent's
+    own conversation was a 503 ``unavailable`` with Python's message, and a warning in the
+    log for each request (sweep 5 of #243). No file has such an offset: it is a 409
+    ``stale_cursor``, as every other cursor the server did not write is."""
+    _two_conversations(tmp_path)
+    for digits in (20, 4_301, 5_000):
+        with pytest.raises(RequestError) as refused:
+            live_transcript("coder-1", "prj_alpha", 10, "ses_1:" + "9" * digits, 60)
+        assert (refused.value.status, refused.value.error) == (409, "stale_cursor"), digits
+    client = _client(runtime, live_transcript, tmp_path)
+    with caplog.at_level("WARNING", logger="aisquare.services.remote_server"):
+        response = client.get(
+            f"/r/{runtime.token}/api/transcript/coder-1",
+            params={"project": "prj_alpha", "before": "ses_1:" + "9" * 5_000, "width": 60},
+        )
+    assert response.status_code == 409 and response.json()["error"] == "stale_cursor"
+    assert not [record for record in caplog.records if record.levelname == "WARNING"]

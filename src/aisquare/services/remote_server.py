@@ -2360,9 +2360,25 @@ def _live_transcript(
     return payload
 
 
+TRANSCRIPT_OFFSET_DIGITS = 19
+"""The most digits a cursor's offset has: a byte offset in a file, which 2**63 bounds."""
+
+
 def _remote_offset(text: str) -> bool:
-    """Whether ``text`` is a cursor's offset as the server writes it: a whole number past 0."""
-    return text.isascii() and text.isdigit() and int(text) > 0
+    """Whether ``text`` is a cursor's offset as the server writes it: a whole number past 0,
+    no longer than a file offset is.
+
+    ``int`` raises ``ValueError`` past 4 300 digits, CPython's limit on reading one from a
+    string: such a cursor was a 503 ``unavailable`` with Python's own message and a warning
+    in the log for every request, where any other cursor the server did not write is a 409
+    ``stale_cursor``, which the page answers by reading from the end (sweep 5 of #243).
+    """
+    return (
+        text.isascii()
+        and text.isdigit()
+        and len(text) <= TRANSCRIPT_OFFSET_DIGITS
+        and int(text) > 0
+    )
 
 
 def _pane_width(agent: FleetAgent) -> int:

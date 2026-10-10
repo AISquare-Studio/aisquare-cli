@@ -139,6 +139,13 @@ DEVICE_IDLE_LIMIT = timedelta(hours=24)
 """Unused this long, a device is signed out (its cookie refused, its record kept)."""
 DEVICE_LIFETIME = timedelta(days=7)
 """After this long from its first unlock a device is removed; its cookie's Max-Age."""
+DEVICES_MAX = 32
+"""Devices ``remote.json`` keeps at most. Every unlock without a known cookie made one, kept for
+:data:`DEVICE_LIFETIME`, and only the per-client limit bounded them: one address could make
+about 7,200 a day, each one more record that every request's cookie check, every save of
+``remote.json``, ``GET api/devices`` and the R panel go through, and four more sockets
+(sweep 4 of #243). Past it, the device unused longest of those signed out makes room
+(:meth:`Runtime.unlock_device`); with every one signed in, the unlock is refused."""
 DEVICE_UA_MAX = 200
 DEVICE_ID = re.compile(r"dev_[0-9a-f]{8}\Z")
 """A device's public id, used ONLY with ``fullmatch``: ``dev_`` and eight hex digits."""
@@ -1392,6 +1399,7 @@ class Runtime:
                 expires_at=_iso_seconds(now + DEVICE_LIFETIME),
             )
             state = self._state
+            self._make_room_for_a_device(now)  # a drop, as a revoke: no undo (_write_state)
             state.devices.append(device)
 
             def unmade() -> None:
@@ -1399,6 +1407,20 @@ class Runtime:
 
             self._write_state(state, undo=unmade)
             return secret, device
+
+    def _make_room_for_a_device(self, now: datetime) -> None:
+        """Under the file lock, before an unlock adds a device: past :data:`DEVICES_MAX`,
+        drop the one unused longest of those signed out or expired, as a revoke would (its
+        push subscription goes at the next push); with every one signed in, 409
+        ``too_many_devices`` and nothing changes."""
+        if len(self._state.devices) < DEVICES_MAX:
+            return
+        idle = [device for device in self._state.devices if not device.device_signed_in(now)]
+        if not idle:
+            raise RequestError(409, "too_many_devices", TOO_MANY_DEVICES)
+        never = datetime.min.replace(tzinfo=UTC)  # a stamp that does not read: unused longest
+        oldest = min(idle, key=lambda device: _remote_instant(device.last_seen) or never)
+        self._drop(oldest.id, WS_CLOSE_UNAUTHORIZED)
 
     def device_for_cookie(self, secret: str | None) -> Device | None:
         """The SIGNED-IN device behind a cookie, its ``last_seen`` refreshed; ``None`` otherwise.
@@ -3556,6 +3578,11 @@ its routes the whole path, which only the page's catch-all matched: a GET read w
 route at all, a plain-text 404 (sweep 4 of #243)."""
 NO_SOCKET_HERE = "there is no socket here: the page's stream is at ws"
 """404 ``not_found`` (4404 without the denial extension) for a socket at any path but ``ws``."""
+TOO_MANY_DEVICES = (
+    f"{DEVICES_MAX} devices are signed in already — sign one out on its Devices screen, or "
+    "revoke one on the machine (aisquare remote revoke), then unlock again"
+)
+"""409 ``too_many_devices``: an unlock past :data:`DEVICES_MAX` with every device signed in."""
 NOT_UNLOCKED = "no unlocked device for this request — unlock with the passphrase"
 """401 ``unauthorized``: no cookie, or one whose device is signed out, revoked or expired."""
 WRONG_PASSWORD = "that is not the passphrase"

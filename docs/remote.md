@@ -425,7 +425,10 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   private (it is owner-only); if it leaked, run
   `aisquare remote regenerate-password --new-link`. A device is signed out after
   24 hours unused and removed after 7 days. A phone whose sign-in lapsed unlocks
-  back into the same device, so its notifications carry on.
+  back into the same device, so its notifications carry on. At most 32 devices
+  are kept: a new unlock past that removes the signed-out device unused longest,
+  and while all 32 are signed in it is refused (`too_many_devices`) until one is
+  signed out or revoked.
 - **Remote off revokes every device**: turning it off in the panel, or auto-off,
   signs every phone out (after a goodbye notification), and from that moment
   every request is a 404 and no unlock goes through, while the server is still

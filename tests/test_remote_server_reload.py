@@ -371,3 +371,20 @@ def test_a_write_inside_a_checked_request_still_starts_from_the_file(runtime: Ru
     assert on_disk["allow_write"] is True, "the other process's switch survived the write"
     assert on_disk["auto_off_at"] is not None
     assert runtime.allow_write is True, "and the next request sees it"
+
+
+def test_the_link_and_passphrase_given_out_are_of_one_state_after_a_new_link_elsewhere(
+    runtime: Runtime,
+) -> None:
+    """``connection_info`` read the token before the file was checked and the passphrase
+    after: once a ``regenerate-password --new-link`` from a shell had rewritten it, the
+    token was the old one beside the new passphrase and a local link of the new token, and
+    the R panel, turned on then, built ngrok's link from the old token, which the server
+    answers 404 (review of #243, round 6)."""
+    before = runtime.connection_info(8750)
+    shell = Runtime(remote_state_path(), remote_audit_path())
+    password = shell.regenerate_password(new_link=True)
+    info = runtime.connection_info(8750)
+    assert info.token == shell.token != before.token
+    assert info.password == password
+    assert info.url_local == f"http://127.0.0.1:8750/r/{shell.token}/"

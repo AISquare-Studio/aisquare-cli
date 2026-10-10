@@ -48,6 +48,7 @@ from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.core.paths import remote_audit_path, remote_push_path
 from aisquare.services import remote_push, remote_server
 from aisquare.services.ngrok_tunnel import (
+    AUTHTOKEN_HINT,
     TOO_OLD_HINT,
     NgrokTunnel,
     ngrok_command,
@@ -2120,13 +2121,69 @@ def test_a_static_domain_comes_back_on_the_same_link(isolated_home: Path) -> Non
     assert controller.link_url() == f"{same}/r/{server.token}/"
 
 
-def test_a_tunnel_that_never_came_up_is_left_to_its_error(isolated_home: Path) -> None:
-    """It failed for a reason the status line already says; a restart would fail the same."""
-    shop, clock = TunnelShop(None), LocalClock()
+@pytest.mark.parametrize("lasting", [AUTHTOKEN_HINT, TOO_OLD_HINT], ids=["authtoken", "too old"])
+def test_a_tunnel_that_ended_for_a_lasting_reason_is_left_to_its_error(
+    isolated_home: Path, lasting: str
+) -> None:
+    """No authtoken, or an ngrok too old for ``--url``: a restart would end the same way, every
+    minute, until the human acts and turns Remote on again, as the status line says; so for
+    a Remote's first tunnel, and for a restart that ended so before announcing."""
+    shop, clock = TunnelShop(None, exits=(lasting,)), LocalClock()
     controller, _server = controller_with(shop, clock)
-    shop.made[0].alive = False
+    assert controller.message == lasting
+    clock.now += timedelta(minutes=5)
     assert controller.revive_tunnel_if_dead() is False
     assert len(shop.made) == 1
+    shop = TunnelShop("https://first.ngrok-free.app", None, exits=(None, lasting))
+    controller, _server = controller_with(shop, clock)
+    shop.made[0].alive = False
+    assert controller.revive_tunnel_if_dead() is True
+    waited(controller)
+    assert controller.message == lasting
+    clock.now += timedelta(minutes=5)
+    assert controller.revive_tunnel_if_dead() is False
+    assert len(shop.made) == 2
+
+
+@pytest.mark.parametrize(
+    "held",
+    [
+        "failed to start tunnel: The endpoint is already online. ERR_NGROK_334",
+        "authentication failed: Your account is limited to 1 simultaneous ngrok agent "
+        "sessions. ERR_NGROK_108",
+    ],
+    ids=["domain held", "session busy"],
+)
+def test_a_first_tunnel_that_exits_before_it_announces_comes_back_a_minute_later(
+    isolated_home: Path, held: str
+) -> None:
+    """The static domain still held by a session that has not ended (another machine's, an
+    ngrok of a fleet UI killed with -9), or the account's one agent session busy: both clear
+    once the other session ends. A Remote's first ngrok that exited so was never started
+    again, and Remote stayed local-only for as long as it was on, though the docs promise a
+    restart within half a minute; turning it off and on to retry signs every phone out
+    (sweep 4 of #243). It is revived as any dead tunnel is, and its coming up is news that
+    phones can reach Remote, not of a link that changed: there was none."""
+    same = "https://remote-anmol.ngrok-free.app"
+    shop, clock = TunnelShop(None, same, exits=(held,)), LocalClock()
+    server = FakeServer()
+    controller = RemoteController(server=server, tunnel_factory=shop, now=clock, url_timeout=0.2)
+    heard: list[tuple[str, bool]] = []
+    controller.on_news = lambda news, trouble: heard.append((news, trouble))
+    controller.turn_on()
+    waited(controller)
+    assert controller.message == held
+    assert controller.info is not None and controller.link_url() == controller.info.url_local
+    assert controller.revive_tunnel_if_dead() is True
+    waited(controller)
+    assert len(shop.made) == 2 and shop.made[0].stopped
+    link = f"{same}/r/{server.token}/"
+    assert controller.link_url() == link and server.public_urls == [link]
+    assert controller.message is None
+    assert heard == [
+        (f"Remote is on, but phones cannot reach it — {held}", True),
+        ("ngrok is up — phones can reach Remote now", False),
+    ]
 
 
 def test_a_restart_that_fails_is_tried_again_the_next_minute(isolated_home: Path) -> None:
@@ -2169,24 +2226,29 @@ def test_a_restart_that_exits_before_it_announces_is_restarted_a_minute_later(
     assert controller.message == "ngrok stopped — restarted it"
 
 
-def test_a_new_remote_whose_first_tunnel_never_came_up_is_left_alone(
+def test_a_new_remote_owes_nothing_to_the_restarts_of_an_earlier_one(
     isolated_home: Path,
 ) -> None:
-    """Restarts in an earlier Remote do not make this one's first tunnel a restart: it never
-    came up, for a reason a restart would hit again."""
-    shop = TunnelShop("https://first.ngrok-free.app", "https://second.ngrok-free.app", None)
+    """Restarts in an earlier Remote do not hold up this one's first, nor make its link one
+    that "changed": the link before them was the earlier Remote's."""
+    held = "failed to start tunnel: The endpoint is already online. ERR_NGROK_334"
+    shop = TunnelShop("https://first.ngrok-free.app", "https://second.ngrok-free.app", None,
+                      "https://third.ngrok-free.app", exits=(None, None, held))  # fmt: skip
     clock = LocalClock()
-    controller, _server = controller_with(shop, clock)
+    controller, server = controller_with(shop, clock)
     shop.made[0].alive = False
     assert controller.revive_tunnel_if_dead() is True
     waited(controller)
     controller.turn_off()
     controller.turn_on()
     waited(controller)
-    shop.made[2].alive = False
-    clock.now += timedelta(minutes=5)
-    assert controller.revive_tunnel_if_dead() is False
-    assert len(shop.made) == 3
+    assert controller.message == held
+    clock.now += timedelta(seconds=30)  # the next 30 s check; the earlier restart was 30 s ago
+    assert controller.revive_tunnel_if_dead() is True
+    waited(controller)
+    assert len(shop.made) == 4
+    assert controller.link_url() == f"https://third.ngrok-free.app/r/{server.token}/"
+    assert controller.message is None, "no link of this Remote's changed"
 
 
 def test_remote_off_revives_nothing(isolated_home: Path) -> None:
@@ -2243,8 +2305,8 @@ def test_ngrok_is_told_the_static_domain_from_the_environment(
     tunnel.wait_for_url(5)
     tunnel.stop_tunnel()
     assert spawned == [
-        ["ngrok", "http", "8750", "--log=stdout", "--log-format=json", "--log-level=info",
-         "--inspect=false", "--url=remote-anmol.ngrok-free.app"]
+        ["ngrok", "http", "127.0.0.1:8750", "--log=stdout", "--log-format=json",
+         "--log-level=info", "--inspect=false", "--url=remote-anmol.ngrok-free.app"]
     ]  # fmt: skip
 
 

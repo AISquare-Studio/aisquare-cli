@@ -15,7 +15,11 @@ phone loads ships inside aisquare-cli.
 ```
 
 - **One port, loopback only.** The server binds `127.0.0.1:8750` and nothing
-  else. ngrok, or a browser on the same machine, is the only way in.
+  else. ngrok, or a browser on the same machine, is the only way in. Point ngrok at
+  `127.0.0.1:8750`, never at `8750` alone: ngrok reads that as `localhost`, which
+  is IPv6's `::1` first, and anyone on the machine can listen on `[::1]:8750` and be
+  handed every request, the passphrase and the cookies with them. The panel's ngrok
+  and the command `serve` prints both use `127.0.0.1`.
 - **A secret URL, then a passphrase.** Every path lives under `/r/<token>/`, a
   32-character random token; a wrong one is a 404 everywhere. The page then asks
   for the four-word passphrase the machine shows, once per browser.
@@ -72,7 +76,10 @@ panel starts the server and ngrok, shows the link, a QR code and the passphrase,
 the write switch, the auto-off timer (30, 60 or 120 minutes, or Never) and the
 devices that have unlocked. Scan the QR code with the phone; until ngrok is up
 the panel shows the local link alone, and no QR, since no phone can open that
-link. If ngrok stops, the UI restarts it within half a minute, and a link ngrok
+link. If ngrok stops, the UI restarts it within half a minute, and once a minute
+until it is up, the first ngrok of a Remote too (its static domain still held by an
+ngrok that has not let go of it yet, say); not one that stopped for want of an
+authtoken, or too old for `--url`, which the panel says how to fix. A link ngrok
 announces late (a network still coming up) is shown, and used for notifications,
 as soon as it comes. With the panel closed, a notice says when a Remote that was
 on could not come back on as the UI started, when phones cannot reach it (ngrok
@@ -87,17 +94,21 @@ the one an exported `AISQUARE_REMOTE_PORT` names, as `serve` does.
 
 ```sh
 aisquare remote serve --auto-off 120 --public-url https://your-name.ngrok-free.app
-ngrok http --url=your-name.ngrok-free.app --inspect=false 8750
+ngrok http --url=your-name.ngrok-free.app --inspect=false 127.0.0.1:8750
 ```
 
 `serve` prints the local link and the passphrase and runs until Ctrl-C or until
-auto-off. A Ctrl-C while a phone's write is still running (a restart or switch
-can take 40 seconds) says which, and waits for it: cut short, it can leave the
-agent down. A second Ctrl-C quits at once and leaves it unfinished, giving a
-notification still on its way, such as auto-off's farewell, two seconds at most.
-Quitting the fleet UI waits, and says so, the same way: first for Remote's server
-and ngrok to stop, then for the write, and a Ctrl-C in either wait quits at once
-(ngrok stopped first). Its options:
+auto-off. Stop the ngrok you started beside it then too, as `serve` says on its way
+out: left up, ngrok hands the phones' requests, their cookies with them, to whatever
+takes port 8750 next, and any account on the machine can. (The panel stops its own
+ngrok first, once the phones heard Remote is off, and lets go of the port after.) A
+Ctrl-C while a phone's write is still running (a restart or switch can take 40
+seconds) says which, and waits for it: cut short, it can leave the agent down. A
+second Ctrl-C quits at once and leaves it unfinished, giving a notification still on
+its way, such as auto-off's farewell, two seconds at most. Quitting the fleet UI
+waits, and says so, the same way: first for Remote's ngrok and server to stop, then
+for the write, and a Ctrl-C in either wait quits at once (ngrok stopped first). Its
+options:
 
 | option | default | what it does |
 | --- | --- | --- |
@@ -484,11 +495,11 @@ aisquare remote regenerate-password --new-link
 `serve`), and lists every device (`--json` too) and any lockout. `revoke --all`
 signs every device out but keeps Remote on. `regenerate-password` makes a new
 passphrase and signs every device out; with `--new-link` it also makes a new
-token, so a leaked link stops working everywhere. The TUI shows the new link
-after Remote is turned off and on. The link `status` and `--new-link` print is
-for port 8750: when `serve` runs on another, give them its `--port` too. An
-exported `AISQUARE_REMOTE_PORT` sets the port for all of them, and for the R
-panel, whose server and ngrok use it as well.
+token, so a leaked link stops working everywhere. The R panel of a running fleet
+UI shows the new link, and its QR code, at once. The link `status` and
+`--new-link` print is for port 8750: when `serve` runs on another, give them its
+`--port` too. An exported `AISQUARE_REMOTE_PORT` sets the port for all of them,
+and for the R panel, whose server and ngrok use it as well.
 
 ---
 

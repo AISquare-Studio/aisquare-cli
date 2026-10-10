@@ -807,6 +807,22 @@ def test_the_devices_table_follows_last_seen_and_sign_in_while_the_devices_stay_
     drive(go, tunnel=missing_ngrok)
 
 
+def test_an_auto_off_time_says_its_date_on_any_day_but_today(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``serve --auto-off`` sets a deadline up to a week ahead, and the panel said it as a bare
+    ``HH:MM``: a day off read as now, 25 hours off as an hour off (sweep 4 of #243). The
+    panel's own deadline, eight hours ahead at most, crosses midnight as well. Today's is the
+    time alone; another day's says its date, in this machine's zone, as a device's times do."""
+    monkeypatch.setattr(remote_view, "LOCAL_ZONE", PACIFIC)
+    now = datetime(2026, 10, 9, 6, 8, tzinfo=UTC)  # Oct 8 23:08 in Los Angeles
+    assert remote_view._auto_off_time(now + timedelta(minutes=30), now) == "23:38"
+    assert remote_view._auto_off_time(now + timedelta(hours=1), now) == "Oct 9 00:08"
+    assert remote_view._auto_off_time(now + timedelta(days=1), now) == "Oct 9 23:08"
+    assert remote_view._auto_off_time(now + timedelta(days=7), now) == "Oct 15 23:08"
+    assert remote_view._auto_off_time(now - timedelta(hours=7), now) == "16:08", "same day"
+
+
 def test_a_devices_times_are_said_in_this_machines_zone_with_their_date(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -872,15 +888,17 @@ def test_a_repaint_reads_the_status_once_and_draws_the_qr_only_for_a_new_link(
         modal.repaint()
         assert len(reads) == statuses + 2, "one status read a repaint"
 
-        app.remote.public_url = build_public_url(PUBLIC, info.token)  # ngrok announced it
+        app.remote.public_origin = PUBLIC  # ngrok announced it
+        public = build_public_url(PUBLIC, info.token)
+        assert app.remote.public_url == public
         modal.repaint()
-        assert drawn == [app.remote.public_url]
+        assert drawn == [public]
         modal.repaint()
         modal.repaint()
-        assert drawn == [app.remote.public_url], "the same link: no QR drawn again"
+        assert drawn == [public], "the same link: no QR drawn again"
         await pilot.pause()
-        assert shown(modal.query_one("#remote-qr", Static)) == qr_text(app.remote.public_url)
-        assert shown(modal.query_one("#remote-link", Static)) == app.remote.public_url
+        assert shown(modal.query_one("#remote-qr", Static)) == qr_text(public)
+        assert shown(modal.query_one("#remote-link", Static)) == public
 
     drive(go, tunnel=missing_ngrok)
 
@@ -970,6 +988,53 @@ def test_a_status_sentence_that_reads_as_markup_is_painted_as_it_is() -> None:
         modal.repaint()
         await pilot.pause()
         assert shown(modal.query_one("#remote-status", Static)) == sentence
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def test_the_link_and_its_qr_follow_a_new_link_from_another_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``regenerate-password --new-link`` from a shell retires the old link at the server's
+    next request; the panel showed it still, and drew its QR, beside the new passphrase,
+    until Remote was turned off and on, which signs every phone out (review of #243, round
+    6). The link row and the QR follow the token ``remote.json`` holds, the local link too."""
+    drawn: list[str] = []
+
+    def drawing(url: str) -> str:
+        drawn.append(url)
+        return qr_text(url)
+
+    monkeypatch.setattr(remote_view, "qr_text", drawing)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await written(pilot)
+        info = app.remote.info
+        assert info is not None
+        link = modal.query_one("#remote-link", Static)
+        shell = Runtime(paths.remote_state_path(), paths.remote_audit_path())
+        shell.regenerate_password(new_link=True)
+        new = shell.token
+        assert new != info.token
+        modal.repaint()
+        await pilot.pause()
+        assert shown(link).splitlines()[0] == info.url_local.replace(info.token, new)
+        assert drawn == [], "the local link has no QR"
+        app.remote.public_origin = PUBLIC  # ngrok announced it
+        modal.repaint()
+        await pilot.pause()
+        assert drawn == [build_public_url(PUBLIC, new)] and shown(link) == drawn[0]
+        shell.regenerate_password(new_link=True)
+        newer = shell.token
+        modal.repaint()
+        await pilot.pause()
+        assert drawn[-1] == build_public_url(PUBLIC, newer) and shown(link) == drawn[-1]
+        assert shown(modal.query_one("#remote-qr", Static)) == qr_text(drawn[-1])
+        assert info.token not in shown(link) and new not in shown(link)
 
     drive(go, tunnel=missing_ngrok)
 
@@ -1175,7 +1240,9 @@ def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended() -> Non
         assert line.startswith(f"{UNLOCK_GLOBAL_FAILURES} failed unlocks in 30 min")
         assert "new unlocks paused" in line and "regenerate-password --new-link" in line
         state_line = shown(modal.query_one("#remote-state", Static))
-        assert f"auto-off at {extended.astimezone():%H:%M}" in state_line
+        # with its date when it is tomorrow already: an extension can cross midnight
+        assert f"auto-off at {remote_view._auto_off_time(extended)}" in state_line
+        assert f"{extended.astimezone():%H:%M}" in state_line
         assert app.remote.auto_off_at == extended, "the extension holds in the TUI too"
 
     drive(go, tunnel=missing_ngrok)
@@ -1321,20 +1388,30 @@ def test_the_panel_says_remote_is_on_while_another_process_serves_this_home(
     drive(go, tunnel=missing_ngrok)
 
 
-@pytest.mark.parametrize("minutes", [45, None], ids=["a timer", "never"])
+@pytest.mark.parametrize(
+    "days", [0, 1, 6, None], ids=["a timer today", "tomorrow", "in six days", "never"]
+)
 def test_while_another_process_serves_the_panel_shows_its_auto_off_and_picks_none(
-    monkeypatch: pytest.MonkeyPatch, minutes: int | None
+    monkeypatch: pytest.MonkeyPatch, days: int | None
 ) -> None:
     """The Auto-off picker beside "on in another process" showed this UI's saved 60 min, and a
     pick of it was taken without a word while the serving Remote kept its own deadline, or
     none at all with ``serve --auto-off 0`` (sweep 3 of #243). The state says that Remote's
-    timer, and the picker is off until this UI's Remote is the one to set."""
+    timer, and the picker is off until this UI's Remote is the one to set. A timer on another
+    day says its date: ``serve --auto-off`` sets one up to a week ahead, and a bare 21:58 a
+    day or six off read as today (sweep 4 of #243)."""
     monkeypatch.setattr(remote_control, "ELSEWHERE_EVERY_SECONDS", 0.0)
     monkeypatch.setattr(remote_view, "LOCAL_ZONE", UTC)
     paths.ensure_home()
     serving = paths.remote_state_path().with_name(remote_server.SERVE_LOCK_NAME)
-    deadline = None if minutes is None else datetime(2026, 10, 9, 21, 58, tzinfo=UTC)
-    said = "no auto-off" if deadline is None else "auto-off at 21:58"
+    today = datetime.now(UTC).replace(hour=21, minute=58, second=0, microsecond=0)
+    deadline = None if days is None else today + timedelta(days=days)
+    if deadline is None:
+        said = "no auto-off"
+    elif days:
+        said = f"auto-off at {deadline:%b} {deadline.day} 21:58"
+    else:
+        said = "auto-off at 21:58"
 
     async def go(pilot: Pilot[None]) -> None:
         remote_server.set_auto_off(deadline)  # the other process's serve set it

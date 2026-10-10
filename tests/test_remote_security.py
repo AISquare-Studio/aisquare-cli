@@ -1735,6 +1735,43 @@ def test_remote_off_says_farewell_then_revokes_every_device_with_4410(
     assert runtime.device_rows() == []
 
 
+def test_a_revoked_sockets_close_is_waited_for_until_its_stream_ends(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The R panel stops ngrok before the server, which lets go of the port as it stops, so
+    the public link never leads to a port anyone may take (sweep 4 of #243). A phone hears
+    its 4410 only through ngrok, so turning off waits for the revoked sockets to end first,
+    a moment at most; a socket of the last server's that never said it ended is not waited
+    for by the next one."""
+    monkeypatch.setattr(remote_server, "_runtime", runtime)
+    monkeypatch.setattr(remote_push, "push_farewell", lambda ids, reason: None)
+    made = runtime.unlock_device(runtime.password, "iPhone Safari")
+    assert made is not None
+    device = made[1]
+    closed: list[int] = []
+    runtime.register_socket(device.id, closed.append)
+    assert remote_server.remote_wait_for_closes(0.0), "nothing closed: nothing to wait for"
+    remote_server.revoke_every_remote_device("remote off")
+    assert closed == [WS_CLOSE_REMOTE_OFF]
+    assert remote_server.remote_wait_for_closes(0.05) is False, "its stream has not ended"
+    runtime.unregister_socket(device.id, closed.append)  # as the stream's own end does
+    assert remote_server.remote_wait_for_closes(0.0)
+    runtime.remote_coming_on()
+    again = runtime.unlock_device(runtime.password, "iPhone Safari")
+    assert again is not None
+    runtime.register_socket(again[1].id, closed.append)
+    runtime.revoke_every_device("remote off", close_code=WS_CLOSE_REMOTE_OFF)
+    runtime.remote_coming_on()  # the next server: that stream never said it ended
+    assert remote_server.remote_wait_for_closes(0.0)
+    client = make_client(app)
+    unlock(client, runtime)
+    with client.websocket_connect(f"{base(runtime)}/ws") as ws:
+        receive_within(ws)
+        remote_server.revoke_every_remote_device("remote off")
+        assert remote_server.remote_wait_for_closes(5), "a real stream ends once it is closed"
+        assert _closed_with(ws) == WS_CLOSE_REMOTE_OFF
+
+
 def test_once_remote_turns_off_no_unlock_gets_in_while_its_server_stops(
     app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
 ) -> None:

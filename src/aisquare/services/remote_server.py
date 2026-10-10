@@ -858,6 +858,10 @@ class Runtime:
         :attr:`_lock`, never while holding it."""
         self._closers: dict[str, set[Callable[[int], None]]] = {}
         """Each device's live sockets, by device id, as closers that take the close code."""
+        self._closing: set[Callable[[int], None]] = set()
+        """The sockets a revoke closed, as closers, until their streams end: what turning Remote
+        off waits for before it stops ngrok, the one way their close reaches the phones
+        (:meth:`remote_closes_landed`)."""
         self._file_lock_depth = 0
         self._writer: int | None = None
         """The thread in :meth:`_state_file_lock`, while one is: what it writes must start from
@@ -1189,8 +1193,14 @@ class Runtime:
         return self._state.allow_write
 
     def connection_info(self, port: int = DEFAULT_PORT) -> RemoteInfo:
+        """The link and the passphrase as ``remote.json`` says now, from one state: read before
+        the file was checked, the token was the old one beside a passphrase and a link of
+        the new, after a ``regenerate-password --new-link`` from a shell, and the R panel
+        built ngrok's link from that old token (review of #243, round 6)."""
+        self.reload_if_changed()
         with self._lock:
-            return RemoteInfo(self.token, self.password, build_local_url(self.token, port))
+            state = self._state
+            return RemoteInfo(state.token, state.password, build_local_url(state.token, port))
 
     def token_matches(self, supplied: str) -> bool:
         """Whether ``supplied`` is the whole link token, read fresh from the file first:
@@ -1287,9 +1297,11 @@ class Runtime:
             self._going_off = True
 
     def remote_coming_on(self) -> None:
-        """A server is starting over this state: what :meth:`remote_going_off` closed opens."""
+        """A server is starting over this state: what :meth:`remote_going_off` closed opens.
+        A socket of the last one's that never said it ended is waited for no more."""
         with self._lock:
             self._going_off = False
+            self._closing.clear()
 
     def _refuse_while_going_off(self) -> None:
         """Under the file lock, as a device is made or renewed: a 404, as the gate answers,
@@ -1507,7 +1519,9 @@ class Runtime:
             return [d.device_row(now) for d in self._state.devices if not d.device_expired(now)]
 
     def _close_sockets(self, device_id: str, code: int) -> None:
-        for close in self._closers.pop(device_id, set()):
+        closers = self._closers.pop(device_id, set())
+        self._closing |= closers
+        for close in closers:
             try:
                 close(code)
             except Exception:  # a socket already gone must not stop the revoke
@@ -1595,11 +1609,25 @@ class Runtime:
 
     def unregister_socket(self, device_id: str, close: Callable[[int], None]) -> None:
         with self._lock:
+            self._closing.discard(close)
             sockets = self._closers.get(device_id)
             if sockets:
                 sockets.discard(close)
                 if not sockets:
                     del self._closers[device_id]
+
+    def remote_closes_landed(self, timeout: float) -> bool:
+        """Wait at most ``timeout`` s for every socket a revoke closed to end; whether they all
+        had. A stream ends once its close is sent and the phone answered it, or the socket
+        dropped."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                if not self._closing:
+                    return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
 
     # -- audit --
 
@@ -5898,7 +5926,8 @@ def stop_remote_server() -> None:
     The server stops first and ``remote.json`` is flushed last, best effort, as the
     flusher's every-30-s write is: a file that will not write is logged, never
     raised. The TUI turns Remote off from a Textual timer (auto-off), where an
-    exception ends the whole fleet UI, and stops ngrok only once this returns. A
+    exception ends the whole fleet UI, and stops ngrok before this: uvicorn lets go of
+    the port as it begins to stop, and anything on the machine may take it then. A
     server still finishing a phone's write after its 5 s keeps the home claimed until
     it is done, on a thread of its own (:func:`_release_remote_home`).
     """
@@ -5983,6 +6012,17 @@ def revoke_every_remote_device(reason: str) -> None:
     state.revoke_every_device(reason, close_code=WS_CLOSE_REMOTE_OFF)
 
 
+def remote_wait_for_closes(timeout: float) -> bool:
+    """Wait at most ``timeout`` s for the sockets a revoke closed to end; whether they all had.
+
+    The R panel turns Remote off by revoking every device, which closes their sockets with
+    4410, and stops ngrok before the server, which lets go of the port as it stops: ngrok
+    must not forward the public link to a port anyone may take. A phone hears the 4410
+    only through ngrok, so ngrok waits for the closes, a moment at most."""
+    state = _runtime
+    return state is None or state.remote_closes_landed(timeout)
+
+
 def set_allow_write(enabled: bool) -> None:
     """Flip the write gate — the ONLY way it turns on; the default is off."""
     runtime().set_allow_write(enabled)
@@ -6021,6 +6061,15 @@ def remote_allow_write() -> bool:
 def remote_password() -> str:
     """The passphrase as ``remote.json`` says now, ``regenerate-password`` from a shell included."""
     return runtime().password
+
+
+def remote_link_token() -> str:
+    """The link's token as ``remote.json`` says now: a ``regenerate-password --new-link`` from a
+    shell retires the one a running Remote started with at its next request
+    (:meth:`Runtime.token_matches`), and the R panel's link and QR read the new one here."""
+    state = runtime()
+    state.reload_if_changed()
+    return state.token
 
 
 _flush_failing = False

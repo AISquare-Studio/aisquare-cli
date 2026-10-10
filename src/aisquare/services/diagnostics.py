@@ -1221,8 +1221,8 @@ def _refused_fix(
     repair the path that blocks, unless it is a file where a directory must be, or what
     generates a settings.json read-only by design (``also``); for the directory sessions
     from this shell read, CLAUDE_CONFIG_DIR, with the disconnect that takes out one the
-    doctor grades anyway (recorded, or holding aisquare), where it would work and leave
-    no plugin; for another recorded, forgetting
+    doctor grades whatever the variable says (recorded, or a ``~/.claude*`` holding
+    aisquare), where it would work and leave no plugin; for another recorded, forgetting
     it. Each step made for one state of the path met a state it failed in (review of #257).
     Empty where none applies: the row's fact is all there is.
     """
@@ -1238,8 +1238,7 @@ def _refused_fix(
         agent_core.plugin_route_supported() and agent_core.claude_plugin(directory)
     )
     disconnect = f"aisquare agents disconnect claude-code --config-dir {directory}"
-    held = agent_core.holds_aisquare(directory)
-    if refusal.this_shell and not (recorded or held):
+    if refusal.this_shell and not (recorded or agent_core.found_on_disk(directory)):
         fixes.append(_REPOINT)
     elif refusal.this_shell and leaves:
         fixes.append(f"{_REPOINT}, and disconnect this one: {disconnect}")

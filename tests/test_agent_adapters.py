@@ -1142,6 +1142,7 @@ _THIS_SHELLS_DIR = [
     "the variable names ~/.claude, in a HOME this user may not write",
     "a recorded ~/.claude, its hooks taken out by hand, its CLAUDE.md not UTF-8",
     "a recorded ~/.claude, its settings.json not valid JSON",
+    "the variable names a folder outside ~/.claude*, read-only, its hooks pinning a lost program",
 ]
 
 
@@ -1157,8 +1158,9 @@ def test_the_variables_remedy_is_never_unset_and_done_as_worded_clears_the_row(
     exports it), the remedy offered first was "or unset it", which led sessions to the
     same refused directory. For a recorded ~/.claude, pointing the variable elsewhere was
     offered, and done, the row still named it: the doctor grades a recorded directory
-    whatever the variable says (review of #257). The variable's remedy never says unset
-    and never comes first; for a recorded one it comes
+    whatever the variable says; and for one outside ~/.claude* holding aisquare's hooks,
+    which it grades only as the variable's, it was dropped (review of #257). The
+    variable's remedy never says unset and never comes first; for a recorded one it comes
     with the disconnect that takes it out, and only where that disconnect would work.
     Each remedy printed, done as worded, lets connect write and clears the row."""
     if os.name == "nt" and "may not write" in shape:

@@ -804,6 +804,12 @@ def action_dialog_guard(
     about to end anyway, and the ``/exit`` waits until the pane is at rest. An
     agent at rest gets none: nothing there opens a prompt until something is typed.
 
+    An agent nothing here reads (:func:`remote_needs.needs_unseen`: no board session,
+    or a transcript that cannot be read) is never at rest, and is refused as one that
+    shows a dialog: its prompt cannot be told from its idle pane. With ``dismiss``, the
+    ``/exit`` waits until its pane has printed nothing for a whole
+    ``fleet.ACTIVITY_WINDOW`` after the Escape (:func:`action_after_escape`).
+
     The Escape answers a permission prompt "No", so a refusal after it is audited,
     as ``audit_start`` and then ``dismissed=yes refused=<error>``.
     """
@@ -827,9 +833,18 @@ def action_dialog_guard(
             f"{doing} could answer it — send dismiss_dialog: true to press Esc (No) "
             "first, which also stops a running tool",
         )
+    if not dismiss and remote_needs.needs_unseen(snap):
+        raise RequestError(
+            409,
+            "dialog_open",
+            f"{action_unseen_why(snap, label)}, so nothing here shows whether it is "
+            f"showing a prompt; {doing} could answer one — send dismiss_dialog: true to "
+            "press Esc (No) first",
+        )
     action_press_escape(snap, label)
+    rest = action_after_escape(action_at_rest)
     with action_audited(lambda error: f"{audit_start} dismissed=yes refused={error}"):
-        rested = action_settle(target, label, pin, action_at_rest, action_interrupt_wait())
+        rested = action_settle(target, label, pin, rest, action_interrupt_wait())
         if rested is None:
             if dialog or pending:
                 still = "still shows a prompt" if dialog else "still has its tool pending"
@@ -864,12 +879,58 @@ def action_at_rest(snap: AgentNow) -> bool:
 def action_may_answer(snap: AgentNow) -> bool:
     """Whether an Enter typed into the agent's pane now may answer a dialog.
 
-    One needs-you sees (:func:`remote_needs.needs_dialog_open`), or any tool use
+    One needs-you sees (:func:`remote_needs.needs_dialog_open`), any tool use
     still waiting for its result (:func:`remote_needs.needs_tool_pending`), which
     is what a permission prompt is until its pane has been quiet for 5 s and its
-    notification has come at 6 s.
+    notification has come at 6 s, or any at all in an agent nothing here reads
+    (:func:`remote_needs.needs_unseen`), whose prompt is never either.
     """
-    return remote_needs.needs_dialog_open(snap) or remote_needs.needs_tool_pending(snap)
+    return (
+        remote_needs.needs_dialog_open(snap)
+        or remote_needs.needs_tool_pending(snap)
+        or remote_needs.needs_unseen(snap)
+    )
+
+
+def action_unseen_why(snap: AgentNow, label: str | None = None) -> str:
+    """Why nothing here reads what the agent's pane shows (:func:`remote_needs.needs_unseen`),
+    said of ``label``, or of "it"."""
+    who, whose = ("it", "its") if label is None else (label, f"{label}'s")
+    status = snap.status
+    if status is not None and status.agent.session_id is None:
+        return f"{who} runs without aisquare's hooks"
+    if status is not None and status.session is None:
+        return f"{whose} board session cannot be read"
+    return f"{whose} transcript cannot be read"
+
+
+def action_quiet_window() -> float:
+    """How long a pane prints nothing to read as quiet: ``fleet.ACTIVITY_WINDOW``, in seconds."""
+    from aisquare.services import fleet as fleet_service
+
+    return fleet_service.ACTIVITY_WINDOW.total_seconds()
+
+
+def action_after_escape(reached: Callable[[AgentNow], bool]) -> Callable[[AgentNow], bool]:
+    """What the reads after an Escape just sent wait for: ``reached``, or, for an agent
+    nothing here reads (:func:`remote_needs.needs_unseen`), its pane quiet a whole
+    :func:`action_quiet_window` after the Escape.
+
+    Neither its dialog nor its prompt shows here, so its pane is all there is. The one
+    Escape answers a prompt "No" or stops a turn, and its redraw is output: quiet the
+    whole window since, the pane took the Escape and came to rest. Quiet from before
+    it, as a dialog left waiting is, the Escape may not have been read yet, and the
+    ``/exit`` and Enter, or the text and Enter, typed behind it would reach the dialog.
+    """
+    escaped = time.monotonic()
+
+    def rested(snap: AgentNow) -> bool:
+        if remote_needs.needs_unseen(snap):
+            waited = time.monotonic() - escaped >= action_quiet_window()
+            return waited and snap.pane_quiet is True
+        return reached(snap)
+
+    return rested
 
 
 @dataclass
@@ -945,7 +1006,9 @@ def action_keys_guard(target: ProjectInfo, label: str, pin: str) -> None:
     not yet in the transcript (sweep 4 of #243): Interrupt & tell is the way to
     reach it from there. A limited agent is at rest, and a message typed there
     fails on its limit and parks it anew, as a tell typed there did
-    (:func:`action_type_now`). The agent is read from its own facts
+    (:func:`action_type_now`). An agent nothing here reads
+    (:func:`remote_needs.needs_unseen`) may show a prompt at any time, so it is
+    refused as one that does. The agent is read from its own facts
     (``needs_single_agent_now``: its row, its pane, its tail), which must still be
     of the row ``pin`` names, the one the keys were going to.
     """
@@ -960,6 +1023,13 @@ def action_keys_guard(target: ProjectInfo, label: str, pin: str) -> None:
             "dialog_open",
             f"{label} has a tool pending, and a prompt for it may have just opened; typing "
             "now could answer it — look at its pane first",
+        )
+    if remote_needs.needs_unseen(snap):
+        raise RequestError(
+            409,
+            "dialog_open",
+            f"{action_unseen_why(snap, label)}, so nothing here shows whether it is showing "
+            "a prompt; typing now could answer one — look at its pane first",
         )
     if action_state(snap) == "limited" or not action_at_rest(snap):
         raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))
@@ -990,8 +1060,14 @@ def action_busy_sentence(snap: AgentNow, label: str) -> str:
     told anything: a message fails on the same limit until the reset, and a
     switch to another account is what moves it. Any other row (waiting, or
     attention that an Escape already answered, with a pane still redrawing) is
-    a moment early.
+    a moment early. Of an agent nothing here reads (:func:`remote_needs.needs_unseen`)
+    nothing says which it is: Interrupt & tell sends its Escape first.
     """
+    if remote_needs.needs_unseen(snap):
+        return (
+            f"{action_unseen_why(snap, label)}, so nothing here shows whether it is at its "
+            "prompt or showing one — use Interrupt & tell, whose Esc (No) goes first"
+        )
     state = action_state(snap)
     if state == "working":
         return f"{label} is working — use Interrupt & tell"
@@ -1068,6 +1144,10 @@ def action_type_now(
     the manager nudged again and, under ``on_limit = "switch"``, another hand-over
     asked for (sweep 4 of #243). A switch is what moves it
     (:func:`action_busy_sentence`), so neither mode sends anything to it.
+
+    An agent nothing here reads (:func:`remote_needs.needs_unseen`) is never at its
+    prompt to ``prompt``. ``interrupt`` types once its pane has been quiet a whole
+    ``fleet.ACTIVITY_WINDOW`` after the Escape (:func:`action_after_escape`).
     """
     snap = snap if snap is not None else action_snapshot(target, label, pin)
     if remote_needs.needs_dialog_open(snap):
@@ -1080,10 +1160,9 @@ def action_type_now(
             raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))
         return action_paste(snap, label, text, interrupted=False)
     action_press_escape(snap, label)
+    prompt = action_after_escape(remote_needs.needs_at_input_prompt)
     with action_audited(lambda error: trail(f"delivered=no escape=sent refused={error}")):
-        reached = action_settle(
-            target, label, pin, remote_needs.needs_at_input_prompt, action_interrupt_wait()
-        )
+        reached = action_settle(target, label, pin, prompt, action_interrupt_wait())
         if reached is None:
             raise RequestError(
                 409,
@@ -1118,7 +1197,9 @@ def action_tell_auto(
     While an Enter may answer a dialog (:func:`action_may_answer`), the text becomes
     the board note ``fleet tell`` files for any agent it does not type into, and the
     pane gets nothing. An agent at work with a tool pending is the common case of
-    that, and ``how`` says of it what ``fleet tell`` says ("it is working"). ``fleet
+    that, and ``how`` says of it what ``fleet tell`` says ("it is working"). So is an
+    agent nothing here reads (:func:`remote_needs.needs_unseen`), whose quiet pane
+    ``fleet tell`` took for one waiting at its prompt, whatever it showed. ``fleet
     tell`` pastes before it presses Enter, and files a note when that fails, so it can
     fail with the text already in the pane: on the trail.
     """
@@ -1131,6 +1212,11 @@ def action_tell_auto(
             why = "it is showing a prompt, which typing would answer"
         elif state != "waiting":
             why = f"it is {state}"
+        elif remote_needs.needs_unseen(snap):
+            why = (
+                f"{action_unseen_why(snap)}, so nothing here shows whether it is showing a "
+                "prompt, which typing would answer"
+            )
         else:
             why = "it has a tool pending, and a prompt for it may have just opened"
         filed = action_fleet_call(lambda: fleet_service._file_note(target, label, text, None))

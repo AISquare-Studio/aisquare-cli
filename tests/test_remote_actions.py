@@ -58,6 +58,7 @@ from aisquare.services.remote_actions import (
     action_audit_excerpt,
     action_handlers,
     action_interrupt_wait,
+    action_quiet_window,
     action_switch_reason,
     fleet_refusal,
     new_action_ledger,
@@ -757,6 +758,23 @@ def pane(monkeypatch: pytest.MonkeyPatch, log: list[str]) -> FakePane:
     return fake
 
 
+_HOOKED = TeamSession(
+    id="ses_one", project_id="prj", role="coder", started_at=T0, last_seen_at=T0, state="working"
+)
+"""The board session of an agent aisquare's hooks report on, as nothing but a working one."""
+
+_MID_TURN = TranscriptTail(
+    pending=(),
+    newest="tool_result",
+    newest_at=None,
+    last_text=None,
+    last_text_at=None,
+    marker_key=None,
+)
+"""A transcript that is read, and says nothing either way: no tool pending, no prompt reached,
+no time to go by. What the predicates read of it is what the row's state says."""
+
+
 class FakeNeeds:
     """needs-you's view of the agent, changing the way Claude Code's screen does: one Escape
     closes the dialog, or stops a working agent at its prompt. Each change shows from the
@@ -793,9 +811,11 @@ class FakeNeeds:
         self.escape_stops_agent = True
         self.lag = 1
         self.items: tuple[NeedsItem, ...] = ()
-        self.tail: TranscriptTail | None = None
-        self.session: TeamSession | None = None
-        """The row's board session, for the predicates that read it."""
+        self.tail: TranscriptTail | None = _MID_TURN
+        """What the agent's transcript says; ``None`` is one that cannot be read."""
+        self.session: TeamSession | None = _HOOKED
+        """The row's board session, for the predicates that read it; ``None`` is an agent
+        no hook reports on."""
         self.pane_quiet: bool | None = True
         self.before_read: Callable[[], None] | None = None
         self.reads = 0
@@ -897,6 +917,7 @@ def needs(monkeypatch: pytest.MonkeyPatch, pane: FakePane) -> FakeNeeds:
     monkeypatch.setattr(remote_needs, "DIALOG_SETTLE_SECONDS", 0.05)
     monkeypatch.setattr(remote_actions, "ACTION_POLL_SECONDS", 0.001)
     monkeypatch.setattr(remote_actions, "action_interrupt_wait", lambda: 0.05)
+    monkeypatch.setattr(remote_actions, "action_quiet_window", lambda: 0.0)
     return fake
 
 
@@ -1550,12 +1571,23 @@ def test_an_agent_the_escape_does_not_bring_to_rest_is_refused_and_nothing_else_
 def test_at_rest_is_the_agents_own_pane_quiet_by_tmuxs_word_with_nothing_pending(
     project: ProjectInfo,
 ) -> None:
-    """Quiet is what tmux says of the pane: a transcript can be 100 ms behind the screen."""
-    status = FleetAgentStatus(agent=_agent(project), state="working")
+    """Quiet is what tmux says of the pane: a transcript can be 100 ms behind the screen. And
+    something must read what the pane may hold: a board session and a transcript."""
+    status = FleetAgentStatus(agent=_agent(project), state="working", session=_HOOKED)
     snap = AgentNow(
-        project=project, status=status, tail=None, pane_is_agent=True, pane_quiet=True, items=()
+        project=project,
+        status=status,
+        tail=_MID_TURN,
+        pane_is_agent=True,
+        pane_quiet=True,
+        items=(),
     )
     assert remote_actions.action_at_rest(snap)
+    hookless = dataclasses.replace(snap, status=status.model_copy(update={"session": None}))
+    assert not remote_actions.action_at_rest(hookless), "no board session: nothing reads it"
+    assert not remote_actions.action_at_rest(dataclasses.replace(snap, tail=None)), (
+        "a transcript that cannot be read"
+    )
     assert not remote_actions.action_at_rest(dataclasses.replace(snap, pane_quiet=False))
     assert not remote_actions.action_at_rest(dataclasses.replace(snap, pane_quiet=None)), (
         "tmux would not say"
@@ -2604,18 +2636,6 @@ def test_a_tool_still_pending_after_the_escape_is_409_and_nothing_else_is_done(
     assert pane.keys() == ["Escape"] and fleet.calls == []
 
 
-def test_prompt_types_into_a_quiet_waiting_agent_that_has_no_transcript(
-    phone: Phone, own_predicates: FakeNeeds, pane: FakePane, project: ProjectInfo
-) -> None:
-    """``needs_at_input_prompt``: with no readable tail, a quiet pane running the agent and
-    a row that reads ``waiting`` is at its prompt."""
-    _row(project)
-    own_predicates.state = "waiting"
-    response = phone.post("agent/tell", agent=LABEL, text="hi", mode="prompt")
-    assert response.status_code == 200, response.text
-    assert [kind for _pane, kind, _what in pane.sent] == ["paste", "key"]
-
-
 LIMITED = "coder-1 hit its usage limit, and a message will not get past it — use Switch account"
 
 
@@ -2923,6 +2943,185 @@ def test_send_keys_whose_label_was_handed_on_while_the_guard_looked_types_nothin
         "current": {"agent_id": "agt_new"},
     }
     assert pane.sent == []
+
+
+# --- an agent nothing here reads -----------------------------------------------------------------
+#
+# Review of #243, round 7: a row with no board session (``fleet spawn --bin``, a Claude Code
+# started without aisquare's hooks) has no transcript read either, so a permission prompt
+# there is no pending tool and never ``attention``, and its pane, quiet for 5 s, derives
+# ``waiting``. It read as an agent at rest.
+
+HOOKLESS = "coder-1 runs without aisquare's hooks, so nothing here shows whether it is showing"
+
+
+def _hookless_at_a_prompt(needs: FakeNeeds, pane: FakePane, project: ProjectInfo) -> None:
+    """coder-1 as ``fleet spawn --bin`` leaves it: no session, so no transcript read, its
+    pane quiet and deriving ``waiting``, and on it a Bash permission prompt."""
+    _row(project)
+    needs.session, needs.tail, needs.state = None, None, "waiting"
+    pane.prompt = True
+
+
+@pytest.mark.parametrize("name", PINNED_ACTIONS)
+def test_an_agent_with_no_board_session_is_refused_as_one_that_may_show_a_prompt(
+    phone: Phone,
+    exits: FleetCalls,
+    own_predicates: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    name: str,
+) -> None:
+    """The stop typed ``/exit`` and Enter into the prompt it could not see, and the Enter took
+    "1. Yes": the command the stop was meant to stop ran. Refused as a dialog is, and
+    nothing reaches the pane."""
+    _hookless_at_a_prompt(own_predicates, pane, project)
+    response = phone.post(name, **PINNED)
+    assert response.status_code == 409, response.text
+    assert response.json() == {
+        "error": "dialog_open",
+        "message": f"{HOOKLESS} a prompt; {DOING[name]} could answer one — send "
+        "dismiss_dialog: true to press Esc (No) first",
+    }
+    assert exits.calls == [] and pane.sent == [] and pane.answered == []
+
+
+@pytest.mark.parametrize("name", PINNED_ACTIONS)
+def test_dismiss_dialog_on_an_agent_with_no_board_session_answers_its_prompt_no_first(
+    phone: Phone,
+    exits: FleetCalls,
+    own_predicates: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    log: list[str],
+    name: str,
+) -> None:
+    """Press Esc (No) first: the Escape, and the ``/exit`` and Enter once its pane is still."""
+    _hookless_at_a_prompt(own_predicates, pane, project)
+    response = phone.post(name, **PINNED, dismiss_dialog=True)
+    assert response.status_code == 200, response.text
+    assert pane.answered == ["No"]
+    assert log == ["key Escape", f"fleet {name.removeprefix('agent/')}", "literal", "key Enter"]
+    assert "dismissed=yes" in phone.audit()[0][1]
+
+
+def test_an_agent_whose_transcript_cannot_be_read_is_refused_the_same_way(
+    phone: Phone, exits: FleetCalls, own_predicates: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    """A board session, but no tail to read: a tool use's first seconds show nowhere else."""
+    with store_session() as store:
+        store.upsert_fleet_agent(_agent(project).model_copy(update={"session_id": "ses_one"}))
+    own_predicates.tail, own_predicates.state = None, "waiting"
+    pane.prompt = True
+    response = phone.post("agent/stop", **PINNED)
+    assert response.status_code == 409, response.text
+    assert response.json()["message"].startswith(
+        "coder-1's transcript cannot be read, so nothing here shows whether it is showing"
+    )
+    assert exits.calls == [] and pane.sent == []
+
+
+def test_the_escape_to_an_agent_nothing_reads_has_a_whole_quiet_window_to_land(
+    phone: Phone,
+    exits: FleetCalls,
+    own_predicates: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its pane is all there is, and a prompt left waiting is quiet from before the Escape:
+    quiet at the first read says nothing of whether the Escape landed. The ``/exit`` waits
+    until the pane has been quiet ``fleet.ACTIVITY_WINDOW`` since the Escape."""
+    _hookless_at_a_prompt(own_predicates, pane, project)
+    fake_time = FakeTime()
+    monkeypatch.setattr(remote_actions, "time", fake_time)
+    monkeypatch.setattr(remote_actions, "ACTION_POLL_SECONDS", 0.25)
+    monkeypatch.setattr(remote_actions, "action_interrupt_wait", action_interrupt_wait)
+    monkeypatch.setattr(remote_actions, "action_quiet_window", action_quiet_window)
+    monkeypatch.setattr(remote_needs, "DIALOG_SETTLE_SECONDS", 3.0)
+    response = phone.post("agent/stop", **PINNED, dismiss_dialog=True)
+    assert response.status_code == 200, response.text
+    assert fake_time.slept == [0.25] * 20, "5 s of quiet after the Escape, not the first read"
+    assert pane.answered == ["No"]
+
+
+def test_prompt_mode_types_nothing_into_an_agent_nothing_reads_and_says_to_interrupt(
+    phone: Phone, own_predicates: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    """A quiet pane deriving ``waiting`` was all ``needs_at_input_prompt`` had of it, and
+    the paste and Enter went into the prompt. Interrupt & tell, whose Escape goes first,
+    is the way: the page offers it on ``agent_busy``."""
+    _hookless_at_a_prompt(own_predicates, pane, project)
+    response = phone.post("agent/tell", agent=LABEL, text="no, run the tests", mode="prompt")
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "agent_busy",
+        "message": "coder-1 runs without aisquare's hooks, so nothing here shows whether it is "
+        "at its prompt or showing one — use Interrupt & tell, whose Esc (No) goes first",
+    }
+    assert pane.sent == [] and pane.answered == []
+
+
+def test_interrupt_and_tell_answers_the_prompt_of_an_agent_nothing_reads_no_then_types(
+    phone: Phone, own_predicates: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    _hookless_at_a_prompt(own_predicates, pane, project)
+    response = phone.post("agent/tell", agent=LABEL, text="no, run the tests", mode="interrupt")
+    assert response.status_code == 200, response.text
+    assert pane.answered == ["No"]
+    assert [(kind, what) for _pane, kind, what in pane.sent] == [
+        ("key", "Escape"),
+        ("paste", "no, run the tests"),
+        ("key", "Enter"),
+    ]
+
+
+def test_an_auto_tell_to_an_agent_nothing_reads_is_a_board_note_and_never_fleet_tell(
+    phone: Phone,
+    fleet: FleetCalls,
+    own_predicates: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+) -> None:
+    """``fleet tell`` types into a row that derives ``waiting``: the quiet pane of an agent
+    nothing reads, its prompt included."""
+    _hookless_at_a_prompt(own_predicates, pane, project)
+    response = phone.post("agent/tell", agent=LABEL, agent_id="agt_one", text="use the test DB")
+    assert response.status_code == 200, response.text
+    (note,) = _notes(project)
+    assert response.json()["how"] == (
+        "it runs without aisquare's hooks, so nothing here shows whether it is showing a "
+        f"prompt, which typing would answer — filed as board note #{note.seq} to coder-1"
+    )
+    assert fleet.calls == [] and pane.sent == []
+
+
+def test_send_keys_with_the_dialog_guard_types_nothing_into_an_agent_nothing_reads(
+    phone: Phone, own_predicates: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    """The Transcript tab's Send. The Live tab, which shows the prompt, still types."""
+    _hookless_at_a_prompt(own_predicates, pane, project)
+    body = {"agent": LABEL, "text": "carry on", "enter": True}
+    refused = phone.post("send-keys", **body, dialog_guard=True)
+    assert refused.status_code == 409
+    assert refused.json() == {
+        "error": "dialog_open",
+        "message": f"{HOOKLESS} a prompt; typing now could answer one — look at its pane first",
+    }
+    assert pane.sent == [] and pane.answered == []
+    assert phone.post("send-keys", **body).status_code == 200
+
+
+def test_prompt_types_into_a_quiet_waiting_agent_whose_transcript_is_read(
+    phone: Phone, own_predicates: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    """The control: a board session and a transcript that says nothing either way, a quiet
+    pane and a row that reads ``waiting``: at its prompt."""
+    _row(project)
+    own_predicates.state = "waiting"
+    response = phone.post("agent/tell", agent=LABEL, text="hi", mode="prompt")
+    assert response.status_code == 200, response.text
+    assert [kind for _pane, kind, _what in pane.sent] == ["paste", "key"]
 
 
 # --- the switch, as fleet.switch itself makes it -------------------------------------------------

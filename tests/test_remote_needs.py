@@ -61,6 +61,7 @@ from aisquare.services.remote_needs import (
     needs_push_safe,
     needs_single_agent_now,
     needs_tool_pending,
+    needs_unseen,
     record_needs_dismissal,
     scan_needs_you,
 )
@@ -2691,7 +2692,7 @@ def test_a_pane_on_a_server_younger_than_the_row_is_another_agents(
 
 
 def test_at_the_prompt_takes_a_quiet_pane_tmux_vouches_for(monkeypatch: pytest.MonkeyPatch) -> None:
-    waiting = _working(None, state="waiting")
+    waiting = _working(_tail(newest="tool_result"), state="waiting")
     assert needs_at_input_prompt(_now_of(waiting, FakeTmux(reference=NOW), monkeypatch))
     busy = FakeTmux(reference=NOW, quiet_for=0)
     assert not needs_at_input_prompt(_now_of(waiting, busy, monkeypatch))
@@ -2701,6 +2702,33 @@ def test_at_the_prompt_takes_a_quiet_pane_tmux_vouches_for(monkeypatch: pytest.M
     assert not needs_at_input_prompt(
         _now_of(_working(mid_turn), FakeTmux(reference=NOW), monkeypatch)
     )
+
+
+def test_an_agent_nothing_here_reads_is_never_at_its_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #243, round 7: a row with no board session (``fleet spawn --bin``, a Claude
+    Code started without aisquare's hooks) has no transcript read, so a permission prompt
+    there is no pending tool and no ``attention``, and ``fleet._derive`` reads its pane,
+    quiet for 5 s, as ``waiting``. That was all ``needs_at_input_prompt`` had, and a
+    prompt-mode tell pasted and pressed Enter into the prompt. A session whose transcript
+    cannot be read hides a tool use's first seconds the same way. Neither shows a dialog
+    here either: nothing says one is up, and the actions take the unseen for one."""
+    hookless = _row().model_copy(update={"session_id": None})
+    snap = _now_of(
+        Fleet(agents=[_status(hookless, "waiting")]), FakeTmux(reference=NOW), monkeypatch
+    )
+    assert snap.pane_is_agent and snap.pane_quiet is True and snap.tail is None
+    assert needs_unseen(snap)
+    assert not needs_at_input_prompt(snap) and not needs_dialog_open(snap)
+    unread = _now_of(_working(None, state="waiting"), FakeTmux(reference=NOW), monkeypatch)
+    assert unread.status is not None and unread.status.session is not None
+    assert needs_unseen(unread) and not needs_at_input_prompt(unread)
+    read = _working(_tail(newest="tool_result"), state="waiting")
+    snap = _now_of(read, FakeTmux(reference=NOW), monkeypatch)
+    assert not needs_unseen(snap) and needs_at_input_prompt(snap), "the control"
+    gone = _now_of(Fleet(agents=[_status(hookless, "waiting")]), FakeTmux(gone=True), monkeypatch)
+    assert not needs_unseen(gone), "no pane of its own: not_agent says so"
 
 
 _NOTHING_WRITTEN = TranscriptTail(

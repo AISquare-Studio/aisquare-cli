@@ -2581,6 +2581,26 @@ def needs_tool_pending(snap: AgentNow) -> bool:
     return bool(_needs_pending(snap.tail, status.agent))
 
 
+def needs_unseen(snap: AgentNow) -> bool:
+    """Whether the agent's pane is its own, and nothing read here can say what it shows: its
+    row has no board session, or its transcript cannot be read.
+
+    A row with no session is an agent no aisquare hook reports on (``fleet spawn --bin``,
+    a Claude Code started without the hooks: ``no hooks`` in ``fleet ls``), or one whose
+    session could not be found. Its tail is never read, so a permission prompt there is
+    no pending tool and never ``attention``, and ``fleet._derive`` reads its pane quiet
+    for 5 s as ``waiting``. Taken for an agent at rest, a stop typed ``/exit`` and Enter
+    into the prompt, which took "1. Yes", and a tell's Enter did the same (review of
+    #243, round 7). A session whose transcript cannot be read hides a tool use's first
+    seconds the same way. Such an agent is a dialog that may be up: nothing is typed
+    into it without an Escape before it.
+    """
+    status = snap.status
+    if status is None or not snap.pane_is_agent:
+        return False
+    return status.session is None or snap.tail is None
+
+
 def needs_at_input_prompt(snap: AgentNow) -> bool:
     """Whether the agent sits at its input prompt, where typed text is a message to it.
 
@@ -2588,8 +2608,9 @@ def needs_at_input_prompt(snap: AgentNow) -> bool:
     pending, and the newest record is an interruption, the agent's own words or
     one Claude Code wrote itself (a local command's output, a compaction's
     summary: ``own``), or this process has written no conversation yet
-    (:func:`_needs_nothing_said`) — or the row derives ``waiting``, the only sign
-    there is without a tail.
+    (:func:`_needs_nothing_said`), or the row derives ``waiting``. Never for an
+    agent nothing here reads (:func:`needs_unseen`): a quiet pane that derives
+    ``waiting`` was all it had, and a permission prompt left 5 s is that too.
 
     A session starts ``working`` on the board, and the board is trusted for 30
     minutes: an agent just spawned with no prompt, or after a ``/clear``, read as
@@ -2603,10 +2624,8 @@ def needs_at_input_prompt(snap: AgentNow) -> bool:
     status = snap.status
     if status is None or not snap.pane_is_agent or snap.pane_quiet is not True:
         return False
-    if needs_dialog_open(snap):
+    if needs_dialog_open(snap) or snap.tail is None or needs_unseen(snap):
         return False
-    if snap.tail is None:
-        return status.state == "waiting"
     if _needs_pending(snap.tail, status.agent):
         return False
     if snap.tail.newest in ("interrupted", "assistant_text", "own") or status.state == "waiting":
@@ -3533,6 +3552,7 @@ __all__ = [
     "needs_scanned_iso",
     "needs_single_agent_now",
     "needs_tool_pending",
+    "needs_unseen",
     "needs_ws_frames",
     "record_needs_dismissal",
     "scan_needs_you",

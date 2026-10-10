@@ -362,6 +362,15 @@ no result yet included, or is at work or parked on its usage limit
 Its Send and keys wait until the transcript has loaded, which names the agent
 they go to.
 
+An agent the machine cannot read, one started without aisquare's hooks (`no
+hooks` in `fleet ls`, as `fleet spawn --bin` can start one) or whose transcript
+it cannot open, never shows it a prompt, so it is taken to be showing one. Stop,
+restart and switch are refused with `dialog_open`, and **Press Esc (No) first**
+types `/exit` once its pane has been still for 5 seconds after the Esc. A card's
+Tell does not type into it (`agent_busy`, and the sheet offers Interrupt & tell,
+whose Esc goes first), the menu's Tell leaves a board note, and Send on the
+Transcript tab types nothing; Live shows its pane.
+
 Every action, and every key or line you type, is pinned to the agent you
 looked at: if a manager restarted or switched it in the meantime, it is refused
 as `stale` rather than applied to the replacement, also when that happens while

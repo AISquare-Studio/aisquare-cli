@@ -302,7 +302,8 @@ class RemoteController:
         and the ``PermissionError`` raised out of ``restore()`` in ``FleetApp.on_mount``
         ended the fleet UI at start with uvicorn still serving in its thread. The server
         is stopped again instead, which leaves Remote as any start that fails does: off,
-        the saved switch as it was, and the status line saying why.
+        and the status line saying why. A press that fails saves the switch off too
+        (:meth:`_start_failed`); a TUI start that fails (:meth:`restore`) keeps it on.
 
         The server starts on the caller's thread; the deadline's write, the saved switch
         and ngrok follow on the writer's (:meth:`_finish_start`), and ``wait=False``
@@ -336,7 +337,7 @@ class RemoteController:
             info = self._server.start_remote_server(self._dist_dir, port=self._port)
         except Exception as exc:  # the remote extra is missing, or the port is taken
             # RemoteUnavailable / RemoteError carry the sentence to show; Remote stays
-            # off and the saved switch is not flipped on, so a restart does not retry blindly.
+            # off, and a press saves its switch off, so a restart does not retry blindly.
             self.info = None
             self.message = f"Remote could not start — {exc}"
             if not restoring:
@@ -364,7 +365,8 @@ class RemoteController:
         try:
             self._write_deadline(deadline)
         except Exception as exc:  # remote.json will not write: no Remote without its deadline
-            # Never raises, and keeps the saved switch. The stopping's own failures are this
+            # Never raises, and saves no switch: a press saves it off once this is stopped
+            # (_start_failed), a TUI start keeps it on. The stopping's own failures are this
             # one again (the deadline cleared in the same file), so the sentence stands alone.
             stopped = self.turn_off(
                 persist=False,

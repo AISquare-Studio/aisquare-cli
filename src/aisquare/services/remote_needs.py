@@ -2041,9 +2041,12 @@ def _needs_fleet_down(
     seen.add(key)
     first = first_seen.get(key)
     # Kept on disk, a sighting from before one of these rows was made is another outage's,
-    # cleared while no watcher looked: a row is made only while its tmux answers.
+    # cleared while no watcher looked: a row is made only while its tmux answers. A row
+    # dated after this scan (the clock set back, a VM restored from a snapshot) is no
+    # sign of that: every scan's sighting is before it, and each one started the outage
+    # anew, a new id every 3 s that no dismissal held and no push streak reached.
     newest = max(status.agent.created_at for status in live).replace(microsecond=0)
-    if first is None or first < newest:
+    if first is None or first < newest <= now:
         first = first_seen[key] = now
     return [
         _needs_item(

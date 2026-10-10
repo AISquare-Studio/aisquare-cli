@@ -1183,6 +1183,20 @@ def test_a_listing_that_fails_does_not_forget_when_tmux_went_down() -> None:
     assert (again.id, again.since) == (first.id, NOW)
 
 
+def test_a_row_dated_after_the_scan_does_not_start_tmux_down_over_every_scan() -> None:
+    """A sighting from before a live row was made is another outage's. A row dated ahead of
+    the clock (the clock set back, a VM restored from a snapshot) is after every sighting,
+    and each scan started the outage again: a new id every 3 s, no dismissal held and no
+    push streak built (merge of round 5 of #243)."""
+    ahead = _row("coder-1", created=NOW + timedelta(hours=1))
+    fleet = Fleet(agents=[_status(ahead, "unknown")])
+    memory: dict[str, datetime] = {}
+    first = _one(_scan(fleet, first_seen=memory))
+    for later in (3, 6, 9):
+        again = _one(_scan(fleet, now=NOW + timedelta(seconds=later), first_seen=memory))
+        assert (again.id, again.since) == (first.id, NOW)
+
+
 def _parked_and_asking() -> Fleet:
     """coder-1 parked on its limit, coder-2 at an MCP form, coder-3 at the usage-limit dialog:
     each named by an event the team writes once, when it starts."""

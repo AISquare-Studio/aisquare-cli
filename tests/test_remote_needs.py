@@ -2114,11 +2114,10 @@ class FakeTmux:
         return True
 
     def run(self, *args: str, stdin: bytes | None = None) -> str:
-        if args[:2] == ("list-panes", "-a"):
-            return ""  # the fleet listing's output times: none, so the board's state decides
-        assert args[:3] == ("display-message", "-p", "-t") and args[-1] == "#{window_activity}"
-        self.asked.append(args[3])
-        return self.output_epoch()
+        # Every fact about the pane is asked through `pane_facts`, the one format `PaneFacts`
+        # owns: a question of its own here is the copy of it needs-you once kept.
+        assert args[:2] == ("list-panes", "-a"), f"only the fleet's listing runs tmux: {args}"
+        return ""  # the fleet listing's output times: none, so the board's state decides
 
     def send_keys(self, pane_id: str, *keys: str) -> None:
         if self.fail:
@@ -2982,6 +2981,79 @@ def test_the_live_sources_take_a_turn_that_died_on_an_api_error_for_one_that_nee
     assert (
         scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=()) == []
     )
+
+
+def _live_agent(
+    store: Any,
+    project: ProjectInfo,
+    label: str,
+    *,
+    state: str,
+    seen: datetime,
+    born: datetime,
+    transcript: Path | None = None,
+    resets: datetime | None = None,
+) -> TeamSession:
+    """``label``'s fleet row and session in the store, its pane ``%<n>`` of its label."""
+    session = TeamSession(
+        id=f"ses_{label}", project_id=project.id, role="coder", label=label, started_at=born,
+        last_seen_at=seen, state=state, limit_resets_at=resets,
+        transcript_path=None if transcript is None else str(transcript),
+    )  # fmt: skip
+    store.upsert_session(session)
+    store.upsert_fleet_agent(
+        FleetAgent(
+            id=f"agt_{label}", project_id=project.id, label=label, role="coder",
+            pane_id=f"%{label[-1]}", session_id=session.id, cwd=project.root, created_at=born,
+        )
+    )  # fmt: skip
+    return session
+
+
+def _transcript(path: Path, *records: dict[str, Any]) -> Path:
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    return path
+
+
+def test_the_live_sources_ask_tmux_when_a_sub_agents_pane_last_printed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the store, the fleet's listing and the pane's facts: a sub-agent's next prompt
+    has no card until its notice, and a pane that printed after the last one, within
+    ``_NOTICE_WAIT``, is that next prompt being drawn. The scan read when the pane printed
+    with a ``display-message`` and a parse of its own, beside the one ``PaneFacts`` owns
+    and the snapshot reads, so the two could read one pane by two rules; and no test ran
+    the live read at all: stubbed out, the card of the prompt before stayed, and its "1"
+    approved the next (review of #243, round 5)."""
+    now = datetime.now(UTC)
+    root = tmp_path / "alpha"
+    task = {"type": "tool_use", "id": "toolu_task", "name": "Task", "input": {"description": "x"}}
+    running = {
+        "type": "assistant",
+        "uuid": "a1",
+        "timestamp": (now - timedelta(minutes=5)).isoformat(),
+        "message": {"id": "m1", "role": "assistant", "content": [task]},
+    }
+    with store_session() as store:
+        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        _live_agent(
+            store, project, "coder-1", state="attention", seen=now - timedelta(minutes=1),
+            born=now - timedelta(hours=1), transcript=_transcript(tmp_path / "c1.jsonl", running),
+        )  # fmt: skip
+    drawing = FakeTmux(quiet_for=10)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: drawing)
+    assert scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=()) == []
+    assert "%1" in drawing.asked, "asked through the pane's facts"
+    snap = needs_agent_now(project, "coder-1", now=now)
+    assert snap.items == () and snap.pane_quiet is True
+    quiet = FakeTmux(quiet_for=120)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: quiet)
+    (item,) = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+    assert (item.kind, item.reason) == (
+        "permission",
+        "coder-1 waits for a permission answer (in a sub-agent)",
+    )
+    assert [card.id for card in needs_agent_now(project, "coder-1", now=now).items] == [item.id]
 
 
 # --- the watcher --------------------------------------------------------------------------

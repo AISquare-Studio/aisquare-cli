@@ -2213,16 +2213,6 @@ def _needs_pane_now(
     return True, None if output is None else now - output > fleet_service.ACTIVITY_WINDOW
 
 
-def _needs_pane_output_at(server: TmuxServer, pane_id: str) -> datetime | None:
-    """When the pane's window last printed (``#{window_activity}``, to the second rounded
-    down); ``None`` when tmux would not say."""
-    try:
-        raw = server.run("display-message", "-p", "-t", pane_id, "#{window_activity}").strip()
-    except Exception:
-        return None
-    return datetime.fromtimestamp(int(raw), tz=UTC) if raw.isdigit() else None
-
-
 def needs_dialog_open(snap: AgentNow) -> bool:
     """Whether the agent may show a dialog that an Enter (or a typed ``/exit``) would answer.
 
@@ -2312,6 +2302,7 @@ def live_needs_sources() -> NeedsSources:
     from aisquare.services import claude_accounts as claude_accounts_service
     from aisquare.services import fleet as fleet_service
     from aisquare.services import project as project_service
+    from aisquare.services import remote_server
 
     def needs_rows_ended(project_id: str, since: datetime) -> list[FleetAgent]:
         with store_session() as store:
@@ -2352,7 +2343,11 @@ def live_needs_sources() -> NeedsSources:
         return fleet_service.server_for(socket).answers()
 
     def needs_pane_output(agent: FleetAgent) -> datetime | None:
-        return _needs_pane_output_at(fleet_service.server_for(agent.tmux_socket), agent.pane_id)
+        # The fact the snapshot reads (`_needs_pane_now`), from the one format and parse
+        # `PaneFacts` owns: a second copy of both read the same pane quiet by another rule.
+        server = fleet_service.server_for(agent.tmux_socket)
+        facts = remote_server._remote_pane_facts(server, agent)
+        return None if facts is None else facts.last_output
 
     def needs_session_event(
         project_id: str, session_id: str, kind: str, since: datetime

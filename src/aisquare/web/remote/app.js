@@ -2584,6 +2584,7 @@ VIEWS.agent = (route, main) => {
         for (const node of nodes) lines.insertBefore(node, first);
       } else {
         drawn = page;
+        gateButtons();
         clear(lines);
         for (const node of nodes) lines.appendChild(node);
         if (!nodes.length) lines.appendChild(el("span", "ln muted", "No conversation recorded yet."));
@@ -2609,8 +2610,8 @@ VIEWS.agent = (route, main) => {
   }
   if (route.tab !== "card") main.appendChild(inputBar(pid, label, cleanups, route.tab !== "live", () => drawn && drawn.agent_id));
   drawState();
-  // Nor at an unread pane: it shows no agent.
-  const held = route.tab === "live" ? () => !paneFresh(pid, label) || isText(drawn && drawn.error) : null;
+  // Nor at an unread pane or before a transcript page: neither names an agent.
+  const held = { live: () => !paneFresh(pid, label) || isText(drawn && drawn.error), transcript: () => !(drawn && drawn.agent_id) }[route.tab];
   return { fleet: drawState, needs: drawState, held, cleanup: () => { for (const fn of cleanups) fn(); } };
 };
 
@@ -2634,9 +2635,9 @@ function drawExplainability(body, card) {
 
 /* The bar under the pane: a growing textarea, ⏎ on by default (text left in
  * Claude Code's input box holds back its next question), Send, and the key
- * pad, which the soft keyboard and it never share the screen with. blind: the
- * tab shows no pane (Transcript), so Send types nothing while a prompt may be up. Each tap
- * carries pin(), the agent_id of what the tab shows: none reaches a replacement. */
+ * pad, which the soft keyboard and it never share the screen with. blind: no pane
+ * (Transcript), so Send types nothing while a prompt may be up. pin(): the agent_id of
+ * what the tab shows, which each tap carries. */
 function inputBar(pid, label, cleanups, blind, pin) {
   const bar = el("div", "inputbar");
   const line = el("div", "row-inline");
@@ -2699,12 +2700,11 @@ function inputBar(pid, label, cleanups, blind, pin) {
     if (res.status === 409 && res.error === "double_press") {
       // Asked on this agent's own screen, over no other sheet: the answer can come after
       // the human moved on, and a sheet in its place would put Send and exit where
-      // another agent's button was.
-      const which = (body.keys || []).indexOf("C-d") >= 0 ? "Ctrl-D" : "Ctrl-C";
+      // another agent's button was. what: Ctrl-C or Ctrl-D.
       if (onAgent({ pid, label }) && !sheetOpen()) {
-        confirmSheet("Send " + which + " to " + label + " again?", "A second " + which + " within 3 s exits Claude Code, and " + label + " with it.",
+        confirmSheet("Send " + what + " to " + label + " again?", "A second " + what + " within 3 s exits Claude Code, and " + label + " with it.",
           "Send and exit", () => post(Object.assign({}, body, { confirm_exit: true }), what, tapped));
-      } else toast(label + ": the second " + which + " was not sent — it would exit Claude Code.");
+      } else toast(label + ": the second " + what + " was not sent — it would exit Claude Code.");
       return false;
     }
     if (res.status === 409 && res.error === "dialog_open") {

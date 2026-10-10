@@ -308,7 +308,8 @@ into an agent waiting at its prompt: while the agent may be showing a prompt,
 even one left unanswered for hours, the message is left as a board note instead.
 Send on the Transcript tab, which does not show the pane, types nothing while
 the agent may be showing a prompt, a tool with no result yet included; send from
-Live, where the pane shows what the keys would answer.
+Live, where the pane shows what the keys would answer. Its Send and keys wait
+until the transcript has loaded, which names the agent they go to.
 
 Every action, and every key or line you type, is pinned to the agent you
 looked at: if a manager restarted or switched it in the meantime, it is refused

@@ -1811,7 +1811,9 @@ async function transcriptSendGuarded() {
  * came (still the first row's: the tap was at its screen); Send at the replacement's frame;
  * a key the machine refuses stale, and what the page says; a frame that could not be read,
  * at which the pad and Send wait (a tap there sends nothing) until a screen comes. On
- * Transcript: Send with the page's id. Each body as [keys or text, agent_id]. */
+ * Transcript: Send and the pad while the first page is out and once its read failed, each
+ * held and a tap sending nothing ([Send, ⏎] disabled), then Send with the id of the page
+ * Refresh read. Each body as [keys or text, agent_id]. */
 async function pinnedKeys() {
   const ok = { status: 200, json: { sent: true } };
   const stale = { status: 409, json: { error: "stale", message: "'coder-1' is another agent now (agt_3) — nothing was sent", current: { agent_id: "agt_3" } } };
@@ -1845,20 +1847,39 @@ async function pinnedKeys() {
   click(buttonNamed(live.main(), "4"));
   await settle();
   const said = (body) => [body.keys || body.text, body.agent_id === undefined ? null : body.agent_id];
+  const reads = [];
   const transcript = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
-    "GET api/transcript/coder-1": () => ({ status: 200, json: { lines: ["done?"], cursor: null, more: false, stamps: {}, agent_id: "agt_1" } }),
+    "GET api/transcript/coder-1": () => (reads[reads.length] = deferred()).promise,
     "POST api/send-keys": () => ok,
   }));
   await settle();
   transcript.acceptSockets();
   transcript.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
   await settle();
+  const keys = () => ["Send", "⏎"].map((name) => buttonNamed(transcript.main(), name).disabled);
+  const tapped = async (text) => {
+    await typeAndSend(transcript, text);
+    click(buttonNamed(transcript.main(), "⏎"));
+    await settle();
+  };
+  const unpaged = keys();
+  await tapped("before the page came");
+  reads[0].settle({ status: 503, json: { error: "store_busy", message: "the store is busy" } });
+  await settle();
+  const failed = keys();
+  await tapped("after the read failed");
+  click(buttonNamed(transcript.main(), "Refresh"));
+  await settle();
+  reads[1].settle({ status: 200, json: { lines: ["done?"], cursor: null, more: false, stamps: {}, agent_id: "agt_1" } });
+  await settle();
+  const paged = keys();
   await typeAndSend(transcript, "yes");
   return {
     live: live.sent("api/send-keys").map(said),
     staleSaid,
     unread,
     read,
+    transcriptHeld: { unpaged, failed, paged },
     transcript: transcript.sent("api/send-keys").map((body) => said(body).concat(body.dialog_guard === true)),
   };
 }
@@ -2238,7 +2259,7 @@ async function transcriptLoads() {
 }
 
 function transcriptPage(lines, cursor, more) {
-  return { status: 200, json: { lines, cursor, more, stamps: {} } };
+  return { status: 200, json: { lines, cursor, more, stamps: {}, agent_id: "agt_1" } };
 }
 
 /* The Transcript tab, its Load older answered stale_cursor (a /clear since its first page):

@@ -1224,6 +1224,34 @@ def test_a_remote_json_that_cannot_be_read_is_a_sentence_in_the_panel_not_a_sile
     drive(go, tunnel=missing_ngrok)
 
 
+@pytest.mark.parametrize("found", ["missing", "edited by hand"])
+def test_a_remote_json_the_first_read_cannot_write_is_said_as_a_write_in_the_panel(
+    monkeypatch: pytest.MonkeyPatch, found: str
+) -> None:
+    """The process's first read makes ``remote.json`` when it is missing and rewrites one
+    edited by hand. In a home that cannot be written, that write failed and the panel said
+    the file "could not be read": a file that did not exist, or read fine, while ``asq remote
+    status`` said "could not be written" and to make the directory writable (sweep 5 of
+    #243). The panel says what the CLI says."""
+    paths.ensure_home()
+    if found == "edited by hand":
+        Runtime(paths.remote_state_path(), paths.remote_audit_path())
+        compact = json.dumps(json.loads(paths.remote_state_path().read_text()))
+        paths.remote_state_path().write_text(compact)  # readable, not as the server writes it
+    refuse_remote_json(monkeypatch)
+
+    async def go(pilot: Pilot[None]) -> None:
+        modal = await open_panel(pilot)
+        await written(pilot)  # the process's first read is the writer thread's
+        said = shown(modal.query_one("#remote-status", Static))
+        assert said.startswith("remote.json could not be written — "), said
+        assert "Permission denied" in said
+        assert said.endswith("; make its directory writable, or free some space")
+        assert paths.remote_state_path().exists() is (found == "edited by hand")
+
+    drive(go, tunnel=missing_ngrok)
+
+
 def test_a_write_that_lands_takes_away_the_sentence_that_one_did_not_in_the_panel() -> None:
     """The panel said write actions had not been saved for as long as Remote stayed on, after
     the switch, flipped back, had saved them (sweep of #243)."""

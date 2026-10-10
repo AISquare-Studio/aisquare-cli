@@ -235,8 +235,9 @@ class RemoteController:
         saved long after both had been (sweep of #243)."""
         self.read_problem: str | None = None
         """Why ``remote.json`` could not be read at the last paint, until it can be: a file that
-        is no JSON object, one this account may not read. The panel showed writes off and no
-        devices, and said why only once Remote was switched on (sweep of #243)."""
+        is no JSON object, one this account may not read, or one the first read could not make
+        or rewrite (:meth:`_read_remote_json`). The panel showed writes off and no devices, and
+        said why only once Remote was switched on (sweep of #243)."""
         self.auto_off_at: datetime | None = None
         self._deadline_unsaved = False
         """Set by a write of the deadline that failed, until one goes through or the server is
@@ -916,9 +917,20 @@ class RemoteController:
             return reading
 
     def _read_remote_json(self) -> None:
-        """The first read of ``remote.json``, on the writer's thread (:meth:`_first_read`)."""
+        """The first read of ``remote.json``, on the writer's thread (:meth:`_first_read`).
+
+        A read the server refuses is a ``RemoteError``; an ``OSError`` is the write a first
+        read makes, of a file that is missing, old or edited by hand. Both were "could not be
+        read": in a home that cannot be written, the panel blamed a file that did not exist,
+        or read fine, where ``asq remote status`` said the directory (sweep 5 of #243).
+        """
         try:
             self._server.runtime()
+        except OSError as exc:  # as cli/remote.py's _writing_remote_json says it
+            self.read_problem = (
+                f"remote.json could not be written — {exc}; make its directory writable, "
+                "or free some space"
+            )
         except Exception as exc:  # the paints say why, as a read of theirs did
             self.read_problem = f"remote.json could not be read — {exc}"
         else:

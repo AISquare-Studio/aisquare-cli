@@ -2009,11 +2009,11 @@ function tellSheet(ctx, mode, replyTo) {
       const now = stale && res.data ? res.data.current : null;
       if (stale && replyTo && !Array.isArray(now)) return postReply(ctx, sheet, replyTo, text.value);
       if (stale && ctx.item) {
-        // The card gives way, the words typed stay: Tell again is a Tell with no card.
+        // The card gives way, the words typed stay: Tell again goes with no card, same row.
         const item = ctx.item;
         ctx.item = ctx.needsId = null;
         noLonger(item, now);
-        sheet.say(noLongerText(item, now) + " Tell again to send it anyway.");
+        sheet.say(Array.isArray(now) ? noLongerText(item, now) + " Tell again to send it anyway." : failText(res));
         return;
       }
       sheet.say(failText(res, TEXT_MAX.tell));

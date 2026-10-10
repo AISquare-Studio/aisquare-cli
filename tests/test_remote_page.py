@@ -2693,6 +2693,21 @@ def test_a_cards_tell_refused_stale_keeps_its_sheet_and_what_was_typed(
     }
 
 
+def test_a_cards_tell_refused_because_its_agent_is_another_row_now_offers_no_tell_again(
+    boot_report: dict[str, Any],
+) -> None:
+    """A card's Tell refused ``stale`` offers "Tell again to send it anyway", a Tell with no
+    card, pinned to the card's row as before. That reaches coder-1 only when its item went
+    (``current`` is its items). Once coder-1 was stopped, or a fresh row holds its label,
+    the machine refuses that pin every time, and the sheet still offered it. It says the
+    machine's sentence instead; the card gives way all the same."""
+    assert boot_report["staleCards"]["tellReplaced"] == {
+        "shown": ["No longer needs you: nothing waits on coder-1 now."],
+        "sheet": "Tell coder-1",
+        "said": "'coder-1' is another agent now (agt_d) — nothing was done",
+    }
+
+
 def test_each_refusal_is_said_in_the_sentence_the_spec_gives_it(
     boot_report: dict[str, Any],
 ) -> None:

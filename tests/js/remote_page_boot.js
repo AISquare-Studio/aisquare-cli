@@ -3499,6 +3499,14 @@ async function staleCards() {
   await settle();
   tell.sent = told.requests.filter((one) => one.path === "api/agent/tell").map((one) => [one.body.text, one.body.needs_id || null, one.body.agent_id || null]);
   tell.after = sheetTitle(told);
+  // The same Tell once coder-1 is another row: the pin it would go again with is that ended one.
+  const replaced = { status: 409, json: { error: "stale", message: "'coder-1' is another agent now (agt_d) — nothing was done", current: { agent_id: "agt_d" } } };
+  const gone = await feed(asked, { "POST api/agent/tell": () => replaced });
+  click(buttonNamed(gone.main(), "Tell…"));
+  find(gone.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "yes, merge";
+  click(buttonNamed(gone.run("UI.sheet"), "Tell"));
+  await settle();
+  const goneSaid = find(gone.run("UI.sheet"), (node) => node.className === "status");
   const crashed = Object.assign({}, ITEM, { kind: "crashed", detail: {}, answers: [], actions: ["stop"] });
   const stopped = await feed(crashed, { "POST api/agent/stop": stale([]) });
   click(buttonNamed(stopped.main(), "Stop…"));
@@ -3507,6 +3515,7 @@ async function staleCards() {
   return {
     answer,
     tell,
+    tellReplaced: { shown: shown(gone), sheet: sheetTitle(gone), said: goneSaid && goneSaid.textContent },
     stop: { shown: shown(stopped), sheet: sheetTitle(stopped) },
   };
 }

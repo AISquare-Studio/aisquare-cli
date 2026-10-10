@@ -605,6 +605,57 @@ def test_a_refusal_lands_on_its_step_and_stops_the_rest(tmp_path: Path) -> None:
     assert [(s.label, s.outcome) for s in later.steps] == [("coder-1", "refused")]
 
 
+@pytest.mark.parametrize("cause", ["cannot-enter", "io-error"])
+def test_a_root_that_cannot_be_looked_into_is_a_refusal_after_the_steps_before_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cause: str
+) -> None:
+    """``is_git_project`` is ``(root / ".git").exists()``, which raises PermissionError on
+    3.11 to 3.13 for a root this user can no longer enter, and EIO or ESTALE on every
+    version. It ran after the manager and a lost coder's restart, and raised: those steps
+    went with it, and Welcome said only "could not start the fleet" (round 12 of #257).
+    It is a refused step, after them."""
+    root = _repo(tmp_path / "demo")
+    project = ProjectInfo(id="prj_demo", root=root)
+    looks_into = fleet_service.is_git_project
+    if cause == "cannot-enter":
+        if sys.platform == "win32" or not can_deny_reads():
+            pytest.skip("needs a directory this user cannot enter")
+        if sys.version_info >= (3, 14):
+            pytest.skip("Path.exists answers False there instead of raising")
+    else:
+
+        def unreadable(path: Path) -> bool:
+            raise OSError(5, "Input/output error", str(path / ".git"))
+
+        monkeypatch.setattr(fleet_service, "is_git_project", unreadable)
+    listed = [
+        *_seen(_agent("manager", "manager")),
+        *_seen(_agent("coder-1", "coder"), state="lost"),
+    ]
+    spawns, restarts = Spawns(), Restarts()
+    if cause == "cannot-enter":
+        root.chmod(0o600)
+    try:
+        started = first_run.start_fleet(
+            project, spawn=spawns, restart=restarts, live=lambda p: listed
+        )
+    finally:
+        root.chmod(0o755)
+    assert [(s.label, s.outcome) for s in started.steps] == [
+        ("manager", "running"),
+        ("coder-1", "started"),
+        ("coder-2", "refused"),
+    ], [s.detail for s in started.steps]
+    detail = started.steps[-1].detail
+    assert detail.startswith(f"could not look into {root}: "), detail
+    assert ("Permission denied" if cause == "cannot-enter" else "Input/output error") in detail
+    assert spawns.calls == [] and restarts.calls == [("coder-1", "agt_coder-1")]
+    # Control: the same root, enterable and readable again, gets its coder.
+    monkeypatch.setattr(fleet_service, "is_git_project", looks_into)
+    again = first_run.start_fleet(project, spawn=spawns, restart=Restarts(), live=lambda p: listed)
+    assert [(s.label, s.outcome) for s in again.steps][-1] == ("coder-2", "started")
+
+
 def test_a_crash_in_the_fleet_path_is_a_refusal_not_a_raise(tmp_path: Path) -> None:
     project = ProjectInfo(id="prj_demo", root=_repo(tmp_path / "demo"))
 

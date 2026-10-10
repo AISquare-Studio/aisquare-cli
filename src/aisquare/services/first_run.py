@@ -656,7 +656,8 @@ def start_fleet(
     ``fleet.spawn``'s to refuse, with the way to clear it. Coders take the
     role's worktree default in a git repository and ``worktree=False``
     elsewhere, with a note. The first refusal (no tmux, the agent cap, a
-    worktree git will not make) stops the call, and its reason is on its step.
+    worktree git will not make, a root this user cannot look into) stops the
+    call, and its reason is on its step; the steps before it are kept.
     ``on_step`` hears each step as it lands, for a caller that shows progress.
     Nothing is typed into an agent it starts: see the module docstring.
     """
@@ -702,8 +703,18 @@ def start_fleet(
             return FleetStart(tuple(steps))
         missing -= 1
     if missing:
-        git = fleet_service.is_git_project(project.root)
         held = {status.agent.label for status in listed}  # running or not, as spawn holds them
+        try:
+            git = fleet_service.is_git_project(project.root)
+        except OSError as exc:
+            # A root this user can no longer enter raises on 3.11 to 3.13 (EIO or ESTALE on
+            # every version), after the manager and the restarts above ran: raised, it took
+            # their steps with it, and Welcome said only "could not start the fleet"
+            # (round 12 of #257). Refused on a step, as coder_folder answers it.
+            label = next(_free_labels("coder", 1, held))
+            reason = f"could not look into {project.root}: {_why(exc)}"
+            done(FleetStep(label, "coder", "refused", reason))
+            return FleetStart(tuple(steps))
         for label in _free_labels("coder", missing, held):
             step = _spawn(spawner, project, "coder", label=label, worktree=None if git else False)
             if not git and step.outcome == "started":

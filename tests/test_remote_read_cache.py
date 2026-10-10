@@ -179,6 +179,48 @@ def test_a_snapshot_that_fails_is_its_ticks_answer_and_the_next_tick_computes_it
     assert cache._flights == {}
 
 
+def test_a_snapshot_is_as_old_as_its_read_so_a_tick_on_it_is_read_again_however_slow() -> None:
+    """Sweep of #243, round 5: an outcome was as old as the moment its read came back. A
+    socket's turns are a tick apart, so at its next tick its own read of a tick before was a
+    tick less the read's time old, inside the 0.9 tick ttl once the read took a tenth of a
+    tick: the socket took the same snapshot back and sent no frame, and a pane, a board or a
+    fleet that slow came every two ticks. Its age counts from when its read began; another
+    socket half a tick out of step still shares it."""
+    ticks = Ticks()
+    cache = remote_server._Cache(ttl=0.9, clock=ticks)
+    began: list[float] = []
+
+    def pane() -> str:
+        began.append(ticks.now)
+        ticks.now += 0.3  # the capture takes 0.3 of a tick
+        return f"screen {len(began)}"
+
+    assert _ask(cache, "pane:", pane) == "screen 1"
+    ticks.now = 0.5  # another socket, half a tick out of step
+    assert _ask(cache, "pane:", pane) == "screen 1", "within the tick, one read for both"
+    ticks.now = 1.0  # the first socket's next tick
+    assert _ask(cache, "pane:", pane) == "screen 2"
+    assert began == [0.0, 1.0]
+
+
+def test_a_snapshot_whose_read_took_the_whole_tick_is_kept_for_no_later_caller() -> None:
+    """Its callers waited for it and take it; one that asks after it came back reads anew, as
+    what it would be given was read a tick ago or more, and the cache holds none of it."""
+    ticks = Ticks()
+    cache = remote_server._Cache(ttl=0.9, clock=ticks)
+    began: list[float] = []
+
+    def fleet() -> str:
+        began.append(ticks.now)
+        ticks.now += 1.0
+        return f"fleet {len(began)}"
+
+    assert _ask(cache, "fleet:", fleet) == "fleet 1"
+    assert cache._values == {}
+    assert _ask(cache, "fleet:", fleet) == "fleet 2"
+    assert began == [0.0, 1.0]
+
+
 def test_a_failure_raised_to_every_caller_keeps_the_traceback_it_was_raised_with() -> None:
     """Raised again as it is, one exception would carry every caller's frames, one more set
     each time it is raised, for as long as the tick keeps it."""

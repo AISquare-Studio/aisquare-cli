@@ -1187,14 +1187,20 @@ def test_a_read_a_little_slower_than_the_tick_still_sends_its_frame(
     assert frame["payload"] == {"agents": [], "read": 1}, "the first read, sent once it was back"
 
 
+@pytest.mark.parametrize("capture", [0.0, 0.3], ids=["an instant capture", "a capture of 0.3 tick"])
 def test_while_a_read_hangs_the_other_frames_still_come_once_a_tick(
-    runtime: Runtime, tmp_path: Path
+    runtime: Runtime, tmp_path: Path, capture: float
 ) -> None:
     """Sweep of #243, round 5: a tick waited a whole tick for a read that hung, and the stream
     then paused another whole tick before the next one. While a fleet waited out tmux's
     30 s, the Live pane, needs-you and every other frame came every two ticks, and an
     auto-off closed the socket up to two ticks late. The wait and the pause share one tick
-    now. The control: with nothing hung, the same pane comes once a tick as before."""
+    now. The control: with nothing hung, the same pane comes once a tick as before.
+
+    A capture that takes a while still comes once a tick: the cache counted a snapshot's
+    age from when its read came back, so with turns a tick apart the socket's own capture
+    of a tick before was still fresh, came back the same and sent no frame, and a capture
+    of more than a tenth of a tick came every two ticks, hung read or none."""
     tick = 0.25
 
     def gaps(hang: bool) -> list[float]:
@@ -1206,6 +1212,7 @@ def test_while_a_read_hangs_the_other_frames_still_come_once_a_tick(
             return {"agents": []}
 
         def panes(agent: str, project: str | None, history: int) -> dict[str, object]:
+            time.sleep(capture * tick)
             return {"rows": [f"screen {next(screens)}"], "width": 80, "height": 1}
 
         sources = dataclasses.replace(_sources(), fleet=fleet, panes=panes)

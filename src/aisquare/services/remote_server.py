@@ -2965,6 +2965,15 @@ class _Cache:
     thread. Each caller waited in a thread of the loop's default pool, which
     also runs every unlock, write and transcript read, so a few sockets waiting
     on one slow kind held all of it.
+
+    An outcome is as old as its read: its age counts from when its compute was
+    claimed, not from when it came back. Counted from its end, a socket's own
+    read was still within the ttl at its next tick, a tick after it began,
+    whenever it took more than a tenth of one: the socket took its own last
+    snapshot back, the frame was the same, none went out, and a board, a fleet or
+    a pane that slow came every two ticks (sweep of #243, round 5). Sockets out of
+    step still share one read within the tick, and an outcome whose read took the
+    whole ttl answers the callers that waited on it and is kept for none after.
     """
 
     def __init__(self, ttl: float, *, clock: Callable[[], float] = time.monotonic) -> None:
@@ -2973,24 +2982,26 @@ class _Cache:
         self._lock = threading.Lock()
         """Guards the two tables, and is never held while a snapshot is computed."""
         self._values: dict[str, tuple[float, object]] = {}
-        """Each kind's outcome within the tick: its snapshot, or :class:`_Failed`."""
-        self._flights: dict[str, Future[object]] = {}
-        """The kinds being computed now, each to the future its callers wait on. A flight
-        goes when its compute ends, so this holds the kinds in flight and no more,
-        whatever kinds are asked for."""
+        """Each kind's outcome within the tick, with when its compute was claimed: its
+        snapshot, or :class:`_Failed`."""
+        self._flights: dict[str, tuple[Future[object], float]] = {}
+        """The kinds being computed now, each to the future its callers wait on and when it
+        was claimed. A flight goes when its compute ends, so this holds the kinds in flight
+        and no more, whatever kinds are asked for."""
 
     def _cache_fresh(self, kind: str) -> tuple[float, object] | None:
         """``kind``'s outcome while it is younger than the ttl; call it holding ``_lock``."""
         hit = self._values.get(kind)
         return hit if hit is not None and self._clock() - hit[0] < self._ttl else None
 
-    def _cache_store(self, kind: str, outcome: object) -> None:
-        """Keep ``outcome`` as ``kind``'s, once what expired is dropped; hold ``_lock``."""
+    def _cache_store(self, kind: str, outcome: object, began: float) -> None:
+        """Keep ``outcome`` as ``kind``'s, as old as its compute (``began``), and drop what
+        expired, the outcome itself if its compute took the whole ttl; hold ``_lock``."""
+        self._values.pop(kind, None)  # stored anew, so the dict stays in the order stored
+        self._values[kind] = (began, outcome)
         now = self._clock()
         for stale in [k for k, (at, _kept) in self._values.items() if now - at >= self._ttl]:
             del self._values[stale]
-        self._values.pop(kind, None)  # stored anew, so the dict stays oldest first
-        self._values[kind] = (now, outcome)
         while len(self._values) > CACHE_KINDS_MAX:
             del self._values[next(iter(self._values))]
 
@@ -3003,10 +3014,11 @@ class _Cache:
         with self._lock:
             hit = self._cache_fresh(kind)
             if hit is None:
-                flight = self._flights.get(kind)
-                if flight is not None:
-                    return flight, False
-                flight = self._flights[kind] = Future()
+                flying = self._flights.get(kind)
+                if flying is not None:
+                    return flying[0], False
+                flight: Future[object] = Future()
+                self._flights[kind] = (flight, self._clock())
                 # Running, so a waiter that is cancelled (its socket closed) ends its own
                 # wait and never the flight the other callers wait on.
                 flight.set_running_or_notify_cancel()
@@ -3033,11 +3045,12 @@ class _Cache:
         """End ``kind``'s flight with ``outcome``, kept as the tick's when ``keep``; a flight
         ends once, and a later ending changes nothing."""
         with self._lock:
-            if self._flights.get(kind) is not flight:
+            flying = self._flights.get(kind)
+            if flying is None or flying[0] is not flight:
                 return
             del self._flights[kind]
             if keep:
-                self._cache_store(kind, outcome)
+                self._cache_store(kind, outcome, flying[1])
         flight.set_result(outcome)
 
     def _cache_job_done(self, kind: str, flight: Future[object]) -> None:

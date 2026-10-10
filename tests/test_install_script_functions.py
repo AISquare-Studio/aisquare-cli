@@ -662,6 +662,9 @@ def test_dry_run_still_reports_what_it_would_do(tmp_path: Path) -> None:
     curl = stub_dir(tmp_path, "bin", "curl")
     result = sh(
         "main --dry-run --yes --no-project --offline --no-agent --no-system-deps",
+        # The suite's own home is in AISQUARE_HOME, and the banner names the home this
+        # run resolves; the default is the one asserted here.
+        env={"AISQUARE_HOME": ""},
         path=f"{cli}:{curl}:{base_path(tmp_path)}",
     )
     assert "aisquare installer" in result.stdout
@@ -2088,6 +2091,7 @@ def test_the_banner_lists_only_what_the_run_writes(
     }[machine]
     result = sh(
         f"WANT_AGENT={want_agent}; WANT_PROJECT=1; PROJECT_DIR=/p; {decided}; banner",
+        env={"AISQUARE_HOME": ""},  # the default home, not the suite's (see below)
         path=base_path(tmp_path),
     )
 
@@ -2393,11 +2397,25 @@ def test_the_short_circuit_takes_claude_code_from_where_the_run_wires_it(
     [
         ("plain", 1, False),
         ("project-scope file here", 1, True),
-        ("local-scope file above", 1, True),
+        ("local-scope file at the repository", 1, True),
+        ("local-scope file above the repository", 1, False),
+        ("the home's local file, from the repository", 1, False),
+        ("the home's local file, from a folder in no repository", 1, False),
+        ("the home's local file, from the home", 1, True),
         ("the home's own settings", 1, False),
         ("project-scope file here", 0, False),
     ],
-    ids=["plain", "project-here", "local-above", "home-settings", "no-agent"],
+    ids=[
+        "plain",
+        "project-here",
+        "local-at-repo",
+        "local-above-repo",
+        "home-local-from-repo",
+        "home-local-from-a-plain-folder",
+        "home-local-from-home",
+        "home-settings",
+        "no-agent",
+    ],
 )
 def test_the_doctor_runs_from_root_only_where_this_folder_could_answer_differently(
     tmp_path: Path, layout: str, want_agent: int, asked_from_root: bool
@@ -2405,25 +2423,38 @@ def test_the_doctor_runs_from_root_only_where_this_folder_could_answer_different
     """`doctor_json` ran a second full doctor from `/` for its claude-code row on every
     call, so a run started four doctors where it used to start two (review of #257,
     round 14). This folder changes that row only through a repository's aisquare plugin,
-    enabled in .claude/settings.json of the folder a session starts in or in
-    .claude/settings.local.json of it or a repository above; the home's own
-    settings.json is Claude Code's user settings. Only there is `/` asked."""
+    enabled in .claude/settings.json of the folder a session starts in, or in
+    .claude/settings.local.json where the doctor's `_local_settings_root` reads it: the
+    first folder up that holds a .git, or this folder, never the home unless the session
+    starts there. Counted every ancestor's file, a ~/.claude/settings.local.json (one
+    saved permission) asked `/` again from every folder (round 15). The home's own
+    settings.json is Claude Code's user settings."""
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     (home / ".claude" / "settings.json").write_text("{}", encoding="utf-8")
-    repo = tmp_path / "repo"
+    code = home / "code"
+    repo = code / "repo"
+    (repo / ".git").mkdir(parents=True)
     (repo / "src" / ".claude").mkdir(parents=True)
+    files = {
+        "project-scope file here": repo / "src" / ".claude" / "settings.json",
+        "local-scope file at the repository": repo / ".claude" / "settings.local.json",
+        "local-scope file above the repository": code / ".claude" / "settings.local.json",
+        "the home's local file, from the repository": home / ".claude" / "settings.local.json",
+        "the home's local file, from a folder in no repository": (
+            home / ".claude" / "settings.local.json"
+        ),
+        "the home's local file, from the home": home / ".claude" / "settings.local.json",
+    }
+    if layout in files:
+        files[layout].parent.mkdir(parents=True, exist_ok=True)
+        files[layout].write_text("{}", encoding="utf-8")
+    (home / "notes").mkdir()
     here = {
-        "plain": repo / "src",
-        "project-scope file here": repo / "src",
-        "local-scope file above": repo / "src",
+        "the home's local file, from a folder in no repository": home / "notes",
+        "the home's local file, from the home": home,
         "the home's own settings": home,
-    }[layout]
-    if layout == "project-scope file here":
-        (repo / "src" / ".claude" / "settings.json").write_text("{}", encoding="utf-8")
-    if layout == "local-scope file above":
-        (repo / ".claude").mkdir()
-        (repo / ".claude" / "settings.local.json").write_text("{}", encoding="utf-8")
+    }.get(layout, repo / "src")
     log = tmp_path / "doctor-runs.log"
     row = '{"name": "claude-code", "status": "ok", "detail": "d", "fix": null}'
     cli = stub_dir(
@@ -2443,6 +2474,49 @@ def test_the_doctor_runs_from_root_only_where_this_folder_could_answer_different
     runs = log.read_text(encoding="utf-8").splitlines()
     assert result.returncode == 0, result.stderr
     assert runs == ([str(here.resolve()), "/"] if asked_from_root else [str(here.resolve())]), runs
+
+
+@pytest.mark.parametrize(
+    ("environment", "home_shown", "settings_shown"),
+    [
+        ({}, "~/.aisquare/", "~/.claude/settings.json"),
+        (
+            {"AISQUARE_HOME": "{home}/aq-home/", "CLAUDE_CONFIG_DIR": "{home}/.claude-work"},
+            "~/aq-home/",
+            "~/.claude-work/settings.json",
+        ),
+        (
+            {"AISQUARE_HOME": "/srv/aq%d", "CLAUDE_CONFIG_DIR": "/srv/claude"},
+            "/srv/aq%d/",
+            "/srv/claude/settings.json",
+        ),
+    ],
+    ids=["defaults", "redirected-in-home", "redirected-elsewhere"],
+)
+def test_the_banner_and_the_steps_name_the_paths_this_run_resolves(
+    tmp_path: Path, environment: dict[str, str], home_shown: str, settings_shown: str
+) -> None:
+    """The banner said "Written to: ~/.claude/settings.json" and "~/.aisquare/" while
+    `init --agent claude-code` wrote where CLAUDE_CONFIG_DIR and AISQUARE_HOME point, which
+    the one-liner inherits (review of #257, round 15). It names the paths aisquare
+    resolves, and a % in one prints as a %: the plan is no longer a printf format."""
+    home = tmp_path / "home"
+    home.mkdir()
+    # Both cleared first: the suite's own home is in AISQUARE_HOME.
+    env = {"HOME": str(home), "AISQUARE_HOME": "", "CLAUDE_CONFIG_DIR": ""}
+    env.update({k: v.format(home=home) for k, v in environment.items()})
+    result = sh(
+        "WANT_AGENT=1; WANT_PROJECT=0; DRY_RUN=1; CLI_ACTION=current; CLI_VERSION=0.8.0; "
+        "UV_VERSION=0.12.3; CLAUDE_ACTION=update; CLAUDE_VERSION=2.1.294; banner; init_home",
+        env=env,
+        path=base_path(tmp_path),
+    )
+
+    written = result.stdout.split("Written to:\n", 1)[1]
+    assert f"  {home_shown:<33} config.toml, context.db, projects/\n" in written, written
+    assert f"  {settings_shown:<33} MERGED" in written, written
+    assert f"  set up   {home_shown.rstrip('/')} (no project registered)\n" in result.stdout
+    assert f"==> Setting up {home_shown.rstrip('/')}\n" in result.stdout, result.stdout
 
 
 def test_a_folder_that_was_removed_may_load_a_repo_plugin(tmp_path: Path) -> None:

@@ -182,6 +182,29 @@ debug() {
     printf '  %s· %s%s\n' "$C_DIM" "$*" "$C_RESET"
 }
 
+# A path as this script shows it: the home as `~`.
+# shellcheck disable=SC2088  # display text: a tilde for a person to read.
+shown_path() {
+    case "$1" in
+        "$HOME") printf '~' ;;
+        "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+# Where init writes the aisquare home, and the settings.json it merges Claude
+# Code's hooks into, as aisquare resolves them: AISQUARE_HOME and
+# CLAUDE_CONFIG_DIR when set (core/paths.py aisquare_home, core/agents.py
+# _claude_home), else the defaults. Shown, never used as paths.
+aisquare_home_shown() {
+    _ah_dir=${AISQUARE_HOME:-$HOME/.aisquare}
+    shown_path "${_ah_dir%/}"
+}
+claude_settings_shown() {
+    _cs_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+    shown_path "${_cs_dir%/}/settings.json"
+}
+
 # ---------------------------------------------------------------------------
 # Primitives
 # ---------------------------------------------------------------------------
@@ -802,9 +825,9 @@ short_circuit() {
     say "${C_BOLD}aisquare $CLI_VERSION is already the latest.${C_RESET}"
     note "uv $UV_VERSION · Claude Code ${CLAUDE_VERSION:-skipped} · tmux $TMUX_VERSION · gh $GH_VERSION · git $GIT_VERSION · Node $NODE_VERSION"
     if [ "$WANT_AGENT" = 1 ]; then
-        note "~/.aisquare configured · claude-code hooks installed"
+        note "$(aisquare_home_shown) configured · claude-code hooks installed"
     else
-        note "~/.aisquare configured (--no-agent: no agent hooks)"
+        note "$(aisquare_home_shown) configured (--no-agent: no agent hooks)"
     fi
     # Gated per line, the way `summary` is. The unconditional version named
     # gbrain as the reason on a machine that HAS gbrain — reachable, since
@@ -886,14 +909,15 @@ banner() {
     if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
         _plan="$_plan\n  register $PROJECT_DIR as a project"
     else
-        _plan="$_plan\n  set up   ~/.aisquare (no project registered)"
+        _plan="$_plan\n  set up   $(aisquare_home_shown) (no project registered)"
     fi
     # Its own line: init connects the hooks with or without a project, and not
     # at all under --no-agent.
     [ "$WANT_AGENT" = 1 ] && _plan="$_plan\n  connect  claude-code's hooks"
 
-    # shellcheck disable=SC2059  # the format string is ours, built above.
-    printf "$_plan\n"
+    # %b, not the plan as the format: it holds paths (PROJECT_DIR, AISQUARE_HOME),
+    # and a % in one was read as a conversion.
+    printf '%b\n' "$_plan"
 
     # Only what THIS run's own steps write, from the same decisions as the plan
     # above: uv when it installs uv, aisquare and asq when it installs or upgrades
@@ -911,9 +935,11 @@ banner() {
     case "$CLI_ACTION" in
         install | upgrade) note "~/.local/share/uv/tools/          the $PYPI_PACKAGE tool environment" ;;
     esac
-    note "~/.aisquare/                      config.toml, context.db, projects/"
+    # Where this run's init writes, as aisquare resolves it: AISQUARE_HOME and
+    # CLAUDE_CONFIG_DIR redirect both, and the one-liner inherits them.
+    note "$(printf '%-33s %s' "$(aisquare_home_shown)/" "config.toml, context.db, projects/")"
     if [ "$WANT_AGENT" = 1 ]; then
-        note "~/.claude/settings.json           MERGED — aisquare's hook groups only"
+        note "$(printf '%-33s %s' "$(claude_settings_shown)" "MERGED — aisquare's hook groups only")"
     fi
     say ""
 
@@ -1620,10 +1646,10 @@ install_claude() {
 # (never file-wide, where a real `cd "~/x"` bug would then hide).
 # shellcheck disable=SC2088
 init_home() {
-    step "Setting up ~/.aisquare"
+    step "Setting up $(aisquare_home_shown)"
 
-    # --agent claude-code installs the five lifecycle hooks and ingests
-    # ~/.claude/CLAUDE.md; without --no-onboard it also packs the Repomix
+    # --agent claude-code installs the six lifecycle hooks and ingests the
+    # CLAUDE.md of the config dir sessions from this shell read; without --no-onboard it also packs the Repomix
     # snapshot in the same run. That is `claude-code` and `snapshot` fixed in one
     # command (§4).
     #
@@ -1647,9 +1673,9 @@ init_home() {
         die "\`aisquare $*\` failed. Rerun with --verbose to see its output."
     fi
     if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
-        good "~/.aisquare set up, $PROJECT_DIR registered"
+        good "$(aisquare_home_shown) set up, $PROJECT_DIR registered"
     else
-        good "~/.aisquare set up"
+        good "$(aisquare_home_shown) set up"
     fi
 }
 
@@ -1758,11 +1784,16 @@ doctor_json() {
 # session started here loads (core/agents.py claude_repo_plugin_here). Claude Code
 # enables a project-scope install in .claude/settings.json of the folder a session
 # starts in, never a parent, and a local-scope one in .claude/settings.local.json of
-# that folder or the repository above it. With neither file there, this folder's
-# row is the one `/` gives. The home's own .claude/settings.json is Claude Code's
-# user settings, which every folder reads alike. Physical paths, as the doctor
-# resolves them. A false "may" costs one doctor run; a false "may not" would be
-# S2-C19 again, so a folder whose own path cannot be read answers "may".
+# the folder the doctor's _local_settings_root names: the first folder up from here
+# that holds a .git, or this folder, and never the home unless the session starts
+# there. With neither file there, this folder's row is the one `/` gives. The walk
+# stops at that .git, so a ~/.claude/settings.local.json (Claude Code writes one
+# for a permission saved in a session started in ~) counts only from ~ itself, and
+# the home's .claude/settings.json is Claude Code's user settings, which every
+# folder reads alike. It looks at every folder up to that .git, more than the
+# doctor reads: a false "may" costs one doctor run; a false "may not" would be
+# S2-C19 again, so a folder whose own path cannot be read answers "may". Physical
+# paths, as the doctor resolves them.
 _folder_may_load_a_repo_plugin() {
     _rp_dir=$(pwd -P 2>/dev/null) || return 0
     # dash and BusyBox ash print nothing, and succeed, in a folder that was
@@ -1775,11 +1806,16 @@ _folder_may_load_a_repo_plugin() {
     if [ "$_rp_dir" != "$_rp_home" ] && [ -e "$_rp_dir/.claude/settings.json" ]; then
         return 0
     fi
-    while :; do
-        [ -e "$_rp_dir/.claude/settings.local.json" ] && return 0
+    [ -e "$_rp_dir/.claude/settings.local.json" ] && return 0
+    # Up to and including the first folder that holds a .git (of any kind, as the
+    # doctor's lstat sees it), skipping the home's own file on the way.
+    while [ ! -e "$_rp_dir/.git" ] && [ ! -L "$_rp_dir/.git" ]; do
         [ "$_rp_dir" = / ] && return 1
         _rp_dir=$(dirname "$_rp_dir")
+        [ "$_rp_dir" = "$_rp_home" ] && continue
+        [ -e "$_rp_dir/.claude/settings.local.json" ] && return 0
     done
+    return 1
 }
 
 # The names of every check that is not ok, SORTED and space-separated.

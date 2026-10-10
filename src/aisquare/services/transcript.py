@@ -553,7 +553,9 @@ class TranscriptTail:
     """Tool uses still waiting for their result, OLDEST first."""
     newest: str
     """The newest record: ``assistant_text``, ``assistant_tool``, ``user_prompt``,
-    ``tool_result``, ``interrupted`` (an Esc, or a rejected tool use) or ``none``."""
+    ``tool_result``, ``interrupted`` (an Esc, or a rejected tool use), ``own`` (one Claude
+    Code wrote itself: a local command and its output, a compaction's summary) or
+    ``none``."""
     newest_at: datetime | None
     last_text: str | None
     """The newest assistant message's text blocks, joined; ``None`` when it has none."""
@@ -661,7 +663,7 @@ def _tail_walk(file: Path, size: int, budget: int, written: datetime) -> Transcr
                 for block in blocks
                 if block.get("type") == "tool_result" and isinstance(block.get("tool_use_id"), str)
             )
-            said = _tail_user_kind(message.get("content"), blocks)
+            said = _tail_user_kind(message.get("content"), blocks, record)
             if newest == "none":
                 newest, newest_at, marker_key = said, at, key
             if said == "user_prompt":
@@ -734,15 +736,18 @@ def _tail_result_text(block: dict[str, Any]) -> str:
     return "\n".join(part["text"] for part in _blocks(content) if isinstance(part.get("text"), str))
 
 
-def _tail_user_kind(content: object, blocks: list[dict[str, Any]]) -> str:
-    """``interrupted``, ``tool_result`` or ``user_prompt``: what a user record is.
+def _tail_user_kind(
+    content: object, blocks: list[dict[str, Any]], record: dict[str, Any] | None = None
+) -> str:
+    """``interrupted``, ``tool_result``, ``own`` or ``user_prompt``: what a user record is.
 
     An interruption is Claude Code's marker text after an Esc, or the error
     result of a tool use the human rejected; either way the agent stopped and
     sits at its prompt. Not a rejection with words for the agent, after which
     it goes on working (:data:`REJECTED_WITH_WORDS`), nor a failed tool whose
     output only quotes the sentence (a test run of this very module): that is
-    a result. Anything else that is not a tool result is the human.
+    a result. ``own`` is a record Claude Code wrote itself (:func:`_tail_own`).
+    Anything else that is not a tool result is the human.
     """
     texts = [content] if isinstance(content, str) else []
     texts += [
@@ -753,7 +758,30 @@ def _tail_user_kind(content: object, blocks: list[dict[str, Any]]) -> str:
     results = [block for block in blocks if block.get("type") == "tool_result"]
     if any(_tail_rejected(block) for block in results):
         return "interrupted"
-    return "tool_result" if results else "user_prompt"
+    if results:
+        return "tool_result"
+    return "own" if _tail_own(record or {}, "\n".join(texts)) else "user_prompt"
+
+
+def _tail_own(record: dict[str, Any], text: str) -> bool:
+    """Whether a "user" record that is no tool result is Claude Code's own, not a turn.
+
+    A compaction's summary (``isCompactSummary``), another source's words (its
+    ``origin``), or text in Claude Code's tags held closed (:data:`_OWN_TEXT`): a
+    slash command and its output, a ``!`` command and its output, a notice, as the
+    transcript renders them (:func:`_render_claude_codes_own`). A local command
+    (``/model``, ``/mcp``, ``/compact``) runs no turn, so no hook follows it: taken for
+    the human's prompt, it read as a turn under way, and an agent idle at its prompt
+    was refused a typed message as busy for the board's 30 minutes (sweep 4 of #243).
+    The walk goes on past such a record, as past a tool result.
+    """
+    if record.get("isCompactSummary") is True:
+        return True
+    origin = record.get("origin")
+    if isinstance(origin, dict) and origin.get("kind") not in (None, "human"):
+        return True
+    opening = _OWN_TEXT.match(text)
+    return opening is not None and _own_tag(text, opening.group(0).strip()[1:-1]) is not None
 
 
 def _tail_rejected(block: dict[str, Any]) -> bool:

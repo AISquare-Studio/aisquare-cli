@@ -247,8 +247,10 @@ not send it again: the server's log then warns, with the line that is missing.
 
 ## Needs you
 
-The server scans every project every 3 seconds and keeps one list of what is
-waiting on you. The page shows it as cards; `aisquare remote needs` prints it:
+While a phone has the page open, or has notifications on, the server scans
+every project every 3 seconds and keeps one list of what is waiting on you; with
+neither, it scans only when a page asks for the list. The page shows it as
+cards; `aisquare remote needs` prints it:
 
 ```sh
 aisquare remote needs
@@ -271,22 +273,36 @@ aisquare --json remote needs
 | board_result | the manager (or a coder with no manager left) reports a result |
 | interrupted | you pressed Esc on an agent, or turned its prompt down without saying what to do instead, and it waits for you |
 
-A card holds what you must read before answering: the exact command a
-permission is for, every question with its options, the plan, the text. What is
-too long for a permission's card is cut, its command at 2,000 characters and all
-it shows at 4 KiB, and the card says so and how long the whole is; a call whose
-input is over 16 KiB never reaches the phone, and its card says that instead.
-Open the agent to read such a call before you answer it. Under a permission, a
-question or a plan, the bottom of the agent's live screen is shown too, so the
-real option labels are on screen next to the buttons.
+The board a project's cards come from is the one `aisquare board` shows in its
+directory: under `AISQUARE_TEAM_HUB` it is the hub's, and a question on a board
+that several projects share is one card, in the project of the agent that asked.
+
+A card holds what you must read before answering: the exact call a permission
+is for, every field of it (the command or the path first, a list or an object
+as its JSON), every question with its options, the plan, the text. What is too
+long for a card is cut, a permission's each field at 2,000 characters and all it
+shows at 4 KiB, a question's at 8 KiB and a plan at 16 KiB, and the card says so
+and how long the whole is; past 20 fields it says how many it leaves out; a call
+whose input is over 16 KiB never reaches the phone, and its card says that
+instead. A permission a sub-agent asks for shows the task the sub-agent was
+given, and says that the call it answers is the sub-agent's own, which the card
+cannot show. Open the agent to read such a call before you answer it. Under a
+permission, a question or a plan, the bottom of the agent's live screen is shown
+too, so the real option labels are on screen next to the buttons.
 
 **Quick answers** are the card's buttons: `1`, `2` and No for a tool's
 permission; one per option, and Cancel, for a single question with one answer to
 pick from at most nine; `1` to `3` and Keep planning for a plan. A quick answer
 is checked against the agent **as it is now**: if the prompt has already gone,
 the card says "No longer needs you" and nothing is typed. Anything else (one of
-Claude Code's own dialogs, a question of several answers) is answered from the
-agent's key pad.
+Claude Code's own dialogs, a form an MCP server asks you to fill in, a question of
+several answers) is answered from the agent's key pad. The board keeps the words
+of only the first thing a turn asks for. A form an MCP server asks for while its
+tool runs is a card without quick answers when it is that first thing, or when
+it comes straight after the tool's own permission prompt. When the agent already
+went on past an earlier prompt in the same turn, the form reads as its tool's
+permission card, with `1`, `2` and No: read the live screen under a permission
+card before you answer it.
 
 The other buttons follow the kind: **Tell** for a question asked in text,
 **Reply** on the board, **Switch account** for a usage limit, **Tell** (to go on)
@@ -383,15 +399,19 @@ the kinds that often clear by themselves, or that someone else is already on:
 
 Several at once come as one notification, at most one every 20 seconds per
 phone; a new one takes the place of the one still shown and sounds all the
-same. Tapping it opens the card, at the address the panel's ngrok announced or
+same. One that the phone's push service did not take (no answer, a 429 or a
+5xx) goes again, at most three more times, 40, 80 and 160 seconds apart.
+Tapping it opens the card, at the address the panel's ngrok announced or
 `serve --public-url` named; a `serve` told neither opens the page the phone
 subscribed from.
 
 The machine also sends: a warning 10 minutes before auto-off ("open to extend
 it" while writes are on; with writes off, that the phone cannot extend it), a
 goodbye when Remote is turned off, an alert when someone is guessing the
-passphrase, and a warning a day before a phone's 7-day sign-in ends. Once the
-auto-off time has come, nothing goes out but the goodbye.
+passphrase, and a warning a day before a phone's 7-day sign-in ends. Either
+warning, when a phone's push service did not take it, goes again at most three
+more times, 30 seconds apart. Once the auto-off time has come, nothing goes out
+but the goodbye.
 
 **What a notification holds.** A title and a line built from fixed sentences
 (`coder-auth asks you a question`), with every name cut to 40 plain characters,

@@ -80,6 +80,10 @@ log = logging.getLogger(__name__)
 
 PUSH_MIN_INTERVAL_SECONDS = 20.0
 """The shortest gap between two needs notifications to one device. System pushes skip it."""
+PUSH_RETRIES_MAX = 3
+"""How many times a push its service did not take (no answer, 429, 5xx) goes again to that
+device. A needs push goes at the device's next turn, each turn twice as far off as the one
+before (:meth:`RemotePushSender._push_gap`); a system push at the next system check."""
 PUSH_COALESCE_SECONDS = 5.0
 """How long the sender waits once an item becomes pushable, so a burst is one notification."""
 AUTO_OFF_WARNING = timedelta(minutes=10)
@@ -730,16 +734,23 @@ def push_https_transport(endpoint: str, headers: dict[str, str], body: bytes) ->
         connection.close()
 
 
+def push_untaken(status: int | None) -> bool:
+    """Whether a push service's answer leaves the push to be sent again: no answer at all,
+    429 or 5xx. Any other answer is final, the push taken (2xx) or refused for good."""
+    return status is None or status == 429 or status >= 500
+
+
 def push_record_outcome(device_id: str, endpoint: str, status: int | None) -> None:
     """Apply a push service's answer to the subscription it was about (SPEC §5.7).
 
     2xx resets the failures; 404/410 drop it (it expired, or the phone
     unsubscribed); 400/401/403 count, and drop it at the third in a row; 413 is
     our bug, logged and kept; 429, 5xx and no answer at all count and keep it,
-    with no retry loop: the next push is the retry. Only refusals make the row
-    that drops a subscription (:attr:`PushSubscriptionRecord.refusals`): any
-    other answer ends it. An answer about an endpoint the device has since
-    replaced is about nothing any more.
+    and the sender sends that push again a few times (:data:`PUSH_RETRIES_MAX`),
+    never in a loop. Only refusals make the row that drops a subscription
+    (:attr:`PushSubscriptionRecord.refusals`): any other answer ends it. An
+    answer about an endpoint the device has since replaced is about nothing any
+    more.
     """
     with _push_state_edit() as state:
         record = state.subscriptions.get(device_id)
@@ -1065,8 +1076,12 @@ class RemotePushSender:
     showed it, and it is still in the watcher's feed when its coalescing window
     closes. Each subscribed device then gets ONE notification covering every
     such item, no sooner than 20 s after its last, and the ids it covered are
-    then recorded as pushed, so neither a later scan nor a restart pushes them
-    again. Without a watcher at ``kit.lane_state["needs"]`` nothing is pushed.
+    then recorded as pushed once its push service took it, so neither a later
+    scan nor a restart pushes them again. One its service did not take (no
+    answer, 429, 5xx) is owed to that device again, a few times
+    (:data:`PUSH_RETRIES_MAX`), each turn further off: recorded at once, a 503
+    lost the push for good, for a prompt its agent sat blocked on. Without a
+    watcher at ``kit.lane_state["needs"]`` nothing is pushed.
     """
 
     def __init__(
@@ -1091,6 +1106,12 @@ class RemotePushSender:
         """Per device id, the item ids its next notification covers, while its throttle runs."""
         self._last_sent: dict[str, datetime] = {}
         """Per device id, when its last needs notification went out."""
+        self._untaken: dict[str, int] = {}
+        """Per device id, its needs notifications in a row that its push service did not take:
+        how many times what they covered has gone again, and how far off its next turn is."""
+        self._system_sends: dict[str, tuple[int, frozenset[str]]] = {}
+        """Per system push not yet recorded as pushed, how many times it went, and the devices
+        whose push service took it (or refused it for good)."""
         self._pushed: dict[str, str] | None = None
         """``remote-push.json``'s ``pushed``, read once, then kept current by :meth:`_push_mark`."""
         self._next_system_check: datetime | None = None
@@ -1110,6 +1131,15 @@ class RemotePushSender:
         self._queue.put(_STOP)
         if self._thread is not None:
             self._thread.join(timeout)
+
+    def push_listening(self) -> bool:
+        """Whether a needs scan can reach anyone through this sender: a device the runtime
+        still has holds a push subscription, signed in or signed out (SPEC §5.3). While no
+        page is open, the needs watcher scans for nobody else
+        (``remote_needs.RemoteNeedsWatcher._needs_heard``). It reads ``remote-push.json``:
+        the watcher's thread asks, never the event loop."""
+        held = load_push_state().subscriptions
+        return bool(held) and not push_device_ids(self._kit).isdisjoint(held)
 
     def enqueue_needs_push(self, items: list[NeedsItem], scanned_at: datetime) -> None:
         """The needs watcher's listener: queue one scan, and return at once."""
@@ -1185,6 +1215,7 @@ class RemotePushSender:
         now = self._clock()
         if self._kit.runtime.auto_off_passed(now):
             self._window, self._window_closes, self._owed = set(), None, {}
+            self._untaken, self._system_sends = {}, {}
             return PUSH_SYSTEM_CHECK_SECONDS
         if self._window_closes is not None and now >= self._window_closes:
             self._push_close_window(now)
@@ -1237,65 +1268,95 @@ class RemotePushSender:
             self._owed.setdefault(device_id, set()).update(covered)
 
     def _push_send_owed(self, now: datetime) -> None:
-        """One notification to each device its throttle allows, of what is still in the feed."""
+        """One notification to each device its throttle allows, of what is still in the feed.
+
+        What it covered is recorded as pushed once the device's push service took it, or
+        refused it for good. Not taken (no answer, 429, 5xx), it is owed to that device
+        again, at its next turn, which :meth:`_push_gap` puts further off each time, at
+        most :data:`PUSH_RETRIES_MAX` times; after that it is recorded all the same, so a
+        service that stays down costs a few sends, never one every turn. Recorded before
+        the device's turn came again, it is still owed to it: what another device's
+        service took is that device's. Owed nothing any more, a device's next notification,
+        of whatever comes next, has its whole 20 s turn and every try again.
+        """
         subscriptions = self._push_live_subscriptions()
         feed = self._push_feed()
-        gap = timedelta(seconds=PUSH_MIN_INTERVAL_SECONDS)
         for device_id in list(self._owed):
             record = subscriptions.get(device_id)
             if record is None:  # unsubscribed, or gone, since: owed nothing any more
                 del self._owed[device_id]
+                self._untaken.pop(device_id, None)
                 continue
             last = self._last_sent.get(device_id)
-            if last is not None and now - last < gap:
+            if last is not None and now - last < self._push_gap(device_id):
                 continue
             owed = self._owed.pop(device_id)
             items = [item for item in feed if item.id in owed]
             if not items:  # every one of them cleared while the throttle ran
+                self._untaken.pop(device_id, None)
                 continue
             base = self._kit.kit_public_url()
             message = push_needs_message(items, total=len(feed), base_url=base)
             self._last_sent[device_id] = now
-            self.deliver_one_push(device_id, record, message)
-            self._push_mark([item.id for item in items], now)
+            status = self.deliver_one_push(device_id, record, message)
+            covered = [item.id for item in items]
+            untaken = self._untaken.get(device_id, 0)
+            if push_untaken(status) and untaken < PUSH_RETRIES_MAX:
+                self._untaken[device_id] = untaken + 1
+                self._owed.setdefault(device_id, set()).update(covered)
+                continue
+            self._untaken.pop(device_id, None)
+            self._push_mark(covered, now)
+
+    def _push_gap(self, device_id: str) -> timedelta:
+        """How long after its last needs notification a device's next may go: 20 s, doubled
+        for each one in a row its push service did not take."""
+        return timedelta(seconds=PUSH_MIN_INTERVAL_SECONDS * 2 ** self._untaken.get(device_id, 0))
 
     def _push_system_checks(self, now: datetime) -> None:
+        """Each warning that is due now. One still being tried that no longer is (a deadline
+        extended or passed, a phone signed in again, unsubscribed or gone) is let go."""
         subscriptions = self._push_live_subscriptions()
+        due: set[str] = set()
         if subscriptions:
-            self._push_auto_off_warning(now, subscriptions)
-            self._push_expiry_warnings(now, subscriptions)
+            due |= self._push_auto_off_warning(now, subscriptions)
+            due |= self._push_expiry_warnings(now, subscriptions)
+        for key in set(self._system_sends) - due:
+            del self._system_sends[key]
 
     def _push_auto_off_warning(
         self, now: datetime, subscriptions: Mapping[str, PushSubscriptionRecord]
-    ) -> None:
+    ) -> set[str]:
         """Ten minutes before auto-off, once per deadline: an extension arms it again.
 
         The title says the minutes really left: a deadline nearer than ten minutes
         from the start (``serve --auto-off 5``) is warned of at once, with five.
         The line offers the extension only while writes are on, as they are when
         it is sent: with writes off no phone can extend, and every phone was told
-        to open and do it (review of #243, round 3, 12/13).
+        to open and do it (review of #243, round 3, 12/13). Returns its key while it
+        is due.
         """
         remote = self._kit.runtime.remote_json()
         raw = remote.get("auto_off_at")
         deadline = _push_parse_time(raw, naive_is_local=True) if isinstance(raw, str) else None
         if deadline is None or not timedelta(0) < deadline - now <= AUTO_OFF_WARNING:
-            return
+            return set()
         key = f"sys:auto-off:{raw}"
         if key in self._push_pushed():
-            return
-        self._push_mark([key], now)
+            return {key}
         base = self._kit.kit_public_url()
         title = AUTO_OFF_TITLE.format(minutes=math.ceil((deadline - now).total_seconds() / 60))
         body = AUTO_OFF_BODY if remote.get("allow_write") is True else AUTO_OFF_READ_ONLY_BODY
         message = push_system_message(title, body, base, tag="asq-auto-off")
-        for device_id, record in subscriptions.items():
-            self.deliver_one_push(device_id, record, message)
+        self._push_system_send(key, subscriptions, message, now)
+        return {key}
 
     def _push_expiry_warnings(
         self, now: datetime, subscriptions: Mapping[str, PushSubscriptionRecord]
-    ) -> None:
-        """A day before a device's 7-day sign-in ends, to that device alone."""
+    ) -> set[str]:
+        """A day before a device's 7-day sign-in ends, to that device alone. Returns the keys
+        of those due."""
+        due: set[str] = set()
         for row in self._kit.runtime.device_rows():
             device_id, expires = row.get("id"), row.get("expires_at")
             if not isinstance(device_id, str) or not isinstance(expires, str):
@@ -1305,22 +1366,46 @@ class RemotePushSender:
             if record is None or at is None or not timedelta(0) < at - now <= EXPIRY_WARNING:
                 continue
             key = f"sys:expiry:{device_id}:{expires}"
+            due.add(key)
             if key in self._push_pushed():
                 continue
-            self._push_mark([key], now)
             base = self._kit.kit_public_url()
             message = push_system_message(EXPIRY_TITLE, EXPIRY_BODY, base, tag="asq-expiry")
-            self.deliver_one_push(device_id, record, message)
+            self._push_system_send(key, {device_id: record}, message, now)
+        return due
+
+    def _push_system_send(
+        self,
+        key: str,
+        targets: Mapping[str, PushSubscriptionRecord],
+        message: PushMessage,
+        now: datetime,
+    ) -> None:
+        """A system push to each of ``targets`` whose push service has not taken it yet.
+
+        ``key`` is recorded as pushed once every one's service took it (or refused it for
+        good), or after :data:`PUSH_RETRIES_MAX` more tries, one at each system check.
+        Recorded before it went, a warning a service answered 503 was never sent again.
+        """
+        tries, done = self._system_sends.get(key, (0, frozenset()))
+        for device_id, record in targets.items():
+            if device_id not in done and not push_untaken(
+                self.deliver_one_push(device_id, record, message)
+            ):
+                done |= {device_id}
+        if done.issuperset(targets) or tries >= PUSH_RETRIES_MAX:
+            self._system_sends.pop(key, None)
+            self._push_mark([key], now)
+        else:
+            self._system_sends[key] = (tries + 1, done)
 
     def _push_next_due(self, now: datetime) -> float:
         due = [self._next_system_check or now]
         if self._window_closes is not None:
             due.append(self._window_closes)
-        gap = timedelta(seconds=PUSH_MIN_INTERVAL_SECONDS)
-        due += [
-            now if (last := self._last_sent.get(device_id)) is None else last + gap
-            for device_id in self._owed
-        ]
+        for device_id in self._owed:
+            last = self._last_sent.get(device_id)
+            due.append(now if last is None else last + self._push_gap(device_id))
         return max(0.0, (min(due) - now).total_seconds())
 
     # --- what it reads ---

@@ -466,12 +466,15 @@ function renderDetail(kind, detail, doc) {
     add(mk(doc, "pre", "text", d.text));
     text = d.text;
   }
-  // A command cut to fit read as the whole of it, and an input too long to send as none.
+  // What of the call its buttons answer the card leaves out, said.
   const cut = d.cut && typeof d.cut === "object" ? Object.keys(d.cut).slice(0, 20) : [];
-  if (d.dropped === true || cut.length) {
-    const what = cut.map((key) => "its " + plainText(key) + " (" + toInt(d.cut[key]) + " characters in all)");
-    add(mk(doc, "p", "cut", "Not all of it: " + (d.dropped === true ? "this was too long to send to the phone."
-      : "the card shows the start of " + what.join(", ") + ".") + " Open the agent to read it before you answer."));
+  const left = toInt(d.omitted);
+  if (d.dropped === true || d.subagent === true || cut.length || left > 0) {
+    let what = cut.map((key) => "its " + plainText(key) + " (" + toInt(d.cut[key]) + " characters in all)").join(", ");
+    if (what) what = "the card shows the start of " + what + (left > 0 ? "; it" : "");
+    if (left > 0) what += (what ? "" : "it") + " leaves out " + left + " field" + (left > 1 ? "s" : "");
+    add(mk(doc, "p", "cut", "Not all of it: " + (d.subagent === true ? "this answers the sub-agent's own call, not shown here."
+      : d.dropped === true ? "this was too long to send to the phone." : what + ".") + " Open the agent to read it before you answer."));
   }
   return { box: shown ? box : null, text, lead };
 }

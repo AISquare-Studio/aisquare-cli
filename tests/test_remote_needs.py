@@ -319,6 +319,53 @@ def test_rule_5_a_pending_tool_with_attention_is_a_prompt_about_the_oldest_tool(
     )
 
 
+def test_a_permission_card_shows_the_call_not_eleven_keys_of_it() -> None:
+    """Only the scalar values of eleven known keys were kept, and nothing said the rest were
+    gone: an MCP merge's owner, repo and pull request showed as ``input: {}``, a
+    ``MultiEdit`` as its file without a single edit, each card reading as the whole call
+    beside the "1" that approves it (review of #243, round 6). Every field shows now, the
+    known keys first; a list or an object as its JSON."""
+    row = _row()
+    attention = _status(row, "attention", _session(row, state="attention"))
+    merge = _tool(
+        "toolu_m",
+        "mcp__github__merge_pull_request",
+        owner="acme",
+        repo="prod",
+        pull_number=42,
+        merge_method="squash",
+    )
+    assert _one(_classify(attention, _tail(merge))).detail == {
+        "tool": "mcp__github__merge_pull_request",
+        "input": {"owner": "acme", "repo": "prod", "pull_number": 42, "merge_method": "squash"},
+    }
+    edits = [{"old_string": "a", "new_string": "b"}, {"old_string": "c", "replace_all": True}]
+    multi = _tool("toolu_e", "MultiEdit", edits=edits, file_path="/etc/hosts", dry_run=None)
+    assert _one(_classify(attention, _tail(multi))).detail["input"] == {
+        "file_path": "/etc/hosts",
+        "edits": '[{"old_string":"a","new_string":"b"},{"old_string":"c","replace_all":true}]',
+        "dry_run": "null",
+    }
+
+
+def test_a_call_of_more_fields_than_a_card_holds_says_how_many_it_leaves_out() -> None:
+    """The page draws twenty fields, and a name it could not hold to the card's size is
+    none of them: each one left out is counted, so the card says so."""
+    row = _row()
+    attention = _status(row, "attention", _session(row, state="attention"))
+    fields: dict[str, Any] = {f"f{n:02}": n for n in range(25)}
+    fields["x" * 65] = "a name longer than a card holds"
+    fields["bad\nname"] = 1
+    call = _tool("toolu_w", "mcp__wide__call", **fields)
+    detail = _one(_classify(attention, _tail(call))).detail
+    shown = detail["input"]
+    assert isinstance(shown, dict) and list(shown) == [f"f{n:02}" for n in range(20)]
+    assert detail["omitted"] == 7
+    narrow: dict[str, Any] = {f"f{n:02}": n for n in range(20)}
+    whole = _tool("toolu_n", "mcp__narrow__call", **narrow)
+    assert "omitted" not in _one(_classify(attention, _tail(whole))).detail
+
+
 def test_a_pending_tool_without_attention_is_a_tool_at_work() -> None:
     row = _row()
     assert _classify(_status(row, "working", _session(row)), _tail(_tool("toolu_a"))) == []
@@ -358,6 +405,24 @@ def test_every_prompt_of_a_sub_agent_is_a_new_item() -> None:
     assert (first.since, second.since) == (NOW - timedelta(minutes=4), NOW - timedelta(seconds=30))
     assert second.push_after == second.since, "pushed, as the first was"
     assert second.reason == "coder-1 waits for a permission answer (in a sub-agent)"
+
+
+def test_a_sub_agents_prompt_card_says_the_call_it_answers_is_not_on_it() -> None:
+    """The ``Task`` is the one tool the agent's own transcript holds, so its description and
+    prompt were the card's detail, with nothing to say that the "1" beside them approves
+    whatever the sub-agent asked: a ``git push --force`` approved from a card that never
+    named it (review of #243, round 6). The detail is still the task, marked ``subagent``,
+    which the page says in words."""
+    item = _one(_classify(*_in_a_sub_agent(NOW - timedelta(seconds=30))))
+    assert item.detail == {"tool": "Task", "input": {"description": "the cache"}, "subagent": True}
+    row = _row()
+    direct = _one(
+        _classify(
+            _status(row, "attention", _session(row, state="attention")),
+            _tail(_tool("toolu_b", command="git push --force")),
+        )
+    )
+    assert "subagent" not in direct.detail
 
 
 def test_a_sub_agents_next_prompt_has_no_item_until_its_notice() -> None:
@@ -463,7 +528,7 @@ def test_rule_7_the_session_paused_dialog_reads_as_limited() -> None:
     row = _row()
     session = _session(row, state="attention")
     text = "Session paused — choose: continue on usage credits or switch models"
-    events = [_event(9, "attention", text, session=session)]
+    events = [_event(9, "attention", text, session=session, at=session.last_seen_at)]
     item = _one(_classify(_status(row, "attention", session), None, events))
     assert item.kind == "limited"
     assert item.id == needs_item_id(PROJECT.id, "limited", "attention:9")
@@ -488,6 +553,142 @@ def test_rule_8_attention_without_a_tool_is_a_dialog() -> None:
     assert item.since == seen
 
 
+@pytest.mark.parametrize(
+    "said",
+    ["Claude Code needs your input", "An MCP server needs your input", "tester needs your input"],
+)
+def test_an_elicitation_asked_mid_call_is_a_dialog_not_the_calls_permission(said: str) -> None:
+    """An MCP server asks for input while its tool call is still pending, so the tool use
+    has no result and rule 5 took it first: "waits for a permission answer to use
+    mcp__deploy__release", its notice's words dropped, and quick answers whose "1" typed a
+    digit into the form's field, the toast saying it was sent and the agent still blocked
+    (SPEC §4.2 gives a form no buttons; sweep 4 of #243). Its notice says it asks for
+    input, as a permission prompt's does not: the dialog form, as rule 8 makes it."""
+    row = _row()
+    seen = NOW - timedelta(seconds=30)
+    session = _session(row, state="attention", seen=seen)
+    call = _tool("toolu_mcp", "mcp__deploy__release", at=seen - timedelta(seconds=8), env="prod")
+    tail = _tail(call, at=seen - timedelta(seconds=8))
+    status = _status(row, "attention", session)
+    events = [_event(4, "attention", said, session=session, at=seen)]
+    item = _one(_classify(status, tail, events))
+    assert item.kind == "permission"
+    assert item.id == needs_item_id(PROJECT.id, "permission", f"attention:4:{seen.isoformat()}")
+    assert item.reason == "coder-1 shows a dialog that needs you"
+    assert (item.detail, item.excerpt, item.answers) == ({"text": said}, said, ())
+    permission = "Claude needs your permission to use mcp__deploy__release"
+    prompt = _one(
+        _classify(status, tail, [_event(4, "attention", permission, session=session, at=seen)])
+    )
+    assert prompt.reason == "coder-1 waits for a permission answer to use mcp__deploy__release"
+    assert [answer.label for answer in prompt.answers] == ["1", "2", "No"]
+    assert [answer.label for answer in _one(_classify(status, tail)).answers] == ["1", "2", "No"]
+
+
+def test_a_form_asked_after_its_calls_own_prompt_is_a_dialog_not_that_prompt_again() -> None:
+    """An MCP tool not allowed yet asks its permission first, and that notice is the turn's
+    first, the one the board keeps in words. The human grants it, the call runs, and its
+    server asks for a form. A grant writes nothing to the transcript and a later notice no
+    event, only ``last_seen_at``: the card was the call's permission again, under the
+    answered card's id, so nothing was pushed, and its "1" typed a digit into the form
+    (verifier of sweep 4's item 18 on #243). A notice since the turn's first with nothing
+    written between is a dialog the board has no words for: rule 8's form, its own id."""
+    row = _row()
+    asked = NOW - timedelta(seconds=40)
+    called = asked - timedelta(seconds=6)
+    first = _session(row, state="attention", seen=asked)
+    permission = "Claude needs your permission to use mcp__deploy__release"
+    events = [_event(4, "attention", permission, session=first, at=asked)]
+    call = _tool("toolu_mcp", "mcp__deploy__release", at=called, env="prod")
+    tail = _tail(call, at=called)
+    prompt = _one(_classify(_status(row, "attention", first), tail, events))
+    assert prompt.id == needs_item_id(PROJECT.id, "permission", "toolu_mcp")
+    assert [answer.label for answer in prompt.answers] == ["1", "2", "No"]
+    seen = NOW - timedelta(seconds=5)
+    later = _status(row, "attention", _session(row, state="attention", seen=seen))
+    form = _one(_classify(later, tail, events))
+    assert form.id == needs_item_id(PROJECT.id, "permission", f"attention:4:{seen.isoformat()}")
+    assert form.reason == "coder-1 shows a dialog that needs you"
+    assert (form.excerpt, form.detail, form.answers) == ("", {"text": ""}, ())
+    assert form.push_after == form.since == seen
+    beside = _tool("toolu_beside", "mcp__deploy__status", at=called)
+    both = _one(_classify(later, _tail(call, beside, at=called), events))
+    assert (both.id, both.answers) == (form.id, ()), "not the granted call's card again"
+
+
+def test_the_next_prompt_of_a_turn_keeps_its_answers_after_a_notice_since_the_first() -> None:
+    """``last_seen_at`` past the turn's first notice is any later notice, the next prompt's
+    too. A prompt's tool use is written before it, so the agent wrote after the event: the
+    call it asks about is the pending one, with its digits."""
+    row = _row()
+    asked = NOW - timedelta(minutes=2)
+    first = _session(row, state="attention", seen=asked)
+    bash = "Claude needs your permission to use Bash"
+    events = [_event(4, "attention", bash, session=first, at=asked)]
+    seen = NOW - timedelta(seconds=5)
+    later = _status(row, "attention", _session(row, state="attention", seen=seen))
+    called = seen - timedelta(seconds=6)
+    call = _tool("toolu_next", "mcp__deploy__release", at=called)
+    item = _one(_classify(later, _tail(call, at=called), events))
+    assert item.id == needs_item_id(PROJECT.id, "permission", "toolu_next")
+    assert [answer.label for answer in item.answers] == ["1", "2", "No"]
+
+
+def test_a_sub_agents_prompt_after_its_form_is_a_prompt_not_that_form_again() -> None:
+    """A sub-agent's records are not its agent's, so every one of its prompts comes with
+    nothing written here. Its form's notice, the turn's first, read as every prompt after
+    it: dialogs without digits. Only while it is the newest notice is it the form's."""
+    seen = NOW - timedelta(seconds=30)
+    status, tail = _in_a_sub_agent(seen)
+    assert status.session is not None
+    said = "Claude Code needs your input"
+    form = [_event(4, "attention", said, session=status.session, at=seen)]
+    assert _one(_classify(status, tail, form)).answers == ()
+    asked = _one(_classify(*_in_a_sub_agent(NOW - timedelta(seconds=5)), form))
+    assert asked.reason == "coder-1 waits for a permission answer (in a sub-agent)"
+    assert [answer.label for answer in asked.answers] == ["1", "2", "No"]
+
+
+def test_the_hooks_own_writes_tell_a_form_from_the_prompt_before_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Over the real store, by ``team.hook_notification``: the first notice of a turn leaves
+    ``last_seen_at`` before its event, which is what names the call's prompt; the form's
+    notice after it writes no event and moves ``last_seen_at`` past it."""
+    from aisquare.services import team as team_service
+
+    work = tmp_path / "repo"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("AISQUARE_TEAM", "1")
+    project = team_service.activate(work)
+    called = datetime.now(UTC)
+    row = _row(created=called - timedelta(minutes=1))
+    session_id = str(row.session_id)
+    team_service.hook_session_start(session_id, work, "startup")
+    tail = _tail(_tool("toolu_mcp", "mcp__deploy__release", at=called, env="prod"), at=called)
+
+    def card() -> NeedsItem:
+        with store_session() as store:
+            session = store.get_session(session_id)
+            events = store.recent_events(project.id, limit=20)
+        status = _status(row, "attention", session)
+        now = datetime.now(UTC)
+        return _one(needs_from_agent(status, tail, project=project, events=events, now=now))
+
+    said = "Claude needs your permission to use mcp__deploy__release"
+    team_service.hook_notification(session_id, work, said, notification_type="permission_prompt")
+    prompt = card()
+    assert prompt.id == needs_item_id(project.id, "permission", "toolu_mcp")
+    assert [answer.label for answer in prompt.answers] == ["1", "2", "No"]
+    team_service.hook_notification(
+        session_id, work, "Claude Code needs your input", notification_type="elicitation_dialog"
+    )
+    form = card()
+    assert (form.reason, form.answers) == ("coder-1 shows a dialog that needs you", ())
+    assert form.id != prompt.id
+
+
 def test_a_dialog_after_the_agent_moved_on_is_not_named_by_the_notice_before_it() -> None:
     """``mark_attention`` flips a session once per turn: a turn's later dialogs leave no event
     and move ``last_seen_at`` alone. A usage-limit dialog after a Bash prompt that was
@@ -507,8 +708,11 @@ def test_a_dialog_after_the_agent_moved_on_is_not_named_by_the_notice_before_it(
     assert later.reason == "coder-1 shows a dialog that needs you"
     assert _one(_classify(status, moved_on, limit)).kind == "permission", "not the limit's"
     still = _tail(newest="assistant_text", at=first - timedelta(seconds=8), text="Running it.")
-    assert _one(_classify(status, still, limit)).kind == "limited", "the dialog it named"
-    assert _one(_classify(status, still, bash)).excerpt == bash[0].text
+    named = _status(row, "attention", _session(row, state="attention", seen=first))
+    assert _one(_classify(named, still, limit)).kind == "limited", "the dialog it named"
+    assert _one(_classify(named, still, bash)).excerpt == bash[0].text
+    after = _one(_classify(status, still, limit))
+    assert (after.kind, after.detail) == ("permission", {"text": ""}), "a notice since: another"
 
 
 def test_stale_attention_still_counts_as_attention() -> None:
@@ -1650,7 +1854,7 @@ def test_every_detail_fits_its_cap() -> None:
         old_string="o" * 5_000,
         new_string="n\u00e9" * 3_000,
         content="z" * 3_000,
-        extra="never shown",
+        extra="shown too",
         timeout=120,
         query=3,
         pattern=float("nan"),
@@ -1659,10 +1863,16 @@ def test_every_detail_fits_its_cap() -> None:
     assert _size(tool) <= 4_096
     shown = tool["input"]
     assert isinstance(shown, dict)
-    assert "extra" not in shown and "timeout" not in shown, "only what the tool would do"
-    assert shown["query"] == 3 and "pattern" not in shown, "a NaN is not JSON a browser reads"
-    texts = [value for value in shown.values() if isinstance(value, str)]
-    assert len(texts) == 4 and all(value.endswith("…") for value in texts)
+    assert shown["extra"] == "shown too" and shown["timeout"] == 120, "the rest of the call"
+    assert shown["query"] == 3 and shown["pattern"] == "NaN", "a NaN as text a browser reads"
+    texts = [shown[key] for key in ("command", "old_string", "new_string", "content")]
+    assert all(isinstance(value, str) and value.endswith("…") for value in texts)
+    wide: dict[str, Any] = {f"{n:02}" + "k" * 62: "v" * 3_000 for n in range(30)}
+    fields = _one(_classify(attention, _tail(_tool("toolu_w", "mcp__wide__call", **wide)))).detail
+    assert _size(fields) <= 4_096, "twenty names as long as a card holds, each value cut"
+    cut, given = fields["cut"], fields["input"]
+    assert isinstance(cut, dict) and isinstance(given, dict)
+    assert (len(given), fields["omitted"], len(cut)) == (20, 10, 20)
     questions: dict[str, Any] = {
         "questions": [
             {
@@ -1677,6 +1887,9 @@ def test_every_detail_fits_its_cap() -> None:
     asking = _status(row, "working", _session(row))
     question = _one(_classify(asking, _tail(_tool("toolu_q", "AskUserQuestion", **questions))))
     assert _size(question.detail) <= 8_192
+    assert question.detail["cut"] == {"questions": 4 * (2 + 1_000) + 16 * (2 + 3_000)}, (
+        "options cut to fit beside the digits that pick them, and the card says so"
+    )
     assert question.excerpt.endswith("(+3 more)") or len(question.excerpt) == 280
     plan = _one(_classify(asking, _tail(_tool("toolu_p", "ExitPlanMode", plan="p" * 40_000))))
     assert _size(plan.detail) <= 16_384 and str(plan.detail["plan"]).endswith("…")
@@ -1743,7 +1956,14 @@ def test_the_guide_gives_quick_answers_only_to_the_cards_that_carry_them() -> No
     prose = " ".join(guide.read_text(encoding="utf-8").split())
     assert "`1`, `2` and No for a tool's permission" in prose
     assert "for a single question with one answer to pick from at most nine" in prose
-    assert "(one of Claude Code's own dialogs, a question of several answers)" in prose
+    assert (
+        "(one of Claude Code's own dialogs, a form an MCP server asks you to fill in, a"
+        " question of several answers)"
+    ) in prose
+    assert (
+        "When the agent already went on past an earlier prompt in the same turn, the form"
+        " reads as its tool's permission card"
+    ) in prose
     row = _row()
     dialog = _one(_classify(_status(row, "attention", _session(row, state="attention")), None))
     assert (dialog.kind, dialog.answers) == ("permission", ())
@@ -2670,7 +2890,9 @@ def test_without_the_board_a_dialogs_item_is_still_a_dialog(
     which an action matches before its Escape, on the project's scan."""
     fleet = _working(None, state="attention")
     session = fleet.agents[0].session
-    fleet.events = [_event(9, "attention", "Session paused: usage limit", session=session)]
+    assert session is not None
+    paused = "Session paused: usage limit"
+    fleet.events = [_event(9, "attention", paused, session=session, at=session.last_seen_at)]
     scanned = _now_of(fleet, FakeTmux(reference=NOW), monkeypatch)
     alone = _alone_of(fleet, FakeTmux(reference=NOW), monkeypatch)
     assert [item.kind for item in scanned.items] == ["limited"]
@@ -2778,7 +3000,7 @@ def test_the_live_sources_scan_the_store_the_fleet_and_the_transcripts(
     transcript.write_text(json.dumps(record) + "\n", encoding="utf-8")
     hour_ago, crashed_at = now - timedelta(hours=1), now - timedelta(minutes=5)
     with store_session() as store:
-        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        project = store.onboard_project(_rooted(root))
         store.upsert_session(
             TeamSession(
                 id="ses_1",
@@ -2937,8 +3159,8 @@ def test_a_scan_builds_none_of_a_projects_history_it_cannot_use(
 
     now = datetime.now(UTC)
     old = now - timedelta(days=3)
-    dormant = ProjectInfo(id="prj_dormant", root=tmp_path / "dormant")
-    active = ProjectInfo(id="prj_active", root=tmp_path / "active")
+    dormant = _rooted(tmp_path / "dormant")
+    active = _rooted(tmp_path / "active")
     history = 60
     with store_session() as store:
         for project in (dormant, active):
@@ -3008,7 +3230,7 @@ def test_the_live_sources_keep_a_board_question_however_busy_the_board_gets(
     """Through the store: a manager's question three hours old, under 300 newer notes, is
     still open, and a reply to the manager under 300 more still answers it."""
     now = datetime.now(UTC)
-    project = ProjectInfo(id="prj_busy", root=tmp_path / "busy")
+    project = _rooted(tmp_path / "busy")
 
     def written(
         kind: str, at: datetime, *, session_id: str | None = None, to: str | None = None
@@ -3052,7 +3274,7 @@ def test_the_live_sources_take_a_manager_stopped_after_its_result_for_done(
     hour_ago = now - timedelta(hours=1)
     root = tmp_path / "alpha"
     with store_session() as store:
-        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        project = store.onboard_project(_rooted(root))
         for session_id, role in (("ses_m", "manager"), ("ses_c", "coder")):
             store.upsert_session(
                 TeamSession(
@@ -3094,7 +3316,7 @@ def test_the_live_sources_take_a_turn_that_died_on_an_api_error_for_one_that_nee
     hour_ago = datetime.now(UTC) - timedelta(hours=1)
     root = tmp_path / "alpha"
     with store_session() as store:
-        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        project = store.onboard_project(_rooted(root))
         store.upsert_session(
             TeamSession(
                 id="ses_c", project_id=project.id, role="coder", started_at=hour_ago,
@@ -3124,6 +3346,118 @@ def test_the_live_sources_take_a_turn_that_died_on_an_api_error_for_one_that_nee
     assert (
         scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=()) == []
     )
+
+
+@pytest.mark.parametrize("hub_listed", [False, True])
+def test_under_a_team_hub_the_scan_reads_the_hubs_board_once_for_its_projects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub_listed: bool
+) -> None:
+    """Under ``AISQUARE_TEAM_HUB`` the team writes every session and event to the hub's
+    project, and the scan read each project's board by the project's own id: a manager's
+    question, a coder's failed turn, the words of a dialog never became a card or a push,
+    while the Board tab showed them (sweep 4 of #243). The scan reads the board where the
+    team writes it, as the Board tab does, and a question on a board two projects share is
+    one card, the asking row's project's, whether or not the hub is a listed project."""
+    from aisquare.services import team as team_service
+
+    now = datetime.now(UTC)
+    hour_ago = now - timedelta(hours=1)
+    hub = _rooted(tmp_path / "hub")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
+    with store_session() as store:
+        alpha = store.onboard_project(_rooted(tmp_path / "alpha"))
+        beta = store.onboard_project(_rooted(tmp_path / "beta"))
+        if hub_listed:
+            store.onboard_project(hub)
+        else:
+            store.ensure_project(hub)  # as the hooks' first write makes it
+        rows = ((alpha, "manager", "manager", "%1"), (beta, "coder-1", "coder", "%2"))
+        for project, label, role, pane in rows:
+            store.upsert_session(
+                TeamSession(
+                    id=f"ses_{label}", project_id=hub.id, role=role, label=label,
+                    started_at=hour_ago, last_seen_at=hour_ago, state="working",
+                )
+            )  # fmt: skip
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=f"agt_{label}", project_id=project.id, label=label, role=role,
+                    pane_id=pane, session_id=f"ses_{label}", cwd=project.root, created_at=hour_ago,
+                )
+            )  # fmt: skip
+        store.add_team_event(
+            TeamEvent(
+                id="evt_q", project_id=hub.id, session_id="ses_manager", kind="question",
+                text="Ship on Friday?", created_at=now - timedelta(minutes=1),
+            )
+        )  # fmt: skip
+    team_service.hook_stop_failure(
+        "ses_coder-1", error="overloaded", message="Overloaded · try again", details=None
+    )
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+    assert [(item.kind, item.project_id, item.agent) for item in items] == [
+        ("board_question", alpha.id, "manager"),
+        ("failed", beta.id, "coder-1"),
+    ]
+    assert items[0].detail["text"] == "Ship on Friday?"
+    assert [item.kind for item in needs_agent_now(beta, "coder-1").items] == ["failed"]
+
+
+def test_under_a_team_hub_a_projects_rows_are_derived_again_in_one_look_at_tmux(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every row's session is the hub's, so every row was derived again by
+    ``fleet.status_of``: a store session and a look at its tmux server for each agent, on
+    top of the listing's one look, every 3 s (verifier of sweep 4's item 8 on #243). The
+    rows are derived again together, each with its own session."""
+    now = datetime.now(UTC)
+    hour_ago = now - timedelta(hours=1)
+    hub = _rooted(tmp_path / "hub")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
+    labels = ("coder-1", "coder-2", "coder-3")
+    with store_session() as store:
+        alpha = store.onboard_project(_rooted(tmp_path / "alpha"))
+        store.ensure_project(hub)
+        for n, label in enumerate(labels, start=1):
+            store.upsert_session(
+                TeamSession(
+                    id=f"ses_{label}", project_id=hub.id, role="coder", label=label,
+                    started_at=hour_ago, last_seen_at=now - timedelta(minutes=1),
+                    state="attention" if label == "coder-2" else "working",
+                )
+            )  # fmt: skip
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=f"agt_{label}", project_id=alpha.id, label=label, role="coder",
+                    pane_id=f"%{n}", session_id=f"ses_{label}", cwd=alpha.root,
+                    created_at=hour_ago,
+                )
+            )  # fmt: skip
+    looks: list[list[str]] = []
+    observe = fleet_service._observe
+
+    def looked(srv: Any, tmux_session: str | None, agents: Any) -> Any:
+        looks.append(sorted(agent.label for agent in agents))
+        return observe(srv, tmux_session, agents)
+
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    monkeypatch.setattr(fleet_service, "_observe", looked)
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+    assert looks == [list(labels), list(labels)], "the listing's look, and one more"
+    assert [(item.kind, item.agent) for item in items] == [("permission", "coder-2")]
+    assert items[0].reason == "coder-2 shows a dialog that needs you"
+
+
+def _rooted(root: Path) -> ProjectInfo:
+    """A project as ``asq init`` registers it: its id derived from its root, which is where
+    the team writes its board too (``team_project``), and where the scan reads it."""
+    from aisquare.core.workspace import project_id_for
+
+    resolved = root.resolve()
+    return ProjectInfo(id=project_id_for(resolved), root=resolved)
 
 
 def _live_agent(
@@ -3194,7 +3528,7 @@ def test_the_live_sources_keep_a_dialogs_and_a_limits_cards_past_a_busy_board(
     }
     words = "Claude needs your permission to use the deploy MCP tool"
     with store_session() as store:
-        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        project = store.onboard_project(_rooted(root))
         asking = _live_agent(
             store, project, "coder-1", state="attention", seen=now - timedelta(minutes=1),
             born=now - timedelta(hours=1), transcript=_transcript(tmp_path / "c1.jsonl", said),
@@ -3261,7 +3595,7 @@ def test_the_live_sources_ask_tmux_when_a_sub_agents_pane_last_printed(
         "message": {"id": "m1", "role": "assistant", "content": [task]},
     }
     with store_session() as store:
-        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        project = store.onboard_project(_rooted(root))
         _live_agent(
             store, project, "coder-1", state="attention", seen=now - timedelta(minutes=1),
             born=now - timedelta(hours=1), transcript=_transcript(tmp_path / "c1.jsonl", running),
@@ -3296,7 +3630,7 @@ def test_a_session_at_its_fresh_prompt_is_told_now_in_prompt_and_interrupt_mode(
     now = datetime.now(UTC)
     transcript = tmp_path / "coder-1.jsonl"
     with store_session() as store:
-        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=tmp_path / "alpha"))
+        project = store.onboard_project(_rooted(tmp_path / "alpha"))
         _live_agent(
             store, project, "coder-1", state="working", seen=now - timedelta(seconds=10),
             born=now - timedelta(seconds=12), transcript=transcript,
@@ -3327,6 +3661,79 @@ def test_a_session_at_its_fresh_prompt_is_told_now_in_prompt_and_interrupt_mode(
     assert (busy.value.status, busy.value.error) == (409, "agent_busy")
 
 
+def _local_command(at: datetime, name: str, output: str) -> list[dict[str, Any]]:
+    """What Claude Code 2.1.296 writes for a local slash command (``/model``, ``/compact``):
+    a caveat it marks ``isMeta``, the command, its output, and no turn: no prompt hook, no
+    query, no Stop."""
+
+    def user(uuid: str, content: str, **flags: bool) -> dict[str, Any]:
+        record = {"type": "user", "uuid": uuid, "timestamp": at.isoformat(), **flags}
+        return {**record, "message": {"role": "user", "content": content}}
+
+    caveat = "<local-command-caveat>Caveat: generated by the user running local commands."
+    return [
+        user(f"{name}-c", caveat + "</local-command-caveat>", isMeta=True),
+        user(f"{name}-n", f"<command-name>{name}</command-name>\n<command-args></command-args>"),
+        user(f"{name}-o", f"<local-command-stdout>{output}</local-command-stdout>"),
+    ]
+
+
+@pytest.mark.parametrize("case", ["a fresh agent's /model", "a /compact after its turn"])
+def test_an_agent_idle_after_a_local_command_is_at_its_prompt_and_told_now(
+    case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local command runs no turn, so no hook follows it, and a manual ``/compact``'s
+    ``SessionStart`` puts the session back to ``working``. Its records, and the summary the
+    compaction leaves, read as the human's prompt of a turn under way: prompt mode answered
+    ``agent_busy`` and Interrupt & tell sent an Escape and gave up, for the board's 30
+    minutes, to an agent idle at its prompt (sweep 4 of #243). They are Claude Code's own
+    records; a quiet pane over them is the prompt."""
+    from aisquare.services import remote_actions
+
+    now = datetime.now(UTC)
+    path = tmp_path / "coder-1.jsonl"
+    born = now - timedelta(minutes=10)
+    records: list[dict[str, Any]] = []
+    if case == "a /compact after its turn":
+        asked, done, compacted = (
+            (born + timedelta(minutes=1)).isoformat(),
+            (born + timedelta(minutes=3)).isoformat(),
+            (now - timedelta(minutes=1)).isoformat(),
+        )
+        said = {"type": "text", "text": "Done: the cache is in."}
+        records = [
+            {"type": "user", "uuid": "u1", "timestamp": asked,
+             "message": {"role": "user", "content": "add the cache"}},
+            {"type": "assistant", "uuid": "a1", "timestamp": done,
+             "message": {"id": "m1", "role": "assistant", "content": [said]}},
+            {"type": "system", "subtype": "compact_boundary", "uuid": "b1", "timestamp": compacted},
+            {"type": "user", "uuid": "s1", "isCompactSummary": True, "timestamp": compacted,
+             "message": {"role": "user", "content": "This session is being continued from..."}},
+        ]  # fmt: skip
+        records += _local_command(now - timedelta(minutes=1), "/compact", "Compacted")
+    else:
+        records = _local_command(now - timedelta(minutes=8), "/model", "Set model to opus")
+    _transcript(path, *records)
+    with store_session() as store:
+        project = store.onboard_project(_rooted(tmp_path / "alpha"))
+        session = _live_agent(
+            store, project, "coder-1", state="waiting", seen=now - timedelta(minutes=1),
+            born=born, transcript=path,
+        )  # fmt: skip
+        store.upsert_session(session)  # as SessionStart (startup or compact) writes it
+    tmux = FakeTmux(quiet_for=30)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    snap = needs_agent_now(project, "coder-1")
+    assert snap.status is not None and snap.status.state == "working"
+    assert snap.tail is not None and snap.tail.newest == "own"
+    assert needs_at_input_prompt(snap)
+    body = {"agent": "coder-1", "text": "now the docs", "project": project.id}
+    for mode in ("prompt", "interrupt"):
+        result, _line = remote_actions.action_tell({**body, "mode": mode})
+        assert result["delivered"] is True, result
+    assert ("paste", "%1", "now the docs") in tmux.typed
+
+
 # --- the watcher --------------------------------------------------------------------------
 
 
@@ -3354,8 +3761,29 @@ def _until_true(check: Callable[[], bool], seconds: float = 5.0) -> None:
         time.sleep(0.01)
 
 
-def test_the_watcher_scans_only_while_a_device_exists(runtime: Runtime, tmp_path: Path) -> None:
-    """Nobody to show it to, no scan: no store reads, no tmux spawns."""
+def _a_page_open(app: Any, runtime: Runtime) -> Callable[[], None]:
+    """A phone unlocked, its page's socket open as the stream registers it; the closer."""
+    assert unlock(make_client(app), runtime).status_code == 200
+    (device_id,) = runtime.device_ids()
+
+    def closer(code: int) -> None:
+        return None
+
+    app.kit.kit_socket_opened(device_id, closer)
+    return lambda: app.kit.kit_socket_closed(device_id, closer)
+
+
+def test_the_watcher_scans_only_while_a_page_or_a_subscription_hears_of_it(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """Nobody to show it to, no scan: no store reads, no tmux spawns. A device on record was
+    enough: one signed out, or that never turned notifications on, has no socket and gets no
+    push, and a phone unlocked once and closed cost a scan of every project every 3 s for
+    the rest of its 7 days, the result read by nobody (review of #243, round 6). A page's
+    socket is someone, and so is a subscription of a device the runtime still has, signed
+    out or not, through the push sender."""
+    from aisquare.services import remote_push
+
     app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
     made: list[NeedsSources] = []
 
@@ -3363,17 +3791,72 @@ def test_the_watcher_scans_only_while_a_device_exists(runtime: Runtime, tmp_path
         made.append(_sources(Fleet()))
         return made[-1]
 
+    def quiet() -> bool:
+        before = len(made)
+        threading.Event().wait(0.2)
+        return len(made) == before
+
     watcher = RemoteNeedsWatcher(app.kit, sources=counted, interval=0.01)
     watcher.start_watching()
     try:
-        threading.Event().wait(0.2)
-        assert made == [] and watcher.needs_scanned_at() is None
+        assert quiet() and watcher.needs_scanned_at() is None
         assert unlock(make_client(app), runtime).status_code == 200
+        assert quiet(), "a device on record, and nothing that would hear of a scan"
+        (device_id,) = runtime.device_ids()
+
+        def closer(code: int) -> None:
+            return None
+
+        app.kit.kit_socket_opened(device_id, closer)
         _until_true(lambda: watcher.needs_scanned_at() is not None)
+        app.kit.kit_socket_closed(device_id, closer)
+        _until_true(quiet)
+        sender = remote_push.RemotePushSender(app.kit)
+        app.kit.lane_state["push"] = sender
+        assert quiet(), "a push sender with nobody subscribed"
+        phone = remote_push.PushSubscriptionRecord(
+            "https://fcm.googleapis.com/fcm/send/x", "p256dh", "auth", NOW.isoformat()
+        )
+        remote_push.push_subscribe_device(device_id, phone, {device_id})
+        assert not quiet(), "a phone with notifications on, its page closed"
+        runtime.revoke_device(device_id)
+        _until_true(quiet)
         assert any(t.name == "asq-remote-needs" for t in threading.enumerate())
     finally:
         watcher.stop_watching()
     assert not watcher.needs_watching()
+
+
+def test_a_read_with_nobody_listening_scans_for_itself_once_the_latest_is_old(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """The watcher scans for nobody, so a page that reads the feed with no socket open (one
+    that cannot connect, or before it has) gets a scan of its own when the latest is older
+    than the interval, and the latest when it is not."""
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    client = make_client(app)
+    assert unlock(client, runtime).status_code == 200
+    made: list[NeedsSources] = []
+
+    def counted() -> NeedsSources:
+        made.append(_sources(Fleet()))
+        return made[-1]
+
+    watcher = RemoteNeedsWatcher(app.kit, sources=counted, interval=1.0)
+    app.kit.lane_state["needs"] = watcher
+    watcher.start_watching()
+    try:
+        threading.Event().wait(0.2)
+        assert made == []
+        url = f"{base(runtime)}/api/needs"
+        first = client.get(url).json()["scanned_at"]
+        assert first is not None and len(made) == 1
+        assert client.get(url).json()["scanned_at"] == first and len(made) == 1, "fresh"
+        threading.Event().wait(1.1)
+        client.get(url)
+        assert len(made) == 2, "older than the interval, and nobody else scans"
+    finally:
+        watcher.stop_watching()
 
 
 def test_the_watcher_scans_nothing_past_the_auto_off_deadline(
@@ -3383,7 +3866,7 @@ def test_the_watcher_scans_nothing_past_the_auto_off_deadline(
     Remote off has yet to run, the TUI's check every 30 s: no scan feeds a phone, or the push
     sender, meanwhile. A deadline moved later scans again."""
     app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
-    assert unlock(make_client(app), runtime).status_code == 200
+    _a_page_open(app, runtime)
     runtime.set_auto_off(datetime.now(UTC) - timedelta(seconds=1))
     made: list[NeedsSources] = []
 
@@ -3400,6 +3883,73 @@ def test_the_watcher_scans_nothing_past_the_auto_off_deadline(
         _until_true(lambda: watcher.needs_scanned_at() is not None)
     finally:
         watcher.stop_watching()
+
+
+class _CountedLock:
+    """The watcher's one-scan-at-a-time lock, counting who asked for it."""
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.asked = 0
+
+    def __enter__(self) -> _CountedLock:
+        self.asked += 1
+        self.lock.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.lock.release()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_requests_that_waited_for_a_scan_share_it_instead_of_each_running_one(
+    runtime: Runtime, tmp_path: Path, fails: bool
+) -> None:
+    """Each request made before the first scan ran its own, one after another, though one had
+    just published: five early reads over a 2 s fleet were answered at 2, 4, 6, 8 and 10 s,
+    each holding a thread of the shared pool, and a Remote off waited behind them (sweep 4
+    of #243). Those that waited share the scan they waited for, its failure included."""
+    from aisquare.core.store import StoreUnopenable
+
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    started, release = threading.Event(), threading.Event()
+    scans: list[int] = []
+
+    def slow() -> list[ProjectInfo]:
+        scans.append(len(scans))
+        started.set()
+        assert release.wait(5)
+        if fails:
+            raise StoreUnopenable("file is not a database")
+        return []
+
+    watcher = RemoteNeedsWatcher(
+        app.kit, sources=lambda: replace(_sources(Fleet()), list_projects=slow)
+    )
+    counted = _CountedLock()
+    watcher._scanning = counted  # type: ignore[assignment]
+    answers: list[Exception | None] = []
+    requests = [
+        threading.Thread(target=lambda: answers.append(watcher.needs_scan_for_request()))
+        for _ in range(5)
+    ]
+    requests[0].start()
+    assert started.wait(5)
+    for request in requests[1:]:
+        request.start()
+    _until_true(lambda: counted.asked >= 3 + 4)  # the first one's scan, and four waiting
+    release.set()
+    for request in requests:
+        request.join(5)
+    assert scans == [0], "one scan for the five"
+    assert len(answers) == 5
+    if fails:
+        assert all(isinstance(answer, StoreUnopenable) for answer in answers)
+    else:
+        assert answers == [None] * 5 and watcher.needs_scanned_at() is not None
+    again = watcher.needs_scan_for_request()
+    assert isinstance(again, StoreUnopenable) if fails else again is None
+    assert scans == [0, 1], "a request with nothing in flight scans for itself"
 
 
 def test_every_scan_reaches_every_listener_and_a_failing_one_costs_nothing(
@@ -3451,7 +4001,7 @@ def test_a_scan_that_keeps_failing_is_told_once_until_it_works_again(
     from aisquare.core.store import damaged_store_recovery
 
     app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
-    assert unlock(make_client(app), runtime).status_code == 200
+    _a_page_open(app, runtime)
     broken = threading.Event()
     broken.set()
     scans = 0
@@ -3931,6 +4481,38 @@ def test_an_answer_asks_the_gates_again_in_the_thread_that_types_it(
     assert (response.status_code, response.json()["error"]) == (status, error), response.text
     assert live.tmux.typed == []
     assert not any(" needs/answer " in line for line in live.audit())
+
+
+def test_an_answer_is_a_write_on_the_write_pool_counted_and_named_while_it_runs(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It ran on the loop's shared pool, which every read, frame and unlock waits on, its
+    re-derivation a scan of the project with tmux, while it held the agent's lock: with
+    tmux not answering, a few taps stalled every phone. It was past the per-device cap of
+    writes waiting, and a quit or a Remote off meanwhile did not name it among the writes
+    still running (review of #243, round 6)."""
+    from aisquare.services import remote_server
+
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    derive = remote_needs.needs_agent_now
+    seen: list[tuple[str, list[str]]] = []
+
+    def derived_where(project: ProjectInfo, label: str) -> Any:
+        seen.append((threading.current_thread().name, remote_server.remote_writes_running()))
+        return derive(project, label)
+
+    monkeypatch.setattr(remote_needs, "needs_agent_now", derived_where)
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert response.status_code == 200, response.text
+    ((thread, running),) = seen
+    assert thread.startswith("asq-remote-write"), thread
+    assert running == ["needs/answer for coder-1"]
+    assert remote_server.remote_writes_running() == []
+    monkeypatch.setattr(remote_server, "WRITE_WAITING_PER_DEVICE", 0)
+    again = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert (again.status_code, again.json()["error"]) == (409, "busy"), again.text
+    assert live.tmux.typed == [("keys", "%7", "1")], "the one past the cap was never typed"
 
 
 def test_an_answer_types_into_the_agent_is_audited_and_clears_its_card(live: Live) -> None:

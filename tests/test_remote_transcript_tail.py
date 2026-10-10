@@ -533,6 +533,38 @@ def test_the_humans_prompt_is_the_newest_record(tmp_path: Path) -> None:
     assert tail is not None and tail.newest == "user_prompt" and tail.last_text is None
 
 
+@pytest.mark.parametrize(
+    "own",
+    [
+        _prompt("<command-name>/model</command-name>\n<command-args></command-args>", uuid="o"),
+        _prompt("<local-command-stdout>Set model to opus</local-command-stdout>", uuid="o"),
+        _prompt("<bash-stdout>main</bash-stdout><bash-stderr></bash-stderr>", uuid="o"),
+        _prompt("This session is being continued from…", uuid="o", isCompactSummary=True),
+        _prompt("a task finished", uuid="o", origin={"kind": "task-notification"}),
+    ],
+)
+def test_claude_codes_own_records_are_own_and_the_walk_goes_on_past_them(
+    tmp_path: Path, own: dict[str, Any]
+) -> None:
+    """A local command's records and a compaction's summary are "user" records that no turn
+    follows: read as the human's prompt, they ended the walk and made an agent idle at its
+    prompt read as one at work (sweep 4 of #243). They are ``own``, and what the agent said
+    before them is still its last words."""
+    path = _write(
+        tmp_path / "t.jsonl",
+        [_said(_text("Anything else?"), uuid="a1", message="m1", second=1), {**own, "uuid": "o1"}],
+    )
+    tail = read_transcript_tail(path)
+    assert tail is not None and (tail.newest, tail.marker_key) == ("own", "o1")
+    assert tail.last_text == "Anything else?"
+
+
+def test_words_that_only_start_like_claude_codes_tags_are_the_humans(tmp_path: Path) -> None:
+    path = _write(tmp_path / "t.jsonl", [_prompt("<command-name> is a tag I use", uuid="u1")])
+    tail = read_transcript_tail(path)
+    assert tail is not None and tail.newest == "user_prompt"
+
+
 def test_a_large_input_is_dropped_but_the_summary_kept(tmp_path: Path) -> None:
     content = "z" * (TOOL_INPUT_MAX + 1)
     path = _write(

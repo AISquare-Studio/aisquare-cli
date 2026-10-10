@@ -1238,6 +1238,43 @@ def test_a_card_says_what_it_leaves_out_of_the_call_its_buttons_answer(tmp_path:
     assert said[3] == []
 
 
+def test_a_card_shows_the_whole_call_says_what_it_leaves_out_and_when_it_is_a_sub_agents(
+    tmp_path: Path,
+) -> None:
+    """A card showed eleven known keys of a call and nothing of the rest, and a sub-agent's
+    prompt as the ``Task`` it runs in, each beside the "1" that approves the call (review of
+    #243, round 6). From the transcript the scan reads to the text the page draws: an MCP
+    call's own fields, a call of more fields than a card holds and how many it left out,
+    and a sub-agent's prompt said to be one; and a question whose options were cut to fit."""
+    wide = [{"label": f"o{n}", "description": "d" * 3_000} for n in range(4)]
+    cards = [
+        _served(tmp_path, "mcp__github__merge_pull_request", owner="acme", pull_number=42),
+        _served(tmp_path, "mcp__wide__call", **{f"f{n:02}": n for n in range(23)}),
+        _served(tmp_path, "Task", description="Refactor the parser", prompt="Split it up"),
+        _served(tmp_path, "Bash", command="x" * 3_000, **{f"f{n:02}": n for n in range(21)}),
+        _served(tmp_path, "AskUserQuestion", questions=[{"question": "Which?", "options": wide}]),
+    ]
+    served = _node_report(HARNESS, cards)["served"]
+    shown = [[text for name, text in card if name == "mono"] for card in served]
+    said = [[text for name, text in card if name == "cut"] for card in served]
+    tail = " Open the agent to read it before you answer."
+    assert shown[0] == ["tool: mcp__github__merge_pull_request\nowner: acme\npull_number: 42"]
+    assert said[0] == []
+    assert shown[1] == ["\n".join(["tool: mcp__wide__call"] + [f"f{n:02}: {n}" for n in range(20)])]
+    assert said[1] == [f"Not all of it: it leaves out 3 fields.{tail}"]
+    assert shown[2] == ["tool: Task\ndescription: Refactor the parser\nprompt: Split it up"]
+    assert said[2] == [
+        f"Not all of it: this answers the sub-agent's own call, not shown here.{tail}"
+    ]
+    assert said[3] == [
+        "Not all of it: the card shows the start of its command (3000 characters in all); it"
+        f" leaves out 2 fields.{tail}"
+    ]
+    assert said[4] == [
+        f"Not all of it: the card shows the start of its questions (12014 characters in all).{tail}"
+    ]
+
+
 def test_the_page_names_a_tool_call_by_the_keys_the_server_summarises_it_by() -> None:
     """The page hides a permission's excerpt only when the detail holds the value the
     server built it from, so its keys must be the summariser's, in the summariser's order,

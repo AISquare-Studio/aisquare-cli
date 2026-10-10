@@ -47,6 +47,7 @@ import math
 import os
 import re
 import threading
+import time
 import unicodedata
 from collections.abc import Callable, Collection, Mapping, MutableMapping, MutableSet, Sequence
 from dataclasses import dataclass, replace
@@ -69,6 +70,8 @@ from aisquare.services.transcript import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from starlette.requests import Request
     from starlette.responses import Response
     from starlette.routing import BaseRoute
@@ -126,6 +129,14 @@ LIMIT_DIALOG = re.compile(r"session paused|usage limit|usage credits", re.IGNORE
 """An attention notification that is Claude Code 2.1.292's usage-limit dialog ("Session
 paused — choose: continue on usage credits or switch models") rather than a permission
 prompt. A Claude Code string, not a contract: matched loosely, pinned by a test."""
+
+_INPUT_NOTICE = re.compile(r"needs your input", re.IGNORECASE)
+"""An attention notification that asks for input in a form, not for a permission ("Claude
+needs your permission to use Bash"): an MCP server's elicitation ("Claude Code needs your
+input", "An MCP server needs your input") or an agent's ("<label> needs your input"), in
+Claude Code 2.1.296. A digit typed there goes into a field. Read only from the turn's first
+notice, the one the board keeps in words (:func:`_needs_notice`). A Claude Code string, not
+a contract."""
 
 NEEDS_ANSWER_KEYS = frozenset(
     {*"123456789", "Escape", "Enter", "Up", "Down", "Space", "Tab", "y", "n"}
@@ -216,7 +227,16 @@ _DETAIL_INPUT_KEYS = (
     "new_string",
     "content",
 )
-"""The keys of a pending tool's input a permission card shows: what the tool would DO."""
+"""The keys of a pending tool's input a permission card shows first: what the tool would DO.
+The rest of the call follows them (:func:`_needs_tool_fields`)."""
+
+_DETAIL_FIELDS_MAX = 20
+"""The most fields of a pending tool's input a permission card shows: as many as the page
+draws. The rest are counted in the detail's ``omitted``."""
+_DETAIL_FIELD_NAME = re.compile(r"[A-Za-z0-9_.:@$-]{1,64}\Z")
+"""A field name a permission card shows. Field names are not cut to fit as values are, so
+one outside this (a name of 300 characters, control characters that JSON spells in six)
+could hold a detail over its cap; it is counted in ``omitted`` instead."""
 
 _DETAIL_STRING_MAX = 2_000
 _DETAIL_TOOL_MAX = 4_096
@@ -342,6 +362,11 @@ def _needs_no_output(agent: FleetAgent) -> datetime | None:
     return None
 
 
+def _needs_own_board(project: ProjectInfo) -> str:
+    """A source's ``board_project`` when it says nothing: each project writes its own board."""
+    return project.id
+
+
 @dataclass(frozen=True)
 class NeedsSources:
     """Everything the scan reads, as callables: the live store and tmux, or a test's fakes.
@@ -387,6 +412,11 @@ class NeedsSources:
     pane_output: Callable[[FleetAgent], datetime | None] = _needs_no_output
     """When the row's pane last printed (``#{window_activity}``); ``None``: tmux would not
     say. Asked only of an agent whose sub-agent waits on a prompt (:func:`needs_from_agent`)."""
+    board_project: Callable[[ProjectInfo], str] = _needs_own_board
+    """The id of the project whose board a project's agents write: the project's own, a
+    worktree's principal checkout's, or under ``AISQUARE_TEAM_HUB`` the hub's, as ``asq board``
+    run in its root resolves it (``team.resolve_project``). Its sessions and events are
+    read there; its rows, by its own id."""
 
 
 # --- names on a lock screen, and text on a card -------------------------------------------
@@ -442,6 +472,11 @@ def _needs_strings(value: object) -> list[tuple[Any, Any]]:
         else:
             found.extend(_needs_strings(inner))
     return found
+
+
+def _needs_said(value: object) -> int:
+    """How many characters the strings inside ``value`` hold, all told."""
+    return sum(len(container[key]) for container, key in _needs_strings(value))
 
 
 def _needs_fit(detail: dict[str, Any], limit: int) -> dict[str, Any]:
@@ -779,7 +814,14 @@ def needs_from_agent(
        prompt has its own tool use, so the 2nd prompt of a turn is a new item. Not under
        a ``Task``, whose sub-agent's tool uses are in its own records: every prompt of the
        sub-agent's has that one pending tool, so the prompt is also its notice, the
-       ``last_seen_at`` each notification moves (:func:`_needs_subagent_prompt`);
+       ``last_seen_at`` each notification moves (:func:`_needs_subagent_prompt`). Nor
+       while the notice asks for input (:data:`_INPUT_NOTICE`): an MCP server's
+       elicitation comes while its tool call is pending, and that form is rule 8's. Nor
+       after a notice later than the turn's first with nothing written since it
+       (:func:`_needs_later_notice`): the call's own prompt was answered, and what is up
+       now is rule 8's too. Once the agent wrote after the turn's first notice, a later
+       one's words are not on the board, and nothing tells a form asked then from its
+       tool's own prompt: it reads as the prompt, whose digits would go into the form;
     6. no pending tool, and the newest record an interruption later than the session's last
        hook → ``interrupted``, whatever the row reads (Esc fires no Stop, so a dismissed
        prompt still reads ``attention`` and an interrupted turn ``working``);
@@ -789,7 +831,7 @@ def needs_from_agent(
     10. ``waiting`` since its turn ended on an API error (the session's ``turn_failed``
         event, no hook since) → ``failed``.
 
-    Rules 7 and 8 read the notification from the session's newest ``attention`` event
+    Rules 5, 7 and 8 read the notification from the session's newest ``attention`` event
     only while it still names the dialog on screen (:func:`_needs_notice`); after it a
     dialog is the plain form, its words not on the board. So the usage-limit dialog is a
     ``limited`` card only as the first notice of its turn; later in a turn it is the
@@ -854,17 +896,25 @@ def needs_from_agent(
     if pending:
         if not attention:
             return []  # a tool running, or the 6 s before Claude Code's notification
-        if pending[0].name in _SUBAGENT_TOOLS and session is not None:
-            return _needs_subagent_prompt(
-                pending[0], session, pane_output, project=project, agent=agent, now=now
+        notice = _needs_notice(attention_event, tail, session)
+        if notice is not None:
+            form = _INPUT_NOTICE.search(notice.text) is not None
+        else:  # a sub-agent's prompts each send a notice, its records not this transcript's
+            form = pending[0].name not in _SUBAGENT_TOOLS and _needs_later_notice(
+                attention_event, tail, session
             )
-        return [
-            _needs_permission_item(pending[0], project=project, agent=agent, name=name, now=now)
-        ]
-    if tail is not None and _needs_marker_later(status, tail):
+        if not form:
+            if pending[0].name in _SUBAGENT_TOOLS and session is not None:
+                return _needs_subagent_prompt(
+                    pending[0], session, pane_output, project=project, agent=agent, now=now
+                )
+            return [
+                _needs_permission_item(pending[0], project=project, agent=agent, name=name, now=now)
+            ]
+    elif tail is not None and _needs_marker_later(status, tail):
         return [_needs_interrupted_item(tail, project=project, agent=agent, name=name, now=now)]
     if attention or _needs_unanswered(status, tail, unread=False):
-        notice = _needs_notice(attention_event, tail)
+        notice = _needs_notice(attention_event, tail, session)
         if notice is not None and LIMIT_DIALOG.search(notice.text):
             since = notice.created_at
             return [
@@ -937,22 +987,49 @@ def _needs_seq(event: TeamEvent) -> int:
     return event.seq
 
 
-def _needs_notice(event: TeamEvent | None, tail: TranscriptTail | None) -> TeamEvent | None:
+def _needs_notice(
+    event: TeamEvent | None, tail: TranscriptTail | None, session: TeamSession | None
+) -> TeamEvent | None:
     """The session's newest ``attention`` event, while it still names the dialog on screen.
 
     ``mark_attention`` flips a session once per turn, so a turn's first notice is
     the only one the board records: a later one moves ``last_seen_at`` and writes
     nothing. Once the agent wrote anything after the event (a granted tool's
-    result, its reply after the dialog was answered), the dialog the event named
-    was answered, and one on screen now is another, which its text would misname:
-    the usage-limit dialog read as the Bash prompt approved before it, and the
-    reverse. Without a tail nothing says it moved on.
+    result, its reply after the dialog was answered), or a notice came after it,
+    the dialog the event named was answered, and one on screen now is another,
+    which its text would misname: the usage-limit dialog read as the Bash prompt
+    approved before it, and the reverse, an MCP server's form as its tool's
+    permission prompt granted just before it. Without a tail nothing says the
+    agent moved on.
     """
-    if event is None:
+    if event is None or _needs_moved_on(event, tail):
         return None
-    if tail is not None and tail.newest_at is not None and tail.newest_at > event.created_at:
+    if session is not None and session.last_seen_at > event.created_at:
         return None
     return event
+
+
+def _needs_moved_on(event: TeamEvent, tail: TranscriptTail | None) -> bool:
+    """The agent wrote a record of its conversation after ``event``."""
+    return tail is not None and tail.newest_at is not None and tail.newest_at > event.created_at
+
+
+def _needs_later_notice(
+    event: TeamEvent | None, tail: TranscriptTail | None, session: TeamSession | None
+) -> bool:
+    """A notice came after the turn's first, ``event``, with nothing written between.
+
+    ``mark_attention`` writes the event after it moves ``last_seen_at``, so the
+    notice the event records leaves ``last_seen_at`` before it, and only a later
+    one moves it past. A pending tool's prompt is answered with no record written
+    (its result comes when it ends), so the dialog that notice is for is not the
+    one the event named: an MCP server's form, asked during the call its
+    permission prompt let run, or the prompt of a tool called beside it in the
+    same message. Neither is that tool's own prompt.
+    """
+    if event is None or session is None or _needs_moved_on(event, tail):
+        return False
+    return session.last_seen_at > event.created_at
 
 
 def _needs_attention(status: FleetAgentStatus) -> bool:
@@ -1168,6 +1245,14 @@ def _needs_question_item(
                 QuickAnswer("Cancel", ("Escape",)),
             )
     since = tool.at or now
+    detail: dict[str, Any] = {"questions": questions}
+    said = _needs_said(detail)
+    detail = _needs_tool_detail(tool, detail, _DETAIL_TEXT_MAX)
+    if _needs_said(detail) < said:
+        # Cut to fit, an option's words read as the whole of them beside the digit that
+        # picks it, as a call's did (review of #243, round 6): the card says so.
+        detail["cut"] = {"questions": said}
+        _needs_fit(detail, _DETAIL_TEXT_MAX)
     return _needs_item(
         "question",
         tool.tool_use_id,
@@ -1175,7 +1260,7 @@ def _needs_question_item(
         agent=agent,
         reason=f"{name} asks you a question",
         excerpt=excerpt,
-        detail=_needs_tool_detail(tool, {"questions": questions}, _DETAIL_TEXT_MAX),
+        detail=detail,
         since=since,
         push_after=since,
         answers=answers,
@@ -1251,7 +1336,12 @@ def _needs_subagent_prompt(
 
 
 def _needs_tool_detail(
-    tool: PendingTool, detail: dict[str, Any], limit: int, *, shown: dict[str, Any] | None = None
+    tool: PendingTool,
+    detail: dict[str, Any],
+    limit: int,
+    *,
+    shown: dict[str, Any] | None = None,
+    whole: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     """A pending tool's ``detail`` fit to ``limit``, saying what it leaves out of the call.
 
@@ -1260,19 +1350,52 @@ def _needs_tool_detail(
     holds only the start of, by the whole one's length in characters. A command cut to
     2 000 characters, or fit to the card's 4 KiB, read as the whole of it beside the
     buttons that approve it; ``cut`` is fit with the rest, so the detail keeps to ``limit``.
+    ``whole`` is each value as the card would show it whole, the input's own by default.
     """
     if tool.input_dropped:
         detail["dropped"] = True
+    wholes = tool.input if whole is None else whole
     while True:
         _needs_fit(detail, limit)
         cut = {
-            key: len(whole)
-            for key, whole in tool.input.items()
-            if isinstance(whole, str) and shown is not None and key in shown and shown[key] != whole
+            key: len(value)
+            for key, value in wholes.items()
+            if isinstance(value, str) and shown is not None and key in shown and shown[key] != value
         }
         if cut == detail.get("cut", {}):
             return detail
         detail["cut"] = cut
+
+
+def _needs_tool_fields(raw: Mapping[str, object]) -> tuple[dict[str, object], int]:
+    """The fields of a tool call's input its permission card shows, each as the card would show
+    it whole, and how many it leaves out.
+
+    What the tool would do first (:data:`_DETAIL_INPUT_KEYS`), then the rest in the call's
+    own order, at most :data:`_DETAIL_FIELDS_MAX`, under a name the card can hold
+    (:data:`_DETAIL_FIELD_NAME`). A string, a number or a bool as it is; a list, an object
+    or a null as its JSON. Only those eleven keys' scalar values were kept, and nothing
+    said the rest were gone: an MCP merge's owner, repo and pull request showed as no
+    input at all, a ``MultiEdit`` as its file without its edits, each card reading as the
+    whole call beside the "1" that approves it (review of #243, round 6).
+    """
+    order = [key for key in _DETAIL_INPUT_KEYS if key in raw]
+    order += [key for key in raw if key not in _DETAIL_INPUT_KEYS]
+    fields: dict[str, object] = {}
+    for key in order:
+        if len(fields) >= _DETAIL_FIELDS_MAX or not _DETAIL_FIELD_NAME.match(key):
+            continue
+        value = raw[key]
+        if isinstance(value, str | bool | int) or (
+            isinstance(value, float) and math.isfinite(value)
+        ):
+            fields[key] = value
+            continue
+        try:
+            fields[key] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError, RecursionError):  # not as the call's JSON had it
+            continue
+    return fields, len(raw) - len(fields)
 
 
 def _needs_permission_item(
@@ -1285,14 +1408,15 @@ def _needs_permission_item(
     subject: str | None = None,
     since: datetime | None = None,
 ) -> NeedsItem:
-    """A permission prompt: the command or path in ``detail``, and what of it the card cannot
-    hold (:func:`_needs_tool_detail`), so nobody approves blind.
+    """A permission prompt: the call in ``detail``, and what of it the card cannot hold
+    (:func:`_needs_tool_fields`, :func:`_needs_tool_detail`), so nobody approves blind.
 
     The buttons are the dialog's own digits and Esc; the card shows the live
     pane beside them, so the options' real text is on screen. A prompt under a
     ``Task``/``Agent`` tool is a sub-agent's, whose own tool use is in its own
-    records, not this transcript. ``subject`` and ``since`` default to the
-    tool use's.
+    records, not this transcript: its detail is the task the sub-agent was given,
+    marked ``subagent``, since the call its "1" approves is not in it.
+    ``subject`` and ``since`` default to the tool use's.
     """
     if tool.name in _SUBAGENT_TOOLS:
         reason = f"{name} waits for a permission answer (in a sub-agent)"
@@ -1300,15 +1424,17 @@ def _needs_permission_item(
         reason = f"{name} waits for a permission answer to use {tool.name}"
     else:
         reason = f"{name} waits for a permission answer"
-    shown: dict[str, Any] = {}
-    for key in _DETAIL_INPUT_KEYS:
-        value = tool.input.get(key)
-        if isinstance(value, str):
-            shown[key] = _needs_cut(value, _DETAIL_STRING_MAX)
-        elif isinstance(value, bool | int) or (isinstance(value, float) and math.isfinite(value)):
-            shown[key] = value
+    whole, omitted = _needs_tool_fields(tool.input)
+    shown: dict[str, Any] = {
+        key: _needs_cut(value, _DETAIL_STRING_MAX) if isinstance(value, str) else value
+        for key, value in whole.items()
+    }
     since = since or tool.at or now
     detail: dict[str, Any] = {"tool": _needs_cut(tool.name, 200), "input": shown}
+    if omitted:
+        detail["omitted"] = omitted
+    if tool.name in _SUBAGENT_TOOLS:
+        detail["subagent"] = True
     return _needs_item(
         "permission",
         subject or tool.tool_use_id,
@@ -1316,7 +1442,7 @@ def _needs_permission_item(
         agent=agent,
         reason=reason,
         excerpt=tool.summary,
-        detail=_needs_tool_detail(tool, detail, _DETAIL_TOOL_MAX, shown=shown),
+        detail=_needs_tool_detail(tool, detail, _DETAIL_TOOL_MAX, shown=shown, whole=whole),
         since=since,
         push_after=since,
         answers=(
@@ -1564,6 +1690,14 @@ def _needs_scan_project(
     not answering) from the first scan that saw them; ``seen`` collects what
     this scan saw, so the caller can forget the rest. ``answers`` says whether a
     tmux server answers (:func:`_needs_unheard`), once per socket for a whole scan.
+
+    The board's sessions and events are read from the project's board
+    (:attr:`NeedsSources.board_project`), its rows by its own id. Under
+    ``AISQUARE_TEAM_HUB`` every session and event is the hub's: read by the fleet
+    project's id, the board was empty to the scan, and a manager's question or
+    result, a failed turn, the usage-limit dialog's words and a hand-over that
+    could not start its replacement never became a card or a push, while the
+    Board tab showed them (sweep 4 of #243).
     """
     from aisquare.services.fleet import RECENTLY_ENDED
 
@@ -1572,13 +1706,14 @@ def _needs_scan_project(
     ended = _needs_read(
         lambda: sources.ended_agents(project.id, now - RECENTLY_ENDED), "rows", project
     )
+    board_id = _needs_board_of(sources, project)
     day = now - max(QUESTION_HORIZON, RECENTLY_ENDED)
-    board_read = _needs_read_or_none(lambda: sources.board_since(project.id, day), "board", project)
+    board_read = _needs_read_or_none(lambda: sources.board_since(board_id, day), "board", project)
     board = board_read or []
-    window = _needs_window(sources, project)
+    window = _needs_window(sources, project, board_id)
     authors = _needs_board_authors(board, now)
     sessions = _needs_read(
-        lambda: sources.board_sessions(project.id, now - _MANAGER_FRESH, authors),
+        lambda: sources.board_sessions(board_id, now - _MANAGER_FRESH, authors),
         "sessions",
         project,
     )
@@ -1607,7 +1742,7 @@ def _needs_scan_project(
                 tail,
                 project=project,
                 events=[
-                    *_needs_own_events(sources, project, status, window),
+                    *_needs_own_events(sources, board_id, status, window),
                     *_needs_failures(board, status),
                 ],
                 now=now,
@@ -1652,7 +1787,7 @@ def _needs_tail_of(sources: NeedsSources, status: FleetAgentStatus) -> Transcrip
 
 def _needs_own_events(
     sources: NeedsSources,
-    project: ProjectInfo,
+    board_id: str,
     status: FleetAgentStatus,
     window: Callable[[], Sequence[TeamEvent]],
 ) -> list[TeamEvent]:
@@ -1683,7 +1818,7 @@ def _needs_own_events(
     for kind in wanted:
         if any(event.kind == kind for event in own):
             break
-        found = _needs_session_event(sources, project, session.id, kind, born)
+        found = _needs_session_event(sources, board_id, session.id, kind, born)
         if found is not None:
             own.append(found)
             break
@@ -1712,17 +1847,19 @@ def _needs_output_of(sources: NeedsSources, agent: FleetAgent) -> Callable[[], d
     return needs_output
 
 
-def _needs_window(sources: NeedsSources, project: ProjectInfo) -> Callable[[], list[TeamEvent]]:
-    """The project's newest :data:`NEEDS_BOARD_EVENTS` events, read the first time they are
-    asked for in a scan, and not at all by one that asks nothing of them: most scans of
-    most projects, whose agents are not at a dialog or parked on a limit."""
+def _needs_window(
+    sources: NeedsSources, project: ProjectInfo, board_id: str
+) -> Callable[[], list[TeamEvent]]:
+    """The project's board's newest :data:`NEEDS_BOARD_EVENTS` events, read the first time
+    they are asked for in a scan, and not at all by one that asks nothing of them: most
+    scans of most projects, whose agents are not at a dialog or parked on a limit."""
     read: list[list[TeamEvent]] = []
 
     def needs_window() -> list[TeamEvent]:
         if not read:
             read.append(
                 _needs_read(
-                    lambda: sources.board_events(project.id, NEEDS_BOARD_EVENTS), "board", project
+                    lambda: sources.board_events(board_id, NEEDS_BOARD_EVENTS), "board", project
                 )
             )
         return read[0]
@@ -1731,13 +1868,24 @@ def _needs_window(sources: NeedsSources, project: ProjectInfo) -> Callable[[], l
 
 
 def _needs_session_event(
-    sources: NeedsSources, project: ProjectInfo, session_id: str, kind: str, since: datetime
+    sources: NeedsSources, board_id: str, session_id: str, kind: str, since: datetime
 ) -> TeamEvent | None:
     try:
-        return sources.session_event(project.id, session_id, kind, since)
+        return sources.session_event(board_id, session_id, kind, since)
     except Exception:
         log.debug("remote: needs could not read %s's events", session_id, exc_info=True)
         return None
+
+
+def _needs_board_of(sources: NeedsSources, project: ProjectInfo) -> str:
+    """The id of ``project``'s board (:attr:`NeedsSources.board_project`); its own when the
+    source cannot say (the team off, a root that is gone): a board read there finds what
+    it finds."""
+    try:
+        return sources.board_project(project)
+    except Exception:
+        log.debug("remote: needs could not resolve the board of %s", project.id, exc_info=True)
+        return project.id
 
 
 def _needs_hearing(sources: NeedsSources) -> Callable[[str], bool]:
@@ -2094,7 +2242,8 @@ def scan_needs_you(
     accounts = _needs_accounts(sources)
     answers = _needs_hearing(sources)
     items: list[NeedsItem] = []
-    for project in sources.list_projects():
+    projects = sources.list_projects()
+    for project in projects:
         statuses: list[FleetAgentStatus] | None
         try:
             statuses = sources.list_agents(project) if _needs_has_live(sources, project) else []
@@ -2124,7 +2273,51 @@ def scan_needs_you(
         items.extend(scanned.items)
     for key in [key for key in memory if key not in seen]:
         del memory[key]
+    items = _needs_board_once(items, projects, sources)
     return _needs_ranked([item for item in items if item.id not in dismissed])
+
+
+def _needs_board_once(
+    items: Sequence[NeedsItem], projects: Sequence[ProjectInfo], sources: NeedsSources
+) -> list[NeedsItem]:
+    """``items`` with each question or result of a board that several projects write one card.
+
+    Under ``AISQUARE_TEAM_HUB`` every project's board is the hub's, so each project's scan
+    found every one of its questions and results: one event, one card per project, each
+    its own id and its own push. It is the card of the project whose row asked it; one
+    that no row asked (a manager started outside the fleet) is the card of the board's
+    own project when it is listed, else of the first project that writes the board.
+    """
+    boards = {project.id: _needs_board_of(sources, project) for project in projects}
+    writers: dict[str, list[str]] = {}
+    for project in projects:
+        writers.setdefault(boards[project.id], []).append(project.id)
+    shared = {board: ids for board, ids in writers.items() if len(ids) > 1}
+    if not shared:
+        return list(items)
+    kept: dict[tuple[str, object], NeedsItem] = {}
+    rest: list[NeedsItem] = []
+    for item in items:
+        board = boards.get(item.project_id)
+        if item.kind not in _NEEDS_BOARD_KINDS or board not in shared:
+            rest.append(item)
+            continue
+        key = (board, item.detail.get("seq"))
+        held = kept.get(key)
+        if held is None or _needs_board_rank(item, board, shared[board]) < _needs_board_rank(
+            held, board, shared[board]
+        ):
+            kept[key] = item
+    return [*rest, *kept.values()]
+
+
+def _needs_board_rank(item: NeedsItem, board: str, writers: Sequence[str]) -> tuple[int, int]:
+    """Which project's card a shared board's item is: the asker's row's, the board's own, the
+    first writer's, in that order."""
+    return (
+        0 if item.agent_id is not None else 1 if item.project_id == board else 2,
+        writers.index(item.project_id),
+    )
 
 
 _K = TypeVar("_K")
@@ -2392,15 +2585,20 @@ def needs_at_input_prompt(snap: AgentNow) -> bool:
     """Whether the agent sits at its input prompt, where typed text is a message to it.
 
     No dialog, the pane is the agent and quiet (tmux must say so), no tool
-    pending, and the newest record is an interruption or the agent's own words,
-    or this process has written no conversation yet (:func:`_needs_nothing_said`)
-    — or the row derives ``waiting``, the only sign there is without a tail.
+    pending, and the newest record is an interruption, the agent's own words or
+    one Claude Code wrote itself (a local command's output, a compaction's
+    summary: ``own``), or this process has written no conversation yet
+    (:func:`_needs_nothing_said`) — or the row derives ``waiting``, the only sign
+    there is without a tail.
 
     A session starts ``working`` on the board, and the board is trusted for 30
     minutes: an agent just spawned with no prompt, or after a ``/clear``, read as
     busy at its fresh prompt. Prompt mode refused it, Interrupt & tell sent its Escape
     and gave up, and the only way to reach it was the Live tab (review of #243, sweep
     3). A turn writes the human's prompt first, and Claude Code animates while one runs.
+    No hook follows a local command either (``/model``, ``/mcp``, a ``/compact``, whose
+    ``SessionStart`` marks the session ``working`` again), and its records read as the
+    human's prompt of a turn under way, for the same 30 minutes (sweep 4 of #243).
     """
     status = snap.status
     if status is None or not snap.pane_is_agent or snap.pane_quiet is not True:
@@ -2411,7 +2609,7 @@ def needs_at_input_prompt(snap: AgentNow) -> bool:
         return status.state == "waiting"
     if _needs_pending(snap.tail, status.agent):
         return False
-    if snap.tail.newest in ("interrupted", "assistant_text") or status.state == "waiting":
+    if snap.tail.newest in ("interrupted", "assistant_text", "own") or status.state == "waiting":
         return True
     return _needs_nothing_said(snap.tail, status.agent)
 
@@ -2475,7 +2673,7 @@ def live_needs_sources() -> NeedsSources:
         return None if task is None else task.status
 
     def needs_live_agents(project: ProjectInfo) -> list[FleetAgentStatus]:
-        return fleet_service.list_agents(project, live_only=True)
+        return _needs_with_board_sessions(fleet_service.list_agents(project, live_only=True))
 
     def needs_tmux_answers(socket: str) -> bool:
         return fleet_service.server_for(socket).answers()
@@ -2493,6 +2691,22 @@ def live_needs_sources() -> NeedsSources:
         with store_session() as store:
             return store.newest_session_event(project_id, session_id, kind, since=since)
 
+    def needs_board_project(project: ProjectInfo) -> str:
+        """The project's board as ``asq board`` in its root resolves it, ``AISQUARE_TEAM_HUB``
+        and worktrees included, once per root and hub: ``team_project`` runs ``git``, and
+        neither changes under a running server (``remote_server.remote_board_payload``)."""
+        from aisquare.core import orchestrator
+        from aisquare.services import team as team_service
+
+        key = (project.root, os.environ.get(orchestrator.TEAM_HUB_ENV_VAR, ""))
+        with _boards_lock:
+            known = _boards.get(key)
+        if known is None:
+            known = team_service.resolve_project(project.root).id
+            with _boards_lock:
+                _boards[key] = known
+        return known
+
     return NeedsSources(
         list_projects=project_service.list_projects,
         list_agents=needs_live_agents,
@@ -2507,7 +2721,62 @@ def live_needs_sources() -> NeedsSources:
         tmux_answers=needs_tmux_answers,
         session_event=needs_session_event,
         pane_output=needs_pane_output,
+        board_project=needs_board_project,
     )
+
+
+def _needs_with_board_sessions(statuses: list[FleetAgentStatus]) -> list[FleetAgentStatus]:
+    """The listing, each live row whose session the team keeps on another project's board
+    derived again with it, the session found by its id.
+
+    ``fleet.list_agents`` reads the sessions of the project's own board, and under
+    ``AISQUARE_TEAM_HUB`` every session is the hub's: no row had one, so none read
+    attention, a usage limit or a failed turn, and no transcript was read (sweep 4 of
+    #243). Only such rows are derived again, in one read of the store and one look at
+    each tmux server they are on, as the listing looks: ``fleet.status_of`` of each was a
+    store session and a server's three questions per row, every row of a hub's every 3 s
+    scan. If the servers cannot be asked, the rows are left as the listing had them.
+    """
+    from aisquare.core.store import store_session
+    from aisquare.services import fleet as fleet_service
+
+    elsewhere = [
+        status
+        for status in statuses
+        if status.session is None and status.agent.session_id and status.agent.ended_at is None
+    ]
+    if not elsewhere:
+        return statuses
+    with store_session() as store:
+        held = {
+            status.agent.id: session
+            for status in elsewhere
+            if status.agent.session_id
+            and (session := store.get_session(status.agent.session_id)) is not None
+        }
+    if not held:
+        return statuses
+    rows = [status.agent for status in elsewhere if status.agent.id in held]
+    tmux_session = elsewhere[0].tmux_session  # the listing's one, its project's
+    try:
+        views = fleet_service._observe_sockets(rows, tmux_session)
+    except Exception:
+        log.debug("remote: needs could not derive the hub's rows again", exc_info=True)
+        return statuses
+    now = fleet_service._now()
+    derived = {
+        agent.id: fleet_service._status(
+            agent, held[agent.id], views.get(agent.tmux_socket), tmux_session, now
+        )
+        for agent in rows
+    }
+    return [derived.get(status.agent.id, status) for status in statuses]
+
+
+_boards: dict[tuple[Path, str], str] = {}
+"""The board project's id of each project root under each ``AISQUARE_TEAM_HUB`` (blank for
+none), as :func:`live_needs_sources` resolved it."""
+_boards_lock = threading.Lock()
 
 
 _tails: dict[str, tuple[tuple[int, int], TranscriptTail | None]] = {}
@@ -2646,14 +2915,15 @@ def _needs_stamps(memory: Mapping[str, datetime]) -> dict[str, str]:
 
 
 class RemoteNeedsWatcher:
-    """The scanner: a daemon thread scanning every ``interval`` while any device exists.
+    """The scanner: a daemon thread scanning every ``interval`` while anyone would hear of it.
 
-    Signed-out devices count: they still receive pushes. Each scan replaces the
-    latest snapshot at once and then calls every listener in
-    ``kit.needs_listeners`` with ``(all items, scanned_at)``; a listener that
-    raises is logged and the rest are called. Readers (the stream, the
-    heartbeat, the routes, the push sender) take the snapshot under a lock and
-    do no I/O.
+    That is a page with its socket open, or a device with a push subscription, signed
+    in or signed out (:meth:`_needs_heard`); a page that reads the feed with no socket
+    scans for itself (:meth:`needs_scan_wanted`). Each scan replaces the latest
+    snapshot at once and then calls every listener in ``kit.needs_listeners`` with
+    ``(all items, scanned_at)``; a listener that raises is logged and the rest are
+    called. Readers (the stream, the heartbeat, the routes, the push sender) take the
+    snapshot under a lock and do no I/O.
     """
 
     def __init__(
@@ -2669,8 +2939,15 @@ class RemoteNeedsWatcher:
         self._interval = interval
         self._clock = clock
         self._lock = threading.Lock()
-        self._scanning = threading.Lock()
+        self._scanning = threading.RLock()
         """One scan at a time: the watcher's own, a route's, the one after a quick answer."""
+        self._scans_told = 0
+        """How many scans :meth:`_needs_scan_told` has finished, and ``_scan_failure`` how the
+        last one ended: what a request that waited for another's scan reads instead of its
+        own (:meth:`needs_scan_for_request`)."""
+        self._scan_failure: Exception | None = None
+        self._heard = False
+        """Whether the thread's last turn found anyone to scan for (:meth:`_needs_heard`)."""
         self._latest: list[NeedsItem] = []
         self._latest_json: list[dict[str, object]] = []
         self._scanned_at: datetime | None = None
@@ -2710,32 +2987,84 @@ class RemoteNeedsWatcher:
 
     def _needs_loop(self) -> None:
         while not self._stopping.is_set():
-            if self._needs_devices():
+            self._heard = self._needs_heard()
+            if self._heard:
                 self._needs_scan_told()
             self._stopping.wait(self._interval)
 
     def _needs_scan_told(self) -> Exception | None:
         """:meth:`scan_needs_now`, its failure told once a streak, and its recovery once; the
         failure, or ``None``."""
-        try:
-            self.scan_needs_now()
-        except Exception as exc:
-            _needs_failed("the needs scan", exc, self._failing, "scan")
-            return exc
-        if "scan" in self._failing:
-            self._failing.discard("scan")
-            log.info("remote: the needs scan works again")
-        return None
+        with self._scanning:
+            failure: Exception | None = None
+            try:
+                self.scan_needs_now()
+            except Exception as exc:
+                _needs_failed("the needs scan", exc, self._failing, "scan")
+                failure = exc
+            else:
+                if "scan" in self._failing:
+                    self._failing.discard("scan")
+                    log.info("remote: the needs scan works again")
+            self._scans_told += 1
+            self._scan_failure = failure
+            return failure
 
-    def _needs_devices(self) -> bool:
-        """Whether any device is on record, signed in or not, and Remote is not past its
-        auto-off deadline: nobody to show it to, no scan. Past the deadline every request is
-        a 404 and every socket closed, whatever turns Remote off has yet to run."""
+    def needs_scan_for_request(self) -> Exception | None:
+        """A scan for a request that has nothing fresh to read, unless one finished while it
+        waited for the scan before it: how that one ended, a failure or ``None``.
+
+        Each request made before the first scan ran a scan of its own, one after another,
+        each re-reading every project though one had just published, and each holding a
+        thread of the shared pool meanwhile: a page sends two on loading and one on each
+        wake, and five early requests over a 2 s fleet were answered at 2, 4, 6, 8 and
+        10 s, a turn of Remote off waiting behind them (sweep 4 of #243). Now the requests
+        that waited share the scan they waited for.
+        """
+        told = self._scans_told
+        with self._scanning:
+            if self._scans_told != told:
+                return self._scan_failure
+            return self._needs_scan_told()
+
+    def _needs_heard(self) -> bool:
+        """Whether a scan reaches anyone: a page's socket is open (its ``needs_you`` frames
+        and heartbeat), or a device the runtime still has holds a push subscription (the
+        push sender's, signed out or not), and Remote is not past its auto-off deadline,
+        from which on every request is a 404 and every socket closed, whatever turns Remote
+        off has yet to run.
+
+        Any device on record was enough: one that signed out, or never turned
+        notifications on, has no socket and gets no push, and a phone unlocked once and
+        closed cost a scan of every project every 3 s for the rest of its 7 days, the
+        result read by nobody (review of #243, round 6). A push file that cannot be read
+        is taken for a subscription: the sender may yet send.
+        """
         try:
-            runtime = self._kit.runtime
-            return bool(runtime.device_ids()) and not runtime.auto_off_passed(self._clock())
+            if self._kit.runtime.auto_off_passed(self._clock()):
+                return False
         except Exception:
             return False
+        if self._kit.sockets:
+            return True
+        listening = getattr(self._kit.lane_state.get("push"), "push_listening", None)
+        if listening is None:
+            return False
+        try:
+            return bool(listening())
+        except Exception:
+            log.debug("remote: could not tell whether a phone has notifications on", exc_info=True)
+            return True
+
+    def needs_scan_wanted(self) -> bool:
+        """Whether a read of the feed must scan for itself: no thread scans (no lifespan),
+        none has scanned yet, or the thread scans for nobody (:meth:`_needs_heard`) and the
+        latest scan is older than its interval, as a page with no socket finds it."""
+        scanned = self.needs_scanned_at()
+        if scanned is None or not self.needs_watching():
+            return True
+        stale = (self._clock() - scanned).total_seconds() >= self._interval
+        return stale and not self._heard
 
     def scan_needs_now(self) -> list[NeedsItem]:
         """One synchronous scan: the snapshot replaced, then every listener called.
@@ -2950,14 +3279,73 @@ def _needs_send(agent: FleetAgent, keys: Sequence[str], text: str, enter: bool) 
         server.send_keys(agent.pane_id, "Enter")
 
 
+def _needs_answer_now(
+    kit: RemoteKit,
+    device: Device,
+    item: NeedsItem,
+    project: ProjectInfo,
+    keys: list[str],
+    text: str,
+    enter: bool,
+) -> tuple[dict[str, object], str]:
+    """Type a quick answer into the agent ``item`` is about, in a thread of the write pool:
+    its response and its audit summary, or :class:`RequestError`.
+
+    Under the agent's action lock, taken without waiting (409 ``busy``). The agent is
+    re-derived first (:func:`needs_agent_now`), and a card no longer current is a 409
+    ``stale`` carrying what is current instead. The gates are asked again right before
+    typing (:meth:`RemoteKit.kit_write_still_allowed`): the re-derivation came between
+    them and the keys. A tmux that fails mid-answer is a 503 whose ``audit`` says it was
+    tried, as part of it may have reached the pane.
+    """
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services.remote_server import RequestError, _audit_keys, remote_agent_lock
+
+    label = item.agent or ""
+    lock = remote_agent_lock(project.id, label)
+    if not lock.acquire(blocking=False):
+        raise RequestError(409, "busy", f"another action on {label} is still running")
+    try:
+        try:
+            snap = needs_agent_now(project, label)
+        except fleet_service.NoSuchAgent:
+            raise RequestError(409, "stale", f"{label} is gone", current=[]) from None
+        except fleet_service.FleetUnavailable as exc:
+            raise RequestError(503, "fleet_unavailable", str(exc)) from None
+        except fleet_service.FleetError as exc:
+            raise RequestError(409, "fleet_error", str(exc)) from None
+        except Exception as exc:  # the store, mid-read: as a failed scan is, not a bare 500
+            log.warning("remote: a needs answer could not read %s: %s", label, exc)
+            raise RequestError(503, "unavailable", str(exc)) from None
+        if not needs_item_current(snap, item.id):
+            current = [now_item.needs_item_json() for now_item in snap.items]
+            gone = f"{label} no longer shows that {item.kind}"
+            raise RequestError(409, "stale", gone, current=current)
+        if snap.status is None or not snap.pane_is_agent:
+            why = f"{label}'s pane is not running the agent — nothing was sent"
+            raise RequestError(409, "not_agent", why)
+        summary = (
+            f"answer {item.id} {item.kind} {label}@{project.id} keys={_audit_keys(keys)} "
+            f"text={len(text)}ch enter={enter}"
+        )
+        kit.kit_write_still_allowed(device)
+        try:
+            _needs_send(snap.status.agent, keys, text, enter)
+        except Exception as exc:
+            said = f"tmux could not type it: {exc}"
+            raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} failed") from None
+        return {"answered": item.id, "agent": label, "project": project.id, "sent": True}, summary
+    finally:
+        lock.release()
+
+
 def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
     """``GET api/needs``, ``POST api/needs/dismiss``, ``POST api/needs/answer`` (SPEC §1.3)."""
     import asyncio
 
     from starlette.responses import JSONResponse
 
-    from aisquare.services import fleet as fleet_service
-    from aisquare.services.remote_server import RequestError, _audit_keys, remote_agent_lock
+    from aisquare.services.remote_server import RequestError, _remote_write_tracked
 
     async def needs_scanned_here(watcher: RemoteNeedsWatcher) -> Response | None:
         """One scan for a request that has none to read; ``None``, or the 503 its failure is.
@@ -2967,16 +3355,17 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
         answers 503 ``unavailable`` in JSON and the watcher's own scans are told once a
         streak (review of #243, sweep 3).
         """
-        failed = await asyncio.to_thread(watcher._needs_scan_told)
+        failed = await asyncio.to_thread(watcher.needs_scan_for_request)
         return None if failed is None else kit.kit_refuse(503, "unavailable", str(failed))
 
     async def needs_list_endpoint(
         request: Request, device: Device, body: dict[str, Any]
     ) -> Response:
-        """The feed. A watcher that is not running (no lifespan) scans for this request."""
+        """The feed. A watcher that does not scan for anyone, or is not running (no
+        lifespan), scans for this request (:meth:`RemoteNeedsWatcher.needs_scan_wanted`)."""
         watcher = _needs_watcher(kit)
-        unread = not watcher.needs_watching() or watcher.needs_scanned_at() is None
-        if unread and (failed := await needs_scanned_here(watcher)) is not None:
+        wanted = watcher.needs_scan_wanted()
+        if wanted and (failed := await needs_scanned_here(watcher)) is not None:
             return failed
         return JSONResponse(watcher.needs_payload_now())
 
@@ -3010,13 +3399,16 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
     ) -> Response:
         """Answer a card on the agent it is about, only while the card is still true.
 
-        The item comes from the latest scan; the agent is re-derived right
-        before typing, under the agent's action lock, and a card that is no
-        longer current is a 409 ``stale`` that carries what is current instead.
-        The thread that types asks the gates again first
-        (:meth:`RemoteKit.kit_write_still_allowed`): a scan, the agent's re-derivation
-        and the wait for a thread of the shared pool came between them and it.
+        The item comes from the latest scan; the rest is a write like every other
+        (:meth:`RemoteKit.kit_run_write`), on the write pool, counted among the device's
+        writes waiting and among the writes running: the agent re-derived under its action
+        lock (:func:`_needs_answer_now`), and typed into. It ran on the shared pool, its
+        re-derivation a scan of the whole project with tmux, while its lock was held: with
+        tmux not answering, each tap held a thread of the pool every read, frame and
+        unlock waits on, past the per-device cap, and a quit or a Remote off that came
+        meanwhile did not name it (review of #243, round 6).
         """
+        arrived = time.monotonic()
         item_id, keys, text, enter = _needs_answer_body(body)
         watcher = _needs_watcher(kit)
         unread = watcher.needs_scanned_at() is None
@@ -3026,58 +3418,26 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
         if found is None:
             return kit.kit_refuse(409, "stale", "that card no longer needs you", current=[])
         item, project = found
-        label = item.agent
-        if item.kind not in _NEEDS_ANSWERABLE or label is None:
+        if item.kind not in _NEEDS_ANSWERABLE or item.agent is None:
             board = item.kind in _NEEDS_BOARD_KINDS
             why = "reply on the board instead" if board else f"a {item.kind} card takes its actions"
             return kit.kit_refuse(400, "not_answerable", why)
-        lock = remote_agent_lock(project.id, label)
-        if not lock.acquire(blocking=False):
-            return kit.kit_refuse(409, "busy", f"another action on {label} is still running")
+
+        def answer_now(_named: dict[str, Any]) -> tuple[dict[str, object], str]:
+            return _needs_answer_now(kit, device, item, project, keys, text, enter)
+
+        tracked = _remote_write_tracked("needs/answer", answer_now)
         try:
-            try:
-                snap = await asyncio.to_thread(needs_agent_now, project, label)
-            except fleet_service.NoSuchAgent:
-                return kit.kit_refuse(409, "stale", f"{label} is gone", current=[])
-            except fleet_service.FleetUnavailable as exc:
-                return kit.kit_refuse(503, "fleet_unavailable", str(exc))
-            except fleet_service.FleetError as exc:
-                return kit.kit_refuse(409, "fleet_error", str(exc))
-            except Exception as exc:  # the store, mid-read: as a failed scan is, not a bare 500
-                log.warning("remote: a needs answer could not read %s: %s", label, exc)
-                return kit.kit_refuse(503, "unavailable", str(exc))
-            if not needs_item_current(snap, item.id):
-                current = [now_item.needs_item_json() for now_item in snap.items]
-                gone = f"{label} no longer shows that {item.kind}"
-                return kit.kit_refuse(409, "stale", gone, current=current)
-            if snap.status is None or not snap.pane_is_agent:
-                why = f"{label}'s pane is not running the agent — nothing was sent"
-                return kit.kit_refuse(409, "not_agent", why)
-            summary = (
-                f"answer {item.id} {item.kind} {label}@{project.id} keys={_audit_keys(keys)} "
-                f"text={len(text)}ch enter={enter}"
+            result, summary = await kit.kit_run_write(
+                tracked, {"agent": item.agent}, arrived, device
             )
-            agent = snap.status.agent
-
-            def answer_now() -> None:
-                kit.kit_write_still_allowed(device)
-                _needs_send(agent, keys, text, enter)
-
-            try:
-                await asyncio.to_thread(answer_now)
-            except RequestError:
-                raise  # refused before anything was typed: answered as the gate answers
-            except Exception as exc:
-                # Part of it may have reached the pane: the trail says it was tried.
-                await asyncio.to_thread(kit.kit_audit, device, "needs/answer", f"{summary} failed")
-                return kit.kit_refuse(503, "fleet_unavailable", f"tmux could not type it: {exc}")
-            await asyncio.to_thread(kit.kit_audit, device, "needs/answer", summary)
-        finally:
-            lock.release()
+        except RequestError as exc:
+            if exc.audit is not None:  # part of it may have reached the pane
+                await asyncio.to_thread(kit.kit_audit, device, "needs/answer", exc.audit)
+            raise
+        await asyncio.to_thread(kit.kit_audit, device, "needs/answer", summary)
         watcher.needs_rescan_soon()
-        return JSONResponse(
-            {"answered": item.id, "agent": label, "project": project.id, "sent": True}
-        )
+        return JSONResponse(result)
 
     return [
         kit.kit_route("/api/needs", needs_list_endpoint, methods=["GET"], write_gated=False),

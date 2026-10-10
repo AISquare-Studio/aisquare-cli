@@ -766,10 +766,13 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
     latest = plan.latest_version
     moved_elsewhere = latest is not None and not install_route.same_version(version or "", latest)
     pypis = plan.latest is not None and plan.latest.cutoff is None
-    if plan.target is None and version is not None and moved_elsewhere and pypis:
+    unseen = _newly_recorded(plan, ran)
+    now = f" — its uv settings now record: {', '.join(unseen)}" if unseen else ""
+    if plan.target is None and version is not None and moved_elsewhere and (pypis or unseen):
         # Not why: "your package index served" named an index that had served the newer one,
         # and "newest" was false where a setting picks (`resolution = "lowest"`).
-        notes.append(f"PyPI's latest is {latest}; uv picks {version} here")
+        held = f"PyPI's latest is {latest}; " if pypis else ""
+        notes.append(f"{held}uv picks {version} here{now}")
     notes.append(
         f"asq and `aisquare serve` processes that were already running keep {plan.current} "
         "until they are restarted"
@@ -780,6 +783,13 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
         return UpgradeReport(plan, exit_code=code, version=version, notes=tuple(notes))
     hooks = tuple(_refresh(site, plan.route.facts) for site in plan.refresh)
     return UpgradeReport(plan, exit_code=code, version=version, hooks=hooks, notes=tuple(notes))
+
+
+def _newly_recorded(plan: UpgradePlan, ran: install_route.InstallRoute) -> list[str]:
+    """The settings that can hold releases back which the receipt uv wrote for the run
+    records and the plan's receipt did not: from uv's own config, applied to this run."""
+    seen = set(plan.route.receipt.holds) if plan.route.receipt is not None else set()
+    return [key for key in (ran.receipt.holds if ran.receipt else ()) if key not in seen]
 
 
 def _as_recorded(route: install_route.InstallRoute) -> install_route.InstallRoute:
@@ -834,11 +844,10 @@ def _verify(plan: UpgradePlan, ran: install_route.InstallRoute) -> tuple[str | N
     process reports — the pin when one was asked for, otherwise any move that is
     not BACK: a downgrade is only done by asking for one with ``--version``. An
     unchanged version is a failure exactly when PyPI said there is something
-    newer, whatever the receipt records: then the plan compared (plain, or under a global
-    cutoff alone), and a recorded cutoff it compared excused a real no-op (#257). When PyPI
-    was not asked or could not answer, it is the release uv picks for this install. Settings
-    the receipt uv wrote for the install that ``ran`` (:func:`_as_recorded`) records, and the
-    plan's did not, are named in the failure rather than §3.9.1.
+    newer and the receipt uv wrote for the install that ``ran`` (:func:`_as_recorded`)
+    explains nothing the plan had not accounted for: a recorded cutoff the plan had compared
+    excused a real no-op as ✓ (#257). Settings only that receipt records
+    (:func:`_newly_recorded`), and an unknown latest, make it the release uv picks.
     """
     found, problem = _installed_version(plan)
     if found is None:
@@ -855,14 +864,10 @@ def _verify(plan: UpgradePlan, ran: install_route.InstallRoute) -> tuple[str | N
     latest = plan.latest_version
     if not install_route.same_version(found, plan.current) or latest is None:
         return found, None
-    seen = set(plan.route.receipt.holds) if plan.route.receipt is not None else set()
-    unseen = [key for key in (ran.receipt.holds if ran.receipt else ()) if key not in seen]
-    if unseen:
-        # From uv's own config, which only the receipt uv just wrote shows: not §3.9.1's.
-        return found, (
-            f"uv reported success but aisquare still reports {found}, not {latest}; the receipt "
-            f"uv wrote records uv settings that can hold releases back ({', '.join(unseen)})"
-        )
+    if _newly_recorded(plan, ran):
+        # A setting in uv's own config (uv.toml, UV_EXCLUDE_NEWER) the plan could not see held
+        # it back: what uv picks, said with those settings named (upgrade()'s note).
+        return found, None
     return found, (
         f"uv reported success but aisquare still reports {found}, not {latest} — the "
         "silent no-op docs/plans/one-line-install.md §3.9.1 describes"

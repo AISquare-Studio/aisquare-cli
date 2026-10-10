@@ -2721,10 +2721,11 @@ def test_an_unchanged_version_under_uvs_own_settings_is_the_newest_they_allow(
     runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch, tail: str
 ) -> None:
     """A setting in uv's own config (uv.toml, UV_EXCLUDE_NEWER) is in no receipt the plan can
-    read, so the plan compared PyPI's newer release, and an unchanged version fails: passed as
-    ✓, a real no-op went unreported (review of #257's fixes). The failure names what the
-    receipt uv wrote records instead of §3.9.1 or "your package index" (an index that had
-    served the newer one). The next run's plan sees it."""
+    read, so the plan compared PyPI's newer release, and the version uv rightly left failed as
+    §3.9.1's silent no-op (sweep of #257), then read "your package index served" (an index
+    that had served the newer one). uv records the setting in the receipt it writes
+    (measured, uv 0.12.19): the run is what uv picks, and the note names what it recorded.
+    A no-op the receipt explains nothing of still fails (the cooldown test above)."""
     machine.new_version = "0.9.0"  # PyPI says 0.9.1; uv's settings allow nothing newer
     installer = install_route.run_installer
 
@@ -2737,16 +2738,21 @@ def test_an_unchanged_version_under_uvs_own_settings_is_the_newest_they_allow(
 
     monkeypatch.setattr(install_route, "run_installer", install_under_settings)
 
-    result = runner.invoke(app, ["upgrade", "--yes"])
+    plain = _receipt(_OURS_PINNED, _TIKTOKEN)
 
+    result = runner.invoke(app, ["upgrade", "--yes"])
     added = install_route.read_receipt(tool.prefix)
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(plain, encoding="utf-8")
+    report = _one_object(runner.invoke(app, ["--json", "upgrade", "--yes"]).stdout)
+
     assert added is not None and added.holds, added
-    assert result.exit_code == 1, "the plan compared and PyPI has 0.9.1: a no-op fails"
-    assert (
-        "uv reported success but aisquare still reports 0.9.0, not 0.9.1; the receipt uv wrote "
-        f"records uv settings that can hold releases back ({', '.join(added.holds)})"
-    ) in result.stderr, result.stderr
+    recorded = ", ".join(added.holds)
+    note = f"PyPI's latest is 0.9.1; uv picks 0.9.0 here — its uv settings now record: {recorded}"
+    assert result.exit_code == 0, result.output
+    assert "✓ aisquare 0.9.0 is the release uv picks for this install" in result.stdout
+    assert f"· {note}" in result.stdout, result.stdout
     assert "package index" not in result.output and "§3.9.1" not in result.output, result.output
+    assert report["upgraded"] is True and note in report["notes"], report
 
 
 def test_check_with_a_pin_advises_the_pin(runner: CliRunner, tool: Tool, machine: Machine) -> None:

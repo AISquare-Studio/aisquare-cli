@@ -29,7 +29,6 @@ from starlette.testclient import TestClient
 from aisquare.core.paths import remote_audit_path, remote_state_path
 from aisquare.core.tmux import CHECK_SOCKET_SUFFIX, TmuxError, TmuxServer
 from aisquare.services.remote_server import (
-    HISTORY_CAP,
     NoSuchAgent,
     NoSuchProject,
     Runtime,
@@ -296,13 +295,25 @@ def test_a_younger_pane_returns_what_it_has_and_says_how_much(live_panes: Any) -
 
 
 @requires_tmux
-def test_the_cap_is_enforced_and_reported_not_silent(live_panes: Any) -> None:
-    """A short answer must never be mistakable for a short pane."""
-    asked = HISTORY_CAP + 1
-    frame = live_panes("coder-1", None, asked)
-    assert frame["history_capped"] == HISTORY_CAP
-    assert frame["history"] <= HISTORY_CAP
-    assert "history_capped" not in live_panes("coder-1", None, HISTORY_CAP)
+def test_the_cap_is_enforced_and_reported_not_silent(
+    live_panes: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A short answer must never be mistakable for a short pane.
+
+    The cap is brought below what the pane holds: at 5 000 lines over a pane of about
+    176, ``history <= cap`` held with no cap at all, so a capture that asked tmux for
+    every line it keeps (50 000) and still said ``history_capped`` passed (sweep 4 of
+    #243)."""
+    from aisquare.services import remote_server
+
+    cap = 100
+    monkeypatch.setattr(remote_server, "HISTORY_CAP", cap)
+    frame = live_panes("coder-1", None, cap + 1)
+    assert frame["history_size"] > cap + 1, "the premise: the pane holds more than was asked"
+    assert frame["history_capped"] == cap
+    assert frame["history"] == cap
+    assert len(frame["rows"]) == cap + frame["height"]
+    assert "history_capped" not in live_panes("coder-1", None, cap)
 
 
 @requires_tmux

@@ -4566,6 +4566,8 @@ def test_an_answer_is_a_write_on_the_write_pool_counted_and_named_while_it_runs(
     assert thread.startswith("asq-remote-write"), thread
     assert running == ["needs/answer for coder-1"]
     assert remote_server.remote_writes_running() == []
+    watcher = live.app.kit.lane_state["needs"]
+    _until_true(lambda: watcher.needs_lookup(card["id"]) is not None)  # this pane never moved
     monkeypatch.setattr(remote_server, "WRITE_WAITING_PER_DEVICE", 0)
     again = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
     assert (again.status_code, again.json()["error"]) == (409, "busy"), again.text
@@ -4591,6 +4593,77 @@ def test_an_answer_types_into_the_agent_is_audited_and_clears_its_card(live: Liv
         "enter=False"
     )
     _until_true(lambda: watcher.needs_scanned_at() != scanned)
+
+
+def test_an_answered_card_leaves_the_feed_at_once_as_a_dismissed_one_does(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An answer only scheduled a scan a second on, and its card stayed in the feed until it
+    ran: on every page with its buttons live, and before the push sender, whose window
+    closing meanwhile pushed the answered prompt to every phone, the one that answered it
+    too (review of #243, sweep 5). It leaves at once, and a scan begun before the answer
+    is over does not bring it back, though this fleet still shows the prompt."""
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 30.0)
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    watcher = live.app.kit.lane_state["needs"]
+    try:
+        response = live.client.post(
+            live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]}
+        )
+        assert response.status_code == 200, response.text
+        assert card["id"] not in [item.id for item in watcher.needs_items_now()]
+        assert [item["kind"] for item in live.feed()] == ["board_question"], (
+            "the feed's own scan, begun right after the answer, still shows the prompt"
+        )
+    finally:
+        watcher.stop_watching()
+
+
+def test_an_answered_prompt_still_up_comes_back_with_the_first_scan_begun_after_the_answer(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing of an answer is kept on disk, unlike a dismissal: keys that did not close the
+    prompt leave it in the feed by the scan after the answer. A scan under way as the answer
+    came read the fleet before it, and one begun at once may read the pane before the agent
+    acted on the key: neither brings the card back, nor hands it to the listeners."""
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 1.0)
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    status, tail = _asking(datetime.now(UTC))
+    fleet = Fleet(agents=[status])
+    fleet.tails["/transcripts/coder-1.jsonl"] = tail
+    started, release = threading.Event(), threading.Event()
+    holding = [False]
+
+    def projects() -> list[ProjectInfo]:
+        if holding[0]:
+            holding[0] = False
+            started.set()
+            assert release.wait(5)
+        return [PROJECT]
+
+    heard: list[list[str]] = []
+    app.kit.needs_listeners.append(lambda items, at: heard.append([item.id for item in items]))
+    watcher = RemoteNeedsWatcher(
+        app.kit, sources=lambda: replace(_sources(fleet), list_projects=projects)
+    )
+    try:
+        (card,) = watcher.scan_needs_now()
+        holding[0] = True
+        under_way = threading.Thread(target=watcher.scan_needs_now)
+        under_way.start()
+        assert started.wait(5)
+        watcher.needs_answered(card.id)
+        assert watcher.needs_items_now() == [] and watcher.needs_items_json() == []
+        release.set()
+        under_way.join(5)
+        assert watcher.needs_scan_for_request() is None  # begun at once
+        assert watcher.needs_items_now() == [] and heard[1:3] == [[], []]
+        _until_true(lambda: [item.id for item in watcher.needs_items_now()] == [card.id])
+        assert heard[-1] == [card.id], "the same card, its id unchanged"
+    finally:
+        release.set()
+        watcher.stop_watching()
 
 
 def test_an_answer_in_words_is_typed_then_entered(live: Live) -> None:

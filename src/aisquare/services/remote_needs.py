@@ -2958,6 +2958,9 @@ class RemoteNeedsWatcher:
         reads it."""
         self._forgotten: set[str] = set()
         """Ids :meth:`needs_forget` dropped that no scan has read from the dismissals file yet."""
+        self._answered: dict[str, float] = {}
+        """Ids :meth:`needs_answered` dropped, each with when (``time.monotonic()``), until a
+        scan that began :data:`NEEDS_RESCAN_AFTER_ANSWER` after it publishes."""
         self._failing: set[object] = set()
         """What has failed since it last worked, the scan itself (``"scan"``) or a listener,
         and ``_failing_projects`` the projects whose part of it has: each streak is told once
@@ -3086,9 +3089,12 @@ class RemoteNeedsWatcher:
         what it read, and :meth:`needs_forget` drops it only from the snapshot there
         is then: published, the scan put it back on every phone and before the push
         sender, which could push it. So each id dropped since is dropped from what the
-        scan publishes too, until a scan that read it from the file has published.
+        scan publishes too, until a scan that read it from the file has published. A card
+        answered (:meth:`needs_answered`) is, until a scan that began long enough after the
+        answer for the agent to have acted on it publishes, whatever that scan finds.
         """
         with self._scanning:
+            began = time.monotonic()
             now = self._clock()
             sources = self._sources()
             projects = sources.list_projects()
@@ -3106,7 +3112,13 @@ class RemoteNeedsWatcher:
             )
             scanned = [item for item in everything if item.id not in dismissed]
             with self._lock:
-                items = [item for item in scanned if item.id not in self._forgotten]
+                self._answered = {
+                    key: at
+                    for key, at in self._answered.items()
+                    if began - at < NEEDS_RESCAN_AFTER_ANSWER
+                }
+                hidden = self._forgotten.union(self._answered)
+                items = [item for item in scanned if item.id not in hidden]
                 self._forgotten.difference_update(dismissed)
                 payload = [item.needs_item_json() for item in items]
                 self._latest, self._latest_json, self._scanned_at = items, payload, now
@@ -3197,8 +3209,29 @@ class RemoteNeedsWatcher:
         """
         with self._lock:
             self._forgotten.add(item_id)
-            self._latest = [item for item in self._latest if item.id != item_id]
-            self._latest_json = [item for item in self._latest_json if item.get("id") != item_id]
+            self._needs_drop(item_id)
+
+    def needs_answered(self, item_id: str) -> None:
+        """A quick answer was typed: its card leaves the feed now, and a scan follows
+        (:meth:`needs_rescan_soon`).
+
+        It stayed in the snapshot until that scan, a second on, and a scan already under
+        way published it again: the push sender, whose window closed meanwhile, pushed
+        the answered prompt to every phone, the one that answered it too, and each page
+        kept its live buttons (review of #243, sweep 5). Unlike a dismissal nothing is
+        kept on disk: a prompt the keys did not close is back with the first scan that
+        began :data:`NEEDS_RESCAN_AFTER_ANSWER` after the answer, by when the agent has
+        acted on them.
+        """
+        with self._lock:
+            self._answered[item_id] = time.monotonic()
+            self._needs_drop(item_id)
+        self.needs_rescan_soon()
+
+    def _needs_drop(self, item_id: str) -> None:
+        """Take ``item_id`` out of the snapshot; the caller holds ``_lock``."""
+        self._latest = [item for item in self._latest if item.id != item_id]
+        self._latest_json = [item for item in self._latest_json if item.get("id") != item_id]
 
     def needs_rescan_soon(self) -> None:
         """Scan again :data:`NEEDS_RESCAN_AFTER_ANSWER` seconds after the latest quick answer,
@@ -3468,7 +3501,7 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
                 await asyncio.to_thread(kit.kit_audit, device, "needs/answer", exc.audit)
             raise
         await asyncio.to_thread(kit.kit_audit, device, "needs/answer", summary)
-        watcher.needs_rescan_soon()
+        watcher.needs_answered(item.id)
         return JSONResponse(result)
 
     return [

@@ -1005,6 +1005,53 @@ def test_what_cleared_while_the_throttle_ran_is_not_pushed(world: World) -> None
     assert len(world.transport.sent) == 2
 
 
+def test_a_card_answered_from_a_phone_before_its_window_closed_is_pushed_to_no_phone(
+    app: Any, runtime: Runtime, roster: set[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An answer only scheduled a scan a second on, and its card stayed in the feed until that
+    ran: the coalescing window that closed meanwhile pushed "coder-1 needs you" to every
+    phone, the one that answered it too, for a prompt already answered (review of #243,
+    sweep 5). The needs watcher, the routes and the sender here are the real ones; the fleet
+    still shows the prompt, as it does for the moment the agent takes to act on the key."""
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services import remote_needs
+    from aisquare.services.remote_needs import RemoteNeedsWatcher
+    from tests.test_remote_needs import FakeTmux, Fleet, _asking
+    from tests.test_remote_needs import _sources as needs_sources
+
+    now = datetime.now(UTC)
+    status, tail = _asking(now)
+    fleet = Fleet(agents=[status], tails={"/transcripts/coder-1.jsonl": tail})
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: needs_sources(fleet))
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: FakeTmux())
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 30.0)
+    client, device = unlocked(app, runtime, roster)
+    assert opt_in(client, runtime, Browser(f"{FCM}{device}")) == 201
+    runtime.set_allow_write(True)
+    clock, transport = Clock(now), Transport()
+    watcher = RemoteNeedsWatcher(app.kit, sources=lambda: needs_sources(fleet), clock=clock)
+    app.kit.lane_state["needs"] = watcher
+    sender = RemotePushSender(app.kit, transport=transport, clock=clock)
+    app.kit.needs_listeners.append(sender.push_scan_seen)
+    try:
+        sender.push_run_due()
+        (card,) = watcher.scan_needs_now()
+        clock.advance(3)
+        watcher.scan_needs_now()  # the second scan: pushable, its window closes in 5 s
+        clock.advance(4.5)
+        sender.push_run_due()
+        answer = {"id": card.id, "keys": ["1"]}
+        answered = client.post(f"{base(runtime)}/api/needs/answer", json=answer)
+        assert answered.status_code == 200, answered.text
+        clock.advance(0.5)
+        sender.push_run_due()  # the window closes
+        clock.advance(30)
+        sender.push_run_due()
+        assert transport.sent == []
+    finally:
+        watcher.stop_watching()
+
+
 @pytest.mark.parametrize("answer", [503, 429, None])
 def test_a_push_its_service_did_not_take_goes_again_to_that_device_alone(
     world: World, answer: int | None

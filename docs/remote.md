@@ -299,7 +299,9 @@ too, so the real option labels are on screen next to the buttons.
 permission; one per option, and Cancel, for a single question with one answer to
 pick from at most nine; `1` to `3` and Keep planning for a plan. A quick answer
 is checked against the agent **as it is now**: if the prompt has already gone,
-the card says "No longer needs you" and nothing is typed. Anything else (one of
+the card says "No longer needs you" and nothing is typed. An answered card leaves
+the feed at once, on every phone and before any notification goes out, and is
+back a second later if the prompt is still there. Anything else (one of
 Claude Code's own dialogs, a form an MCP server asks you to fill in, a question of
 several answers) is answered from the agent's key pad. The board keeps the words
 of only the first thing a turn asks for. A form an MCP server asks for while its

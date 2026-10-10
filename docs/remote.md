@@ -260,14 +260,18 @@ aisquare --json remote needs
 | board_result | the manager (or a coder with no manager left) reports a result |
 | interrupted | you pressed Esc on an agent, or turned its prompt down without saying what to do instead, and it waits for you |
 
-A card holds what you must read before answering: the exact command a
-permission is for, every question with its options, the plan, the text. What is
-too long for a permission's card is cut, its command at 2,000 characters and all
-it shows at 4 KiB, and the card says so and how long the whole is; a call whose
-input is over 16 KiB never reaches the phone, and its card says that instead.
-Open the agent to read such a call before you answer it. Under a permission, a
-question or a plan, the bottom of the agent's live screen is shown too, so the
-real option labels are on screen next to the buttons.
+A card holds what you must read before answering: the exact call a permission
+is for, every field of it (the command or the path first, a list or an object
+as its JSON), every question with its options, the plan, the text. What is too
+long for a card is cut, a permission's each field at 2,000 characters and all it
+shows at 4 KiB, a question's at 8 KiB and a plan at 16 KiB, and the card says so
+and how long the whole is; past 20 fields it says how many it leaves out; a call
+whose input is over 16 KiB never reaches the phone, and its card says that
+instead. A permission a sub-agent asks for shows the task the sub-agent was
+given, and says that the call it answers is the sub-agent's own, which the card
+cannot show. Open the agent to read such a call before you answer it. Under a
+permission, a question or a plan, the bottom of the agent's live screen is shown
+too, so the real option labels are on screen next to the buttons.
 
 **Quick answers** are the card's buttons: `1`, `2` and No for a tool's
 permission; one per option, and Cancel, for a single question with one answer to

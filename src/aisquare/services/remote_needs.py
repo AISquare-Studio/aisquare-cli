@@ -216,7 +216,16 @@ _DETAIL_INPUT_KEYS = (
     "new_string",
     "content",
 )
-"""The keys of a pending tool's input a permission card shows: what the tool would DO."""
+"""The keys of a pending tool's input a permission card shows first: what the tool would DO.
+The rest of the call follows them (:func:`_needs_tool_fields`)."""
+
+_DETAIL_FIELDS_MAX = 20
+"""The most fields of a pending tool's input a permission card shows: as many as the page
+draws. The rest are counted in the detail's ``omitted``."""
+_DETAIL_FIELD_NAME = re.compile(r"[A-Za-z0-9_.:@$-]{1,64}\Z")
+"""A field name a permission card shows. Field names are not cut to fit as values are, so
+one outside this (a name of 300 characters, control characters that JSON spells in six)
+could hold a detail over its cap; it is counted in ``omitted`` instead."""
 
 _DETAIL_STRING_MAX = 2_000
 _DETAIL_TOOL_MAX = 4_096
@@ -442,6 +451,11 @@ def _needs_strings(value: object) -> list[tuple[Any, Any]]:
         else:
             found.extend(_needs_strings(inner))
     return found
+
+
+def _needs_said(value: object) -> int:
+    """How many characters the strings inside ``value`` hold, all told."""
+    return sum(len(container[key]) for container, key in _needs_strings(value))
 
 
 def _needs_fit(detail: dict[str, Any], limit: int) -> dict[str, Any]:
@@ -1168,6 +1182,14 @@ def _needs_question_item(
                 QuickAnswer("Cancel", ("Escape",)),
             )
     since = tool.at or now
+    detail: dict[str, Any] = {"questions": questions}
+    said = _needs_said(detail)
+    detail = _needs_tool_detail(tool, detail, _DETAIL_TEXT_MAX)
+    if _needs_said(detail) < said:
+        # Cut to fit, an option's words read as the whole of them beside the digit that
+        # picks it, as a call's did (review of #243, round 6): the card says so.
+        detail["cut"] = {"questions": said}
+        _needs_fit(detail, _DETAIL_TEXT_MAX)
     return _needs_item(
         "question",
         tool.tool_use_id,
@@ -1175,7 +1197,7 @@ def _needs_question_item(
         agent=agent,
         reason=f"{name} asks you a question",
         excerpt=excerpt,
-        detail=_needs_tool_detail(tool, {"questions": questions}, _DETAIL_TEXT_MAX),
+        detail=detail,
         since=since,
         push_after=since,
         answers=answers,
@@ -1251,7 +1273,12 @@ def _needs_subagent_prompt(
 
 
 def _needs_tool_detail(
-    tool: PendingTool, detail: dict[str, Any], limit: int, *, shown: dict[str, Any] | None = None
+    tool: PendingTool,
+    detail: dict[str, Any],
+    limit: int,
+    *,
+    shown: dict[str, Any] | None = None,
+    whole: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     """A pending tool's ``detail`` fit to ``limit``, saying what it leaves out of the call.
 
@@ -1260,19 +1287,52 @@ def _needs_tool_detail(
     holds only the start of, by the whole one's length in characters. A command cut to
     2 000 characters, or fit to the card's 4 KiB, read as the whole of it beside the
     buttons that approve it; ``cut`` is fit with the rest, so the detail keeps to ``limit``.
+    ``whole`` is each value as the card would show it whole, the input's own by default.
     """
     if tool.input_dropped:
         detail["dropped"] = True
+    wholes = tool.input if whole is None else whole
     while True:
         _needs_fit(detail, limit)
         cut = {
-            key: len(whole)
-            for key, whole in tool.input.items()
-            if isinstance(whole, str) and shown is not None and key in shown and shown[key] != whole
+            key: len(value)
+            for key, value in wholes.items()
+            if isinstance(value, str) and shown is not None and key in shown and shown[key] != value
         }
         if cut == detail.get("cut", {}):
             return detail
         detail["cut"] = cut
+
+
+def _needs_tool_fields(raw: Mapping[str, object]) -> tuple[dict[str, object], int]:
+    """The fields of a tool call's input its permission card shows, each as the card would show
+    it whole, and how many it leaves out.
+
+    What the tool would do first (:data:`_DETAIL_INPUT_KEYS`), then the rest in the call's
+    own order, at most :data:`_DETAIL_FIELDS_MAX`, under a name the card can hold
+    (:data:`_DETAIL_FIELD_NAME`). A string, a number or a bool as it is; a list, an object
+    or a null as its JSON. Only those eleven keys' scalar values were kept, and nothing
+    said the rest were gone: an MCP merge's owner, repo and pull request showed as no
+    input at all, a ``MultiEdit`` as its file without its edits, each card reading as the
+    whole call beside the "1" that approves it (review of #243, round 6).
+    """
+    order = [key for key in _DETAIL_INPUT_KEYS if key in raw]
+    order += [key for key in raw if key not in _DETAIL_INPUT_KEYS]
+    fields: dict[str, object] = {}
+    for key in order:
+        if len(fields) >= _DETAIL_FIELDS_MAX or not _DETAIL_FIELD_NAME.match(key):
+            continue
+        value = raw[key]
+        if isinstance(value, str | bool | int) or (
+            isinstance(value, float) and math.isfinite(value)
+        ):
+            fields[key] = value
+            continue
+        try:
+            fields[key] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError, RecursionError):  # not as the call's JSON had it
+            continue
+    return fields, len(raw) - len(fields)
 
 
 def _needs_permission_item(
@@ -1285,14 +1345,15 @@ def _needs_permission_item(
     subject: str | None = None,
     since: datetime | None = None,
 ) -> NeedsItem:
-    """A permission prompt: the command or path in ``detail``, and what of it the card cannot
-    hold (:func:`_needs_tool_detail`), so nobody approves blind.
+    """A permission prompt: the call in ``detail``, and what of it the card cannot hold
+    (:func:`_needs_tool_fields`, :func:`_needs_tool_detail`), so nobody approves blind.
 
     The buttons are the dialog's own digits and Esc; the card shows the live
     pane beside them, so the options' real text is on screen. A prompt under a
     ``Task``/``Agent`` tool is a sub-agent's, whose own tool use is in its own
-    records, not this transcript. ``subject`` and ``since`` default to the
-    tool use's.
+    records, not this transcript: its detail is the task the sub-agent was given,
+    marked ``subagent``, since the call its "1" approves is not in it.
+    ``subject`` and ``since`` default to the tool use's.
     """
     if tool.name in _SUBAGENT_TOOLS:
         reason = f"{name} waits for a permission answer (in a sub-agent)"
@@ -1300,15 +1361,17 @@ def _needs_permission_item(
         reason = f"{name} waits for a permission answer to use {tool.name}"
     else:
         reason = f"{name} waits for a permission answer"
-    shown: dict[str, Any] = {}
-    for key in _DETAIL_INPUT_KEYS:
-        value = tool.input.get(key)
-        if isinstance(value, str):
-            shown[key] = _needs_cut(value, _DETAIL_STRING_MAX)
-        elif isinstance(value, bool | int) or (isinstance(value, float) and math.isfinite(value)):
-            shown[key] = value
+    whole, omitted = _needs_tool_fields(tool.input)
+    shown: dict[str, Any] = {
+        key: _needs_cut(value, _DETAIL_STRING_MAX) if isinstance(value, str) else value
+        for key, value in whole.items()
+    }
     since = since or tool.at or now
     detail: dict[str, Any] = {"tool": _needs_cut(tool.name, 200), "input": shown}
+    if omitted:
+        detail["omitted"] = omitted
+    if tool.name in _SUBAGENT_TOOLS:
+        detail["subagent"] = True
     return _needs_item(
         "permission",
         subject or tool.tool_use_id,
@@ -1316,7 +1379,7 @@ def _needs_permission_item(
         agent=agent,
         reason=reason,
         excerpt=tool.summary,
-        detail=_needs_tool_detail(tool, detail, _DETAIL_TOOL_MAX, shown=shown),
+        detail=_needs_tool_detail(tool, detail, _DETAIL_TOOL_MAX, shown=shown, whole=whole),
         since=since,
         push_after=since,
         answers=(

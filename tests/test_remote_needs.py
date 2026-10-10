@@ -319,6 +319,53 @@ def test_rule_5_a_pending_tool_with_attention_is_a_prompt_about_the_oldest_tool(
     )
 
 
+def test_a_permission_card_shows_the_call_not_eleven_keys_of_it() -> None:
+    """Only the scalar values of eleven known keys were kept, and nothing said the rest were
+    gone: an MCP merge's owner, repo and pull request showed as ``input: {}``, a
+    ``MultiEdit`` as its file without a single edit, each card reading as the whole call
+    beside the "1" that approves it (review of #243, round 6). Every field shows now, the
+    known keys first; a list or an object as its JSON."""
+    row = _row()
+    attention = _status(row, "attention", _session(row, state="attention"))
+    merge = _tool(
+        "toolu_m",
+        "mcp__github__merge_pull_request",
+        owner="acme",
+        repo="prod",
+        pull_number=42,
+        merge_method="squash",
+    )
+    assert _one(_classify(attention, _tail(merge))).detail == {
+        "tool": "mcp__github__merge_pull_request",
+        "input": {"owner": "acme", "repo": "prod", "pull_number": 42, "merge_method": "squash"},
+    }
+    edits = [{"old_string": "a", "new_string": "b"}, {"old_string": "c", "replace_all": True}]
+    multi = _tool("toolu_e", "MultiEdit", edits=edits, file_path="/etc/hosts", dry_run=None)
+    assert _one(_classify(attention, _tail(multi))).detail["input"] == {
+        "file_path": "/etc/hosts",
+        "edits": '[{"old_string":"a","new_string":"b"},{"old_string":"c","replace_all":true}]',
+        "dry_run": "null",
+    }
+
+
+def test_a_call_of_more_fields_than_a_card_holds_says_how_many_it_leaves_out() -> None:
+    """The page draws twenty fields, and a name it could not hold to the card's size is
+    none of them: each one left out is counted, so the card says so."""
+    row = _row()
+    attention = _status(row, "attention", _session(row, state="attention"))
+    fields: dict[str, Any] = {f"f{n:02}": n for n in range(25)}
+    fields["x" * 65] = "a name longer than a card holds"
+    fields["bad\nname"] = 1
+    call = _tool("toolu_w", "mcp__wide__call", **fields)
+    detail = _one(_classify(attention, _tail(call))).detail
+    shown = detail["input"]
+    assert isinstance(shown, dict) and list(shown) == [f"f{n:02}" for n in range(20)]
+    assert detail["omitted"] == 7
+    narrow: dict[str, Any] = {f"f{n:02}": n for n in range(20)}
+    whole = _tool("toolu_n", "mcp__narrow__call", **narrow)
+    assert "omitted" not in _one(_classify(attention, _tail(whole))).detail
+
+
 def test_a_pending_tool_without_attention_is_a_tool_at_work() -> None:
     row = _row()
     assert _classify(_status(row, "working", _session(row)), _tail(_tool("toolu_a"))) == []
@@ -358,6 +405,24 @@ def test_every_prompt_of_a_sub_agent_is_a_new_item() -> None:
     assert (first.since, second.since) == (NOW - timedelta(minutes=4), NOW - timedelta(seconds=30))
     assert second.push_after == second.since, "pushed, as the first was"
     assert second.reason == "coder-1 waits for a permission answer (in a sub-agent)"
+
+
+def test_a_sub_agents_prompt_card_says_the_call_it_answers_is_not_on_it() -> None:
+    """The ``Task`` is the one tool the agent's own transcript holds, so its description and
+    prompt were the card's detail, with nothing to say that the "1" beside them approves
+    whatever the sub-agent asked: a ``git push --force`` approved from a card that never
+    named it (review of #243, round 6). The detail is still the task, marked ``subagent``,
+    which the page says in words."""
+    item = _one(_classify(*_in_a_sub_agent(NOW - timedelta(seconds=30))))
+    assert item.detail == {"tool": "Task", "input": {"description": "the cache"}, "subagent": True}
+    row = _row()
+    direct = _one(
+        _classify(
+            _status(row, "attention", _session(row, state="attention")),
+            _tail(_tool("toolu_b", command="git push --force")),
+        )
+    )
+    assert "subagent" not in direct.detail
 
 
 def test_a_sub_agents_next_prompt_has_no_item_until_its_notice() -> None:
@@ -1650,7 +1715,7 @@ def test_every_detail_fits_its_cap() -> None:
         old_string="o" * 5_000,
         new_string="n\u00e9" * 3_000,
         content="z" * 3_000,
-        extra="never shown",
+        extra="shown too",
         timeout=120,
         query=3,
         pattern=float("nan"),
@@ -1659,10 +1724,16 @@ def test_every_detail_fits_its_cap() -> None:
     assert _size(tool) <= 4_096
     shown = tool["input"]
     assert isinstance(shown, dict)
-    assert "extra" not in shown and "timeout" not in shown, "only what the tool would do"
-    assert shown["query"] == 3 and "pattern" not in shown, "a NaN is not JSON a browser reads"
-    texts = [value for value in shown.values() if isinstance(value, str)]
-    assert len(texts) == 4 and all(value.endswith("…") for value in texts)
+    assert shown["extra"] == "shown too" and shown["timeout"] == 120, "the rest of the call"
+    assert shown["query"] == 3 and shown["pattern"] == "NaN", "a NaN as text a browser reads"
+    texts = [shown[key] for key in ("command", "old_string", "new_string", "content")]
+    assert all(isinstance(value, str) and value.endswith("…") for value in texts)
+    wide: dict[str, Any] = {f"{n:02}" + "k" * 62: "v" * 3_000 for n in range(30)}
+    fields = _one(_classify(attention, _tail(_tool("toolu_w", "mcp__wide__call", **wide)))).detail
+    assert _size(fields) <= 4_096, "twenty names as long as a card holds, each value cut"
+    cut, given = fields["cut"], fields["input"]
+    assert isinstance(cut, dict) and isinstance(given, dict)
+    assert (len(given), fields["omitted"], len(cut)) == (20, 10, 20)
     questions: dict[str, Any] = {
         "questions": [
             {
@@ -1677,6 +1748,9 @@ def test_every_detail_fits_its_cap() -> None:
     asking = _status(row, "working", _session(row))
     question = _one(_classify(asking, _tail(_tool("toolu_q", "AskUserQuestion", **questions))))
     assert _size(question.detail) <= 8_192
+    assert question.detail["cut"] == {"questions": 4 * (2 + 1_000) + 16 * (2 + 3_000)}, (
+        "options cut to fit beside the digits that pick them, and the card says so"
+    )
     assert question.excerpt.endswith("(+3 more)") or len(question.excerpt) == 280
     plan = _one(_classify(asking, _tail(_tool("toolu_p", "ExitPlanMode", plan="p" * 40_000))))
     assert _size(plan.detail) <= 16_384 and str(plan.detail["plan"]).endswith("…")

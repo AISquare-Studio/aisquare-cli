@@ -353,7 +353,8 @@ NOTE_TO_MAX = 200
 board keeps it with the event, and every board read and frame carries it."""
 BOARD_REF_MAX = 64
 """The longest session or task ref a board write takes (``as``, ``task``, a task's ``ref``):
-an id is 30 characters, and a prefix of one shorter."""
+a task's id is 30 characters, a session's (Claude Code's own UUID) 36, and a label or a
+prefix of either shorter."""
 NOTE_KINDS = frozenset({"note", "decision", "question", "result"})
 """The kinds a phone may post. The others (``attention``, ``limited``, ``agent_exited``,
 ``switched``…) are the fleet's own reports, which wake the manager or set an agent's state."""

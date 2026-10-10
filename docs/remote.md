@@ -364,23 +364,22 @@ when the agent shows a prompt, stop, restart and switch are refused with
 prompt and then goes on. For its first few seconds a permission prompt cannot be
 told from a tool at work, so they are refused the same way while any tool the
 agent called has no result yet, or when the end of its transcript is too long
-to read; there the Esc also stops a running tool. An
-agent at work gets one Esc first without asking, since a prompt could open just
-before the Enter, and `/exit` is typed once its pane has been still for 5
-seconds; one still busy 8 seconds after the Esc is refused with `still_busy`. A
-restart or a switch checks first what it can, so what it would refuse anyway (a
-task closed meanwhile; for a switch, an account that does not exist, the one the
-agent is on, none with room) is refused before any Esc. A card's Tell and
-Interrupt & tell refuse a dialog the same way. The menu's plain Tell types only
-into an agent waiting at its prompt: while the agent may be showing a prompt,
-even one left unanswered for hours, the message is left as a board note instead.
-Send and the key pad on the Transcript tab, which does not show the pane, type
-only into an agent still at its prompt: nothing while it may be showing a
-prompt, a tool with no result yet included, or is at work or parked on its usage
-limit (`agent_busy`); send from Live, where the pane shows what the keys would
-answer. Esc, which answers a prompt only No, goes from there as from Live, but
-not twice in a row. Its Send and keys wait until the transcript has loaded,
-which names the agent they go to.
+to read; there the Esc also stops a running tool. An agent at work gets one Esc
+first without asking, since a prompt could open just before the Enter, and
+`/exit` is typed once its pane has been still for 5 seconds; one still busy 8
+seconds after the Esc is refused with `still_busy`. A restart or a switch checks
+first what it can, so what it would refuse anyway (a task closed meanwhile; for
+a switch, an account that does not exist, the one the agent is on, none with
+room) is refused before any Esc. A card's Tell and Interrupt & tell refuse a
+dialog the same way. The menu's plain Tell types only into an agent waiting at
+its prompt: while the agent may be showing a prompt, even one left unanswered
+for hours, the message is left as a board note instead. Send and the key pad on
+the Transcript tab, which does not show the pane, type only into an agent still
+at its prompt: nothing while it may be showing a prompt, a tool with no result
+yet included, or is at work or parked on its usage limit (`agent_busy`); send
+from Live, where the pane shows what the keys would answer. Esc, which answers a
+prompt only No, goes from there as from Live, but not twice in a row. Its Send
+and keys wait until the transcript has loaded, which names the agent they go to.
 
 An agent the machine cannot read, one started without aisquare's hooks (`no
 hooks` in `fleet ls`, as `fleet spawn --bin` can start one) or whose transcript
@@ -410,11 +409,10 @@ because Claude Code exits on it. A second Esc within a second and a half of the
 last one sent asks too, again after its sheet was closed unanswered, and from
 the Transcript tab is not sent, nor is any Esc there until a second and a half
 passes with none tapped: two in a row open Claude Code's Rewind selector. The
-pad and the phone's
-keyboard never share the screen. Keys reach an agent one at a time, in the order
-they were tapped, and a key shows in the accent colour until the machine has
-answered it; one that waits behind a key that did not get through, or for longer
-than 15 seconds, is not sent, and the page says so.
+pad and the phone's keyboard never share the screen. Keys reach an agent one at
+a time, in the order they were tapped, and a key shows in the accent colour
+until the machine has answered it; one that waits behind a key that did not get
+through, or for longer than 15 seconds, is not sent, and the page says so.
 
 ---
 

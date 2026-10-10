@@ -2024,9 +2024,12 @@ function tellSheet(ctx, mode) {
   });
 }
 
+/* A note to the manager wakes it; another agent the fleet runs reads one only at its next
+ * prompt, which nothing brings one that asked and waits: a reply to it is a Tell (auto). */
 function replySheet(ctx) {
   const detail = ctx.item.detail && typeof ctx.item.detail === "object" ? ctx.item.detail : {};
   const author = typeof detail.author === "string" ? detail.author : "";
+  if (author === ctx.label && ctx.agentId && author.trim().toLowerCase() !== "manager") return tellSheet(ctx, "auto");
   openSheet("Reply on the board", (sheet) => {
     sheet.body.appendChild(el("p", "lead", isText(author) ? "A note to " + author + " on the board." : "A note on the board."));
     const text = el("textarea", "compose");

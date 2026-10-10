@@ -2418,6 +2418,96 @@ def test_a_card_is_dismissed_by_hand_and_after_a_tell_only_once_it_was_typed_in(
     assert gone["reply"] == {"sent": [{"id": "ny_00000000000000b2"}], "cards": 0}
 
 
+def test_a_reply_to_a_coder_that_asked_reaches_it_as_its_tell_does(
+    boot_report: dict[str, Any],
+) -> None:
+    """Reply filed a board note to the coder that asked, and dismissed the card. A note to a
+    coder wakes nobody (only one to the manager does): it reads it at its next prompt, and
+    nothing prompts a coder that asked and waits, so it sat idle with the card gone. A reply
+    to an agent the fleet runs is now its Tell from the menu, typed in while it waits and the
+    same note otherwise, and says which; the card goes once it was typed in, as a Tell's
+    does, or once the note answers it on the board. The manager still gets the note."""
+    replies = boot_report["crewReplies"]
+    told = {"agent": "coder-1", "project": "prj_x", "text": "Take T-4.", "mode": "auto"}
+    told.update(needs_id="ny_00000000000000c1", agent_id="agt_1")
+    assert replies["typed"] == {
+        "title": "Tell coder-1",
+        "told": [told],
+        "noted": [],
+        "toast": "Typed into coder-1",
+        "dismissed": ["ny_00000000000000c1"],
+    }
+    assert replies["filed"] == {
+        "title": "Tell coder-1",
+        "told": [told],
+        "noted": [],
+        "toast": "coder-1: it is working — filed as board note #12 to coder-1",
+        "dismissed": [],
+    }
+    assert replies["manager"] == {
+        "title": "Reply on the board",
+        "told": [],
+        "noted": [{"text": "Take T-4.", "kind": "note", "project": "prj_x", "to": "manager"}],
+        "toast": "Posted on the board",
+        "dismissed": ["ny_00000000000000c2"],
+    }
+
+
+def test_the_tell_a_reply_sends_is_typed_into_the_coder_that_asked_on_the_board(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The machine's half of a reply to a coder: the board card it builds carries the
+    coder's row, and the Tell the page sends with the card's ``needs_id`` and that row's
+    ``agent_id`` is taken as the coder's own item, and typed into its pane while it waits.
+    Nothing on the board answers it, so the card stays until the page dismisses it."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.core.store import store_session
+    from aisquare.models import FleetAgent, TeamEvent, TeamSession
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services import remote_actions
+    from tests.test_remote_needs import FakeTmux, _rooted
+
+    now = datetime.now(UTC)
+    root = tmp_path / "proj"
+    root.mkdir()
+    with store_session() as store:
+        project = store.onboard_project(_rooted(root))
+        store.upsert_session(
+            TeamSession(
+                id="ses_c", project_id=project.id, role="coder", label="coder-1",
+                started_at=now - timedelta(hours=1), last_seen_at=now, state="waiting",
+            )
+        )  # fmt: skip
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_c", project_id=project.id, label="coder-1", role="coder", pane_id="%9",
+                session_id="ses_c", cwd=project.root, created_at=now - timedelta(hours=1),
+            )
+        )  # fmt: skip
+        store.add_team_event(
+            TeamEvent(
+                id="evt_q", project_id=project.id, session_id="ses_c", kind="question",
+                text="Take T-4 or T-5?", to_role="manager", created_at=now - timedelta(minutes=1),
+            )
+        )  # fmt: skip
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    sources = remote_needs.live_needs_sources()
+    (card,) = remote_needs.scan_needs_you(sources, now=now, dismissed=())
+    assert (card.kind, card.agent, card.agent_id) == ("board_question", "coder-1", "agt_c")
+    told, _trail = remote_actions.action_tell(
+        {
+            "agent": "coder-1", "project": project.id, "text": "Take T-4.", "mode": "auto",
+            "needs_id": card.id, "agent_id": card.agent_id,
+        }
+    )  # fmt: skip
+    assert told["delivered"] is True
+    assert tmux.typed == [("paste", "%9", "Take T-4."), ("keys", "%9", "Enter")]
+    later = remote_needs.scan_needs_you(sources, now=datetime.now(UTC), dismissed=())
+    assert [item.id for item in later] == [card.id]
+
+
 def test_a_card_refused_stale_says_so_in_its_place_and_the_feed_is_read_again(
     boot_report: dict[str, Any],
 ) -> None:

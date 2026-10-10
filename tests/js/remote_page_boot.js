@@ -2735,6 +2735,41 @@ async function dismissals() {
   };
 }
 
+/* A Reply on a board question to the agent that asked, as the machine builds one for a coder
+ * the fleet runs (agent and agent_id are its row), the tell typed in and filed as a note; and
+ * a Reply to the manager. The sheet's title, what was sent, the toast and the dismissals. */
+async function crewReplies() {
+  const crew = Object.assign({}, ITEM, {
+    id: "ny_00000000000000c1", kind: "board_question", detail: { text: "Take T-4 or T-5?", author: "coder-1" }, answers: [], actions: ["reply", "dismiss"],
+  });
+  const manager = Object.assign({}, crew, { id: "ny_00000000000000c2", agent: "manager", agent_id: "agt_m", detail: { text: "Ship it?", author: "manager" } });
+  const ok = () => ({ status: 200, json: { ok: true } });
+  const strip = (body) => Object.fromEntries(Object.entries(body).filter(([key]) => key !== "request_id"));
+  const reply = async (item, told, go) => {
+    const page = bootPage("#/", signedIn({
+      "GET api/needs": () => ({ status: 200, json: { items: [item] } }), "POST api/agent/tell": told, "POST api/note": ok, "POST api/needs/dismiss": ok,
+    }));
+    await settle();
+    page.acceptSockets();
+    await settle();
+    click(buttonNamed(page.main(), "Reply…"));
+    const title = sheetTitle(page);
+    find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "Take T-4.";
+    click(buttonNamed(page.run("UI.sheet"), go));
+    await settle();
+    return {
+      title, told: page.sent("api/agent/tell").map(strip), noted: page.sent("api/note").map(strip),
+      toast: page.toast(), dismissed: page.sent("api/needs/dismiss").map((body) => body.id),
+    };
+  };
+  const answered = (delivered, how) => () => ({ status: 200, json: { label: "coder-1", delivered, how, mode: "auto", project: PROJECT } });
+  return {
+    typed: await reply(crew, answered(true, "typed into its pane (it was waiting)"), "Tell"),
+    filed: await reply(crew, answered(false, "it is working — filed as board note #12 to coder-1"), "Tell"),
+    manager: await reply(manager, answered(true, "typed into its pane (it was waiting)"), "Post"),
+  };
+}
+
 /* Answers that come after the human left the screen that asked: a note posted on the Board
  * tab, then the tab left; a transcript read, then the Live tab opened; and Back after a hash
  * typed in by hand that is no route. The toast, where the page scrolled, and where Back went. */
@@ -3483,6 +3518,7 @@ async function main() {
     writesReachTheirRoutes: await writesReachTheirRoutes(),
     wakes: await wakes(),
     dismissals: await dismissals(),
+    crewReplies: await crewReplies(),
     afterLeaving: await afterLeaving(),
     refusalSentences: await refusalSentences(),
     reasonsGiven: await reasonsGiven(),

@@ -316,6 +316,11 @@ hides a card for good, on every phone and through a restart of Remote, however
 long what it is about lasts. A tell or a reply dismisses its card itself once it
 was delivered.
 
+A reply is a board note to whoever asked, and a note to the manager wakes it.
+Any other agent the fleet runs reads a note only at its next prompt, and nothing
+prompts one that asked and waits, so a reply to one goes as Tell from its menu
+does: typed into its prompt while it waits there, otherwise left as that note.
+
 ---
 
 ## Agent actions

@@ -1237,6 +1237,51 @@ def test_doctor_names_a_full_text_index_fts5_cannot_open_instead_of_calling_the_
     assert row.fix is not None and "mv " not in row.fix, row.fix
 
 
+def test_the_copy_to_keep_of_a_store_short_of_schema_is_quoted_for_a_home_with_a_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The database row's "keep a copy (cp <db> <db>.bak)" embedded the store's path bare:
+    under an AISQUARE_HOME with a space, pasted, cp got four arguments (review of #257).
+    Quoted for this shell, it reads back as the two paths."""
+    from aisquare.services import diagnostics, install_route
+
+    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / "aisquare home"))
+    with store_session() as store:
+        store.add(_entry())
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript("DROP TABLE entry_fts_data;")
+    finally:
+        raw.close()
+    row = diagnostics._check_database()
+
+    database = _db_path()
+    keep = install_route.command_line(["cp", str(database), f"{database}.bak"])
+    assert " " in str(database) and f"keep a copy ({keep})" in str(row.fix), row.fix
+    assert install_route.split_line(keep)[1:] == [str(database), f"{database}.bak"]
+
+
+def test_the_acknowledgement_of_a_truncated_store_is_quoted_for_a_home_with_a_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The database row's "Acknowledge it with: rm <marker>" embedded the marker's path
+    bare: under an AISQUARE_HOME with a space, pasted, rm got two arguments and the marker
+    stayed (review of #257). Quoted for this shell, it reads back as the one path."""
+    from aisquare.core import paths
+    from aisquare.services import diagnostics, install_route
+
+    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / "aisquare home"))
+    with store_session() as store:
+        store.add(_entry())
+    marker = paths.truncation_marker_path()
+    marker.write_text("2026-10-10T00:00:00Z\n", encoding="utf-8")
+    row = diagnostics._check_database()
+
+    remove = install_route.command_line(["rm", str(marker)])
+    assert " " in str(marker) and f"Acknowledge it with: {remove}" in str(row.fix), row.fix
+    assert install_route.split_line(remove) == ["rm", str(marker)]
+
+
 def test_a_lock_on_the_full_text_index_is_not_taken_for_an_unreadable_one() -> None:
     """Only a read the module refuses names ``entry_fts`` unreadable. "database is
     locked" says nothing about the file, so it raises as it did before the read was

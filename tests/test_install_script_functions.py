@@ -21,14 +21,28 @@ work under whatever `/bin/sh` the developer has, and CI runs the same file with
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
+from typer.testing import CliRunner
+
+from aisquare.cli.app import app
+from aisquare.core import agents as agent_core
+from aisquare.core import paths
+from aisquare.core import snapshot as snapshot_core
+from aisquare.core.store import store_session
+from aisquare.core.workspace import project_id_for
+from aisquare.models import CheckStatus, ProjectInfo, Snapshot
+from aisquare.services import diagnostics
 
 # `install.sh` is a POSIX shell script and every test here drives it through
 # `sh`, `pty.fork` and `os.execve`. None of that exists on Windows, and `pty`
@@ -648,6 +662,9 @@ def test_dry_run_still_reports_what_it_would_do(tmp_path: Path) -> None:
     curl = stub_dir(tmp_path, "bin", "curl")
     result = sh(
         "main --dry-run --yes --no-project --offline --no-agent --no-system-deps",
+        # The suite's own home is in AISQUARE_HOME, and the banner names the home this
+        # run resolves; the default is the one asserted here.
+        env={"AISQUARE_HOME": ""},
         path=f"{cli}:{curl}:{base_path(tmp_path)}",
     )
     assert "aisquare installer" in result.stdout
@@ -1409,6 +1426,124 @@ def test_no_system_deps_expects_the_checks_it_skipped(tmp_path: Path) -> None:
         assert member.stdout.strip() == "yes", name
 
 
+def _summary_then_handoff(
+    tmp_path: Path, assignments: str, *, node: bool, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """`summary` then `handoff` after a run with a project, `node` on PATH or not."""
+    path = base_path(tmp_path)
+    if node:
+        path = f"{stub_dir(tmp_path, 'nodebin', 'node')}:{path}"
+    return sh(
+        f"DRY_RUN=0; WANT_PROJECT=1; PROJECT_DIR=/p; UNEXPECTED=0; {assignments}; "
+        'summary; echo "UNEXPECTED=$UNEXPECTED"; handoff',
+        env=env,
+        path=path,
+        no_terminal=True,
+    )
+
+
+def test_a_node_this_run_could_not_install_is_unexpected(tmp_path: Path) -> None:
+    """System deps on, and no `node` on PATH after the run: exit 2, and the summary names it.
+
+    `aisquare doctor` reads no Node at all as codebase snapshots OFF, which is
+    optional, so every row is ok, and it cannot tell that from a Node install that
+    failed. Until it learned the difference, the amber `repomix` row was what
+    turned a failed Node install into exit 2 (review of #244, finding 1). The
+    installer knows it asked for Node, so it says so itself.
+    """
+    result = _summary_then_handoff(tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER=brain", node=False)
+
+    assert result.returncode == 2, result.stdout
+    assert "UNEXPECTED=1" in result.stdout
+    assert "node — Node 22+ did not install" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("assignments", "node", "unexpected"),
+    [
+        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER=brain", True, 0),
+        # --no-system-deps asked for no Node.
+        ("WANT_SYSTEM_DEPS=0; DOCTOR_AMBER=brain", False, 0),
+        # --dry-run installs nothing, so nothing failed to install.
+        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER=brain; DRY_RUN=1", False, 0),
+        # A Node that is too old, and a packer with no Node, turn the repomix row
+        # amber: counted once, as repomix, never twice.
+        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain repomix'", True, 1),
+        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain repomix'", False, 1),
+    ],
+    ids=["node-installed", "no-system-deps", "dry-run", "node-too-old", "packer-without-node"],
+)
+def test_only_a_missing_node_that_was_asked_for_is_named(
+    tmp_path: Path, assignments: str, node: bool, unexpected: int
+) -> None:
+    result = _summary_then_handoff(tmp_path, assignments, node=node)
+
+    assert f"UNEXPECTED={unexpected}" in result.stdout, result.stdout
+    assert result.returncode == (2 if unexpected else 0)
+    assert "did not install" not in result.stdout
+
+
+def test_a_missing_node_alone_is_not_sent_to_the_doctor(tmp_path: Path) -> None:
+    """For a Node that did not install, doctor's rows are all ok: "off", no fix (review of #257).
+
+    The summary still ended "the full detail and a fix for each: aisquare doctor". The
+    pointer now follows only checks the doctor explains, and the node line, which
+    carries its own remedy, comes after it.
+    """
+    alone = _summary_then_handoff(tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER=brain", node=False)
+    both = _summary_then_handoff(
+        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain python'", node=False
+    )
+
+    assert "node — Node 22+ did not install" in alone.stdout
+    assert "aisquare doctor" not in alone.stdout, alone.stdout
+    assert alone.returncode == 2
+    pointer = both.stdout.index("the full detail and a fix for each: aisquare doctor")
+    assert both.stdout.index("  python\n") < pointer < both.stdout.index("node — Node 22+")
+    assert both.returncode == 2
+
+
+def test_exit_2_is_documented_for_a_node_that_did_not_install(tmp_path: Path) -> None:
+    """The run exits 2 for a Node it could not install, with no check amber (review of #257)."""
+    usage = sh("usage", path=base_path(tmp_path)).stdout
+    exit_codes = " ".join(usage.split("Exit codes", 1)[1].split("\n\n", 1)[0].split())
+    page = " ".join((REPO / "docs" / "install.md").read_text(encoding="utf-8").split())
+
+    assert "a fatal step failed" in exit_codes, "control: this is the exit-code section"
+    assert "or Node did not install" in exit_codes, exit_codes
+    assert "unexpectedly amber, or Node did not install" in page
+
+
+def test_the_fnm_warning_says_what_a_shell_without_its_node_still_gets(tmp_path: Path) -> None:
+    """fnm's Node is on PATH for this run only (review of #257).
+
+    The warning said doctor "reads codebase snapshots as off" in the shells without it,
+    but this run packs the project it registers, and agents keep getting that pack
+    there. What those shells cannot do is pack or refresh one.
+    """
+    home = tmp_path / "home"
+    fnm_dir = home / ".local" / "share" / "fnm"
+    alias = fnm_dir / "aliases" / "default" / "bin"
+    alias.mkdir(parents=True)
+    for script, body in ((fnm_dir / "fnm", "exit 0"), (alias / "node", "echo v22.11.0")):
+        script.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8", newline="\n")
+        script.chmod(0o755)
+    path = f"{stub_dir(tmp_path, 'bashbin', 'bash')}:{base_path(tmp_path)}"
+
+    result = sh(
+        "fetch_into_shell() { return 0; }; _install_node_via_fnm",
+        env={"HOME": str(home)},
+        path=path,
+    )
+
+    warning = " ".join(result.stderr.split())
+    assert "Node 22.11.0 via fnm" in result.stdout, result.stdout + result.stderr
+    assert "fnm env --use-on-cd" in warning, "control: this is the warning in question"
+    assert "reads codebase snapshots as off" not in warning
+    assert "cannot pack or refresh a codebase snapshot" in warning
+    assert "agents still get any pack this run makes" in warning
+
+
 def test_a_version_pin_moves_a_machine_that_is_ahead_of_it(tmp_path: Path) -> None:
     """`--version V` is documented as a PIN, so anything that is not V must move.
 
@@ -1561,6 +1696,865 @@ def test_the_short_circuit_reason_names_only_the_checks_that_are_amber(
         "the reason named gbrain while `brain` was green:\n" + result.stdout
     )
     assert "no project registered" in result.stdout, result.stdout
+
+
+def test_no_claude_code_row_is_called_a_sign_in_to_finish(tmp_path: Path) -> None:
+    """The summary mapped amber claude-code rows to "run `claude` once to authenticate
+    it". No claude-code row is fixed by a sign-in: it writes no hooks, and `agents
+    connect` makes a never-started ~/.claude itself. Round 9 took the hint from a
+    settings.json `agents connect` refuses; the fix review found the one row it kept,
+    missing hooks, no better (review of #257). Neither gets a fix here."""
+
+    def advice(detail: str) -> subprocess.CompletedProcess[str]:
+        row = {"name": "claude-code", "status": "warn", "detail": detail, "fix": ""}
+        # Assigned after the source, which starts DOCTOR_RAW empty.
+        return sh(
+            "DOCTOR_RAW=$PAYLOAD; _actionable_fix claude-code; echo",
+            env={"PAYLOAD": json.dumps([row])},
+            path=base_path(tmp_path),
+        )
+
+    refused = advice(
+        "Claude Code 2.1.294 hooks cannot be written in /h/.claude: can't read "
+        "/h/.claude/settings.json: it is not valid JSON"
+    )
+    missing = advice("Claude Code hooks are missing or outdated in: /h/.claude")
+
+    assert refused.returncode == 0 and missing.returncode == 0, refused.stderr + missing.stderr
+    assert refused.stdout.strip() == "", f"a refusal was given a fix: {refused.stdout!r}"
+    assert missing.stdout.strip() == "", f"missing hooks were given a fix: {missing.stdout!r}"
+
+
+# The rows below are the real check's, built in a temp home and printed as
+# `aisquare --json doctor` prints them, so a reworded doctor row is read here as the
+# installer will read it.
+
+
+def _claude_code_row() -> dict[str, Any]:
+    """The claude-code row as `aisquare --json doctor` prints it (cli/common.py emit_doctor)."""
+    row: dict[str, Any] = diagnostics._check_claude_code().model_dump(mode="json")
+    return row
+
+
+def _connect_claude_code(config_dir: Path) -> None:
+    config_dir.mkdir(parents=True, exist_ok=True)
+    argv = ["agents", "connect", "claude-code", "--config-dir", str(config_dir)]
+    result = CliRunner().invoke(app, argv)
+    assert result.exit_code == 0, result.output
+
+
+def _edit_settings(config_dir: Path, change: Callable[[dict[str, Any]], object]) -> None:
+    path = config_dir / "settings.json"
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    change(settings)
+    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+
+def _lose_the_stop_hook(config_dir: Path) -> None:
+    """What an install from before the Stop event left: "hooks are missing or outdated"."""
+    _edit_settings(config_dir, lambda settings: settings["hooks"].pop("Stop"))
+
+
+def _switch_hooks_off(config_dir: Path) -> None:
+    _edit_settings(config_dir, lambda settings: settings.update(disableAllHooks=True))
+
+
+def _install_the_plugin(config_dir: Path) -> None:
+    """What `/plugin install aisquare@aisquare-cli` leaves (Claude Code 2.1.292)."""
+    plugin = agent_core.CLAUDE_PLUGIN_ID
+    _edit_settings(
+        config_dir, lambda settings: settings.setdefault("enabledPlugins", {plugin: True})
+    )
+    record = {"scope": "user", "installPath": str(config_dir / "plugins"), "version": "0.8.0"}
+    (config_dir / "plugins").mkdir()
+    (config_dir / "plugins" / "installed_plugins.json").write_text(
+        json.dumps({"version": 2, "plugins": {plugin: [record]}}), encoding="utf-8"
+    )
+
+
+def _run_another_install(config_dir: Path, other: Path) -> None:
+    """Every hook names `other` in place of this install's aisquare."""
+
+    def rename(settings: dict[str, Any]) -> None:
+        for groups in settings["hooks"].values():
+            for hook in (hook for group in groups for hook in group["hooks"]):
+                hook["command"] = f"{other} hook {hook['command'].rsplit(' ', 1)[1]}"
+
+    _edit_settings(config_dir, rename)
+
+
+def _claude_code_state(
+    state: str, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Code in `home` as `state` names it, from a ~/.claude `agents connect` made."""
+    claude = home / ".claude"
+    never = {
+        "never connected": "{}",
+        "switched off, never connected": '{"disableAllHooks": true}',
+        "refused, never connected": '{"broken": \n',
+    }
+    if state in never:
+        claude.mkdir(parents=True)
+        (claude / "settings.json").write_text(never[state], encoding="utf-8")
+        return
+    _connect_claude_code(claude)
+    if state == "switched off":
+        _switch_hooks_off(claude)
+    elif state == "plugin and hooks":
+        _install_the_plugin(claude)
+    elif state == "another install":
+        other = tmp_path / "old" / "aisquare"
+        other.parent.mkdir()
+        other.write_text("#!/bin/sh\n", encoding="utf-8")
+        other.chmod(0o755)  # one that can start: one that cannot is graded gone
+        _run_another_install(claude, other)
+        monkeypatch.setattr(agent_core, "hook_binary_version", lambda argv, **_kwargs: "0.7.0")
+    elif state == "switched off beside missing hooks":
+        work = home / ".claude-work"
+        _connect_claude_code(work)
+        _lose_the_stop_hook(work)
+        _switch_hooks_off(claude)
+    elif state == "missing hooks":
+        _lose_the_stop_hook(claude)
+    else:
+        assert state == "missing hooks in two directories", state
+        work = home / ".claude-work"
+        _connect_claude_code(work)
+        _lose_the_stop_hook(work)
+        _lose_the_stop_hook(claude)
+
+
+@pytest.mark.parametrize(
+    ("state", "row_says"),
+    [
+        ("switched off", 'hooks are switched off ("disableAllHooks": true)'),
+        ("plugin and hooks", "runs aisquare two ways"),
+        ("another install", "(0.7.0) — this install is"),
+        ("switched off beside missing hooks", "; hooks are missing or outdated"),
+        ("missing hooks", "hooks are missing or outdated"),
+        ("missing hooks in two directories", "hooks are missing or outdated"),
+    ],
+    ids=[
+        "switched-off",
+        "plugin-and-hooks",
+        "another-install",
+        "switched-off-and-missing",
+        "missing",
+        "missing-in-two-dirs",
+    ],
+)
+def test_an_amber_claude_code_row_is_unexpected_and_printed_in_the_doctors_words(
+    tmp_path: Path,
+    isolated_agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    row_says: str,
+) -> None:
+    """Every amber claude-code row after a run that wired the hooks got "run `claude`
+    once to authenticate it" and exit 0, and round 9 and its sweep kept that for missing
+    hooks, which a sign-in does not fix either (review of #257). Each is unexpected now,
+    exit 2, and the summary prints the row's own detail and fix: the row this verdict
+    read, which `aisquare doctor` run inside a repository whose plugin is its route does
+    not show. So claude-code is not sent to that doctor."""
+    _claude_code_state(state, isolated_agent_home, tmp_path, monkeypatch)
+    row = _claude_code_row()
+
+    result = _summary_then_handoff(
+        tmp_path,
+        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        node=False,
+        env={"PAYLOAD": json.dumps([row])},
+    )
+
+    assert row_says in row["detail"], row
+    assert "authenticate" not in result.stdout, f"{state}: a sign-in to finish\n{result.stdout}"
+    printed = (
+        f"Not expected, and worth a look:\n  claude-code — {row['detail']}\n    → {row['fix']}\n"
+    )
+    assert printed in result.stdout, result.stdout
+    assert "the full detail and a fix for each" not in result.stdout, result.stdout
+    assert "UNEXPECTED=1" in result.stdout
+    assert result.returncode == 2
+
+
+@pytest.mark.parametrize(
+    ("text", "printed"),
+    [
+        ("Zoë", "Zoë"),
+        ("café — naïve Ångström", "café — naïve Ångström"),
+        ('a "quote", a back\\slash, a /slash', 'a "quote", a back\\slash, a /slash'),
+        ("tab\there, newline\nthere", "tab\there, newline\nthere"),
+        ("日本語 नमस्ते", "日本語 नमस्ते"),
+        ("snake \U0001f40d and \U0001d11e", "snake \U0001f40d and \U0001d11e"),
+        # A directory name must not send the terminal a sequence: controls stay escaped.
+        ("esc \x1b[31m, C1 \x9b, DEL \x7f", "esc \\u001b[31m, C1 \\u009b, DEL \\u007f"),
+        ("ends with a backslash \\", "ends with a backslash \\"),
+        ("\\u0041 is text, not an escape", "\\u0041 is text, not an escape"),
+    ],
+    ids=[
+        "latin",
+        "dash",
+        "quote-backslash-slash",
+        "tab-newline",
+        "cjk-devanagari",
+        "surrogate-pairs",
+        "controls",
+        "trailing-backslash",
+        "escaped-backslash-u",
+    ],
+)
+def test_a_doctor_string_prints_as_the_text_it_encodes(
+    tmp_path: Path, text: str, printed: str
+) -> None:
+    """`aisquare --json doctor` writes every non-ASCII character as an escape, and the
+    summary decoded only a quote, a backslash and the dash, so a home named Zoë printed
+    escaped in the very line meant to say where to look (fix review of #257). It is
+    decoded in the shell alone, exactly: no interpreter is assumed. Compared as bytes,
+    so no locale is in the way."""
+    environment = {
+        **os.environ,
+        "AISQUARE_INSTALL_LIB": "1",
+        "PATH": base_path(tmp_path),
+        "BODY": json.dumps(text)[1:-1],
+    }
+    result = subprocess.run(
+        [SH, "-c", f'. "{SCRIPT}"\n_json_text "$BODY"'],
+        capture_output=True,
+        env=environment,
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+    )
+
+    assert json.dumps(text).isascii(), "the doctor's JSON is ASCII"
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (printed + "\n").encode("utf-8"), result.stdout
+
+
+def test_a_hand_written_escape_the_doctor_never_emits_still_decodes(tmp_path: Path) -> None:
+    """`\\/`, upper-case hex, and a lone surrogate (U+FFFD), which json.dumps never writes."""
+    environment = {
+        **os.environ,
+        "AISQUARE_INSTALL_LIB": "1",
+        "PATH": base_path(tmp_path),
+        "BODY": "\\/ and \\u00E9 and \\ud83d alone",
+    }
+    result = subprocess.run(
+        [SH, "-c", f'. "{SCRIPT}"\n_json_text "$BODY"'],
+        capture_output=True,
+        env=environment,
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+    )
+
+    assert result.stdout == "/ and é and \N{REPLACEMENT CHARACTER} alone\n".encode(), result
+
+
+def test_a_home_with_a_non_ascii_name_is_printed_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The summary prints the claude-code row's detail and fix in the doctor's words, and
+    printed Zo\\u00eb for a home named Zoë (fix review of #257)."""
+    home = tmp_path / "Zoë"
+    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
+    monkeypatch.setattr("aisquare.core.claude_accounts._home", lambda: home)
+    _claude_code_state("switched off", home, tmp_path, monkeypatch)
+    row = _claude_code_row()
+
+    result = _summary_then_handoff(
+        tmp_path,
+        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        node=False,
+        env={"PAYLOAD": json.dumps([row])},
+    )
+
+    assert str(home) in row["detail"] and str(home) in row["fix"], row
+    assert f"  claude-code — {row['detail']}\n    → {row['fix']}\n" in result.stdout, result.stdout
+    assert result.returncode == 2
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "never connected",
+        "missing hooks",
+        "switched off",
+        "switched off, never connected",
+        "refused, never connected",
+        "another install",
+    ],
+    ids=[
+        "never-connected",
+        "missing",
+        "switched-off",
+        "switched-off-never-connected",
+        "refused-never-connected",
+        "another-install",
+    ],
+)
+def test_a_no_agent_run_expects_claude_code_whatever_its_row_says(
+    tmp_path: Path,
+    isolated_agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    """`--no-agent` asked for Claude Code to be left alone, and the run touches none of
+    it. Its unconnected row was told to sign in (fix review of #257), and then a
+    settings.json `agents connect` refuses, or hooks switched off, were "Not expected":
+    exit 2 on every run, never a short-circuit, and told to "connect again" (delta
+    review). No claude-code state is this run's to change, so each is expected, exit 0,
+    and named in the doctor's words as information, without its fix."""
+    _claude_code_state(state, isolated_agent_home, tmp_path, monkeypatch)
+    row = _claude_code_row()
+
+    result = _summary_then_handoff(
+        tmp_path,
+        "WANT_AGENT=0; WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        node=False,
+        env={"PAYLOAD": json.dumps([row])},
+    )
+
+    assert row["status"] == "warn" and row["fix"], row
+    assert "expected: brain claude-code" in result.stdout, result.stdout
+    told = "  claude-code — left alone by --no-agent; aisquare doctor here says:\n"
+    assert f"{told}               {row['detail']}\n" in result.stdout, result.stdout
+    assert row["fix"] not in result.stdout, result.stdout
+    assert "Not expected" not in result.stdout and "authenticate" not in result.stdout
+    assert result.returncode == 0
+
+
+def test_a_no_agent_row_whose_detail_cannot_be_read_says_where_to_read_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `{` in a path the claude-code row names splits the payload this script reads,
+    so its detail cannot be extracted, and the --no-agent line ended at "aisquare doctor
+    here says:" with nothing under it (second delta review of #257). It names where the
+    state can be read in full instead."""
+    home = tmp_path / "ho{me}"
+    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
+    monkeypatch.setattr("aisquare.core.claude_accounts._home", lambda: home)
+    _claude_code_state("refused, never connected", home, tmp_path, monkeypatch)
+    row = _claude_code_row()
+
+    result = _summary_then_handoff(
+        tmp_path,
+        "WANT_AGENT=0; WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        node=False,
+        env={"PAYLOAD": json.dumps([row])},
+    )
+
+    assert "{" in row["detail"], row
+    said = "  claude-code — left alone by --no-agent; aisquare doctor here shows its state.\n"
+    assert said in result.stdout, result.stdout
+    assert "here says:" not in result.stdout, result.stdout
+    assert result.returncode == 0
+
+
+@pytest.mark.parametrize(
+    ("machine", "want_agent", "bin_line", "tool_env", "hooks"),
+    [
+        ("fresh", 1, "uv, aisquare, asq, claude", True, True),
+        ("fresh", 0, "uv, aisquare, asq", True, False),
+        ("current", 1, None, False, True),
+        ("current", 0, None, False, False),
+        ("force", 1, "aisquare, asq", True, True),
+        ("upgrade-all", 1, None, False, True),
+    ],
+    ids=["fresh", "fresh-no-agent", "current", "current-no-agent", "force", "upgrade-all"],
+)
+def test_the_banner_lists_only_what_the_run_writes(
+    tmp_path: Path,
+    machine: str,
+    want_agent: int,
+    bin_line: str | None,
+    tool_env: bool,
+    hooks: bool,
+) -> None:
+    """Under --no-agent the plan said "register DIR as a project, and connect
+    claude-code's hooks" and listed ~/.claude/settings.json and `claude` as written;
+    init runs without --agent then and no Claude Code is installed (fix and delta
+    reviews of #257). And a current uv or aisquare-cli is left where it is, so
+    "Written to" names only what this run writes; --force (an upgrade) rewrites the CLI,
+    and --upgrade-all's `uv self update` is named in the plan (second delta review)."""
+    decided = {
+        "fresh": 'UV_VERSION=""; CLI_ACTION=install; CLAUDE_ACTION=install; CLAUDE_VERSION=""',
+        "current": (
+            "UV_VERSION=0.12.3; CLI_ACTION=current; CLI_VERSION=0.8.0; "
+            "CLAUDE_ACTION=update; CLAUDE_VERSION=2.1.294"
+        ),
+        "force": (
+            "UV_VERSION=0.12.3; FORCE=1; CLI_ACTION=upgrade; CLI_VERSION=0.8.0; "
+            "CLAUDE_ACTION=update; CLAUDE_VERSION=2.1.294"
+        ),
+        "upgrade-all": (
+            "UV_VERSION=0.12.3; UPGRADE_ALL=1; CLI_ACTION=current; CLI_VERSION=0.8.0; "
+            "CLAUDE_ACTION=update; CLAUDE_VERSION=2.1.294"
+        ),
+    }[machine]
+    result = sh(
+        f"WANT_AGENT={want_agent}; WANT_PROJECT=1; PROJECT_DIR=/p; {decided}; banner",
+        env={"AISQUARE_HOME": ""},  # the default home, not the suite's (see below)
+        path=base_path(tmp_path),
+    )
+
+    written = result.stdout.split("Written to:\n", 1)[1]
+    assert "register /p as a project" in result.stdout, result.stdout + result.stderr
+    assert "  ~/.aisquare/  " in written, written
+    if bin_line is None:
+        assert "~/.local/bin/" not in written, written
+    else:
+        assert f"  ~/.local/bin/                     {bin_line}\n" in written, written
+    assert ("~/.local/share/uv/tools/" in written) is tool_env, written
+    assert ("claude-code's hooks" in result.stdout) is hooks, result.stdout
+    assert ("~/.claude/settings.json" in written) is hooks, written
+    moves_uv = "  update   uv 0.12.3 (uv self update, --upgrade-all)\n"
+    assert (moves_uv in result.stdout) is (machine == "upgrade-all"), result.stdout
+
+
+@pytest.mark.parametrize(
+    ("packed", "summary_says", "exit_code"),
+    [
+        ("never", "  snapshot — aisquare project onboard\n", 0),
+        ("too large", "Not expected, and worth a look:\n  snapshot\n", 2),
+    ],
+    ids=["never-packed", "packed-too-large"],
+)
+def test_the_snapshot_advice_is_only_for_a_project_with_no_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, packed: str, summary_says: str, exit_code: int
+) -> None:
+    """The other row this script answers with a fixed command, by the same rule. A
+    snapshot packed too large before 0.7.0 is reused by a plain `project onboard`, so
+    "snapshot — aisquare project onboard" never turned it green: the doctor's own fix
+    became a re-pack in #82 and this one did not (review of #257)."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    project = ProjectInfo(id=project_id_for(root.resolve()), root=root.resolve(), linked_repos=[])
+    paths.ensure_home()
+    with store_session() as store:
+        store.ensure_project(project)
+    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
+    if packed == "too large":
+        snapshot_core.snapshot_dir(project.id).mkdir(parents=True)
+        verdict = Snapshot(
+            project_id=project.id,
+            generated_at=datetime.now(tz=UTC),
+            pack_path=snapshot_core.pack_path(project.id),
+            skeleton_path=snapshot_core.skeleton_path(project.id),
+            index_path=snapshot_core.index_path(project.id),
+            token_count=203_991,
+            compressed=True,
+            status="too_large",
+            full_token_count=412_318,
+            max_tokens=150_000,
+        )
+        snapshot_core.meta_path(project.id).write_text(verdict.model_dump_json(), "utf-8")
+    check = diagnostics._check_snapshot(root)
+
+    result = _summary_then_handoff(
+        tmp_path,
+        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain snapshot'",
+        node=False,
+        env={"PAYLOAD": json.dumps([check.model_dump(mode="json")])},
+    )
+
+    assert check.status is CheckStatus.warn, check
+    assert summary_says in result.stdout, result.stdout
+    assert result.returncode == exit_code
+
+
+# A repository's own plugin answers for that repository only, and the installer wires
+# Claude Code's own config. These run the real CLI as the script does, so the doctor
+# sees the folder it is started in (review of #257).
+
+
+def _the_cli(tmp_path: Path) -> Path:
+    """A directory for PATH whose `aisquare` is this tree's CLI, in a process of its own."""
+    directory = tmp_path / "cli"
+    directory.mkdir()
+    script = directory / "aisquare"
+    script.write_text(f'#!/bin/sh\nexec "{sys.executable}" -P -m aisquare "$@"\n', "utf-8")
+    script.chmod(0o755)
+    return directory
+
+
+def _repo_scope_plugin(config_dir: Path, repo: Path, scope: str) -> None:
+    """What `claude plugin install aisquare@aisquare-cli --scope <scope>`, run in `repo`,
+    leaves (Claude Code 2.1.294): the key in the repository's settings, none in the
+    config dir's, and a record in the config dir naming the scope and the repository."""
+    (repo / ".git").mkdir(parents=True)
+    (repo / "src").mkdir()
+    (repo / ".claude").mkdir()
+    name = "settings.json" if scope == "project" else "settings.local.json"
+    plugin = agent_core.CLAUDE_PLUGIN_ID
+    (repo / ".claude" / name).write_text(json.dumps({"enabledPlugins": {plugin: True}}), "utf-8")
+    record = {"scope": scope, "projectPath": str(repo), "version": "0.8.0"}
+    (config_dir / "plugins").mkdir(parents=True)
+    (config_dir / "plugins" / "installed_plugins.json").write_text(
+        json.dumps({"version": 2, "plugins": {plugin: [record]}}), encoding="utf-8"
+    )
+
+
+def _claude_code_row_from(where: Path, cli: Path, path: str, home: Path) -> dict[str, Any]:
+    """The claude-code row of the real `aisquare --json doctor`, run in `where` with `path`."""
+    doctor = subprocess.run(
+        [str(cli / "aisquare"), "--json", "doctor"],
+        cwd=where,
+        env={**os.environ, "HOME": str(home), "PATH": path},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    row: dict[str, Any] = next(c for c in json.loads(doctor.stdout) if c["name"] == "claude-code")
+    return row
+
+
+@pytest.mark.parametrize(("scope", "inside"), [("project", "."), ("local", "src")])
+def test_a_repositorys_plugin_does_not_answer_for_claude_codes_own_hooks(
+    tmp_path: Path, isolated_agent_home: Path, scope: str, inside: str
+) -> None:
+    """Run from inside a repository whose project- or local-scope plugin is the only
+    route, the doctor's claude-code row is green there, and the installer read it as
+    "claude-code hooks installed": it short-circuited, wired nothing in ~/.claude, and
+    every other repository ran without aisquare (review of #257). The installer's
+    reading of the row is now Claude Code's own config's, asked from `/`."""
+    claude = isolated_agent_home / ".claude"
+    claude.mkdir(parents=True)
+    (claude / "settings.json").write_text("{}", encoding="utf-8")
+    repo = tmp_path / "team-repo"
+    _repo_scope_plugin(claude, repo, scope)
+    cli = _the_cli(tmp_path)
+    path = f"{cli}:{base_path(tmp_path)}"
+
+    here = _claude_code_row_from(repo / inside, cli, path, isolated_agent_home)
+    amber = sh(
+        "doctor_amber; echo",
+        cwd=repo / inside,
+        env={"HOME": str(isolated_agent_home)},
+        path=path,
+    )
+
+    assert here["status"] == "ok" and f"at {scope} scope in {repo}" in here["detail"], here
+    assert "claude-code" in amber.stdout.split(), amber.stdout + amber.stderr
+
+
+def test_a_run_from_that_repository_lists_hooks_it_could_not_write(
+    tmp_path: Path, isolated_agent_home: Path
+) -> None:
+    """The closing doctor ran in the same folder. With a settings.json `agents connect`
+    refuses, `init` only notes it and the plugin read as connected there, so the run
+    listed nothing and exited 0 with no hooks wired. It is unexpected now, as anywhere
+    else. And `aisquare doctor` run there still reads green, so the summary prints the
+    row its verdict came from, Claude Code's own config's, rather than send the user to
+    a doctor that disagrees (fix review of #257)."""
+    paths.ensure_home()
+    with store_session():
+        pass
+    claude = isolated_agent_home / ".claude"
+    claude.mkdir(parents=True)
+    (claude / "settings.json").write_text('{"broken": \n', encoding="utf-8")
+    repo = tmp_path / "team-repo"
+    _repo_scope_plugin(claude, repo, "project")
+    cli = _the_cli(tmp_path)
+    path = f"{cli}:{base_path(tmp_path)}"
+
+    here = _claude_code_row_from(repo, cli, path, isolated_agent_home)
+    result = sh(
+        "DRY_RUN=0; WANT_SYSTEM_DEPS=0; PROJECT_DIR=$PWD; run_doctor >/dev/null; "
+        'summary; echo "UNEXPECTED=$UNEXPECTED"; handoff',
+        cwd=repo,
+        env={"HOME": str(isolated_agent_home)},
+        path=path,
+        no_terminal=True,
+    )
+
+    assert here["status"] == "ok", here
+    said = result.stdout.split("Not expected, and worth a look:\n", 1)[-1]
+    assert said.startswith(f"  claude-code — Claude Code hooks cannot be written in {claude}"), (
+        result.stdout
+    )
+    assert f"    → repair {claude / 'settings.json'} (it is not valid JSON" in said, result.stdout
+    assert "the full detail and a fix for each" not in result.stdout, result.stdout
+    assert "UNEXPECTED=1" in result.stdout
+    assert result.returncode == 2
+
+
+def _claude_code_doctor(status: str, detail: str) -> str:
+    """A doctor payload with an amber brain and this claude-code row."""
+    return json.dumps(
+        [
+            {"name": "brain", "status": "warn", "detail": "gbrain not found", "fix": "x"},
+            {"name": "claude-code", "status": status, "detail": detail, "fix": "y"},
+        ]
+    )
+
+
+_CONNECTED = _claude_code_doctor("ok", "Claude Code connected (all lifecycle hooks installed)")
+_MISSING = _claude_code_doctor(
+    "warn",
+    "Claude Code hooks are missing or outdated (older installs lack the "
+    "Stop/Notification/SessionEnd events) in: /h/.claude (found on disk, not connected in "
+    "this home)",
+)
+_SWITCHED_OFF = _claude_code_doctor(
+    "warn", 'Claude Code hooks are switched off ("disableAllHooks": true) in: /h/.claude'
+)
+_REFUSED = _claude_code_doctor(
+    "warn",
+    "Claude Code hooks cannot be written in /h/.claude: can't read /h/.claude/settings.json: "
+    "it is not valid JSON",
+)
+_LEFT_ALONE = (
+    "doctor: everything ok except brain claude-code "
+    "(gbrain is out of scope; Claude Code left alone (--no-agent))"
+)
+_ONLY_BRAIN = "doctor: everything ok except brain (gbrain is out of scope)"
+
+
+@pytest.mark.parametrize(
+    ("want_agent", "plugin_file", "here", "from_root", "doctor_line"),
+    [
+        (1, "settings.json", _CONNECTED, _MISSING, None),
+        (1, "settings.json", _CONNECTED, _CONNECTED, _ONLY_BRAIN),
+        # No repository plugin can load here, so this folder's row is `/`'s: not asked.
+        (1, None, _CONNECTED, _MISSING, _ONLY_BRAIN),
+        # --no-agent wires nothing, so `/` is not asked: its row would be listed here.
+        (0, "settings.json", _CONNECTED, _SWITCHED_OFF, _ONLY_BRAIN),
+        (0, "settings.json", _MISSING, _MISSING, _LEFT_ALONE),
+        (0, "settings.json", _SWITCHED_OFF, _SWITCHED_OFF, _LEFT_ALONE),
+        (0, "settings.json", _REFUSED, _REFUSED, _LEFT_ALONE),
+    ],
+    ids=[
+        "agent-root-missing",
+        "agent-root-connected",
+        "agent-no-repo-plugin-root-not-asked",
+        "no-agent-root-not-asked",
+        "no-agent-not-connected",
+        "no-agent-switched-off",
+        "no-agent-refused",
+    ],
+)
+def test_the_short_circuit_takes_claude_code_from_where_the_run_wires_it(
+    tmp_path: Path,
+    want_agent: int,
+    plugin_file: str | None,
+    here: str,
+    from_root: str,
+    doctor_line: str | None,
+) -> None:
+    """`short_circuit` printed "claude-code hooks installed" and did nothing whenever the
+    folder it ran in answered green. With the agent wanted it goes by `/`'s answer, and
+    a machine whose hooks are there still has nothing to do. `--no-agent` wires nothing:
+    it reads this folder's row, the one `aisquare doctor` here shows, and leaves every
+    claude-code state alone, so none of them stops it (fix and delta reviews of #257)."""
+    versions = tmp_path / "v"
+    versions.mkdir()
+    for name, out in (
+        ("uv", "uv 0.12.3"),
+        ("tmux", "tmux 3.7c"),
+        ("gh", "gh version 2.97.0 (x)"),
+        ("git", "git version 2.55.0"),
+        ("node", "v26.7.0"),
+        ("claude", "2.1.294 (Claude Code)"),
+        ("curl", ""),
+    ):
+        script = versions / name
+        script.write_text(f'#!/bin/sh\nprintf "%s\\n" "{out}"\nexit 0\n', encoding="utf-8")
+        script.chmod(0o755)
+    cli = stub_dir(
+        tmp_path,
+        "cli",
+        "aisquare",
+        body=(
+            'case "$1" in\n'
+            '  --version) echo "aisquare 0.6.0"; exit 0 ;;\n'
+            '  --json) if [ "$(pwd)" = / ]; then printf %s "$FROM_ROOT"; '
+            'else printf %s "$HERE"; fi; exit 0 ;;\n'
+            "esac\nexit 0"
+        ),
+    )
+    repo = tmp_path / "repo"
+    (repo / ".claude").mkdir(parents=True)
+    if plugin_file is not None:
+        # Where a project-scope plugin is enabled: why this folder's answer may differ.
+        (repo / ".claude" / plugin_file).write_text("{}", encoding="utf-8")
+
+    result = sh(
+        f"WANT_AGENT={want_agent}; WANT_PROJECT=0; OFFLINE=1; "
+        "survey >/dev/null 2>&1; resolve >/dev/null 2>&1; "
+        "if short_circuit; then echo FIRED; else echo REFUSED; fi",
+        cwd=repo,
+        env={"AISQUARE_INSTALL_VERSION": "", "HERE": here, "FROM_ROOT": from_root},
+        path=f"{versions}:{cli}:{base_path(tmp_path)}",
+    )
+
+    fired = doctor_line is not None
+    assert ("FIRED" in result.stdout) is fired, result.stdout + result.stderr
+    assert not fired or f"  {doctor_line}\n" in result.stdout, result.stdout
+    hooks = "claude-code hooks installed" if want_agent else "(--no-agent: no agent hooks)"
+    assert not fired or hooks in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    ("layout", "want_agent", "asked_from_root"),
+    [
+        ("plain", 1, False),
+        ("project-scope file here", 1, True),
+        ("local-scope file at the repository", 1, True),
+        ("local-scope file above the repository", 1, False),
+        ("the home's local file, from the repository", 1, False),
+        ("the home's local file, from a folder in no repository", 1, False),
+        ("the home's local file, from the home", 1, True),
+        ("the home's own settings", 1, False),
+        ("project-scope file here", 0, False),
+    ],
+    ids=[
+        "plain",
+        "project-here",
+        "local-at-repo",
+        "local-above-repo",
+        "home-local-from-repo",
+        "home-local-from-a-plain-folder",
+        "home-local-from-home",
+        "home-settings",
+        "no-agent",
+    ],
+)
+def test_the_doctor_runs_from_root_only_where_this_folder_could_answer_differently(
+    tmp_path: Path, layout: str, want_agent: int, asked_from_root: bool
+) -> None:
+    """`doctor_json` ran a second full doctor from `/` for its claude-code row on every
+    call, so a run started four doctors where it used to start two (review of #257,
+    round 14). This folder changes that row only through a repository's aisquare plugin,
+    enabled in .claude/settings.json of the folder a session starts in, or in
+    .claude/settings.local.json where the doctor's `_local_settings_root` reads it: the
+    first folder up that holds a .git, or this folder, never the home unless the session
+    starts there. Counted every ancestor's file, a ~/.claude/settings.local.json (one
+    saved permission) asked `/` again from every folder (round 15). The home's own
+    settings.json is Claude Code's user settings."""
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text("{}", encoding="utf-8")
+    code = home / "code"
+    repo = code / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "src" / ".claude").mkdir(parents=True)
+    files = {
+        "project-scope file here": repo / "src" / ".claude" / "settings.json",
+        "local-scope file at the repository": repo / ".claude" / "settings.local.json",
+        "local-scope file above the repository": code / ".claude" / "settings.local.json",
+        "the home's local file, from the repository": home / ".claude" / "settings.local.json",
+        "the home's local file, from a folder in no repository": (
+            home / ".claude" / "settings.local.json"
+        ),
+        "the home's local file, from the home": home / ".claude" / "settings.local.json",
+    }
+    if layout in files:
+        files[layout].parent.mkdir(parents=True, exist_ok=True)
+        files[layout].write_text("{}", encoding="utf-8")
+    (home / "notes").mkdir()
+    here = {
+        "the home's local file, from a folder in no repository": home / "notes",
+        "the home's local file, from the home": home,
+        "the home's own settings": home,
+    }.get(layout, repo / "src")
+    log = tmp_path / "doctor-runs.log"
+    row = '{"name": "claude-code", "status": "ok", "detail": "d", "fix": null}'
+    cli = stub_dir(
+        tmp_path,
+        "cli",
+        "aisquare",
+        body=f"""[ "$1" = --json ] && pwd -P >>"{log}"\nprintf '[%s]' '{row}'""",
+    )
+
+    result = sh(
+        f"WANT_AGENT={want_agent}; doctor_json >/dev/null",
+        cwd=here,
+        env={"HOME": str(home)},
+        path=f"{cli}:{base_path(tmp_path)}",
+    )
+
+    runs = log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == 0, result.stderr
+    assert runs == ([str(here.resolve()), "/"] if asked_from_root else [str(here.resolve())]), runs
+
+
+def test_a_path_in_the_plan_prints_as_written(tmp_path: Path) -> None:
+    """The plan is printed as text. As the printf format a % in a path was a conversion
+    (round 15), and under %b a \\c in one ended the banner there, and \\t or \\0NNN were
+    rewritten (review of #257, round 16). Every backslash and % prints as written, under
+    whichever sh runs the suite."""
+    project = "/tmp/we\\cird\\tx\\0101 100%sure"
+    home_dir = "/data/a\\cq%d"
+    result = sh(
+        'WANT_AGENT=1; WANT_PROJECT=1; PROJECT_DIR=$P; CLI_ACTION=install; UV_VERSION=""; '
+        'CLAUDE_ACTION=install; CLAUDE_VERSION=""; banner',
+        env={"P": project, "AISQUARE_HOME": home_dir, "CLAUDE_CONFIG_DIR": ""},
+        path=base_path(tmp_path),
+    )
+
+    assert "\\c" in project and "%" in project, "control: the path holds both"
+    assert f"  register {project} as a project\n" in result.stdout, result.stdout
+    assert "  connect  claude-code's hooks\n" in result.stdout, result.stdout
+    assert f"  {home_dir + '/':<33} config.toml" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    ("environment", "home_shown", "settings_shown"),
+    [
+        ({}, "~/.aisquare/", "~/.claude/settings.json"),
+        (
+            {"AISQUARE_HOME": "{home}/aq-home/", "CLAUDE_CONFIG_DIR": "{home}/.claude-work"},
+            "~/aq-home/",
+            "~/.claude-work/settings.json",
+        ),
+        (
+            {"AISQUARE_HOME": "/srv/aq%d", "CLAUDE_CONFIG_DIR": "/srv/claude"},
+            "/srv/aq%d/",
+            "/srv/claude/settings.json",
+        ),
+    ],
+    ids=["defaults", "redirected-in-home", "redirected-elsewhere"],
+)
+def test_the_banner_and_the_steps_name_the_paths_this_run_resolves(
+    tmp_path: Path, environment: dict[str, str], home_shown: str, settings_shown: str
+) -> None:
+    """The banner said "Written to: ~/.claude/settings.json" and "~/.aisquare/" while
+    `init --agent claude-code` wrote where CLAUDE_CONFIG_DIR and AISQUARE_HOME point, which
+    the one-liner inherits (review of #257, round 15). It names the paths aisquare
+    resolves, and a % in one prints as a %: the plan is no longer a printf format."""
+    home = tmp_path / "home"
+    home.mkdir()
+    # Both cleared first: the suite's own home is in AISQUARE_HOME.
+    env = {"HOME": str(home), "AISQUARE_HOME": "", "CLAUDE_CONFIG_DIR": ""}
+    env.update({k: v.format(home=home) for k, v in environment.items()})
+    result = sh(
+        "WANT_AGENT=1; WANT_PROJECT=0; DRY_RUN=1; CLI_ACTION=current; CLI_VERSION=0.8.0; "
+        "UV_VERSION=0.12.3; CLAUDE_ACTION=update; CLAUDE_VERSION=2.1.294; banner; init_home",
+        env=env,
+        path=base_path(tmp_path),
+    )
+
+    written = result.stdout.split("Written to:\n", 1)[1]
+    assert f"  {home_shown:<33} config.toml, context.db, projects/\n" in written, written
+    assert f"  {settings_shown:<33} MERGED" in written, written
+    assert f"  set up   {home_shown.rstrip('/')} (no project registered)\n" in result.stdout
+    assert f"==> Setting up {home_shown.rstrip('/')}\n" in result.stdout, result.stdout
+
+
+def test_a_folder_that_was_removed_may_load_a_repo_plugin(tmp_path: Path) -> None:
+    """In a folder that was removed, dash and BusyBox ash answer `pwd -P` with nothing and
+    succeed. Walked up, "" became "." for ever, and the installer hung (review of round
+    14's fixes for #257). A path that cannot be read answers "may", as a failing `pwd -P`
+    (bash) already did."""
+    gone = tmp_path / "gone"
+    gone.mkdir()
+
+    result = sh(
+        f'cd "{gone}" && rmdir "{gone}" && {{ _folder_may_load_a_repo_plugin; echo "may=$?"; }}',
+        env={"HOME": str(tmp_path)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1:] == ["may=0"], result.stdout
 
 
 def test_the_gh_advice_matches_whether_gh_exists(tmp_path: Path) -> None:

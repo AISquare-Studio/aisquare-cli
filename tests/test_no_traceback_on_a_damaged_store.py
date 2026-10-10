@@ -50,6 +50,7 @@ would have to be relaxed for every command that words it differently.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -75,8 +76,15 @@ UNINVOKED = {
     ),
     "logout": "clears credentials on the developer's own machine",
     "open": "launches a browser",
-    "uninstall": "removes the installation running the test",
-    "upgrade": "reaches the network to reinstall",
+    "uninstall": (
+        "removes the hooks, the package running the test and, with --purge, the home; "
+        "its read-only plan (`--json` without `--yes`) is invoked by "
+        "test_the_uninstall_plan_is_held_to_it"
+    ),
+    "upgrade": (
+        "on a uv tool install it asks PyPI and, with --yes, reinstalls the CLI running the "
+        "test; its read-only `--check` is invoked by test_the_upgrade_check_is_held_to_it"
+    ),
     "sync": "reaches the network",
     "project onboard": "packs a codebase snapshot; minutes, not seconds",
     "workspace onboard": "packs a codebase snapshot; minutes, not seconds",
@@ -412,3 +420,51 @@ def test_the_rule_still_ignores_the_exits_that_are_legible() -> None:
     """
     assert _escaped(SystemExit(2)) is None, "a usage error is being called a traceback"
     assert _escaped(None) is None
+
+
+def test_the_upgrade_check_is_held_to_it(
+    damaged_store: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``upgrade`` is UNINVOKED because a real run reinstalls the CLI under test, but
+    ``--check`` only reads: this interpreter's route, ``agents.json``, and PyPI — which
+    is stubbed here to be unreachable, the answer that must still be one JSON object."""
+    from aisquare.services import install_route
+
+    monkeypatch.setattr(
+        install_route,
+        "fetch_latest",
+        lambda timeout=0.0, **_asked: install_route.LatestRelease(
+            None, "could not reach PyPI (stubbed)"
+        ),
+    )
+
+    result = CliRunner().invoke(app, ["--json", "upgrade", "--check"], catch_exceptions=True)
+
+    assert _escaped(result.exception) is None, (
+        f"`aisquare --json upgrade --check` raised under {damaged_store} damage: "
+        f"{result.exception!r}"
+    )
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1, f"--json must print exactly one object, got {result.stdout!r}"
+    assert json.loads(lines[0])["latest"] is None
+
+
+def test_the_uninstall_plan_is_held_to_it(damaged_store: str) -> None:
+    """``uninstall`` is UNINVOKED because a real run removes the CLI under test, but
+    ``--json`` without ``--yes`` is its documented read-only plan, and the plan is the
+    one place it reads the store: to count the fleet's live agents. A store that
+    cannot answer is reported in the plan, never raised."""
+    result = CliRunner().invoke(app, ["--json", "uninstall"], catch_exceptions=True)
+
+    assert _escaped(result.exception) is None, (
+        f"`aisquare --json uninstall` raised under {damaged_store} damage: {result.exception!r}"
+    )
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1, f"--json must print exactly one object, got {result.stdout!r}"
+    plan = json.loads(lines[0])
+    assert plan["dry_run"] is True
+    if damaged_store == "at-open":
+        # A store that cannot be opened cannot say whether agents are live, and the
+        # plan has to say so. The at-query shape zeroes a page the plan's two small
+        # queries never reach, so there they answer — honestly — and nothing is owed.
+        assert plan["fleet_error"], "an unopenable store must be reported in the plan"

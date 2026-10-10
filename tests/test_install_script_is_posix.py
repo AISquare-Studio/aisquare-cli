@@ -36,6 +36,9 @@ SCRIPT = REPO / "install.sh"
 CELL = REPO / "tests/install/cell.sh"
 CELL_NONROOT = REPO / "tests/install/cell-nonroot.sh"
 MATRIX = REPO / "tests/install/matrix.sh"
+#: The Claude Code plugin's hook launcher: Claude Code runs it with `sh`, which is
+#: dash on Debian and Ubuntu, so it is held to the same rules.
+PLUGIN_HOOK = REPO / "plugins/claude-code/scripts/aisquare-hook"
 
 #: Every shell file this project ships that has to run under `dash` and BusyBox
 #: `ash`, not just bash.
@@ -45,7 +48,7 @@ MATRIX = REPO / "tests/install/matrix.sh"
 #: the tree was checked by nothing at all. Anything added to tests/install/ must
 #: be added here; the test below asserts that, so the next omission fails
 #: instead of going unnoticed.
-POSIX_SCRIPTS = (SCRIPT, CELL, CELL_NONROOT, MATRIX)
+POSIX_SCRIPTS = (SCRIPT, CELL, CELL_NONROOT, MATRIX, PLUGIN_HOOK)
 
 
 @pytest.fixture(scope="module")

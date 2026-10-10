@@ -209,6 +209,7 @@ class HelpScreen(ModalScreen[None]):
             ("t", "themes (applied live, autosaved)"),
             ("r", "refresh now"),
             ("a", "show or hide the captured directories (never added)"),
+            ("+  w", "onboard a project · back to the Welcome page"),
             ("F1", "command palette"),
             ("q", "quit — from the sidebar; inside a pane every key goes to the agent"),
         ):
@@ -328,6 +329,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         Binding("t", "pick_theme", "theme"),
         Binding("r", "refresh_now", "refresh"),
         Binding("a", "toggle_captured", "captured", show=False),
+        Binding("plus", "add_project", "add project", show=False, key_display="+"),
+        Binding("w", "welcome", "welcome", show=False),
         Binding("question_mark", "help", "help", key_display="?"),
     ]
     SIDEBAR_ACTIONS: ClassVar[frozenset[str]] = frozenset(
@@ -339,6 +342,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             "command_palette",
             "change_theme",
             "toggle_captured",
+            "add_project",
+            "welcome",
         }
     )
     """Actions that are live only while focus is in the sidebar (§4.3)."""
@@ -394,7 +399,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 # The Onboard view is built on the first `+` (on_add_project): its
                 # DirectoryTree scans the home directory and keeps a loader worker
                 # alive for its whole life — not a cost to pay at every start-up.
-                yield DoctorView(id="doctor")
+                yield DoctorView(id="doctor", machine=True)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -657,6 +662,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         header that ages until the next read succeeds, while the sidebar carries
         the reason on the project's own card.
         """
+        for welcome in self.query(WelcomeView):
+            welcome.note_frame()  # shown or not: what step 3's refusals were about still stands
         for agent_view in self.query(AgentView):
             fresh = snapshot.agent(agent_view.status.agent.project_id, agent_view.status.agent.id)
             if fresh is not None and fresh != agent_view.status:
@@ -1049,14 +1056,89 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.run_doctor()
 
     async def on_project_onboarded(self, event: ProjectOnboarded) -> None:
+        # Asked BEFORE the switch below, which hides whatever the content pane had
+        # focused: only a keyboard still on the Onboard view (or nowhere) is handed on.
+        focused = self.focused
+        onboarding = focused is None or any(isinstance(n, OnboardView) for n in focused.ancestors)
         self.refresh_data()
-        self.post_message(ProjectSelected(event.project_id))
+        await self.on_project_selected(ProjectSelected(event.project_id))
+        if onboarding:
+            self.call_after_refresh(self._hand_on_after_onboarding, f"project-{event.project_id}")
+
+    def _hand_on_after_onboarding(self, view_id: str) -> None:
+        """The Onboard view kept the keyboard on its path box, hidden now: give it the next step.
+
+        Keys typed there went nowhere anyone could see, and the footer had nothing
+        to offer. The project's *Start manager* takes it, else the sidebar. Only
+        asked when the keyboard was on the Onboard view as onboarding finished; one
+        the user has put on a visible widget since then is left where it is.
+        """
+        chain = self.screen.focus_chain
+        if self.focused is not None and self.focused in chain:
+            return
+        try:
+            view = self.content.get_child_by_id(view_id)
+        except NoMatches:
+            view = None
+        start = (
+            next((w for w in view.query("#start-manager") if w in chain), None) if view else None
+        )
+        (start or self.sidebar).focus()
 
     def on_onboard_failed(self, event: OnboardFailed) -> None:
         # markup=False: the message carries a path the user chose, and a toast
         # parses markup by default — ``/home/me/[archive]/repo`` would reach the
         # screen as ``/home/me//repo`` and name a directory that did not fail.
         self.notify(f"{event.path}: {event.reason}", severity="error", timeout=8, markup=False)
+
+    def action_add_project(self) -> None:
+        """``+`` from the sidebar: what a click on the ``+`` beside Fleet does."""
+        self.post_message(AddProject())
+
+    async def action_welcome(self) -> None:
+        """``w`` from the sidebar: back to the Welcome page, with nothing selected."""
+        await self._show("welcome")
+        self.sidebar.select(None)
+        self._remember_selection(None)
+
+    def on_welcome_view_progress(self, event: WelcomeView.Progress) -> None:
+        """Welcome added a project or started an agent: the sidebar shows it now."""
+        self.refresh_data()
+
+    def on_welcome_view_connected(self, event: WelcomeView.Connected) -> None:
+        """Welcome ran the doctor's Connect: the checks run again, as after a Doctor-view fix."""
+        self.run_doctor()
+
+    def on_welcome_view_chosen(self, event: WelcomeView.Chosen) -> None:
+        """While Welcome is shown, the Doctor answers for the project its step 2 answers for."""
+        if self.content.current == "welcome":
+            self._set_doctor_scope(event.project_id)
+
+    hand_off: tuple[str, ...] | None = None
+    """The ``aisquare`` command this terminal goes to when asq quits (``run_ui``)."""
+
+    def on_doctor_view_hand_off(self, event: DoctorView.HandOff) -> None:
+        """Update or Uninstall in the Doctor view: quit, and let ``run_ui`` hand over.
+
+        Never under work that is still writing, which quitting would cut off (asyncio.run
+        then joins its thread with the terminal blank, and the hand-over can replace the
+        install under it): any worker :func:`_writing_workers` names, in any view, shown
+        or not (rounds 15 and 16 of #257).
+        """
+        running = self._work_running()
+        if running is not None:
+            self.notify(f"{running} is still running — try again when it ends", severity="warning")
+            return
+        self.hand_off = event.args
+        self.exit()
+
+    def _work_running(self) -> str | None:
+        """What writing work still runs, in the toast's words, else ``None``."""
+        writing = _writing_workers()
+        return next(
+            (writing[w.name] for w in self.workers if w.name in writing and not w.is_finished),
+            None,
+        )
 
     def on_doctor_refreshed(self, event: DoctorRefreshed) -> None:
         """A view re-ran the doctor after a one-click fix — follow it.
@@ -1093,9 +1175,57 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return store.list_projects()
 
 
+def _writing_workers() -> dict[str, str]:
+    """Every worker that writes, by name, with what it is in a toast's words.
+
+    One rule on the app's worker manager, where views kept a flag each (a bool, a set, a
+    property) and the next writer was missed: the Project tab's Start manager, an agent's
+    Stop and Restart, and Explainability's writes all quit under an Update (round 16 of
+    #257). The views' own name constants, imported here so the import block stays as it
+    is. The AISquare sign-in is left out: it waits for the browser until a token arrives,
+    a quit cancels that wait (``AccountsView.on_unmount``) and nothing is stored past a
+    cancel, and counted it held Update for the device code's lifetime.
+    """
+    from aisquare.cli.ui.views import (
+        accounts,
+        agent,
+        doctor,
+        explainability,
+        onboard,
+        project,
+        welcome,
+    )
+
+    return {
+        doctor.FIX_WORKER: "a fix",
+        onboard.ONBOARD_WORKER: "a folder's setup",
+        welcome.worker_name("onboard"): "a folder's setup",
+        welcome.worker_name("connect"): "Connect",
+        welcome.worker_name("manager"): "a manager start",
+        welcome.worker_name("coders"): "the coders' start",
+        project.SPAWN_WORKER: "a manager start",
+        agent.STOP_WORKER: "an agent's stop",
+        agent.RESTART_WORKER: "an agent's restart",
+        explainability.SAVE_WORKER: "Explainability's setup",
+        explainability.REGISTER_WORKER: "Explainability's registration",
+        explainability.SHIP_WORKER: "Explainability's ship",
+        accounts.SIGN_OUT_WORKER: "an AISquare sign-out",
+        accounts.COMPLETE_WORKER: "a Claude sign-in",
+        accounts.REMOVE_WORKER: "an account's removal",
+        accounts.ARRANGE_WORKER: "an account change",
+    }
+
+
 def run_ui(**options: Any) -> None:
     """Run the fleet UI until the user quits; then say what its last saves could not land."""
     app = FleetApp(**options)
     app.run()
     for line in app.unsaved:
         stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
+    # The terminal is ours again: give it to the command. Read with getattr so an
+    # app still needs only `run()` and `unsaved` to be run here.
+    hand_off = getattr(app, "hand_off", None)
+    if hand_off is not None:
+        from aisquare.core import selfcli
+
+        selfcli.exec_self(hand_off)

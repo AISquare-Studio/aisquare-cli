@@ -41,6 +41,7 @@ from pathlib import Path
 
 import pytest
 
+from aisquare.core import snapshot as snapshot_core
 from aisquare.core.version import DISTRIBUTION
 from aisquare.models import CheckStatus, DoctorCheck
 from aisquare.services import diagnostics
@@ -304,6 +305,9 @@ def test_tiktoken_hint_names_the_pipx_environment_that_actually_exists(
 ) -> None:
     """`pipx inject` takes an ENVIRONMENT name, and ours is the distribution."""
     monkeypatch.setattr(diagnostics, "_has_module", lambda _name: False)
+    # The hint is printed only where snapshots can run; without a Node the row is
+    # off and has none (tests/test_snapshot_optional_without_node.py).
+    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     check = diagnostics._check_tiktoken()
     assert check.status is CheckStatus.warn
     assert f"pipx inject {DISTRIBUTION} tiktoken" in (check.fix or "")

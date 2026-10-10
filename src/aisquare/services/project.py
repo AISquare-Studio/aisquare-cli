@@ -31,6 +31,7 @@ from aisquare.models import (
     PruneCandidate,
     Snapshot,
 )
+from aisquare.services import install_route
 
 # Files at a project root that imply a fact worth seeding during onboarding.
 _ECOSYSTEM_MARKERS: tuple[tuple[str, str], ...] = (
@@ -120,12 +121,13 @@ class ProjectBusyError(Exception):
         # row on a server it cannot reach, and an operator following that advice
         # after a hand-run `tmux kill-server` reaped nothing, twice. The scoped
         # `fleet shutdown` is the command that can, on their word.
+        # Its folder's name may hold a space or a `$`: quoted for this shell (review of #257).
         scope = project.codename or display_name(project)
+        shutdown = install_route.command_line(["aisquare", "fleet", "shutdown", "--project", scope])
         super().__init__(
             f"{display_name(project)} has {len(agents)} live fleet agent(s): {labels} — "
             "stop them first (aisquare fleet stop <label>), or run aisquare fleet reap if "
-            f"they are already gone; if their tmux server is gone too, aisquare fleet "
-            f"shutdown --project {scope} records them"
+            f"they are already gone; if their tmux server is gone too, {shutdown} records them"
         )
         self.project = project
         self.agents = agents
@@ -376,7 +378,8 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
                 seeded.append(
                     store.add(new_entry(fact, "project", project.id, ["onboarding"], "onboard"))
                 )
-    return OnboardReport(seeded=seeded, snapshot=_ensure_snapshot(project, refresh=refresh))
+    snapshot, note = _ensure_snapshot(project, refresh=refresh)
+    return OnboardReport(seeded=seeded, snapshot=snapshot, snapshot_note=note)
 
 
 def snapshot_settings() -> SnapshotSettings:
@@ -387,13 +390,21 @@ def snapshot_settings() -> SnapshotSettings:
         return SnapshotSettings()
 
 
-def _ensure_snapshot(project: ProjectInfo, *, refresh: bool) -> Snapshot | None:
-    """Generate (or reuse) the codebase snapshot; ``None`` if repomix is unavailable."""
+def _ensure_snapshot(project: ProjectInfo, *, refresh: bool) -> tuple[Snapshot | None, str | None]:
+    """Generate (or reuse) the codebase snapshot: ``(snapshot, why nothing was packed)``.
+
+    The second half is ``None`` when a pack was made or reused. Otherwise it is the
+    sentence :mod:`snapshot_core` words: the optional feature being off (no Node, or
+    a Node with no packer) is not a pack that failed, and a pack that failed says
+    why in the packer's own words. A failed ``--refresh`` rewrites nothing, so a
+    last pack agents still get is returned, with a sentence that says so.
+    """
     if snapshot_core.exists(project.id) and not refresh:
-        return snapshot_core.load(project.id)
+        return snapshot_core.load(project.id), None
     settings = snapshot_settings()
+    failure: str | None = None
     try:
-        return snapshot_core.generate(
+        packed = snapshot_core.generate(
             project.id,
             project.root,
             head=snapshot_core.head_sha(project.root),
@@ -401,6 +412,15 @@ def _ensure_snapshot(project: ProjectInfo, *, refresh: bool) -> Snapshot | None:
             ignore=settings.ignore,
         )
     except snapshot_core.RepomixUnavailableError:
-        return None
-    except (subprocess.SubprocessError, OSError):
-        return None
+        pass
+    except (subprocess.SubprocessError, OSError) as exc:
+        failure = snapshot_core.failure_reason(exc)
+    else:
+        return packed, None
+    try:
+        kept = snapshot_core.load(project.id)
+    except (OSError, ValueError):  # an unreadable snapshot.json serves no agent either
+        kept = None
+    if kept is not None and kept.status in ("ready", "skeleton_only"):
+        return kept, snapshot_core.not_refreshed_detail(kept, failure)
+    return None, snapshot_core.skipped_detail(failure)

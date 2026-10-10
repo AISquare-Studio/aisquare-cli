@@ -3,6 +3,24 @@
 Thanks for your interest in aisquare! This is an early-stage, open-source
 project and contributions are welcome.
 
+## Where to start
+
+- **Pick up a
+  [good first issue](https://github.com/AISquare-Studio/aisquare-cli/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22).**
+  Each one names the files and lines involved and says what done looks like.
+  Say on the issue that you are taking it, so two people do not build the
+  same thing.
+- **Ask when unsure.**
+  [Discussions, Q&A](https://github.com/AISquare-Studio/aisquare-cli/discussions/categories/q-a)
+  is the place for "where does this live?" and "would you take a PR that…?".
+- **Find your way around.** `src/aisquare/cli/` parses the command line and
+  holds the full-screen UI (`src/aisquare/cli/ui/`), `src/aisquare/services/`
+  does the work, and `src/aisquare/core/` is shared plumbing. `tests/` is
+  hermetic: it never touches your real `~/.aisquare`. User docs live under
+  `docs/`; the README is the front page.
+- **Keep a PR to one change**, with a test that fails without it. The rest of
+  this page says how this suite likes its tests.
+
 ## Development setup
 
 Requires Python 3.11+.
@@ -12,6 +30,10 @@ python3 -m venv .venv
 source .venv/bin/activate
 make install          # editable install + dev tools (ruff, mypy, pytest)
 ```
+
+`make install` pins ruff and mypy to the versions CI runs, through
+`ci/constraints.txt`, so lint and the type check agree with CI. A venv built
+another way takes the same file: `uv pip install -c ci/constraints.txt -e ".[dev]"`.
 
 > **Do not install the explainability extra into this checkout.**
 > `pip install 'aisquare-cli[explainability]'` puts a second `aisquare` package
@@ -92,10 +114,10 @@ signatures already exist. The flow is:
 2. **Render it** in the matching `src/aisquare/cli/<group>.py` command: parse,
    call the service, print (honouring `--json` via `get_state().json_output`).
    Shared rendering helpers live in `cli/common.py`.
-3. **Move the command off the stub skip-list** in `tests/test_stubs.py`
-   (`IMPLEMENTED`) and add real tests for the new behaviour.
+3. **Add the command to `IMPLEMENTED`** in `tests/test_stubs.py` (the stub
+   test's skip-list) in the same commit, and add real tests for the new behaviour.
 
-See the README's [Architecture](README.md#architecture) section for the full
+See [Architecture](docs/reference.md#architecture) in the reference for the full
 layout and the thin-CLI / service / core split.
 
 ## Writing a guard that still guards
@@ -450,9 +472,15 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   real home in a test or example.
 - Keep CLI modules thin and services free of CLI concerns.
 - New shared plumbing goes in `core/`; new domain shapes go in `models.py`.
+- A change that makes the CLI keep something new on disk, change Claude Code's
+  settings, or reach the network updates SECURITY.md's "What the CLI stores,
+  changes and sends" (its Stored, Changed or Sent list) in the same PR.
 
 ## Reporting bugs / proposing features
 
-Open an issue describing what you expected and what happened. For larger
+A security problem goes privately, as SECURITY.md says, never in an issue.
+Questions, and ideas that are not yet a feature, go to Discussions.
+
+For a bug, open an issue describing what you expected and what happened. For larger
 changes, it's worth opening an issue to discuss the approach before writing
 code.

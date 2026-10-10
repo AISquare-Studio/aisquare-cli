@@ -125,12 +125,12 @@ def describe(account: ClaudeAccount) -> ClaudeAccountStatus:
 
 
 def _hooks_installed(account: ClaudeAccount) -> bool:
-    from aisquare.core import agents as agent_core
+    """Whether aisquare runs in this slot: the one shared answer, which never raises.
 
-    try:
-        return agent_core.hooks_installed(AGENT, account.config_dir)
-    except Exception:  # a settings.json we cannot parse is "not installed", not a crash
-        return False
+    So a slot reads as the doctor's row and ``agents status`` read it, and a
+    settings.json that cannot be read is "not installed" rather than a crash.
+    """
+    return agents_service.claude_code_connected(account.config_dir)
 
 
 def overview() -> AccountsOverview:
@@ -361,7 +361,7 @@ def slot_of(config_dir: str | Path) -> int | None:
     try:
         if Path(config_dir).resolve() == core.default_config_dir().resolve():
             return core.DEFAULT_SLOT
-    except OSError:
+    except (OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11 and 3.12
         return None
     return None
 
@@ -1220,7 +1220,11 @@ def carry_environment(
     for var in CARRIED_VARS:
         value = view.get(var, "").strip()
         if value:
-            to_set[var] = str((base / Path(value).expanduser()).absolute())
+            path = paths.expand_user(Path(value))
+            # A `~olduser/…` naming a home this machine does not have travels as written,
+            # as this shell holds it: expanding it raised, and joined to the cwd it named a
+            # directory there for the window's claude to make (review of #257).
+            to_set[var] = value if paths.names_no_home(path) else str((base / path).absolute())
     to_unset = [var for var in CARRIED_VARS if var not in to_set]
     argv = list(command)
     if to_unset:

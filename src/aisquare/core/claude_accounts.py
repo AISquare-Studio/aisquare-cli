@@ -120,7 +120,7 @@ def default_config_dir() -> Path:
     """
     env = plain_environment().get(CONFIG_DIR_VAR, "").strip()
     if env:
-        return Path(env).expanduser()
+        return paths.expand_user(Path(env))  # a `~olduser/…` reads as written (sweep of #257)
     return home_config_dir()
 
 
@@ -143,16 +143,22 @@ def _managed(slot: int) -> ClaudeAccount:
 
 
 def managed_accounts() -> list[ClaudeAccount]:
-    """Every slot the CLI created, lowest first. Removed slots (renamed) are not slots."""
+    """Every slot the CLI created, lowest first. Removed slots (renamed) are not slots.
+
+    Asked with ``os.path.isdir`` and ``os.path.isfile``, which never raise: ``Path``'s
+    raised PermissionError on 3.11 to 3.13 for a slot linked into a folder this user
+    cannot enter, or one it may list but not enter, and every reader of the slots ended
+    in a traceback (uninstall's plan among them). Such a slot is not one of these.
+    """
     root = accounts_root()
-    if not root.is_dir():
+    if not os.path.isdir(root):
         return []
     found: list[ClaudeAccount] = []
     for child in root.iterdir():
-        if not child.is_dir() or not _SLOT_DIR.match(child.name):
+        if not _SLOT_DIR.match(child.name) or not os.path.isdir(child):
             continue
         slot = int(child.name)
-        if slot < FIRST_MANAGED_SLOT or not (child / MARKER).is_file():
+        if slot < FIRST_MANAGED_SLOT or not os.path.isfile(child / MARKER):
             continue
         found.append(_managed(slot))
     return sorted(found, key=lambda account: account.slot)
@@ -172,7 +178,7 @@ def managed_slot(config_dir: Path | str) -> int | None:
     path = Path(config_dir)
     try:
         relative = path.resolve().relative_to(accounts_root().resolve())
-    except (ValueError, OSError):
+    except (ValueError, OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11/3.12
         return None
     parts = relative.parts
     if len(parts) != 1 or not _SLOT_DIR.match(parts[0]):
@@ -649,7 +655,7 @@ def plain_environment(environ: Mapping[str, str] | None = None) -> dict[str, str
     source = os.environ if environ is None else environ
     own = {var: source[var] for var in LAUNCH_VARS if source.get(var, "").strip()}
     config_dir = own.get(CONFIG_DIR_VAR)
-    if config_dir is None or managed_slot(Path(config_dir.strip()).expanduser()) is None:
+    if config_dir is None or managed_slot(paths.expand_user(Path(config_dir.strip()))) is None:
         return own
     return {var: source[kept] for var, kept in PLAIN_VARS.items() if source.get(kept, "").strip()}
 

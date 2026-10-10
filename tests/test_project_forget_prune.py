@@ -1030,3 +1030,31 @@ def test_older_than_without_captured_only_is_refused(
     assert refused.exit_code == 1 and "applies only with --captured-only" in refused.output
     assert as_json.exit_code == 1 and _json(as_json.stdout)["error"] == "usage"
     assert gone in _listed(runner), "nothing was dropped"
+
+
+@pytest.mark.parametrize("folder", ["My Repo", "repo-$HOME"], ids=["space", "dollar"])
+def test_a_busy_project_names_the_shutdown_to_run_quoted_for_its_folder(
+    tmp_path: Path, folder: str
+) -> None:
+    """With no codename yet, a busy project's refusal named `fleet shutdown --project` with
+    its folder's name bare: a space split it, and a `$` was expanded by the shell when
+    pasted (review of #257). Quoted for this shell, it reads back as that one name."""
+    from aisquare.services import install_route
+    from aisquare.services import project as project_service
+
+    project = ProjectInfo(id="p-1", root=tmp_path / folder)
+    agent = FleetAgent(
+        id="a-1",
+        project_id=project.id,
+        label="coder-a",
+        role="coder",
+        pane_id="%1",
+        cwd=project.root,
+        created_at=datetime.now(UTC),
+    )
+    said = str(project_service.ProjectBusyError(project, [agent]))
+    printed = said.split("gone too, ", 1)[1].removesuffix(" records them")
+
+    argv = ["aisquare", "fleet", "shutdown", "--project", folder]
+    assert printed == install_route.command_line(argv), said
+    assert install_route.split_line(printed) == argv, said

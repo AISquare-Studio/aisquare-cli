@@ -509,29 +509,60 @@ def _hook_sites(agent: AgentInfo) -> str:
     """One cell summarising where an agent's hooks live and whether they're healthy.
 
     Parallel installs each own a config dir, so a bare yes/no would hide a dir
-    whose hooks went missing — name the broken ones explicitly.
+    whose hooks went missing — name the broken ones explicitly. A dir whose
+    settings switch every hook off is named as that, and so is one whose files
+    `agents connect` refuses, with connect's reason as the doctor gives it (the file
+    and why, or that the directory does not exist): "missing" pointed at Connect,
+    which cannot change either, and the directory alone named no file (review of
+    #257).
     """
     if not agent.sites:
         return "—"
-    broken = [site.config_dir for site in agent.sites if not site.hooks_installed]
-    if not broken:
+    off = [site.config_dir for site in agent.sites if site.hooks_off is not None]
+    down = [site for site in agent.sites if not site.hooks_installed and site.hooks_off is None]
+    missing = [site.config_dir for site in down if site.refused is None]
+    if not off and not down:
         if len(agent.sites) == 1:
             return str(agent.sites[0].config_dir)
         return f"{len(agent.sites)} dirs, all ok"
-    listed = ", ".join(str(path) for path in broken)
-    return f"{len(agent.sites) - len(broken)}/{len(agent.sites)} ok — missing in {listed}"
+    clauses = [
+        f"{what} in {', '.join(str(path) for path in dirs)}"
+        for what, dirs in (("missing", missing), ("switched off", off))
+        if dirs
+    ]
+    clauses.extend(
+        f"cannot be written in {site.config_dir}: {site.refused}"
+        + (f" — {'; or '.join(site.remedies)}" if site.remedies else "")
+        for site in down
+        if site.refused is not None
+    )
+    ok = len(agent.sites) - len(off) - len(down)
+    return f"{ok}/{len(agent.sites)} ok — {'; '.join(clauses)}"
 
 
 def emit_connected(connection: AgentConnection) -> None:
-    """Confirm an agent connection: hook install + context ingested."""
+    """Confirm an agent connection: hook install + context ingested.
+
+    Hooks installed where the settings switch every hook off are not a connection:
+    Claude Code runs none of them until that key goes, so the line says so and
+    names the file (review of #257).
+    """
     if get_state().json_output:
         typer.echo(connection.model_dump_json())
         return
-    hooks = "hooks installed" if connection.hooks_installed else "no hooks for this agent"
+    # Always installed: `connect` refuses rather than return a connection without hooks.
     noun = "entry" if connection.imported == 1 else "entries"
-    stdout_console().print(
-        f"✓ connected {connection.name} — {hooks}; imported {connection.imported} {noun}"
-    )
+    imported = f"imported {connection.imported} {noun}"
+    if connection.hooks_off is not None:
+        stdout_console().print(
+            f"hooks installed for {connection.name}, but switched off — {imported}"
+        )
+        stderr_console().print(
+            f'note: {connection.hooks_off} sets "disableAllHooks": true, so Claude Code runs '
+            "none of its hooks, aisquare's included — remove that key to turn them on"
+        )
+        return
+    stdout_console().print(f"✓ connected {connection.name} — hooks installed; {imported}")
 
 
 def emit_onboard(report: OnboardReport) -> None:
@@ -541,21 +572,27 @@ def emit_onboard(report: OnboardReport) -> None:
         return
     console = stdout_console()
     snapshot = report.snapshot
-    if snapshot is not None and snapshot.status == "ready":
+    if report.snapshot_note is not None:
+        # Nothing packed: off, a pack that failed and why, or a --refresh that kept
+        # the last pack -- the service's sentence, which `init` prints too.
+        console.print(f"snapshot: {report.snapshot_note}")
+    elif snapshot is not None and snapshot.status == "ready":
         line = f"✓ snapshot: {snapshot.file_count} files, {snapshot.token_count} tokens"
         if snapshot.skeleton_token_count:
             line += f" (skeleton {snapshot.skeleton_token_count} tokens)"
         console.print(line)
     elif snapshot is not None and snapshot.status == "skeleton_only":
         console.print(f"snapshot: {snapshot_core.skeleton_only_detail(snapshot)}")
-    elif snapshot is not None and snapshot.status == "too_large":
+    elif snapshot is not None and snapshot.status == "too_large" and snapshot_core.can_pack():
         # The same sentence the doctor prints (one definition, so the two never
         # disagree on the numbers), plus what to run once a remedy is in place.
+        # Where nothing can pack, no remedy can run: the verdict reads off below,
+        # as the doctor's row does.
         console.print(
             f"snapshot: {snapshot_core.too_large_detail(snapshot)} {snapshot_core.REPACK_HINT}"
         )
     else:
-        console.print("snapshot: skipped (repomix/Node not available)")
+        console.print(f"snapshot: {snapshot_core.skipped_detail()}")
     if report.seeded:
         console.print(f"seeded {len(report.seeded)} project fact(s):")
         for entry in report.seeded:

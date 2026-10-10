@@ -1,0 +1,60 @@
+#!/bin/sh
+# The stand-in agent docs/demo.tape records. It is NOT Claude Code.
+#
+# docs/demo/seed.sh puts this directory first on PATH inside the render image,
+# so every fleet window that would start `claude` starts this instead: no
+# network, no account, nothing signed in. It says so in its banner, then hands
+# the pane to `cat`, which echoes what is typed at it.
+#
+# Its directory is named stand-in so that what the Welcome page prints for it,
+# "Claude Code · …/stand-in/claude", says so on the GIF's last screen; render.sh
+# fails the render if that line is not there (review of #256).
+#
+# `exec cat`, never a `while read` loop: the fleet tells a live agent from the
+# shell an agent leaves behind by the pane's foreground process
+# (services/fleet.py, _NOT_AN_AGENT). A loop in sh IS a shell, so the row would
+# never read as the agent and a prompt typed at spawn would wait out the 20 s
+# PROMPT_TIMEOUT first. cat is not a shell.
+
+# The banner below is the only line that says "stand-in agent".
+case "${1:-}" in
+--version | -v)
+    echo "0.0.0 (the aisquare demo's stand-in, not Claude Code)"
+    exit 0
+    ;;
+esac
+
+# Nothing to talk to without a terminal (a probe, a pipe): say so and stop,
+# rather than leave `cat` waiting on a stdin nobody will close.
+if [ ! -t 0 ]; then
+    echo "stand-in: nothing is signed in in this demo, so there is no answer"
+    exit 0
+fi
+
+# The label the fleet gave this window (`--name coder-1`), else the role.
+name=
+previous=
+for arg in "$@"; do
+    [ "$previous" = "--name" ] && name=$arg
+    previous=$arg
+done
+name=${name:-${AISQUARE_ROLE:-agent}}
+
+where=$PWD
+case "$where" in
+"$HOME"/*) where="~${where#"$HOME"}" ;;
+esac
+
+# ASCII inside the padded field: dash's printf pads by bytes, not characters.
+line() { printf '│ %-52s │\n' "$1"; }
+printf '╭──────────────────────────────────────────────────────╮\n'
+line "stand-in agent: $name"
+line ""
+line "This demo runs a stand-in where Claude Code would"
+line "run. Nothing here is signed in; it echoes what you"
+line "type, and a real fleet runs the real agent."
+line ""
+line "cwd: $where"
+printf '╰──────────────────────────────────────────────────────╯\n'
+
+exec cat

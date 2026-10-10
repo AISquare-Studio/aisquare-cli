@@ -825,6 +825,9 @@ def test_doctor_treats_a_skeleton_only_snapshot_as_usable_and_offers_no_fix(
     monkeypatch.chdir(root)
     monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
     monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    # A machine that can pack. Where nothing can, the row also says the skeleton cannot
+    # be refreshed there (test_snapshot_optional_without_node.py), whatever is on PATH.
+    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     verdict = _skeleton_only_snapshot(_seed(root).id)
 
     check = _by_name(diagnostics.doctor())["snapshot"]
@@ -855,6 +858,9 @@ def test_doctor_reports_an_over_budget_snapshot_with_its_numbers_and_a_re_pack(
     monkeypatch.chdir(root)
     monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
     monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    # A machine that can pack. Where nothing can, the verdict reads off with no fix
+    # (test_snapshot_optional_without_node.py), whatever is on PATH.
+    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     verdict = _too_large_snapshot(_seed(root).id)
 
     check = _by_name(diagnostics.doctor())["snapshot"]
@@ -877,6 +883,9 @@ def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(
     monkeypatch.chdir(here)
     monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
     monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    # A machine that can pack, so `here`'s missing snapshot warns rather than reading
+    # off -- without a Node it is off on purpose, whatever this machine has on PATH.
+    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     # Activate the orchestrator in `there` only, with an off-ladder live session.
     monkeypatch.setenv("AISQUARE_ROLE", "runner")
     team_service.hook_session_start("sess-there-1", there, "startup", model="claude-haiku-4-5")

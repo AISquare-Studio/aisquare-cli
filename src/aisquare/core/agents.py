@@ -8,11 +8,13 @@ known context file) exists. The set of connected agents is persisted in
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -57,16 +59,32 @@ _HOOKS = (
     ("StopFailure", "stop-failure"),
 )
 
+#: The Claude Code plugin route (``plugins/claude-code`` in this repo): the plugin and
+#: the marketplace that lists it, as ``/plugin install aisquare@aisquare-cli`` names
+#: them and ``enabledPlugins`` keys them. Its hooks run the same ``aisquare hook
+#: <event>`` as :data:`_HOOKS`, and stand down for any event settings.json already
+#: runs. tests/test_claude_plugin.py holds both manifests to these names.
+CLAUDE_PLUGIN = "aisquare"
+CLAUDE_PLUGIN_MARKETPLACE = "aisquare-cli"
+CLAUDE_PLUGIN_ID = f"{CLAUDE_PLUGIN}@{CLAUDE_PLUGIN_MARKETPLACE}"
+
 
 @dataclass(frozen=True)
 class AgentSpec:
-    """A coding agent aisquare knows how to detect."""
+    """A coding agent aisquare knows how to detect, and to connect when it has hooks for it."""
 
     name: str
     label: str
     home: Path
     context_files: tuple[Path, ...]
     settings_path: Path | None = None  # where aisquare installs hooks, if supported
+    planned: str | None = None
+    """The release planned to connect this agent, while aisquare can only detect it."""
+
+    @property
+    def connectable(self) -> bool:
+        """Whether ``agents connect`` installs anything: aisquare has hooks for this agent."""
+        return self.settings_path is not None
 
 
 def _home() -> Path:
@@ -83,10 +101,10 @@ def _claude_home(config_dir: Path | None = None) -> Path:
     then ``CLAUDE_CONFIG_DIR``, then ``~/.claude``.
     """
     if config_dir is not None:
-        return config_dir.expanduser()
+        return paths.expand_user(config_dir)
     env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     if env:
-        return Path(env).expanduser()
+        return paths.expand_user(Path(env))
     return _home() / ".claude"
 
 
@@ -122,8 +140,11 @@ def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
             (claude / "CLAUDE.md",),
             settings_path=claude / "settings.json",
         ),
+        # Detected only: no hooks yet, so `agents connect` refuses them. The doctor's
+        # row names a release only where the release plan has one (Codex: 10.1);
+        # tests/test_agent_adapters.py fails once that release is the running one.
         AgentSpec("cursor", "Cursor", home / ".cursor", ()),
-        AgentSpec("codex", "Codex", home / ".codex", ()),
+        AgentSpec("codex", "Codex", home / ".codex", (), planned="0.10"),
     ]
 
 
@@ -193,14 +214,54 @@ def _aisquare_command() -> str:
     return " ".join(_quote(part) for part in selfcli.argv_for([]))
 
 
-def _read_settings(path: Path) -> dict[str, Any]:
+class SettingsNotAnObjectError(ValueError):
+    """A ``settings.json`` whose text is not a JSON object, which the hook writers leave alone.
+
+    ``install_hooks`` edits the object it reads and writes it back. Text that did
+    not parse was read as ``{}``, so one trailing comma cost the user every other
+    setting: the file came back holding only ``hooks`` (review of #257). The
+    message names the file and what is wrong with it.
+    """
+
+
+def read_settings(path: Path) -> dict[str, Any]:
+    """The object in ``path`` that the hook writers edit: ``{}`` when there is no file.
+
+    The writers' reader, deliberately not :func:`read_json`, because what it returns
+    is written back. Text that is not a JSON object raises
+    :class:`SettingsNotAnObjectError`, and a file that cannot be read raises its
+    ``OSError`` or ``UnicodeDecodeError``. An empty file holds nothing to lose.
+    """
     if not path.exists():
         return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
         return {}
-    return data if isinstance(data, dict) else {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SettingsNotAnObjectError(
+            f"can't read {path}: it is not valid JSON "
+            f"({exc.msg}, line {exc.lineno} column {exc.colno})"
+        ) from exc
+    if not isinstance(data, dict):
+        raise SettingsNotAnObjectError(f"can't read {path}: it is not a JSON object")
+    return data
+
+
+def _write_settings(path: Path, settings: dict[str, Any]) -> None:
+    """Write ``settings`` back to ``path`` the way Claude Code writes the file: UTF-8.
+
+    ``json.dumps`` escapes every non-ASCII character unless told not to, so a hook
+    naming ``~/Développement/…/aisquare`` was stored as ``D\\u00e9veloppement``. The
+    plugin's launcher reads the file as text and cannot read a program out of an
+    escape, so it trusted such a hook: when that program was deleted it stood down
+    beside a hook that fails on every event, and no aisquare ran at all (review of
+    #257). A lone surrogate (a path that is not UTF-8) cannot be written as UTF-8 and
+    keeps the escape ``json.dumps`` would give it.
+    """
+    text = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+    path.write_text(text, encoding="utf-8", errors="backslashreplace")
 
 
 def _is_aisquare_hook_command(command: str) -> bool:
@@ -245,19 +306,51 @@ def _is_aisquare_group(group: Any) -> bool:
     )
 
 
+def _without_aisquare(groups: list[Any]) -> list[Any]:
+    """``groups`` with aisquare's hook ENTRIES taken out, and only emptied groups dropped.
+
+    A group can hold a user's command beside ours, from a hand edit or another
+    tool that appends to the group it finds. Dropping every group that held one
+    of ours took the user's command with it (review of #253). So each group
+    keeps its other entries and its other keys (``matcher``); a group goes only
+    when nothing of the user's is left in it.
+    """
+    kept: list[Any] = []
+    for group in groups:
+        if not _is_aisquare_group(group):
+            kept.append(group)
+            continue
+        others = [
+            item
+            for item in group["hooks"]
+            if not (
+                isinstance(item, dict)
+                and isinstance(item.get("command"), str)
+                and _is_aisquare_hook_command(item["command"])
+            )
+        ]
+        if others:
+            kept.append({**group, "hooks": others})
+    return kept
+
+
 def install_hooks(name: str, config_dir: Path | None = None) -> bool:
-    """Install aisquare's lifecycle hooks. False if the agent is unsupported."""
+    """Install aisquare's lifecycle hooks. False if the agent is unsupported.
+
+    Raises :class:`SettingsNotAnObjectError` for a settings file it must not
+    rewrite, and ``OSError`` or ``UnicodeDecodeError`` for one it cannot read.
+    """
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
         return False
-    settings = _read_settings(spec.settings_path)
+    settings = read_settings(spec.settings_path)  # raises rather than lose what is in it
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         hooks = {}
     command = _aisquare_command()  # already shell-quoted where needed
     for event, subcommand in _HOOKS:
         groups = hooks.get(event)
-        kept = [g for g in groups if not _is_aisquare_group(g)] if isinstance(groups, list) else []
+        kept = _without_aisquare(groups) if isinstance(groups, list) else []
         entry: dict[str, Any] = {"type": "command", "command": f"{command} hook {subcommand}"}
         if event in _CONTEXT_HOOKS:
             # Never below the ceiling the CI hook may wait for; never *reducing*
@@ -267,8 +360,14 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
         kept.append({"hooks": [entry]})
         hooks[event] = kept
     settings["hooks"] = hooks
+    if paths.names_no_home(spec.settings_path):
+        # A `~olduser/.claude` read as written (paths.expand_user): made, it landed in the
+        # cwd, and connect said ✓ (sweep of #257).
+        raise FileNotFoundError(
+            errno.ENOENT, "no such home on this machine", str(spec.settings_path)
+        )
     spec.settings_path.parent.mkdir(parents=True, exist_ok=True)
-    spec.settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    _write_settings(spec.settings_path, settings)
     return True
 
 
@@ -277,7 +376,12 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None or not spec.settings_path.exists():
         return False
-    settings = _read_settings(spec.settings_path)
+    try:
+        settings = read_settings(spec.settings_path)
+    except (SettingsNotAnObjectError, UnicodeDecodeError):
+        # Nothing of ours can be found in it to take out, and it is left alone. One that
+        # holds our hooks all the same is refused before this (services.agents.access).
+        return False
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         return False
@@ -286,8 +390,8 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
         groups = hooks.get(event)
         if not isinstance(groups, list):
             continue
-        kept = [g for g in groups if not _is_aisquare_group(g)]
-        if len(kept) != len(groups):
+        kept = _without_aisquare(groups)
+        if kept != groups:
             removed = True
         if kept:
             hooks[event] = kept
@@ -296,7 +400,7 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
     if not hooks:
         settings.pop("hooks", None)
     if removed:
-        spec.settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+        _write_settings(spec.settings_path, settings)
     return removed
 
 
@@ -340,21 +444,158 @@ def hook_timeout_shortfall(name: str, config_dir: Path | None = None) -> list[st
     return _missing_events(name, config_dir, reconciled=True)
 
 
+def hooks_disabled(name: str, config_dir: Path | None = None) -> bool:
+    """Whether the agent's settings file switches every hook off (``"disableAllHooks": true``).
+
+    Claude Code then runs no hook from that directory, its plugins' included, so
+    none of ours fire however complete they are, and ``agents connect`` leaves the
+    key alone: Connect cannot change it. Only a literal ``true`` counts, as Claude
+    Code reads it. Read-only (:func:`read_json`); never raises.
+    """
+    spec = _spec(name, config_dir)
+    if spec is None or spec.settings_path is None:
+        return False
+    return read_json(spec.settings_path).get("disableAllHooks") is True
+
+
+def hooks_off(name: str, config_dir: Path | None = None) -> Path | None:
+    """The settings file that switches every hook off (:func:`hooks_disabled`), else ``None``.
+
+    What `agents connect`, `agents list` and `agents status` name in place of a
+    connection or a "missing": the cause is that key, and Connect cannot change it.
+    """
+    spec = _spec(name, config_dir)
+    if spec is None or spec.settings_path is None or not hooks_disabled(name, config_dir):
+        return None
+    return spec.settings_path
+
+
+def claude_code_connected(config_dir: Path | None = None, *, cwd: Path | None = None) -> bool:
+    """Whether Claude Code in ``config_dir`` runs aisquare: the one "connected?" answer.
+
+    ``cwd`` is the folder a session would start in, for a project- or local-scope
+    plugin (:func:`claude_repo_plugin_here`); this process's working directory
+    unless given.
+
+    ``services.agents.claude_code_connected`` is its public face and says who asks
+    and why. It is implemented here so this module's own per-directory readers ask
+    it too: ``_to_info`` reports it as each site's ``hooks_installed`` in ``agents
+    list`` and ``agents status``.
+
+    Two routes, in a directory whose ``settings.json`` does not switch hooks off:
+    every lifecycle hook ``agents connect`` installs is in that file, or the
+    aisquare Claude Code plugin is installed and enabled there
+    (:func:`claude_plugin`), or, where that file has none of our hooks, installed at
+    project or local scope for the repository a session started in ``cwd`` loads it
+    from (:func:`claude_repo_plugin_here`). The switch comes first because it
+    silences every route, the plugin's included. Never raises: everything it
+    reads goes through :func:`read_json`.
+    """
+    if hooks_disabled("claude-code", config_dir):
+        return False
+    if hooks_installed("claude-code", config_dir):
+        return True
+    if not plugin_route_supported():
+        return False
+    if claude_plugin(config_dir) is not None:
+        return True
+    if hook_commands("claude-code", config_dir):
+        # Its own hooks, partial ones included, are what every other repository runs on;
+        # a repository's plugin covers its repository alone (as in `hook_site_health`).
+        # Counted, five of six hooks read "all lifecycle hooks installed" there, with no
+        # Connect to add the sixth (review of #257).
+        return False
+    return claude_repo_plugin_here(config_dir, cwd) is not None
+
+
+def claude_repo_plugin_here(
+    config_dir: Path | None = None, cwd: Path | None = None
+) -> ClaudePlugin | None:
+    """The project- or local-scope install (:func:`claude_repo_plugins`) that a session
+    of ``config_dir`` started in ``cwd`` loads, else ``None``. ``cwd`` is this process's
+    working directory unless given: the current project.
+
+    Claude Code 2.1.294's settings loader reads project settings from the directory
+    the session starts in, never a parent, so a project-scope install counts only
+    there; and local settings from :func:`_local_settings_root`. Told "not connected"
+    in that repository, a user with only such an install was offered Connect, which
+    installs the settings.json hooks beside it (review of #257). Read-only; never
+    raises.
+    """
+    try:
+        here = _dir_key(cwd if cwd is not None else Path.cwd())
+    except OSError:
+        return None  # the working directory was removed
+    plugins = claude_repo_plugins(config_dir)
+    if not plugins:
+        return None
+    reads = {"project": here, "local": _local_settings_root(here)}
+    for plugin in plugins:
+        if plugin.project is not None and _dir_key(plugin.project) == reads.get(plugin.scope):
+            return plugin
+    return None
+
+
+def _local_settings_root(directory: Path) -> Path:
+    """Where Claude Code reads ``.claude/settings.local.json`` for a session started in
+    ``directory`` (resolved): the root of the git repository it is in, when that root,
+    its ``.git`` and its ``.claude`` belong to this user and it is not the home
+    directory; else ``directory`` itself (Claude Code 2.1.294).
+
+    Claude Code follows a linked worktree to its main repository; a ``.git`` that is
+    not a directory is not followed here, so such an install reads as not loaded.
+    """
+    geteuid = getattr(os, "geteuid", None)
+    for root in (directory, *directory.parents):
+        try:
+            git = os.lstat(root / ".git")
+        except OSError:
+            continue
+        if geteuid is None or not stat.S_ISDIR(git.st_mode) or root == _dir_key(_home()):
+            return directory
+        try:
+            owners = [os.stat(root).st_uid, git.st_uid]
+            if os.path.lexists(root / ".claude"):
+                owners.append(os.lstat(root / ".claude").st_uid)
+        except OSError:
+            return directory
+        return root if all(owner == geteuid() for owner in owners) else directory
+    return directory
+
+
 def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> list[str]:
     """Lifecycle events with no aisquare group — or, with ``reconciled``, none
-    whose context timeout reaches :data:`CONTEXT_HOOK_TIMEOUT_SECONDS`."""
+    whose context timeout reaches :data:`CONTEXT_HOOK_TIMEOUT_SECONDS`.
+
+    Read through :func:`read_json`, this module's rule for a file it only reads:
+    a ``settings.json`` that is missing, unreadable, not UTF-8 or a directory
+    holds no hooks. Read through :func:`read_settings`, which must raise for the
+    writers, each of those cost ``aisquare doctor`` its whole report.
+    """
     spec = _spec(name, config_dir)
-    if spec is None or spec.settings_path is None or not spec.settings_path.exists():
+    if spec is None or spec.settings_path is None:
         return [event for event, _ in _HOOKS]
-    hooks = _read_settings(spec.settings_path).get("hooks")
+    hooks = read_json(spec.settings_path).get("hooks")
     if not isinstance(hooks, dict):
         return [event for event, _ in _HOOKS]
     accepts = _is_current_aisquare_group if reconciled else (lambda g, _e: _is_aisquare_group(g))
     return [
         event
         for event, _ in _HOOKS
-        if not any(accepts(group, event) for group in (hooks.get(event) or []))
+        if not any(accepts(group, event) for group in _event_groups(hooks, event))
     ]
+
+
+def _event_groups(hooks: dict[str, Any], event: str) -> list[Any]:
+    """The hook groups ``settings.json`` lists under ``event``; anything but a list is none.
+
+    The file is hand-edited, and a number or ``true`` under an event made every
+    reader raise ``TypeError``: ``aisquare doctor`` printed a traceback instead of
+    its claude-code row, and the "connected?" check raised with it. The writers
+    (``install_hooks``, ``remove_hooks``) already treated such a value as no groups.
+    """
+    groups = hooks.get(event)
+    return groups if isinstance(groups, list) else []
 
 
 def _installed_timeout(groups: Any, event: str) -> int | None:
@@ -410,22 +651,245 @@ def _spec(name: str, config_dir: Path | None = None) -> AgentSpec | None:
     return next((spec for spec in _specs(config_dir) if spec.name == name), None)
 
 
+def specs() -> list[AgentSpec]:
+    """Every coding agent aisquare knows, in the registry's order: one doctor row each."""
+    return _specs()
+
+
+def spec(name: str, config_dir: Path | None = None) -> AgentSpec | None:
+    """The registry entry for ``name``, or ``None`` when aisquare knows no such agent."""
+    return _spec(name, config_dir)
+
+
 def read_json(path: Path) -> dict[str, Any]:
     """The JSON object at ``path``, or ``{}`` — absent, unreadable, invalid or not an object.
 
     The rule for a config file this package only READS: one that cannot be read
     is ``{}``, said once here for the agent registry and for every
     ``.claude.json`` / ``settings.json`` the doctor scans, rather than a copy of
-    the same three lines per caller (review of #203). :func:`_read_settings`
+    the same three lines per caller (review of #203). :func:`read_settings`
     is deliberately NOT this: it feeds a read-modify-WRITE of the operator's
-    ``settings.json``, where a permission error swallowed into ``{}`` would be
-    written back over their hooks — so it raises on ``OSError``.
+    ``settings.json``, where a permission error or a trailing comma swallowed
+    into ``{}`` would be written back over everything in it — so it raises.
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def enabled_plugins(config_dir: Path) -> list[str]:
+    """The plugins ``config_dir``'s ``settings.json`` enables: its ``enabledPlugins`` keys.
+
+    Each is ``<plugin>@<marketplace>`` (or a bare name). One set to ``false`` is
+    installed but disabled -- ``/plugin disable`` writes that -- so it is left
+    out. The one reader of the key: the doctor's browser-tools row and the
+    plugin route (:func:`claude_plugin`) both ask here. Read-only; a file that
+    cannot be read enables nothing (:func:`read_json`).
+    """
+    return _enabled_in(config_dir / "settings.json")
+
+
+def _enabled_in(settings: Path) -> list[str]:
+    """The ``enabledPlugins`` keys one settings file sets to true: a config dir's
+    (:func:`enabled_plugins`) or a repository's (:func:`claude_repo_plugins`)."""
+    plugins = read_json(settings).get("enabledPlugins")
+    if not isinstance(plugins, dict):
+        return []
+    return [str(key) for key, enabled in plugins.items() if enabled]
+
+
+@dataclass(frozen=True)
+class ClaudePlugin:
+    """The aisquare plugin, installed in one Claude Code config directory and enabled
+    there (user scope) or in one repository (project and local scope)."""
+
+    config_dir: Path
+    version: str | None
+    """What ``plugins/installed_plugins.json`` records; ``None`` when it records none."""
+    scope: str = "user"
+    """``user``, or ``project``/``local``: the scope ``claude plugin install`` was given."""
+    project: Path | None = None
+    """The repository a project- or local-scope install is enabled in; ``None`` at user scope."""
+
+
+def plugin_route_supported() -> bool:
+    """Whether the plugin route runs here: its hooks run ``sh``, so macOS, Linux and WSL.
+
+    Native Windows keeps the settings.json route (docs/claude-code-plugin.md): there
+    Claude Code runs hook commands through ``cmd.exe``, which has no ``sh`` unless Git
+    Bash put one on PATH. So on win32 the connected check and doctor read only the
+    settings.json hooks, and a plugin-only directory is offered Connect, beside which
+    the plugin's launcher stands down if it ever does run.
+    """
+    return sys.platform != "win32"
+
+
+def claude_plugin(config_dir: Path | None = None) -> ClaudePlugin | None:
+    """The aisquare plugin when ``config_dir`` enables AND installed it, else ``None``.
+
+    Enabled is ``settings.json``'s ``enabledPlugins`` holding
+    :data:`CLAUDE_PLUGIN_ID` as true; installed is ``plugins/installed_plugins.json``
+    listing it, which is also where the version is read. Both, because an enabled
+    key with nothing installed runs nothing. ``/plugin disable`` sets the key to
+    false and ``/plugin uninstall`` removes both (measured on Claude Code 2.1.292,
+    which writes ``{"version": 2, "plugins": {id: [records]}}``).
+
+    The version is the user-scope record's. A project- or local-scope record is
+    another install, for one repository (:func:`claude_repo_plugins`), and may be
+    an older release: listed first, it named the wrong version and uvx pin (sweep
+    of #257). A record with no scope is the single record from before version 2.
+    Any record's, where none is the user scope's.
+
+    Per directory, like the hooks: Claude Code keeps plugins under each config
+    dir, so one installed in ``~/.claude`` does not reach ``~/.claude-c2``.
+    ``None`` is the directory a session from this shell reads
+    (``CLAUDE_CONFIG_DIR``, else ``~/.claude``). Read-only; never raises.
+    """
+    directory = _claude_home(config_dir)
+    if CLAUDE_PLUGIN_ID not in enabled_plugins(directory):
+        return None
+    records = _plugin_records(directory)
+    if not records:
+        return None
+    user = [r for r in records if isinstance(r, dict) and r.get("scope", "user") == "user"]
+    versions = [record.get("version") for record in user or records if isinstance(record, dict)]
+    version = next((found for found in versions if isinstance(found, str) and found), None)
+    return ClaudePlugin(config_dir=directory, version=version)
+
+
+def _plugin_records(config_dir: Path) -> list[Any]:
+    """The aisquare plugin's install records in ``config_dir``'s
+    ``plugins/installed_plugins.json``: a list since its version 2, one record before."""
+    installed = read_json(config_dir / "plugins" / "installed_plugins.json").get("plugins")
+    records = installed.get(CLAUDE_PLUGIN_ID) if isinstance(installed, dict) else None
+    if isinstance(records, dict):
+        return [records]
+    return records if isinstance(records, list) else []
+
+
+#: The file in a repository's ``.claude`` that enables a plugin installed at each
+#: repository scope (``claude plugin install --scope``, or the ``/plugin`` dialog).
+_REPO_SCOPES = {"project": "settings.json", "local": "settings.local.json"}
+
+
+def claude_repo_plugins(config_dir: Path | None = None) -> list[ClaudePlugin]:
+    """The project- and local-scope installs of the aisquare plugin that ``config_dir``
+    records and whose repository still enables it.
+
+    Those scopes enable the plugin in the repository, in ``.claude/settings.json``
+    (project, shared with the team) or ``.claude/settings.local.json`` (local), and
+    not in ``config_dir``'s own settings.json, so :func:`claude_plugin` does not see
+    them. ``plugins/installed_plugins.json`` records each with its ``scope`` and
+    ``projectPath``, and a session of ``config_dir`` started in that repository runs
+    it (measured on Claude Code 2.1.294). Read-only; never raises.
+    """
+    directory = _claude_home(config_dir)
+    found: list[ClaudePlugin] = []
+    for record in _plugin_records(directory):
+        if not isinstance(record, dict):
+            continue
+        scope, project = record.get("scope"), record.get("projectPath")
+        if not isinstance(scope, str) or scope not in _REPO_SCOPES:
+            continue
+        if not isinstance(project, str) or not Path(project).is_absolute():
+            continue  # Claude Code records an absolute path; any other would read the cwd's
+        repo = Path(project)
+        if CLAUDE_PLUGIN_ID not in _enabled_in(repo / ".claude" / _REPO_SCOPES[scope]):
+            continue  # removed or disabled there: nothing runs
+        version = record.get("version")
+        recorded = version if isinstance(version, str) and version else None
+        found.append(ClaudePlugin(directory, recorded, scope=scope, project=repo))
+    return found
+
+
+def _starts(program: Path) -> bool:
+    """The launcher's ``_starts``: an executable file whose absolute ``#!`` interpreter,
+    when it has one, is an executable file too. A console script whose environment lost
+    its Python stays executable and fails every run; ``env`` lines and binaries are
+    trusted, as the launcher trusts them."""
+    # os.path.isfile, here and below: a #! may name a path this user cannot reach, where
+    # Path.is_file raises PermissionError on 3.11 to 3.13 (measured; 3.14 answers False);
+    # the launcher's `[ -f ]` answers no.
+    if not (os.path.isfile(program) and os.access(program, os.X_OK)):
+        return False
+    try:
+        with program.open("rb") as handle:
+            first = handle.readline(4096)
+    except OSError:
+        return True  # unreadable: trusted, as the launcher's failed `read` is
+    if not first.startswith(b"#!"):
+        return True
+    line = first[2:].rstrip(b"\n").lstrip(b" \t")
+    interpreter = Path(re.split(rb"[ \t]", line, maxsplit=1)[0].decode(errors="replace"))
+    if not interpreter.is_absolute():
+        return True
+    return os.path.isfile(interpreter) and os.access(interpreter, os.X_OK)
+
+
+def hooks_can_start(name: str, config_dir: Path) -> bool:
+    """Whether every aisquare hook in ``config_dir`` names a program that can start
+    (:func:`_starts`; for a module-form hook, its interpreter): the path-only half of
+    :func:`classify_hook_binary`'s verdict, asked with no process, as Welcome asks it."""
+    found = (hook_binary(command) for command in hook_commands(name, config_dir))
+    return all(binary is None or _starts(binary.program) for binary in found)
+
+
+def launcher_finds(name: str) -> Path | None:
+    """The program ``name`` where the plugin's launcher looks for it, as THIS process sees.
+
+    The launcher's ``_find`` (``plugins/claude-code/scripts/aisquare-hook``): on PATH,
+    then ``~/.local/bin`` and ``~/.cargo/bin``, for ``aisquare`` and for ``uvx`` alike,
+    passing over one that cannot start (:func:`_starts`). One search here for both, so
+    the doctor's answer cannot drift from the launcher's (review of #257). A Claude Code
+    started from a desktop app may see another PATH; this is the best a doctor run can
+    see.
+    """
+    found = shutil.which(name)
+    if found and _starts(Path(found)):
+        return Path(found)
+    for candidate in (_home() / ".local" / "bin", _home() / ".cargo" / "bin"):
+        program = candidate / name
+        if _starts(program):
+            return program
+    return None
+
+
+def plugin_runner() -> Path | None:
+    """The aisquare the plugin's launcher would run (:func:`launcher_finds`).
+
+    ``None`` means it falls back to the pinned release through uvx, or to nothing.
+    """
+    return launcher_finds("aisquare")
+
+
+def claude_plugin_command(
+    verb: str, config_dir: Path, *, scope: str = "user", project: Path | None = None
+) -> str:
+    """``claude plugin <verb> aisquare@aisquare-cli``, aimed at ``config_dir``.
+
+    Plugins belong to one config dir, and ``claude`` acts on the one it starts in, so
+    a bare ``/plugin`` typed into the usual session would act on the wrong one for a
+    fleet account dir. The ambient dir needs nothing; ``~/.claude`` needs
+    ``CLAUDE_CONFIG_DIR`` unset (pointed at it, Claude Code would look for
+    ``.claude.json`` inside it); any other dir is named. A project- or local-scope
+    install (:func:`claude_repo_plugins`) takes its ``--scope``, run from inside its
+    ``project``: without it ``claude plugin uninstall`` acts on the user scope, and
+    run anywhere else it answers that the plugin is not installed at that scope
+    (measured on Claude Code 2.1.294).
+    """
+    command = f"claude plugin {verb} {CLAUDE_PLUGIN_ID}"
+    if scope != "user":
+        command += f" --scope {scope}"
+    key = _dir_key(config_dir)
+    if key == _dir_key(_claude_home()):
+        line = command
+    elif key == _dir_key(_home() / ".claude"):
+        line = f"env -u CLAUDE_CONFIG_DIR {command}"
+    else:
+        line = f"CLAUDE_CONFIG_DIR={_quote(str(config_dir))} {command}"
+    return line if project is None else f"cd {_quote(str(project))} && {line}"
 
 
 def _registry() -> dict[str, Any]:
@@ -504,20 +968,108 @@ def set_connected(name: str, connected: bool, config_dir: Path | None = None) ->
     )
 
 
-def _to_info(spec: AgentSpec, registry: dict[str, Any]) -> AgentInfo:
-    existing = [path for path in spec.context_files if path.exists()]
+#: What ``Path.exists`` reads as "nothing there" (pathlib's ignored errnos and Windows
+#: errors): no such file, not a directory, a bad descriptor, a symlink loop.
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+_ABSENT_WINERRORS = frozenset({21, 123, 1921})
+
+
+def nothing_there(exc: OSError) -> bool:
+    """Whether ``exc``, from opening or stat'ing a path, means nothing is there: what
+    ``Path.exists`` reads as absence. The one notion of "missing" for every reader of an
+    agent's files (:func:`present`, ``lifecycle.settings_unreadable``), so the doctor,
+    connect, disconnect and uninstall never disagree about one directory: a recorded one
+    that became a symlink loop was "does not exist" to the doctor and "could not be read"
+    to disconnect, which then refused the doctor's own fix (review of #257)."""
+    return exc.errno in _ABSENT_ERRNOS or getattr(exc, "winerror", None) in _ABSENT_WINERRORS
+
+
+def present(path: Path) -> bool:
+    """Whether there is something at ``path`` for a reader to open; never raises.
+
+    Absent where ``Path.exists`` reads absence (:func:`nothing_there`), and where the path
+    still starts with a ``~user`` this machine does not have (``paths.names_no_home``):
+    read as written it would be looked up in the cwd. Every other error from stat (a link
+    into a directory this user cannot search, EIO, ESTALE) counts as present, so the
+    reader opens it and names it: ``Path.exists`` raised those on 3.11 to 3.13, which cost
+    the doctor and `agents list` their whole output for one CLAUDE.md, and answers False
+    on 3.14, where connect skipped a CLAUDE.md it never read (review of #257).
+    """
+    if paths.names_no_home(path):
+        return False
+    try:
+        os.stat(path)
+    except OSError as exc:
+        return not nothing_there(exc)
+    except ValueError:  # an embedded NUL: no such file can exist
+        return False
+    return True
+
+
+def detected(spec: AgentSpec) -> bool:
+    """Whether ``spec``'s agent is on this machine: its home or one of its context files exists.
+
+    Paths only. The registry says what this home connected, which is a different
+    question, so the doctor's rows for agents aisquare cannot connect ask here
+    rather than through :func:`detect`.
+    """
+    return present(spec.home) or any(present(path) for path in spec.context_files)
+
+
+def claude_on_path() -> str | None:
+    """Where ``claude`` is on PATH, if it is (an indirection so tests can decide).
+
+    npm and Homebrew make Claude Code's config dir only when ``claude`` first runs,
+    so before then the binary is how detection, ``agents connect`` and the doctor know
+    it is installed (review of #257). ``claude`` is ``harness.DEFAULT_AGENT_BINARY``,
+    named here so this module stays light to import.
+    """
+    return shutil.which("claude")
+
+
+def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False) -> AgentInfo:
+    existing = [path for path in spec.context_files if present(path)]
+    # A record of an agent aisquare has no hooks for is no connection: 0.7.0's `agents
+    # connect codex` wrote one and installed nothing, and it read as connected beside the
+    # doctor's "can't connect it yet" (review of #257). `agents disconnect` clears it.
+    recorded = connected_dirs(spec.name, registry) if spec.connectable else []
     sites = [
         AgentHookSite(
             config_dir=directory,
-            hooks_installed=hooks_installed(spec.name, directory),
+            # Claude Code's sites report the shared answer, as the doctor's row does.
+            hooks_installed=(
+                claude_code_connected(directory)
+                if spec.name == "claude-code"
+                else hooks_installed(spec.name, directory)
+            ),
+            # And why it is False where hooks are switched off: read as "missing", it
+            # sent the user to Connect, which cannot change it (review of #257).
+            hooks_off=hooks_off(spec.name, directory),
         )
-        for directory in connected_dirs(spec.name, registry)
+        for directory in recorded
     ]
+    found = detected(spec)
+    connected = spec.connectable and spec.name in _connected_set(registry)
+    if spec.name == "claude-code":
+        # The answer doctor and Welcome give, so `agents list`/`status` and `aisquare
+        # status` agree with them (review of #257). A directory whose hooks or plugin
+        # run aisquare is connected, whoever wrote them: told "not connected", a
+        # plugin user ran `agents connect` and got both routes.
+        directory = _hook_dir(spec)
+        if claude_code_connected(directory):
+            connected = True
+            if all(_dir_key(site.config_dir) != _dir_key(directory) for site in sites):
+                sites.append(AgentHookSite(config_dir=directory, hooks_installed=True))
+        # A Claude Code that has never started has no config dir yet; its binary on PATH
+        # says it is installed, for the directory a session from this shell reads (never
+        # a --config-dir, which a typo could name), as `agents connect` treats it.
+        if not found and ambient and claude_on_path() is not None:
+            found = True
     return AgentInfo(
         name=spec.name,
-        detected=spec.home.exists() or bool(existing),
+        detected=found,
         config_paths=existing,
-        connected=spec.name in _connected_set(registry),
+        connected=connected,
         sites=sites,
     )
 
@@ -525,19 +1077,19 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any]) -> AgentInfo:
 def detect_all() -> list[AgentInfo]:
     """Detection state for every agent aisquare knows about."""
     registry = _registry()
-    return [_to_info(spec, registry) for spec in _specs()]
+    return [_to_info(spec, registry, ambient=True) for spec in _specs()]
 
 
 def detect(name: str, config_dir: Path | None = None) -> AgentInfo | None:
     """Detection state for one agent, or ``None`` if the name is unknown."""
     spec = _spec(name, config_dir)
-    return _to_info(spec, _registry()) if spec is not None else None
+    return _to_info(spec, _registry(), ambient=config_dir is None) if spec is not None else None
 
 
 def context_files(name: str, config_dir: Path | None = None) -> list[Path]:
-    """Existing context files for an agent (its content, for ingestion)."""
+    """An agent's context files that are there to read (:func:`present`), for ingestion."""
     spec = _spec(name, config_dir)
-    return [path for path in spec.context_files if path.exists()] if spec else []
+    return [path for path in spec.context_files if present(path)] if spec else []
 
 
 # --- which aisquare do the hooks actually RUN? (#84) -------------------------------------
@@ -557,7 +1109,8 @@ that reports the same version."""
 HOOK_BINARY_STALE = "stale"
 """The hooks run an aisquare that reports a different version from this one."""
 HOOK_BINARY_MISSING = "missing"
-"""The program the hooks name is not on disk — every hook fails, every session."""
+"""The program the hooks name is not on disk, or cannot start (:func:`_starts`: a script
+whose ``#!`` interpreter is gone) — every hook fails, every session."""
 HOOK_BINARY_UNKNOWN = "unknown"
 """The program is on disk but its version could not be read: it did not run, exited
 non-zero, or printed nothing that parses as a version."""
@@ -574,6 +1127,17 @@ _HOOK_BINARY_SEVERITY = {
 #: (``0.6.0``, ``0.4.0rc1``, ``1.0.0+local``). Anchored on nothing else because
 #: the prefix has already changed once and may again.
 _VERSION_TOKEN = re.compile(r"\d+(?:\.\d+)+[0-9A-Za-z.+!-]*")
+
+
+def version_in(output: str) -> str | None:
+    """The version an ``aisquare --version`` printed, or ``None`` when it printed none.
+
+    Public because ``aisquare upgrade`` reads the new install's answer the same
+    way this module reads a hook binary's: one parse, so a change to what
+    ``--version`` prints has one place to land.
+    """
+    match = _VERSION_TOKEN.search(output)
+    return match.group(0) if match else None
 
 
 @dataclass(frozen=True)
@@ -616,6 +1180,9 @@ class HookSiteHealth:
     binary: Path | None = None
     binary_version: str | None = None
     binary_state: str | None = None
+    plugin: ClaudePlugin | None = None
+    """The aisquare plugin, when this directory has it enabled (:func:`claude_plugin`), or
+    a project- or local-scope install of it a session started here loads."""
 
 
 def hook_commands(name: str, config_dir: Path | None = None) -> list[str]:
@@ -623,17 +1190,22 @@ def hook_commands(name: str, config_dir: Path | None = None) -> list[str]:
 
     Any event counts, not only the full set ``hooks_installed`` demands: a
     partial install from an older version still RUNS on the events it has, so
-    what it runs is still worth grading.
+    what it runs is still worth grading. Read-only, so through :func:`read_json`
+    (see ``_missing_events``): a file that cannot be read names no command.
     """
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
         return []
-    hooks = _read_settings(spec.settings_path).get("hooks")
+    return _aisquare_commands(read_json(spec.settings_path).get("hooks"))
+
+
+def _aisquare_commands(hooks: object) -> list[str]:
+    """The aisquare hook commands in a settings file's ``hooks`` value (:func:`hook_commands`)."""
     if not isinstance(hooks, dict):
         return []
     found: list[str] = []
     for event, _ in _HOOKS:
-        for group in hooks.get(event) or []:
+        for group in _event_groups(hooks, event):
             if not _is_aisquare_group(group):
                 continue
             for item in group["hooks"]:
@@ -649,9 +1221,21 @@ def _resolve_program(token: str) -> Path:
     ``_aisquare_command`` has written absolute paths since the bare-name bug was
     fixed, but hooks installed before that are still on disk; a bare name goes
     through PATH exactly as the shell would send it, and an unfindable one is
-    returned as written so it grades as missing rather than crashing.
+    returned as written so it grades as missing rather than crashing. ``$HOME/``
+    and ``${HOME}/`` are expanded as ``~/`` is: the hook's shell expands them, and
+    read literally a working hook graded as missing (review of #257). So is a
+    ``~olduser/…`` naming a user this machine does not have, on which pathlib
+    raises RuntimeError: upgrade, its ``--check`` and doctor ended in a traceback
+    (sweep of #257).
     """
-    path = Path(token).expanduser()
+    try:
+        for prefix in ("$HOME/", "${HOME}/"):
+            if token.startswith(prefix):
+                token = str(Path("~").expanduser() / token[len(prefix) :])
+                break
+        path = Path(token).expanduser()
+    except RuntimeError:
+        path = Path(token)
     if not path.is_absolute() and path.parent == Path("."):
         found = shutil.which(token)
         return Path(found) if found else path
@@ -696,16 +1280,23 @@ def _same_install(binary: HookBinary) -> bool:
     venv beside the symlink, not the target. The file is compared RESOLVED, so
     ``python`` and ``python3`` in one venv — links to the same interpreter — are
     one install. Anything else is asked its version, once per doctor run.
+
+    A console script reached through a link is the exception that resolving gets
+    right: uv's ``~/.local/bin/aisquare`` IS this install's script when it resolves
+    to it, the same file and so the same interpreter and package. Compared
+    unresolved, the doctor ran it for its version on every run (review of #257).
     """
     program = binary.program
     this = Path(sys.executable) if binary.module_form else current_install()
     if program == this:
         return True
+    if not binary.module_form and os.path.realpath(program) == os.path.realpath(this):
+        return True
     if program.parent != this.parent:
         return False
     try:
         return program.resolve() == this.resolve()
-    except OSError:
+    except (OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11 and 3.12
         return False
 
 
@@ -734,8 +1325,7 @@ def hook_binary_version(argv: Sequence[str], *, timeout: float = 10.0) -> str | 
         return None
     if completed.returncode != 0:
         return None
-    match = _VERSION_TOKEN.search(completed.stdout)
-    return match.group(0) if match else None
+    return version_in(completed.stdout)
 
 
 def classify_hook_binary(binary: HookBinary) -> tuple[str, str | None]:
@@ -746,7 +1336,10 @@ def classify_hook_binary(binary: HookBinary) -> tuple[str, str | None]:
     directory is asked its version, and it is asked ONCE per doctor run however
     many directories name it (see ``hook_site_health``'s cache).
     """
-    if not binary.program.exists():
+    # The launcher's own test (_starts), which never raises: a program that is gone, in a
+    # directory this user cannot enter, or a script whose #! interpreter is gone fails
+    # every event, and its --version probe could only fail (review of #257).
+    if not _starts(binary.program):
         return HOOK_BINARY_MISSING, None
     if _same_install(binary):
         return HOOK_BINARY_CURRENT, __version__
@@ -762,16 +1355,33 @@ def hook_site_health(
     *,
     recorded: bool,
     cache: dict[HookBinary, tuple[str, str | None]] | None = None,
+    cwd: Path | None = None,
 ) -> HookSiteHealth:
-    """Grade one config directory: are the hooks all there, and what do they run?"""
+    """Grade one config directory: are the hooks all there, and what do they run?
+
+    Its ``plugin`` is the user-scope install; else, only where the directory runs no
+    hooks of ours, a project- or local-scope one a session started in ``cwd`` loads
+    (:func:`claude_repo_plugin_here`). That one covers sessions in its repository
+    alone. Beside the directory's own hooks it doubles nothing (the launcher stands
+    down there), and graded as the directory's plugin it read as "two ways" and the
+    advice removed the hooks every other repository runs on (review of #257).
+    """
     installed = hooks_installed(name, config_dir)
+    commands = hook_commands(name, config_dir)
+    plugin = None
+    if name == "claude-code" and plugin_route_supported():
+        plugin = claude_plugin(config_dir)
+        if plugin is None and not commands:
+            plugin = claude_repo_plugin_here(config_dir, cwd)
     binaries: list[HookBinary] = []
-    for command in hook_commands(name, config_dir):
+    for command in commands:
         binary = hook_binary(command)
         if binary is not None and binary not in binaries:
             binaries.append(binary)
     if not binaries:
-        return HookSiteHealth(config_dir=config_dir, hooks_installed=installed, recorded=recorded)
+        return HookSiteHealth(
+            config_dir=config_dir, hooks_installed=installed, recorded=recorded, plugin=plugin
+        )
     verdicts = cache if cache is not None else {}
     graded: list[tuple[HookBinary, str, str | None]] = []
     for binary in binaries:
@@ -787,6 +1397,7 @@ def hook_site_health(
         binary=worst.program,
         binary_version=version,
         binary_state=state,
+        plugin=plugin,
     )
 
 
@@ -796,9 +1407,10 @@ def _claude_dirs_on_disk() -> list[Path]:
     ``$CLAUDE_CONFIG_DIR``, ``~/.claude`` and every ``~/.claude*`` directory —
     the ``[0-9]`` siblings of a parallel-install setup and the
     ``~/.claude-account1`` naming the README documents. Only directories whose
-    ``settings.json`` holds at least one aisquare hook are returned: a hook that
-    is on disk runs whether or not this home ever heard of the directory, and
-    that is the only thing that makes a directory doctor's business.
+    ``settings.json`` holds at least one aisquare hook, or enables the aisquare
+    plugin (:func:`claude_plugin`), are returned: a hook that is on disk runs
+    whether or not this home ever heard of the directory, and that is the only
+    thing that makes a directory doctor's business.
 
     A candidate whose ``settings.json`` this user cannot read — another
     account's ``~/.claude-archived``, a backup left at mode 000 — is skipped, not
@@ -808,33 +1420,72 @@ def _claude_dirs_on_disk() -> list[Path]:
     candidates: list[Path] = []
     env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     if env:
-        candidates.append(Path(env).expanduser())
+        candidates.append(paths.expand_user(Path(env)))
     home = _home()
     candidates.append(home / ".claude")
-    if home.is_dir():
-        candidates.extend(sorted(path for path in home.glob(".claude*") if path.is_dir()))
+    # os.path.isdir, which never raises: ``Path.is_dir`` raised PermissionError on 3.11
+    # to 3.13 for one in a folder this user cannot enter, and cost the doctor its output.
+    if os.path.isdir(home):
+        candidates.extend(sorted(path for path in home.glob(".claude*") if os.path.isdir(path)))
     seen: set[Path] = set()
     found: list[Path] = []
     for candidate in candidates:
         key = _dir_key(candidate)
-        if key in seen or not candidate.is_dir():
+        if key in seen or not os.path.isdir(candidate):
             continue
         seen.add(key)
-        try:
-            ours = bool(hook_commands("claude-code", candidate))
-        except OSError:
-            continue  # unreadable settings.json — see the docstring
-        if ours:
+        if _holds_aisquare(candidate):
             found.append(candidate)
     return found
 
 
+def _holds_aisquare(config_dir: Path) -> bool:
+    """Whether ``config_dir``'s settings.json holds an aisquare hook or enables the aisquare
+    plugin that is installed there (:func:`claude_plugin`'s two halves), reading it once;
+    one that cannot be read holds neither (:func:`read_json`)."""
+    home = _claude_home(config_dir)
+    settings = read_json(home / "settings.json")
+    enabled = settings.get("enabledPlugins")
+    return bool(_aisquare_commands(settings.get("hooks"))) or (
+        plugin_route_supported()
+        and isinstance(enabled, dict)
+        and bool(enabled.get(CLAUDE_PLUGIN_ID))
+        and bool(_plugin_records(home))
+    )
+
+
+def found_on_disk(config_dir: Path) -> bool:
+    """Whether the doctor finds ``config_dir`` whatever ``CLAUDE_CONFIG_DIR`` says: a
+    ``~/.claude*`` directory holding aisquare's hooks or plugin (:func:`_claude_dirs_on_disk`),
+    reading no sibling's settings but its own."""
+    home, key = _home(), _dir_key(config_dir)
+    named = home / ".claude", *(home.glob(".claude*") if os.path.isdir(home) else ())
+    return any(_dir_key(p) == key for p in named) and _holds_aisquare(config_dir)
+
+
 def _dir_key(path: Path) -> Path:
-    """One identity for the several spellings of a directory (``~``, symlinks)."""
+    """One identity for the several spellings of a directory (``~``, symlinks).
+
+    pathlib raises RuntimeError, not OSError, for a symlink loop on 3.11 and 3.12, and
+    for a ``~olduser`` naming no user here (``paths.expand_user`` keeps that as written).
+    A recorded directory of either kind ended upgrade and uninstall in a traceback
+    here, and the ``~olduser`` one doctor, status and ``agents list`` in
+    :func:`_claude_home` (sweep of #257).
+    """
+    path = paths.expand_user(path)
     try:
-        return path.expanduser().resolve()
-    except OSError:
-        return path.expanduser().absolute()
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return path.absolute()
+
+
+def dir_identity(path: Path) -> Path:
+    """:func:`_dir_key` for callers outside this module (``services.lifecycle``).
+
+    One notion of "the same directory" for every dedupe of hook sites, rather
+    than a copy that could drift from this one.
+    """
+    return _dir_key(path)
 
 
 def claude_config_dirs() -> list[Path]:
@@ -875,8 +1526,9 @@ def claude_config_dirs() -> list[Path]:
     return unique
 
 
-def hook_sites(name: str) -> list[HookSiteHealth]:
-    """Every config directory doctor should grade, each with its verdict.
+def hook_sites(name: str, *, cwd: Path | None = None) -> list[HookSiteHealth]:
+    """Every config directory doctor should grade, each with its verdict. ``cwd`` is
+    where the sessions in question start (:func:`hook_site_health`).
 
     Recorded sites first (the registry's order), then the ambient directory a
     session from THIS shell would use, then anything found on disk with our
@@ -885,7 +1537,19 @@ def hook_sites(name: str) -> list[HookSiteHealth]:
     ``AISQUARE_HOME`` opens (#84). Each directory appears once however many
     lists name it.
     """
-    registry = _registry()
+    cache: dict[HookBinary, tuple[str, str | None]] = {}
+    return [
+        hook_site_health(name, path, recorded=recorded, cache=cache, cwd=cwd)
+        for path, recorded in _hook_dir_candidates(name)
+    ]
+
+
+def _hook_dir_candidates(name: str) -> list[tuple[Path, bool]]:
+    """``(directory, recorded)`` for every place ``name``'s hooks may live, each once.
+
+    The one list :func:`hook_sites` grades and :func:`hook_dirs` returns as it
+    is, so doctor and uninstall cannot disagree about which directories exist.
+    """
     sites: list[tuple[Path, bool]] = []
     seen: set[Path] = set()
 
@@ -895,16 +1559,26 @@ def hook_sites(name: str) -> list[HookSiteHealth]:
             seen.add(key)
             sites.append((path, recorded))
 
-    for path in connected_dirs(name, registry):
+    for path in connected_dirs(name, _registry()):
         add(path, recorded=True)
     ambient = ambient_hook_dir(name)
-    if ambient is not None and ambient.is_dir():
+    # os.path.isdir: for a CLAUDE_CONFIG_DIR in a folder this user cannot enter,
+    # ``Path.is_dir`` raised on 3.11 to 3.13, and the doctor printed nothing and
+    # uninstall a traceback (review of #257).
+    if ambient is not None and os.path.isdir(ambient):
         add(ambient, recorded=False)
     if name == "claude-code":
         for path in _claude_dirs_on_disk():
             add(path, recorded=False)
+    return sites
 
-    cache: dict[HookBinary, tuple[str, str | None]] = {}
-    return [
-        hook_site_health(name, path, recorded=recorded, cache=cache) for path, recorded in sites
-    ]
+
+def hook_dirs(name: str) -> list[Path]:
+    """Every config directory that may carry ``name``'s hooks — found, never graded.
+
+    The directories :func:`hook_sites` grades, without the grading:
+    ``hook_sites`` asks each hook's program its version, which is the wrong
+    thing to do while removing that program, so ``uninstall`` asks this
+    instead. Reads only; each directory appears once.
+    """
+    return [path for path, _recorded in _hook_dir_candidates(name)]

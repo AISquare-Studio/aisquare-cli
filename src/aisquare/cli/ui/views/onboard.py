@@ -64,6 +64,10 @@ class ProjectTree(DirectoryTree):
         return [path for path in paths if not path.name.startswith(".")]
 
 
+ONBOARD_WORKER = "onboard"
+"""The worker ``init`` and then ``doctor`` run in for a folder: it writes."""
+
+
 def render_verdict(verdict: PathVerdict) -> Text:
     """The verdict line, styled by what it says; the words come from the service."""
     if verdict.path is None:
@@ -183,7 +187,9 @@ class OnboardView(Vertical):
         self._onboard(self.verdict.path)
         return True
 
-    @work(thread=True, exclusive=True, group="onboard", exit_on_error=False)
+    @work(
+        thread=True, exclusive=True, name=ONBOARD_WORKER, group=ONBOARD_WORKER, exit_on_error=False
+    )
     def _onboard(self, path: Path) -> None:
         """The subprocesses run here, off the UI thread; every line goes back onto it."""
         app = self.app

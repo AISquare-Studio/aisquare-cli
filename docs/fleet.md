@@ -72,8 +72,10 @@ tmux can see and its row says so (`no hooks`).
 ## The first five minutes
 
 1. **Run `asq`** (or `aisquare`) in a terminal. The UI opens: the navigator on
-   the left and, until you add a project, a Welcome page on the right that
-   checks `tmux`, `claude` and `gh` are on this machine. No script ever meets a
+   the left and a Welcome page on the right that walks you to a fleet in three
+   steps: pick a project, connect Claude Code (it names the install command
+   when Claude Code is missing), then start the manager and two coders. Press
+   `w` in the sidebar to come back to it. No script ever meets a
    full-screen app, and the two ways of getting no UI differ. **In a pipe or
    with `TERM=dumb`**: the help page on stdout and exit 2, byte for byte as
    before — the same ~5 KB either way (5,159 bytes at 80 columns, measured).
@@ -82,12 +84,13 @@ tmux can see and its row says so (`no hooks`).
    `{"error": "usage", "message": "Missing command."}`. Under `--json` stdout
    belongs to a program, and ~40 lines of Rich-formatted help there would hand a
    `jq` pipeline a parse error.
-2. **Click `+` beside Fleet.** Onboarding opens on the right: browse or type a
-   directory (`~` and `$VAR` expand). When it resolves, the UI runs the
-   equivalent of `aisquare init <path>` and then `aisquare doctor` **in the
-   background, without leaving the UI or prompting**, streams the log, and the
-   project appears as a card in the navigator. Doctor warnings are listed with
-   their fixes; the fix is one click where it is a known command (Phase 2).
+2. **Or click `+` beside Fleet** (or press `+` in the sidebar). Onboarding
+   opens on the right: browse or type a directory (`~` and `$VAR` expand).
+   When it resolves, the UI runs the equivalent of `aisquare init <path>` and
+   then `aisquare doctor` **in the background, without leaving the UI or
+   prompting**, streams the log, and the project appears as a card in the
+   navigator. Doctor warnings are listed with their fixes; the fix is one click
+   where it is a known command (Phase 2).
 3. **Click the project.** The Project view opens on its **Manager** tab. Press
    *Start manager* and the manager's live Claude Code session fills the pane.
    Type your goal to it in prose, exactly as you would to any Claude session. It
@@ -592,8 +595,8 @@ form and `add` refuses outside an interactive terminal. `aisquare doctor` gains 
 and a `claude-account-bindings` line when a role or project names an account the
 machine no longer has. Accounts laid
 out some other way — a wrapper, a proxy, a directory of your own — still bind
-to a role as a launch profile (`aisquare team bind coder1 --env …`, README
-"Several accounts, one team").
+to a role as a launch profile (`aisquare team bind coder1 --env …`, see
+[Several accounts, one team](orchestration.md#several-accounts-one-team)).
 
 ---
 

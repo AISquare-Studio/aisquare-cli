@@ -6,6 +6,13 @@ fix for each, and where the fix is one of our own commands it is one click
 text). A click runs ``apply_fix`` in a thread worker with the project's cwd,
 then re-runs the doctor and posts :class:`DoctorRefreshed` so the shell and the
 sidebar's Doctor section can follow. The UI process never changes directory.
+
+asq's own Doctor (``machine=True``, never the Onboard or Project copies) also
+carries Update and Uninstall. Both hand the terminal over rather than run in
+here: the view posts :class:`DoctorView.HandOff`, the app quits, and ``run_ui``
+hands this terminal to ``aisquare upgrade --reopen`` or ``aisquare uninstall``,
+which show their plan and ask y/N themselves. An upgrade must not run under the
+UI it replaces, and asq comes back after it.
 """
 
 from __future__ import annotations
@@ -16,17 +23,19 @@ from pathlib import Path
 from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Button, Static
 
 from aisquare.core import selfcli
 from aisquare.models import CheckStatus, DoctorCheck
-from aisquare.services import onboarding
+from aisquare.services import install_route, onboarding
 from aisquare.services.onboarding import FixCommand, FixResult, Runner
 
 _SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "✗"}
 _STYLE = {CheckStatus.ok: "green", CheckStatus.warn: "yellow", CheckStatus.fail: "bold red"}
+FIX_WORKER = "doctor-fix"
+"""The worker a one-click fix runs in (and the doctor after it): it writes."""
 
 Refresh = Callable[[Path | None], list[DoctorCheck]]
 """``cwd -> checks``: how the view re-runs the doctor after a fix. Raising is
@@ -73,6 +82,34 @@ def _doctor_via_cli(run: Runner) -> Refresh:
     return refresh
 
 
+#: The machine buttons and the ``aisquare`` arguments each hands the terminal to.
+#: ``--reopen`` brings asq back, after Enter, unless the upgrade failed or the
+#: uninstall removed something (then there is no asq to come back to).
+HAND_OFFS: dict[str, tuple[str, ...]] = {
+    "doctor-update": ("upgrade", "--reopen"),
+    "doctor-uninstall": ("uninstall", "--reopen"),
+}
+
+
+def _update_refusal() -> str | None:
+    """Why ``aisquare upgrade`` would only refuse this install, with its command, or ``None``.
+
+    ``install_route``'s own offline answer (files under ``sys.prefix`` and one PATH
+    lookup): Windows, an editable checkout, pipx, Homebrew, a plain venv or system
+    pip are told a command instead of upgraded, so Update would only cost the asq
+    session. An answer that cannot be had offers the button: the CLI then says why.
+    """
+    try:
+        route = install_route.detect()
+        reason = install_route.not_automated(route)
+        if reason is None:
+            return None
+        command = install_route.command_line(install_route.upgrade_argv(route, None))
+    except Exception:  # the Doctor view must keep its buttons whatever this finds
+        return None
+    return f"aisquare does not upgrade this install itself ({reason}). Upgrade it with: {command}"
+
+
 class DoctorView(VerticalScroll):
     """Scrollable doctor report for the selected project, with one-click fixes.
 
@@ -89,7 +126,16 @@ class DoctorView(VerticalScroll):
     DoctorView #doctor-status { height: auto; margin-top: 1; }
     DoctorView #doctor-fixes { height: auto; }
     DoctorView #doctor-fixes Button { margin: 1 1 0 0; }
+    DoctorView #doctor-machine { height: auto; margin-top: 1; }
+    DoctorView #doctor-machine Button { margin: 0 1 0 0; }
     """
+
+    class HandOff(Message):
+        """Update or Uninstall: quit asq and run ``aisquare <args>`` in this terminal."""
+
+        def __init__(self, args: tuple[str, ...]) -> None:
+            self.args = args
+            super().__init__()
 
     def __init__(
         self,
@@ -99,8 +145,13 @@ class DoctorView(VerticalScroll):
         refresh: Refresh | None = None,
         id: str | None = None,
         classes: str | None = None,
+        machine: bool = False,
+        update_refusal: Callable[[], str | None] | None = None,
     ) -> None:
         super().__init__(id=id, classes=classes)
+        self.machine = machine
+        """asq's own Doctor: also Update and Uninstall, which act on the whole install."""
+        self._update_refusal = update_refusal
         self.cwd = cwd
         self._run = run
         self._refresh: Refresh = refresh if refresh is not None else _doctor_via_cli(run)
@@ -113,6 +164,25 @@ class DoctorView(VerticalScroll):
         yield Static("", id="doctor-report")
         yield Static("", id="doctor-status")
         yield Vertical(id="doctor-fixes")
+        if self.machine:
+            refusal = (self._update_refusal or _update_refusal)()
+            with Horizontal(id="doctor-machine"):
+                update = Button("Update aisquare", id="doctor-update")
+                update.tooltip = Text(
+                    refusal
+                    or "Quits asq and runs `aisquare upgrade` here: it shows what it will do "
+                    "and asks first. asq opens again when it is done."
+                )
+                update.disabled = refusal is not None
+                yield update
+                uninstall = Button("Uninstall aisquare…", id="doctor-uninstall", variant="error")
+                uninstall.tooltip = (
+                    "Quits asq and runs `aisquare uninstall` here: it lists what goes and "
+                    "what stays, and asks first. asq opens again if nothing is removed."
+                )
+                yield uninstall
+            if refusal is not None:  # said on screen, not only on hover
+                yield Static(Text(f"Update: {refusal}", style="dim"), id="doctor-update-note")
 
     def on_mount(self) -> None:
         self._redraw()
@@ -174,6 +244,12 @@ class DoctorView(VerticalScroll):
     # ---------------------------------------------------------------- the click
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        hand_off = HAND_OFFS.get(event.button.id or "") if self.machine else None
+        if hand_off is not None:
+            # The app decides: it refuses while ANY Doctor view's fix is still writing.
+            event.stop()
+            self.post_message(self.HandOff(hand_off))
+            return
         fix = self.fixes.get(event.button.id or "")
         if fix is None:
             return
@@ -186,7 +262,7 @@ class DoctorView(VerticalScroll):
         self._set_status(Text(f"… running {fix.label}", style="dim"))
         self._apply(fix)
 
-    @work(thread=True, exclusive=True, group="doctor-fix", exit_on_error=False)
+    @work(thread=True, exclusive=True, name=FIX_WORKER, group=FIX_WORKER, exit_on_error=False)
     def _apply(self, fix: FixCommand) -> None:
         """Run the fix, then the doctor, off the UI thread; report back on it."""
         result = onboarding.apply_fix(fix, self.cwd, run=self._run)

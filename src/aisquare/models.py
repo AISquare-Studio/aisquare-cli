@@ -75,6 +75,18 @@ class AgentHookSite(BaseModel):
 
     config_dir: Path
     hooks_installed: bool = False
+    hooks_off: Path | None = None
+    """The directory's settings file, when it switches every hook off (``"disableAllHooks":
+    true``): Claude Code runs none of them however complete they are, so ``hooks_installed``
+    is False, and ``agents connect`` cannot change that. ``None`` otherwise."""
+    refused: str | None = None
+    """Why ``agents connect`` would refuse the directory, in its words, when its hooks are
+    not installed and it would: a settings.json that is not a JSON object or that this
+    user may not write, a CLAUDE.md it cannot read, or a recorded directory that no
+    longer exists and that connect would not make ("<dir> does not exist"). Connect can
+    only fail there, as the doctor and Welcome say. ``None`` otherwise."""
+    remedies: list[str] = Field(default_factory=list)
+    """What changes ``refused``, as Welcome and the doctor give it (``agents.remedies``)."""
 
 
 class AgentInfo(BaseModel):
@@ -699,6 +711,11 @@ class OnboardReport(BaseModel):
 
     seeded: list[ContextEntry] = Field(default_factory=list)
     snapshot: Snapshot | None = None
+    snapshot_note: str | None = None
+    """Why this run packed nothing, as ``init`` and ``onboard`` say it: off, or the
+    pack failed and why. ``None`` when a pack was made or reused. Set beside a
+    ``snapshot``, it is a ``--refresh`` that failed: that is the last pack, kept,
+    and agents still get it."""
 
 
 class ProjectForgetReport(BaseModel):
@@ -769,6 +786,10 @@ class AgentConnection(BaseModel):
     name: str
     hooks_installed: bool = False
     imported: int = 0
+    hooks_off: Path | None = None
+    """The settings file the hooks went into, when it switches every hook off
+    (``"disableAllHooks": true``): they are installed, and Claude Code runs none of them
+    until that key goes. ``agents connect`` leaves the key alone. ``None`` otherwise."""
 
 
 FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited", "lost", "unknown"]

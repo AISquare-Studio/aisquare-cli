@@ -537,6 +537,33 @@ def test_rule_7_the_session_paused_dialog_reads_as_limited() -> None:
     assert item.answers == ()
 
 
+@pytest.mark.parametrize(
+    ("accounts", "manager_live"),
+    [
+        (AccountsSettings(), False),
+        (AccountsSettings(), True),
+        (AccountsSettings(on_limit="switch"), False),
+        (AccountsSettings(on_limit="switch"), True),
+    ],
+)
+def test_the_session_paused_dialog_is_pushed_at_once_since_nobody_else_acts_on_it(
+    accounts: AccountsSettings, manager_live: bool
+) -> None:
+    """The dialog's card waited 90 s with ``on_limit = "switch"`` or a live manager, for the
+    hand-over or the manager to move the agent first. The dialog is a notification: the
+    hand-over starts only on a turn that failed on its limit (``StopFailure``), and an
+    ``attention`` event wakes no manager, so the agent waited 90 s on a human nobody told
+    (review of #243, sweep 5)."""
+    row = _row()
+    seen = NOW - timedelta(minutes=1)
+    session = _session(row, state="attention", seen=seen)
+    text = "Session paused — choose: continue on usage credits or switch models"
+    events = [_event(9, "attention", text, session=session, at=seen)]
+    status = _status(row, "attention", session)
+    item = _one(_classify(status, None, events, manager_live=manager_live, accounts=accounts))
+    assert (item.kind, item.since, item.push_after) == ("limited", seen, seen)
+
+
 def test_rule_8_attention_without_a_tool_is_a_dialog() -> None:
     """An MCP elicitation is a form: a digit would be typed into a field, so no buttons."""
     row = _row()
@@ -1269,8 +1296,9 @@ def test_a_manager_tmux_cannot_reach_is_no_manager_to_leave_work_to() -> None:
 
 def test_a_manager_at_the_usage_limit_dialog_does_not_wait_for_itself() -> None:
     """At the usage-limit dialog a manager reads attention, so it counted as the live manager
-    its own limit's push waited 90 s for: itself. Its items wait for another manager only;
-    a coder's limit still waits for it."""
+    its own limit's push waited 90 s for: itself. A coder's dialog waited 90 s for it too,
+    but no manager hears of a dialog (an ``attention`` event wakes none), and no hand-over
+    starts on one: both go at once (review of #243, sweep 5)."""
     paused = "Session paused — choose: continue on usage credits or switch models"
     at = NOW - timedelta(minutes=1)
     manager, coder = _row("manager", role="manager"), _row()
@@ -1285,7 +1313,7 @@ def test_a_manager_at_the_usage_limit_dialog_does_not_wait_for_itself() -> None:
         ],
     )
     pushes = {item.agent: item.push_after for item in _scan(fleet) if item.kind == "limited"}
-    assert pushes == {"manager": at, "coder-1": at + timedelta(seconds=90)}
+    assert pushes == {"manager": at, "coder-1": at}
 
 
 def test_a_manager_session_parked_on_its_limit_is_not_live_without_its_row_either() -> None:

@@ -400,7 +400,9 @@ the kinds that often clear by themselves, or that someone else is already on:
 - a usage limit: never when it lifts within
   `[accounts] wait_if_reset_within_minutes` (15 by default), since Claude Code
   carries on by itself at the reset; after 90 seconds when `on_limit = "switch"`
-  or a live manager is on it; at once otherwise;
+  or a live manager is on it; at once otherwise. Claude Code's "Session paused"
+  dialog, which a limit can show instead, goes at once: no hand-over starts on
+  it, and no manager hears of it;
 - a turn that ended with a question: after 5 minutes while a manager is live,
   for an agent that is neither the manager nor one you started yourself, since
   the manager is to answer it first; at once otherwise;

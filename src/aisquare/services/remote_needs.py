@@ -916,7 +916,11 @@ def needs_from_agent(
     if attention or _needs_unanswered(status, tail, unread=False):
         notice = _needs_notice(attention_event, tail, session)
         if notice is not None and LIMIT_DIALOG.search(notice.text):
-            since = notice.created_at
+            # Pushed at once, whatever ``on_limit`` says and whether a manager is live: the
+            # dialog is a notification, which starts no hand-over (a turn that failed on its
+            # limit does, ``hooks.turn_failed``) and wakes no manager (``attention`` is a
+            # human board kind), so the 90 s :func:`_needs_limited_push` waits for someone
+            # else to act had nobody behind them (review of #243, sweep 5).
             return [
                 _needs_item(
                     "limited",
@@ -926,10 +930,8 @@ def needs_from_agent(
                     reason=f"{name} hit its usage limit (Claude Code is asking what to do)",
                     excerpt=notice.text,
                     detail=_needs_fit({"text": notice.text}, _DETAIL_TEXT_MAX),
-                    since=since,
-                    push_after=_needs_limited_push(
-                        since, None, now=now, manager_live=manager_live, accounts=accounts
-                    ),
+                    since=notice.created_at,
+                    push_after=notice.created_at,
                 )
             ]
         seen = session.last_seen_at if session is not None else now
@@ -1733,8 +1735,8 @@ def _needs_scan_project(
             tail = tails[status.agent.id] = _needs_tail_of(sources, status)
             live = manager_live
             if _needs_is_manager(status.agent.role):
-                # Its own items wait for no manager but another: at the usage-limit dialog
-                # a manager reads attention, and its limit's push waited 90 s for itself.
+                # Its own items wait for no manager but another: a manager at a prompt of
+                # its own reads attention, live, and is no one to leave them to.
                 others = [row for row in acting if row.id != status.agent.id]
                 live = _needs_manager_live(others, rowed, sessions, now)
             for item in needs_from_agent(

@@ -1898,7 +1898,9 @@ def check_project_add_root(raw: object) -> Path:
     A path the system refuses to look up is refused as such: a NUL byte's
     ``ValueError`` and the ``RuntimeError`` of a ``~user`` with no home here fell
     to 400 ``write_failed``, the system's own words for a write that never began
-    (sweep 3 of #243).
+    (sweep 3 of #243), and so did a directory this account may see but not look
+    inside, ``/root`` or a ``chmod 000`` one, whose ``.git`` the root lookup asks
+    about: ``[Errno 13] Permission denied: '/root/.git'`` (sweep 4).
     """
     from aisquare.core.workspace import find_project_root
     from aisquare.services import fleet as fleet_service
@@ -1921,15 +1923,29 @@ def check_project_add_root(raw: object) -> Path:
         raise RequestError(400, "invalid", f"{path} does not exist") from None
     if not resolved.is_dir():
         raise RequestError(400, "invalid", f"{resolved} is not a directory")
-    root = find_project_root(resolved)
     home = Path.home().resolve()
+    unreadable = RequestError(
+        400,
+        "invalid",
+        f"{resolved} is outside your home directory: add a project inside it"
+        if not resolved.is_relative_to(home)
+        else f"{resolved} cannot be read: add a project this account may look inside",
+    )
+    try:
+        root = find_project_root(resolved)
+    except OSError:  # a directory this account may not search: /root, another user's home
+        raise unreadable from None
     if root == home or not root.is_relative_to(home):
         where = "is your home directory" if root == home else "is outside your home directory"
         raise RequestError(400, "invalid", f"{root} {where}: add a project inside it")
     hidden = next((part for part in root.relative_to(home).parts if part.startswith(".")), None)
     if hidden is not None:
         raise RequestError(400, "invalid", f"{root} is inside the hidden directory {hidden}")
-    if not (fleet_service.is_git_project(root) or _holds_repositories(root)):
+    try:
+        shaped = fleet_service.is_git_project(root) or _holds_repositories(root)
+    except OSError:
+        raise unreadable from None
+    if not shaped:
         raise RequestError(
             400, "invalid", f"{root} is neither a git checkout nor a directory of repositories"
         )

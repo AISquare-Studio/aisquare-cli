@@ -19,7 +19,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -73,6 +73,7 @@ from aisquare.services.remote_server import (
 )
 from aisquare.services.remote_words import REMOTE_PASSPHRASE_WORDS
 from tests.cli_tree import root_command
+from tests.fsperms import can_deny_reads
 from tests.remote_kit_helpers import (
     PASSWORD,
     base,
@@ -2115,6 +2116,66 @@ def test_a_project_outside_home_is_refused(home: Path, tmp_path: Path) -> None:
     with pytest.raises(RequestError) as refused:
         check_project_add_root(str(outside))
     assert "outside your home directory" in refused.value.message
+
+
+@contextlib.contextmanager
+def _unsearchable(directory: Path) -> Iterator[Path]:
+    """``directory``, made and then closed to this account as ``/root`` is to everyone but
+    root: it can be seen, and nothing inside it can be looked up."""
+    directory.mkdir(parents=True)
+    directory.chmod(0)
+    try:
+        yield directory
+    finally:
+        directory.chmod(0o700)
+
+
+@pytest.mark.skipif(not can_deny_reads(), reason="chmod(0) denies nothing here (root, or NTFS)")
+@pytest.mark.parametrize(
+    ("where", "says"),
+    [("outside", "is outside your home directory"), ("inside", "cannot be read")],
+)
+def test_a_directory_this_account_may_not_look_inside_is_invalid_not_a_failed_write(
+    home: Path, tmp_path: Path, where: str, says: str
+) -> None:
+    """The root lookup asks for its ``.git``, and the ``PermissionError`` fell to 400
+    ``write_failed`` with the system's own words, ``[Errno 13] Permission denied:
+    '/root/.git'``, for a write that never began (sweep 4 of #243)."""
+    parent = tmp_path / "elsewhere" if where == "outside" else home / "code"
+    with _unsearchable(parent / "locked") as locked, pytest.raises(RequestError) as refused:
+        check_project_add_root(str(locked))
+    assert (refused.value.status, refused.value.error) == (400, "invalid")
+    assert refused.value.message == f"{locked} {says}" + (
+        ": add a project inside it"
+        if where == "outside"
+        else ": add a project this account may look inside"
+    )
+
+
+@pytest.mark.skipif(not can_deny_reads(), reason="chmod(0) denies nothing here (root, or NTFS)")
+def test_adding_or_removing_a_directory_this_account_may_not_look_inside_changes_nothing(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """From the phone: 400 ``invalid`` for the add and 404 ``not_found`` for the remove, as a
+    path that does not exist is answered, never ``write_failed`` (sweep 4 of #243)."""
+    (alpha,) = _projects(home, "code/alpha")
+    monkeypatch.chdir(alpha.root)
+    client = _project_writes(runtime, tmp_path)
+    before = _audit_lines()
+    with (
+        _unsearchable(tmp_path / "elsewhere" / "locked") as outside,
+        _unsearchable(home / "code" / "locked") as inside,
+    ):
+        answers = [
+            client.post(f"{base(runtime)}/api/project/{route}", json={field: value})
+            for route, field in (("add", "path"), ("remove", "ref"))
+            for value in (str(outside), str(inside), "~/code/locked")
+        ]
+    codes = [(answer.status_code, answer.json()["error"]) for answer in answers]
+    assert codes == [(400, "invalid")] * 3 + [(404, "not_found")] * 3, [a.text for a in answers]
+    assert not any("Errno" in answer.text for answer in answers)
+    assert [project.id for project in project_service.list_projects()] == [alpha.id]
+    assert _audit_lines() == before
 
 
 def test_a_path_over_the_cap_is_413(home: Path) -> None:

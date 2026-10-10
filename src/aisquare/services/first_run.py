@@ -607,19 +607,19 @@ def _spawn(
 
 
 def _unworkable(root: Path) -> str | None:
-    """Why this user cannot work in ``root`` (enter it, and list it), else ``None``.
+    """Why this user cannot enter ``root``, else ``None``.
 
     Asked of the OS, where every Python answers alike: ``Path.exists`` raised on 3.11 to
     3.13 for a root this user cannot enter and answered False on 3.14. tmux cannot start a
     window in a folder it cannot enter, and starts it in $HOME without a word, so a
     manager or a restarted coder was reported started while working there (review of the
-    round-12 fixes). The ``stat`` through the root needs what ``chdir`` needs (search
-    permission); the listing needs read permission.
+    round-12 fixes). The ``stat`` through the root needs what ``chdir`` needs: search
+    permission. Read permission is not asked for: tmux starts an agent in a folder it can
+    enter but not list, and step 1 offers such a folder (refused here, the user was walked
+    through two steps to a refusal nothing needed; review of the round-12 fixes, again).
     """
     try:
         os.stat(os.path.join(root, os.curdir))
-        with os.scandir(root) as entries:
-            next(entries, None)
     except OSError as exc:
         return exc.strerror or _why(exc)
     return None
@@ -689,9 +689,9 @@ def start_fleet(
     its place takes the next free label. A manager in either state is
     ``fleet.spawn``'s to refuse, with the way to clear it. Coders take the
     role's worktree default in a git repository and ``worktree=False``
-    elsewhere, with a note. A root this user cannot enter and list is refused
-    first, and nothing is started or restarted: tmux would start every agent in
-    $HOME instead. After that, the first refusal (no tmux, the agent cap, a
+    elsewhere, with a note. A root this user cannot enter is refused first, and
+    nothing is started or restarted: tmux would start every agent in $HOME
+    instead. After that, the first refusal (no tmux, the agent cap, a
     worktree git will not make) stops the call, and its reason is on its step;
     the steps before it are kept.
     ``on_step`` hears each step as it lands, for a caller that shows progress.

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -613,21 +613,10 @@ def _lost_coder_listing() -> list[FleetAgentStatus]:
     ]
 
 
-@pytest.mark.parametrize("before", ["the-manager", "a-lost-coder"])
-@pytest.mark.parametrize("cause", ["cannot-enter", "cannot-list", "gone"])
-def test_a_root_this_user_cannot_work_in_starts_and_restarts_nothing(
-    tmp_path: Path, cause: str, before: str
-) -> None:
-    """tmux cannot start a window in a folder it cannot enter, and starts it in $HOME
-    without a word. The root was asked about only before new coders were spawned, through
-    ``Path.exists``, which raises on 3.11 to 3.13 and answers False on 3.14: the manager
-    and a lost coder's restart went into the root unasked and were reported started, in
-    $HOME (review of the round-12 fixes). The root is asked first, of the OS, and a root
-    this user cannot enter, list, or find refuses the call before anything starts."""
-    root = _repo(tmp_path / "demo")
-    project = ProjectInfo(id="prj_demo", root=root)
-    if cause != "gone" and (sys.platform == "win32" or not can_deny_reads()):
-        pytest.skip("needs a directory this user cannot enter or list")
+def _starter(
+    project: ProjectInfo, before: str
+) -> tuple[Callable[[], first_run.FleetStart], Spawns, Restarts]:
+    """Start the manager (``the-manager``), or the coders beside a lost coder-1."""
     listed = [] if before == "the-manager" else _lost_coder_listing()
     manager, coders = (True, 0) if before == "the-manager" else (False, first_run.CODERS)
     spawns, restarts = Spawns(), Restarts()
@@ -642,11 +631,30 @@ def test_a_root_this_user_cannot_work_in_starts_and_restarts_nothing(
             live=lambda p: listed,
         )
 
+    return start, spawns, restarts
+
+
+@pytest.mark.parametrize("before", ["the-manager", "a-lost-coder"])
+@pytest.mark.parametrize("cause", ["cannot-enter", "gone"])
+def test_a_root_this_user_cannot_enter_starts_and_restarts_nothing(
+    tmp_path: Path, cause: str, before: str
+) -> None:
+    """tmux cannot start a window in a folder it cannot enter, and starts it in $HOME
+    without a word. The root was asked about only before new coders were spawned, through
+    ``Path.exists``, which raises on 3.11 to 3.13 and answers False on 3.14: the manager
+    and a lost coder's restart went into the root unasked and were reported started, in
+    $HOME (review of the round-12 fixes). The root is asked first, of the OS, and a root
+    this user cannot enter, or that is gone, refuses the call before anything starts."""
+    root = _repo(tmp_path / "demo")
+    project = ProjectInfo(id="prj_demo", root=root)
+    if cause != "gone" and (sys.platform == "win32" or not can_deny_reads()):
+        pytest.skip("needs a directory this user cannot enter")
+    start, spawns, restarts = _starter(project, before)
     moved = tmp_path / "moved-away"
     if cause == "gone":
         root.rename(moved)
     else:
-        root.chmod(0o600 if cause == "cannot-enter" else 0o300)
+        root.chmod(0o600)
     try:
         refused = start()
     finally:
@@ -659,10 +667,40 @@ def test_a_root_this_user_cannot_work_in_starts_and_restarts_nothing(
         ("fleet", "refused", f"could not look into {root}: {reason}")
     ]
     assert spawns.calls == [] and restarts.calls == [], "nothing started or restarted"
-    # Control: the same root, this user's to work in again, gets its agents.
+    # Control: the same root, this user's to enter again, gets its agents.
     started = start()
     assert started.refused is None, [s.detail for s in started.steps]
     assert spawns.calls or restarts.calls
+
+
+@pytest.mark.parametrize("before", ["the-manager", "a-lost-coder"])
+def test_a_root_this_user_can_enter_but_not_list_gets_its_agents(
+    tmp_path: Path, before: str
+) -> None:
+    """Search permission without read (mode 300, an execute-only ACL) is enough for tmux,
+    which starts the agents in the root, and step 1 offers such a folder. Step 3 refused
+    it as "could not look into" anyway, and the user was walked through two steps to a
+    refusal nothing needed (review of the round-12 fixes, again). Step 3 asks only what
+    starting an agent needs, as step 1 does."""
+    if sys.platform == "win32" or not can_deny_reads():
+        pytest.skip("needs a directory this user can enter but not list")
+    home = tmp_path / "home"
+    root = _repo(home / "demo")
+    project = ProjectInfo(id="prj_demo", root=root, onboarded_at=T0)
+    start, spawns, restarts = _starter(project, before)
+    root.chmod(0o300)
+    try:
+        offered = first_run.candidates(home, home=home, projects=lambda: [project])
+        started = start()
+    finally:
+        root.chmod(0o755)
+    assert [c.root for c in offered.items] == [root], "premise: step 1 offers it"
+    assert started.refused is None, [s.detail for s in started.steps]
+    if before == "the-manager":
+        assert [role for role, _ in spawns.calls] == ["manager"]
+    else:
+        assert restarts.calls == [("coder-1", "agt_coder-1")]
+        assert [kwargs["worktree"] for _, kwargs in spawns.calls] == [None], "in a worktree"
 
 
 def test_a_git_dir_that_cannot_be_looked_into_is_a_refusal_after_the_steps_before_it(

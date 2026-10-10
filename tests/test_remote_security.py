@@ -379,6 +379,35 @@ def test_a_send_that_fails_after_typing_is_still_on_the_audit_trail(
     assert summary == "coder-1@prj_p text=6ch keys=0 enter=True failed"
 
 
+def test_a_send_of_32_keys_that_fails_still_says_failed_and_enter_on_its_audit_line(
+    runtime: Runtime, pane: FakePane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every key name was spelled out, up to 290 characters for 32 keys, and the
+    300-character cut of the line took the ``enter=`` and the ``failed`` after them: a send
+    that failed with keys typed read as one that went through (sweep 5 of #243). With the
+    longest label and a real project id, a run reads as one name and its count, and a list
+    past what fits says how many keys it left out."""
+    project = SimpleNamespace(id="prj_" + "a" * 26, root=Path("/tmp/p"))
+    monkeypatch.setattr(remote_server, "_resolve_project", lambda ref: project)
+    client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
+    assert unlock(client, runtime).status_code == 200
+    runtime.set_allow_write(True)
+    label = "coder-" + "x" * 18
+    pane.fail_keys = True
+
+    def sent(keys: list[str]) -> str:
+        client.post(
+            f"{base(runtime)}/api/send-keys", json={"agent": label, "keys": keys, "enter": True}
+        )
+        return _audit_lines()[-1][3]
+
+    mixed = sent(["PageDown", "PageUp"] * 16)
+    assert mixed.endswith(",…+18] enter=True failed"), mixed
+    assert sent(["PageDown"] * 31 + ["1"]) == (
+        f"{label}@{project.id} text=0ch keys=[PageDown*31,1] enter=True failed"
+    )
+
+
 def test_a_key_outside_the_allowlist_sends_nothing_at_all(pane: FakePane) -> None:
     send = live_writes().handlers["send-keys"]
     with pytest.raises(RequestError):

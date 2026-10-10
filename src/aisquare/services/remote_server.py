@@ -403,6 +403,10 @@ AUDIT_DEVICE_MAX = 32
 AUDIT_ENDPOINT_MAX = 32
 AUDIT_SUMMARY_MAX = 300
 """How much of each field an audit line keeps (:func:`_audit_clean`)."""
+AUDIT_KEYS_MAX = 120
+"""The longest key list an audit line spells out (:func:`_audit_keys`): what is left of
+:data:`AUDIT_SUMMARY_MAX` once a send-keys or a quick answer has named its agent, project,
+item and text, with the ``enter=`` and the ``failed`` that follow the keys."""
 
 
 class RemoteError(RuntimeError):
@@ -2778,11 +2782,29 @@ def _audit_keys(keys: list[str] | None) -> str:
     and an authenticated device is precisely who the trail exists to hold to
     account. Defence in depth now: :func:`check_remote_key_names` refuses any such
     name before a key is sent, and :meth:`Runtime.audit` scrubs every field.
+
+    A run of one key is written once with its count (``PageDown*31``), and a list longer
+    than :data:`AUDIT_KEYS_MAX` stops at the last name that fits and says how many keys it
+    left out (``…+12``): spelled out whole, 32 keys took up to 290 characters, and the
+    300-character cut of the line took the ``enter=`` and the ``failed`` after them, so a
+    send that failed with keys typed read as one that went through (sweep 5 of #243).
     """
+    import itertools
+
     if not keys:
         return "0"
     scrubbed = [_UNSAFE_IN_A_KEY_NAME.sub("?", key)[:32] or "?" for key in keys]
-    return "[" + ",".join(scrubbed) + "]"
+    listed: list[str] = []
+    left = len(scrubbed)
+    for name, run in itertools.groupby(scrubbed):
+        count = len(list(run))
+        entry = name if count == 1 else f"{name}*{count}"
+        more = "" if left == count else f",…+{left - count}"  # room for it, if one is next
+        if len(",".join([*listed, entry])) + len(more) > AUDIT_KEYS_MAX:
+            return "[" + ",".join([*listed, f"…+{left}"]) + "]"
+        listed.append(entry)
+        left -= count
+    return "[" + ",".join(listed) + "]"
 
 
 def _optional_ref(

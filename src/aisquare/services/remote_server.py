@@ -2999,17 +2999,18 @@ def _remote_author(ref: str | None) -> str | None:
     ``ses_abc`` with 400 ``*`` after it named ``ses_abc123def``, and the note's line said
     ``as=ses_abc****…``, cut at 300 characters before its ``to=``, and never named the
     session the note was posted as; ``ses_a?b?c[`` read as a ref that named nothing
-    (sweep 5 of #243).
+    (sweep 5 of #243). Read by the board's own reading of ``as`` (``team._resolve_session``),
+    which the services then read again: one of its own here could come to name another
+    session than the one the note is posted as, or none.
     """
     if ref is None:
         return None
     from aisquare.core.store import store_session
+    from aisquare.services import team as team_service
 
     with store_session() as store:
-        session = store.get_session(ref)
-    if session is None:
-        raise KeyError(ref)
-    return session.id
+        session = team_service._resolve_session(store, ref)
+    return None if session is None else session.id
 
 
 def live_writes() -> Writes:

@@ -271,6 +271,32 @@ def test_a_board_writes_audit_line_names_the_session_it_resolved_not_the_ref_it_
     )
 
 
+def test_a_board_writes_as_is_read_as_the_board_reads_it(
+    phone: TestClient, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The session ``as`` names is resolved once for the audit line and again by the board's
+    service: read by a copy of the board's reading, the two could come to name different
+    sessions, or the copy none, and a note the board would take was refused or audited as
+    another session. Whatever the board reads ``as`` to name, the line names."""
+    from aisquare.services import team as team_service
+
+    (alpha,) = (p for p in project_service.list_projects() if p.root.name == "alpha")
+    _session(alpha, "ses_abc123def")
+    resolve = team_service._resolve_session
+
+    def read_a_role_too(store: Any, ref: str | None) -> TeamSession | None:
+        return resolve(store, "ses_abc123def" if ref == "manager" else ref)
+
+    monkeypatch.setattr(team_service, "_resolve_session", read_a_role_too)
+
+    posted = phone.post(f"{base(runtime)}/api/note", json={"text": "hi", "as": "manager"})
+
+    assert posted.status_code == 200, posted.text
+    assert posted.json()["event"]["payload"]["session_id"] == "ses_abc123def"
+    line = remote_audit_path().read_text(encoding="utf-8").splitlines()[-1]
+    assert line.endswith(" as=ses_abc123def to=-"), line
+
+
 def test_a_note_on_a_task_of_another_projects_board_is_refused_invalid(
     phone: TestClient, runtime: Runtime, home: Path
 ) -> None:

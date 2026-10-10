@@ -1227,16 +1227,24 @@ class RemoteController:
         network that is down for a while, clears within minutes, and the watchdog
         must still be trying then. A first one was left alone, and its Remote stayed
         local-only for as long as it was on, though turning it off and on to try
-        again signs every phone out (sweep 4 of #243). But not one that ended before
-        announcing for a reason a restart would hit again (:data:`LASTING_TUNNEL_ERRORS`:
-        no authtoken, an ngrok too old for ``--url``), which the status line says, with
-        what to do. The new link is shown, and noted for push links, as soon as
-        ngrok announces it.
+        again signs every phone out (sweep 4 of #243). But not a Remote's first that
+        ended before announcing for a reason a restart would hit again
+        (:data:`LASTING_TUNNEL_ERRORS`: no authtoken, an ngrok too old for ``--url``),
+        which the status line says, with what to do. A restart that ended so is tried
+        again each minute, as any restart is: its Remote had a tunnel up, phones on it,
+        and an authtoken revoked meanwhile and put back with ``ngrok config
+        add-authtoken`` brings them back at the next minute, where turning Remote off and
+        on signs every one out. The new link is shown, and noted for push links, as soon
+        as ngrok announces it.
         """
         dead = self.tunnel
         if not self.running or dead is None or dead.running:
             return False
-        if dead.public_url is None and dead.error in LASTING_TUNNEL_ERRORS:
+        if (
+            dead is not self._revived_tunnel
+            and dead.public_url is None
+            and dead.error in LASTING_TUNNEL_ERRORS
+        ):
             return False
         now = self._now()
         if self._revived_at is not None and now - self._revived_at < timedelta(

@@ -78,17 +78,20 @@ devices that have unlocked. Scan the QR code with the phone; until ngrok is up
 the panel shows the local link alone, and no QR, since no phone can open that
 link. If ngrok stops, the UI restarts it within half a minute, and once a minute
 until it is up, the first ngrok of a Remote too (its static domain still held by an
-ngrok that has not let go of it yet, say); not one that stopped for want of an
-authtoken, or too old for `--url`, which the panel says how to fix. A link ngrok
-announces late (a network still coming up) is shown, and used for notifications,
-as soon as it comes. With the panel closed, a notice says when a Remote that was
-on could not come back on as the UI started, when phones cannot reach it (ngrok
-missing or not up, and once it is up after all), when ngrok came back on a new
-link, and when auto-off turned Remote off. A Remote another `serve` or fleet UI
-has on is not news: the panel says it is on in another process. One that cannot
-come back is tried at every start until a press of the switch fails as well;
-that leaves it off for the next start too. The panel serves on port 8750, or on
-the one an exported `AISQUARE_REMOTE_PORT` names, as `serve` does.
+ngrok that has not let go of it yet, say); not a Remote's first ngrok that
+stopped for want of an authtoken, or too old for `--url`, which the panel says
+how to fix. A restart that stopped so is tried each minute all the same: an
+authtoken put back while Remote is on brings the phones back with no off and on,
+which would sign every one out. A link ngrok announces late (a network still
+coming up) is shown, and used for notifications, as soon as it comes. With the
+panel closed, a notice says when a Remote that was on could not come back on as
+the UI started, when phones cannot reach it (ngrok missing or not up, and once it
+is up after all), when ngrok came back on a new link, and when auto-off turned
+Remote off. A Remote another `serve` or fleet UI has on is not news: the panel
+says it is on in another process. One that cannot come back is tried at every
+start until a press of the switch fails as well; that leaves it off for the next
+start too. The panel serves on port 8750, or on the one an exported
+`AISQUARE_REMOTE_PORT` names, as `serve` does.
 
 **From a shell**, for a machine without the UI open:
 

@@ -2356,27 +2356,42 @@ def test_a_static_domain_comes_back_on_the_same_link(isolated_home: Path) -> Non
 
 
 @pytest.mark.parametrize("lasting", [AUTHTOKEN_HINT, TOO_OLD_HINT], ids=["authtoken", "too old"])
-def test_a_tunnel_that_ended_for_a_lasting_reason_is_left_to_its_error(
+def test_a_first_tunnel_that_ended_for_a_lasting_reason_is_left_to_its_error(
     isolated_home: Path, lasting: str
 ) -> None:
     """No authtoken, or an ngrok too old for ``--url``: a restart would end the same way, every
-    minute, until the human acts and turns Remote on again, as the status line says; so for
-    a Remote's first tunnel, and for a restart that ended so before announcing."""
+    minute, until the human acts and turns Remote on again, as the status line says."""
     shop, clock = TunnelShop(None, exits=(lasting,)), LocalClock()
     controller, _server = controller_with(shop, clock)
     assert controller.message == lasting
     clock.now += timedelta(minutes=5)
     assert controller.revive_tunnel_if_dead() is False
     assert len(shop.made) == 1
-    shop = TunnelShop("https://first.ngrok-free.app", None, exits=(None, lasting))
-    controller, _server = controller_with(shop, clock)
+
+
+@pytest.mark.parametrize("lasting", [AUTHTOKEN_HINT, TOO_OLD_HINT], ids=["authtoken", "too old"])
+def test_a_restart_that_ended_for_a_lasting_reason_is_tried_again_each_minute(
+    isolated_home: Path, lasting: str
+) -> None:
+    """The authtoken revoked while Remote is on: its tunnel dies, and the restart ends before
+    it announces, for want of one. Left alone, Remote stayed local-only until the human
+    turned it off and on, which signs every phone out; tried each minute, as any restart
+    is, the one after ``ngrok config add-authtoken`` brings them back on the link they had."""
+    same = "https://remote-anmol.ngrok-free.app"
+    shop, clock = TunnelShop(same, None, same, exits=(None, lasting)), LocalClock()
+    controller, server = controller_with(shop, clock)
     shop.made[0].alive = False
     assert controller.revive_tunnel_if_dead() is True
     waited(controller)
     assert controller.message == lasting
-    clock.now += timedelta(minutes=5)
-    assert controller.revive_tunnel_if_dead() is False
-    assert len(shop.made) == 2
+    clock.now += timedelta(seconds=59)
+    assert controller.revive_tunnel_if_dead() is False, "a minute has not passed"
+    clock.now += timedelta(seconds=1)
+    assert controller.revive_tunnel_if_dead() is True
+    waited(controller)
+    assert len(shop.made) == 3 and controller.tunnel is shop.made[2]
+    assert controller.link_url() == f"{same}/r/{server.token}/"
+    assert controller.message == "ngrok stopped — restarted it"
 
 
 @pytest.mark.parametrize(

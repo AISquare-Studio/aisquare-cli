@@ -2721,14 +2721,15 @@ def _needs_stamps(memory: Mapping[str, datetime]) -> dict[str, str]:
 
 
 class RemoteNeedsWatcher:
-    """The scanner: a daemon thread scanning every ``interval`` while any device exists.
+    """The scanner: a daemon thread scanning every ``interval`` while anyone would hear of it.
 
-    Signed-out devices count: they still receive pushes. Each scan replaces the
-    latest snapshot at once and then calls every listener in
-    ``kit.needs_listeners`` with ``(all items, scanned_at)``; a listener that
-    raises is logged and the rest are called. Readers (the stream, the
-    heartbeat, the routes, the push sender) take the snapshot under a lock and
-    do no I/O.
+    That is a page with its socket open, or a device with a push subscription, signed
+    in or signed out (:meth:`_needs_heard`); a page that reads the feed with no socket
+    scans for itself (:meth:`needs_scan_wanted`). Each scan replaces the latest
+    snapshot at once and then calls every listener in ``kit.needs_listeners`` with
+    ``(all items, scanned_at)``; a listener that raises is logged and the rest are
+    called. Readers (the stream, the heartbeat, the routes, the push sender) take the
+    snapshot under a lock and do no I/O.
     """
 
     def __init__(
@@ -2744,8 +2745,15 @@ class RemoteNeedsWatcher:
         self._interval = interval
         self._clock = clock
         self._lock = threading.Lock()
-        self._scanning = threading.Lock()
+        self._scanning = threading.RLock()
         """One scan at a time: the watcher's own, a route's, the one after a quick answer."""
+        self._scans_told = 0
+        """How many scans :meth:`_needs_scan_told` has finished, and ``_scan_failure`` how the
+        last one ended: what a request that waited for another's scan reads instead of its
+        own (:meth:`needs_scan_for_request`)."""
+        self._scan_failure: Exception | None = None
+        self._heard = False
+        """Whether the thread's last turn found anyone to scan for (:meth:`_needs_heard`)."""
         self._latest: list[NeedsItem] = []
         self._latest_json: list[dict[str, object]] = []
         self._scanned_at: datetime | None = None
@@ -2785,32 +2793,84 @@ class RemoteNeedsWatcher:
 
     def _needs_loop(self) -> None:
         while not self._stopping.is_set():
-            if self._needs_devices():
+            self._heard = self._needs_heard()
+            if self._heard:
                 self._needs_scan_told()
             self._stopping.wait(self._interval)
 
     def _needs_scan_told(self) -> Exception | None:
         """:meth:`scan_needs_now`, its failure told once a streak, and its recovery once; the
         failure, or ``None``."""
-        try:
-            self.scan_needs_now()
-        except Exception as exc:
-            _needs_failed("the needs scan", exc, self._failing, "scan")
-            return exc
-        if "scan" in self._failing:
-            self._failing.discard("scan")
-            log.info("remote: the needs scan works again")
-        return None
+        with self._scanning:
+            failure: Exception | None = None
+            try:
+                self.scan_needs_now()
+            except Exception as exc:
+                _needs_failed("the needs scan", exc, self._failing, "scan")
+                failure = exc
+            else:
+                if "scan" in self._failing:
+                    self._failing.discard("scan")
+                    log.info("remote: the needs scan works again")
+            self._scans_told += 1
+            self._scan_failure = failure
+            return failure
 
-    def _needs_devices(self) -> bool:
-        """Whether any device is on record, signed in or not, and Remote is not past its
-        auto-off deadline: nobody to show it to, no scan. Past the deadline every request is
-        a 404 and every socket closed, whatever turns Remote off has yet to run."""
+    def needs_scan_for_request(self) -> Exception | None:
+        """A scan for a request that has nothing fresh to read, unless one finished while it
+        waited for the scan before it: how that one ended, a failure or ``None``.
+
+        Each request made before the first scan ran a scan of its own, one after another,
+        each re-reading every project though one had just published, and each holding a
+        thread of the shared pool meanwhile: a page sends two on loading and one on each
+        wake, and five early requests over a 2 s fleet were answered at 2, 4, 6, 8 and
+        10 s, a turn of Remote off waiting behind them (sweep 4 of #243). Now the requests
+        that waited share the scan they waited for.
+        """
+        told = self._scans_told
+        with self._scanning:
+            if self._scans_told != told:
+                return self._scan_failure
+            return self._needs_scan_told()
+
+    def _needs_heard(self) -> bool:
+        """Whether a scan reaches anyone: a page's socket is open (its ``needs_you`` frames
+        and heartbeat), or a device the runtime still has holds a push subscription (the
+        push sender's, signed out or not), and Remote is not past its auto-off deadline,
+        from which on every request is a 404 and every socket closed, whatever turns Remote
+        off has yet to run.
+
+        Any device on record was enough: one that signed out, or never turned
+        notifications on, has no socket and gets no push, and a phone unlocked once and
+        closed cost a scan of every project every 3 s for the rest of its 7 days, the
+        result read by nobody (review of #243, round 6). A push file that cannot be read
+        is taken for a subscription: the sender may yet send.
+        """
         try:
-            runtime = self._kit.runtime
-            return bool(runtime.device_ids()) and not runtime.auto_off_passed(self._clock())
+            if self._kit.runtime.auto_off_passed(self._clock()):
+                return False
         except Exception:
             return False
+        if self._kit.sockets:
+            return True
+        listening = getattr(self._kit.lane_state.get("push"), "push_listening", None)
+        if listening is None:
+            return False
+        try:
+            return bool(listening())
+        except Exception:
+            log.debug("remote: could not tell whether a phone has notifications on", exc_info=True)
+            return True
+
+    def needs_scan_wanted(self) -> bool:
+        """Whether a read of the feed must scan for itself: no thread scans (no lifespan),
+        none has scanned yet, or the thread scans for nobody (:meth:`_needs_heard`) and the
+        latest scan is older than its interval, as a page with no socket finds it."""
+        scanned = self.needs_scanned_at()
+        if scanned is None or not self.needs_watching():
+            return True
+        stale = (self._clock() - scanned).total_seconds() >= self._interval
+        return stale and not self._heard
 
     def scan_needs_now(self) -> list[NeedsItem]:
         """One synchronous scan: the snapshot replaced, then every listener called.
@@ -3101,16 +3161,17 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
         answers 503 ``unavailable`` in JSON and the watcher's own scans are told once a
         streak (review of #243, sweep 3).
         """
-        failed = await asyncio.to_thread(watcher._needs_scan_told)
+        failed = await asyncio.to_thread(watcher.needs_scan_for_request)
         return None if failed is None else kit.kit_refuse(503, "unavailable", str(failed))
 
     async def needs_list_endpoint(
         request: Request, device: Device, body: dict[str, Any]
     ) -> Response:
-        """The feed. A watcher that is not running (no lifespan) scans for this request."""
+        """The feed. A watcher that does not scan for anyone, or is not running (no
+        lifespan), scans for this request (:meth:`RemoteNeedsWatcher.needs_scan_wanted`)."""
         watcher = _needs_watcher(kit)
-        unread = not watcher.needs_watching() or watcher.needs_scanned_at() is None
-        if unread and (failed := await needs_scanned_here(watcher)) is not None:
+        wanted = watcher.needs_scan_wanted()
+        if wanted and (failed := await needs_scanned_here(watcher)) is not None:
             return failed
         return JSONResponse(watcher.needs_payload_now())
 

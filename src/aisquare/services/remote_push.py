@@ -1132,6 +1132,15 @@ class RemotePushSender:
         if self._thread is not None:
             self._thread.join(timeout)
 
+    def push_listening(self) -> bool:
+        """Whether a needs scan can reach anyone through this sender: a device the runtime
+        still has holds a push subscription, signed in or signed out (SPEC §5.3). While no
+        page is open, the needs watcher scans for nobody else
+        (``remote_needs.RemoteNeedsWatcher._needs_heard``). It reads ``remote-push.json``:
+        the watcher's thread asks, never the event loop."""
+        held = load_push_state().subscriptions
+        return bool(held) and not push_device_ids(self._kit).isdisjoint(held)
+
     def enqueue_needs_push(self, items: list[NeedsItem], scanned_at: datetime) -> None:
         """The needs watcher's listener: queue one scan, and return at once."""
         self._queue.put((list(items), scanned_at))

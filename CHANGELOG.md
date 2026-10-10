@@ -41,8 +41,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never, and the banner says so); the phone can extend it an hour at a time,
   up to 8 hours ahead. `status` and `regenerate-password --new-link` take the
   same `--port` (and `AISQUARE_REMOTE_PORT`) for the link they print.
-- **Needs you.** Every 3 s the server works out what waits on the human across
-  every project: a permission prompt (each prompt of a turn on its own), a
+- **Needs you.** Every 3 s, while a phone has the page open or notifications on,
+  the server works out what waits on the human across every project: a
+  permission prompt (each prompt of a turn on its own), a
   question, a plan to approve, a board question or result, a crashed agent, a
   stopped manager, a usage limit, a turn that died on an API error (an expired
   login, credit run out), a lost pane, tmux not answering, a turn that ended

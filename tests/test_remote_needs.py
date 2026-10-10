@@ -3463,8 +3463,29 @@ def _until_true(check: Callable[[], bool], seconds: float = 5.0) -> None:
         time.sleep(0.01)
 
 
-def test_the_watcher_scans_only_while_a_device_exists(runtime: Runtime, tmp_path: Path) -> None:
-    """Nobody to show it to, no scan: no store reads, no tmux spawns."""
+def _a_page_open(app: Any, runtime: Runtime) -> Callable[[], None]:
+    """A phone unlocked, its page's socket open as the stream registers it; the closer."""
+    assert unlock(make_client(app), runtime).status_code == 200
+    (device_id,) = runtime.device_ids()
+
+    def closer(code: int) -> None:
+        return None
+
+    app.kit.kit_socket_opened(device_id, closer)
+    return lambda: app.kit.kit_socket_closed(device_id, closer)
+
+
+def test_the_watcher_scans_only_while_a_page_or_a_subscription_hears_of_it(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """Nobody to show it to, no scan: no store reads, no tmux spawns. A device on record was
+    enough: one signed out, or that never turned notifications on, has no socket and gets no
+    push, and a phone unlocked once and closed cost a scan of every project every 3 s for
+    the rest of its 7 days, the result read by nobody (review of #243, round 6). A page's
+    socket is someone, and so is a subscription of a device the runtime still has, signed
+    out or not, through the push sender."""
+    from aisquare.services import remote_push
+
     app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
     made: list[NeedsSources] = []
 
@@ -3472,17 +3493,72 @@ def test_the_watcher_scans_only_while_a_device_exists(runtime: Runtime, tmp_path
         made.append(_sources(Fleet()))
         return made[-1]
 
+    def quiet() -> bool:
+        before = len(made)
+        threading.Event().wait(0.2)
+        return len(made) == before
+
     watcher = RemoteNeedsWatcher(app.kit, sources=counted, interval=0.01)
     watcher.start_watching()
     try:
-        threading.Event().wait(0.2)
-        assert made == [] and watcher.needs_scanned_at() is None
+        assert quiet() and watcher.needs_scanned_at() is None
         assert unlock(make_client(app), runtime).status_code == 200
+        assert quiet(), "a device on record, and nothing that would hear of a scan"
+        (device_id,) = runtime.device_ids()
+
+        def closer(code: int) -> None:
+            return None
+
+        app.kit.kit_socket_opened(device_id, closer)
         _until_true(lambda: watcher.needs_scanned_at() is not None)
+        app.kit.kit_socket_closed(device_id, closer)
+        _until_true(quiet)
+        sender = remote_push.RemotePushSender(app.kit)
+        app.kit.lane_state["push"] = sender
+        assert quiet(), "a push sender with nobody subscribed"
+        phone = remote_push.PushSubscriptionRecord(
+            "https://fcm.googleapis.com/fcm/send/x", "p256dh", "auth", NOW.isoformat()
+        )
+        remote_push.push_subscribe_device(device_id, phone, {device_id})
+        assert not quiet(), "a phone with notifications on, its page closed"
+        runtime.revoke_device(device_id)
+        _until_true(quiet)
         assert any(t.name == "asq-remote-needs" for t in threading.enumerate())
     finally:
         watcher.stop_watching()
     assert not watcher.needs_watching()
+
+
+def test_a_read_with_nobody_listening_scans_for_itself_once_the_latest_is_old(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """The watcher scans for nobody, so a page that reads the feed with no socket open (one
+    that cannot connect, or before it has) gets a scan of its own when the latest is older
+    than the interval, and the latest when it is not."""
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    client = make_client(app)
+    assert unlock(client, runtime).status_code == 200
+    made: list[NeedsSources] = []
+
+    def counted() -> NeedsSources:
+        made.append(_sources(Fleet()))
+        return made[-1]
+
+    watcher = RemoteNeedsWatcher(app.kit, sources=counted, interval=1.0)
+    app.kit.lane_state["needs"] = watcher
+    watcher.start_watching()
+    try:
+        threading.Event().wait(0.2)
+        assert made == []
+        url = f"{base(runtime)}/api/needs"
+        first = client.get(url).json()["scanned_at"]
+        assert first is not None and len(made) == 1
+        assert client.get(url).json()["scanned_at"] == first and len(made) == 1, "fresh"
+        threading.Event().wait(1.1)
+        client.get(url)
+        assert len(made) == 2, "older than the interval, and nobody else scans"
+    finally:
+        watcher.stop_watching()
 
 
 def test_the_watcher_scans_nothing_past_the_auto_off_deadline(
@@ -3492,7 +3568,7 @@ def test_the_watcher_scans_nothing_past_the_auto_off_deadline(
     Remote off has yet to run, the TUI's check every 30 s: no scan feeds a phone, or the push
     sender, meanwhile. A deadline moved later scans again."""
     app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
-    assert unlock(make_client(app), runtime).status_code == 200
+    _a_page_open(app, runtime)
     runtime.set_auto_off(datetime.now(UTC) - timedelta(seconds=1))
     made: list[NeedsSources] = []
 
@@ -3509,6 +3585,73 @@ def test_the_watcher_scans_nothing_past_the_auto_off_deadline(
         _until_true(lambda: watcher.needs_scanned_at() is not None)
     finally:
         watcher.stop_watching()
+
+
+class _CountedLock:
+    """The watcher's one-scan-at-a-time lock, counting who asked for it."""
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.asked = 0
+
+    def __enter__(self) -> _CountedLock:
+        self.asked += 1
+        self.lock.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.lock.release()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_requests_that_waited_for_a_scan_share_it_instead_of_each_running_one(
+    runtime: Runtime, tmp_path: Path, fails: bool
+) -> None:
+    """Each request made before the first scan ran its own, one after another, though one had
+    just published: five early reads over a 2 s fleet were answered at 2, 4, 6, 8 and 10 s,
+    each holding a thread of the shared pool, and a Remote off waited behind them (sweep 4
+    of #243). Those that waited share the scan they waited for, its failure included."""
+    from aisquare.core.store import StoreUnopenable
+
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    started, release = threading.Event(), threading.Event()
+    scans: list[int] = []
+
+    def slow() -> list[ProjectInfo]:
+        scans.append(len(scans))
+        started.set()
+        assert release.wait(5)
+        if fails:
+            raise StoreUnopenable("file is not a database")
+        return []
+
+    watcher = RemoteNeedsWatcher(
+        app.kit, sources=lambda: replace(_sources(Fleet()), list_projects=slow)
+    )
+    counted = _CountedLock()
+    watcher._scanning = counted  # type: ignore[assignment]
+    answers: list[Exception | None] = []
+    requests = [
+        threading.Thread(target=lambda: answers.append(watcher.needs_scan_for_request()))
+        for _ in range(5)
+    ]
+    requests[0].start()
+    assert started.wait(5)
+    for request in requests[1:]:
+        request.start()
+    _until_true(lambda: counted.asked >= 3 + 4)  # the first one's scan, and four waiting
+    release.set()
+    for request in requests:
+        request.join(5)
+    assert scans == [0], "one scan for the five"
+    assert len(answers) == 5
+    if fails:
+        assert all(isinstance(answer, StoreUnopenable) for answer in answers)
+    else:
+        assert answers == [None] * 5 and watcher.needs_scanned_at() is not None
+    again = watcher.needs_scan_for_request()
+    assert isinstance(again, StoreUnopenable) if fails else again is None
+    assert scans == [0, 1], "a request with nothing in flight scans for itself"
 
 
 def test_every_scan_reaches_every_listener_and_a_failing_one_costs_nothing(
@@ -3560,7 +3703,7 @@ def test_a_scan_that_keeps_failing_is_told_once_until_it_works_again(
     from aisquare.core.store import damaged_store_recovery
 
     app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
-    assert unlock(make_client(app), runtime).status_code == 200
+    _a_page_open(app, runtime)
     broken = threading.Event()
     broken.set()
     scans = 0

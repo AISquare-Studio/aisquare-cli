@@ -236,8 +236,10 @@ not send it again: the server's log then warns, with the line that is missing.
 
 ## Needs you
 
-The server scans every project every 3 seconds and keeps one list of what is
-waiting on you. The page shows it as cards; `aisquare remote needs` prints it:
+While a phone has the page open, or has notifications on, the server scans
+every project every 3 seconds and keeps one list of what is waiting on you; with
+neither, it scans only when a page asks for the list. The page shows it as
+cards; `aisquare remote needs` prints it:
 
 ```sh
 aisquare remote needs

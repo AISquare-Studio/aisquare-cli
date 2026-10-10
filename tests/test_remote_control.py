@@ -11,6 +11,7 @@ branches — on/off, restore after a restart, auto-off, write actions default OF
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import inspect
 import io
@@ -916,6 +917,31 @@ def test_a_config_of_ours_that_is_no_utf8_is_written_again_not_raised_into_the_u
     ours.write_bytes(b"web_addr: \xff\n")
     assert api_off_configs(own=own) == [own, ours]
     assert ours.read_text(encoding="utf-8").endswith('version: "2"\nweb_addr: false\n')
+
+
+@pytest.mark.parametrize(
+    "encoding",
+    ["utf-8-sig", "utf-16-le", "utf-16-be"],
+    ids=["UTF-8 with BOM", "UTF-16 LE (PowerShell 5.1)", "UTF-16 BE"],
+)
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["LF", "CRLF"])
+def test_a_config_of_the_humans_saved_with_a_byte_order_mark_still_turns_the_api_off(
+    tmp_path: Path, encoding: str, newline: str
+) -> None:
+    """``ngrok config add-authtoken`` writes ``version`` first, and Notepad's "UTF-8 with BOM"
+    or PowerShell 5.1's ``Set-Content``/``Out-File`` re-save it with a byte-order mark. Read
+    as plain UTF-8, the mark hid that first line, and ngrok started with its unauthenticated
+    agent API on, which ngrok itself, decoding the mark, had no reason to (sweep 5 of #243)."""
+    text = newline.join(["version: 3", "agent:", "  authtoken: tok_123", ""])
+    raw = text.encode(encoding)
+    if encoding.startswith("utf-16"):  # the codec names its order, so writes no mark itself
+        raw = (codecs.BOM_UTF16_LE if encoding.endswith("le") else codecs.BOM_UTF16_BE) + raw
+    own = write_ngrok_config(tmp_path, "")
+    own.write_bytes(raw)
+    assert api_off_configs(own=own, environ={}) == [
+        own,
+        paths.aisquare_home() / "remote-ngrok-v3.yml",
+    ]
 
 
 def test_an_ngrok_whose_api_off_config_cannot_be_had_starts_as_before(tmp_path: Path) -> None:

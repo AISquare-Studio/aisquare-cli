@@ -73,6 +73,7 @@ from urllib.parse import urlsplit
 
 from aisquare.core import paths
 from aisquare.core.atomic import write_replacing
+from aisquare.core.config import decode_by_bom
 from aisquare.core.injection import sanitise_text
 
 INSTALL_HINT = (
@@ -315,10 +316,14 @@ def api_off_configs(
     was, its API on: no config of the human's and nothing to sign in with (ngrok will say
     so), one whose version is not known here, or a path with a comma (``--config``
     splits on them), or ours could not be written.
+
+    The human's is decoded by its byte-order mark, as ngrok's YAML reader decodes it: read
+    as plain UTF-8, a file Notepad or PowerShell 5.1 saved with one hid its first line, the
+    ``version:`` ngrok writes there, and ngrok started with its API on (sweep 5 of #243).
     """
     own = ngrok_default_config(environ=environ) if own is None else own
     try:
-        text = own.read_text(encoding="utf-8", errors="replace")
+        text = decode_by_bom(own.read_bytes(), errors="replace")
     except FileNotFoundError:
         if not environ.get("NGROK_AUTHTOKEN"):
             return None

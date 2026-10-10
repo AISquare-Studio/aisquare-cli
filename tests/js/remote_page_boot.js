@@ -2648,6 +2648,68 @@ async function socketCloses() {
   };
 }
 
+/* Off screens a wake or a tapped notification meets (SPEC §6.4 "Waking up"): Remote went off
+ * (4410), then came back under the same link, as a fleet UI started again turns it on, and the
+ * phone woke; a page opened while no Remote answered (404), handed a notification's card by its
+ * worker once Remote was back; and a link the machine refused (4404), woken. What each shows,
+ * whether it is still off, and how often it asked api/remote. */
+async function offAndBack() {
+  const card = "#/n/" + NEEDS_ID + "/p/" + PROJECT + "/a/coder-1";
+  const heading = (page) => {
+    const title = find(page.main(), (node) => node.tagName === "H2");
+    return title ? title.textContent : null;
+  };
+  const machine = () => {
+    const state = { on: true, reads: 0 };
+    state.routes = {
+      "GET api/remote": () => {
+        state.reads += 1;
+        return state.on ? { status: 200, json: { allow_write: true, auto_off_at: null, version: "test" } }
+          : { status: 404, json: { error: "not_found", message: "no such link" } };
+      },
+      "GET api/needs": () => ({ status: 200, json: { items: [ITEM] } }),
+    };
+    return state;
+  };
+  const shown = (page, state) => ({
+    off: page.run("S.off"), heading: heading(page), cards: page.main().querySelectorAll("div.card").length, reads: state.reads,
+  });
+  const woke = machine();
+  const woken = bootPage("#/", signedIn(woke.routes));
+  await settle();
+  woken.acceptSockets();
+  woken.live().fire("close", { code: 4410 });
+  await settle();
+  const wentOff = shown(woken, woke);
+  woken.run("S.lastWake = 0;");
+  fire(woken, "document", "visibilitychange");
+  await settle();
+  woken.acceptSockets();
+  await settle();
+  const wokeUp = Object.assign(shown(woken, woke), { sockets: woken.sockets.length, open: woken.live().readyState === 1 });
+  const push = fakePush(KEY_NOW);
+  const tap = machine();
+  tap.on = false;
+  const scope = "https://x.ngrok-free.app/r/" + "t".repeat(32) + "/";
+  const tapped = bootPage("#/settings", signedIn(Object.assign(pushRoutes([]), tap.routes)), push.globals, scope);
+  await settle();
+  const gone = shown(tapped, tap);
+  tap.on = true;
+  for (const fn of push.heard.message || []) fn({ data: { type: "open", hash: card } });
+  await settle();
+  const landed = Object.assign(shown(tapped, tap), { hash: tapped.location.hash });
+  const link = machine();
+  const refused = bootPage("#/", signedIn(link.routes));
+  await settle();
+  refused.acceptSockets();
+  refused.live().fire("close", { code: 4404 });
+  await settle();
+  refused.run("S.lastWake = 0;");
+  fire(refused, "document", "visibilitychange");
+  await settle();
+  return { wentOff, wokeUp, gone, landed, link: shown(refused, link) };
+}
+
 /* The strip at the top, writes off, an auto-off set and a card in the feed, before and after the
  * socket closed 4410 (Remote went off), 4404 (the link changed) and 4401 (signed out), and a
  * handshake whose probe the machine answered 404: whether the timer, Extend and the READ-ONLY
@@ -3173,6 +3235,7 @@ async function main() {
     refusalSentences: await refusalSentences(),
     reasonsGiven: await reasonsGiven(),
     socketCloses: await socketCloses(),
+    offAndBack: await offAndBack(),
     unlockWait: await unlockAnswered(429, { error: "rate_limited", message: "too many tries" }),
     statusStrip: await statusStrip(),
     offStrip: await offStrip(),

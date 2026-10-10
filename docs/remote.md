@@ -595,4 +595,5 @@ Remove what `install-page` installed: `rm -rf ~/.aisquare/remote-dist`.
 auto-off passed, ngrok came back on a new address, or
 `regenerate-password --new-link` replaced the link (a phone still on the old one
 is told so when it tries to unlock). Turn it on again, or open the link the
-machine shows now.
+machine shows now. A page showing this asks again when the phone wakes or a
+notification is tapped, and at once on **Retry**.

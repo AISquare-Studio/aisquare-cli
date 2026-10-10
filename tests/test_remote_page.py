@@ -2288,6 +2288,45 @@ def test_each_close_code_and_a_failed_handshake_lead_where_the_spec_says(
     assert closes["dropped"] == {"shown": None, "probes": 0, "timers": ["connect"]}
 
 
+def test_a_page_off_asks_again_when_the_phone_wakes_or_a_notification_is_tapped(
+    boot_report: dict[str, Any],
+) -> None:
+    """SPEC §6.4 reconnects on every wake, but the page returned early while off: once Remote
+    went off, or stopped answering, it said so until Retry was tapped, though a fleet UI
+    started again turns Remote back on under the same link. A notification of the Remote
+    back on, tapped, opened on "Remote is off" and no card. A wake asks the machine again, as
+    Retry does, and so does a tap; a link the machine refused (4404) has nothing to ask."""
+    back = boot_report["offAndBack"]
+    assert back["wentOff"] == {
+        "off": "off",
+        "heading": "Remote is off on the machine",
+        "cards": 0,
+        "reads": 1,
+    }
+    assert back["wokeUp"] == {
+        "off": None,
+        "heading": None,
+        "cards": 1,
+        "reads": 2,
+        "sockets": 2,
+        "open": True,
+    }
+    assert back["gone"]["off"] == "gone" and back["gone"]["reads"] == 1
+    assert back["landed"] == {
+        "off": None,
+        "heading": None,
+        "cards": 1,
+        "reads": 2,
+        "hash": "#/n/ny_0123456789abcdef/p/prj_x/a/coder-1",
+    }
+    assert back["link"] == {
+        "off": "link",
+        "heading": "This link is no longer valid",
+        "cards": 0,
+        "reads": 1,
+    }
+
+
 def test_a_page_that_cannot_go_on_keeps_no_timer_extend_or_connecting_dot(
     boot_report: dict[str, Any],
 ) -> None:

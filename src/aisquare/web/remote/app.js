@@ -1623,13 +1623,18 @@ function drawOff() {
   const text = OFF_SCREENS[S.off] || OFF_SCREENS.gone;
   const box = el("section", "off");
   box.append(el("h2", null, text[0]), el("p", "muted", text[1]));
-  box.appendChild(button("primary", "Retry", () => {
-    S.off = null;
-    S.backoff = 0;
-    start();
-  }));
+  box.appendChild(button("primary", "Retry", () => lookAgain(true)));
   UI.main.appendChild(box);
   drawNav();
+}
+
+/* Off, a wake or a tapped notification asks again, as Retry (any) does: Remote may be on
+ * again under the same link, as a fleet UI started again turns it back on. */
+function lookAgain(any) {
+  if (!any && S.off !== "off" && S.off !== "gone") return;
+  S.off = null;
+  S.backoff = 0;
+  start();
 }
 
 /* Visible again, back on the page, or back online: the socket may be a dead
@@ -1639,8 +1644,9 @@ function wake(force) {
   if (!force && now - S.lastWake < 1000) return;
   S.lastWake = now;
   S.backoff = 0;
+  if (S.off) return lookAgain();
   // Nothing to wake before the first answer: a page still booting, or one not unlocked.
-  if (S.off || S.locked || S.booting) return;
+  if (S.locked || S.booting) return;
   if (S.sockState === "replaced" && !force && document.visibilityState !== "visible") return;
   connect();
   drawBanner();
@@ -3094,7 +3100,9 @@ function boot() {
     navigator.serviceWorker.register("sw.js", { scope: "./" }).catch(() => undefined);
     navigator.serviceWorker.addEventListener("message", (event) => {
       const data = event.data;
-      if (data && data.type === "open" && typeof data.hash === "string") pageGo(data.hash);
+      if (!data || data.type !== "open" || typeof data.hash !== "string") return;
+      pageGo(data.hash);
+      lookAgain();
     });
   }
   setInterval(onSecond, 1000);

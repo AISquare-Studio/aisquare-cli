@@ -3405,6 +3405,52 @@ def test_under_a_team_hub_the_scan_reads_the_hubs_board_once_for_its_projects(
     assert [item.kind for item in needs_agent_now(beta, "coder-1").items] == ["failed"]
 
 
+def test_under_a_team_hub_a_projects_rows_are_derived_again_in_one_look_at_tmux(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every row's session is the hub's, so every row was derived again by
+    ``fleet.status_of``: a store session and a look at its tmux server for each agent, on
+    top of the listing's one look, every 3 s (verifier of sweep 4's item 8 on #243). The
+    rows are derived again together, each with its own session."""
+    now = datetime.now(UTC)
+    hour_ago = now - timedelta(hours=1)
+    hub = _rooted(tmp_path / "hub")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
+    labels = ("coder-1", "coder-2", "coder-3")
+    with store_session() as store:
+        alpha = store.onboard_project(_rooted(tmp_path / "alpha"))
+        store.ensure_project(hub)
+        for n, label in enumerate(labels, start=1):
+            store.upsert_session(
+                TeamSession(
+                    id=f"ses_{label}", project_id=hub.id, role="coder", label=label,
+                    started_at=hour_ago, last_seen_at=now - timedelta(minutes=1),
+                    state="attention" if label == "coder-2" else "working",
+                )
+            )  # fmt: skip
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=f"agt_{label}", project_id=alpha.id, label=label, role="coder",
+                    pane_id=f"%{n}", session_id=f"ses_{label}", cwd=alpha.root,
+                    created_at=hour_ago,
+                )
+            )  # fmt: skip
+    looks: list[list[str]] = []
+    observe = fleet_service._observe
+
+    def looked(srv: Any, tmux_session: str | None, agents: Any) -> Any:
+        looks.append(sorted(agent.label for agent in agents))
+        return observe(srv, tmux_session, agents)
+
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    monkeypatch.setattr(fleet_service, "_observe", looked)
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+    assert looks == [list(labels), list(labels)], "the listing's look, and one more"
+    assert [(item.kind, item.agent) for item in items] == [("permission", "coder-2")]
+    assert items[0].reason == "coder-2 shows a dialog that needs you"
+
+
 def _rooted(root: Path) -> ProjectInfo:
     """A project as ``asq init`` registers it: its id derived from its root, which is where
     the team writes its board too (``team_project``), and where the scan reads it."""

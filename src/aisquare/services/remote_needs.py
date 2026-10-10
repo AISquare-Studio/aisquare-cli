@@ -2727,13 +2727,15 @@ def live_needs_sources() -> NeedsSources:
 
 def _needs_with_board_sessions(statuses: list[FleetAgentStatus]) -> list[FleetAgentStatus]:
     """The listing, each live row whose session the team keeps on another project's board
-    derived again with it (``fleet.status_of``, which finds a session by its id).
+    derived again with it, the session found by its id.
 
     ``fleet.list_agents`` reads the sessions of the project's own board, and under
     ``AISQUARE_TEAM_HUB`` every session is the hub's: no row had one, so none read
     attention, a usage limit or a failed turn, and no transcript was read (sweep 4 of
-    #243). Only such rows are asked about again, each once; one that cannot be is left as
-    the listing had it.
+    #243). Only such rows are derived again, in one read of the store and one look at
+    each tmux server they are on, as the listing looks: ``fleet.status_of`` of each was a
+    store session and a server's three questions per row, every row of a hub's every 3 s
+    scan. If the servers cannot be asked, the rows are left as the listing had them.
     """
     from aisquare.core.store import store_session
     from aisquare.services import fleet as fleet_service
@@ -2747,18 +2749,27 @@ def _needs_with_board_sessions(statuses: list[FleetAgentStatus]) -> list[FleetAg
         return statuses
     with store_session() as store:
         held = {
-            status.agent.id
+            status.agent.id: session
             for status in elsewhere
-            if status.agent.session_id and store.get_session(status.agent.session_id)
+            if status.agent.session_id
+            and (session := store.get_session(status.agent.session_id)) is not None
         }
-    derived: dict[str, FleetAgentStatus] = {}
-    for status in elsewhere:
-        if status.agent.id not in held:
-            continue
-        try:
-            derived[status.agent.id] = fleet_service.status_of(status.agent)
-        except Exception:
-            log.debug("remote: needs could not derive %s again", status.agent.id, exc_info=True)
+    if not held:
+        return statuses
+    rows = [status.agent for status in elsewhere if status.agent.id in held]
+    tmux_session = elsewhere[0].tmux_session  # the listing's one, its project's
+    try:
+        views = fleet_service._observe_sockets(rows, tmux_session)
+    except Exception:
+        log.debug("remote: needs could not derive the hub's rows again", exc_info=True)
+        return statuses
+    now = fleet_service._now()
+    derived = {
+        agent.id: fleet_service._status(
+            agent, held[agent.id], views.get(agent.tmux_socket), tmux_session, now
+        )
+        for agent in rows
+    }
     return [derived.get(status.agent.id, status) for status in statuses]
 
 

@@ -2249,17 +2249,15 @@ VIEWS.project = (route, main) => {
   main.appendChild(body);
   const view = {};
   if (route.tab === "fleet") {
-    // A refusal of its read is drawn here too, so a redraw keeps it.
+    // A refused read, kept so a redraw says it again.
     let failed = null;
     const fill = () => {
       const fleet = projectIdOf(S.fleet) === pid ? S.fleet : null;
       title.textContent = projectName(pid);
       clear(body);
       if (!fleet) return body.appendChild(el("p", "empty", failed ? failText(failed) : "Loading…"));
-      // A fleet the machine could not read: why, in place of the rows it last had.
-      if (isText(fleet.error)) return body.appendChild(el("p", "empty", plainText(fleet.error)));
       const agents = agentsOf(fleet);
-      if (!agents.length) body.appendChild(el("p", "empty", "No agents running in this project."));
+      if (!agents.length) body.appendChild(el("p", "empty", plainText(fleet.error) || "No agents running in this project."));
       for (const row of agents) {
         const label = row.agent.label;
         if (!REF.test(label || "")) continue;

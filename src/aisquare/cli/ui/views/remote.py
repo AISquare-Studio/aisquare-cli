@@ -18,7 +18,7 @@ has while ngrok is missing, starting or restarting, leads a phone to its own loo
 from __future__ import annotations
 
 import io
-from datetime import tzinfo
+from datetime import UTC, datetime, tzinfo
 from typing import Any, ClassVar
 
 from rich.text import Text
@@ -238,7 +238,7 @@ class RemotePanel(ModalScreen[None]):
             text = Text(ELSEWHERE, style="bold yellow")
             read, served = controller.served_auto_off()
             if read and served is not None:
-                text.append(f"  · auto-off at {served.astimezone(LOCAL_ZONE):%H:%M}", style="dim")
+                text.append(f"  · auto-off at {_auto_off_time(served)}", style="dim")
             elif read:
                 text.append("  · no auto-off", style="dim")
             return text
@@ -247,7 +247,7 @@ class RemotePanel(ModalScreen[None]):
             text.append("  · local only — no tunnel yet", style="dim")
         deadline = controller.adopt_server_deadline()  # a phone's extension shows here too
         if deadline is not None:
-            text.append(f"  · auto-off at {deadline.astimezone(LOCAL_ZONE):%H:%M}", style="dim")
+            text.append(f"  · auto-off at {_auto_off_time(deadline)}", style="dim")
         elif controller.state.auto_off_minutes is None:
             # Never: say so, rather than leave the slot the timer usually fills empty —
             # "on" with nothing after it reads like the timer simply has not armed yet.
@@ -387,9 +387,29 @@ def _device_cells(device: dict[str, Any]) -> tuple[str, ...]:
     )
 
 
+def _auto_off_time(at: datetime, now: datetime | None = None) -> str:
+    """When auto-off comes, in this machine's zone: the time alone today (``21:58``), with its
+    date on any other day (``Oct 14 21:58``), as a device's times read (:func:`_device_time`).
+
+    The time alone said nothing of the day: ``serve --auto-off`` sets a deadline up to a week
+    ahead, and the panel gave a serve's a day off as ``auto-off at 23:08`` at 23:08, which
+    read as now, and one 25 hours off as an hour off (sweep 4 of #243). The panel's own,
+    eight hours ahead at most, crosses midnight too.
+    """
+    here = at.astimezone(LOCAL_ZONE)
+    today = (datetime.now(UTC) if now is None else now).astimezone(LOCAL_ZONE).date()
+    return f"{here:%H:%M}" if here.date() == today else _dated(here)
+
+
+def _dated(here: datetime) -> str:
+    """``Oct 14 20:58``: a time with its date, the day unpadded."""
+    return f"{here:%b} {here.day} {here:%H:%M}"
+
+
 def _device_time(value: Any) -> str:
-    """A device's time as the auto-off line says its own: in this machine's zone, with the
-    date (``Oct 14 20:58``), since a sign-in ends a week on, on the same weekday.
+    """A device's time in this machine's zone, with its date (``Oct 14 20:58``), as the
+    auto-off line says one on another day (:func:`_auto_off_time`): a sign-in ends a week on,
+    on the same weekday.
 
     The server's UTC stamps were cut to 19 characters, the offset and the seconds' last
     digit gone: in Los Angeles at 20:58 a phone seen that second read ``2026-10-08T03:58:0…``,
@@ -400,8 +420,7 @@ def _device_time(value: Any) -> str:
     at = _remote_instant(value)
     if at is None:
         return _short_cell(value, 19) or "—"
-    here = at.astimezone(LOCAL_ZONE)
-    return f"{here:%b} {here.day} {here:%H:%M}"
+    return _dated(at.astimezone(LOCAL_ZONE))
 
 
 def _short_cell(value: Any, width: int) -> str:

@@ -807,6 +807,22 @@ def test_the_devices_table_follows_last_seen_and_sign_in_while_the_devices_stay_
     drive(go, tunnel=missing_ngrok)
 
 
+def test_an_auto_off_time_says_its_date_on_any_day_but_today(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``serve --auto-off`` sets a deadline up to a week ahead, and the panel said it as a bare
+    ``HH:MM``: a day off read as now, 25 hours off as an hour off (sweep 4 of #243). The
+    panel's own deadline, eight hours ahead at most, crosses midnight as well. Today's is the
+    time alone; another day's says its date, in this machine's zone, as a device's times do."""
+    monkeypatch.setattr(remote_view, "LOCAL_ZONE", PACIFIC)
+    now = datetime(2026, 10, 9, 6, 8, tzinfo=UTC)  # Oct 8 23:08 in Los Angeles
+    assert remote_view._auto_off_time(now + timedelta(minutes=30), now) == "23:38"
+    assert remote_view._auto_off_time(now + timedelta(hours=1), now) == "Oct 9 00:08"
+    assert remote_view._auto_off_time(now + timedelta(days=1), now) == "Oct 9 23:08"
+    assert remote_view._auto_off_time(now + timedelta(days=7), now) == "Oct 15 23:08"
+    assert remote_view._auto_off_time(now - timedelta(hours=7), now) == "16:08", "same day"
+
+
 def test_a_devices_times_are_said_in_this_machines_zone_with_their_date(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1224,7 +1240,9 @@ def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended() -> Non
         assert line.startswith(f"{UNLOCK_GLOBAL_FAILURES} failed unlocks in 30 min")
         assert "new unlocks paused" in line and "regenerate-password --new-link" in line
         state_line = shown(modal.query_one("#remote-state", Static))
-        assert f"auto-off at {extended.astimezone():%H:%M}" in state_line
+        # with its date when it is tomorrow already: an extension can cross midnight
+        assert f"auto-off at {remote_view._auto_off_time(extended)}" in state_line
+        assert f"{extended.astimezone():%H:%M}" in state_line
         assert app.remote.auto_off_at == extended, "the extension holds in the TUI too"
 
     drive(go, tunnel=missing_ngrok)
@@ -1370,20 +1388,30 @@ def test_the_panel_says_remote_is_on_while_another_process_serves_this_home(
     drive(go, tunnel=missing_ngrok)
 
 
-@pytest.mark.parametrize("minutes", [45, None], ids=["a timer", "never"])
+@pytest.mark.parametrize(
+    "days", [0, 1, 6, None], ids=["a timer today", "tomorrow", "in six days", "never"]
+)
 def test_while_another_process_serves_the_panel_shows_its_auto_off_and_picks_none(
-    monkeypatch: pytest.MonkeyPatch, minutes: int | None
+    monkeypatch: pytest.MonkeyPatch, days: int | None
 ) -> None:
     """The Auto-off picker beside "on in another process" showed this UI's saved 60 min, and a
     pick of it was taken without a word while the serving Remote kept its own deadline, or
     none at all with ``serve --auto-off 0`` (sweep 3 of #243). The state says that Remote's
-    timer, and the picker is off until this UI's Remote is the one to set."""
+    timer, and the picker is off until this UI's Remote is the one to set. A timer on another
+    day says its date: ``serve --auto-off`` sets one up to a week ahead, and a bare 21:58 a
+    day or six off read as today (sweep 4 of #243)."""
     monkeypatch.setattr(remote_control, "ELSEWHERE_EVERY_SECONDS", 0.0)
     monkeypatch.setattr(remote_view, "LOCAL_ZONE", UTC)
     paths.ensure_home()
     serving = paths.remote_state_path().with_name(remote_server.SERVE_LOCK_NAME)
-    deadline = None if minutes is None else datetime(2026, 10, 9, 21, 58, tzinfo=UTC)
-    said = "no auto-off" if deadline is None else "auto-off at 21:58"
+    today = datetime.now(UTC).replace(hour=21, minute=58, second=0, microsecond=0)
+    deadline = None if days is None else today + timedelta(days=days)
+    if deadline is None:
+        said = "no auto-off"
+    elif days:
+        said = f"auto-off at {deadline:%b} {deadline.day} 21:58"
+    else:
+        said = "auto-off at 21:58"
 
     async def go(pilot: Pilot[None]) -> None:
         remote_server.set_auto_off(deadline)  # the other process's serve set it

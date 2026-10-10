@@ -1281,6 +1281,57 @@ def test_serves_auto_off_reads_the_wall_clock_every_30_s_so_a_sleep_cannot_hide_
     assert off == ["off"] and timer.fired
 
 
+def test_serves_auto_off_turns_off_once_when_its_check_and_the_way_out_both_find_it_past(
+    runtime: Runtime, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel cannot stop a check already running, and ``serve``'s way out fires the
+    auto-off itself once the deadline has passed and the timer has not fired. A Ctrl-C
+    while the 30 s check was between reading the deadline and saying it fired turned
+    Remote off from both threads: two farewells, two revokes."""
+    FakeTimer.made = []
+    off: list[str] = []
+    timer = _AutoOffTimer(runtime, lambda: off.append("off"), timer=FakeTimer)
+    runtime.set_auto_off(clock.now - timedelta(seconds=1))
+    read, way_out_done = threading.Event(), threading.Event()
+    deadline_of = runtime.auto_off_deadline
+
+    def slow_read() -> datetime | None:  # the check's thread waits on the way out once read
+        deadline = deadline_of()
+        if threading.current_thread() is not threading.main_thread():
+            read.set()
+            way_out_done.wait(5)
+        return deadline
+
+    monkeypatch.setattr(runtime, "auto_off_deadline", slow_read)
+    check = threading.Thread(target=timer.auto_off_fire, daemon=True)
+    check.start()
+    assert read.wait(5)
+    timer.auto_off_cancel()  # serve's way out, as run_foreground does it
+    timer.auto_off_fire()
+    way_out_done.set()
+    check.join(5)
+    assert not check.is_alive()
+    assert off == ["off"] and timer.fired
+
+
+def test_a_check_running_when_serve_cancels_its_auto_off_arms_no_other(
+    runtime: Runtime, clock: Clock
+) -> None:
+    """``serve``'s way out cancels the timer, but a check already past its wait found the
+    deadline still ahead and armed the next one, which nothing would cancel: the checks
+    went on after ``serve`` had returned, for as long as the process lived."""
+    FakeTimer.made = []
+    off: list[str] = []
+    timer = _AutoOffTimer(runtime, lambda: off.append("off"), timer=FakeTimer)
+    runtime.set_auto_off(clock.now + timedelta(minutes=5))
+    timer.auto_off_arm()
+    (check,) = FakeTimer.made
+    timer.auto_off_cancel()  # as the check began: a Timer's cancel cannot stop it now
+    check.fire()
+    assert FakeTimer.made == [check] and check.cancelled
+    assert off == [] and not timer.fired
+
+
 def _free_port() -> int:
     import socket
 

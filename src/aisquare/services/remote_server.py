@@ -5813,6 +5813,7 @@ class _AutoOffTimer:
         self._timer_factory = timer
         self._timer: Any = None
         self._lock = threading.Lock()
+        self._cancelled = False
         self.fired = False
         """Whether the deadline passed and Remote was turned off."""
         self.failure: str | None = None
@@ -5828,6 +5829,8 @@ class _AutoOffTimer:
             return
         delay = min(max(0.0, (deadline - _remote_now()).total_seconds()), AUTO_OFF_CHECK_SECONDS)
         with self._lock:
+            if self._cancelled:  # a check already running as serve's way out cancelled it
+                return
             if self._timer is not None:
                 self._timer.cancel()
             self._timer = self._timer_factory(delay, self.auto_off_fire)
@@ -5835,13 +5838,22 @@ class _AutoOffTimer:
             self._timer.start()
 
     def auto_off_fire(self) -> None:
+        """At a check: Remote off when the deadline has passed, once whoever finds it so.
+
+        Both the timer's thread and ``serve``'s way out fire it (:func:`run_foreground`),
+        and a cancel cannot stop a check already running: a Ctrl-C as the 30 s check
+        found the deadline past would turn Remote off twice, two farewells and two
+        revokes."""
         deadline = self._state.auto_off_deadline()
         if deadline is None:
             return
         if deadline > _remote_now():
             self.auto_off_arm()  # not yet, or extended from a phone meanwhile
             return
-        self.fired = True
+        with self._lock:
+            if self.fired:
+                return
+            self.fired = True
         try:
             self.failure = self._turn_off()
         finally:
@@ -5862,7 +5874,9 @@ class _AutoOffTimer:
         return self.failure
 
     def auto_off_cancel(self) -> None:
+        """No more checks: none armed, and none armed again by one already running."""
         with self._lock:
+            self._cancelled = True
             if self._timer is not None:
                 self._timer.cancel()
                 self._timer = None

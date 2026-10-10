@@ -2446,6 +2446,40 @@ def test_an_ago_cooldown_is_restated_without_its_sign_so_uv_takes_the_command(
     assert install_route.cutoff(route) == f"--exclude-newer {span[1:]}"
 
 
+@pytest.mark.parametrize("span", ["P999999D", "P999999W", "PT" + "9" * 400 + "S"])
+def test_a_span_no_calendar_holds_is_unreadable_not_a_traceback(
+    runner: CliRunner, tool: Tool, machine: Machine, span: str
+) -> None:
+    """A hand-edited span past datetime's range ended `upgrade --check` in an OverflowError,
+    with no --json object (review of #257). It is a cutoff that cannot be read, so nothing
+    is compared, an index of its own included."""
+    receipts = {
+        "cooldown": f'exclude-newer = "2026-09-26T03:00:00Z"\nexclude-newer-span = "{span}"',
+        "own-index": (
+            f'exclude-newer = "2026-09-26T03:00:00Z"\nexclude-newer-span = "{span}"\n'
+            'index-url = "https://mirror.example/simple"'
+        ),
+    }
+    reports = {}
+    for name, options in receipts.items():
+        (tool.prefix / install_route.RECEIPT_NAME).write_text(
+            _receipt(_OURS_PINNED, tail=f"\n[tool.options]\n{options}\n"), encoding="utf-8"
+        )
+        result = runner.invoke(app, ["--json", "upgrade", "--check"])
+        assert result.exception is None or isinstance(result.exception, SystemExit), result
+        reports[name] = _one_object(result.stdout)
+
+    assert (
+        install_route.cutoff_time(
+            install_route.classify(tool.facts), datetime(2026, 10, 9, tzinfo=UTC)
+        )
+        is None
+    )
+    assert all(report["latest"] is None for report in reports.values()), reports
+    assert "its own index" in reports["own-index"]["latest_error"], reports
+    assert machine.lookups == 0
+
+
 #: A global cooldown as uv records it, for the per-package shapes below.
 _GLOBAL_COOLDOWN = 'exclude-newer = "2026-09-10T04:00:18Z"\nexclude-newer-span = "P30D"\n'
 

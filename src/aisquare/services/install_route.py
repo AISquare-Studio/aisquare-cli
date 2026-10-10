@@ -1093,9 +1093,14 @@ def cutoff_time(route: InstallRoute, now: datetime) -> datetime | None:
     span = _SPAN.fullmatch(value)
     if span is not None and any(span.groups()):
         weeks, days, hours, minutes, seconds = (float(part or 0) for part in span.groups())
-        return now - timedelta(
-            weeks=weeks, days=days, hours=hours, minutes=minutes, seconds=seconds
-        )
+        try:
+            return now - timedelta(
+                weeks=weeks, days=days, hours=hours, minutes=minutes, seconds=seconds
+            )
+        except (OverflowError, ValueError):
+            # A span no calendar holds (a hand-edited P999999D): it ended upgrade --check in
+            # a traceback, with no --json object (#257). Unreadable, so nothing is compared.
+            return None
     # A date or a timestamp, given any way, is recorded as an RFC 3339 timestamp (measured).
     return _instant(value)
 

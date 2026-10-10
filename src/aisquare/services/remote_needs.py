@@ -2965,6 +2965,8 @@ class RemoteNeedsWatcher:
         self._failing_projects: set[str] = set()
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
+        self._rescan: threading.Timer | None = None
+        """The scan after the latest quick answer, until it runs (:meth:`needs_rescan_soon`)."""
 
     def start_watching(self) -> None:
         """Start the daemon thread ``asq-remote-needs``; its first scan runs at once."""
@@ -2975,8 +2977,13 @@ class RemoteNeedsWatcher:
             self._thread.start()
 
     def stop_watching(self) -> None:
-        """Stop the thread, waiting a few seconds for a scan in progress."""
+        """Stop the thread, waiting a few seconds for a scan in progress. The scan after a
+        quick answer that has yet to run never does."""
         self._stopping.set()
+        with self._lock:
+            rescan, self._rescan = self._rescan, None
+        if rescan is not None:
+            rescan.cancel()
         thread, self._thread = self._thread, None
         if thread is not None:
             thread.join(timeout=5.0)
@@ -3040,10 +3047,7 @@ class RemoteNeedsWatcher:
         result read by nobody (review of #243, round 6). A push file that cannot be read
         is taken for a subscription: the sender may yet send.
         """
-        try:
-            if self._kit.runtime.auto_off_passed(self._clock()):
-                return False
-        except Exception:
+        if self._needs_off():
             return False
         if self._kit.sockets:
             return True
@@ -3054,6 +3058,14 @@ class RemoteNeedsWatcher:
             return bool(listening())
         except Exception:
             log.debug("remote: could not tell whether a phone has notifications on", exc_info=True)
+            return True
+
+    def _needs_off(self) -> bool:
+        """Whether Remote is past its auto-off deadline or turning off, or cannot say: a scan
+        then reaches nobody, every request a 404 and every socket closed."""
+        try:
+            return self._kit.runtime.auto_off_passed(self._clock())
+        except Exception:
             return True
 
     def needs_scan_wanted(self) -> bool:
@@ -3189,12 +3201,32 @@ class RemoteNeedsWatcher:
             self._latest_json = [item for item in self._latest_json if item.get("id") != item_id]
 
     def needs_rescan_soon(self) -> None:
-        """Scan again in :data:`NEEDS_RESCAN_AFTER_ANSWER` seconds, off every caller's thread."""
-        timer = threading.Timer(NEEDS_RESCAN_AFTER_ANSWER, self._needs_rescan)
-        timer.daemon = True
-        timer.start()
+        """Scan again :data:`NEEDS_RESCAN_AFTER_ANSWER` seconds after the latest quick answer,
+        off every caller's thread: one scan for however many answers came meanwhile.
+
+        Each answer started a timer of its own, each a scan of every project with tmux:
+        five quick taps were five scans back to back, as the scans for requests were
+        before they shared one (sweep 4), and the timers of the last answers before the
+        watcher stopped, or Remote went off, scanned after it (review of #243, sweep 5).
+        """
+        with self._lock:
+            if self._stopping.is_set():
+                return
+            if self._rescan is not None:
+                self._rescan.cancel()
+            self._rescan = threading.Timer(NEEDS_RESCAN_AFTER_ANSWER, self._needs_rescan)
+            self._rescan.daemon = True
+            self._rescan.start()
 
     def _needs_rescan(self) -> None:
+        """The armed timer's scan; none for a timer a later answer replaced (one that fired as
+        it was cancelled), once the watcher stopped, or once Remote is off."""
+        with self._lock:
+            if self._rescan is not None and self._rescan is not threading.current_thread():
+                return
+            self._rescan = None
+        if self._stopping.is_set() or self._needs_off():
+            return
         self._needs_scan_told()
 
 

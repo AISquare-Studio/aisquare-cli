@@ -3969,6 +3969,46 @@ def test_requests_that_waited_for_a_scan_share_it_instead_of_each_running_one(
     assert scans == [0, 1], "a request with nothing in flight scans for itself"
 
 
+@pytest.mark.parametrize("then", ["nothing", "the watcher stops", "Remote goes off"])
+def test_the_scan_after_quick_answers_is_one_and_never_runs_once_the_watcher_stopped(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, then: str
+) -> None:
+    """Each answer started a timer of its own, each a scan of every project with tmux: five
+    quick taps were five scans back to back, and the timers of the last answers before the
+    watcher stopped, or Remote went off, scanned after it (review of #243, sweep 5). One
+    scan follows the last of them, and none follows a stop."""
+    after = 0.3
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", after)
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    scans: list[float] = []
+
+    def counted() -> list[ProjectInfo]:
+        scans.append(time.monotonic())
+        return []
+
+    watcher = RemoteNeedsWatcher(
+        app.kit, sources=lambda: replace(_sources(Fleet()), list_projects=counted)
+    )
+    for _ in range(4):
+        watcher.needs_rescan_soon()
+    last = time.monotonic()
+    watcher.needs_rescan_soon()
+    if then == "the watcher stops":
+        watcher.stop_watching()
+        watcher.needs_rescan_soon()  # an answer that finished as it stopped
+    elif then == "Remote goes off":
+        runtime.remote_going_off()
+    if then == "nothing":
+        _until_true(lambda: bool(scans))
+        threading.Event().wait(after)
+        assert len(scans) == 1, f"{len(scans)} scans for five answers"
+        assert scans[0] - last >= after, "a second after the LAST answer, its pane had moved"
+    else:
+        threading.Event().wait(2 * after)
+        assert scans == [], f"{len(scans)} scans after {then}"
+    watcher.stop_watching()
+
+
 def test_every_scan_reaches_every_listener_and_a_failing_one_costs_nothing(
     runtime: Runtime, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

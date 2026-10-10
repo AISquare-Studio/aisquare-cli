@@ -252,8 +252,9 @@ class Refusal:
     writes anything (:func:`access`)."""
 
     path: Path
-    """The first path that blocks it: what stands where the config dir or a folder on the
-    way to it must be (:func:`in_the_way`), else the file connect read or would write."""
+    """For connect, the first path that blocks it: what stands where the config dir or a
+    folder on the way to it must be (:func:`in_the_way`), else the file connect read or
+    would write. For disconnect, the settings.json it cannot rewrite."""
     why: str
     """The refusal, in the command's own words."""
     fact: str = ""

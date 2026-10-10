@@ -75,13 +75,19 @@ _REPOINT_FIX = (
     "then start asq or aisquare again from that shell"
 )
 
-#: Welcome step 2's remedies for a refusal of the directory this shell reads; and where a
-#: file stands where that directory must be, which no surface tells anyone to repair.
-_STEP_TWO_REMEDY = (
-    "Connect cannot change that. Repair it and this page checks again within a few seconds, "
-    "or point CLAUDE_CONFIG_DIR at another directory this user can write, then start asq "
-    "again from that shell."
-)
+
+def _step_two(path: Path, fact: str) -> str:
+    """Welcome step 2's remedies for a refusal of the directory this shell reads: the
+    first path that blocks, as the doctor names it, or the variable."""
+    return (
+        f"Connect cannot change that. Repair {path} ({fact}) and this page checks again "
+        "within a few seconds, or point CLAUDE_CONFIG_DIR at another directory this user can "
+        "write, then start asq again from that shell."
+    )
+
+
+#: Where a file stands where that directory must be, which no surface tells anyone to
+#: repair.
 _UNREPAIRABLE = (
     "Connect cannot change that. Point CLAUDE_CONFIG_DIR at another directory this user can "
     "write, then start asq again from that shell."
@@ -695,7 +701,8 @@ def test_an_exported_config_dir_in_a_home_this_machine_lacks_is_never_offered_co
     from aisquare.cli.ui.views.welcome import claude_text
 
     found = dataclasses.replace(welcome, binary="/opt/homebrew/bin/claude")
-    assert _STEP_TWO_REMEDY in claude_text(found, platform="linux").plain
+    assert refusal is not None
+    assert _step_two(refusal.path, refusal.fact) in claude_text(found, platform="linux").plain
     # The variable's remedy, done as worded in a shell started again, lets connect write,
     # and the row no longer names the home this machine lacks.
     writable = tmp_path / "writable"
@@ -843,7 +850,7 @@ def test_a_config_dir_connect_cannot_make_is_named_everywhere_and_never_offered_
     repair = None if a_file else f"repair {blocking} ({fact}), then connect again"
     assert row.fix == "; or ".join(filter(None, [repair, repoint])), row.fix
     assert welcome.refused == reason, welcome
-    assert (_UNREPAIRABLE if a_file else _STEP_TWO_REMEDY) in step_two, step_two
+    assert (_UNREPAIRABLE if a_file else _step_two(blocking, fact)) in step_two, step_two
     assert not made, "nothing written before the refusal"
     # Each remedy, done as worded (the variable's in a shell started again), connects and
     # clears the row.
@@ -1054,7 +1061,7 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
     assert row.fix == "; or ".join(filter(None, [repair, _REPOINT_FIX])), row.fix
     assert fix_commands([row]) == [], "no Connect: the click could only fail"
     step_two = claude_text(welcome, platform="linux").plain
-    assert (_UNREPAIRABLE if a_file else _STEP_TWO_REMEDY) in step_two, step_two
+    assert (_UNREPAIRABLE if a_file else _step_two(blocking, fact)) in step_two, step_two
     assert not made, "nothing written before the refusal"
     for result in (doctor, uninstall):
         lines = [line for line in result.stdout.splitlines() if line.strip()]

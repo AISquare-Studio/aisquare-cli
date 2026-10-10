@@ -2887,7 +2887,7 @@ def test_the_live_sources_scan_the_store_the_fleet_and_the_transcripts(
     transcript.write_text(json.dumps(record) + "\n", encoding="utf-8")
     hour_ago, crashed_at = now - timedelta(hours=1), now - timedelta(minutes=5)
     with store_session() as store:
-        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        project = store.onboard_project(_rooted(root))
         store.upsert_session(
             TeamSession(
                 id="ses_1",
@@ -3046,8 +3046,8 @@ def test_a_scan_builds_none_of_a_projects_history_it_cannot_use(
 
     now = datetime.now(UTC)
     old = now - timedelta(days=3)
-    dormant = ProjectInfo(id="prj_dormant", root=tmp_path / "dormant")
-    active = ProjectInfo(id="prj_active", root=tmp_path / "active")
+    dormant = _rooted(tmp_path / "dormant")
+    active = _rooted(tmp_path / "active")
     history = 60
     with store_session() as store:
         for project in (dormant, active):
@@ -3117,7 +3117,7 @@ def test_the_live_sources_keep_a_board_question_however_busy_the_board_gets(
     """Through the store: a manager's question three hours old, under 300 newer notes, is
     still open, and a reply to the manager under 300 more still answers it."""
     now = datetime.now(UTC)
-    project = ProjectInfo(id="prj_busy", root=tmp_path / "busy")
+    project = _rooted(tmp_path / "busy")
 
     def written(
         kind: str, at: datetime, *, session_id: str | None = None, to: str | None = None
@@ -3161,7 +3161,7 @@ def test_the_live_sources_take_a_manager_stopped_after_its_result_for_done(
     hour_ago = now - timedelta(hours=1)
     root = tmp_path / "alpha"
     with store_session() as store:
-        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        project = store.onboard_project(_rooted(root))
         for session_id, role in (("ses_m", "manager"), ("ses_c", "coder")):
             store.upsert_session(
                 TeamSession(
@@ -3203,7 +3203,7 @@ def test_the_live_sources_take_a_turn_that_died_on_an_api_error_for_one_that_nee
     hour_ago = datetime.now(UTC) - timedelta(hours=1)
     root = tmp_path / "alpha"
     with store_session() as store:
-        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        project = store.onboard_project(_rooted(root))
         store.upsert_session(
             TeamSession(
                 id="ses_c", project_id=project.id, role="coder", started_at=hour_ago,
@@ -3233,6 +3233,72 @@ def test_the_live_sources_take_a_turn_that_died_on_an_api_error_for_one_that_nee
     assert (
         scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=()) == []
     )
+
+
+@pytest.mark.parametrize("hub_listed", [False, True])
+def test_under_a_team_hub_the_scan_reads_the_hubs_board_once_for_its_projects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub_listed: bool
+) -> None:
+    """Under ``AISQUARE_TEAM_HUB`` the team writes every session and event to the hub's
+    project, and the scan read each project's board by the project's own id: a manager's
+    question, a coder's failed turn, the words of a dialog never became a card or a push,
+    while the Board tab showed them (sweep 4 of #243). The scan reads the board where the
+    team writes it, as the Board tab does, and a question on a board two projects share is
+    one card, the asking row's project's, whether or not the hub is a listed project."""
+    from aisquare.services import team as team_service
+
+    now = datetime.now(UTC)
+    hour_ago = now - timedelta(hours=1)
+    hub = _rooted(tmp_path / "hub")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
+    with store_session() as store:
+        alpha = store.onboard_project(_rooted(tmp_path / "alpha"))
+        beta = store.onboard_project(_rooted(tmp_path / "beta"))
+        if hub_listed:
+            store.onboard_project(hub)
+        else:
+            store.ensure_project(hub)  # as the hooks' first write makes it
+        rows = ((alpha, "manager", "manager", "%1"), (beta, "coder-1", "coder", "%2"))
+        for project, label, role, pane in rows:
+            store.upsert_session(
+                TeamSession(
+                    id=f"ses_{label}", project_id=hub.id, role=role, label=label,
+                    started_at=hour_ago, last_seen_at=hour_ago, state="working",
+                )
+            )  # fmt: skip
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=f"agt_{label}", project_id=project.id, label=label, role=role,
+                    pane_id=pane, session_id=f"ses_{label}", cwd=project.root, created_at=hour_ago,
+                )
+            )  # fmt: skip
+        store.add_team_event(
+            TeamEvent(
+                id="evt_q", project_id=hub.id, session_id="ses_manager", kind="question",
+                text="Ship on Friday?", created_at=now - timedelta(minutes=1),
+            )
+        )  # fmt: skip
+    team_service.hook_stop_failure(
+        "ses_coder-1", error="overloaded", message="Overloaded · try again", details=None
+    )
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+    assert [(item.kind, item.project_id, item.agent) for item in items] == [
+        ("board_question", alpha.id, "manager"),
+        ("failed", beta.id, "coder-1"),
+    ]
+    assert items[0].detail["text"] == "Ship on Friday?"
+    assert [item.kind for item in needs_agent_now(beta, "coder-1").items] == ["failed"]
+
+
+def _rooted(root: Path) -> ProjectInfo:
+    """A project as ``asq init`` registers it: its id derived from its root, which is where
+    the team writes its board too (``team_project``), and where the scan reads it."""
+    from aisquare.core.workspace import project_id_for
+
+    resolved = root.resolve()
+    return ProjectInfo(id=project_id_for(resolved), root=resolved)
 
 
 def _live_agent(
@@ -3303,7 +3369,7 @@ def test_the_live_sources_keep_a_dialogs_and_a_limits_cards_past_a_busy_board(
     }
     words = "Claude needs your permission to use the deploy MCP tool"
     with store_session() as store:
-        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        project = store.onboard_project(_rooted(root))
         asking = _live_agent(
             store, project, "coder-1", state="attention", seen=now - timedelta(minutes=1),
             born=now - timedelta(hours=1), transcript=_transcript(tmp_path / "c1.jsonl", said),
@@ -3370,7 +3436,7 @@ def test_the_live_sources_ask_tmux_when_a_sub_agents_pane_last_printed(
         "message": {"id": "m1", "role": "assistant", "content": [task]},
     }
     with store_session() as store:
-        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        project = store.onboard_project(_rooted(root))
         _live_agent(
             store, project, "coder-1", state="attention", seen=now - timedelta(minutes=1),
             born=now - timedelta(hours=1), transcript=_transcript(tmp_path / "c1.jsonl", running),
@@ -3405,7 +3471,7 @@ def test_a_session_at_its_fresh_prompt_is_told_now_in_prompt_and_interrupt_mode(
     now = datetime.now(UTC)
     transcript = tmp_path / "coder-1.jsonl"
     with store_session() as store:
-        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=tmp_path / "alpha"))
+        project = store.onboard_project(_rooted(tmp_path / "alpha"))
         _live_agent(
             store, project, "coder-1", state="working", seen=now - timedelta(seconds=10),
             born=now - timedelta(seconds=12), transcript=transcript,
@@ -3490,7 +3556,7 @@ def test_an_agent_idle_after_a_local_command_is_at_its_prompt_and_told_now(
         records = _local_command(now - timedelta(minutes=8), "/model", "Set model to opus")
     _transcript(path, *records)
     with store_session() as store:
-        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=tmp_path / "alpha"))
+        project = store.onboard_project(_rooted(tmp_path / "alpha"))
         session = _live_agent(
             store, project, "coder-1", state="waiting", seen=now - timedelta(minutes=1),
             born=born, transcript=path,

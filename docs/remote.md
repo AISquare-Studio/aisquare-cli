@@ -262,6 +262,10 @@ aisquare --json remote needs
 | board_result | the manager (or a coder with no manager left) reports a result |
 | interrupted | you pressed Esc on an agent, or turned its prompt down without saying what to do instead, and it waits for you |
 
+The board a project's cards come from is the one `aisquare board` shows in its
+directory: under `AISQUARE_TEAM_HUB` it is the hub's, and a question on a board
+that several projects share is one card, in the project of the agent that asked.
+
 A card holds what you must read before answering: the exact call a permission
 is for, every field of it (the command or the path first, a list or an object
 as its JSON), every question with its options, the plan, the text. What is too

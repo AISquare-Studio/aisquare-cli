@@ -70,6 +70,8 @@ from aisquare.services.transcript import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from starlette.requests import Request
     from starlette.responses import Response
     from starlette.routing import BaseRoute
@@ -359,6 +361,11 @@ def _needs_no_output(agent: FleetAgent) -> datetime | None:
     return None
 
 
+def _needs_own_board(project: ProjectInfo) -> str:
+    """A source's ``board_project`` when it says nothing: each project writes its own board."""
+    return project.id
+
+
 @dataclass(frozen=True)
 class NeedsSources:
     """Everything the scan reads, as callables: the live store and tmux, or a test's fakes.
@@ -404,6 +411,11 @@ class NeedsSources:
     pane_output: Callable[[FleetAgent], datetime | None] = _needs_no_output
     """When the row's pane last printed (``#{window_activity}``); ``None``: tmux would not
     say. Asked only of an agent whose sub-agent waits on a prompt (:func:`needs_from_agent`)."""
+    board_project: Callable[[ProjectInfo], str] = _needs_own_board
+    """The id of the project whose board a project's agents write: the project's own, a
+    worktree's principal checkout's, or under ``AISQUARE_TEAM_HUB`` the hub's, as ``asq board``
+    run in its root resolves it (``team.resolve_project``). Its sessions and events are
+    read there; its rows, by its own id."""
 
 
 # --- names on a lock screen, and text on a card -------------------------------------------
@@ -1639,6 +1651,14 @@ def _needs_scan_project(
     not answering) from the first scan that saw them; ``seen`` collects what
     this scan saw, so the caller can forget the rest. ``answers`` says whether a
     tmux server answers (:func:`_needs_unheard`), once per socket for a whole scan.
+
+    The board's sessions and events are read from the project's board
+    (:attr:`NeedsSources.board_project`), its rows by its own id. Under
+    ``AISQUARE_TEAM_HUB`` every session and event is the hub's: read by the fleet
+    project's id, the board was empty to the scan, and a manager's question or
+    result, a failed turn, the usage-limit dialog's words and a hand-over that
+    could not start its replacement never became a card or a push, while the
+    Board tab showed them (sweep 4 of #243).
     """
     from aisquare.services.fleet import RECENTLY_ENDED
 
@@ -1647,13 +1667,14 @@ def _needs_scan_project(
     ended = _needs_read(
         lambda: sources.ended_agents(project.id, now - RECENTLY_ENDED), "rows", project
     )
+    board_id = _needs_board_of(sources, project)
     day = now - max(QUESTION_HORIZON, RECENTLY_ENDED)
-    board_read = _needs_read_or_none(lambda: sources.board_since(project.id, day), "board", project)
+    board_read = _needs_read_or_none(lambda: sources.board_since(board_id, day), "board", project)
     board = board_read or []
-    window = _needs_window(sources, project)
+    window = _needs_window(sources, project, board_id)
     authors = _needs_board_authors(board, now)
     sessions = _needs_read(
-        lambda: sources.board_sessions(project.id, now - _MANAGER_FRESH, authors),
+        lambda: sources.board_sessions(board_id, now - _MANAGER_FRESH, authors),
         "sessions",
         project,
     )
@@ -1682,7 +1703,7 @@ def _needs_scan_project(
                 tail,
                 project=project,
                 events=[
-                    *_needs_own_events(sources, project, status, window),
+                    *_needs_own_events(sources, board_id, status, window),
                     *_needs_failures(board, status),
                 ],
                 now=now,
@@ -1727,7 +1748,7 @@ def _needs_tail_of(sources: NeedsSources, status: FleetAgentStatus) -> Transcrip
 
 def _needs_own_events(
     sources: NeedsSources,
-    project: ProjectInfo,
+    board_id: str,
     status: FleetAgentStatus,
     window: Callable[[], Sequence[TeamEvent]],
 ) -> list[TeamEvent]:
@@ -1758,7 +1779,7 @@ def _needs_own_events(
     for kind in wanted:
         if any(event.kind == kind for event in own):
             break
-        found = _needs_session_event(sources, project, session.id, kind, born)
+        found = _needs_session_event(sources, board_id, session.id, kind, born)
         if found is not None:
             own.append(found)
             break
@@ -1787,17 +1808,19 @@ def _needs_output_of(sources: NeedsSources, agent: FleetAgent) -> Callable[[], d
     return needs_output
 
 
-def _needs_window(sources: NeedsSources, project: ProjectInfo) -> Callable[[], list[TeamEvent]]:
-    """The project's newest :data:`NEEDS_BOARD_EVENTS` events, read the first time they are
-    asked for in a scan, and not at all by one that asks nothing of them: most scans of
-    most projects, whose agents are not at a dialog or parked on a limit."""
+def _needs_window(
+    sources: NeedsSources, project: ProjectInfo, board_id: str
+) -> Callable[[], list[TeamEvent]]:
+    """The project's board's newest :data:`NEEDS_BOARD_EVENTS` events, read the first time
+    they are asked for in a scan, and not at all by one that asks nothing of them: most
+    scans of most projects, whose agents are not at a dialog or parked on a limit."""
     read: list[list[TeamEvent]] = []
 
     def needs_window() -> list[TeamEvent]:
         if not read:
             read.append(
                 _needs_read(
-                    lambda: sources.board_events(project.id, NEEDS_BOARD_EVENTS), "board", project
+                    lambda: sources.board_events(board_id, NEEDS_BOARD_EVENTS), "board", project
                 )
             )
         return read[0]
@@ -1806,13 +1829,24 @@ def _needs_window(sources: NeedsSources, project: ProjectInfo) -> Callable[[], l
 
 
 def _needs_session_event(
-    sources: NeedsSources, project: ProjectInfo, session_id: str, kind: str, since: datetime
+    sources: NeedsSources, board_id: str, session_id: str, kind: str, since: datetime
 ) -> TeamEvent | None:
     try:
-        return sources.session_event(project.id, session_id, kind, since)
+        return sources.session_event(board_id, session_id, kind, since)
     except Exception:
         log.debug("remote: needs could not read %s's events", session_id, exc_info=True)
         return None
+
+
+def _needs_board_of(sources: NeedsSources, project: ProjectInfo) -> str:
+    """The id of ``project``'s board (:attr:`NeedsSources.board_project`); its own when the
+    source cannot say (the team off, a root that is gone): a board read there finds what
+    it finds."""
+    try:
+        return sources.board_project(project)
+    except Exception:
+        log.debug("remote: needs could not resolve the board of %s", project.id, exc_info=True)
+        return project.id
 
 
 def _needs_hearing(sources: NeedsSources) -> Callable[[str], bool]:
@@ -2169,7 +2203,8 @@ def scan_needs_you(
     accounts = _needs_accounts(sources)
     answers = _needs_hearing(sources)
     items: list[NeedsItem] = []
-    for project in sources.list_projects():
+    projects = sources.list_projects()
+    for project in projects:
         statuses: list[FleetAgentStatus] | None
         try:
             statuses = sources.list_agents(project) if _needs_has_live(sources, project) else []
@@ -2199,7 +2234,51 @@ def scan_needs_you(
         items.extend(scanned.items)
     for key in [key for key in memory if key not in seen]:
         del memory[key]
+    items = _needs_board_once(items, projects, sources)
     return _needs_ranked([item for item in items if item.id not in dismissed])
+
+
+def _needs_board_once(
+    items: Sequence[NeedsItem], projects: Sequence[ProjectInfo], sources: NeedsSources
+) -> list[NeedsItem]:
+    """``items`` with each question or result of a board that several projects write one card.
+
+    Under ``AISQUARE_TEAM_HUB`` every project's board is the hub's, so each project's scan
+    found every one of its questions and results: one event, one card per project, each
+    its own id and its own push. It is the card of the project whose row asked it; one
+    that no row asked (a manager started outside the fleet) is the card of the board's
+    own project when it is listed, else of the first project that writes the board.
+    """
+    boards = {project.id: _needs_board_of(sources, project) for project in projects}
+    writers: dict[str, list[str]] = {}
+    for project in projects:
+        writers.setdefault(boards[project.id], []).append(project.id)
+    shared = {board: ids for board, ids in writers.items() if len(ids) > 1}
+    if not shared:
+        return list(items)
+    kept: dict[tuple[str, object], NeedsItem] = {}
+    rest: list[NeedsItem] = []
+    for item in items:
+        board = boards.get(item.project_id)
+        if item.kind not in _NEEDS_BOARD_KINDS or board not in shared:
+            rest.append(item)
+            continue
+        key = (board, item.detail.get("seq"))
+        held = kept.get(key)
+        if held is None or _needs_board_rank(item, board, shared[board]) < _needs_board_rank(
+            held, board, shared[board]
+        ):
+            kept[key] = item
+    return [*rest, *kept.values()]
+
+
+def _needs_board_rank(item: NeedsItem, board: str, writers: Sequence[str]) -> tuple[int, int]:
+    """Which project's card a shared board's item is: the asker's row's, the board's own, the
+    first writer's, in that order."""
+    return (
+        0 if item.agent_id is not None else 1 if item.project_id == board else 2,
+        writers.index(item.project_id),
+    )
 
 
 _K = TypeVar("_K")
@@ -2555,7 +2634,7 @@ def live_needs_sources() -> NeedsSources:
         return None if task is None else task.status
 
     def needs_live_agents(project: ProjectInfo) -> list[FleetAgentStatus]:
-        return fleet_service.list_agents(project, live_only=True)
+        return _needs_with_board_sessions(fleet_service.list_agents(project, live_only=True))
 
     def needs_tmux_answers(socket: str) -> bool:
         return fleet_service.server_for(socket).answers()
@@ -2573,6 +2652,22 @@ def live_needs_sources() -> NeedsSources:
         with store_session() as store:
             return store.newest_session_event(project_id, session_id, kind, since=since)
 
+    def needs_board_project(project: ProjectInfo) -> str:
+        """The project's board as ``asq board`` in its root resolves it, ``AISQUARE_TEAM_HUB``
+        and worktrees included, once per root and hub: ``team_project`` runs ``git``, and
+        neither changes under a running server (``remote_server.remote_board_payload``)."""
+        from aisquare.core import orchestrator
+        from aisquare.services import team as team_service
+
+        key = (project.root, os.environ.get(orchestrator.TEAM_HUB_ENV_VAR, ""))
+        with _boards_lock:
+            known = _boards.get(key)
+        if known is None:
+            known = team_service.resolve_project(project.root).id
+            with _boards_lock:
+                _boards[key] = known
+        return known
+
     return NeedsSources(
         list_projects=project_service.list_projects,
         list_agents=needs_live_agents,
@@ -2587,7 +2682,51 @@ def live_needs_sources() -> NeedsSources:
         tmux_answers=needs_tmux_answers,
         session_event=needs_session_event,
         pane_output=needs_pane_output,
+        board_project=needs_board_project,
     )
+
+
+def _needs_with_board_sessions(statuses: list[FleetAgentStatus]) -> list[FleetAgentStatus]:
+    """The listing, each live row whose session the team keeps on another project's board
+    derived again with it (``fleet.status_of``, which finds a session by its id).
+
+    ``fleet.list_agents`` reads the sessions of the project's own board, and under
+    ``AISQUARE_TEAM_HUB`` every session is the hub's: no row had one, so none read
+    attention, a usage limit or a failed turn, and no transcript was read (sweep 4 of
+    #243). Only such rows are asked about again, each once; one that cannot be is left as
+    the listing had it.
+    """
+    from aisquare.core.store import store_session
+    from aisquare.services import fleet as fleet_service
+
+    elsewhere = [
+        status
+        for status in statuses
+        if status.session is None and status.agent.session_id and status.agent.ended_at is None
+    ]
+    if not elsewhere:
+        return statuses
+    with store_session() as store:
+        held = {
+            status.agent.id
+            for status in elsewhere
+            if status.agent.session_id and store.get_session(status.agent.session_id)
+        }
+    derived: dict[str, FleetAgentStatus] = {}
+    for status in elsewhere:
+        if status.agent.id not in held:
+            continue
+        try:
+            derived[status.agent.id] = fleet_service.status_of(status.agent)
+        except Exception:
+            log.debug("remote: needs could not derive %s again", status.agent.id, exc_info=True)
+    return [derived.get(status.agent.id, status) for status in statuses]
+
+
+_boards: dict[tuple[Path, str], str] = {}
+"""The board project's id of each project root under each ``AISQUARE_TEAM_HUB`` (blank for
+none), as :func:`live_needs_sources` resolved it."""
+_boards_lock = threading.Lock()
 
 
 _tails: dict[str, tuple[tuple[int, int], TranscriptTail | None]] = {}

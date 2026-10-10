@@ -1276,7 +1276,9 @@ async function limitTimes() {
 /* The Board tab on a phone in UTC-7, from a machine in UTC+5:30 whose board's limited lines
  * say the reset by its own clock: coder-1 parked on a limit that lifts at 13:10 UTC (18:40
  * on the machine, 06:10 on the phone), an older limited line of coder-1's, one of coder-2's
- * (back at work), and a note that quotes such a line. Each line's text, newest first. */
+ * (back at work), and a note that quotes such a line. Each line's text, newest first, as
+ * GET api/board drew them, then as the board frame that follows does: a frame's sessions
+ * are only their id, label and role (remote_server.remote_board_frame). */
 async function boardLimitTimes() {
   const zone = process.env.TZ;
   process.env.TZ = "America/Los_Angeles";
@@ -1299,7 +1301,12 @@ async function boardLimitTimes() {
     const page = bootPage("#/p/" + PROJECT + "/board", signedIn({ "GET api/board": () => ({ status: 200, json: board }) }));
     page.run("Date.now = () => Date.parse('2026-10-07T10:00:07+00:00');");
     await settle();
-    return page.main().querySelectorAll("p.text").map((line) => line.textContent);
+    const lines = () => page.main().querySelectorAll("p.text").map((line) => line.textContent);
+    const read = lines();
+    const sessions = board.sessions.map(({ id, label, role }) => ({ id, label, role }));
+    page.live().frame("board", Object.assign({}, board, { sessions, events: board.events.concat([note(5, "after")]) }), { project: PROJECT });
+    await settle();
+    return { read, framed: lines() };
   } finally {
     if (zone === undefined) delete process.env.TZ;
     else process.env.TZ = zone;

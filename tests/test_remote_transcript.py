@@ -357,6 +357,57 @@ def test_long_text_is_wrapped_to_the_width_it_will_land_in(tmp_path: Path) -> No
     assert len(narrow) > len(wide), "a narrow pane needs more lines for the same words"
 
 
+JAPANESE = (
+    "ページが文字起こしをスマートフォンの幅に合わせて折り返すかどうかを確認しました。"
+    "サーバーは各行を端末の列で数えます。"
+)
+
+
+@pytest.mark.parametrize(
+    "said",
+    [JAPANESE, "构建完成 🎉 所有测试都通过了 " * 6, "done ✅ " * 40, JAPANESE + " word" * 30],
+)
+def test_wide_characters_are_wrapped_by_the_columns_they_take(tmp_path: Path, said: str) -> None:
+    """The page asks for the width in columns (``?width=``), and a line of Japanese wrapped by
+    characters at 40 took 78 of them: the phone wrapped each line again, into a full row and
+    a ragged half outside the indent (review of #243, sweep 5). A CJK character or an emoji
+    takes two columns, and the words come back whole."""
+    from rich.cells import cell_len
+
+    path = _write(tmp_path / "wide.jsonl", [_user(said, uuid="u")])
+    for width in (40, 44, 53):
+        speaker, *body, blank = plain(read_page(path, width=width).lines)
+        assert (speaker, blank) == ("> you", "")
+        assert all(cell_len(line) <= width and line.startswith("  ") for line in body), [
+            (cell_len(line), line) for line in body if cell_len(line) > width
+        ]
+        if " " not in said:  # no word to keep whole: each line but the last fills its row
+            assert all(cell_len(line) >= width - 1 for line in body[:-1])
+        assert "".join(line[2:] for line in body).replace(" ", "") == said.replace(" ", "")
+
+
+def test_a_tool_call_or_a_note_is_one_row_however_wide_its_words(tmp_path: Path) -> None:
+    """A tool call's summary went up to 82 columns, whatever width the page asked for, and a
+    note was cut by characters: either took two of a phone's rows, the second outside the
+    ``⎿`` (review of #243, sweep 5). Each fits the width, cut where it ends."""
+    from rich.cells import cell_len
+
+    command = "git commit -m 'リリース前にキャッシュの無効化を直す' && " + "x" * 60
+    notice = {
+        **_user("バックグラウンドのビルドが終わりました。" * 4, uuid="n"),
+        "origin": {"kind": "task-notification"},
+    }
+    call = {"type": "tool_use", "name": "Bash", "input": {"command": command}}
+    path = _write(tmp_path / "calls.jsonl", [_assistant(call, uuid="a"), notice])
+    for width in (40, 44, 80):
+        notes = [line for line in plain(read_page(path, width=width).lines) if "⎿" in line]
+        call_line, note_line = notes
+        assert call_line.startswith("  ⎿ Bash(git commit") and note_line.startswith("  ⎿ バック")
+        assert all(cell_len(line) <= width and line.endswith("…") for line in notes), notes
+    short = plain(read_page(path, width=200).lines)
+    assert f"  ⎿ Bash({command[:72]})" in short, "the summary as it was, where it fits"
+
+
 # --- paging backwards -------------------------------------------------------------------
 
 

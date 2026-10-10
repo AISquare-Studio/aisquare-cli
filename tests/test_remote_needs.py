@@ -348,6 +348,32 @@ def test_a_permission_card_shows_the_call_not_eleven_keys_of_it() -> None:
     }
 
 
+def test_a_list_or_an_object_cut_at_2000_characters_is_marked_cut_as_a_string_is() -> None:
+    """A list or an object shows as its JSON, cut at 2 000 characters as a string is (round 6).
+    ``cut`` is counted on what the card would show whole, its JSON: counted on the call's
+    own input, where ``edits`` is a list, a MultiEdit's 3 035 characters of edits showed
+    their first 2 000 with no "Not all of it", reading as the whole of what the "1" beside
+    them approves. Nothing tested it (review of #243, sweep 5)."""
+    row = _row()
+    attention = _status(row, "attention", _session(row, state="attention"))
+    edits = [{"old_string": "a" * 1500, "new_string": "b" * 1500}]
+    query = {"ids": list(range(600)), "table": "accounts"}
+    calls = {
+        "edits": _tool("toolu_e", "MultiEdit", edits=edits, file_path="/etc/hosts"),
+        "where": _tool("toolu_q", "mcp__db__delete_rows", where=query),
+    }
+    for key, call in calls.items():
+        whole = json.dumps(call.input[key], ensure_ascii=False, separators=(",", ":"))
+        detail = _one(_classify(attention, _tail(call))).detail
+        fields = detail["input"]
+        assert isinstance(fields, dict)
+        shown = fields[key]
+        assert len(whole) > 2000 and len(shown) == 2000, key
+        assert shown == whole[:1999] + "…", key
+        assert detail["cut"] == {key: len(whole)}, key
+    assert len(json.dumps(edits, separators=(",", ":"))) == 3035
+
+
 def test_a_call_of_more_fields_than_a_card_holds_says_how_many_it_leaves_out() -> None:
     """The page draws twenty fields, and a name it could not hold to the card's size is
     none of them: each one left out is counted, so the card says so."""
@@ -535,6 +561,33 @@ def test_rule_7_the_session_paused_dialog_reads_as_limited() -> None:
     assert item.reason == "coder-1 hit its usage limit (Claude Code is asking what to do)"
     assert item.detail == {"text": text}
     assert item.answers == ()
+
+
+@pytest.mark.parametrize(
+    ("accounts", "manager_live"),
+    [
+        (AccountsSettings(), False),
+        (AccountsSettings(), True),
+        (AccountsSettings(on_limit="switch"), False),
+        (AccountsSettings(on_limit="switch"), True),
+    ],
+)
+def test_the_session_paused_dialog_is_pushed_at_once_since_nobody_else_acts_on_it(
+    accounts: AccountsSettings, manager_live: bool
+) -> None:
+    """The dialog's card waited 90 s with ``on_limit = "switch"`` or a live manager, for the
+    hand-over or the manager to move the agent first. The dialog is a notification: the
+    hand-over starts only on a turn that failed on its limit (``StopFailure``), and an
+    ``attention`` event wakes no manager, so the agent waited 90 s on a human nobody told
+    (review of #243, sweep 5)."""
+    row = _row()
+    seen = NOW - timedelta(minutes=1)
+    session = _session(row, state="attention", seen=seen)
+    text = "Session paused — choose: continue on usage credits or switch models"
+    events = [_event(9, "attention", text, session=session, at=seen)]
+    status = _status(row, "attention", session)
+    item = _one(_classify(status, None, events, manager_live=manager_live, accounts=accounts))
+    assert (item.kind, item.since, item.push_after) == ("limited", seen, seen)
 
 
 def test_rule_8_attention_without_a_tool_is_a_dialog() -> None:
@@ -1269,8 +1322,9 @@ def test_a_manager_tmux_cannot_reach_is_no_manager_to_leave_work_to() -> None:
 
 def test_a_manager_at_the_usage_limit_dialog_does_not_wait_for_itself() -> None:
     """At the usage-limit dialog a manager reads attention, so it counted as the live manager
-    its own limit's push waited 90 s for: itself. Its items wait for another manager only;
-    a coder's limit still waits for it."""
+    its own limit's push waited 90 s for: itself. A coder's dialog waited 90 s for it too,
+    but no manager hears of a dialog (an ``attention`` event wakes none), and no hand-over
+    starts on one: both go at once (review of #243, sweep 5)."""
     paused = "Session paused — choose: continue on usage credits or switch models"
     at = NOW - timedelta(minutes=1)
     manager, coder = _row("manager", role="manager"), _row()
@@ -1285,7 +1339,7 @@ def test_a_manager_at_the_usage_limit_dialog_does_not_wait_for_itself() -> None:
         ],
     )
     pushes = {item.agent: item.push_after for item in _scan(fleet) if item.kind == "limited"}
-    assert pushes == {"manager": at, "coder-1": at + timedelta(seconds=90)}
+    assert pushes == {"manager": at, "coder-1": at}
 
 
 def test_a_manager_session_parked_on_its_limit_is_not_live_without_its_row_either() -> None:
@@ -1893,6 +1947,7 @@ def test_every_detail_fits_its_cap() -> None:
     assert question.excerpt.endswith("(+3 more)") or len(question.excerpt) == 280
     plan = _one(_classify(asking, _tail(_tool("toolu_p", "ExitPlanMode", plan="p" * 40_000))))
     assert _size(plan.detail) <= 16_384 and str(plan.detail["plan"]).endswith("…")
+    assert plan.detail["cut"] == {"plan": 40_000}, "the card says the plan goes on"
     waiting = _status(row, "waiting", _session(row, state="waiting"))
     long = "word " * 4_000 + "\n\nShall I go on?"
     asked = _one(_classify(waiting, _tail(newest="assistant_text", text=long)))
@@ -2381,6 +2436,23 @@ def test_a_dismissals_stamp_and_asq_remote_needs_age_are_read_as_the_server_read
     assert _needs_age("2026-10-07T13:55:00+02:00", NOW) == "5m"
     assert _needs_age(None, NOW) == _needs_age("soon", NOW) == "?"
     assert {"2026-10-07T10:55:00", "2026-10-07T13:55:00+02:00", None, "soon"} <= set(read)
+
+
+def test_asq_remote_needs_writes_an_age_by_the_boards_one_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_needs_age`` promised the age "as the board says it" with a copy of the board's
+    ``_age`` of its own, as ``asq team prune`` had one: a change to how the board writes an
+    age (days past 24 h, say) reached one of the three (review of #243, round 7, 4/4). The
+    rule the board learns here, ``asq remote needs`` writes too."""
+    from aisquare.cli.remote import _needs_age
+    from aisquare.services import team as team_service
+
+    assert _needs_age("2026-10-07T09:55:00Z", NOW) == "2h05m"
+    monkeypatch.setattr(team_service, "minutes_text", lambda minutes: f"<{minutes} min>")
+    assert _needs_age("2026-10-07T09:55:00Z", NOW) == "<125 min>"
+    assert _needs_age("2026-10-07T12:30:00Z", NOW) == "<0 min>", "a stamp ahead is no age"
+    assert team_service.age_text(NOW - timedelta(minutes=125), NOW) == "<125 min>"
 
 
 # --- one agent, now: the predicates actions rely on ---------------------------------------
@@ -3952,6 +4024,48 @@ def test_requests_that_waited_for_a_scan_share_it_instead_of_each_running_one(
     assert scans == [0, 1], "a request with nothing in flight scans for itself"
 
 
+@pytest.mark.parametrize("then", ["nothing", "the watcher stops", "Remote goes off"])
+def test_the_scan_after_quick_answers_is_one_and_never_runs_once_the_watcher_stopped(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, then: str
+) -> None:
+    """Each answer started a timer of its own, each a scan of every project with tmux: five
+    quick taps were five scans back to back, and the timers of the last answers before the
+    watcher stopped, or Remote went off, scanned after it (review of #243, sweep 5). One
+    scan follows the last of them, and none follows a stop."""
+    after = 0.3
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", after)
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    scans: list[float] = []
+
+    def counted() -> list[ProjectInfo]:
+        # The clock a Timer's wait keeps everywhere: Windows' time.monotonic stepped 15.6 ms
+        # before Python 3.13, and read a 0.3 s wait as 0.297 s.
+        scans.append(time.perf_counter())
+        return []
+
+    watcher = RemoteNeedsWatcher(
+        app.kit, sources=lambda: replace(_sources(Fleet()), list_projects=counted)
+    )
+    for _ in range(4):
+        watcher.needs_rescan_soon()
+    last = time.perf_counter()
+    watcher.needs_rescan_soon()
+    if then == "the watcher stops":
+        watcher.stop_watching()
+        watcher.needs_rescan_soon()  # an answer that finished as it stopped
+    elif then == "Remote goes off":
+        runtime.remote_going_off()
+    if then == "nothing":
+        _until_true(lambda: bool(scans))
+        threading.Event().wait(after)
+        assert len(scans) == 1, f"{len(scans)} scans for five answers"
+        assert scans[0] - last >= after, "a second after the LAST answer, its pane had moved"
+    else:
+        threading.Event().wait(2 * after)
+        assert scans == [], f"{len(scans)} scans after {then}"
+    watcher.stop_watching()
+
+
 def test_every_scan_reaches_every_listener_and_a_failing_one_costs_nothing(
     runtime: Runtime, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -4509,6 +4623,8 @@ def test_an_answer_is_a_write_on_the_write_pool_counted_and_named_while_it_runs(
     assert thread.startswith("asq-remote-write"), thread
     assert running == ["needs/answer for coder-1"]
     assert remote_server.remote_writes_running() == []
+    watcher = live.app.kit.lane_state["needs"]
+    _until_true(lambda: watcher.needs_lookup(card["id"]) is not None)  # this pane never moved
     monkeypatch.setattr(remote_server, "WRITE_WAITING_PER_DEVICE", 0)
     again = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
     assert (again.status_code, again.json()["error"]) == (409, "busy"), again.text
@@ -4534,6 +4650,77 @@ def test_an_answer_types_into_the_agent_is_audited_and_clears_its_card(live: Liv
         "enter=False"
     )
     _until_true(lambda: watcher.needs_scanned_at() != scanned)
+
+
+def test_an_answered_card_leaves_the_feed_at_once_as_a_dismissed_one_does(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An answer only scheduled a scan a second on, and its card stayed in the feed until it
+    ran: on every page with its buttons live, and before the push sender, whose window
+    closing meanwhile pushed the answered prompt to every phone, the one that answered it
+    too (review of #243, sweep 5). It leaves at once, and a scan begun before the answer
+    is over does not bring it back, though this fleet still shows the prompt."""
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 30.0)
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    watcher = live.app.kit.lane_state["needs"]
+    try:
+        response = live.client.post(
+            live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]}
+        )
+        assert response.status_code == 200, response.text
+        assert card["id"] not in [item.id for item in watcher.needs_items_now()]
+        assert [item["kind"] for item in live.feed()] == ["board_question"], (
+            "the feed's own scan, begun right after the answer, still shows the prompt"
+        )
+    finally:
+        watcher.stop_watching()
+
+
+def test_an_answered_prompt_still_up_comes_back_with_the_first_scan_begun_after_the_answer(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing of an answer is kept on disk, unlike a dismissal: keys that did not close the
+    prompt leave it in the feed by the scan after the answer. A scan under way as the answer
+    came read the fleet before it, and one begun at once may read the pane before the agent
+    acted on the key: neither brings the card back, nor hands it to the listeners."""
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 1.0)
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    status, tail = _asking(datetime.now(UTC))
+    fleet = Fleet(agents=[status])
+    fleet.tails["/transcripts/coder-1.jsonl"] = tail
+    started, release = threading.Event(), threading.Event()
+    holding = [False]
+
+    def projects() -> list[ProjectInfo]:
+        if holding[0]:
+            holding[0] = False
+            started.set()
+            assert release.wait(5)
+        return [PROJECT]
+
+    heard: list[list[str]] = []
+    app.kit.needs_listeners.append(lambda items, at: heard.append([item.id for item in items]))
+    watcher = RemoteNeedsWatcher(
+        app.kit, sources=lambda: replace(_sources(fleet), list_projects=projects)
+    )
+    try:
+        (card,) = watcher.scan_needs_now()
+        holding[0] = True
+        under_way = threading.Thread(target=watcher.scan_needs_now)
+        under_way.start()
+        assert started.wait(5)
+        watcher.needs_answered(card.id)
+        assert watcher.needs_items_now() == [] and watcher.needs_items_json() == []
+        release.set()
+        under_way.join(5)
+        assert watcher.needs_scan_for_request() is None  # begun at once
+        assert watcher.needs_items_now() == [] and heard[1:3] == [[], []]
+        _until_true(lambda: [item.id for item in watcher.needs_items_now()] == [card.id])
+        assert heard[-1] == [card.id], "the same card, its id unchanged"
+    finally:
+        release.set()
+        watcher.stop_watching()
 
 
 def test_an_answer_in_words_is_typed_then_entered(live: Live) -> None:

@@ -1005,6 +1005,65 @@ def test_what_cleared_while_the_throttle_ran_is_not_pushed(world: World) -> None
     assert len(world.transport.sent) == 2
 
 
+def test_what_cleared_while_one_phone_was_pushed_is_not_pushed_to_the_next(world: World) -> None:
+    """A pass read the feed once and then sent to each phone in turn, each send up to 10 s:
+    a card answered or dismissed while the first phone's push went was pushed to the second
+    (review of #243, sweep 5)."""
+    _sending_while(world, lambda: setattr(world.watcher, "items", []))
+    item = needs_item(1)
+    world.scan(item)
+    world.scan(item)
+    world.later(5)
+    assert world.titles() == [(DEVICES[0], "aisquare-cli: coder-auth needs you")]
+
+
+def test_a_card_answered_from_a_phone_before_its_window_closed_is_pushed_to_no_phone(
+    app: Any, runtime: Runtime, roster: set[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An answer only scheduled a scan a second on, and its card stayed in the feed until that
+    ran: the coalescing window that closed meanwhile pushed "coder-1 needs you" to every
+    phone, the one that answered it too, for a prompt already answered (review of #243,
+    sweep 5). The needs watcher, the routes and the sender here are the real ones; the fleet
+    still shows the prompt, as it does for the moment the agent takes to act on the key."""
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services import remote_needs
+    from aisquare.services.remote_needs import RemoteNeedsWatcher
+    from tests.test_remote_needs import FakeTmux, Fleet, _asking
+    from tests.test_remote_needs import _sources as needs_sources
+
+    now = datetime.now(UTC)
+    status, tail = _asking(now)
+    fleet = Fleet(agents=[status], tails={"/transcripts/coder-1.jsonl": tail})
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: needs_sources(fleet))
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: FakeTmux())
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 30.0)
+    client, device = unlocked(app, runtime, roster)
+    assert opt_in(client, runtime, Browser(f"{FCM}{device}")) == 201
+    runtime.set_allow_write(True)
+    clock, transport = Clock(now), Transport()
+    watcher = RemoteNeedsWatcher(app.kit, sources=lambda: needs_sources(fleet), clock=clock)
+    app.kit.lane_state["needs"] = watcher
+    sender = RemotePushSender(app.kit, transport=transport, clock=clock)
+    app.kit.needs_listeners.append(sender.push_scan_seen)
+    try:
+        sender.push_run_due()
+        (card,) = watcher.scan_needs_now()
+        clock.advance(3)
+        watcher.scan_needs_now()  # the second scan: pushable, its window closes in 5 s
+        clock.advance(4.5)
+        sender.push_run_due()
+        answer = {"id": card.id, "keys": ["1"]}
+        answered = client.post(f"{base(runtime)}/api/needs/answer", json=answer)
+        assert answered.status_code == 200, answered.text
+        clock.advance(0.5)
+        sender.push_run_due()  # the window closes
+        clock.advance(30)
+        sender.push_run_due()
+        assert transport.sent == []
+    finally:
+        watcher.stop_watching()
+
+
 @pytest.mark.parametrize("answer", [503, 429, None])
 def test_a_push_its_service_did_not_take_goes_again_to_that_device_alone(
     world: World, answer: int | None
@@ -1453,6 +1512,86 @@ def test_what_a_throttle_held_is_not_pushed_past_the_auto_off_deadline(world: Wo
     world.later(20)  # T0 + 33 s: the throttle is over, and so is Remote
     assert world.titles() == every_device("aisquare-cli: coder-auth needs you")
     assert second.id not in load_push_state().pushed
+
+
+class Meanwhile(Transport):
+    """A push service that takes each push, and while it does, ``then`` happens: Remote turned
+    off on the machine, a deadline passed during a slow handshake."""
+
+    def __init__(self, then: Callable[[], object]) -> None:
+        super().__init__()
+        self.then = then
+
+    def __call__(self, endpoint: str, headers: dict[str, str], body: bytes) -> int:
+        status = super().__call__(endpoint, headers, body)
+        self.then()
+        return status
+
+
+def _sending_while(world: World, then: Callable[[], object]) -> None:
+    """A new sender on ``world``, whose every push lets ``then`` happen as it goes."""
+    world.transport = Meanwhile(then)
+    world.sender = RemotePushSender(world.kit, transport=world.transport, clock=world.clock)
+    world.sender.push_run_due()
+
+
+@pytest.mark.parametrize("turned_off", ["by its switch", "past its deadline", "on a quit"])
+def test_a_pass_under_way_when_remote_goes_off_sends_the_next_phone_nothing(
+    world: World, turned_off: str
+) -> None:
+    """``push_run_due`` asked once a pass whether Remote was off, and a pass sends to each
+    phone in turn, each send up to 10 s: Remote turned off during the first phone's push,
+    the farewell went, and the second phone heard "coder-auth needs you" after the farewell
+    that promised no more, its link a 404 (review of #243, sweep 5). A sender that was told
+    to stop, whose 2 s wait for it ran out, went on sending as well."""
+    world.kit.runtime.set_auto_off(T0 + timedelta(minutes=30))
+    if turned_off == "by its switch":
+        _sending_while(world, world.kit.runtime.remote_going_off)
+    elif turned_off == "past its deadline":
+        _sending_while(world, lambda: world.clock.advance(31 * 60))  # a slow handshake
+    else:
+        _sending_while(world, lambda: world.sender.push_end(0))
+    item = needs_item(1)
+    world.scan(item)
+    world.scan(item)
+    world.later(5)
+    assert world.titles() == [(DEVICES[0], "aisquare-cli: coder-auth needs you")]
+    world.later(30)
+    assert len(world.transport.sent) == 1, "nor at the second phone's next turn"
+
+
+def test_a_warning_under_way_when_remote_goes_off_reaches_the_next_phone_no_more(
+    world: World,
+) -> None:
+    world.kit.runtime.set_auto_off(T0 + timedelta(minutes=8))
+    _sending_while(world, world.kit.runtime.remote_going_off)
+    for _ in range(4):
+        world.later(30)
+    assert world.titles() == [(DEVICES[0], auto_off_title(8))]
+
+
+@pytest.mark.parametrize("push", ["needs you", "auto-off warning"])
+def test_a_phone_revoked_while_the_pass_sent_to_another_is_pushed_nothing(
+    world: World, push: str
+) -> None:
+    """A pass read the subscriptions once, and each send may wait 10 s on a push service: a
+    phone revoked meanwhile, a lost one, still showed "coder-auth needs you" on its lock
+    screen, project and agent named (review of #243, sweep 5)."""
+    lost = DEVICES[1]
+    _sending_while(world, lambda: world.roster.discard(lost))
+    if push == "needs you":
+        item = needs_item(1)
+        world.scan(item)
+        world.scan(item)
+        world.later(5)
+        title = "aisquare-cli: coder-auth needs you"
+    else:
+        world.kit.runtime.set_auto_off(T0 + timedelta(minutes=8))
+        world.later(30)
+        title = auto_off_title(8)
+    for _ in range(4):
+        world.later(30)
+    assert world.titles() == [(DEVICES[0], title)]
 
 
 def test_no_warning_goes_out_past_the_auto_off_deadline(

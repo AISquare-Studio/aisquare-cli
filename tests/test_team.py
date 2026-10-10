@@ -258,6 +258,24 @@ def test_prune_keep_spares_a_session(work_dir: Path) -> None:
         assert _stored_session(store, CODER).ended_at is not None
 
 
+def test_prune_says_how_long_a_ghost_was_dark_by_the_boards_one_rule(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``asq team prune`` wrote the span with a copy of the board's rule of its own, as
+    ``asq remote needs`` did: a change to the board's reached one of them (review of #243,
+    round 7, 4/4)."""
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        _put_session(store, CODER, project.id, idle_min=90)
+    shown = runner.invoke(app, ["team", "prune", "--dry-run"])
+    assert shown.exit_code == 0, shown.output
+    assert "— dark 1h30m" in _flat(shown.output)
+    monkeypatch.setattr(team_service, "minutes_text", lambda minutes: f"<{minutes} min>")
+    learned = runner.invoke(app, ["team", "prune", "--dry-run"])
+    assert "— dark <90 min>" in _flat(learned.output)
+
+
 # --- hooks: activation, board, delta, end --------------------------------------
 
 

@@ -916,7 +916,11 @@ def needs_from_agent(
     if attention or _needs_unanswered(status, tail, unread=False):
         notice = _needs_notice(attention_event, tail, session)
         if notice is not None and LIMIT_DIALOG.search(notice.text):
-            since = notice.created_at
+            # Pushed at once, whatever ``on_limit`` says and whether a manager is live: the
+            # dialog is a notification, which starts no hand-over (a turn that failed on its
+            # limit does, ``hooks.turn_failed``) and wakes no manager (``attention`` is a
+            # human board kind), so the 90 s :func:`_needs_limited_push` waits for someone
+            # else to act had nobody behind them (review of #243, sweep 5).
             return [
                 _needs_item(
                     "limited",
@@ -926,10 +930,8 @@ def needs_from_agent(
                     reason=f"{name} hit its usage limit (Claude Code is asking what to do)",
                     excerpt=notice.text,
                     detail=_needs_fit({"text": notice.text}, _DETAIL_TEXT_MAX),
-                    since=since,
-                    push_after=_needs_limited_push(
-                        since, None, now=now, manager_live=manager_live, accounts=accounts
-                    ),
+                    since=notice.created_at,
+                    push_after=notice.created_at,
                 )
             ]
         seen = session.last_seen_at if session is not None else now
@@ -1733,8 +1735,8 @@ def _needs_scan_project(
             tail = tails[status.agent.id] = _needs_tail_of(sources, status)
             live = manager_live
             if _needs_is_manager(status.agent.role):
-                # Its own items wait for no manager but another: at the usage-limit dialog
-                # a manager reads attention, and its limit's push waited 90 s for itself.
+                # Its own items wait for no manager but another: a manager at a prompt of
+                # its own reads attention, live, and is no one to leave them to.
                 others = [row for row in acting if row.id != status.agent.id]
                 live = _needs_manager_live(others, rowed, sessions, now)
             for item in needs_from_agent(
@@ -2958,6 +2960,9 @@ class RemoteNeedsWatcher:
         reads it."""
         self._forgotten: set[str] = set()
         """Ids :meth:`needs_forget` dropped that no scan has read from the dismissals file yet."""
+        self._answered: dict[str, float] = {}
+        """Ids :meth:`needs_answered` dropped, each with when (``time.monotonic()``), until a
+        scan that began :data:`NEEDS_RESCAN_AFTER_ANSWER` after it publishes."""
         self._failing: set[object] = set()
         """What has failed since it last worked, the scan itself (``"scan"``) or a listener,
         and ``_failing_projects`` the projects whose part of it has: each streak is told once
@@ -2965,6 +2970,8 @@ class RemoteNeedsWatcher:
         self._failing_projects: set[str] = set()
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
+        self._rescan: threading.Timer | None = None
+        """The scan after the latest quick answer, until it runs (:meth:`needs_rescan_soon`)."""
 
     def start_watching(self) -> None:
         """Start the daemon thread ``asq-remote-needs``; its first scan runs at once."""
@@ -2975,8 +2982,13 @@ class RemoteNeedsWatcher:
             self._thread.start()
 
     def stop_watching(self) -> None:
-        """Stop the thread, waiting a few seconds for a scan in progress."""
+        """Stop the thread, waiting a few seconds for a scan in progress. The scan after a
+        quick answer that has yet to run never does."""
         self._stopping.set()
+        with self._lock:
+            rescan, self._rescan = self._rescan, None
+        if rescan is not None:
+            rescan.cancel()
         thread, self._thread = self._thread, None
         if thread is not None:
             thread.join(timeout=5.0)
@@ -3040,10 +3052,7 @@ class RemoteNeedsWatcher:
         result read by nobody (review of #243, round 6). A push file that cannot be read
         is taken for a subscription: the sender may yet send.
         """
-        try:
-            if self._kit.runtime.auto_off_passed(self._clock()):
-                return False
-        except Exception:
+        if self._needs_off():
             return False
         if self._kit.sockets:
             return True
@@ -3054,6 +3063,14 @@ class RemoteNeedsWatcher:
             return bool(listening())
         except Exception:
             log.debug("remote: could not tell whether a phone has notifications on", exc_info=True)
+            return True
+
+    def _needs_off(self) -> bool:
+        """Whether Remote is past its auto-off deadline or turning off, or cannot say: a scan
+        then reaches nobody, every request a 404 and every socket closed."""
+        try:
+            return self._kit.runtime.auto_off_passed(self._clock())
+        except Exception:
             return True
 
     def needs_scan_wanted(self) -> bool:
@@ -3074,9 +3091,12 @@ class RemoteNeedsWatcher:
         what it read, and :meth:`needs_forget` drops it only from the snapshot there
         is then: published, the scan put it back on every phone and before the push
         sender, which could push it. So each id dropped since is dropped from what the
-        scan publishes too, until a scan that read it from the file has published.
+        scan publishes too, until a scan that read it from the file has published. A card
+        answered (:meth:`needs_answered`) is, until a scan that began long enough after the
+        answer for the agent to have acted on it publishes, whatever that scan finds.
         """
         with self._scanning:
+            began = time.monotonic()
             now = self._clock()
             sources = self._sources()
             projects = sources.list_projects()
@@ -3094,7 +3114,13 @@ class RemoteNeedsWatcher:
             )
             scanned = [item for item in everything if item.id not in dismissed]
             with self._lock:
-                items = [item for item in scanned if item.id not in self._forgotten]
+                self._answered = {
+                    key: at
+                    for key, at in self._answered.items()
+                    if began - at < NEEDS_RESCAN_AFTER_ANSWER
+                }
+                hidden = self._forgotten.union(self._answered)
+                items = [item for item in scanned if item.id not in hidden]
                 self._forgotten.difference_update(dismissed)
                 payload = [item.needs_item_json() for item in items]
                 self._latest, self._latest_json, self._scanned_at = items, payload, now
@@ -3185,16 +3211,57 @@ class RemoteNeedsWatcher:
         """
         with self._lock:
             self._forgotten.add(item_id)
-            self._latest = [item for item in self._latest if item.id != item_id]
-            self._latest_json = [item for item in self._latest_json if item.get("id") != item_id]
+            self._needs_drop(item_id)
+
+    def needs_answered(self, item_id: str) -> None:
+        """A quick answer was typed: its card leaves the feed now, and a scan follows
+        (:meth:`needs_rescan_soon`).
+
+        It stayed in the snapshot until that scan, a second on, and a scan already under
+        way published it again: the push sender, whose window closed meanwhile, pushed
+        the answered prompt to every phone, the one that answered it too, and each page
+        kept its live buttons (review of #243, sweep 5). Unlike a dismissal nothing is
+        kept on disk: a prompt the keys did not close is back with the first scan that
+        began :data:`NEEDS_RESCAN_AFTER_ANSWER` after the answer, by when the agent has
+        acted on them.
+        """
+        with self._lock:
+            self._answered[item_id] = time.monotonic()
+            self._needs_drop(item_id)
+        self.needs_rescan_soon()
+
+    def _needs_drop(self, item_id: str) -> None:
+        """Take ``item_id`` out of the snapshot; the caller holds ``_lock``."""
+        self._latest = [item for item in self._latest if item.id != item_id]
+        self._latest_json = [item for item in self._latest_json if item.get("id") != item_id]
 
     def needs_rescan_soon(self) -> None:
-        """Scan again in :data:`NEEDS_RESCAN_AFTER_ANSWER` seconds, off every caller's thread."""
-        timer = threading.Timer(NEEDS_RESCAN_AFTER_ANSWER, self._needs_rescan)
-        timer.daemon = True
-        timer.start()
+        """Scan again :data:`NEEDS_RESCAN_AFTER_ANSWER` seconds after the latest quick answer,
+        off every caller's thread: one scan for however many answers came meanwhile.
+
+        Each answer started a timer of its own, each a scan of every project with tmux:
+        five quick taps were five scans back to back, as the scans for requests were
+        before they shared one (sweep 4), and the timers of the last answers before the
+        watcher stopped, or Remote went off, scanned after it (review of #243, sweep 5).
+        """
+        with self._lock:
+            if self._stopping.is_set():
+                return
+            if self._rescan is not None:
+                self._rescan.cancel()
+            self._rescan = threading.Timer(NEEDS_RESCAN_AFTER_ANSWER, self._needs_rescan)
+            self._rescan.daemon = True
+            self._rescan.start()
 
     def _needs_rescan(self) -> None:
+        """The armed timer's scan; none for a timer a later answer replaced (one that fired as
+        it was cancelled), once the watcher stopped, or once Remote is off."""
+        with self._lock:
+            if self._rescan is not None and self._rescan is not threading.current_thread():
+                return
+            self._rescan = None
+        if self._stopping.is_set() or self._needs_off():
+            return
         self._needs_scan_told()
 
 
@@ -3436,7 +3503,7 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
                 await asyncio.to_thread(kit.kit_audit, device, "needs/answer", exc.audit)
             raise
         await asyncio.to_thread(kit.kit_audit, device, "needs/answer", summary)
-        watcher.needs_rescan_soon()
+        watcher.needs_answered(item.id)
         return JSONResponse(result)
 
     return [

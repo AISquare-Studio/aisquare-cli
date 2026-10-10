@@ -301,7 +301,9 @@ too, so the real option labels are on screen next to the buttons.
 permission; one per option, and Cancel, for a single question with one answer to
 pick from at most nine; `1` to `3` and Keep planning for a plan. A quick answer
 is checked against the agent **as it is now**: if the prompt has already gone,
-the card says "No longer needs you" and nothing is typed. Anything else (one of
+the card says "No longer needs you" and nothing is typed. An answered card leaves
+the feed at once, on every phone and before any notification goes out, and is
+back a second later if the prompt is still there. Anything else (one of
 Claude Code's own dialogs, a form an MCP server asks you to fill in, a question of
 several answers) is answered from the agent's key pad. The board keeps the words
 of only the first thing a turn asks for. A form an MCP server asks for while its
@@ -400,7 +402,9 @@ the kinds that often clear by themselves, or that someone else is already on:
 - a usage limit: never when it lifts within
   `[accounts] wait_if_reset_within_minutes` (15 by default), since Claude Code
   carries on by itself at the reset; after 90 seconds when `on_limit = "switch"`
-  or a live manager is on it; at once otherwise;
+  or a live manager is on it; at once otherwise. Claude Code's "Session paused"
+  dialog, which a limit can show instead, goes at once: no hand-over starts on
+  it, and no manager hears of it;
 - a turn that ended with a question: after 5 minutes while a manager is live,
   for an agent that is neither the manager nor one you started yourself, since
   the manager is to answer it first; at once otherwise;

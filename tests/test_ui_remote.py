@@ -1276,7 +1276,14 @@ def test_a_write_that_lands_takes_away_the_sentence_that_one_did_not_in_the_pane
     drive(go, tunnel=missing_ngrok)
 
 
-def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended() -> None:
+def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The extended deadline is said with its date once it is past midnight here. The machine
+    is put in a zone where it is, two hours ahead of now: in the suite's own zone the date was
+    expected only on runs within two hours of midnight, and a bare ``%H:%M`` passed every
+    other hour of the day (sweep 5 of #243)."""
+
     async def go(pilot: Pilot[None]) -> None:
         app = pilot.app
         assert isinstance(app, FleetApp)
@@ -1290,15 +1297,19 @@ def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended() -> Non
             budget.record_failed_unlock()
         extended = runtime.extend_auto_off(datetime.now(UTC))
         assert extended is not None
+        # A zone where the deadline, two hours off, is in the first hour of tomorrow.
+        zone = timezone(-timedelta(hours=extended.astimezone(UTC).hour))
+        monkeypatch.setattr(remote_view, "LOCAL_ZONE", zone)
+        there = extended.astimezone(zone)
+        assert there.hour == 0 and there.date() != datetime.now(zone).date()
         modal.repaint()
         await pilot.pause()
         line = shown(modal.query_one("#remote-unlocks", Static))
         assert line.startswith(f"{UNLOCK_GLOBAL_FAILURES} failed unlocks in 30 min")
         assert "new unlocks paused" in line and "regenerate-password --new-link" in line
         state_line = shown(modal.query_one("#remote-state", Static))
-        # with its date when it is tomorrow already: an extension can cross midnight
-        assert f"auto-off at {remote_view._auto_off_time(extended)}" in state_line
-        assert f"{extended.astimezone():%H:%M}" in state_line
+        # with its date: an extension can cross midnight
+        assert f"auto-off at {there:%b} {there.day} 00:{there.minute:02d}" in state_line
         assert app.remote.auto_off_at == extended, "the extension holds in the TUI too"
 
     drive(go, tunnel=missing_ngrok)

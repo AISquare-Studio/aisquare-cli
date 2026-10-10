@@ -179,6 +179,11 @@ WS_CLIENT_MESSAGE_MAX = 4_096
 """The longest text frame a client may send; anything longer is ignored unread."""
 WS_PANE_SUBSCRIPTIONS_MAX = 8
 """Panes one socket may watch at once; a 9th ``subscribe`` is refused with an error frame."""
+WS_SEND_SECONDS = 20.0
+"""The longest a socket's frame or close may wait for the phone to take what was sent before it.
+A phone that stopped reading, asleep or off its network, leaves the server's buffer full, and
+the send waited for it with no end: the socket's stream stopped there, its auto-off, revoke and
+sign-out checks with it (sweep 5 of #243). As long as uvicorn gives a ping its answer."""
 WS_SOCKETS_PER_DEVICE = 4
 """Live sockets per device. A 5th closes the device's OLDEST (4409) rather than refusing the
 new one: what a sleeping phone leaves behind is a half-open socket, and evicting it is what
@@ -3970,6 +3975,11 @@ async def _refuse_at_the_gate(
     await _json_error(status, error, message)(scope, receive, send)
 
 
+class _RemoteSocketStalled(Exception):
+    """A socket's frame waited :data:`WS_SEND_SECONDS` for its phone to take what was sent
+    before it: the stream ends, and no close is sent, which would wait the same."""
+
+
 class _TokenGate:
     """Pure ASGI in front of every route: the five gates of SPEC §1.2, in order.
 
@@ -5071,6 +5081,12 @@ def build_remote_app(
         whole tick, so while one read hung (a fleet waiting out tmux's 30 s, a store kept
         busy) every frame of the socket came every two ticks, and an auto-off or a device
         signed out elsewhere closed it up to two ticks late (sweep of #243, round 5).
+
+        A frame or a close waits :data:`WS_SEND_SECONDS` at most for the phone to take what
+        went before it, and a socket whose phone does not ends there: one that stopped
+        reading held its stream in a send for good, auto-off and sign-out checks and all.
+        Its connection, still holding what it could not send, is cut once the server stops
+        (:func:`_remote_cut_stuck`).
         """
         device = kit.kit_device(websocket)  # the gate refused a socket without one
         await websocket.accept()
@@ -5119,8 +5135,8 @@ def build_remote_app(
         otherwise log a traceback on every tick of every socket."""
 
         async def close_with(code: int) -> None:
-            with contextlib.suppress(Exception):
-                await websocket.close(code=code)
+            with contextlib.suppress(Exception):  # TimeoutError: a phone that is not reading
+                await asyncio.wait_for(websocket.close(code=code), WS_SEND_SECONDS)
 
         def closer(code: int) -> None:
             loop.call_soon_threadsafe(lambda: loop.create_task(close_with(code)))
@@ -5133,7 +5149,10 @@ def build_remote_app(
                 frame["agent"] = agent
             if project is not None:
                 frame["project"] = project
-            await websocket.send_text(json.dumps(frame))
+            try:
+                await asyncio.wait_for(websocket.send_text(json.dumps(frame)), WS_SEND_SECONDS)
+            except TimeoutError:
+                raise _RemoteSocketStalled(kind) from None
 
         async def push_if_changed(
             kind: str, payload: object, *, project: str | None = None
@@ -5318,6 +5337,8 @@ def build_remote_app(
                 await asyncio.wait([reading], timeout=max(0.0, ends - loop.time()))
         except WebSocketDisconnect:
             pass
+        except _RemoteSocketStalled as exc:  # its close would wait as long: none is sent
+            log.debug("remote: stream for %s stalled on a %s frame", device.id, exc)
         except Exception as exc:
             log.debug("remote: stream for %s ended: %s", device.id, exc)
             # A failure, said as one (the page reconnects with backoff): returning
@@ -5658,14 +5679,62 @@ def _remote_uvicorn_config(app: Any, port: int) -> uvicorn.Config:
     )
 
 
+def _remote_uvicorn_server() -> type[uvicorn.Server]:
+    """uvicorn's server for Remote, in the TUI's thread (:class:`_Server`) and under ``serve``
+    (:func:`_remote_serve_server`) alike: its stop cuts what a phone that stopped reading
+    holds up (:func:`_remote_cut_stuck`). Made where a server is, from the ``uvicorn``
+    imported then: it is the remote extra's."""
+    import asyncio
+
+    import uvicorn
+
+    class RemoteUvicorn(uvicorn.Server):
+        remote_cutting: asyncio.Task[None] | None = None
+        """The cut of what is stuck, from the tick its stop begins (:func:`_remote_cut_stuck`).
+        Kept here: the loop holds a task only weakly."""
+
+        async def on_tick(self, counter: int) -> bool:
+            stopping = await super().on_tick(counter)
+            if stopping and self.remote_cutting is None:
+                self.remote_cutting = asyncio.ensure_future(_remote_cut_stuck(self))
+            return stopping
+
+    return RemoteUvicorn
+
+
+async def _remote_cut_stuck(server: uvicorn.Server) -> None:
+    """While ``server`` stops: once no phone's write runs, give the rest
+    :data:`REMOTE_WINDING_DOWN_SECONDS`, then cut every connection still holding bytes its
+    peer has not taken, and any that comes to, until no connection is left.
+
+    uvicorn's stop closes each connection and waits for it to go, with no limit. A close
+    lets what was written drain first, and a phone that stopped reading, asleep or off its
+    network, never takes it: the connection never went, so ``serve`` never exited after its
+    auto-off, holding ``remote-serve.lock`` (every fleet UI's panel said Remote was on
+    elsewhere), a Ctrl-C changed nothing, and the R panel's next start was refused as
+    winding down for as long as the phone's TCP lived (sweep 5 of #243). Cut, a connection
+    goes at once. A phone's write still running is waited for, as the way out waits for
+    it; a read that sent nothing yet holds nothing to cut, and is let finish.
+    """
+    import asyncio
+
+    while remote_writes_running():
+        await asyncio.sleep(0.1)
+    await asyncio.sleep(REMOTE_WINDING_DOWN_SECONDS)
+    while server.server_state.connections:
+        for connection in list(server.server_state.connections):
+            transport = getattr(connection, "transport", None)
+            if transport is not None and transport.get_write_buffer_size():
+                transport.abort()
+        await asyncio.sleep(0.1)
+
+
 class _Server:
     """uvicorn in a daemon thread, stopped by flipping ``should_exit``."""
 
     def __init__(self, app: Any, port: int) -> None:
-        import uvicorn
-
         self.port = port
-        self._server = uvicorn.Server(_remote_uvicorn_config(app, port))
+        self._server = _remote_uvicorn_server()(_remote_uvicorn_config(app, port))
         self._thread = threading.Thread(
             target=self._serve_in_thread, name="asq-remote", daemon=True
         )
@@ -5719,7 +5788,9 @@ to start beside (:func:`start_remote_server`)."""
 
 REMOTE_WINDING_DOWN_SECONDS = 5.0
 """How long :func:`remote_wait_for_writes` gives a stopped server once its writes are done: the
-answers go out, then the lanes stop, as :meth:`_Server.stop_serving` allows."""
+answers go out, then the lanes stop, as :meth:`_Server.stop_serving` allows. And how long a
+stopping server waits, its writes done, before it cuts a connection whose phone takes nothing
+more (:func:`_remote_cut_stuck`)."""
 
 _WRITE_TARGET = re.compile(r"[\w.@-]{1,64}\Z")
 """An agent named in a write's body that may be printed to the terminal: a label, never a
@@ -5875,9 +5946,7 @@ def _remote_serve_server(config: uvicorn.Config) -> uvicorn.Server:
     """
     import signal
 
-    import uvicorn
-
-    class RemoteServe(uvicorn.Server):
+    class RemoteServe(_remote_uvicorn_server()):  # type: ignore[misc]  # uvicorn's, made here
         def handle_exit(self, sig: int, frame: FrameType | None) -> None:
             again = self.should_exit and sig == signal.SIGINT
             super().handle_exit(sig, frame)

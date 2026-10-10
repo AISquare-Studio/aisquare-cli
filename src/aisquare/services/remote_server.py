@@ -5936,16 +5936,23 @@ def install_page(source: Path) -> Path:
     destination = remote_dist_dir()
     staging = destination.with_name(f".{destination.name}.staging-{os.getpid()}")
     shutil.rmtree(staging, ignore_errors=True)
-    shutil.copytree(source, staging, ignore=functools.partial(_page_copy_skips, source))
     previous = destination.with_name(f".{destination.name}.previous-{os.getpid()}")
-    shutil.rmtree(previous, ignore_errors=True)
-    if destination.exists():
-        destination.rename(previous)
     try:
-        staging.rename(destination)
-    except OSError:
-        if previous.exists() and not destination.exists():
-            previous.rename(destination)
+        shutil.copytree(source, staging, ignore=functools.partial(_page_copy_skips, source))
+        shutil.rmtree(previous, ignore_errors=True)
+        if destination.exists():
+            destination.rename(previous)
+        try:
+            staging.rename(destination)
+        except OSError:
+            if previous.exists() and not destination.exists():
+                previous.rename(destination)
+            raise
+    except BaseException:
+        # Named for this process, so no later install's own clean-up ever matched it: each
+        # failed try (a full disk, a file it could not read) left another partial copy
+        # holding the very space the refusal says to free (sweep 4 of #243).
+        shutil.rmtree(staging, ignore_errors=True)
         raise
     shutil.rmtree(previous, ignore_errors=True)
     return destination

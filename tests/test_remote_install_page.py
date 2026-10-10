@@ -17,11 +17,14 @@ gates and its own fixtures, and this file must not inherit them.
 
 from __future__ import annotations
 
+import errno
 import json
+import shutil
 import socket
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -98,6 +101,47 @@ def test_install_page_replaces_an_older_page_and_leaves_no_staging_directory(
     assert not (destination / "assets").exists()  # replaced wholesale, not merged into
     leftovers = [p.name for p in destination.parent.iterdir() if ".remote-dist." in p.name]
     assert leftovers == []  # the staging and previous directories are cleaned up
+
+
+@pytest.mark.parametrize("fails", ["the copy", "the swap"])
+def test_a_failed_install_leaves_no_partial_copy_and_the_page_before_it_served(
+    isolated_home: Path, built: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fails: str
+) -> None:
+    """The staging directory is named for the process, so no later install's clean-up ever
+    matched it: each failed ``install-page`` left a hidden partial copy in ``~/.aisquare``,
+    holding the very space its refusal says to free (sweep 4 of #243)."""
+    remote_server.install_page(built)
+    newer = tmp_path / "newer"
+    (newer / "assets").mkdir(parents=True)
+    (newer / "index.html").write_text("<!doctype html><title>build 2</title>")
+    (newer / "assets" / "big.js").write_text("x" * 4096)
+    full = OSError(errno.ENOSPC, "No space left on device")
+    if fails == "the copy":
+        real_copytree = shutil.copytree
+
+        def copy_then_fill_the_disk(src: Path, dst: Path, *args: Any, **kwargs: Any) -> Any:
+            copied = real_copytree(src, dst, *args, **kwargs)
+            if ".staging-" in Path(dst).name:  # the whole copy made, not one directory of it
+                raise full
+            return copied
+
+        monkeypatch.setattr(shutil, "copytree", copy_then_fill_the_disk)
+    else:
+        real_rename = Path.rename
+
+        def refuse_the_staging_rename(self: Path, target: Path) -> Path:
+            if ".staging-" in self.name:
+                raise full
+            return real_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", refuse_the_staging_rename)
+    with pytest.raises(OSError, match="No space left"):
+        remote_server.install_page(newer)
+    home = remote_dist_dir().parent
+    assert [p.name for p in home.iterdir() if p.name.startswith(".remote-dist.")] == []
+    assert (
+        remote_dist_dir() / "index.html"
+    ).read_text() == "<!doctype html><title>asq remote</title>"
 
 
 def test_install_page_without_an_index_html_refuses_and_installs_nothing(

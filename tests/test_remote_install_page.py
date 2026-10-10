@@ -244,6 +244,34 @@ def test_an_explicit_dist_is_still_the_callers_business(
     assert response.status_code == 404 and response.json()["error"] == "no_dist"
 
 
+def test_an_installed_index_that_goes_as_a_request_is_answered_is_the_bundled_page(
+    isolated_home: Path, built: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The index is looked at twice, and one an ``install-page`` swap took away in between
+    was answered as a ``--dist`` without its index is: 404 ``no_dist`` naming the
+    directory, ``~/.aisquare/remote-dist`` resolved, to anyone holding the link (sweep 4 of
+    #243). It is answered as the next request will be, with the bundled page."""
+    remote_server.install_page(built)
+    index = remote_dist_dir().resolve() / "index.html"
+    looks: list[Path] = []
+    real_is_file = Path.is_file
+
+    def gone_after_the_first_look(self: Path) -> bool:
+        if self == index:
+            looks.append(self)
+            return len(looks) == 1
+        return real_is_file(self)
+
+    runtime = Runtime(remote_state_path(), remote_audit_path())
+    client = make_client(build_app(runtime))
+    monkeypatch.setattr(Path, "is_file", gone_after_the_first_look)
+    response = client.get(f"/r/{runtime.token}/", headers={"accept": "text/html"})
+    assert len(looks) == 2, "the race this answers: present, then gone"
+    assert response.status_code == 200, response.text
+    assert response.text == remote_page.bundled_page_files()["index.html"].decode("utf-8")
+    assert str(isolated_home) not in response.text
+
+
 def test_after_install_page_the_server_serves_the_spa_with_no_dist_flag(
     isolated_home: Path, built: Path
 ) -> None:

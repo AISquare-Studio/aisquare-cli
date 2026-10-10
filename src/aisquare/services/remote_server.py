@@ -294,6 +294,15 @@ REMOTE_SERVER_NEEDS = ("starlette", "uvicorn", "websockets")
 REMOTE_EXTRA = (*REMOTE_SERVER_NEEDS, "cryptography")
 """What the ``remote`` extra installs: the server's three, and what Web Push needs."""
 
+NO_DIST_INDEX = (
+    "no index.html in the --dist directory (is it still being built?) — build the page on the "
+    "machine, or serve it without --dist"
+)
+"""404 ``no_dist`` for a request while ``--dist`` has no ``index.html``, a build that is still
+writing it or one that removed it. Without the directory: anyone holding the link reads it
+before any passphrase, and its absolute path is the machine's home and user name. The log
+names it, as :func:`_page_missing` names it to the machine's own terminal."""
+
 NO_PAGE_HINT = "the bundled remote page is missing from this install — reinstall aisquare-cli"
 """Shown by the modal's status line, ``asq remote serve``'s exit, and the raise of
 ``start_remote_server()`` — one sentence, so a broken install never runs a server that
@@ -4758,16 +4767,26 @@ def build_remote_app(
 
     def page_answer(request: Request) -> Response:
         """:func:`static`'s answer. An installed build's file is typed by the page's own
-        closed list (:func:`remote_page.build_content_type`), not the machine's tables."""
+        closed list (:func:`remote_page.build_content_type`), not the machine's tables.
+
+        No answer names a directory: anyone holding the link reads these before any
+        passphrase. A ``--dist`` without its index said ``no index.html in`` and the
+        directory's absolute path, the machine's home and user name with it (sweep 4 of
+        #243); the log names it now (:data:`NO_DIST_INDEX`). An installed index that went
+        between the two looks at it, as ``install-page`` swaps a build in, is answered as
+        the next request will be, with the bundled page.
+        """
         from aisquare.services import remote_page
 
         rel = request.path_params.get("path", "")
         index = dist / "index.html"
-        if dist_dir is None and not index.is_file():
+
+        def bundled_page() -> Response:
             bundled = remote_page.bundled_page_response(rel, request)
-            if bundled is not None:
-                return bundled
-            response = _json_error(404, "no_dist", NO_PAGE_HINT)
+            return _json_error(404, "no_dist", NO_PAGE_HINT) if bundled is None else bundled
+
+        if dist_dir is None and not index.is_file():
+            response = bundled_page()
         elif rel and (candidate := _built_page_file(dist, rel)) is not None:
             response = FileResponse(
                 candidate,
@@ -4785,8 +4804,11 @@ def build_remote_app(
                 media_type=remote_page.build_content_type(index.name),
                 headers={"cache-control": INDEX_CACHE_CONTROL},
             )
+        elif dist_dir is None:
+            response = bundled_page()
         else:
-            response = _json_error(404, "no_dist", f"no index.html in {dist}")
+            log.warning("remote: no index.html in %s", dist)
+            response = _json_error(404, "no_dist", NO_DIST_INDEX)
         response.headers.update(remote_page.remote_page_headers())
         return response
 
@@ -6402,6 +6424,7 @@ __all__ = [
     "DEFAULT_PORT",
     "HISTORY_CAP",
     "INDEX_CACHE_CONTROL",
+    "NO_DIST_INDEX",
     "NO_PAGE_HINT",
     "READ_ONLY_REASON",
     "WRITE_ENDPOINTS",

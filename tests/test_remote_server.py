@@ -648,14 +648,20 @@ def test_static_page_needs_no_cookie_and_falls_back_to_index(
     assert escaped.status_code == 200 and escaped.text.startswith("<!doctype html>")
 
 
-def test_missing_dist_is_a_404_that_says_where_to_put_it(
-    runtime: Runtime, fake: Fake, tmp_path: Path
+def test_missing_dist_is_a_404_that_names_no_directory_and_the_log_does(
+    runtime: Runtime, fake: Fake, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    app = build_app(runtime, sources=fake.sources(), dist_dir=tmp_path / "nope")
-    response = make_client(app).get(f"{base(runtime)}/")
+    """The page needs no passphrase, and the answer named the ``--dist`` directory's absolute
+    path, the machine's home and user name, to anyone holding the link while a build had no
+    index yet (sweep 4 of #243). The machine's own log names it."""
+    missing = tmp_path / "nope"
+    app = build_app(runtime, sources=fake.sources(), dist_dir=missing)
+    with caplog.at_level(logging.WARNING, logger=remote_server.__name__):
+        response = make_client(app).get(f"{base(runtime)}/", headers={"accept": "text/html"})
     assert response.status_code == 404
-    assert response.json()["error"] == "no_dist"
-    assert "nope" in response.json()["message"]
+    assert response.json() == {"error": "no_dist", "message": remote_server.NO_DIST_INDEX}
+    assert str(tmp_path) not in response.text and "nope" not in response.text
+    assert f"no index.html in {missing.resolve()}" in caplog.text
 
 
 # --- the websocket stream (§4-D) --------------------------------------------------------

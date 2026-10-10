@@ -700,10 +700,8 @@ BUDGETS = {
     # SPEC §6.1 set 110 KB, and the page met it with 13 bytes to spare. The third review of
     # #243 found more for it to do: ask for a board only on its tab, keep keys in tap order,
     # answer a late reply in its own sheet. The fourth, and a sweep of the page in a real
-    # browser, found more again. The fifth said a 503's reason, took a body cut off halfway
-    # for a lost answer, looked again from the off screen at a wake, and left an underline's
-    # colour alone: 130 KiB, and the page 151, a KiB past §6.1's 150 KB.
-    "app.js": 130 * 1024,
+    # browser, found more again. This is their room; the page stays under 150 KB.
+    "app.js": 129 * 1024,
     "sw.js": 4 * 1024,
     "manifest.webmanifest": 1024,
 }
@@ -729,7 +727,7 @@ def test_each_file_and_the_whole_page_fit_their_budgets() -> None:
     icons = sum(_shipped_size(WEB / name) for name in ("icon.svg", "icon-180.png"))
     assert icons <= 10 * 1024
     total = sum(_shipped_size(WEB / name) for name in PAGE_FILES)
-    assert total <= 151 * 1024
+    assert total <= 150 * 1024
 
 
 def test_a_budget_counts_a_crlf_checkout_as_committed_and_a_binary_file_as_it_is(

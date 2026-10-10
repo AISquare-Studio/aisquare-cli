@@ -102,6 +102,10 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
         return
     _say(f"aisquare {plan.current} — {plan.route.describe()}")
     _say(_latest_line(plan))
+    if plan.pin_unmet:
+        # Not "upgrade with" that pin, which uv refuses on this Python (review of #257's fixes).
+        _say(f"`aisquare upgrade --version {plan.target}` cannot install it: {plan.reason}")
+        return
     if plan.runnable:
         if plan.up_to_date:
             # Not "upgrade with: aisquare upgrade", which answers "nothing to do" (sweep of #257).

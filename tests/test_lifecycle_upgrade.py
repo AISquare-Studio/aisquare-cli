@@ -447,6 +447,10 @@ def test_security_md_lists_what_upgrade_and_the_plugin_change_and_send() -> None
     # Not asked for an install whose receipt records its own index or another hold
     # (lifecycle._latest_for), nor for a pin (a later review of #257).
     assert "nothing is asked" in upgrades and "--version" in upgrades, upgrades
+    # The reinstall's own Python may be downloaded too, as the plugin's is (a later review).
+    forced = "UV_PYTHON_DOWNLOADS={}".format(install_route.INSTALLER_ENV["UV_PYTHON_DOWNLOADS"])
+    assert "CPython" in upgrades and "Astral" in upgrades and forced in upgrades, upgrades
+    assert "exported" in upgrades, "and that a setting the user exported is kept"
     assert '--from "$_from" aisquare hook' in launcher, "the launcher still runs uvx --from"
     assert f"uvx --from {DISTRIBUTION}==" in plugin
     assert "--python '>=3.11,<3.14'" in launcher, "the launcher still asks uv for a Python"
@@ -858,10 +862,28 @@ def test_the_installer_env_pins_uv_to_this_environment(tmp_path: Path) -> None:
 
     env = install_route.installer_env(route)
 
+    assert "UV_PYTHON_DOWNLOADS" not in os.environ, "the premise: nobody exported one"
     assert env["UV_TOOL_DIR"] == str(route.facts.prefix.parent)
     assert env["UV_TOOL_BIN_DIR"] == str(bin_dir)
     assert env["UV_PYTHON_DOWNLOADS"] == "automatic", "Fedora's uv.toml says manual"
     assert env["UV_NO_PROGRESS"] == "1"
+
+
+@pytest.mark.parametrize("setting", ["never", "manual"])
+def test_a_python_downloads_setting_the_user_exported_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, setting: str
+) -> None:
+    """The reinstall forced `UV_PYTHON_DOWNLOADS=automatic` over the user's own `never`, so
+    uv downloaded a CPython from Astral they had refused (measured, uv 0.12.19; review of
+    #257's fixes). Only uv.toml's, which Fedora ships as `manual`, is overridden."""
+    monkeypatch.setenv("UV_PYTHON_DOWNLOADS", setting)
+    route = _uv_route(tmp_path, _receipt(_OURS_PINNED))
+
+    env = install_route.installer_env(route)
+
+    assert "UV_PYTHON_DOWNLOADS" not in env, env
+    assert {**os.environ, **env}["UV_PYTHON_DOWNLOADS"] == setting, "run_installer's merge"
+    assert env["UV_NO_PROGRESS"] == "1" and env["UV_TOOL_DIR"], env
 
 
 # --- never `uv tool upgrade` -----------------------------------------------------------
@@ -1174,6 +1196,43 @@ def test_the_lookup_compares_only_a_release_the_reinstalls_python_can_take(
     ), unknown
 
 
+@pytest.mark.parametrize(
+    ("pin", "python", "unmet"),
+    [
+        ("0.9.0", "3.11", ">=3.12"),
+        ("0.8.0", "3.11", None),
+        ("0.9.0", "3.12", None),
+        ("0.9.9", "3.11", None),
+        ("0.8.5", "3.11", None),
+        ("0.7", "3.11", ">=3.10,<3.11"),
+    ],
+    ids=[
+        "newest-excluded",
+        "one-it-can-take",
+        "a-newer-python",
+        "not-listed",
+        "cannot-tell",
+        "a-short-pin-of-an-older-one",
+    ],
+)
+def test_the_lookup_says_when_the_pin_needs_another_python(
+    monkeypatch: pytest.MonkeyPatch, pin: str, python: str, unmet: str | None
+) -> None:
+    """`upgrade --check --version 0.9.0` said 0.9.0 needs Python >=3.12, then "upgrade with:
+    aisquare upgrade --version 0.9.0", which uv can only refuse (review of #257's fixes). The
+    pin's own Requires-Python is carried as data; one not listed, or not told, is uv's to
+    decide."""
+    body = _pypi_requiring(
+        {"0.7.0": ">=3.10,<3.11", "0.8.0": ">=3.11", "0.8.5": ">=3.11.4", "0.9.0": ">=3.12"}
+    )
+    monkeypatch.setattr(install_route, "open_url", lambda _request, timeout: _Response(body))
+
+    latest = _REAL_FETCH_LATEST(python=python, pin=pin)
+
+    assert latest.pin_requires == unmet, latest
+    assert (latest.version is None) is (python == "3.11"), "the newest is judged as before"
+
+
 def test_the_reinstalls_python_is_the_one_the_command_restates(tmp_path: Path) -> None:
     """What `--python` says in the reinstall, when it names a version; any other request
     (a path) was resolved to the interpreter that runs this install."""
@@ -1227,11 +1286,17 @@ def machine(monkeypatch: pytest.MonkeyPatch) -> Machine:
         prereleases: bool = False,
         uploaded_before: Any = None,
         python: str | None = None,
+        pin: str | None = None,
     ) -> LatestRelease:
         # Each keyword changes what the REAL lookup reads; its tests drive it through open_url.
         world.lookups += 1
         world.asked.append(
-            {"prereleases": prereleases, "uploaded_before": uploaded_before, "python": python}
+            {
+                "prereleases": prereleases,
+                "uploaded_before": uploaded_before,
+                "python": python,
+                "pin": pin,
+            }
         )
         return world.latest
 
@@ -2575,6 +2640,44 @@ def test_a_release_this_installs_python_cannot_take_is_not_an_update(
     else:
         assert planned["latest"] == "0.9.0" and planned["update_available"] is True, planned
         assert "✓ aisquare 0.9.0 (was 0.8.0)" in run.stdout, run.stdout
+
+
+@pytest.mark.parametrize("python", ["3.11", "3.12"], ids=["older-python", "control"])
+def test_a_pin_this_installs_python_cannot_take_is_said_not_advised(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    python: str,
+) -> None:
+    """`--check --version 0.9.0` under a receipt that records Python 3.11 said 0.9.0 needs
+    >=3.12, then "upgrade with: aisquare upgrade --version 0.9.0": uv refuses that pin, and
+    the run named the same command again (review of #257's fixes)."""
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        _receipt(_OURS_PINNED, python=python), encoding="utf-8"
+    )
+    monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
+    body = _pypi_requiring({"0.8.0": ">=3.11", "0.9.0": ">=3.12"})
+    monkeypatch.setattr(install_route, "fetch_latest", _REAL_FETCH_LATEST)
+    monkeypatch.setattr(install_route, "open_url", lambda _request, timeout: _Response(body))
+
+    check = runner.invoke(app, ["upgrade", "--check", "--version", "0.9.0"])
+    planned = _one_object(
+        runner.invoke(app, ["--json", "upgrade", "--check", "--version", "0.9.0"]).stdout
+    )
+
+    assert check.exit_code == 0, check.output
+    if python == "3.11":
+        why = (
+            "0.9.0 requires Python >=3.12, and this install's upgrade runs on Python 3.11; "
+            "installing it needs a Python that meets >=3.12"
+        )
+        assert "upgrade with" not in check.stdout, check.stdout
+        assert f"`aisquare upgrade --version 0.9.0` cannot install it: {why}" in check.stdout
+        assert planned["runnable"] is False and planned["reason"] == why, planned
+    else:
+        assert "upgrade with: aisquare upgrade --version 0.9.0" in check.stdout, check.stdout
+        assert planned["runnable"] is True and planned["reason"] is None, planned
 
 
 def test_a_no_op_under_a_cooldown_the_plan_compared_fails(

@@ -78,8 +78,14 @@ that mode, Claude Code's classifier, not you, approves each tool call.
   the installed version. When the install's uv receipt records its own index,
   or another setting that can hold a release back (a cutoff alone is still
   compared), or cannot be read, nothing is asked and `--check` says it cannot
-  tell. `aisquare upgrade` then runs `uv tool install`, which downloads from
-  PyPI, or from the index the install was made from.
+  tell. `aisquare upgrade` then runs `uv tool install --python <version>` (the
+  Python its uv receipt records, else the running interpreter's version), which
+  downloads from PyPI, or from the index the install was made from. If that
+  Python is neither on the PATH nor among uv's managed Pythons, uv first
+  downloads a CPython build from Astral (python-build-standalone). The run sets
+  `UV_PYTHON_DOWNLOADS=automatic`, so a `python-downloads` setting in uv.toml
+  (Fedora ships `manual`) does not stop that download. A `UV_PYTHON_DOWNLOADS`
+  you exported is kept, so `never` or `manual` set there does.
 - **The Claude Code plugin.** With no aisquare CLI installed, its hooks run
   `uvx --from aisquare-cli==<version>`, which downloads that release from PyPI
   on the first session. If no Python 3.11 to 3.13 is installed, uv first

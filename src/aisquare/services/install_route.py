@@ -61,7 +61,7 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from importlib import metadata
 from pathlib import Path
@@ -102,7 +102,8 @@ PIPX_METADATA_NAME = "pipx_metadata.json"
 #: What the installer's environment needs whatever the user's uv config says.
 #: ``python-downloads = "manual"`` ships in Fedora's /etc/uv/uv.toml, and then a
 #: receipt naming a Python that is not installed fails to resolve — the trap
-#: install.sh documents beside its own copy of these two lines.
+#: install.sh documents beside its own copy of these two lines. A
+#: ``UV_PYTHON_DOWNLOADS`` the user exported is kept (:func:`installer_env`).
 INSTALLER_ENV = {"UV_PYTHON_DOWNLOADS": "automatic", "UV_NO_PROGRESS": "1"}
 
 #: ``[tool.options]`` keys uv records and the ``uv tool install`` flag that
@@ -309,6 +310,9 @@ class LatestRelease:
     cutoff: str | None = None
     """The uv cutoff (``--exclude-newer P14D``) ``version`` is the newest release under, when
     it is that rather than PyPI's newest."""
+    pin_requires: str | None = None
+    """The Requires-Python of the release pinned (``--version``), when it is one the
+    reinstall's Python cannot take: uv refuses that pin there."""
 
 
 def fetch_latest(
@@ -317,6 +321,7 @@ def fetch_latest(
     prereleases: bool = False,
     uploaded_before: datetime | None = None,
     python: str | None = None,
+    pin: str | None = None,
 ) -> LatestRelease:
     """The newest ``aisquare-cli`` on PyPI. Never raises; an unreachable PyPI is an answer.
 
@@ -334,7 +339,10 @@ def fetch_latest(
     file uploaded before then, as uv's ``--exclude-newer`` filters them. With ``python``
     (:func:`reinstall_python`), a release none of whose files' Requires-Python admits it is
     not an answer: uv passes over it, and the run that changed nothing failed as §3.9.1's
-    silent no-op (review of #257).
+    silent no-op (review of #257). With ``pin`` too, the pin's Requires-Python is
+    ``pin_requires`` when it cannot be met there: "upgrade with: aisquare upgrade --version
+    0.9.0" was advised under the line that said 0.9.0 needs a newer Python, and uv refused it
+    (review of #257's fixes).
     """
     # Here, not at module top: see the module docstring's one exception.
     from http.client import HTTPException
@@ -353,6 +361,20 @@ def fetch_latest(
         return LatestRelease(None, f"could not reach PyPI ({exc})")
     releases = payload.get("releases") if isinstance(payload, dict) else None
     info = payload.get("info") if isinstance(payload, dict) else None
+    found = _newest(releases, info, prereleases, uploaded_before, python)
+    if pin is None or python is None:
+        return found
+    return replace(found, pin_requires=_unmet(pin, python, releases, info))
+
+
+def _newest(
+    releases: object,
+    info: object,
+    prereleases: bool,
+    uploaded_before: datetime | None,
+    python: str | None,
+) -> LatestRelease:
+    """:func:`fetch_latest`'s answer from PyPI's ``releases`` and ``info``."""
     if uploaded_before is not None:
         version = _newest_listed(releases, finals_only=not prereleases, before=uploaded_before)
         if version is None:
@@ -374,14 +396,8 @@ def _for_python(
     version: str, python: str, releases: object, info: object, before: datetime | None
 ) -> LatestRelease:
     """``version`` when a file of it uv would take admits ``python`` by its Requires-Python,
-    else why it is no answer. With no file listed, ``info``'s, which describes the newest."""
-    files = releases.get(version) if isinstance(releases, dict) else None
-    if isinstance(files, list) and files:
-        specs = [file.get("requires_python") for file in files if _installable(file, before)]
-    elif isinstance(info, dict) and info.get("version") == version:
-        specs = [info.get("requires_python")]
-    else:
-        specs = []
+    else why it is no answer."""
+    specs = _requires(version, releases, info, before)
     verdicts = [admits_python(spec, python) for spec in specs]
     if not verdicts or True in verdicts:
         return LatestRelease(version)
@@ -395,6 +411,31 @@ def _for_python(
         f"{version} on PyPI requires Python {shown}, and this install's upgrade runs on "
         f"Python {python}",
     )
+
+
+def _unmet(release: str, python: str, releases: object, info: object) -> str | None:
+    """``release``'s Requires-Python when no file of it uv would take admits ``python``;
+    ``None`` when one does, when none is listed, or when it cannot be told: uv decides."""
+    specs = _requires(release, releases, info, None)
+    verdicts = [admits_python(spec, python) for spec in specs]
+    if not verdicts or any(verdict is not False for verdict in verdicts):
+        return None
+    return ", ".join(sorted({str(spec) for spec in specs}))
+
+
+def _requires(
+    version: str, releases: object, info: object, before: datetime | None
+) -> list[object]:
+    """The Requires-Python of each file of ``version`` (``0.9`` is ``0.9.0``) uv would take;
+    with no file listed, ``info``'s, which describes the newest release."""
+    listed = releases.items() if isinstance(releases, dict) else ()
+    files = next((f for name, f in listed if same_version(str(name), version)), None)
+    if isinstance(files, list) and files:
+        return [file.get("requires_python") for file in files if _installable(file, before)]
+    newest = info.get("version") if isinstance(info, dict) else None
+    if isinstance(info, dict) and isinstance(newest, str) and same_version(newest, version):
+        return [info.get("requires_python")]
+    return []
 
 
 def _newest_listed(
@@ -1297,6 +1338,10 @@ def installer_env(route: InstallRoute) -> dict[str, str]:
     nothing moved.
     """
     env = dict(INSTALLER_ENV)
+    if os.environ.get("UV_PYTHON_DOWNLOADS"):
+        # The user's own `never` or `manual`: forcing `automatic` over it downloaded a CPython
+        # from Astral they had refused (measured, uv 0.12.19; review of #257's fixes).
+        del env["UV_PYTHON_DOWNLOADS"]
     if route.receipt is not None:
         env["UV_TOOL_DIR"] = str(route.facts.prefix.parent)
         if route.receipt.bin_dir is not None:

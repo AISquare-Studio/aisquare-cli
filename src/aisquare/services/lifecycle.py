@@ -355,6 +355,13 @@ class UpgradePlan:
         return install_route.command_line(self.argv)
 
     @property
+    def pin_unmet(self) -> bool:
+        """Whether ``--version`` names a release the reinstall's Python cannot take
+        (``LatestRelease.pin_requires``); :attr:`reason` then says so."""
+        latest = self.latest
+        return self.target is not None and latest is not None and latest.pin_requires is not None
+
+    @property
     def latest_version(self) -> str | None:
         return self.latest.version if self.latest is not None else None
 
@@ -426,7 +433,8 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
 
     PyPI is asked only when its answer is used: by ``--check``, and by a run
     that targets the latest release on a route that runs. A refused route is
-    refused offline, and a pin needs no lookup.
+    refused offline, and a pin needs no lookup; ``--check`` with one also says
+    whether the reinstall's Python can take it.
     """
     if target is not None:
         pinned = install_route.version_argument(target)
@@ -437,7 +445,15 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
     reason = install_route.not_automated(route)
     latest: install_route.LatestRelease | None = None
     if check or (reason is None and target is None):
-        latest = _latest_for(route)
+        latest = _latest_for(route, target)
+        if target is not None and latest.pin_requires is not None:
+            # uv refuses the pin on this Python, and the run named it again (#257's fixes).
+            python = install_route.reinstall_python(route)
+            reason = (
+                f"{target} requires Python {latest.pin_requires}, and this install's upgrade "
+                f"runs on Python {python}; installing it needs a Python that meets "
+                f"{latest.pin_requires}"
+            )
     refresh: tuple[HookSite, ...] = ()
     left: tuple[HookSite, ...] = ()
     live: tuple[str, ...] = ()
@@ -511,12 +527,14 @@ def _cutoff_alone(route: install_route.InstallRoute) -> bool:
     return bool(holds) and set(holds) <= {"exclude-newer", "exclude-newer-span"}
 
 
-def _latest_for(route: install_route.InstallRoute) -> install_route.LatestRelease:
+def _latest_for(
+    route: install_route.InstallRoute, pin: str | None = None
+) -> install_route.LatestRelease:
     """PyPI's newest release, pre-releases counted when this install's upgrade takes them
     (``install_route.takes_prereleases``); under a global uv cutoff alone, the newest
     uploaded before it; never one the reinstall's Python cannot take. Under any other
     setting that can hold a release back, PyPI's word says nothing about what uv takes, so
-    it is not asked (:func:`_held_back`).
+    it is not asked (:func:`_held_back`). With ``pin``, whether that Python can take it.
 
     Taken as the target under a cutoff, PyPI's newest failed the unchanged version uv
     rightly left as §3.9.1's silent no-op; then, not asked, every run and --check found
@@ -536,6 +554,8 @@ def _latest_for(route: install_route.InstallRoute) -> install_route.LatestReleas
         asked["prereleases"] = True
     if before is not None:
         asked["uploaded_before"] = before
+    if pin is not None:
+        asked["pin"] = pin
     found = install_route.fetch_latest(**asked)
     if before is None or found.version is None:
         return found

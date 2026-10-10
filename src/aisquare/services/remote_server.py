@@ -3838,8 +3838,26 @@ class RemoteKit:
         return JSONResponse(body, status_code=status, headers=dict(headers or {}))
 
     def kit_audit(self, device: Device, endpoint: str, summary: str) -> None:
-        """One line in ``remote-audit.log`` for a write that went through."""
-        self.runtime.audit(device.id, endpoint, summary)
+        """One line in ``remote-audit.log`` for what a device did, best effort: every caller
+        has done it already, so a log that will not write is told in the server's log
+        and the answer stands.
+
+        An unlock's line that raised answered a bare 500 with no cookie, the device on
+        disk and signed in (sweep 2 of #243). Every write's did the same after the
+        write had run, the ledger holding its 200: on a full disk the phone said a
+        send-keys, an extend or a note had failed, and the human sent it again, typed
+        twice (sweep 3 of #243). The summary in the server's log is cleaned as the
+        audit line's would be: it holds what the body said.
+        """
+        try:
+            self.runtime.audit(device.id, endpoint, summary)
+        except OSError as exc:
+            log.warning(
+                "remote: a %s audit line could not be written (%s): %s",
+                endpoint,
+                exc,
+                _audit_clean(summary, AUDIT_SUMMARY_MAX),
+            )
 
     def kit_write_allowed(self) -> bool:
         """Whether writes are on right now (``remote.json``, re-read when it changes)."""
@@ -4251,19 +4269,6 @@ def build_remote_app(
     """Unlocks are decided one at a time: the budget's check and its record are then one
     step, so guesses that arrive together cannot all get past a budget with one left."""
 
-    def audited(device_id: str, endpoint: str, summary: str) -> None:
-        """An audit line for what has happened already, best effort, the log told when it
-        would not write: an unlock's audit log that would not write answered a bare 500
-        with no cookie, the device on disk and signed in, a phantom on every Devices
-        screen (sweep 2 of #243). A revoke that took effect but could not be saved is
-        recorded here too, before its 503 says so."""
-        try:
-            runtime.audit(device_id, endpoint, summary)
-        except OSError as exc:
-            log.warning(
-                "remote: a %s audit line could not be written (%s): %s", endpoint, exc, summary
-            )
-
     def unlock_decision(
         password: str, ua: str, cookies: list[str], direct: bool
     ) -> tuple[str, Device, bool] | datetime | None:
@@ -4303,12 +4308,12 @@ def build_remote_app(
                         f"{KNOWN_DEVICE_FAILURES_MAX} wrong passwords sent with its cookie"
                     )
                     log.warning("remote: %s", revoked)
-                    audited(known.id, "unlock", revoked)
+                    kit.kit_audit(known, "unlock", revoked)
                 return None
             secret, device = unlocked
             reactivated = known is not None and device.id == known.id
             summary = f"device {device.id} " + ("reactivated" if reactivated else f"ua={ua[:60]}")
-            audited(device.id, "unlock", summary)
+            kit.kit_audit(device, "unlock", summary)
             return secret, device, reactivated
 
     async def unlock_endpoint(request: Request) -> Response:
@@ -4445,7 +4450,7 @@ def build_remote_app(
         except OSError as exc:  # it holds in memory, where the gate reads it: recorded
             log.warning("remote: a revoke could not be saved: %s", exc)
             target = "self" if own else device_id
-            await asyncio.to_thread(audited, device.id, "devices/revoke", f"{target} unsaved")
+            await asyncio.to_thread(kit.kit_audit, device, "devices/revoke", f"{target} unsaved")
             unsaved = REVOKE_UNSAVED.format(device=device_id)
             return kit.kit_refuse(503, "remote_state_unwritable", unsaved)
         if not revoked:
@@ -4552,10 +4557,10 @@ def build_remote_app(
             return JSONResponse(payload, status_code=status)
 
         response = await kit.kit_gated(request, device, name, dispatched)
-        # After the ledger has the ending: an audit log that cannot be written fails
-        # the request, and must not make a write that went through read as failed. In a
-        # worker thread: the first line creates the log and restricts it to this account,
-        # on Windows an icacls run, and every line opens and appends to a file.
+        # After the ledger has the ending, and best effort (RemoteKit.kit_audit): a write
+        # that went through must not read as failed for its line. In a worker thread: the
+        # first line creates the log and restricts it to this account, on Windows an
+        # icacls run, and every line opens and appends to a file.
         if summary is not None:
             await asyncio.to_thread(kit.kit_audit, device, name, summary)
         return response

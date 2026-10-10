@@ -3,17 +3,21 @@
 Text that reaches a pane, a board or a terminal is held to one rule per path: what it
 would press, reorder or run there is refused before anything is sent or written. A ref
 that names nothing says which field named it, and a path the operating system refuses
-is a refusal of the request, never ``write_failed`` or an ambiguity.
+is a refusal of the request, never ``write_failed`` or an ambiguity. And a write that
+went through answers so, though its audit line would not write.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import errno
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
 
+from aisquare.core.paths import remote_audit_path
 from aisquare.core.store import store_session
 from aisquare.core.workspace import project_id_for
 from aisquare.models import ProjectInfo, TeamSession
@@ -22,10 +26,13 @@ from aisquare.services import remote_server
 from aisquare.services.remote_server import (
     RequestError,
     Runtime,
+    Sources,
+    Writes,
     build_app,
     check_note_text,
     check_remote_text,
     live_writes,
+    write_endpoint_names,
 )
 from tests.remote_kit_helpers import base, make_client, make_runtime, unlock
 
@@ -250,3 +257,93 @@ def test_a_note_on_a_task_of_another_projects_board_is_refused_invalid(
     )
     _alpha, _sessions, _tasks, events = team_service.board_data()
     assert events == [], "nothing was posted to the note's own board either"
+
+
+# --- an audit line that will not write ----------------------------------------------------
+
+
+def _quiet_sources() -> Sources:
+    return Sources(
+        projects=lambda: [],
+        fleet=lambda project: {},
+        board=lambda project: {},
+        tasks=lambda project: [],
+        memory=lambda project: [],
+        panes=lambda agent, project, history: {"rows": [], "width": 0, "height": 0},
+        explainability=lambda agent, project: {"available": False},
+    )
+
+
+def _audit_will_not_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full disk under ``remote-audit.log``: every line raises, as on a home remounted
+    read-only or a log another process holds locked on Windows."""
+
+    def unwritable(self: Runtime, device_id: str, endpoint: str, summary: str) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device", str(remote_audit_path()))
+
+    monkeypatch.setattr(Runtime, "audit", unwritable)
+
+
+def test_a_write_that_went_through_answers_200_though_its_audit_line_will_not_write(
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The write ran and the ledger held its 200, then the audit line raised: a bare 500
+    ``text/plain``, which the page reads as a failure and does not retry with the same
+    id, so the human sent it again, typed twice into the agent (sweep 3 of #243)."""
+    typed: list[str] = []
+
+    def send(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        typed.append(body["text"])
+        return {"sent": True}, "coder-1 text=5ch \x1b[2J"
+
+    writes = Writes({name: send for name in write_endpoint_names()})
+    client = make_client(
+        build_app(runtime, sources=_quiet_sources(), writes=writes, dist_dir=tmp_path)
+    )
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    _audit_will_not_write(monkeypatch)
+    body = {"agent": "coder-1", "text": "hello", "request_id": "type-1"}
+    with caplog.at_level("WARNING", logger=remote_server.__name__):
+        first = client.post(f"{base(runtime)}/api/send-keys", json=body)
+        again = client.post(f"{base(runtime)}/api/send-keys", json=body)
+    assert (first.status_code, first.json()) == (200, {"sent": True})
+    assert (again.status_code, again.json()) == (200, {"sent": True})
+    assert typed == ["hello"], "typed once, and the retry answered from the ledger"
+    assert "a send-keys audit line could not be written" in caplog.text
+    assert "\x1b" not in caplog.text and "coder-1 text=5ch ?[2J" in caplog.text
+
+
+def test_an_extend_and_a_revoke_that_went_through_answer_200_though_unaudited(
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Another hour of exposure was added and the phone told it failed, so it asked again;
+    a revoke took effect and read as failed (sweep 3 of #243)."""
+    app = build_app(runtime, sources=_quiet_sources(), dist_dir=tmp_path)
+    mine, theirs = make_client(app), make_client(app)
+    unlock(mine, runtime)
+    other = unlock(theirs, runtime).json()["device"]["id"]
+    runtime.set_allow_write(True)
+    deadline = datetime.now(UTC) + timedelta(minutes=10)
+    runtime.set_auto_off(deadline)
+    _audit_will_not_write(monkeypatch)
+    with caplog.at_level("WARNING", logger=remote_server.__name__):
+        extended = mine.post(f"{base(runtime)}/api/remote/extend", json={})
+        revoked = mine.delete(f"{base(runtime)}/api/devices/{other}")
+    assert extended.status_code == 200, extended.text
+    later = runtime.auto_off_deadline()
+    assert later is not None and later > deadline + timedelta(minutes=59)
+    assert extended.json() == {"auto_off_at": remote_server._iso_seconds(later)}
+    assert (revoked.status_code, revoked.json()) == (
+        200,
+        {"ok": True, "id": other, "signed_out": False},
+    )
+    assert other not in runtime.device_ids()
+    assert "a remote/extend audit line could not be written" in caplog.text
+    assert "a devices/revoke audit line could not be written" in caplog.text

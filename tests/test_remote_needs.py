@@ -3584,6 +3584,36 @@ def test_the_feeds_stamps_are_the_apis_whatever_zone_they_were_read_in(
     assert isinstance(shown, str) and shown.endswith("+00:00")
 
 
+def test_a_dismissal_holds_for_as_long_as_its_card_would_show(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pane that stays lost keeps its id until it is reaped, and an agent idle at its
+    question keeps its own. A dismissal was dropped a week after it was made, at the next one
+    written, and the card came back to every phone (review of #243, sweep 3). Each scan that
+    still finds a dismissed item dates its dismissal again, once a day; one whose item is
+    gone goes a week later, as before."""
+    clock = [NOW]
+    monkeypatch.setattr(remote_needs, "_needs_now", lambda: clock[0])
+    lost = _row()
+    fleet = Fleet(agents=[_status(lost, "lost", _session(lost))])
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    watcher = RemoteNeedsWatcher(app.kit, sources=lambda: _sources(fleet), clock=lambda: clock[0])
+    (card,) = watcher.scan_needs_now()
+    record_needs_dismissal(card.id)
+    for day in range(1, 9):
+        clock[0] = NOW + timedelta(days=day, minutes=1)
+        assert watcher.scan_needs_now() == []
+    record_needs_dismissal("ny_another_card0")  # what no scan needed for a week goes now
+    assert card.id in load_needs_dismissals()
+    assert watcher.scan_needs_now() == [], "the pane is still lost, and still dismissed"
+    fleet.agents.clear()  # reaped
+    for day in range(9, 17):
+        clock[0] = NOW + timedelta(days=day, minutes=1)
+        assert watcher.scan_needs_now() == []
+    record_needs_dismissal("ny_a_third_card0")
+    assert card.id not in load_needs_dismissals(), "unneeded for a week: dropped"
+
+
 # --- the routes (SPEC §4.6) ---------------------------------------------------------------
 
 

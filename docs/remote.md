@@ -269,8 +269,8 @@ agent's key pad.
 The other buttons follow the kind: **Tell** for a question asked in text,
 **Reply** on the board, **Switch account** for a usage limit, **Tell** (to go on)
 or **Switch account** for a failed turn, **Restart** for a crash. **Dismiss**
-hides a card for good. A tell or a reply dismisses its card itself once it was
-delivered.
+hides a card for good, on every phone, however long what it is about lasts. A
+tell or a reply dismisses its card itself once it was delivered.
 
 ---
 
@@ -333,7 +333,8 @@ than 15 seconds, is not sent, and the page says so.
 
 Settings → **Turn on** asks the browser for permission, subscribes, and tells
 the machine. **Send test** checks the whole path. A notification goes out when an
-item has been there for two scans in a row: at once for a permission, a
+item has been there for two scans in a row, once for each item, however long it
+stays: at once for a permission, a
 question, a plan, a board question or result and a failed turn, and later for
 the kinds that often clear by themselves, or that someone else is already on:
 

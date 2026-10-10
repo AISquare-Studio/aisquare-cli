@@ -231,6 +231,9 @@ _ESCAPES = re.compile(
 
 _DISMISSALS_KEEP = 500
 _DISMISSALS_AGE = timedelta(days=7)
+_DISMISSALS_REDATED = timedelta(days=1)
+"""How old a dismissal a scan still needs gets before the scan dates it again: one write a
+day for each card that stays hidden, and a week to spare."""
 _dismissals_lock = threading.Lock()
 
 
@@ -2473,47 +2476,86 @@ def _needs_cached_tail(path: str) -> TranscriptTail | None:
     return tail
 
 
-# --- dismissals ---------------------------------------------------------------------------
+# --- what is kept on disk: dismissals -----------------------------------------------------
 
 
-def load_needs_dismissals() -> dict[str, str]:
-    """Item id → when a phone dismissed it, from ``remote-needs.json``; ``{}`` when unreadable."""
+_NEEDS_KEPT_PARTS = ("dismissed",)
+"""The parts of ``remote-needs.json``: item id → when a dismissal was last needed."""
+
+
+def _needs_kept() -> dict[str, dict[str, str]]:
+    """Each part of ``remote-needs.json``, ``key → ISO stamp``; empty where unreadable."""
     from aisquare.core.paths import remote_needs_path
 
     try:
         raw = json.loads(remote_needs_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {}
-    dismissed = raw.get("dismissed") if isinstance(raw, dict) else None
-    if not isinstance(dismissed, dict):
-        return {}
-    return {k: v for k, v in dismissed.items() if isinstance(k, str) and isinstance(v, str)}
+        raw = None
+    parts: dict[str, dict[str, str]] = {}
+    for part in _NEEDS_KEPT_PARTS:
+        kept = raw.get(part) if isinstance(raw, dict) else None
+        pairs = kept.items() if isinstance(kept, dict) else ()
+        parts[part] = {k: v for k, v in pairs if isinstance(k, str) and isinstance(v, str)}
+    return parts
+
+
+def _needs_keep(edit: Callable[[dict[str, dict[str, str]]], None]) -> None:
+    """Write ``remote-needs.json`` again, ``edit`` applied to its parts; one writer at a time,
+    and owner-only, like every Remote file."""
+    from aisquare.core.atomic import write_replacing
+    from aisquare.core.paths import remote_needs_path
+
+    with _dismissals_lock:
+        parts = _needs_kept()
+        edit(parts)
+        path = remote_needs_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_replacing(path, json.dumps({"version": 1, **parts}, indent=2), owner_only=True)
+
+
+def load_needs_dismissals() -> dict[str, str]:
+    """Item id → when a phone dismissed it, or a scan last found it hidden by that, from
+    ``remote-needs.json``; ``{}`` when unreadable."""
+    return _needs_kept()["dismissed"]
 
 
 def record_needs_dismissal(item_id: str) -> None:
     """Remember that ``item_id`` was dismissed, so no later scan shows it again.
 
-    Owner-only, like every Remote file. Dismissals older than 7 days are
-    dropped (an id that old will not come back), and at most the newest 500 are
-    kept, so the file stays small whatever a phone does.
+    Dismissals no scan has needed for 7 days are dropped, and at most the newest 500
+    are kept, so the file stays small whatever a phone does. A scan that finds a
+    dismissed item still there dates its dismissal again (:func:`_needs_still_hidden`):
+    a pane that stays lost, an agent idle at its question, keep their ids for as long as
+    they last, and a dismissal dropped a week after it was made brought the card back
+    to every phone at the next one written (review of #243, sweep 3).
     """
-    from aisquare.core.atomic import write_replacing
-    from aisquare.core.paths import remote_needs_path
-    from aisquare.services.remote_server import _remote_instant
+    from aisquare.services.remote_server import _iso_seconds, _remote_instant
 
     now = _needs_now()
-    with _dismissals_lock:
+
+    def dismissed(parts: dict[str, dict[str, str]]) -> None:
         kept: dict[str, datetime] = {}
-        for key, stamp in load_needs_dismissals().items():
+        for key, stamp in parts["dismissed"].items():
             when = _remote_instant(stamp)
             if when is not None and now - when <= _DISMISSALS_AGE:
                 kept[key] = when
         kept[item_id] = now
         newest = sorted(kept.items(), key=lambda pair: pair[1])[-_DISMISSALS_KEEP:]
-        body = {"version": 1, "dismissed": {k: v.isoformat(timespec="seconds") for k, v in newest}}
-        path = remote_needs_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_replacing(path, json.dumps(body, indent=2), owner_only=True)
+        parts["dismissed"] = {k: _iso_seconds(v) for k, v in newest}
+
+    _needs_keep(dismissed)
+
+
+def _needs_still_hidden(item_ids: Collection[str], now: datetime) -> None:
+    """Date the dismissals of ``item_ids`` ``now``: a scan found their items still there."""
+    from aisquare.services.remote_server import _iso_seconds
+
+    def seen(parts: dict[str, dict[str, str]]) -> None:
+        for key in item_ids:
+            if key in parts["dismissed"]:
+                parts["dismissed"][key] = _iso_seconds(now)
+
+    _needs_keep(seen)
 
 
 # --- the watcher --------------------------------------------------------------------------
@@ -2623,13 +2665,14 @@ class RemoteNeedsWatcher:
             sources = self._sources()
             projects = sources.list_projects()
             dismissed = load_needs_dismissals()
-            scanned = scan_needs_you(
+            everything = scan_needs_you(
                 replace(sources, list_projects=lambda: projects),
                 now=now,
-                dismissed=dismissed,
+                dismissed=(),
                 first_seen=self._first_seen,
                 failing=self._failing_projects,
             )
+            scanned = [item for item in everything if item.id not in dismissed]
             with self._lock:
                 items = [item for item in scanned if item.id not in self._forgotten]
                 self._forgotten.difference_update(dismissed)
@@ -2643,7 +2686,30 @@ class RemoteNeedsWatcher:
                     _needs_failed("a needs listener", exc, self._failing, listener)
                 else:
                     self._failing.discard(listener)
+            self._needs_keep_what_it_saw(everything, dismissed, now)
         return items
+
+    def _needs_keep_what_it_saw(
+        self, items: Sequence[NeedsItem], dismissed: Mapping[str, str], now: datetime
+    ) -> None:
+        """Date again, once a day, the dismissals of the items this scan still found: a week
+        counts from when a card was last there, not from its dismissal."""
+        from aisquare.services.remote_server import _remote_instant
+
+        stale = now - _DISMISSALS_REDATED
+        hidden = [
+            item.id
+            for item in items
+            if item.id in dismissed
+            and ((when := _remote_instant(dismissed[item.id])) is None or when <= stale)
+        ]
+        try:
+            if hidden:
+                _needs_still_hidden(hidden, now)
+        except OSError as exc:
+            _needs_failed("keeping what the needs scan saw", exc, self._failing, "kept")
+        else:
+            self._failing.discard("kept")
 
     def needs_items_now(self) -> list[NeedsItem]:
         """The latest scan's items, ranked."""

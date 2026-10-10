@@ -122,6 +122,9 @@ push's own timeout, so a farewell that can arrive does, and one that cannot cost
 PUSHED_KEEP = timedelta(days=7)
 PUSHED_MAX = 1_000
 """``pushed`` keeps a week, and at most this many ids, the newest."""
+PUSHED_REDATED = timedelta(days=1)
+"""How old the mark of an item still in the feed gets before a scan dates it again: a week
+counts from when the feed last showed the item, not from its push."""
 LOCKOUT_ALERT_WINDOW = timedelta(minutes=30)
 """One lockout alert per window: the unlock budget's own 30 minutes."""
 
@@ -1119,11 +1122,26 @@ class RemotePushSender:
     # --- the state machine ---
 
     def push_scan_seen(self, items: Sequence[NeedsItem], scanned_at: datetime) -> None:
-        """One scan: count each item's consecutive scans, and gather what is now pushable."""
+        """One scan: count each item's consecutive scans, and gather what is now pushable.
+
+        An item that keeps its id for as long as its condition lasts (a pane that stays
+        lost, an agent idle at its question) has its mark dated again once a day: pruned a
+        week after its push, it was pushed again the next scan (review of #243, sweep 3).
+        """
         self._streak = {item.id: self._streak.get(item.id, 0) + 1 for item in items}
         # An item gone from this scan leaves the window too; back, it starts over.
         self._window.intersection_update(self._streak)
         pushed = self._push_pushed()
+        now = self._clock()
+        stale = [
+            item.id
+            for item in items
+            if item.id in pushed
+            and ((at := _push_parse_time(pushed[item.id])) is None or now - at >= PUSHED_REDATED)
+        ]
+        if stale:
+            self._push_mark(stale, now)
+            pushed = self._push_pushed()
         for item in items:
             if (
                 item.push_after is not None

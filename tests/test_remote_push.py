@@ -566,6 +566,33 @@ def test_at_most_the_newest_1000_pushed_ids_are_kept() -> None:
     assert f"ny_{0:016x}" in kept and f"ny_{1004:016x}" not in kept, "the oldest go first"
 
 
+def test_an_item_that_stays_in_the_feed_past_a_week_is_not_pushed_again(world: World) -> None:
+    """A pane that stays lost keeps its id until it is reaped, and an agent idle at its
+    question keeps its own. ``pushed`` kept an id a week from its push, so the next mark of
+    anything a week on dropped it, and the item was pushed again (review of #243, sweep 3).
+    The mark of an item the feed still shows is dated again once a day; one whose item is
+    gone goes a week later, as before."""
+    lasting, other = needs_item(1), needs_item(2, agent="coder-db")
+    world.scan(lasting)
+    world.scan(lasting)
+    world.later(5)
+    assert [payload["ids"] for _device, payload in world.pushes()] == [[lasting.id]] * 2
+    for _day in range(8):
+        world.later(timedelta(days=1).total_seconds())
+        world.scan(lasting)
+    world.scan(lasting, other)
+    world.scan(lasting, other)
+    world.later(5)  # other's push: its mark prunes what is a week old
+    for _scan in range(3):
+        world.later(30)
+        world.scan(lasting, other)
+    world.later(30)
+    assert [payload["ids"] for _device, payload in world.pushes()] == [[lasting.id]] * 2 + [
+        [other.id]
+    ] * 2, "the lasting item was pushed once"
+    assert lasting.id in load_push_state().pushed
+
+
 def test_the_vapid_keys_are_made_once_and_kept(isolated_home: Path) -> None:
     keys = load_or_create_vapid_keys()
     assert load_or_create_vapid_keys() == keys

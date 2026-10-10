@@ -1005,6 +1005,18 @@ def test_what_cleared_while_the_throttle_ran_is_not_pushed(world: World) -> None
     assert len(world.transport.sent) == 2
 
 
+def test_what_cleared_while_one_phone_was_pushed_is_not_pushed_to_the_next(world: World) -> None:
+    """A pass read the feed once and then sent to each phone in turn, each send up to 10 s:
+    a card answered or dismissed while the first phone's push went was pushed to the second
+    (review of #243, sweep 5)."""
+    _sending_while(world, lambda: setattr(world.watcher, "items", []))
+    item = needs_item(1)
+    world.scan(item)
+    world.scan(item)
+    world.later(5)
+    assert world.titles() == [(DEVICES[0], "aisquare-cli: coder-auth needs you")]
+
+
 def test_a_card_answered_from_a_phone_before_its_window_closed_is_pushed_to_no_phone(
     app: Any, runtime: Runtime, roster: set[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

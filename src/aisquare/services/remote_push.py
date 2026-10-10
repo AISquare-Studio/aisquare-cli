@@ -1297,7 +1297,6 @@ class RemotePushSender:
         of whatever comes next, has its whole 20 s turn and every try again.
         """
         subscriptions = self._push_live_subscriptions()
-        feed = self._push_feed()
         for device_id in list(self._owed):
             record = subscriptions.get(device_id) if self._push_reaches(device_id) else None
             if record is None:  # unsubscribed, or gone, since: owed nothing any more
@@ -1310,6 +1309,9 @@ class RemotePushSender:
             if self._push_gone_off(self._clock()):
                 return
             owed = self._owed.pop(device_id)
+            # Read again for each device: the send before may have waited 10 s on its push
+            # service, and a card answered or dismissed meanwhile was pushed to the next.
+            feed = self._push_feed()
             items = [item for item in feed if item.id in owed]
             if not items:  # every one of them cleared while the throttle ran
                 self._untaken.pop(device_id, None)

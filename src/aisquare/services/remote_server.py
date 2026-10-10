@@ -440,6 +440,18 @@ class RemoteOffIncomplete(RemoteError):
     signed in, or the deadline still in ``remote.json`` (:func:`run_foreground`)."""
 
 
+class RemoteSignalled(Exception):
+    """``serve`` was ended by a signal other than Ctrl-C (SIGTERM, SIGHUP), and its way out
+    ran: :func:`run_foreground` raises it last, for the CLI to say what it says on every way
+    out and then exit as that signal says, 128 and its number. ``fired``: auto-off had
+    ended it first."""
+
+    def __init__(self, signum: int, *, fired: bool) -> None:
+        super().__init__(f"ended by signal {signum}")
+        self.signum = signum
+        self.fired = fired
+
+
 class RequestError(Exception):
     """A handler's refusal, carried to the client as ``{error, message}``.
 
@@ -5947,12 +5959,48 @@ def _remote_serve_server(config: uvicorn.Config) -> uvicorn.Server:
     import signal
 
     class RemoteServe(_remote_uvicorn_server()):  # type: ignore[misc]  # uvicorn's, made here
+        remote_ended_by: int | None = None
+        """The first signal other than Ctrl-C that ended it (:class:`RemoteSignalled`)."""
+        remote_interrupted = False
+        """Whether a Ctrl-C came: raised again as ``KeyboardInterrupt`` once it stopped."""
+
         def handle_exit(self, sig: int, frame: FrameType | None) -> None:
             again = self.should_exit and sig == signal.SIGINT
+            if sig == signal.SIGINT:
+                self.remote_interrupted = True
+            elif self.remote_ended_by is None:
+                self.remote_ended_by = sig
             super().handle_exit(sig, frame)
             if again and remote_writes_running():
                 _remote_quit_now()
             _remote_writes_announced("Ctrl-C again")
+
+        @contextlib.contextmanager
+        def capture_signals(self) -> Iterator[None]:
+            """uvicorn's, with a hangup handled as SIGTERM is, and neither raised again once
+            it has stopped.
+
+            uvicorn puts back the handlers it found and raises each signal it caught again:
+            a SIGTERM's is the default, so ``serve`` died of it inside ``run``, before its way
+            out, and a SIGHUP, which it does not catch, killed it at once. Neither revoked
+            the devices of a deadline that had passed, cleared the deadline or saved
+            ``last_seen``, nor said to stop the ngrok, and the phones' cookies opened the
+            next Remote (sweep 5 of #243). :func:`run_foreground` takes its way out, then
+            raises :class:`RemoteSignalled`. A Ctrl-C is raised again, as uvicorn does.
+            """
+            if threading.current_thread() is not threading.main_thread():
+                yield  # signal handlers are the main thread's
+                return
+            names = ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK")  # SIGBREAK: Windows' Ctrl-Break
+            handled = [getattr(signal, name) for name in names if hasattr(signal, name)]
+            before = {sig: signal.signal(sig, self.handle_exit) for sig in handled}
+            try:
+                yield
+            finally:
+                for sig, handler in before.items():
+                    signal.signal(sig, handler)
+            if self.remote_interrupted:
+                signal.raise_signal(signal.SIGINT)
 
     return RemoteServe(config)
 
@@ -6125,6 +6173,25 @@ def _release_remote_claim(fd: int) -> None:
     with contextlib.suppress(OSError):
         unlock(fd)
     os.close(fd)
+
+
+def _remote_auto_off_missed(state: Runtime) -> None:
+    """As Remote comes on, its home claimed: a deadline that passed with no Remote left to keep
+    it is an auto-off whose way out never ran, and it runs now, before any phone is let in.
+    Every device is revoked and the deadline cleared.
+
+    Every way out Remote takes clears its deadline, and when the deadline had passed it
+    revokes the devices too (:func:`run_foreground`; the R panel's ``shutdown_for_exit``).
+    A process that never took one left both: one killed (SIGKILL, a crash, a power cut),
+    or a fleet UI ended by a SIGTERM or a SIGHUP, which stop its ngrok and end it at once.
+    The next Remote set a deadline of its own and let in every phone the missed auto-off
+    would have signed out, for up to the 7 days a device lives (sweep 5 of #243).
+    """
+    if not state.auto_off_passed(_remote_now()):
+        return
+    log.warning("remote: the last Remote's auto-off time passed with no Remote to keep it")
+    state.revoke_every_device("auto-off missed", close_code=WS_CLOSE_REMOTE_OFF)
+    state.set_auto_off(None)
 
 
 def _page_missing(dist_dir: Path | None) -> str | None:
@@ -6300,6 +6367,7 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
                 raise RemoteWindingDown(_remote_winding_down())
             claimed = _claim_remote_home(state)
             state.remote_coming_on()
+            _remote_auto_off_missed(state)
             app = build_remote_app(state, dist_dir=dist_dir)
             server = _Server(app, port)
             server.start_serving()
@@ -6715,7 +6783,8 @@ def run_foreground(
     on while a phone keeps extending it, with the farewell push and every device
     revoked (4410); the flusher writes ``last_seen`` and prunes devices every
     30 s. Ctrl-C revokes nothing (SPEC §2.4): the devices' own expiry bounds them;
-    one that comes once the deadline has passed is auto-off, which does.
+    one that comes once the deadline has passed is auto-off, which does. A SIGTERM or a
+    SIGHUP takes the same way out as Ctrl-C, then :class:`RemoteSignalled` is raised.
     """
     global _foreground, _flusher
     problem = _remote_dependency_error()
@@ -6730,6 +6799,7 @@ def run_foreground(
         claimed = _claim_remote_home(state)  # before anything is bound or printed
     state.remote_coming_on()
     try:
+        _remote_auto_off_missed(state)
         sock = _bind_remote_socket(port)
     except BaseException:
         if claimed:
@@ -6781,6 +6851,9 @@ def run_foreground(
             raise RemoteOffIncomplete(
                 f"Remote turned off — the auto-off timer ran out, but {failure}"
             )
+        ended_by = getattr(server, "remote_ended_by", None)
+        if ended_by is not None:
+            raise RemoteSignalled(ended_by, fired=timer.fired)
         return timer.fired
     finally:
         sock.close()
@@ -6810,6 +6883,7 @@ __all__ = [
     "RemoteError",
     "RemoteInfo",
     "RemoteOffIncomplete",
+    "RemoteSignalled",
     "RemoteUnavailable",
     "RemoteWindingDown",
     "RequestError",

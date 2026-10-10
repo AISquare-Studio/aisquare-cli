@@ -2027,9 +2027,9 @@ def _remote_keys_turn(target: ProjectInfo, label: str) -> Iterator[FleetAgent]:
 def _live_panes(label: str, project: str | None = None, history: int = 0) -> dict[str, object]:
     """One pane frame: the live screen, or scrollback and the screen together (§4-L).
 
-    ``history`` of 0 takes the SAME call today took and returns the live keys
-    alone (:func:`_pane_payload`), so the live stream and every existing client
-    are untouched — the history keys appear only when history was asked for.
+    ``history`` of 0 takes the same call the live stream always took and returns
+    :func:`_pane_payload`'s keys and the row's ``agent_id``, with no history keys:
+    those appear only when history was asked for.
 
     Every frame names the row it was captured from (``agent_id``), which the page
     sends with the keys typed at it (``send-keys``): a replacement that took the

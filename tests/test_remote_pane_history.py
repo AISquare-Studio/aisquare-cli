@@ -245,8 +245,9 @@ it was captured from, which keys typed at it carry."""
 
 
 @requires_tmux
-def test_omitted_history_is_byte_identical_to_today(live_panes: Any) -> None:
-    """§4-L: nothing existing changes — the live frame's keys, no history keys at all."""
+def test_omitted_history_is_the_live_frame_with_no_history_keys(live_panes: Any) -> None:
+    """§4-L: history 0 is the live frame: its keys, the row's ``agent_id`` among them, and no
+    history keys at all."""
     today = live_panes("coder-1", None, 0)
     assert set(today) == LIVE_KEYS
     assert "history" not in today and "history_size" not in today

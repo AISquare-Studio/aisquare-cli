@@ -207,6 +207,26 @@ class Transport:
         assert len(self.sent) >= count, f"{len(self.sent)} pushes arrived, not {count}"
 
 
+class PushServices(Transport):
+    """Each endpoint's own push service: its ``answers`` in turn, ``None`` for no answer at
+    all (a timeout), and 201 once they run out. ``at`` is when each push came, by ``clock``."""
+
+    def __init__(self, answers: dict[str, list[int | None]], clock: Callable[[], datetime]) -> None:
+        super().__init__()
+        self.answers = answers
+        self.clock = clock
+        self.at: list[tuple[str, datetime]] = []
+
+    def __call__(self, endpoint: str, headers: dict[str, str], body: bytes) -> int:
+        self.sent.append((endpoint, headers, body))
+        self.at.append((endpoint, self.clock()))
+        waiting = self.answers.get(endpoint, [])
+        status = waiting.pop(0) if waiting else 201
+        if status is None:
+            raise TimeoutError("the push service did not answer in 10 s")
+        return status
+
+
 # --- the sender's world -----------------------------------------------------------------------
 
 
@@ -285,6 +305,13 @@ class World:
         self.clock.advance(seconds)
         self.sender.push_run_due()
 
+    def scanning(self, seconds: int, *items: NeedsItem) -> None:
+        """``seconds`` more, the sender woken every second and a scan every third."""
+        for second in range(1, seconds + 1):
+            self.later(1)
+            if second % 3 == 0:
+                self.scan(*items)
+
     def pushes(self) -> list[tuple[str, dict[str, Any]]]:
         """``(device id, decrypted payload)`` for every push sent, in order."""
         by_endpoint = {browser.endpoint: d for d, browser in self.browsers.items()}
@@ -295,6 +322,22 @@ class World:
 
     def titles(self) -> list[tuple[str, str]]:
         return [(device, payload["title"]) for device, payload in self.pushes()]
+
+    def answering(self, answers: dict[str, list[int | None]]) -> PushServices:
+        """A new sender, whose devices' push services answer ``answers`` (by device) first."""
+        services = PushServices(
+            {self.browsers[device].endpoint: list(said) for device, said in answers.items()},
+            self.clock,
+        )
+        self.transport = services
+        self.sender = RemotePushSender(self.kit, transport=services, clock=self.clock)
+        self.sender.push_run_due()
+        return services
+
+    def sent_to(self, services: PushServices, device: str) -> list[float]:
+        """When each push to ``device`` went, in seconds from T0."""
+        endpoint = self.browsers[device].endpoint
+        return [(at - T0).total_seconds() for to, at in services.at if to == endpoint]
 
 
 @pytest.fixture
@@ -961,6 +1004,83 @@ def test_what_cleared_while_the_throttle_ran_is_not_pushed(world: World) -> None
     assert len(world.transport.sent) == 2
 
 
+@pytest.mark.parametrize("answer", [503, 429, None])
+def test_a_push_its_service_did_not_take_goes_again_to_that_device_alone(
+    world: World, answer: int | None
+) -> None:
+    """The service's answer was not looked at: a 503, a 429 or no answer at all marked the
+    item pushed all the same, in the file a restart reads, and ten more minutes of it in the
+    feed sent nothing. A laptop that woke before its Wi-Fi, or an FCM 503, lost the
+    notification of a prompt its agent sat blocked on (review of #243, round 6). It goes
+    again to the phone whose service did not take it, at that phone's next turn, 40 s on;
+    the other phone's service took it, and it hears of it once."""
+    phone, other = DEVICES
+    services = world.answering({phone: [answer]})
+    item = needs_item(1)
+    world.scan(item)
+    world.scan(item)
+    world.later(5)
+    world.scanning(600, item)  # ten minutes more, the item in the feed throughout
+    assert world.sent_to(services, phone) == [5.0, 45.0]
+    assert world.sent_to(services, other) == [5.0]
+    assert world.titles()[-1] == (phone, "aisquare-cli: coder-auth needs you")
+    assert item.id in load_push_state().pushed
+
+
+def test_a_push_service_that_stays_down_costs_three_more_tries_each_further_off(
+    world: World,
+) -> None:
+    """Every phone's service answers 503: the item is not on file as pushed while it is
+    still being tried, so neither a scan nor a restart takes it for done, and after the
+    third try more it is, so a service that stays down costs four sends, never one every
+    20 s."""
+    services = world.answering({device: [503] * 50 for device in DEVICES})
+    item = needs_item(1)
+    world.scan(item)
+    world.scan(item)
+    world.later(5)
+    assert item.id not in load_push_state().pushed, "nobody's service took it yet"
+    world.scanning(600, item)
+    for device in DEVICES:
+        assert world.sent_to(services, device) == [5.0, 45.0, 125.0, 285.0]
+    assert item.id in load_push_state().pushed
+
+
+@pytest.mark.parametrize("answer", [403, 410, 413])
+def test_a_push_refused_for_good_is_not_sent_again(world: World, answer: int) -> None:
+    """A refusal (a key the service does not know, a subscription that is gone, a payload
+    too large) says the same the next time: no retry."""
+    phone, _other = DEVICES
+    services = world.answering({phone: [answer]})
+    item = needs_item(1)
+    world.scan(item)
+    world.scan(item)
+    world.later(5)
+    world.scanning(600, item)
+    assert world.sent_to(services, phone) == [5.0]
+
+
+def test_a_new_item_waits_out_a_failing_phones_longer_turn_and_goes_with_the_old(
+    world: World,
+) -> None:
+    """The turns that grow apart are the phone's, not the item's: what became pushable
+    meanwhile goes in the same notification as what is owed again."""
+    phone, _other = DEVICES
+    services = world.answering({phone: [503]})
+    first, second = needs_item(1), needs_item(2, agent="coder-db")
+    world.scan(first)
+    world.scan(first)
+    world.later(5)  # T0 + 5 s: the 503
+    world.later(20)
+    world.scan(first, second)
+    world.scan(first, second)
+    world.later(5)  # T0 + 30 s: the other phone hears of the second, this one waits
+    world.later(15)  # T0 + 45 s: its next turn
+    assert world.sent_to(services, phone) == [5.0, 45.0]
+    payload = world.pushes()[-1][1]
+    assert payload["title"] == "2 things need you" and payload["ids"] == [first.id, second.id]
+
+
 def test_the_title_counts_what_is_open_beyond_the_push(world: World) -> None:
     pushable = needs_item(1)
     feed_only = [needs_item(2, push_after=None), needs_item(3, push_after=None)]
@@ -1293,6 +1413,44 @@ def test_the_expiry_warning_goes_only_to_the_expiring_device(
     assert world.titles() == [(DEVICES[0], EXPIRY_TITLE)]
     world.later(30)
     assert len(world.transport.sent) == 1, "once per expiry"
+
+
+def test_a_warning_its_service_did_not_take_goes_again_at_the_next_check(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both warnings were recorded as sent before they went: a 503 lost the auto-off warning
+    for that deadline and the expiry warning for that sign-in, whatever the service said
+    next (review of #243, round 6). They go again, at the next check, to the phone whose
+    service did not take them, and to no other."""
+    phone, other = DEVICES
+    rows = [{"id": phone, "expires_at": (T0 + timedelta(hours=23)).isoformat()}]
+    monkeypatch.setattr(world.kit.runtime, "device_rows", lambda: rows)
+    world.kit.runtime.set_auto_off(T0 + timedelta(minutes=8))
+    services = world.answering({phone: [503, None]})
+    for _ in range(10):
+        world.later(30)
+    sent = [(device, payload["title"]) for device, payload in world.pushes()]
+    assert sent == [
+        (phone, auto_off_title(8)),
+        (other, auto_off_title(8)),
+        (phone, EXPIRY_TITLE),
+        (phone, auto_off_title(8)),
+        (phone, EXPIRY_TITLE),
+    ]
+    assert world.sent_to(services, phone) == [0.0, 0.0, 30.0, 30.0]
+    assert world.sent_to(services, other) == [0.0]
+
+
+def test_a_warning_no_service_takes_is_tried_three_more_times_and_no_more(
+    world: World,
+) -> None:
+    world.kit.runtime.set_auto_off(T0 + timedelta(minutes=9, seconds=30))
+    services = world.answering({device: [503] * 50 for device in DEVICES})
+    for _ in range(18):
+        world.later(30)
+    for device in DEVICES:
+        assert world.sent_to(services, device) == [0.0, 30.0, 60.0, 90.0]
+    assert any(key.startswith("sys:auto-off:") for key in load_push_state().pushed)
 
 
 @contextlib.contextmanager

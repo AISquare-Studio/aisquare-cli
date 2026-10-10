@@ -365,15 +365,19 @@ the kinds that often clear by themselves, or that someone else is already on:
 
 Several at once come as one notification, at most one every 20 seconds per
 phone; a new one takes the place of the one still shown and sounds all the
-same. Tapping it opens the card, at the address the panel's ngrok announced or
+same. One that the phone's push service did not take (no answer, a 429 or a
+5xx) goes again, at most three more times, 40, 80 and 160 seconds apart.
+Tapping it opens the card, at the address the panel's ngrok announced or
 `serve --public-url` named; a `serve` told neither opens the page the phone
 subscribed from.
 
 The machine also sends: a warning 10 minutes before auto-off ("open to extend
 it" while writes are on; with writes off, that the phone cannot extend it), a
 goodbye when Remote is turned off, an alert when someone is guessing the
-passphrase, and a warning a day before a phone's 7-day sign-in ends. Once the
-auto-off time has come, nothing goes out but the goodbye.
+passphrase, and a warning a day before a phone's 7-day sign-in ends. Either
+warning, when a phone's push service did not take it, goes again at most three
+more times, 30 seconds apart. Once the auto-off time has come, nothing goes out
+but the goodbye.
 
 **What a notification holds.** A title and a line built from fixed sentences
 (`coder-auth asks you a question`), with every name cut to 40 plain characters,

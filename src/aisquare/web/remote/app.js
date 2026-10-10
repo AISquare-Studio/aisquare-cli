@@ -2256,6 +2256,8 @@ VIEWS.project = (route, main) => {
       title.textContent = projectName(pid);
       clear(body);
       if (!fleet) return body.appendChild(el("p", "empty", failed ? failText(failed) : "Loading…"));
+      // A fleet the machine could not read: why, in place of the rows it last had.
+      if (isText(fleet.error)) return body.appendChild(el("p", "empty", plainText(fleet.error)));
       const agents = agentsOf(fleet);
       if (!agents.length) body.appendChild(el("p", "empty", "No agents running in this project."));
       for (const row of agents) {

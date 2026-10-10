@@ -578,8 +578,8 @@ The stream sends `{"type", "payload", "ts"}` frames, each kind when it changed:
   subscription named one. A connection watches 8 panes at most; one more is
   refused with an `error` frame, `{"error": "too_many_subscriptions", "message"}`.
 
-A pane or a board that could not be read is a frame whose `error` says why, and
-one still being read when a tick ends follows on a later tick. The connection
+A pane, a board or a fleet that could not be read is a frame whose `error` says
+why, and one still being read when a tick ends follows on a later tick. The connection
 closes with 4401 for a device that is no longer signed in, 4409 when the same
 device opened a fifth connection, and 4410 when Remote is turned off.
 

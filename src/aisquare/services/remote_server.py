@@ -2456,6 +2456,20 @@ def remote_board_unread(exc: Exception) -> dict[str, object]:
     return {"project": None, "sessions": [], "events": [], "error": str(exc)}
 
 
+def remote_fleet_unread(ref: str | None, exc: Exception) -> dict[str, object]:
+    """The ``fleet`` frame of a fleet that could not be read: the project it was asked for,
+    no agents, and ``error``, the sentence that says why, as a board's says it
+    (:func:`remote_board_unread`).
+
+    The stream skipped such a frame and logged it at debug level, so the Fleet tab and an
+    agent's screen kept the last fleet they had, its agents working or waiting, under
+    heartbeats that said the link was alive: after its project was removed while the phone
+    slept, or with a store that would not open (sweep 5 of #243).
+    """
+    project = None if ref is None else {"id": ref}
+    return {"project": project, "agents": [], "error": str(exc)}
+
+
 def _agent_state_counts(agents: list[FleetAgentStatus]) -> dict[str, int]:
     """The Projects screen's per-project summary — one call's worth of ``fleet ls``, counted.
 
@@ -5191,9 +5205,10 @@ def build_remote_app(
                     board = remote_board_unread(board)
                 await push_if_changed("board", board, project=board_ref or None)
             fleet = remote_taken(fleet_kind)
-            if isinstance(fleet, Exception):
-                log.debug("remote: fleet frame skipped: %s", fleet)
-            elif fleet is not _UNREAD and fleet_wanted and fleet_ref == fleet_project:
+            if fleet is not _UNREAD and fleet_wanted and fleet_ref == fleet_project:
+                if isinstance(fleet, Exception):  # said where the fleet was, not frozen as live
+                    log.debug("remote: fleet frame unread: %s", fleet)
+                    fleet = remote_fleet_unread(fleet_ref, fleet)
                 await push_if_changed("fleet", fleet)
             await push_if_changed("remote", runtime.remote_json())
             # The lanes' frames, each guarded as board and fleet are: one lane's bug,

@@ -568,13 +568,14 @@ class TranscriptTail:
     record, or lines it could not read): that one says nothing about what was written."""
     cut_at: datetime | None = None
     """When the file was last written, for a walk that ran out of its budget or of
-    :data:`TAIL_RECORDS` before it reached the newest assistant message (for records
-    without ids, the human's prompt), on records that do not end a turn: the tool uses
-    of that message went unseen, and one may still wait on its result, its permission
-    prompt up. A screenshot's result of 700 KB, written while a sibling call waits on
-    its prompt, is such a walk: the budget ends inside it, ``pending`` is empty, and the
-    agent read as one at rest (review of #243, round 7). ``None`` when the walk saw what
-    it needed."""
+    :data:`TAIL_RECORDS` before it had read the newest assistant message whole (for
+    records without ids, back to the human's prompt), on records that do not end a turn:
+    a tool use of that message went unseen, and may still wait on its result, its
+    permission prompt up. A screenshot's result of 700 KB, written while a sibling call
+    waits on its prompt, is such a walk: the budget ends inside it, ``pending`` is empty,
+    and the agent read as one at rest (review of #243, round 7). So is one that met a
+    later block of the message first, as tools run while it streams. ``None`` when the
+    walk saw what it needed, or saw the newest message say only text, which ends a turn."""
     under_own: str = "none"
     """When ``newest`` is ``own``: the newest record that is not, in ``newest``'s words, or
     ``none`` when the walk met none. A local command or a ``!`` command typed at the
@@ -657,6 +658,7 @@ def _tail_walk(file: Path, size: int, budget: int, written: datetime) -> Transcr
     message_id: str | None = None
     in_message = False  # the newest assistant message has been reached
     past_message = False  # ...and a user record older than it (records without an id)
+    calls = False  # ...and a record of it calls a tool: an older one of it may too
     examined = 0
     cut = False  # the walk ran out before it could stop where nothing older waits
     own_only = True  # every record walked so far is one Claude Code wrote itself
@@ -730,7 +732,7 @@ def _tail_walk(file: Path, size: int, budget: int, written: datetime) -> Transcr
             texts.append("\n\n".join(record_text))
             text_at = text_at or at
         if any(block.get("type") == "tool_use" for block in blocks):
-            said = "assistant_tool"
+            said, calls = "assistant_tool", True
         elif record_text:
             said = "assistant_text"
         else:
@@ -744,8 +746,11 @@ def _tail_walk(file: Path, size: int, budget: int, written: datetime) -> Transcr
         own_only = False
     else:
         cut = size > budget  # the reader stopped on its budget, short of the file's start
-    # An interruption ends the turn: nothing before it waits, however much was not read.
-    unseen = not in_message or message_id is None
+    # The newest message is whole once an older one is met. Cut inside one that calls
+    # tools, a block of it before the cut may be a tool use still waiting; one seen to
+    # say only text ended its turn. An interruption ends the turn too: nothing before it
+    # waits, however much was not read.
+    unseen = not in_message or message_id is None or calls
     settled = under_own if newest == "own" and under_own != "none" else newest
     cut_at = written if cut and unseen and settled != "interrupted" else None
     pending: list[PendingTool] = []

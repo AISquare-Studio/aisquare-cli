@@ -441,6 +441,34 @@ def test_a_walk_cut_after_the_newest_message_or_an_interruption_is_not_cut_short
     assert tail is not None and (tail.newest, tail.cut_at) == ("interrupted", None)
 
 
+def test_a_walk_cut_inside_the_newest_message_after_one_of_its_calls_may_hide_another(
+    tmp_path: Path,
+) -> None:
+    """Tools run while their message streams, so a block of the newest message can come
+    after a result. Here a Read of the message the screenshot and the Bash are in, its
+    result in: the walk met the Read, then ran out inside the screenshot's 700 KB result,
+    short of the Bash waiting on its permission prompt. Having reached the message is
+    not having read it: a tool use before the cut may still wait. Read whole, the Bash is
+    pending and nothing is cut."""
+    bash = _tool("toolu_bash", "Bash", command="rm -rf build && npm test")
+    shot = _tool("toolu_shot", "mcp__playwright__browser_take_screenshot")
+    records = [
+        _prompt("check the page, then clean and test", uuid="u1"),
+        _said(bash, uuid="a1", message="m1", second=1),
+        _said(shot, uuid="a2", message="m1", second=2),
+        _screenshot("toolu_shot", 700_000, uuid="r1", second=3),
+        _said(_tool("toolu_read", "Read", file_path="/x"), uuid="a3", message="m1", second=4),
+        _result("toolu_read", uuid="r2", second=5),
+    ]
+    path = _write(tmp_path / "later.jsonl", records)
+    tail = read_transcript_tail(path)
+    assert tail is not None and tail.pending == ()
+    assert tail.cut_at == _written(path)
+    whole = read_transcript_tail(path, budget=10_000_000)
+    assert whole is not None and [tool.tool_use_id for tool in whole.pending] == ["toolu_bash"]
+    assert whole.cut_at is None
+
+
 # --- what the newest record says -----------------------------------------------------------
 
 

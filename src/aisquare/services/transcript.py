@@ -45,12 +45,13 @@ from __future__ import annotations
 import json
 import re
 import stat
-import textwrap
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from rich.cells import split_graphemes
 
 DEFAULT_LIMIT = 200
 """Turns per page when the caller does not say (PLAN §4-M)."""
@@ -331,27 +332,91 @@ def _summarise_tool(block: dict[str, Any]) -> str:
     return f"{name}({detail[:72]})" if detail else name
 
 
+_BREAK = re.compile(r"([\t\n\x0b\x0c\r ]+)")
+"""Where a line may break: a run of the whitespace ``textwrap`` breaks at."""
+
+
+def _cells(text: str) -> int:
+    """How many columns ``text`` takes on a terminal, as rich draws it: two for a wide
+    character (CJK, most emoji), none for a mark that combines with the one before."""
+    return split_graphemes(text)[1]
+
+
 def _wrap(text: str, width: int, *, indent: str = "  ") -> list[str]:
+    """``text`` as lines of at most ``width`` columns, each after ``indent``, its paragraphs
+    kept: a run of whitespace is where a line breaks, and a word longer than a line breaks
+    where it reaches the end.
+
+    Measured in columns, as the page counts the width it asks for (``?width=``), not in
+    characters: ``textwrap`` counted characters, so a line of Japanese wrapped at 40 took
+    78 columns, and the phone wrapped each again into a full row and a ragged half outside
+    the indent (review of #243, sweep 5).
+    """
+    room = max(1, width - _cells(indent))
     out: list[str] = []
     for paragraph in text.replace("\r\n", "\n").split("\n"):
-        stripped = paragraph.rstrip()
+        stripped = paragraph.rstrip().expandtabs()
         if not stripped:
             out.append("")
             continue
-        out.extend(
-            textwrap.wrap(
-                stripped,
-                width=width,
-                initial_indent=indent,
-                subsequent_indent=indent,
-                replace_whitespace=False,
-                drop_whitespace=True,
-                break_long_words=True,
-                break_on_hyphens=False,
-            )
-            or [indent]
-        )
+        out.extend(indent + line for line in _wrap_paragraph(stripped, room))
     return out
+
+
+def _wrap_paragraph(text: str, room: int) -> list[str]:
+    """``textwrap``'s greedy fill of one paragraph, its lengths in columns: whitespace is
+    dropped where a line begins or ends, except the paragraph's own leading run."""
+    chunks = [(chunk, _cells(chunk)) for chunk in _BREAK.split(text) if chunk]
+    chunks.reverse()
+    lines: list[str] = []
+
+    def wrapped_line(line: list[str]) -> None:
+        while line and not line[-1].strip():
+            line.pop()
+        if line:
+            lines.append("".join(line))
+
+    while chunks:
+        if lines and not chunks[-1][0].strip():
+            chunks.pop()
+            continue
+        line: list[str] = []
+        used = 0
+        while chunks and used + chunks[-1][1] <= room:
+            chunk, cells = chunks.pop()
+            line.append(chunk)
+            used += cells
+        if chunks and chunks[-1][1] > room:
+            # A word longer than a line: the rest of this line, each whole line it fills,
+            # and what is left of it, a word of its own.
+            head, *rest = _cell_pieces(chunks.pop()[0], room - used, room, bool(line))
+            line.append(head[0])
+            for piece, _width in rest[:-1]:
+                wrapped_line(line)
+                line = [piece]
+            if rest:
+                chunks.append(rest[-1])
+        wrapped_line(line)
+    return lines
+
+
+def _cell_pieces(
+    word: str, first: int, room: int, first_may_be_empty: bool
+) -> list[tuple[str, int]]:
+    """``word`` cut between graphemes into pieces and their widths: the first of at most
+    ``first`` columns, each other of at most ``room``. A piece holds at least one grapheme,
+    the first only when ``first_may_be_empty`` is false, so a wide character on a line of
+    one column still moves on. Measured once, whatever its length."""
+    pieces: list[tuple[str, int]] = []
+    start = used = 0
+    limit = first
+    for at, _end, width in split_graphemes(word)[0]:
+        if used + width > limit and (used or (first_may_be_empty and not pieces)):
+            pieces.append((word[start:at], used))
+            start, used, limit = at, 0, room
+        used += width
+    pieces.append((word[start:], used))
+    return pieces
 
 
 def _render_questions(questions: object, width: int) -> list[str]:

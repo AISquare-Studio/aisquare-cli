@@ -348,6 +348,32 @@ def test_a_permission_card_shows_the_call_not_eleven_keys_of_it() -> None:
     }
 
 
+def test_a_list_or_an_object_cut_at_2000_characters_is_marked_cut_as_a_string_is() -> None:
+    """A list or an object shows as its JSON, cut at 2 000 characters as a string is (round 6).
+    ``cut`` is counted on what the card would show whole, its JSON: counted on the call's
+    own input, where ``edits`` is a list, a MultiEdit's 3 035 characters of edits showed
+    their first 2 000 with no "Not all of it", reading as the whole of what the "1" beside
+    them approves. Nothing tested it (review of #243, sweep 5)."""
+    row = _row()
+    attention = _status(row, "attention", _session(row, state="attention"))
+    edits = [{"old_string": "a" * 1500, "new_string": "b" * 1500}]
+    query = {"ids": list(range(600)), "table": "accounts"}
+    calls = {
+        "edits": _tool("toolu_e", "MultiEdit", edits=edits, file_path="/etc/hosts"),
+        "where": _tool("toolu_q", "mcp__db__delete_rows", where=query),
+    }
+    for key, call in calls.items():
+        whole = json.dumps(call.input[key], ensure_ascii=False, separators=(",", ":"))
+        detail = _one(_classify(attention, _tail(call))).detail
+        fields = detail["input"]
+        assert isinstance(fields, dict)
+        shown = fields[key]
+        assert len(whole) > 2000 and len(shown) == 2000, key
+        assert shown == whole[:1999] + "…", key
+        assert detail["cut"] == {key: len(whole)}, key
+    assert len(json.dumps(edits, separators=(",", ":"))) == 3035
+
+
 def test_a_call_of_more_fields_than_a_card_holds_says_how_many_it_leaves_out() -> None:
     """The page draws twenty fields, and a name it could not hold to the card's size is
     none of them: each one left out is counted, so the card says so."""
@@ -1921,6 +1947,7 @@ def test_every_detail_fits_its_cap() -> None:
     assert question.excerpt.endswith("(+3 more)") or len(question.excerpt) == 280
     plan = _one(_classify(asking, _tail(_tool("toolu_p", "ExitPlanMode", plan="p" * 40_000))))
     assert _size(plan.detail) <= 16_384 and str(plan.detail["plan"]).endswith("…")
+    assert plan.detail["cut"] == {"plan": 40_000}, "the card says the plan goes on"
     waiting = _status(row, "waiting", _session(row, state="waiting"))
     long = "word " * 4_000 + "\n\nShall I go on?"
     asked = _one(_classify(waiting, _tail(newest="assistant_text", text=long)))

@@ -127,18 +127,17 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
         pin = f" --version {plan.target}" if plan.target else ""
         _say(f"upgrade with: aisquare upgrade{pin}")
     else:
-        if plan.up_to_date and plan.route.kind not in (
-            install_route.EDITABLE,
-            install_route.LOCAL_SOURCE,
-        ):
+        checkout = plan.route.kind in (install_route.EDITABLE, install_route.LOCAL_SOURCE)
+        if plan.up_to_date and (plan.target is not None or not checkout):
             # Nothing newer for that route to fetch either: "upgrade with: pipx upgrade
             # aisquare-cli" under "(you have it)" contradicted it (review of #257). A
-            # checkout keeps its command: PyPI's number says nothing about its source.
+            # checkout keeps its command: PyPI's number says nothing about its source. A pin
+            # of the version that runs is that version on every route (a later review).
             _say("nothing to upgrade")
             return
         if plan.pin_refused:
             # Not "upgrade with" a command that installs another version (a later review).
-            _say(f"{plan.reason} with: {plan.command}" if plan.argv else f"{plan.reason}")
+            _say(plan.reason or "")
         else:
             _say(f"upgrade with: {plan.command}")
             _say(f"(`aisquare upgrade` does not run it: {plan.reason})")
@@ -325,11 +324,10 @@ def upgrade(
     if check:
         _emit_check(plan)
         return
-    if not plan.runnable:
-        # The command goes in the MESSAGE: `fail` shows a human nothing else. None for a pin
-        # brew cannot install; for a checkout's, the reinstall after it (a later review).
-        then = "Then reinstall it with" if plan.pin_refused else "Upgrade it with"
-        command = f" {then}: {plan.command}" if plan.argv else ""
+    if not plan.runnable and not (plan.target is not None and plan.up_to_date):
+        # The command goes in the MESSAGE: `fail` shows a human nothing else; there is none
+        # for a pin the route cannot pick (a later review of #257).
+        command = f" Upgrade it with: {plan.command}" if plan.argv else ""
         fail(
             f"aisquare does not upgrade this install itself ({plan.reason}).{command}",
             error="upgrade_unsupported_route",

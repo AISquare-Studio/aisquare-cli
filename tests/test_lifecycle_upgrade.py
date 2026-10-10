@@ -2830,7 +2830,10 @@ def test_a_route_whose_command_cannot_pin_says_what_does_instead_of_advising_it(
 ) -> None:
     """`--check --version 0.7.0` on a Homebrew install said "upgrade with: brew upgrade
     aisquare-cli", which moves to the formula's newest, and a checkout's reinstall installs
-    what the checkout holds (a later review of #257)."""
+    what the checkout holds (a later review of #257). Then "check out 0.7.0" named a ref
+    this repository does not tag, and "point <wheel> at 0.7.0" a step nobody can take,
+    before a command that reinstalled the version already there (a later review): nothing
+    but what is true by construction is said, and no command."""
     source = str(tool.prefix.parent / "src" / "aisquare-cli")
     route = {
         "homebrew": install_route.InstallRoute(
@@ -2850,21 +2853,50 @@ def test_a_route_whose_command_cannot_pin_says_what_does_instead_of_advising_it(
     run = runner.invoke(app, ["upgrade", "--version", "0.7.0", "--yes"])
     latest = install_route.upgrade_argv(route)
 
-    assert "upgrade with" not in check.stdout, check.stdout
+    why = {
+        "homebrew": "Homebrew installs the version its formula has, and brew cannot install 0.7.0",
+        "editable": f"an editable install runs what its checkout holds ({source}), so "
+        "--version cannot pick a release for it",
+        "local-source": f"it runs what it was installed from ({source}), so --version cannot "
+        "pick a release for it",
+    }[kind]
+    assert "upgrade with" not in check.stdout and why in check.stdout, check.stdout
     assert planned["runnable"] is False and machine.installs == [], planned
-    assert run.exit_code == 1 and "Upgrade it with" not in run.stderr, run.stderr
-    if kind == "homebrew":
-        why = "Homebrew installs the version its formula has, and brew cannot install 0.7.0"
-        assert planned["reason"] == why and planned["argv"] == [], planned
-        assert why in check.stdout and "brew upgrade" not in check.stdout, check.stdout
-        assert why in run.stderr and "with:" not in run.stderr, "and no command to run"
-        assert latest == ["brew", "upgrade", "aisquare-cli"], "control: no pin, the newest"
-    else:
-        command = install_route.command_line(latest)
-        assert planned["command"] == command, planned
-        assert "0.7.0" in planned["reason"] and source in planned["reason"], planned
-        assert f"then reinstall it with: {command}" in check.stdout, check.stdout
-        assert f"Then reinstall it with: {command}" in run.stderr, run.stderr
+    assert planned["reason"] == why and planned["argv"] == [], planned
+    assert run.exit_code == 1 and why in run.stderr and "with:" not in run.stderr, run.stderr
+    assert "check out" not in check.stdout + run.stderr, "no step this CLI cannot vouch for"
+    assert latest and "0.7.0" not in " ".join(latest), "control: without a pin, its command"
+
+
+@pytest.mark.parametrize("kind", ["homebrew", "editable", "local-source"])
+def test_a_pin_of_the_version_that_runs_is_nothing_to_do_on_any_route(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """`--version 0.9.0` on a checkout running 0.9.0 still said to check out 0.9.0 and
+    reinstall it (a later review of #257). It is the version asked for."""
+    source = str(tool.prefix.parent / "src" / "aisquare-cli")
+    kinds = {
+        "homebrew": install_route.HOMEBREW,
+        "editable": install_route.EDITABLE,
+        "local-source": install_route.LOCAL_SOURCE,
+    }
+    route = install_route.InstallRoute(
+        kinds[kind], tool.facts, source=source, formula="aisquare-cli"
+    )
+    monkeypatch.setattr(install_route, "detect", lambda: route)
+
+    check = runner.invoke(app, ["upgrade", "--check", "--version", "0.9.0"])
+    planned = _one_object(
+        runner.invoke(app, ["--json", "upgrade", "--check", "--version", "0.9.0"]).stdout
+    )
+    run = runner.invoke(app, ["upgrade", "--version", "0.9.0", "--yes"])
+
+    assert "nothing to upgrade" in check.stdout.splitlines(), check.stdout
+    assert planned["reason"] == install_route.not_automated(route), "not that it cannot pin it"
+    assert "with:" not in check.stdout, check.stdout
+    assert run.exit_code == 0, run.output
+    assert "aisquare 0.9.0 is already the version asked for — nothing to do" in run.stdout
+    assert machine.installs == []
 
 
 def test_a_pin_the_uv_cutoff_excludes_is_said_not_advised(

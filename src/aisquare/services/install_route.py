@@ -1177,6 +1177,8 @@ def upgrade_argv(
     pinned = f"{DISTRIBUTION}=={target}" if target else DISTRIBUTION
     if route.receipt is not None:
         return _uv_install_argv(route, target, __version__ if current is None else current)
+    if target and route.kind in (EDITABLE, LOCAL_SOURCE):
+        return []  # its reinstall installs what its source holds, not ``target`` (pin_refusal)
     if route.kind == EDITABLE:
         # The reinstall, not only `git pull`: hatchling writes the version and the
         # dependencies into the install's metadata, so a pulled checkout still
@@ -1198,6 +1200,9 @@ def upgrade_argv(
         return _pip_argv(route, "install", *user, pinned)
     return _pip_argv(route, "install", "--upgrade", *user, DISTRIBUTION)
 
+
+#: When a reinstall a person runs by hand must wait, on Windows: one wording for every route.
+_AFTER_AISQUARE_EXITS = " after aisquare exits (Windows locks the files of a running program)"
 
 #: Why each route is reported rather than run. Short, because it is printed
 #: beside the command that does the job.
@@ -1230,7 +1235,7 @@ def not_automated(route: InstallRoute) -> str | None:
             f"an editable install follows its checkout — pull it first ({pull}), then reinstall it"
         )
         if windows is not None:
-            reason += " after aisquare exits (Windows locks the files of a running program)"
+            reason += _AFTER_AISQUARE_EXITS
         return reason
     if windows is not None:
         return windows
@@ -1248,23 +1253,25 @@ def not_automated(route: InstallRoute) -> str | None:
 
 
 def pin_refusal(route: InstallRoute, target: str) -> str | None:
-    """Why this route's own command cannot install ``target`` (``--version``), and what does,
-    or ``None``: brew installs its formula's version, and a checkout or a local source the
-    one it holds. "upgrade with: brew upgrade aisquare-cli" moved to the newest instead
-    (a later review of #257)."""
+    """Why ``--version`` cannot pick ``target`` for this route, or ``None``: brew installs its
+    formula's version, and a checkout or a local source runs what it holds, so its
+    command (:func:`upgrade_argv`) has none to offer. "upgrade with: brew upgrade
+    aisquare-cli" moved to the newest; then "check out 0.7.0" named a ref this repository
+    does not tag, and "point <wheel> at 0.7.0" a step nobody can take (reviews of #257)."""
     where = route.source or "."
     if route.kind == HOMEBREW:
         return f"Homebrew installs the version its formula has, and brew cannot install {target}"
     if route.kind == EDITABLE:
-        reason = f"an editable install runs what its checkout holds: check out {target} in {where}"
-    elif route.kind == LOCAL_SOURCE:
-        reason = f"it installs what its source holds: point {where} at {target}"
-    else:
-        return None
-    then = ", then reinstall it"
-    if _windows_blocker(route, "replace") is not None:
-        then += " after aisquare exits (Windows locks the files of a running program)"
-    return reason + then
+        return (
+            f"an editable install runs what its checkout holds ({where}), so --version cannot "
+            "pick a release for it"
+        )
+    if route.kind == LOCAL_SOURCE:
+        return (
+            f"it runs what it was installed from ({where}), so --version cannot pick a "
+            "release for it"
+        )
+    return None
 
 
 def _windows_blocker(route: InstallRoute, verb: str) -> str | None:

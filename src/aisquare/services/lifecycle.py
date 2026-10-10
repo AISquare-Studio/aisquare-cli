@@ -320,6 +320,9 @@ class UpgradePlan:
     """Live fleet agents, counted as uninstall counts them (:func:`running_fleet`)."""
     fleet_error: str | None = None
     """Why the fleet's live agents could not be counted, when they could not."""
+    pin_refused: bool = False
+    """Whether :attr:`reason` is that ``--version`` cannot pick a release for this route
+    (``install_route.pin_refusal``): Homebrew's, a checkout's or a local source's."""
     pin_unmet: str | None = None
     """Why ``--version``'s release cannot be installed here, when ``--check`` found so: the
     reinstall's Python, or the uv cutoff, excludes it. It is :attr:`reason` too when the
@@ -328,13 +331,6 @@ class UpgradePlan:
     @property
     def runnable(self) -> bool:
         return self.reason is None
-
-    @property
-    def pin_refused(self) -> bool:
-        """Whether ``--version`` is one this route's own command cannot install (Homebrew, a
-        checkout): :attr:`reason` then says what does (``install_route.pin_refusal``)."""
-        target = self.target
-        return target is not None and install_route.pin_refusal(self.route, target) is not None
 
     @property
     def backwards(self) -> bool:
@@ -447,9 +443,13 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         target = pinned
     route = install_route.detect()
     reason = install_route.not_automated(route)
-    if target is not None:
+    pin_refused = False
+    if target is not None and not install_route.same_version(target, __version__):
         # The pin is what was asked: a route's reason for the newest says how to get that.
-        reason = install_route.pin_refusal(route, target) or reason
+        # The version that runs is nothing to do, on every route (a later review of #257).
+        refusal = install_route.pin_refusal(route, target)
+        if refusal is not None:
+            reason, pin_refused = refusal, True
     latest: install_route.LatestRelease | None = None
     pin_unmet: str | None = None
     if check or (reason is None and target is None):
@@ -478,6 +478,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         current=__version__,
         target=target,
         latest=latest,
+        pin_refused=pin_refused,
         pin_unmet=pin_unmet,
         argv=tuple(install_route.upgrade_argv(route, target, current=__version__)),
         env=install_route.installer_env(route),

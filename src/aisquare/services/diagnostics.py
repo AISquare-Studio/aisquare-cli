@@ -962,9 +962,10 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
         if site.plugin is not None and agent_core.hook_commands("claude-code", site.config_dir)
     ]
     # Doubled directories are graded too. The plugin's copies stand down only beside
-    # hooks whose program exists, so beside dead ones the plugin runs instead: that
-    # is not "two ways", and those hooks fail on every event (review of #249).
-    dead = [site for site in doubled if site.binary_state == agent_core.HOOK_BINARY_MISSING]
+    # hooks whose program can start, as its launcher decides (``agent_core.hooks_start``),
+    # so beside dead ones the plugin runs instead: that is not "two ways", and those hooks
+    # fail on every event (review of #249).
+    dead = [site for site in doubled if not agent_core.hooks_start("claude-code", site.config_dir)]
     wrong_binary = [
         site
         for site in graded
@@ -1087,8 +1088,8 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     if dead:
         listed = ", ".join(str(site.config_dir) for site in dead)
         problems.append(
-            f"settings.json hooks in: {listed} name an aisquare that does not exist, so they "
-            "fail on every event and the aisquare plugin runs in their place"
+            f"settings.json hooks in: {listed} name an aisquare that does not exist or cannot "
+            "start, so they fail on every event and the aisquare plugin runs in their place"
         )
     if live:
         listed = ", ".join(str(site.config_dir) for site in live)

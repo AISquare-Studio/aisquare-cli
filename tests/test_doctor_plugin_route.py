@@ -772,23 +772,38 @@ def test_two_routes_in_a_read_only_settings_json_never_advise_a_disconnect_that_
 
 
 @posix_route
+@pytest.mark.parametrize(
+    "program", ["gone", "a script whose #! interpreter is gone", "a script that starts"]
+)
 def test_hooks_naming_a_gone_aisquare_beside_the_plugin_say_so(
-    runner: CliRunner, claude: Path, tmp_path: Path
+    runner: CliRunner, claude: Path, tmp_path: Path, program: str
 ) -> None:
     """The CLI uninstalled after `agents connect`, then the plugin installed (review of #249).
 
-    The launcher does not stand down beside a program that is gone, so the plugin is
+    The launcher does not stand down beside a program that cannot start, so the plugin is
     the route that runs and the dead hooks fail on every event. "Two ways" would be
-    false, and "keep the hooks: uninstall the plugin" would leave nothing running.
+    false, and "keep the hooks: uninstall the plugin" would leave nothing running. A
+    script whose ``#!`` interpreter is gone (``uv python uninstall``) exists, and was
+    graded "two ways" (review of #257); one that starts is two ways, the control.
     """
     _connect(runner)
-    _hooks_name(claude, str(tmp_path / "uninstalled" / "aisquare"))
+    hook = tmp_path / "uninstalled" / "aisquare"
+    if program != "gone":
+        hook.parent.mkdir(parents=True)
+        shebang = "/bin/sh" if program == "a script that starts" else "/nonexistent/python3.11"
+        hook.write_text(f"#!{shebang}\nexit 0\n", encoding="utf-8")
+        hook.chmod(0o755)
+    _hooks_name(claude, str(hook))
     _install_plugin(claude)
 
     check = diagnostics._check_claude_code()
 
     assert check.status is CheckStatus.warn
-    assert "name an aisquare that does not exist" in check.detail
+    if program == "a script that starts":
+        assert "runs aisquare two ways in" in check.detail, check
+        assert "keep the hooks:" in str(check.fix), check.fix
+        return
+    assert "name an aisquare that does not exist or cannot start" in check.detail, check
     assert "the aisquare plugin runs in their place" in check.detail
     assert "two ways" not in check.detail and "uninstall" not in (check.fix or "")
     assert f"aisquare agents disconnect claude-code --config-dir {claude}" in (check.fix or "")

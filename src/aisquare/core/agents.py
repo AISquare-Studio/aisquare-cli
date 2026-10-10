@@ -828,6 +828,17 @@ def _starts(program: Path) -> bool:
     return os.path.isfile(interpreter) and os.access(interpreter, os.X_OK)
 
 
+def hooks_start(name: str, config_dir: Path) -> bool:
+    """Whether any of aisquare's hooks in ``config_dir`` names a program that can start
+    (:func:`_starts`; for a module-form hook, its interpreter): the plugin's launcher
+    stands down beside such a hook, and runs in its place beside any other (its
+    ``_runnable``). Counted as dead only when gone, a script whose ``#!`` interpreter is
+    gone was graded "two ways", and the fix offered to uninstall the one route that ran
+    (review of #257)."""
+    found = (hook_binary(command) for command in hook_commands(name, config_dir))
+    return any(binary is not None and _starts(binary.program) for binary in found)
+
+
 def launcher_finds(name: str) -> Path | None:
     """The program ``name`` where the plugin's launcher looks for it, as THIS process sees.
 

@@ -2467,15 +2467,20 @@ def needs_at_input_prompt(snap: AgentNow) -> bool:
     """Whether the agent sits at its input prompt, where typed text is a message to it.
 
     No dialog, the pane is the agent and quiet (tmux must say so), no tool
-    pending, and the newest record is an interruption or the agent's own words,
-    or this process has written no conversation yet (:func:`_needs_nothing_said`)
-    — or the row derives ``waiting``, the only sign there is without a tail.
+    pending, and the newest record is an interruption, the agent's own words or
+    one Claude Code wrote itself (a local command's output, a compaction's
+    summary: ``own``), or this process has written no conversation yet
+    (:func:`_needs_nothing_said`) — or the row derives ``waiting``, the only sign
+    there is without a tail.
 
     A session starts ``working`` on the board, and the board is trusted for 30
     minutes: an agent just spawned with no prompt, or after a ``/clear``, read as
     busy at its fresh prompt. Prompt mode refused it, Interrupt & tell sent its Escape
     and gave up, and the only way to reach it was the Live tab (review of #243, sweep
     3). A turn writes the human's prompt first, and Claude Code animates while one runs.
+    No hook follows a local command either (``/model``, ``/mcp``, a ``/compact``, whose
+    ``SessionStart`` marks the session ``working`` again), and its records read as the
+    human's prompt of a turn under way, for the same 30 minutes (sweep 4 of #243).
     """
     status = snap.status
     if status is None or not snap.pane_is_agent or snap.pane_quiet is not True:
@@ -2486,7 +2491,7 @@ def needs_at_input_prompt(snap: AgentNow) -> bool:
         return status.state == "waiting"
     if _needs_pending(snap.tail, status.agent):
         return False
-    if snap.tail.newest in ("interrupted", "assistant_text") or status.state == "waiting":
+    if snap.tail.newest in ("interrupted", "assistant_text", "own") or status.state == "waiting":
         return True
     return _needs_nothing_said(snap.tail, status.agent)
 

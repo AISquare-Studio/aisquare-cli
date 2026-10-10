@@ -1199,9 +1199,12 @@ def action_tell_auto(
     pane gets nothing. An agent at work with a tool pending is the common case of
     that, and ``how`` says of it what ``fleet tell`` says ("it is working"). So is an
     agent nothing here reads (:func:`remote_needs.needs_unseen`), whose quiet pane
-    ``fleet tell`` took for one waiting at its prompt, whatever it showed. ``fleet
-    tell`` pastes before it presses Enter, and files a note when that fails, so it can
-    fail with the text already in the pane: on the trail.
+    ``fleet tell`` took for one waiting at its prompt, whatever it showed. The board
+    reaches an agent through aisquare's hooks, so of one started without them (``no
+    hooks``) ``how`` says the note is not shown to it, and that Interrupt & tell, whose
+    Escape goes first, types the text. ``fleet tell`` pastes before it presses Enter,
+    and files a note when that fails, so it can fail with the text already in the pane:
+    on the trail.
     """
     from aisquare.services import fleet as fleet_service
 
@@ -1220,6 +1223,9 @@ def action_tell_auto(
         else:
             why = "it has a tool pending, and a prompt for it may have just opened"
         filed = action_fleet_call(lambda: fleet_service._file_note(target, label, text, None))
+        if snap.status is not None and snap.status.agent.session_id is None:
+            # The board reaches an agent through its hooks: `no hooks`, and the note waits unread.
+            filed += ", which it is not shown without aisquare's hooks: Interrupt & tell types it"
         return False, f"{why} — {filed}"
     with action_audited(lambda error: trail(f"delivered=no failed={error}")):
         told = action_pinned_call(

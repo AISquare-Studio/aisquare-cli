@@ -841,6 +841,8 @@ class FakeNeeds:
             row = store.fleet_agent_by_label(project.id, label, live_only=False)
         if row is None:
             raise fleet_service.NoSuchAgent(f"no agent {label!r}")
+        if self.session is not None and row.session_id is None:
+            row = row.model_copy(update={"session_id": self.session.id})  # a hooked row names it
         status = (
             None
             if self.window_gone
@@ -3209,14 +3211,17 @@ def test_an_auto_tell_to_an_agent_nothing_reads_is_a_board_note_and_never_fleet_
     project: ProjectInfo,
 ) -> None:
     """``fleet tell`` types into a row that derives ``waiting``: the quiet pane of an agent
-    nothing reads, its prompt included."""
+    nothing reads, its prompt included. The board reaches an agent through aisquare's
+    hooks, so the note waits unread for one without them, and ``how`` says so and what
+    types the text instead."""
     _hookless_at_a_prompt(own_predicates, pane, project)
     response = phone.post("agent/tell", agent=LABEL, agent_id="agt_one", text="use the test DB")
     assert response.status_code == 200, response.text
     (note,) = _notes(project)
     assert response.json()["how"] == (
         "it runs without aisquare's hooks, so nothing here shows whether it is showing a "
-        f"prompt, which typing would answer — filed as board note #{note.seq} to coder-1"
+        f"prompt, which typing would answer — filed as board note #{note.seq} to coder-1, "
+        "which it is not shown without aisquare's hooks: Interrupt & tell types it"
     )
     assert fleet.calls == [] and pane.sent == []
 

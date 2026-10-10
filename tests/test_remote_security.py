@@ -2459,6 +2459,39 @@ def test_a_switch_or_a_remove_that_names_no_one_project_changes_nothing(
     assert _audit_lines() == before
 
 
+def test_a_remove_naming_a_symlink_loop_is_not_found_on_every_python(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``Path.resolve`` of a symlink loop raises ``RuntimeError`` ("Symlink loop from ...") on
+    Python 3.11 and 3.12, which CI runs, and returns the path on 3.13. Caught as ``OSError``
+    alone, the loop fell to 400 ``write_failed`` with that sentence for a write that never
+    began, where a path no project has is 404 ``not_found`` (sweep 4 of #243's class). On
+    3.13 resolve is made to raise for the loop as 3.12's does."""
+    (alpha,) = _projects(home, "code/alpha")
+    loop = home / "code" / "loop"
+    try:
+        loop.symlink_to(loop)
+    except OSError:
+        pytest.skip("this account may not make a symlink here")
+    if sys.version_info >= (3, 13):
+        resolve = Path.resolve
+
+        def resolve_as_3_12(self: Path, strict: bool = False) -> Path:
+            if self == loop:
+                raise RuntimeError(f"Symlink loop from {str(self)!r}")
+            return resolve(self, strict)
+
+        monkeypatch.setattr(Path, "resolve", resolve_as_3_12)
+    monkeypatch.chdir(alpha.root)
+    client = _project_writes(runtime, tmp_path)
+    before = _audit_lines()
+    refused = client.post(f"{base(runtime)}/api/project/remove", json={"ref": str(loop)})
+    assert (refused.status_code, refused.json()["error"]) == (404, "not_found"), refused.text
+    assert "Symlink loop" not in refused.text
+    assert [project.id for project in project_service.list_projects()] == [alpha.id]
+    assert _audit_lines() == before
+
+
 def test_a_task_another_session_holds_is_refused_claim_lost(
     home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

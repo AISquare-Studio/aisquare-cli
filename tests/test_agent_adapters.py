@@ -1167,6 +1167,8 @@ _THIS_SHELLS_DIR = [
     "a recorded ~/.claude, its hooks taken out by hand, its CLAUDE.md not UTF-8",
     "a recorded ~/.claude, its settings.json not valid JSON",
     "the variable names a folder outside ~/.claude*, read-only, its hooks pinning a lost program",
+    "the variable names a ~/.claude-work this home never connected, its hooks pinning a lost "
+    "program, its CLAUDE.md not UTF-8",
 ]
 
 
@@ -1184,9 +1186,10 @@ def test_the_variables_remedy_is_never_unset_and_done_as_worded_clears_the_row(
     offered, and done, the row still named it: the doctor grades a recorded directory
     whatever the variable says; and for one outside ~/.claude* holding aisquare's hooks,
     which it grades only as the variable's, it was dropped (review of #257). The
-    variable's remedy never says unset and never comes first; for a recorded one it comes
-    with the disconnect that takes it out, and only where that disconnect would work.
-    Each remedy printed, done as worded, lets connect write and clears the row."""
+    variable's remedy never says unset and never comes first; for one the doctor grades
+    whatever the variable says (recorded, or a ~/.claude* holding aisquare's hooks) it
+    comes with the disconnect that takes it out, and only where that disconnect would
+    work. Each remedy printed, done as worded, lets connect write and clears the row."""
     if os.name == "nt" and "may not write" in shape:
         pytest.skip("mode 555 denies nothing on NTFS")
     monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")

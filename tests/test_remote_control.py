@@ -1574,7 +1574,8 @@ def test_without_ngrok_remote_is_on_locally_and_the_status_line_says_how_to_inst
     )
     controller.turn_on()
     assert controller.running and server.running
-    assert controller.tunnel is None
+    tunnel = controller.tunnel  # kept, never started, for the watchdog to start
+    assert tunnel is not None and not tunnel.running and tunnel.public_url is None
     assert controller.message == INSTALL_HINT
     assert controller.link_url() == f"http://127.0.0.1:8750/r/{server.token}/"  # §6 fallback
 

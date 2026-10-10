@@ -92,6 +92,8 @@ UNREACHABLE = "Remote is on, but phones cannot reach it"
 """How news of a tunnel that is not up begins (:attr:`RemoteController.on_news`)."""
 STARTING = "starting Remote…"
 """The status line while a start's deadline is written, before ngrok starts."""
+STARTING_NGROK = "starting ngrok…"
+"""The status line from ngrok's start until it announces a URL, or fails to."""
 SAVING = "saving to remote.json…"
 """The status line's line while a write the controls asked for waits (:data:`SAVING_AFTER`)."""
 SAVING_AFTER = 0.5
@@ -410,10 +412,14 @@ class RemoteController:
             current = self.info is info
             if current and failure is not None:
                 # No tunnel, but the local server is up: the modal keeps the local link
-                # (PLAN §6 fallback) and the status line says what to install.
-                self.message, self.tunnel = failure, None
+                # (PLAN §6 fallback) and the status line says what to install. The tunnel is
+                # kept, for the watchdog to start each minute (revive_tunnel_if_dead): dropped,
+                # an ngrok installed while Remote was on was never started, and nothing said
+                # that only turning Remote off and on would (sweep 5 of #243).
+                self.message, self.tunnel = failure, tunnel
+                self._unstarted = tunnel
             elif current:
-                self.tunnel, self.message = tunnel, "starting ngrok…"
+                self.tunnel, self.message = tunnel, STARTING_NGROK
         if not current:  # turned off as ngrok started: this one is nobody's to stop
             if failure is None:
                 tunnel.stop_tunnel()
@@ -1213,6 +1219,9 @@ class RemoteController:
     _origin_before_revive: str | None = None
     """ngrok's address when the Remote's tunnel died, so the message can say whether the new
     one differs, however many restarts it took to get one."""
+    _unstarted: NgrokTunnel | None = None
+    """The tunnel a start could not start (no ngrok on PATH, a spawn that failed): its first
+    start is the watchdog's, and says so, since it never stopped."""
 
     def revive_tunnel_if_dead(self) -> bool:
         """Start ngrok again when it died under a Remote that is still on; ``True`` when it did.
@@ -1235,7 +1244,10 @@ class RemoteController:
         and an authtoken revoked meanwhile and put back with ``ngrok config
         add-authtoken`` brings them back at the next minute, where turning Remote off and
         on signs every one out. The new link is shown, and noted for push links, as soon
-        as ngrok announces it.
+        as ngrok announces it. A tunnel that could not start at all is tried each minute
+        too, a look on PATH until ngrok is there: one installed while Remote is on comes up
+        within the minute, where it waited for an off and on that nothing asked for (sweep
+        5 of #243).
         """
         dead = self.tunnel
         if not self.running or dead is None or dead.running:
@@ -1266,7 +1278,10 @@ class RemoteController:
                 self._origin_before_revive = self.public_origin
             self.tunnel = self._revived_tunnel = tunnel
             self.public_origin = None  # the modal shows the local link until ngrok announces one
-            self.message = "ngrok stopped — restarting it…"
+            if dead is self._unstarted:  # it never ran: nothing stopped
+                self.message = STARTING_NGROK
+            else:
+                self.message = "ngrok stopped — restarting it…"
         # Its URL says ngrok was restarted, and whether the link changed (_adopt_tunnel_url);
         # a restart that dies before it announces leaves ngrok's own error on the status line.
         self._waiter = threading.Thread(

@@ -892,9 +892,10 @@ def action_prompt_up(label: str) -> RequestError:
 
 def action_keys_guard(target: ProjectInfo, label: str, pin: str) -> None:
     """``send-keys`` with ``dialog_guard``: nothing is typed unless the agent's pane is at
-    rest (:func:`action_at_rest`). 409 ``dialog_open`` while anything typed may answer a
-    dialog (:func:`action_may_answer`), ``agent_busy`` while the agent is at work, and
-    ``not_agent`` for a pane the agent is not running.
+    rest (:func:`action_at_rest`) and the agent is not parked on its usage limit. 409
+    ``dialog_open`` while anything typed may answer a dialog (:func:`action_may_answer`),
+    ``agent_busy`` while the agent is at work or limited, and ``not_agent`` for a pane
+    the agent is not running.
 
     For a sender that does not see the pane: the page's Transcript tab, whose Send
     types its text and then Enter, ⏎ being on by default. Into a permission prompt
@@ -903,7 +904,9 @@ def action_keys_guard(target: ProjectInfo, label: str, pin: str) -> None:
     of #243, round 4). An agent at work showed none when it was read, but one
     could open before the text landed, or be on screen already with its tool use
     not yet in the transcript (sweep 4 of #243): Interrupt & tell is the way to
-    reach it from there. The agent is read from its own facts
+    reach it from there. A limited agent is at rest, and a message typed there
+    fails on its limit and parks it anew, as a tell typed there did
+    (:func:`action_type_now`). The agent is read from its own facts
     (``needs_single_agent_now``: its row, its pane, its tail), which must still be
     of the row ``pin`` names, the one the keys were going to.
     """
@@ -919,7 +922,7 @@ def action_keys_guard(target: ProjectInfo, label: str, pin: str) -> None:
             f"{label} has a tool pending, and a prompt for it may have just opened; typing "
             "now could answer it — look at its pane first",
         )
-    if not action_at_rest(snap):
+    if action_state(snap) == "limited" or not action_at_rest(snap):
         raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))
 
 
@@ -1011,17 +1014,28 @@ def action_type_now(
 ) -> tuple[bool, str]:
     """``prompt`` and ``interrupt``: type ``text`` at the agent's input prompt, now.
 
-    Both refuse an open dialog, which the Enter would answer, and a pane that is
-    not running the agent. ``prompt`` types only at an idle prompt, and otherwise
-    says what the agent is doing. ``interrupt`` sends one Escape and waits for the
-    prompt to come back. If it does not, nothing is typed. By then the Escape has
-    cut the agent's turn short, so a refusal after it is audited: ``trail`` words
-    the tell's line from how it ended.
+    Both refuse an open dialog, which the Enter would answer, a pane that is not
+    running the agent, and an agent parked on its usage limit. ``prompt`` types
+    only at an idle prompt, and otherwise says what the agent is doing.
+    ``interrupt`` sends one Escape and waits for the prompt to come back. If it does
+    not, nothing is typed. By then the Escape has cut the agent's turn short, so a
+    refusal after it is audited: ``trail`` words the tell's line from how it ended.
+
+    A limited agent sits quiet at its prompt, Claude Code's limit message its newest
+    words, and ``needs_at_input_prompt`` reads that as a prompt to type at. Both
+    modes typed there and answered ``delivered``: the message failed on the same
+    limit, its ``UserPromptSubmit`` took the row off ``limited`` and its card off the
+    feed, and the next failure parked it as a new limit, pushed again under a new id,
+    the manager nudged again and, under ``on_limit = "switch"``, another hand-over
+    asked for (sweep 4 of #243). A switch is what moves it
+    (:func:`action_busy_sentence`), so neither mode sends anything to it.
     """
     snap = snap if snap is not None else action_snapshot(target, label, pin)
     if remote_needs.needs_dialog_open(snap):
         raise action_prompt_up(label)
     action_pane_agent(snap, label)  # refused here, before the interrupt's Escape
+    if action_state(snap) == "limited":
+        raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))
     if not interrupt:
         if not remote_needs.needs_at_input_prompt(snap):
             raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))

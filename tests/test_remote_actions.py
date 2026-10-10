@@ -82,7 +82,7 @@ from aisquare.services.remote_server import (
     write_endpoint_names,
 )
 from aisquare.services.team import TeamDisabledError
-from aisquare.services.transcript import PendingTool, TranscriptTail
+from aisquare.services.transcript import PendingTool, TranscriptTail, read_transcript_tail
 from tests.remote_kit_helpers import (
     base,
     frame_within,
@@ -2540,6 +2540,84 @@ def test_prompt_types_into_a_quiet_waiting_agent_that_has_no_transcript(
     response = phone.post("agent/tell", agent=LABEL, text="hi", mode="prompt")
     assert response.status_code == 200, response.text
     assert [kind for _pane, kind, _what in pane.sent] == ["paste", "key"]
+
+
+LIMITED = "coder-1 hit its usage limit, and a message will not get past it — use Switch account"
+
+
+def _parked_on_its_limit(needs: FakeNeeds, project: ProjectInfo, tmp_path: Path) -> None:
+    """coder-1 as a usage limit leaves it: the row reads ``limited`` with its card, the pane
+    is quiet at the prompt, and the transcript ends on the record Claude Code writes for the
+    failed turn, an assistant message of its own, read by the transcript's own reader."""
+    path = tmp_path / "limited.jsonl"
+    records = [
+        {
+            "type": "user",
+            "uuid": "rec-prompt",
+            "timestamp": "2026-10-07T10:04:00Z",
+            "message": {"role": "user", "content": "run the migrations"},
+        },
+        {
+            "type": "assistant",
+            "uuid": "rec-limit",
+            "timestamp": "2026-10-07T10:04:01Z",
+            "isApiErrorMessage": True,
+            "message": {
+                "id": "msg_limit",
+                "role": "assistant",
+                "model": "<synthetic>",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "You've hit your session limit · resets 9:30am (America/Toronto)",
+                    }
+                ],
+            },
+        },
+    ]
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    needs.state = "limited"
+    needs.tail = read_transcript_tail(path)
+    needs.items = (_item(project, "ny_limit"),)
+
+
+@pytest.mark.parametrize("mode", ["prompt", "interrupt"])
+def test_a_tell_that_types_sends_nothing_to_an_agent_parked_on_its_usage_limit(
+    phone: Phone,
+    own_predicates: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    """Sweep 4 of #243: a limited agent reads as one at its prompt, its newest record its
+    own words (the limit's), and both modes typed there, Interrupt & tell after its
+    Escape, and answered ``delivered``. The message failed on the same limit, took the
+    row off ``limited`` and its card off the feed, and the next failure was a new limit,
+    pushed again. Refused before anything is sent, with what does move it."""
+    _row(project)
+    _parked_on_its_limit(own_predicates, project, tmp_path)
+    snap = own_predicates.needs_single_agent_now(project, LABEL)
+    assert needs_at_input_prompt(snap) and not needs_dialog_open(snap), "the trap: it reads idle"
+    response = phone.post("agent/tell", agent=LABEL, text="stop and push what you have", mode=mode)
+    assert response.status_code == 409
+    assert response.json() == {"error": "agent_busy", "message": LIMITED}
+    assert pane.sent == [] and phone.audit() == []
+
+
+def test_send_keys_with_the_dialog_guard_types_nothing_into_an_agent_parked_on_its_limit(
+    phone: Phone, own_predicates: FakeNeeds, pane: FakePane, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """The Transcript tab's Send, the same message by another way: at rest, and refused all
+    the same. The Live tab, which shows the limit, still types."""
+    _row(project)
+    _parked_on_its_limit(own_predicates, project, tmp_path)
+    body = {"agent": LABEL, "text": "carry on", "enter": True}
+    refused = phone.post("send-keys", **body, dialog_guard=True)
+    assert refused.status_code == 409
+    assert refused.json() == {"error": "agent_busy", "message": LIMITED}
+    assert pane.sent == []
+    assert phone.post("send-keys", **body).status_code == 200
 
 
 # --- what may answer a prompt: auto's tell, and send-keys with the guard -----------------------

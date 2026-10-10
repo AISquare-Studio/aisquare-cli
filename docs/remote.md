@@ -299,6 +299,8 @@ From an agent's **Actions…** menu, or from a card:
 | Interrupt & tell | one Esc stops what the agent is doing; the message is typed once it is back at its prompt |
 
 When an agent is working, a card's Tell offers **Interrupt & tell** instead.
+Neither types into an agent parked on its usage limit (`agent_busy`): a message
+fails on the same limit until the reset, and **Switch account** is what moves it.
 
 **Stop**, **Restart** and **Switch account** each open a sheet that says in one
 sentence what will happen, and send the agent's name as confirmation. Restart
@@ -323,9 +325,10 @@ into an agent waiting at its prompt: while the agent may be showing a prompt,
 even one left unanswered for hours, the message is left as a board note instead.
 Send on the Transcript tab, which does not show the pane, types only into an
 agent still at its prompt: nothing while it may be showing a prompt, a tool with
-no result yet included, or is at work (`agent_busy`); send from Live, where the
-pane shows what the keys would answer. Its Send and keys wait until the
-transcript has loaded, which names the agent they go to.
+no result yet included, or is at work or parked on its usage limit
+(`agent_busy`); send from Live, where the pane shows what the keys would answer.
+Its Send and keys wait until the transcript has loaded, which names the agent
+they go to.
 
 Every action, and every key or line you type, is pinned to the agent you
 looked at: if a manager restarted or switched it in the meantime, it is refused

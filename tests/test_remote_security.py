@@ -408,6 +408,31 @@ def test_a_send_of_32_keys_that_fails_still_says_failed_and_enter_on_its_audit_l
     )
 
 
+def test_a_key_list_on_an_audit_line_fits_its_room_and_accounts_for_every_key() -> None:
+    """A send's line and a quick answer's (``remote_needs``) both write their outcome after
+    the keys, and the quick answer's ``enter=`` and ``failed`` were cut off the same way: 32
+    keys spelled out took up to 290 characters (sweep 5 of #243). Whatever 32 keys are
+    sent, the list fits :data:`AUDIT_KEYS_MAX` and still says, in order, every key it
+    names, how many times, and how many it left out."""
+    import random
+
+    names = ["PageDown", "PageUp", "BSpace", "Escape", "Delete", "F12", "C-c", "9"]
+    draw = random.Random(243)
+    for _ in range(500):
+        keys = [draw.choice(names) for _ in range(SEND_KEYS_KEYS_MAX)]
+        listed = remote_server._audit_keys(keys)
+        assert len(listed) <= remote_server.AUDIT_KEYS_MAX + 2, listed
+        named: list[str] = []
+        left_out = 0
+        for entry in listed.removeprefix("[").removesuffix("]").split(","):
+            if entry.startswith("…+"):
+                left_out = int(entry.removeprefix("…+"))
+            else:
+                name, _, count = entry.partition("*")
+                named += [name] * int(count or 1)
+        assert named == keys[: len(named)] and len(named) + left_out == len(keys), listed
+
+
 def test_a_key_outside_the_allowlist_sends_nothing_at_all(pane: FakePane) -> None:
     send = live_writes().handlers["send-keys"]
     with pytest.raises(RequestError):

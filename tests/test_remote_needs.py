@@ -1884,6 +1884,95 @@ def test_text_that_asks(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
+        "The branch is green.\n\nShould I go ahead and merge it? (y/n)",
+        "Want me to also update the README? (It still mentions the old flag.)",
+        "Proceed with the migration? [y/N]",
+        "Merge it now? (y/n) [default: no]",
+        "Shall I deploy to staging? 🚀",
+        "Ready to merge? 👍🏽",
+        "Ship it? ❤️",
+        "**Should I push? (it is a force-push)**",
+        "要我现在提交吗\uff1f",
+        "缓存已经改好了。\n\n你想用哪种方案\uff1f\n1. Redis\n2. SQLite\n3. 不用缓存",
+        "この変更をコミットしてもよろしいですか\uff1f",
+        "هل تريد أن أدفع التغييرات الآن؟",
+    ],
+)
+def test_text_that_asks_after_its_question_mark_or_with_another_one(text: str) -> None:
+    """``?`` alone, then quotes and brackets alone, missed a question followed by an aside or
+    an emoji, and every question asked in Chinese, Japanese or Arabic, in which Claude answers
+    its human: no card and no push for an agent waiting on an answer (review of #243, sweep
+    3). The card shows the question it found."""
+    assert looks_like_a_question(text)
+    row = _row()
+    tail = _tail(newest="assistant_text", text=text)
+    item = _one(_classify(_status(row, "waiting", _session(row, state="waiting")), tail))
+    assert item.kind == "asked" and item.excerpt
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Fixed the parser (see below).",
+        "Updated the docs [skip ci]",
+        "Merged (was it the cache?) and pushed.",
+        "Done 🚀",
+        "缓存已经改好了。",
+        "Fixed in [#123](https://example.com/pull/123)",
+    ],
+)
+def test_an_aside_or_an_emoji_alone_asks_nothing(text: str) -> None:
+    assert not looks_like_a_question(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Tests pass? ✅",
+        "- Lint clean? ✔️",
+        "* Types check? ✔",
+        "Migrations reversible? ❌ (the drop is not)",
+    ],
+)
+def test_a_checklist_line_ticked_after_its_question_reports_and_asks_nothing(text: str) -> None:
+    """An emoji may follow a question ("Shall I deploy? 🚀"), but a check or cross mark after
+    one is a closing checklist's result, not a question to the human (review of #243, round
+    5)."""
+    assert not looks_like_a_question(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "asks"),
+    [
+        ("Merge it now? " + "(a) " * 8_000, True),
+        (" ".join(f"[#{n}](https://example.com/pull/{n})" for n in range(1_000)), False),
+    ],
+    ids=["asides", "links"],
+)
+def test_a_long_line_of_asides_or_links_is_read_in_one_pass(text: str, asks: bool) -> None:
+    """The question test runs every scan, and every quarter second of an interrupt, on an
+    assistant's last text, up to a 256 KiB record. Searching the line for its last aside again
+    after each one took seconds on a line of 1 000 links, and minutes on a 256 KiB one of
+    ``(a)``s (review of #243, round 5). Each aside is read once now: milliseconds."""
+    started = time.perf_counter()
+    assert looks_like_a_question(text) is asks
+    assert time.perf_counter() - started < 0.5
+
+
+def test_a_long_line_of_backtick_runs_is_read_in_one_pass() -> None:
+    """Pairing each run of backticks against the rest of its line took over a second on a
+    256 KiB line of runs of different lengths, none closed (review of #243, round 5). Each run
+    is paired with the next of its length now, in one pass."""
+    text = " ".join("`" * size for size in range(1, 720)) + " — keep these?"
+    assert len(text) > 250_000
+    started = time.perf_counter()
+    assert looks_like_a_question(text)
+    assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "",
         "Done.",
         "Why did it fail? The cache was cold.\n\nFixed and pushed.",
@@ -2030,6 +2119,36 @@ def test_an_unreadable_dismissals_file_dismisses_nothing(body: str) -> None:
     assert load_needs_dismissals() == {}
 
 
+def test_a_dismissals_stamp_and_asq_remote_needs_age_are_read_as_the_server_reads_a_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both read an ISO stamp with copies of the rule ``remote_server._remote_instant`` is the
+    one reader of: with an offset as it says, without one as UTC. A copy that drifted read
+    stamps unlike the server that wrote them, as the push sender's once read a device's
+    expiry as local time (review of #243, round 3): the next change to the rule is made in
+    one place, and both read through it."""
+    from aisquare.cli.remote import _needs_age
+    from aisquare.services import remote_server
+
+    read: list[object] = []
+    real = remote_server._remote_instant
+
+    def reading(text: object, *, naive_is_local: bool = False) -> datetime | None:
+        read.append(text)
+        return real(text, naive_is_local=naive_is_local)
+
+    monkeypatch.setattr(remote_server, "_remote_instant", reading)
+    naive = (datetime.now(UTC) - timedelta(days=6)).replace(tzinfo=None).isoformat()
+    _seed_dismissals({"ny_naive": naive, "ny_garbled": "last tuesday"})
+    record_needs_dismissal("ny_newest")
+    assert set(load_needs_dismissals()) == {"ny_naive", "ny_newest"}, "naive is UTC: 6 days"
+    assert naive in read and "last tuesday" in read
+    assert _needs_age("2026-10-07T10:55:00", NOW) == "1h05m"
+    assert _needs_age("2026-10-07T13:55:00+02:00", NOW) == "5m"
+    assert _needs_age(None, NOW) == _needs_age("soon", NOW) == "?"
+    assert {"2026-10-07T10:55:00", "2026-10-07T13:55:00+02:00", None, "soon"} <= set(read)
+
+
 # --- one agent, now: the predicates actions rely on ---------------------------------------
 
 
@@ -2084,11 +2203,10 @@ class FakeTmux:
         return True
 
     def run(self, *args: str, stdin: bytes | None = None) -> str:
-        if args[:2] == ("list-panes", "-a"):
-            return ""  # the fleet listing's output times: none, so the board's state decides
-        assert args[:3] == ("display-message", "-p", "-t") and args[-1] == "#{window_activity}"
-        self.asked.append(args[3])
-        return self.output_epoch()
+        # Every fact about the pane is asked through `pane_facts`, the one format `PaneFacts`
+        # owns: a question of its own here is the copy of it needs-you once kept.
+        assert args[:2] == ("list-panes", "-a"), f"only the fleet's listing runs tmux: {args}"
+        return ""  # the fleet listing's output times: none, so the board's state decides
 
     def send_keys(self, pane_id: str, *keys: str) -> None:
         if self.fail:
@@ -2099,6 +2217,9 @@ class FakeTmux:
 
     def send_literal(self, pane_id: str, text: str) -> None:
         self.typed.append(("text", pane_id, text))
+
+    def paste(self, pane_id: str, text: str) -> None:
+        self.typed.append(("paste", pane_id, text))
 
 
 def _now_of(
@@ -2346,6 +2467,43 @@ def test_at_the_prompt_takes_a_quiet_pane_tmux_vouches_for(monkeypatch: pytest.M
     assert not needs_at_input_prompt(
         _now_of(_working(mid_turn), FakeTmux(reference=NOW), monkeypatch)
     )
+
+
+_NOTHING_WRITTEN = TranscriptTail(
+    pending=(), newest="none", newest_at=None, last_text=None, last_text_at=None,
+    marker_key=None, empty=True,
+)  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("tail", "quiet_for", "at_prompt"),
+    [
+        pytest.param(_NOTHING_WRITTEN, 60.0, True, id="nothing written yet"),
+        pytest.param(
+            _tail(newest="tool_result", at=BORN - timedelta(minutes=1)),
+            60.0,
+            True,
+            id="only a resumed session's records",
+        ),
+        pytest.param(_NOTHING_WRITTEN, 1.0, False, id="a pane at work"),
+        pytest.param(_tail(newest="user_prompt"), 60.0, False, id="its first prompt written"),
+        pytest.param(None, 60.0, False, id="a transcript that cannot be read"),
+    ],
+)
+def test_a_session_at_its_fresh_prompt_is_at_its_prompt_though_the_board_says_working(
+    tail: TranscriptTail | None, quiet_for: float, at_prompt: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session starts ``working`` on the board, which is trusted for 30 minutes: an agent
+    spawned with no prompt, or after a ``/clear``, read as busy at its fresh prompt, and
+    neither prompt mode nor Interrupt & tell could reach it (review of #243, sweep 3). A
+    turn writes the human's prompt before anything else, and its pane animates while it
+    runs: a quiet pane over a transcript this process has written nothing in is a prompt.
+    A transcript that cannot be read says nothing of what was written."""
+    snap = _now_of(_working(tail), FakeTmux(reference=NOW, quiet_for=quiet_for), monkeypatch)
+    assert snap.status is not None and snap.status.state == "working"
+    assert needs_at_input_prompt(snap) is at_prompt
+    noticed = _now_of(_working(tail, state="attention"), FakeTmux(reference=NOW), monkeypatch)
+    assert not needs_at_input_prompt(noticed), "a dialog at its start is still a dialog"
 
 
 def test_quiet_is_unknown_when_tmux_will_not_say(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2954,6 +3112,207 @@ def test_the_live_sources_take_a_turn_that_died_on_an_api_error_for_one_that_nee
     )
 
 
+def _live_agent(
+    store: Any,
+    project: ProjectInfo,
+    label: str,
+    *,
+    state: str,
+    seen: datetime,
+    born: datetime,
+    transcript: Path | None = None,
+    resets: datetime | None = None,
+) -> TeamSession:
+    """``label``'s fleet row and session in the store, its pane ``%<n>`` of its label."""
+    session = TeamSession(
+        id=f"ses_{label}", project_id=project.id, role="coder", label=label, started_at=born,
+        last_seen_at=seen, state=state, limit_resets_at=resets,
+        transcript_path=None if transcript is None else str(transcript),
+    )  # fmt: skip
+    store.upsert_session(session)
+    store.upsert_fleet_agent(
+        FleetAgent(
+            id=f"agt_{label}", project_id=project.id, label=label, role="coder",
+            pane_id=f"%{label[-1]}", session_id=session.id, cwd=project.root, created_at=born,
+        )
+    )  # fmt: skip
+    return session
+
+
+def _transcript(path: Path, *records: dict[str, Any]) -> Path:
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    return path
+
+
+def _counted_session_events(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Every ``(session, kind)`` the store is asked for its newest event of, from now on."""
+    from aisquare.core.store import SqliteStore
+
+    asked: list[tuple[str, str]] = []
+    real = SqliteStore.newest_session_event
+
+    def counted(self: Any, project_id: str, session_id: str, kind: str, **kw: Any) -> Any:
+        asked.append((session_id, kind))
+        return real(self, project_id, session_id, kind, **kw)
+
+    monkeypatch.setattr(SqliteStore, "newest_session_event", counted)
+    return asked
+
+
+def test_the_live_sources_keep_a_dialogs_and_a_limits_cards_past_a_busy_board(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the store and the fleet's listing: a dialog and a parked limit are named by
+    their sessions' own ``attention`` and ``limited`` events. The window of the newest
+    events holds them, and the store is asked for neither; 300 notes later the window
+    no longer does, and the store's own read of each session finds them, so both cards
+    keep their ids and their words. Every other test of this hands the scan fakes: the
+    live window, the session read and their arguments could each be stubbed out with the
+    suite green, and a card that changed its id was pushed again, its dismissal lost
+    (review of #243, sweep 3)."""
+    now = datetime.now(UTC)
+    root = tmp_path / "alpha"
+    said = {
+        "type": "assistant",
+        "uuid": "a1",
+        "timestamp": (now - timedelta(minutes=2)).isoformat(),
+        "message": {"id": "m1", "role": "assistant", "content": [{"type": "text", "text": "OK"}]},
+    }
+    words = "Claude needs your permission to use the deploy MCP tool"
+    with store_session() as store:
+        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        asking = _live_agent(
+            store, project, "coder-1", state="attention", seen=now - timedelta(minutes=1),
+            born=now - timedelta(hours=1), transcript=_transcript(tmp_path / "c1.jsonl", said),
+        )  # fmt: skip
+        parked = _live_agent(
+            store, project, "coder-2", state="limited", seen=now - timedelta(hours=2),
+            born=now - timedelta(hours=3), resets=now + timedelta(hours=3),
+        )  # fmt: skip
+        for session, kind, text, at in (  # in the order they were written: seq is time
+            (parked, "limited", "coder-2 hit its usage limit", now - timedelta(hours=2)),
+            (asking, "attention", words, now - timedelta(minutes=1)),
+        ):
+            store.add_team_event(
+                TeamEvent(
+                    id=f"evt_{kind}", project_id=project.id, session_id=session.id, kind=kind,
+                    text=text, created_at=at,
+                )
+            )  # fmt: skip
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    asked = _counted_session_events(monkeypatch)
+
+    def cards() -> dict[str, tuple[str, str, object]]:
+        items = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+        return {item.agent or "": (item.kind, item.id, item.detail.get("text")) for item in items}
+
+    before = cards()
+    assert before == {
+        "coder-1": ("permission", before["coder-1"][1], words),
+        "coder-2": ("limited", before["coder-2"][1], "coder-2 hit its usage limit"),
+    }
+    assert asked == [], "the window held both events: no read of a session of its own"
+    with store_session() as store:
+        for n in range(remote_needs.NEEDS_BOARD_EVENTS):
+            store.add_team_event(
+                TeamEvent(
+                    id=f"evt_note_{n}", project_id=project.id, kind="note", text=f"note {n}",
+                    created_at=now - timedelta(seconds=30),
+                )
+            )  # fmt: skip
+    assert cards() == before, "the same cards, under the same ids, with the same words"
+    assert sorted(asked) == [("ses_coder-1", "attention"), ("ses_coder-2", "limited")]
+    snap = needs_agent_now(project, "coder-1", now=now)
+    assert [(item.kind, item.id) for item in snap.items] == [("permission", before["coder-1"][1])]
+
+
+def test_the_live_sources_ask_tmux_when_a_sub_agents_pane_last_printed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the store, the fleet's listing and the pane's facts: a sub-agent's next prompt
+    has no card until its notice, and a pane that printed after the last one, within
+    ``_NOTICE_WAIT``, is that next prompt being drawn. The scan read when the pane printed
+    with a ``display-message`` and a parse of its own, beside the one ``PaneFacts`` owns
+    and the snapshot reads, so the two could read one pane by two rules; and no test ran
+    the live read at all: stubbed out, the card of the prompt before stayed, and its "1"
+    approved the next (review of #243, round 5)."""
+    now = datetime.now(UTC)
+    root = tmp_path / "alpha"
+    task = {"type": "tool_use", "id": "toolu_task", "name": "Task", "input": {"description": "x"}}
+    running = {
+        "type": "assistant",
+        "uuid": "a1",
+        "timestamp": (now - timedelta(minutes=5)).isoformat(),
+        "message": {"id": "m1", "role": "assistant", "content": [task]},
+    }
+    with store_session() as store:
+        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=root))
+        _live_agent(
+            store, project, "coder-1", state="attention", seen=now - timedelta(minutes=1),
+            born=now - timedelta(hours=1), transcript=_transcript(tmp_path / "c1.jsonl", running),
+        )  # fmt: skip
+    drawing = FakeTmux(quiet_for=10)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: drawing)
+    assert scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=()) == []
+    assert "%1" in drawing.asked, "asked through the pane's facts"
+    snap = needs_agent_now(project, "coder-1", now=now)
+    assert snap.items == () and snap.pane_quiet is True
+    quiet = FakeTmux(quiet_for=120)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: quiet)
+    (item,) = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+    assert (item.kind, item.reason) == (
+        "permission",
+        "coder-1 waits for a permission answer (in a sub-agent)",
+    )
+    assert [card.id for card in needs_agent_now(project, "coder-1", now=now).items] == [item.id]
+
+
+def test_a_session_at_its_fresh_prompt_is_told_now_in_prompt_and_interrupt_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the store, the fleet's listing, the cached tail and the tell itself: a session
+    the board has as ``working`` since it started, its transcript not made yet (Claude Code
+    makes it with the first record), its pane quiet. Prompt mode answered ``agent_busy``,
+    and Interrupt & tell sent its Escape, waited 8 s and typed nothing (review of #243,
+    sweep 3). Once its first prompt is written, a turn runs, and both refuse again."""
+    from aisquare.services import remote_actions
+    from aisquare.services.remote_server import RequestError
+
+    now = datetime.now(UTC)
+    transcript = tmp_path / "coder-1.jsonl"
+    with store_session() as store:
+        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=tmp_path / "alpha"))
+        _live_agent(
+            store, project, "coder-1", state="working", seen=now - timedelta(seconds=10),
+            born=now - timedelta(seconds=12), transcript=transcript,
+        )  # fmt: skip
+    tmux = FakeTmux(quiet_for=8)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    snap = needs_agent_now(project, "coder-1")
+    assert snap.status is not None and snap.status.state == "working"
+    assert snap.tail is not None and snap.tail.empty and needs_at_input_prompt(snap)
+    body = {"agent": "coder-1", "text": "start on the cache", "project": project.id}
+    for mode in ("prompt", "interrupt"):
+        result, _line = remote_actions.action_tell({**body, "mode": mode})
+        assert result["delivered"] is True, result
+    assert tmux.typed == [
+        ("paste", "%1", "start on the cache"), ("keys", "%1", "Enter"),
+        ("keys", "%1", "Escape"), ("paste", "%1", "start on the cache"), ("keys", "%1", "Enter"),
+    ]  # fmt: skip
+    prompted = {
+        "type": "user",
+        "uuid": "u1",
+        "timestamp": now.isoformat(),
+        "message": {"role": "user", "content": "start on the cache"},
+    }
+    _transcript(transcript, prompted)
+    assert not needs_at_input_prompt(needs_agent_now(project, "coder-1"))
+    with pytest.raises(RequestError) as busy:
+        remote_actions.action_tell({**body, "mode": "prompt"})
+    assert (busy.value.status, busy.value.error) == (409, "agent_busy")
+
+
 # --- the watcher --------------------------------------------------------------------------
 
 
@@ -3270,6 +3629,108 @@ def test_the_feeds_stamps_are_the_apis_whatever_zone_they_were_read_in(
     assert isinstance(shown, str) and shown.endswith("+00:00")
 
 
+def test_a_dismissal_holds_for_as_long_as_its_card_would_show(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pane that stays lost keeps its id until it is reaped, and an agent idle at its
+    question keeps its own. A dismissal was dropped a week after it was made, at the next one
+    written, and the card came back to every phone (review of #243, sweep 3). Each scan that
+    still finds a dismissed item dates its dismissal again, once a day; one whose item is
+    gone goes a week later, as before."""
+    clock = [NOW]
+    monkeypatch.setattr(remote_needs, "_needs_now", lambda: clock[0])
+    lost = _row()
+    fleet = Fleet(agents=[_status(lost, "lost", _session(lost))])
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    watcher = RemoteNeedsWatcher(app.kit, sources=lambda: _sources(fleet), clock=lambda: clock[0])
+    (card,) = watcher.scan_needs_now()
+    record_needs_dismissal(card.id)
+    for day in range(1, 9):
+        clock[0] = NOW + timedelta(days=day, minutes=1)
+        assert watcher.scan_needs_now() == []
+    record_needs_dismissal("ny_another_card0")  # what no scan needed for a week goes now
+    assert card.id in load_needs_dismissals()
+    assert watcher.scan_needs_now() == [], "the pane is still lost, and still dismissed"
+    fleet.agents.clear()  # reaped
+    for day in range(9, 17):
+        clock[0] = NOW + timedelta(days=day, minutes=1)
+        assert watcher.scan_needs_now() == []
+    record_needs_dismissal("ny_a_third_card0")
+    assert card.id not in load_needs_dismissals(), "unneeded for a week: dropped"
+
+
+def test_tmux_not_answering_is_one_card_through_a_restart_of_remote(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``fleet_down``'s id is the first scan that saw tmux stop answering, and the watcher
+    kept that in memory alone: every Remote toggle, TUI restart or ``serve`` restart made the
+    same outage a new card, its dismissal lost and the phone pushed again, and ``asq remote
+    needs`` gave it an id and an age of its own each run (review of #243, sweep 3). The
+    sighting is kept on disk, read by the next watcher and by the command, and let go when
+    tmux answers again; one from before a live row was made is another outage's."""
+    from aisquare.services.remote_server import RemoteKit
+
+    one, two = _row("coder-1"), _row("coder-2")
+    fleet = Fleet(agents=[_status(one, "unknown"), _status(two, "unknown")])
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: _sources(fleet))
+
+    def watcher_at(at: datetime) -> RemoteNeedsWatcher:
+        return RemoteNeedsWatcher(
+            RemoteKit(runtime), sources=lambda: _sources(fleet), clock=lambda: at
+        )
+
+    elsewhere = timezone(timedelta(hours=-7))  # the id is the same whatever zone a clock reads
+    (down,) = watcher_at(NOW.astimezone(elsewhere)).scan_needs_now()
+    assert down.kind == "fleet_down"
+    monkeypatch.setattr(remote_needs, "_needs_now", lambda: NOW + timedelta(minutes=5))
+    items = remote_needs.needs_cli_payload()["items"]
+    assert isinstance(items, list)
+    (said,) = items
+    assert (said["id"], said["since"]) == (down.id, "2026-10-07T12:00:00+00:00")
+    record_needs_dismissal(down.id)
+    restarted = watcher_at(NOW + timedelta(minutes=10))
+    assert restarted.scan_needs_now() == [], "the same outage, still dismissed"
+    fleet.agents = [_status(row, "waiting", _session(row, state="waiting")) for row in (one, two)]
+    assert restarted.scan_needs_now() == []
+    assert remote_needs._needs_first_seen_kept() == {}, "tmux answers: let go on disk too"
+    fleet.agents = [_status(one, "unknown"), _status(two, "unknown")]
+    (again,) = watcher_at(NOW + timedelta(minutes=12)).scan_needs_now()
+    assert again.id != down.id, "tmux answered in between: a new outage, a new card"
+    spawned = _row("coder-3", created=NOW + timedelta(minutes=20))
+    fleet.agents.append(_status(spawned, "unknown"))
+    (later,) = watcher_at(NOW + timedelta(minutes=30)).scan_needs_now()
+    assert later.id != again.id and later.since == NOW + timedelta(minutes=30), (
+        "a row made since the kept sighting: tmux answered while no watcher looked"
+    )
+
+
+def test_a_lost_panes_card_keeps_its_date_through_a_restart_and_in_asq_remote_needs(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pane gone has no date of its own, so its card is dated by the first scan that saw
+    it, in the same memory as ``fleet_down``'s: a restart of Remote said it had just gone,
+    and ``asq remote needs`` said so every run (sweep of #243, the instance of round 5's
+    ``fleet_down`` in the same memory)."""
+    from aisquare.services.remote_server import RemoteKit
+
+    lost = _row()
+    fleet = Fleet(agents=[_status(lost, "lost", _session(lost))])
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: _sources(fleet))
+
+    def watcher_at(at: datetime) -> RemoteNeedsWatcher:
+        return RemoteNeedsWatcher(
+            RemoteKit(runtime), sources=lambda: _sources(fleet), clock=lambda: at
+        )
+
+    (card,) = watcher_at(NOW).scan_needs_now()
+    (again,) = watcher_at(NOW + timedelta(minutes=10)).scan_needs_now()
+    assert (again.id, again.since) == (card.id, NOW)
+    monkeypatch.setattr(remote_needs, "_needs_now", lambda: NOW + timedelta(minutes=15))
+    items = remote_needs.needs_cli_payload()["items"]
+    assert isinstance(items, list)
+    assert [item["since"] for item in items] == ["2026-10-07T12:00:00+00:00"]
+
+
 # --- the routes (SPEC §4.6) ---------------------------------------------------------------
 
 
@@ -3364,6 +3825,51 @@ def test_a_dismissal_of_nothing_is_refused(
     assert (response.status_code, response.json()["error"]) == (status, error)
     # The trail may hold other lines (the unlock is audited, SPEC §1.3); not a dismissal.
     assert not any(" needs/dismiss " in line for line in live.audit())
+
+
+def test_a_dismissal_that_cannot_be_saved_says_so_and_keeps_the_card(live: Live) -> None:
+    """Saved nowhere, it was a 500 with no JSON; hidden in memory alone, the card came back
+    with the next start, the phone told it was gone for good."""
+    card = live.card("permission")
+    remote_needs_path().unlink(missing_ok=True)
+    remote_needs_path().mkdir(parents=True)  # a path no file can be written to
+    response = live.client.post(live.url("needs/dismiss"), json={"id": card["id"]})
+    assert response.status_code == 503, response.text
+    assert response.json()["error"] == "unavailable"
+    assert response.json()["message"].startswith("the dismissal could not be saved: ")
+    assert card["id"] in [item["id"] for item in live.feed()]
+    assert not any(" needs/dismiss " in line for line in live.audit())
+
+
+def test_a_needs_read_over_a_store_that_cannot_be_opened_is_a_503_as_every_read_is(
+    runtime: Runtime, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The feed, a dismissal and an answer scan for themselves when no scan has run, and that
+    scan raised: a bare 500 ``text/plain``, its traceback on the terminal once a request,
+    where ``api/projects`` and every other read answer 503 ``unavailable`` in JSON and the
+    watcher tells a failing scan once a streak (review of #243, sweep 3)."""
+    from aisquare.core.paths import db_path
+
+    db_path().parent.mkdir(parents=True, exist_ok=True)
+    db_path().write_bytes(b"this is not a database\n" * 256)
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    client = make_client(app)
+    assert unlock(client, runtime).status_code == 200
+    runtime.set_allow_write(True)
+    caplog.set_level(logging.DEBUG, logger=remote_needs.__name__)
+    api = f"{base(runtime)}/api"
+    answers = [
+        client.get(f"{api}/needs"),
+        client.get(f"{api}/needs"),
+        client.post(f"{api}/needs/dismiss", json={"id": "ny_0000000000000000"}),
+        client.post(f"{api}/needs/answer", json={"id": "ny_0000000000000000", "keys": ["1"]}),
+    ]
+    for response in answers:
+        assert response.status_code == 503, response.text
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json() == {"error": "unavailable", "message": "file is not a database"}
+    told = [r for r in caplog.records if r.name == remote_needs.__name__ and r.levelno >= 30]
+    assert len(told) == 1 and told[0].exc_info is None, [r.getMessage() for r in told]
 
 
 def test_an_answer_is_refused_while_writes_are_off(live: Live) -> None:
@@ -3526,6 +4032,17 @@ def test_an_answer_is_keys_or_words_never_both(
     assert live.tmux.typed == []
 
 
+def test_an_answer_in_words_beside_no_keys_is_words_as_send_keys_takes_it(live: Live) -> None:
+    """A client that always sends ``keys``, empty when the human typed, sent no key to lose
+    the order of: ``send-keys`` takes the body, and a quick answer refused it as both."""
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    body = {"id": card["id"], "keys": [], "text": "yes", "enter": True}
+    response = live.client.post(live.url("needs/answer"), json=body)
+    assert response.status_code == 200, response.text
+    assert live.tmux.typed == [("text", "%7", "yes"), ("keys", "%7", "Enter")]
+
+
 @pytest.mark.parametrize("text", ["\x03", "yes\x1b[201~", "no\x7f", "ok\x04", "1\r"])
 def test_an_answer_in_words_carries_no_control_character(live: Live, text: str) -> None:
     """Words reach the pane byte for byte, so a control in them would be a keystroke
@@ -3574,6 +4091,31 @@ def test_an_answer_needs_the_listing_it_rechecks_against(live: Live) -> None:
     response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
     assert response.status_code == 503
     assert response.json() == {"error": "fleet_unavailable", "message": "tmux is not installed"}
+    assert live.tmux.typed == []
+    assert not remote_agent_lock(PROJECT.id, "coder-1").locked(), "the lock is let go"
+
+
+def test_an_answer_whose_store_fails_as_it_rechecks_is_a_503_not_a_bare_500(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scan read the card, and the store failed as the answer derived the agent again:
+    only the fleet's own errors were answered, and this one was a 500 with no JSON."""
+    from aisquare.core.store import StoreUnopenable
+
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+
+    def unopenable(project: ProjectInfo) -> list[FleetAgentStatus]:
+        raise StoreUnopenable("file is not a database")
+
+    monkeypatch.setattr(
+        remote_needs,
+        "live_needs_sources",
+        lambda: replace(_sources(live.fleet), list_agents=unopenable),
+    )
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert response.status_code == 503, response.text
+    assert response.json() == {"error": "unavailable", "message": "file is not a database"}
     assert live.tmux.typed == []
     assert not remote_agent_lock(PROJECT.id, "coder-1").locked(), "the lock is let go"
 

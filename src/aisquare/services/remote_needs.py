@@ -47,6 +47,7 @@ import math
 import os
 import re
 import threading
+import unicodedata
 from collections.abc import Callable, Collection, Mapping, MutableMapping, MutableSet, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -230,6 +231,9 @@ _ESCAPES = re.compile(
 
 _DISMISSALS_KEEP = 500
 _DISMISSALS_AGE = timedelta(days=7)
+_DISMISSALS_REDATED = timedelta(days=1)
+"""How old a dismissal a scan still needs gets before the scan dates it again: one write a
+day for each card that stays hidden, and a week to spare."""
 _dismissals_lock = threading.Lock()
 
 
@@ -462,12 +466,14 @@ def looks_like_a_question(text: str) -> bool:
     (Swift's ``String?``, SQL's ``WHERE id = ?``, Ruby's ``admin?``, a lazy
     ``(.*?)``), and a closing summary that showed some was an ``asked`` card,
     pushed again every turn. Each line is read without its markdown (``*_`>#``)
-    and trailing quotes, brackets and spaces. The text asks when a line ending in
-    ``?`` lies in its last paragraph (after its last blank line outside a code
-    block), or among its last 12 non-empty lines and within its last 600
-    characters. So "Which approach? 1. … 2. …" asks, and so does a coder's
-    closing "Want me to commit this?" — which the push policy, not this test,
-    keeps from crying wolf.
+    and trailing quotes, brackets, spaces and emoji (a check or cross mark is a
+    checklist's result, and stays), nor an aside in parentheses or brackets after
+    its question (:func:`_needs_line_asks`). The text asks when a line ending in a
+    question mark (``?``, or a script's own) lies in its last paragraph (after its
+    last blank line outside a code block), or among its last 12 non-empty lines
+    and within its last 600 characters. So "Which approach? 1. … 2. …" asks, and
+    so does a coder's closing "Want me to commit this?" — which the push policy,
+    not this test, keeps from crying wolf.
     """
     lines = _needs_lines(text)
     body = "\n".join(lines)
@@ -500,12 +506,24 @@ def looks_like_a_question(text: str) -> bool:
 _NEEDS_TRAILING = " \t*_`>#\"'\u201d\u2019\u00bb)]}"
 """What a line may end with after its question mark: markdown, closing quotes and brackets."""
 
+_NEEDS_QUESTION_MARKS = frozenset("?\uff1f\u061f\ufe56\u2047\u2048\u2049\u203d")
+"""What ends a question: ``?``, the fullwidth one of Chinese and Japanese (U+FF1F), the one of
+Arabic, Persian and Urdu (U+061F), and their variants. Claude answers in the human's language."""
+
+_NEEDS_SYMBOLS = frozenset({"So", "Sk", "Cf", "Mn", "Me"})
+"""Unicode categories a line may also end with after its question: an emoji, and its skin
+tone, variation selector, joiner or keycap."""
+
+_NEEDS_TICKS = frozenset("\u2705\u2611\u2612\u2713\u2714\u2716\u2717\u2718\u274c\u274e")
+"""Check and cross marks, symbols that do not close a question: "Tests pass? ✅" in a closing
+checklist reports a result."""
+
 _NEEDS_FENCE = re.compile(r"[ \t>]*(`{3,}|~{3,})")
 """A line that opens or closes a fenced code block: three backticks or tildes or more, after
 an indent or a blockquote's marks."""
 
-_NEEDS_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`).+?(?<!`)\1(?!`)")
-"""An inline code span: a run of backticks, to the next run of as many."""
+_NEEDS_TICK_RUN = re.compile(r"`+")
+"""A run of backticks, which opens or closes an inline code span."""
 
 _NEEDS_LIST_ITEM = re.compile(r"( *)([-*+]|\d{1,9}[.)])( +|$)")
 """A list item's first line: its marker, after an indent, and the spaces to its content."""
@@ -576,16 +594,101 @@ def _needs_prose(lines: Sequence[str]) -> list[str | None]:
                     items.pop()
                 gap = len(item.group(3))
                 items.append(item.end(2) + (gap if 1 <= gap <= 4 else 1))
-            prose.append(_NEEDS_CODE_SPAN.sub("", line))
+            prose.append(_needs_without_spans(line))
     return prose
 
 
+def _needs_without_spans(line: str) -> str:
+    """``line`` without its inline code spans: each a run of backticks, to the next run of as
+    many.
+
+    Each run is found once and paired with the next of its length. A pattern that tried
+    each run against the rest of the line took over a second on one long line of runs of
+    different lengths, an unclosed one each (review of #243, round 5).
+    """
+    runs = [(found.start(), found.end()) for found in _NEEDS_TICK_RUN.finditer(line)]
+    closes: dict[int, int] = {}  # a run → the next run of its length
+    nearest: dict[int, int] = {}  # a length → the run of it nearest after this one
+    for index in range(len(runs) - 1, -1, -1):
+        size = runs[index][1] - runs[index][0]
+        if size in nearest:
+            closes[index] = nearest[size]
+        nearest[size] = index
+    kept: list[str] = []
+    copied = 0
+    index = 0
+    while index < len(runs):
+        close = closes.get(index)
+        if close is None:
+            index += 1
+            continue
+        kept.append(line[copied : runs[index][0]])
+        copied = runs[close][1]
+        index = close + 1
+    kept.append(line[copied:])
+    return "".join(kept)
+
+
 def _needs_line_asks(line: str) -> bool:
-    return line.rstrip(_NEEDS_TRAILING).endswith("?")
+    """Whether a prose line ends on a question: its mark, then only what may close a line
+    (:data:`_NEEDS_TRAILING`, a symbol such as an emoji), or asides after it.
+
+    ``?`` alone, then quotes and brackets alone, missed "Merge it? (y/n)", "Shall I deploy
+    to staging? 🚀", and every question asked in Chinese, Japanese or Arabic: no card and
+    no push for an agent waiting on its human's answer (review of #243, sweep 3).
+
+    One pass from the end, each aside read once: searching the line for its last aside
+    again after each one took seconds to minutes on a long line of links or ``(a)``s, run
+    every scan and every quarter second of an interrupt (review of #243, round 5).
+    """
+    end = len(line)
+    while True:
+        mark = end
+        while mark and _needs_closes(line[mark - 1]):
+            mark -= 1
+        if mark and line[mark - 1] in _NEEDS_QUESTION_MARKS:
+            return True
+        end = _needs_aside_start(line, end)
+        if not end:
+            return False
+
+
+def _needs_closes(char: str) -> bool:
+    """Whether ``char`` may follow a question's mark at the end of its line."""
+    return char in _NEEDS_TRAILING or (
+        char not in _NEEDS_TICKS and unicodedata.category(char) in _NEEDS_SYMBOLS
+    )
+
+
+def _needs_aside_start(line: str, end: int) -> int:
+    """Where an aside that ends ``line[:end]`` starts, the blanks before it included: ``(…)``
+    or ``[…]`` with none of its own kind inside, then nothing but what is neither a word nor a
+    bracket (``Merge it? (y/n)``, ``Proceed? [y/N].``); 0 when there is none, or it is all the
+    line holds."""
+    close = end
+    while close and line[close - 1] not in "()[]" and not _needs_wordy(line[close - 1]):
+        close -= 1
+    if not close or line[close - 1] not in ")]":
+        return 0
+    pair = "()" if line[close - 1] == ")" else "[]"
+    start = close - 1
+    while start and line[start - 1] not in pair:
+        start -= 1
+    if not start or line[start - 1] != pair[0]:
+        return 0
+    start -= 1
+    while start and line[start - 1] in " \t":
+        start -= 1
+    return start
+
+
+def _needs_wordy(char: str) -> bool:
+    """Whether ``char`` is a word's, as a regular expression's ``\\w`` reads it."""
+    return char.isalnum() or char == "_"
 
 
 def _needs_asked_tail(text: str) -> str:
-    """The question an assistant ended on: its last prose line ending in ``?``, to the end."""
+    """The question an assistant ended on: its last prose line that asks, to the end."""
     lines = _needs_lines(text)
     prose = _needs_prose(lines)
     for index in range(len(lines) - 1, -1, -1):
@@ -1926,18 +2029,26 @@ def _needs_fleet_down(
     ``statuses`` has been through :func:`_needs_unheard`, so a fresh board row on a
     server that is gone reads ``unknown`` too. The subject is the first scan that
     saw it, so it is one item until the condition clears and a new one if it comes
-    back.
+    back. The watcher keeps that sighting on disk, so a restart of Remote, and
+    ``asq remote needs``, give the same outage the same id.
     """
+    from aisquare.services.remote_server import _iso_seconds
+
     live = [status for status in statuses if status.agent.ended_at is None]
     if not live or any(status.state != "unknown" for status in live):
         return []
     key = _needs_memory_key(project.id, "fleet_down")
     seen.add(key)
-    first = first_seen.setdefault(key, now)
+    first = first_seen.get(key)
+    # Kept on disk, a sighting from before one of these rows was made is another outage's,
+    # cleared while no watcher looked: a row is made only while its tmux answers.
+    newest = max(status.agent.created_at for status in live).replace(microsecond=0)
+    if first is None or first < newest:
+        first = first_seen[key] = now
     return [
         _needs_item(
             "fleet_down",
-            f"{project.id}:{first.isoformat(timespec='seconds')}",
+            f"{project.id}:{_iso_seconds(first)}",  # in UTC: as the kept sighting reads back
             project=project,
             agent=None,
             reason=f"tmux is not answering for {needs_push_safe(project.root.name or project.id)}",
@@ -2213,16 +2324,6 @@ def _needs_pane_now(
     return True, None if output is None else now - output > fleet_service.ACTIVITY_WINDOW
 
 
-def _needs_pane_output_at(server: TmuxServer, pane_id: str) -> datetime | None:
-    """When the pane's window last printed (``#{window_activity}``, to the second rounded
-    down); ``None`` when tmux would not say."""
-    try:
-        raw = server.run("display-message", "-p", "-t", pane_id, "#{window_activity}").strip()
-    except Exception:
-        return None
-    return datetime.fromtimestamp(int(raw), tz=UTC) if raw.isdigit() else None
-
-
 def needs_dialog_open(snap: AgentNow) -> bool:
     """Whether the agent may show a dialog that an Enter (or a typed ``/exit``) would answer.
 
@@ -2283,8 +2384,15 @@ def needs_at_input_prompt(snap: AgentNow) -> bool:
     """Whether the agent sits at its input prompt, where typed text is a message to it.
 
     No dialog, the pane is the agent and quiet (tmux must say so), no tool
-    pending, and the newest record is an interruption or the agent's own words —
-    or the row derives ``waiting``, the only sign there is without a tail.
+    pending, and the newest record is an interruption or the agent's own words,
+    or this process has written no conversation yet (:func:`_needs_nothing_said`)
+    — or the row derives ``waiting``, the only sign there is without a tail.
+
+    A session starts ``working`` on the board, and the board is trusted for 30
+    minutes: an agent just spawned with no prompt, or after a ``/clear``, read as
+    busy at its fresh prompt. Prompt mode refused it, Interrupt & tell sent its Escape
+    and gave up, and the only way to reach it was the Live tab (review of #243, sweep
+    3). A turn writes the human's prompt first, and Claude Code animates while one runs.
     """
     status = snap.status
     if status is None or not snap.pane_is_agent or snap.pane_quiet is not True:
@@ -2295,7 +2403,19 @@ def needs_at_input_prompt(snap: AgentNow) -> bool:
         return status.state == "waiting"
     if _needs_pending(snap.tail, status.agent):
         return False
-    return snap.tail.newest in ("interrupted", "assistant_text") or status.state == "waiting"
+    if snap.tail.newest in ("interrupted", "assistant_text") or status.state == "waiting":
+        return True
+    return _needs_nothing_said(snap.tail, status.agent)
+
+
+def _needs_nothing_said(tail: TranscriptTail, agent: FleetAgent) -> bool:
+    """The row's process has written no conversation: its transcript is empty or not made
+    yet (Claude Code makes it with the first record), or every record in it is older than
+    the row, a resumed session's before its first prompt. A walk that met no conversation
+    record is not this: it says nothing of what was written."""
+    if tail.empty:
+        return True
+    return tail.newest_at is not None and tail.newest_at < agent.created_at
 
 
 def needs_item_current(snap: AgentNow, item_id: str) -> bool:
@@ -2312,6 +2432,7 @@ def live_needs_sources() -> NeedsSources:
     from aisquare.services import claude_accounts as claude_accounts_service
     from aisquare.services import fleet as fleet_service
     from aisquare.services import project as project_service
+    from aisquare.services import remote_server
 
     def needs_rows_ended(project_id: str, since: datetime) -> list[FleetAgent]:
         with store_session() as store:
@@ -2352,7 +2473,11 @@ def live_needs_sources() -> NeedsSources:
         return fleet_service.server_for(socket).answers()
 
     def needs_pane_output(agent: FleetAgent) -> datetime | None:
-        return _needs_pane_output_at(fleet_service.server_for(agent.tmux_socket), agent.pane_id)
+        # The fact the snapshot reads (`_needs_pane_now`), from the one format and parse
+        # `PaneFacts` owns: a second copy of both read the same pane quiet by another rule.
+        server = fleet_service.server_for(agent.tmux_socket)
+        facts = remote_server._remote_pane_facts(server, agent)
+        return None if facts is None else facts.last_output
 
     def needs_session_event(
         project_id: str, session_id: str, kind: str, since: datetime
@@ -2382,14 +2507,31 @@ _tails_lock = threading.Lock()
 _TAILS_KEPT = 512
 
 
+_NEEDS_NOTHING_WRITTEN = TranscriptTail(
+    pending=(),
+    newest="none",
+    newest_at=None,
+    last_text=None,
+    last_text_at=None,
+    marker_key=None,
+    empty=True,
+)
+"""The tail of a transcript that is not there yet: Claude Code makes the file with the first
+record it writes, so a session that has had no prompt has none."""
+
+
 def _needs_cached_tail(path: str) -> TranscriptTail | None:
     """:func:`read_transcript_tail`, read again only when the file's size or mtime moved.
 
     An unchanged transcript costs one ``stat()``. Shared by the watcher and
-    :func:`needs_agent_now`, and bounded: the oldest entries go first.
+    :func:`needs_agent_now`, and bounded: the oldest entries go first. A path the
+    session named that does not exist is a conversation with nothing in it yet, as an
+    empty file is; one that cannot be read is ``None``.
     """
     try:
         stat = os.stat(path)
+    except FileNotFoundError:
+        return _NEEDS_NOTHING_WRITTEN
     except OSError:
         return None
     key = (stat.st_size, stat.st_mtime_ns)
@@ -2406,54 +2548,101 @@ def _needs_cached_tail(path: str) -> TranscriptTail | None:
     return tail
 
 
-# --- dismissals ---------------------------------------------------------------------------
+# --- what is kept on disk: dismissals, and first sightings --------------------------------
 
 
-def load_needs_dismissals() -> dict[str, str]:
-    """Item id → when a phone dismissed it, from ``remote-needs.json``; ``{}`` when unreadable."""
+_NEEDS_KEPT_PARTS = ("dismissed", "first_seen")
+"""The parts of ``remote-needs.json``: item id → when a dismissal was last needed, and the
+watcher's memory key → when a scan first saw what it dates (:func:`_needs_dated`)."""
+
+
+def _needs_kept() -> dict[str, dict[str, str]]:
+    """Each part of ``remote-needs.json``, ``key → ISO stamp``; empty where unreadable."""
     from aisquare.core.paths import remote_needs_path
 
     try:
         raw = json.loads(remote_needs_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {}
-    dismissed = raw.get("dismissed") if isinstance(raw, dict) else None
-    if not isinstance(dismissed, dict):
-        return {}
-    return {k: v for k, v in dismissed.items() if isinstance(k, str) and isinstance(v, str)}
+        raw = None
+    parts: dict[str, dict[str, str]] = {}
+    for part in _NEEDS_KEPT_PARTS:
+        kept = raw.get(part) if isinstance(raw, dict) else None
+        pairs = kept.items() if isinstance(kept, dict) else ()
+        parts[part] = {k: v for k, v in pairs if isinstance(k, str) and isinstance(v, str)}
+    return parts
+
+
+def _needs_keep(edit: Callable[[dict[str, dict[str, str]]], None]) -> None:
+    """Write ``remote-needs.json`` again, ``edit`` applied to its parts; one writer at a time,
+    and owner-only, like every Remote file."""
+    from aisquare.core.atomic import write_replacing
+    from aisquare.core.paths import remote_needs_path
+
+    with _dismissals_lock:
+        parts = _needs_kept()
+        edit(parts)
+        path = remote_needs_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_replacing(path, json.dumps({"version": 1, **parts}, indent=2), owner_only=True)
+
+
+def load_needs_dismissals() -> dict[str, str]:
+    """Item id → when a phone dismissed it, or a scan last found it hidden by that, from
+    ``remote-needs.json``; ``{}`` when unreadable."""
+    return _needs_kept()["dismissed"]
 
 
 def record_needs_dismissal(item_id: str) -> None:
     """Remember that ``item_id`` was dismissed, so no later scan shows it again.
 
-    Owner-only, like every Remote file. Dismissals older than 7 days are
-    dropped (an id that old will not come back), and at most the newest 500 are
-    kept, so the file stays small whatever a phone does.
+    Dismissals no scan has needed for 7 days are dropped, and at most the newest 500
+    are kept, so the file stays small whatever a phone does. A scan that finds a
+    dismissed item still there dates its dismissal again (:func:`_needs_still_hidden`):
+    a pane that stays lost, an agent idle at its question, keep their ids for as long as
+    they last, and a dismissal dropped a week after it was made brought the card back
+    to every phone at the next one written (review of #243, sweep 3).
     """
-    from aisquare.core.atomic import write_replacing
-    from aisquare.core.paths import remote_needs_path
+    from aisquare.services.remote_server import _iso_seconds, _remote_instant
 
     now = _needs_now()
-    with _dismissals_lock:
+
+    def dismissed(parts: dict[str, dict[str, str]]) -> None:
         kept: dict[str, datetime] = {}
-        for key, stamp in load_needs_dismissals().items():
-            when = _needs_stamp(stamp)
+        for key, stamp in parts["dismissed"].items():
+            when = _remote_instant(stamp)
             if when is not None and now - when <= _DISMISSALS_AGE:
                 kept[key] = when
         kept[item_id] = now
         newest = sorted(kept.items(), key=lambda pair: pair[1])[-_DISMISSALS_KEEP:]
-        body = {"version": 1, "dismissed": {k: v.isoformat(timespec="seconds") for k, v in newest}}
-        path = remote_needs_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_replacing(path, json.dumps(body, indent=2), owner_only=True)
+        parts["dismissed"] = {k: _iso_seconds(v) for k, v in newest}
+
+    _needs_keep(dismissed)
 
 
-def _needs_stamp(raw: str) -> datetime | None:
-    try:
-        when = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
+def _needs_still_hidden(item_ids: Collection[str], now: datetime) -> None:
+    """Date the dismissals of ``item_ids`` ``now``: a scan found their items still there."""
+    from aisquare.services.remote_server import _iso_seconds
+
+    def seen(parts: dict[str, dict[str, str]]) -> None:
+        for key in item_ids:
+            if key in parts["dismissed"]:
+                parts["dismissed"][key] = _iso_seconds(now)
+
+    _needs_keep(seen)
+
+
+def _needs_first_seen_kept() -> dict[str, datetime]:
+    """The first sightings the watcher kept, for the next watcher and ``asq remote needs``."""
+    from aisquare.services.remote_server import _remote_instant
+
+    kept = {key: _remote_instant(stamp) for key, stamp in _needs_kept()["first_seen"].items()}
+    return {key: when for key, when in kept.items() if when is not None}
+
+
+def _needs_stamps(memory: Mapping[str, datetime]) -> dict[str, str]:
+    from aisquare.services.remote_server import _iso_seconds
+
+    return {key: _iso_seconds(when) for key, when in memory.items()}
 
 
 # --- the watcher --------------------------------------------------------------------------
@@ -2490,6 +2679,9 @@ class RemoteNeedsWatcher:
         self._scanned_at: datetime | None = None
         self._projects: dict[str, ProjectInfo] = {}
         self._first_seen: dict[str, datetime] = {}
+        self._first_seen_kept: dict[str, str] | None = None
+        """What ``remote-needs.json`` holds of ``_first_seen``; ``None`` until the first scan
+        reads it."""
         self._forgotten: set[str] = set()
         """Ids :meth:`needs_forget` dropped that no scan has read from the dismissals file yet."""
         self._failing: set[object] = set()
@@ -2525,16 +2717,18 @@ class RemoteNeedsWatcher:
                 self._needs_scan_told()
             self._stopping.wait(self._interval)
 
-    def _needs_scan_told(self) -> None:
-        """:meth:`scan_needs_now`, its failure told once a streak, and its recovery once."""
+    def _needs_scan_told(self) -> Exception | None:
+        """:meth:`scan_needs_now`, its failure told once a streak, and its recovery once; the
+        failure, or ``None``."""
         try:
             self.scan_needs_now()
         except Exception as exc:
             _needs_failed("the needs scan", exc, self._failing, "scan")
-            return
+            return exc
         if "scan" in self._failing:
             self._failing.discard("scan")
             log.info("remote: the needs scan works again")
+        return None
 
     def _needs_devices(self) -> bool:
         """Whether any device is on record, signed in or not, and Remote is not past its
@@ -2560,14 +2754,19 @@ class RemoteNeedsWatcher:
             now = self._clock()
             sources = self._sources()
             projects = sources.list_projects()
+            if self._first_seen_kept is None:
+                kept = _needs_first_seen_kept()
+                self._first_seen = {**kept, **self._first_seen}
+                self._first_seen_kept = _needs_stamps(kept)
             dismissed = load_needs_dismissals()
-            scanned = scan_needs_you(
+            everything = scan_needs_you(
                 replace(sources, list_projects=lambda: projects),
                 now=now,
-                dismissed=dismissed,
+                dismissed=(),
                 first_seen=self._first_seen,
                 failing=self._failing_projects,
             )
+            scanned = [item for item in everything if item.id not in dismissed]
             with self._lock:
                 items = [item for item in scanned if item.id not in self._forgotten]
                 self._forgotten.difference_update(dismissed)
@@ -2581,7 +2780,44 @@ class RemoteNeedsWatcher:
                     _needs_failed("a needs listener", exc, self._failing, listener)
                 else:
                     self._failing.discard(listener)
+            self._needs_keep_what_it_saw(everything, dismissed, now)
         return items
+
+    def _needs_keep_what_it_saw(
+        self, items: Sequence[NeedsItem], dismissed: Mapping[str, str], now: datetime
+    ) -> None:
+        """Keep on disk what a restart must not lose: the first sightings that date items, and
+        the dismissals of items still there, dated now once a day.
+
+        The watcher's memory of when it first saw tmux stop answering is ``fleet_down``'s
+        id. Kept in memory alone, every Remote toggle, TUI restart or ``serve`` restart
+        made the same outage a new item: its dismissal lost, the phone pushed again, and
+        ``asq remote needs`` gave it an id of its own each run (review of #243, sweep 3).
+        """
+        from aisquare.services.remote_server import _remote_instant
+
+        stale = now - _DISMISSALS_REDATED
+        hidden = [
+            item.id
+            for item in items
+            if item.id in dismissed
+            and ((when := _remote_instant(dismissed[item.id])) is None or when <= stale)
+        ]
+        stamps = _needs_stamps(self._first_seen)
+        try:
+            if hidden:
+                _needs_still_hidden(hidden, now)
+            if stamps != self._first_seen_kept:
+
+                def first_seen(parts: dict[str, dict[str, str]]) -> None:
+                    parts["first_seen"] = stamps
+
+                _needs_keep(first_seen)
+                self._first_seen_kept = stamps
+        except OSError as exc:
+            _needs_failed("keeping what the needs scan saw", exc, self._failing, "kept")
+        else:
+            self._failing.discard("kept")
 
     def needs_items_now(self) -> list[NeedsItem]:
         """The latest scan's items, ranked."""
@@ -2666,7 +2902,10 @@ def _needs_answer_body(body: Mapping[str, object]) -> tuple[str, list[str], str,
 
     The text reaches the pane byte for byte, as ``send-keys``' does, so it passes the
     same :func:`~aisquare.services.remote_server.check_remote_text`: a ``"\\x03"`` in it
-    would be a Ctrl-C that no key allowlist saw and the audit line could not show.
+    would be a Ctrl-C that no key allowlist saw and the audit line could not show. Both
+    is what ``send-keys`` calls both, keys given and words given: an empty ``keys`` next
+    to words, from a client that always sends the field, gives no key to lose the order
+    of. Refused as both, it was told it sent what it had not.
     """
     from aisquare.services.remote_server import (
         SEND_KEYS_TEXT_MAX,
@@ -2680,11 +2919,11 @@ def _needs_answer_body(body: Mapping[str, object]) -> tuple[str, list[str], str,
     raw_keys, raw_text = body.get("keys"), body.get("text")
     if raw_text is not None and not isinstance(raw_text, str):
         raise RequestError(400, "invalid", "'text' must be a string")
-    if raw_keys is not None and raw_text:
+    keys = [] if raw_keys is None else check_remote_key_names(raw_keys)
+    if keys and raw_text:
         raise RequestError(
             400, "text_and_keys", "send 'keys' or 'text', not both: the order would be lost"
         )
-    keys = [] if raw_keys is None else check_remote_key_names(raw_keys)
     refused = [key for key in keys if key not in NEEDS_ANSWER_KEYS]
     if refused:
         allowed = ", ".join(sorted(NEEDS_ANSWER_KEYS))
@@ -2723,28 +2962,47 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
     from aisquare.services import fleet as fleet_service
     from aisquare.services.remote_server import RequestError, _audit_keys, remote_agent_lock
 
+    async def needs_scanned_here(watcher: RemoteNeedsWatcher) -> Response | None:
+        """One scan for a request that has none to read; ``None``, or the 503 its failure is.
+
+        A scan that raised, over a store that cannot be opened, answered a bare 500
+        ``text/plain`` and printed its traceback on the terminal, where every other read
+        answers 503 ``unavailable`` in JSON and the watcher's own scans are told once a
+        streak (review of #243, sweep 3).
+        """
+        failed = await asyncio.to_thread(watcher._needs_scan_told)
+        return None if failed is None else kit.kit_refuse(503, "unavailable", str(failed))
+
     async def needs_list_endpoint(
         request: Request, device: Device, body: dict[str, Any]
     ) -> Response:
         """The feed. A watcher that is not running (no lifespan) scans for this request."""
         watcher = _needs_watcher(kit)
-        if not watcher.needs_watching() or watcher.needs_scanned_at() is None:
-            await asyncio.to_thread(watcher.scan_needs_now)
+        unread = not watcher.needs_watching() or watcher.needs_scanned_at() is None
+        if unread and (failed := await needs_scanned_here(watcher)) is not None:
+            return failed
         return JSONResponse(watcher.needs_payload_now())
 
     async def needs_dismiss_endpoint(
         request: Request, device: Device, body: dict[str, Any]
     ) -> Response:
-        """Hide one card for good. Not write-gated: it changes what is shown, not the fleet."""
+        """Hide one card for good. Not write-gated: it changes what is shown, not the fleet.
+        A dismissal that could not be saved is a 503, and the card stays: hidden here
+        alone, it came back with the next start."""
         item_id = _needs_id_field(body)
         watcher = _needs_watcher(kit)
-        if watcher.needs_scanned_at() is None:
-            await asyncio.to_thread(watcher.scan_needs_now)
+        unread = watcher.needs_scanned_at() is None
+        if unread and (failed := await needs_scanned_here(watcher)) is not None:
+            return failed
         found = watcher.needs_lookup(item_id)
         if found is None:
             return kit.kit_refuse(404, "not_found", "no such item in the needs feed")
         item, _project = found
-        await asyncio.to_thread(record_needs_dismissal, item.id)
+        try:
+            await asyncio.to_thread(record_needs_dismissal, item.id)
+        except OSError as exc:
+            log.warning("remote: a needs dismissal could not be saved: %s", exc)
+            return kit.kit_refuse(503, "unavailable", f"the dismissal could not be saved: {exc}")
         watcher.needs_forget(item.id)
         summary = f"{item.id} {item.kind} {item.agent or '-'}@{item.project_id}"
         await asyncio.to_thread(kit.kit_audit, device, "needs/dismiss", summary)
@@ -2764,8 +3022,9 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
         """
         item_id, keys, text, enter = _needs_answer_body(body)
         watcher = _needs_watcher(kit)
-        if watcher.needs_scanned_at() is None:
-            await asyncio.to_thread(watcher.scan_needs_now)
+        unread = watcher.needs_scanned_at() is None
+        if unread and (failed := await needs_scanned_here(watcher)) is not None:
+            return failed
         found = watcher.needs_lookup(item_id)
         if found is None:
             return kit.kit_refuse(409, "stale", "that card no longer needs you", current=[])
@@ -2787,6 +3046,9 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
                 return kit.kit_refuse(503, "fleet_unavailable", str(exc))
             except fleet_service.FleetError as exc:
                 return kit.kit_refuse(409, "fleet_error", str(exc))
+            except Exception as exc:  # the store, mid-read: as a failed scan is, not a bare 500
+                log.warning("remote: a needs answer could not read %s: %s", label, exc)
+                return kit.kit_refuse(503, "unavailable", str(exc))
             if not needs_item_current(snap, item.id):
                 current = [now_item.needs_item_json() for now_item in snap.items]
                 gone = f"{label} no longer shows that {item.kind}"
@@ -2871,7 +3133,12 @@ def needs_cli_payload() -> dict[str, object]:
     from aisquare.services.remote_server import _iso_seconds
 
     now = _needs_now()
-    items = scan_needs_you(live_needs_sources(), now=now, dismissed=load_needs_dismissals())
+    items = scan_needs_you(
+        live_needs_sources(),
+        now=now,
+        dismissed=load_needs_dismissals(),
+        first_seen=_needs_first_seen_kept(),  # the phone's dates and ids, not this run's
+    )
     return {
         "items": [item.needs_item_json() for item in items],
         "scanned_at": _iso_seconds(now),

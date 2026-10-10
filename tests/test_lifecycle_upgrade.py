@@ -2635,8 +2635,14 @@ def test_a_cutoff_date_is_read_as_uv_records_it_and_anything_else_is_not_guessed
             "your package index serves",
             "your package index served",
         ),
+        (
+            "\n[tool.options]\nexclude-newer-package = { aisquare-cli = { timestamp = "
+            '"2026-09-10T04:56:48Z", span = "P30D" } }\n',
+            "your uv cutoff allows (exclude-newer-package for aisquare-cli)",
+            "your uv cutoff allows",
+        ),
     ],
-    ids=["cooldown", "fixed-date", "index"],
+    ids=["cooldown", "fixed-date", "index", "aisquare-clis-own-cutoff"],
 )
 def test_an_unchanged_version_under_uvs_own_settings_is_the_newest_they_allow(
     runner: CliRunner,

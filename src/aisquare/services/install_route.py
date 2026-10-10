@@ -1132,6 +1132,16 @@ def cutoff_time(route: InstallRoute, now: datetime) -> datetime | None:
     return _instant(value)
 
 
+def cutoff_of_ours(route: InstallRoute) -> str | None:
+    """The uv cutoff aisquare-cli itself resolves under, as a person reads it: its own
+    (``exclude-newer-package``) when the receipt records one, none when it exempts it,
+    else the global one (:func:`cutoff`)."""
+    receipt = route.receipt or UvReceipt()
+    if receipt.package_cutoff:
+        return f"exclude-newer-package for {DISTRIBUTION}"
+    return None if receipt.package_exempt else cutoff(route)
+
+
 def takes_prereleases(route: InstallRoute, current: str) -> bool:
     """Whether uv takes pre-releases when this install upgrades to the latest release.
 

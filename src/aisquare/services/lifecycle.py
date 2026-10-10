@@ -787,7 +787,9 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
             plan, exit_code=code, version=kept, problem=f"{plan.argv[0]} exited {code}"
         )
     ran = _as_recorded(plan.route)
-    cutoff = install_route.cutoff(ran) or install_route.cutoff(plan.route)
+    # What held aisquare-cli back, as `_verify` judges it: a cutoff of its own from uv's
+    # settings was reported as "your package index served" (review of #257).
+    cutoff = install_route.cutoff_of_ours(ran) or install_route.cutoff_of_ours(plan.route)
     version, problem = _verify(plan, ran)
     if problem is not None:
         return UpgradeReport(plan, exit_code=code, version=version, problem=problem, cutoff=cutoff)

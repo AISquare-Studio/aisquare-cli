@@ -110,7 +110,7 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
         if plan.target is None and plan.update_available is None:
             # Nothing to compare (an index of its own, PyPI out of reach): "upgrade with"
             # sent every run to a reinstall that changed nothing (review of #257).
-            newest = _newest(install_route.cutoff(plan.route))
+            newest = _newest(install_route.cutoff_of_ours(plan.route))
             _say(
                 "can't tell whether anything is newer: `aisquare upgrade` reinstalls the "
                 f"newest release {newest}, which may be the one you have"
@@ -148,7 +148,7 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
         where += " (the newest your uv cutoff allows)" if held else " (latest on PyPI)"
     _say(f"aisquare {plan.current} → {where}")
     if plan.target is None and plan.latest is not None and plan.latest.version is None:
-        newest = _newest(install_route.cutoff(plan.route))
+        newest = _newest(install_route.cutoff_of_ours(plan.route))
         _say(
             f"  {plan.latest.error}; uv will install the newest release {newest}, "
             "which may be the one you have"

@@ -20,11 +20,13 @@ the rest is here:
   stop the agent the same way. With a dialog up, that Enter answers it: it can
   approve a Bash command or take a question's first option. So an open dialog
   refuses the action (409 ``dialog_open``), unless ``dismiss_dialog`` asks for one
-  Escape (No) first. A restart or a switch asks it last, after the fleet's own
+  Escape (No) first. An agent at work gets that Escape unasked, and the ``/exit``
+  waits until its pane is at rest: a prompt could open between the guard's read
+  and the Enter. A restart or a switch asks it last, after the fleet's own
   refusals (:class:`ActionGuardLast`), so its Escape never comes before a
   refusal that needed none. No tell types into a dialog either. ``auto``,
   which is ``fleet tell``, files its text as a board note while one may be up,
-  and ``send-keys`` with ``dialog_guard`` types nothing then
+  and ``send-keys`` with ``dialog_guard`` types only into a pane at rest
   (:func:`action_keys_guard`). A stop, restart or switch that fails after the
   guard's Escape says that the Escape went.
 * **One action per agent at a time.** ``remote_server.remote_agent_lock`` is
@@ -739,55 +741,85 @@ def action_dialog_guard(
     doing: str,
     audit_start: str,
 ) -> bool:
-    """Refuse to stop an agent that shows a dialog, or with ``dismiss``, press Escape first.
+    """Leave the stop's ``/exit`` and Enter nothing to answer: refuse an agent that shows a
+    dialog, or with ``dismiss`` press Escape first, and press it first, unasked, for an
+    agent that is not at rest (:func:`action_at_rest`).
 
-    ``doing`` names the action for the refusal ("stopping"). Returns whether a
-    dialog was dismissed, which the audit line records. A false alarm costs a
-    refusal with a sentence, or with ``dismiss`` an Escape to an agent about to be
-    stopped anyway. It never costs an Enter into a dialog.
+    ``doing`` names the action for the refusal ("stopping"). Returns whether the
+    Escape went, which the audit line records as ``dismissed``. A false alarm costs a
+    refusal with a sentence, or an Escape to an agent about to be stopped anyway. It
+    never costs an Enter into a dialog.
 
     A pending tool counts as a dialog here (:func:`action_may_answer`): in a
     permission prompt's first seconds nothing else tells it from a tool at work,
     and the ``/exit`` and Enter of a stop would answer it "1. Yes". For a tool
     that is running, the Escape stops it, which a stop was about to do anyway.
 
+    An agent at work with no tool pending showed no dialog when it was read, and
+    the ``/exit`` and Enter went on: a few tmux calls later, more for a restart or
+    a switch. A permission prompt that opened in between took them, the letters
+    doing nothing in its list and the Enter its "1. Yes", and so did one already
+    drawn whose tool use Claude Code had not yet flushed to the transcript, which
+    it writes up to 100 ms late (sweep 4 of #243). So such an agent gets the one
+    Escape first, which answers that prompt "No" and ends the turn the stop was
+    about to end anyway, and the ``/exit`` waits until the pane is at rest. An
+    agent at rest gets none: nothing there opens a prompt until something is typed.
+
     The Escape answers a permission prompt "No", so a refusal after it is audited,
     as ``audit_start`` and then ``dismissed=yes refused=<error>``.
     """
     snap = snap if snap is not None else action_snapshot(target, label, pin)
-    if not action_may_answer(snap):
-        return False
+    if snap.status is None or not snap.pane_is_agent or action_at_rest(snap):
+        return False  # no pane of the agent's to answer anything, or one at rest
     dialog = remote_needs.needs_dialog_open(snap)
-    if not dismiss:
-        if dialog:
-            message = (
-                f"{label} is showing a prompt; {doing} would answer it — "
-                "send dismiss_dialog: true to press Esc (No) first"
-            )
-        else:
-            message = (
-                f"{label} has a tool pending, and a prompt for it may have just opened; "
-                f"{doing} could answer it — send dismiss_dialog: true to press Esc (No) "
-                "first, which also stops a running tool"
-            )
-        raise RequestError(409, "dialog_open", message)
+    pending = not dialog and remote_needs.needs_tool_pending(snap)
+    if not dismiss and dialog:
+        raise RequestError(
+            409,
+            "dialog_open",
+            f"{label} is showing a prompt; {doing} would answer it — "
+            "send dismiss_dialog: true to press Esc (No) first",
+        )
+    if not dismiss and pending:
+        raise RequestError(
+            409,
+            "dialog_open",
+            f"{label} has a tool pending, and a prompt for it may have just opened; "
+            f"{doing} could answer it — send dismiss_dialog: true to press Esc (No) "
+            "first, which also stops a running tool",
+        )
     action_press_escape(snap, label)
     with action_audited(lambda error: f"{audit_start} dismissed=yes refused={error}"):
-        closed = action_settle(
-            target,
-            label,
-            pin,
-            lambda again: not action_may_answer(again),
-            remote_needs.DIALOG_SETTLE_SECONDS,
-        )
-        if closed is None:
-            still = "still shows a prompt" if dialog else "still has its tool pending"
+        rested = action_settle(target, label, pin, action_at_rest, action_interrupt_wait())
+        if rested is None:
+            if dialog or pending:
+                still = "still shows a prompt" if dialog else "still has its tool pending"
+                code = "dialog_open"
+            else:
+                still, code = "has not stopped yet", "still_busy"
             raise RequestError(
-                409,
-                "dialog_open",
-                f"Escape was sent, but {label} {still} — nothing else was done",
+                409, code, f"Escape was sent, but {label} {still} — nothing else was done"
             )
     return True
+
+
+def action_at_rest(snap: AgentNow) -> bool:
+    """Whether the agent's pane is at rest: the agent's own, quiet, and nothing in it waiting
+    on an answer (:func:`action_may_answer`). Keys typed there answer no dialog.
+
+    Quiet is no output for ``fleet.ACTIVITY_WINDOW``, which tmux must say. Claude Code
+    animates while a turn runs and draws a prompt when it opens, so a quiet pane is
+    neither at work nor in a prompt's first seconds, whatever the transcript, which
+    Claude Code writes up to 100 ms after the screen, has caught up with. What reads
+    the transcript (``needs_tool_pending``) sees a prompt too late to stop an Enter
+    already on its way. A turn starts at rest only when something is typed.
+    """
+    return (
+        snap.status is not None
+        and snap.pane_is_agent
+        and snap.pane_quiet is True
+        and not action_may_answer(snap)
+    )
 
 
 def action_may_answer(snap: AgentNow) -> bool:
@@ -859,19 +891,25 @@ def action_prompt_up(label: str) -> RequestError:
 
 
 def action_keys_guard(target: ProjectInfo, label: str, pin: str) -> None:
-    """``send-keys`` with ``dialog_guard``: 409 ``dialog_open``, and nothing typed, while
-    anything typed into the agent's pane may answer a dialog (:func:`action_may_answer`).
+    """``send-keys`` with ``dialog_guard``: nothing is typed unless the agent's pane is at
+    rest (:func:`action_at_rest`). 409 ``dialog_open`` while anything typed may answer a
+    dialog (:func:`action_may_answer`), ``agent_busy`` while the agent is at work, and
+    ``not_agent`` for a pane the agent is not running.
 
     For a sender that does not see the pane: the page's Transcript tab, whose Send
     types its text and then Enter, ⏎ being on by default. Into a permission prompt
     the text is keystrokes, a digit in it picks that option, and the Enter takes
     the highlighted one: "1. Yes" to the command the text meant to refuse (sweep
-    of #243, round 4). The agent is read from its own facts
+    of #243, round 4). An agent at work showed none when it was read, but one
+    could open before the text landed, or be on screen already with its tool use
+    not yet in the transcript (sweep 4 of #243): Interrupt & tell is the way to
+    reach it from there. The agent is read from its own facts
     (``needs_single_agent_now``: its row, its pane, its tail), which must still be
     of the row ``pin`` names, the one the keys were going to.
     """
     snap = action_fleet_call(lambda: remote_needs.needs_single_agent_now(target, label))
     snap = action_still_pinned(target, label, pin, snap, escaped=False)
+    action_pane_agent(snap, label)
     if remote_needs.needs_dialog_open(snap):
         raise action_prompt_up(label)
     if remote_needs.needs_tool_pending(snap):
@@ -881,6 +919,8 @@ def action_keys_guard(target: ProjectInfo, label: str, pin: str) -> None:
             f"{label} has a tool pending, and a prompt for it may have just opened; typing "
             "now could answer it — look at its pane first",
         )
+    if not action_at_rest(snap):
+        raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))
 
 
 # --- typing into the agent's prompt ------------------------------------------------------------

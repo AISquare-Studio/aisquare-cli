@@ -2073,7 +2073,7 @@ const AGENT_ACTIONS = {
 
 function effectSentence(kind, label, o) {
   let text;
-  if (kind === "stop") text = o.force ? "Stop " + label + " now: its window is killed without /exit." : "Stop " + label + ": /exit, then its window is killed after 5 s.";
+  if (kind === "stop") text = o.force ? "Stop " + label + " now: its window is killed without /exit." : "Stop " + label + ": Esc if it is busy, then /exit; its window is killed 5 s later.";
   else if (kind === "restart") text = "Restart " + label + ": it stops, then starts again on " + (o.fresh ? "a fresh conversation." : "its own conversation.") + " This can take 40 s.";
   else text = "Switch " + label + (o.to ? " to " + o.to : " to the account with the most headroom") + ": it hands over and carries on there. This can take 40 s.";
   return o.dismiss ? text + " Its prompt is dismissed (No) first." : text;

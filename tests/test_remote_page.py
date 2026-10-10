@@ -1604,7 +1604,7 @@ def test_a_stop_refused_at_a_prompt_is_explained_in_the_pages_own_words(
         "Press Esc (No) first to dismiss it."
     )
     assert stop["lead"] == (
-        "Stop coder-1: /exit, then its window is killed after 5 s. "
+        "Stop coder-1: Esc if it is busy, then /exit; its window is killed 5 s later. "
         "Its prompt is dismissed (No) first."
     )
     assert stop["dismissed"] == [False, True]

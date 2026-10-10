@@ -1040,11 +1040,6 @@ def signals(as_session: SessionRef = None) -> None:
         console.print(_signal_line(state), markup=False)
 
 
-def _fmt_idle(minutes: int) -> str:
-    """Render an idle span the way the board's ``_age`` does (12m, 3h07m)."""
-    return f"{minutes}m" if minutes < 60 else f"{minutes // 60}h{minutes % 60:02d}m"
-
-
 @app.command("prune")
 def prune(
     older_than: Annotated[
@@ -1127,7 +1122,7 @@ def prune(
         bullet = "·" if report.dry_run else "✓"
         console.print(
             f"  {bullet} {team_service.short_id(entry.id)} ({entry.role}) — "
-            f"dark {_fmt_idle(entry.idle_minutes)}{claims}",
+            f"dark {team_service.minutes_text(entry.idle_minutes)}{claims}",
             markup=False,
         )
     count = len(report.pruned)

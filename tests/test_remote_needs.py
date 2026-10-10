@@ -2383,6 +2383,23 @@ def test_a_dismissals_stamp_and_asq_remote_needs_age_are_read_as_the_server_read
     assert {"2026-10-07T10:55:00", "2026-10-07T13:55:00+02:00", None, "soon"} <= set(read)
 
 
+def test_asq_remote_needs_writes_an_age_by_the_boards_one_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_needs_age`` promised the age "as the board says it" with a copy of the board's
+    ``_age`` of its own, as ``asq team prune`` had one: a change to how the board writes an
+    age (days past 24 h, say) reached one of the three (review of #243, round 7, 4/4). The
+    rule the board learns here, ``asq remote needs`` writes too."""
+    from aisquare.cli.remote import _needs_age
+    from aisquare.services import team as team_service
+
+    assert _needs_age("2026-10-07T09:55:00Z", NOW) == "2h05m"
+    monkeypatch.setattr(team_service, "minutes_text", lambda minutes: f"<{minutes} min>")
+    assert _needs_age("2026-10-07T09:55:00Z", NOW) == "<125 min>"
+    assert _needs_age("2026-10-07T12:30:00Z", NOW) == "<0 min>", "a stamp ahead is no age"
+    assert team_service.age_text(NOW - timedelta(minutes=125), NOW) == "<125 min>"
+
+
 # --- one agent, now: the predicates actions rely on ---------------------------------------
 
 

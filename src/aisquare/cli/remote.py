@@ -486,12 +486,11 @@ def _needs_line(item: dict[str, Any], now: datetime) -> str:
 
 
 def _needs_age(since: object, now: datetime) -> str:
-    """How long an item has waited, as the board says it: ``12m``, ``3h05m``; ``?`` for a
-    ``since`` that is no stamp. Read as the server reads every stamp it wrote."""
+    """How long an item has waited, as the board says it (``team.age_text``): ``12m``,
+    ``3h05m``; ``?`` for a ``since`` that is no stamp. Read as the server reads every stamp
+    it wrote."""
+    from aisquare.services import team as team_service
     from aisquare.services.remote_server import _remote_instant
 
     when = _remote_instant(since)
-    if when is None:
-        return "?"
-    minutes = max(0, int((now - when).total_seconds() // 60))
-    return f"{minutes}m" if minutes < 60 else f"{minutes // 60}h{minutes % 60:02d}m"
+    return "?" if when is None else team_service.age_text(when, now)

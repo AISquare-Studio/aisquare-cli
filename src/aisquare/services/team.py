@@ -2207,11 +2207,16 @@ def prune_sessions(
 # --- rendering ----------------------------------------------------------------
 
 
-def _age(when: datetime, now: datetime) -> str:
-    minutes = max(0, int((now - when).total_seconds() // 60))
-    if minutes < 60:
-        return f"{minutes}m"
-    return f"{minutes // 60}h{minutes % 60:02d}m"
+def minutes_text(minutes: int) -> str:
+    """Whole minutes as the board writes an age: ``12m``, ``3h05m``. The one copy of the
+    rule: ``asq team prune`` and ``asq remote needs`` write theirs with it, and each had a
+    copy of its own to keep in step by hand."""
+    return f"{minutes}m" if minutes < 60 else f"{minutes // 60}h{minutes % 60:02d}m"
+
+
+def age_text(when: datetime, now: datetime) -> str:
+    """How long before ``now`` ``when`` was, as the board writes it (:func:`minutes_text`)."""
+    return minutes_text(max(0, int((now - when).total_seconds() // 60)))
 
 
 def render_board(
@@ -2274,7 +2279,7 @@ def _render_board(
                     parts.append("⚠ off-ladder")
             if session.focus:
                 parts.append(f"— focus: {session.focus}")
-            parts.append(f"— {_age(session.last_seen_at, now)} ago")
+            parts.append(f"— {age_text(session.last_seen_at, now)} ago")
             if stale:
                 parts.append("(stale)")
             lines.append(" ".join(parts))

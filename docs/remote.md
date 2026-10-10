@@ -143,7 +143,10 @@ The screens, along the bottom bar:
   program shows one, with Fit width), **Transcript** (the conversation, wrapped
   to the phone, each turn's time in the phone's own time zone, older pages on
   demand) and **Card** (model, tokens and the explainability verdict). Under Live
-  and Transcript sit the input bar and the key pad.
+  and Transcript sit the input bar and the key pad. Live, Transcript and a Needs
+  card's pane strip stay dark with the phone in light mode too: an agent's colours
+  are picked for its own theme, dark in Claude Code by default, so an agent on a
+  light theme draws its dark text on that ground as well.
 - **Devices** — every device that unlocked, which one is this one, last seen, when
   its sign-in ends. Sign out of this one, or revoke another (a write, so only
   while writes are on).
@@ -602,8 +605,8 @@ second one beside it.
 **`serve` says the port is in use.** Something else took 8750. Pass `--port` and
 give ngrok (and `status`) the same port.
 
-**Unlocking, extending or revoking fails with `remote_state_unwritable`** (503;
-the page says the machine could not answer). `~/.aisquare/remote.json` would not
+**Unlocking, extending or revoking fails with `remote_state_unwritable`** (503,
+and the page shows the machine's sentence). `~/.aisquare/remote.json` would not
 write: the disk is full, or the home is not writable, and the log says which.
 Nothing was changed but a revoke, which holds on the running Remote and is saved
 by its next write that works, unless a change to the file from a shell is read
@@ -623,4 +626,5 @@ Remove what `install-page` installed: `rm -rf ~/.aisquare/remote-dist`.
 auto-off passed, ngrok came back on a new address, or
 `regenerate-password --new-link` replaced the link (a phone still on the old one
 is told so when it tries to unlock). Turn it on again, or open the link the
-machine shows now.
+machine shows now. A page showing this asks again when the phone wakes or a
+notification is tapped, and at once on **Retry**.

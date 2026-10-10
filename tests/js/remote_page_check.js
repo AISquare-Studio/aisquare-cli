@@ -153,6 +153,24 @@ report.control = control.log;
 
 report.clamped = page.ansiToRuns("\x1b[38;2;999;-1;300mX");
 report.cursor = page.markCursor(page.ansiToRuns("ab\x1b[31mcd"), 2);
+// An underline's colour, as tmux 3.7's capture-pane -e wrote rows an app drew with one, and
+// an underline's style (4:n) in the colon form.
+report.underlines = {
+  rgb: page.ansiToRuns("\x1b[1m\x1b[31mRED\x1b[4m\x1b[58;2;0;255;0mUNDER\x1b[0;1m\x1b[31mafter"),
+  indexed: page.ansiToRuns("\x1b[58;5;7mspell\x1b[0m ok"),
+  red: page.ansiToRuns("\x1b[58;5;31mx\x1b[0my"),
+  ones: page.ansiToRuns("\x1b[58;2;255;1;7mX"),
+  none: page.ansiToRuns("\x1b[4ma\x1b[4:0mb"),
+  curly: page.ansiToRuns("a\x1b[4:3mb"),
+};
+// Rows of Claude Code 2.1's dark theme as tmux captured them: its reply bullet, the trust
+// dialog's highlighted option, a warning, and a key hint, each in a 256 colour of its own.
+report.agentRows = [
+  "\x1b[38;5;231m\x1b[49m●\x1b[39m I'll run the cache tests first.",
+  " \x1b[38;5;153m❯\x1b[39m \x1b[38;5;153mNo,\x1b[39m \x1b[38;5;153mexit\x1b[39m",
+  " \x1b[1m\x1b[38;5;220mAccessing\x1b[0m \x1b[1m\x1b[38;5;220mworkspace:\x1b[0m",
+  " \x1b[38;5;246mEnter\x1b[39m \x1b[38;5;246mto\x1b[39m \x1b[38;5;246mconfirm\x1b[39m",
+].map((row) => page.ansiToRuns(row));
 
 // The excerpts a card shows over a detail text, cut from it as the server cuts them.
 const cards = recorder();

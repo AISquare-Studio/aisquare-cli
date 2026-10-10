@@ -266,8 +266,10 @@ function deferred() {
 
 /* Boot app.js at `hash`, the machine answering every request through `answer`:
  * (method, path, body) -> {status, json}, or "network" for a request that never
- * arrives, or a promise of either. `globals` adds to the browser (fakePush); `base` is
- * the page's own URL, the machine's at http by default. */
+ * arrives, or a promise of either; {status, json, cut: true} is an answer whose
+ * connection dropped halfway through its body, after its headers came. `globals` adds
+ * to the browser (fakePush); `base` is the page's own URL, the machine's at http by
+ * default. */
 function bootPage(hash, answer, globals, base) {
   const address = base || BASE;
   const doc = {
@@ -348,7 +350,11 @@ function bootPage(hash, answer, globals, base) {
     const reply = await answer(init.method, where, body);
     if (reply === "network") throw new TypeError("Failed to fetch");
     const text = JSON.stringify(reply.json);
-    return { ok: reply.status >= 200 && reply.status < 300, status: reply.status, headers: { get: () => null }, text: async () => text };
+    const read = async () => {
+      if (reply.cut) throw new TypeError("network error"); // as Chrome's ERR_CONTENT_LENGTH_MISMATCH
+      return text;
+    };
+    return { ok: reply.status >= 200 && reply.status < 300, status: reply.status, headers: { get: () => null }, text: read };
   };
   Object.assign(win, {
     document: doc,
@@ -631,6 +637,35 @@ async function lostTwice() {
   page.live().frame("action", { actions: [{ request_id: id, endpoint: "send-keys", status: 200, body: { sent: true }, at: "2026-10-07T10:13:00+00:00" }] });
   await settle();
   return { bodies, said, orphaned, later: page.toast(), send: sendState(page) };
+}
+
+/* A send-keys the machine ran and answered 200, its connection dropping halfway through the
+ * body, the socket healthy throughout; then the reconnect, and the retry answered whole. And
+ * the feed's first read cut the same way. Where the page is, what it sent, and what it says. */
+async function bodyCut() {
+  let calls = 0;
+  const page = await agentView({
+    "POST api/send-keys": () => {
+      calls += 1;
+      return { status: 200, json: { agent: "coder-1", project: PROJECT, sent: true }, cut: calls === 1 };
+    },
+  });
+  const say = await typeAndSend(page, "hello");
+  const shown = buttonNamed(page.main(), "Send") ? sendState(page) : null; // the off screen has none
+  const waiting = { off: page.run("S.off"), sockets: page.sockets.length, send: shown };
+  page.acceptSockets();
+  paneCame(page);
+  await settle();
+  const feed = bootPage("#/", signedIn({ "GET api/needs": () => ({ status: 200, json: { items: [] }, cut: true }) }));
+  await settle();
+  const said = find(feed.main(), (node) => node.className === "empty");
+  return {
+    write: {
+      waiting, off: page.run("S.off"), bodies: page.sent("api/send-keys"), typed: say.value,
+      pending: page.run("S.pending.size"), orphans: page.run("S.orphans.size"), toast: page.toast(),
+    },
+    read: { off: feed.run("S.off"), said: said ? said.textContent : null, sockets: feed.sockets.length },
+  };
 }
 
 /* Send with nothing typed, ⏎ on as it is by default. */
@@ -2594,7 +2629,75 @@ async function refusalSentences() {
     tooLong: said({ status: 413, error: "too_large", message: "the body is too large" }, 8000),
     tooMany: said({ status: 429, error: "rate_limited", retryAfter: 30 }),
     unavailable: said({ status: 503, error: "fleet_unavailable", message: "tmux did not answer" }),
+    unavailableBare: said({ status: 503, error: "unavailable" }),
+    unwritable: said({
+      status: 503, error: "remote_state_unwritable",
+      message: "the machine could not save that: its ~/.aisquare/remote.json would not write (a full disk, or a home it may not write) — nothing was changed; fix that on the machine, then try again",
+    }),
     notJson: said({ status: 200, notJson: true }),
+  };
+}
+
+/* The machine's 503 sentence for a revoke it holds on the running Remote but could not save
+ * (remote.json would not write), as remote_server.REVOKE_UNSAVED words it for `id`. */
+function unsavedRevoke(id) {
+  return {
+    status: 503,
+    json: {
+      error: "remote_state_unwritable",
+      message: "revoked on the running Remote, but the machine's ~/.aisquare/remote.json would not write (a full disk, or a home " +
+        "it may not write): once it can, run  aisquare remote revoke " + id + "  on the machine, as until it is saved a change " +
+        "to that file from a shell, or a Remote turned on again, would take the device back",
+    },
+  };
+}
+
+/* 503s whose reason the machine gives: Revoke of another device that held but was not saved,
+ * then this device's own Sign out the same way; a revoke answered 404 (another tab revoked it
+ * first); and the Tasks tab of a machine with Team off. What each says, the device rows after,
+ * how often the list was read, and where the page went. */
+async function reasonsGiven() {
+  let listed = TWO_DEVICES;
+  const devices = bootPage("#/devices", signedIn({
+    "GET api/devices": () => ({ status: 200, json: listed }),
+    "DELETE api/devices/dev_4e5f6a7b": () => {
+      listed = TWO_DEVICES.slice(0, 1);
+      return unsavedRevoke("dev_4e5f6a7b");
+    },
+    "DELETE api/devices/dev_0a1b2c3d": () => unsavedRevoke("dev_0a1b2c3d"),
+  }));
+  await settle();
+  devices.acceptSockets();
+  await settle();
+  const rows = () => textsOf(devices.main().querySelectorAll("span.name"));
+  const reads = () => devices.requests.filter((one) => one.method === "GET" && one.path === "api/devices").length;
+  click(buttonNamed(devices.main(), "Revoke"));
+  await settle();
+  const revoked = { toast: devices.toast(), rows: rows(), reads: reads() };
+  click(buttonNamed(devices.main(), "Sign out"));
+  await settle();
+  const signedOut = { toast: devices.toast(), hash: devices.location.hash };
+  let gone = TWO_DEVICES;
+  const twice = bootPage("#/devices", signedIn({
+    "GET api/devices": () => ({ status: 200, json: gone }),
+    "DELETE api/devices/dev_4e5f6a7b": () => {
+      gone = TWO_DEVICES.slice(0, 1);
+      return { status: 404, json: { error: "not_found", message: "no such device" } };
+    },
+  }));
+  await settle();
+  twice.acceptSockets();
+  await settle();
+  click(buttonNamed(twice.main(), "Revoke"));
+  await settle();
+  const tasks = bootPage("#/p/" + PROJECT + "/tasks", signedIn({
+    "GET api/tasks": () => ({ status: 503, json: { error: "unavailable", message: "the agent orchestrator is disabled (AISQUARE_TEAM=0)" } }),
+  }));
+  await settle();
+  return {
+    revoked, signedOut,
+    revokedElsewhere: { toast: twice.toast(), rows: textsOf(twice.main().querySelectorAll("span.name")) },
+    tasks: textsOf(tasks.main().querySelectorAll("div.data")[0].childNodes),
   };
 }
 
@@ -2621,6 +2724,68 @@ async function socketCloses() {
     probedHere: await closed(1006, false, remote),
     dropped: await closed(1006, true),
   };
+}
+
+/* Off screens a wake or a tapped notification meets (SPEC §6.4 "Waking up"): Remote went off
+ * (4410), then came back under the same link, as a fleet UI started again turns it on, and the
+ * phone woke; a page opened while no Remote answered (404), handed a notification's card by its
+ * worker once Remote was back; and a link the machine refused (4404), woken. What each shows,
+ * whether it is still off, and how often it asked api/remote. */
+async function offAndBack() {
+  const card = "#/n/" + NEEDS_ID + "/p/" + PROJECT + "/a/coder-1";
+  const heading = (page) => {
+    const title = find(page.main(), (node) => node.tagName === "H2");
+    return title ? title.textContent : null;
+  };
+  const machine = () => {
+    const state = { on: true, reads: 0 };
+    state.routes = {
+      "GET api/remote": () => {
+        state.reads += 1;
+        return state.on ? { status: 200, json: { allow_write: true, auto_off_at: null, version: "test" } }
+          : { status: 404, json: { error: "not_found", message: "no such link" } };
+      },
+      "GET api/needs": () => ({ status: 200, json: { items: [ITEM] } }),
+    };
+    return state;
+  };
+  const shown = (page, state) => ({
+    off: page.run("S.off"), heading: heading(page), cards: page.main().querySelectorAll("div.card").length, reads: state.reads,
+  });
+  const woke = machine();
+  const woken = bootPage("#/", signedIn(woke.routes));
+  await settle();
+  woken.acceptSockets();
+  woken.live().fire("close", { code: 4410 });
+  await settle();
+  const wentOff = shown(woken, woke);
+  woken.run("S.lastWake = 0;");
+  fire(woken, "document", "visibilitychange");
+  await settle();
+  woken.acceptSockets();
+  await settle();
+  const wokeUp = Object.assign(shown(woken, woke), { sockets: woken.sockets.length, open: woken.live().readyState === 1 });
+  const push = fakePush(KEY_NOW);
+  const tap = machine();
+  tap.on = false;
+  const scope = "https://x.ngrok-free.app/r/" + "t".repeat(32) + "/";
+  const tapped = bootPage("#/settings", signedIn(Object.assign(pushRoutes([]), tap.routes)), push.globals, scope);
+  await settle();
+  const gone = shown(tapped, tap);
+  tap.on = true;
+  for (const fn of push.heard.message || []) fn({ data: { type: "open", hash: card } });
+  await settle();
+  const landed = Object.assign(shown(tapped, tap), { hash: tapped.location.hash });
+  const link = machine();
+  const refused = bootPage("#/", signedIn(link.routes));
+  await settle();
+  refused.acceptSockets();
+  refused.live().fire("close", { code: 4404 });
+  await settle();
+  refused.run("S.lastWake = 0;");
+  fire(refused, "document", "visibilitychange");
+  await settle();
+  return { wentOff, wokeUp, gone, landed, link: shown(refused, link) };
 }
 
 /* The strip at the top, writes off, an auto-off set and a card in the feed, before and after the
@@ -3092,6 +3257,7 @@ async function main() {
     unlockWrong: await unlockAnswered(401, { error: "wrong_password", message: "wrong password" }),
     lostWrite: await lostWrite(),
     lostTwice: await lostTwice(),
+    bodyCut: await bodyCut(),
     lostKeyLongAgo: await lostKeyLongAgo(),
     lostThenSignedOut: await lostThenSignedOut(),
     lostRead: await lostRead(),
@@ -3146,7 +3312,9 @@ async function main() {
     dismissals: await dismissals(),
     afterLeaving: await afterLeaving(),
     refusalSentences: await refusalSentences(),
+    reasonsGiven: await reasonsGiven(),
     socketCloses: await socketCloses(),
+    offAndBack: await offAndBack(),
     unlockWait: await unlockAnswered(429, { error: "rate_limited", message: "too many tries" }),
     statusStrip: await statusStrip(),
     offStrip: await offStrip(),

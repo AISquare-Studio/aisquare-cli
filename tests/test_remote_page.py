@@ -847,6 +847,23 @@ def test_the_status_strip_and_the_bottom_nav_keep_to_one_line_on_a_phone() -> No
     assert _css_px(css, ".bottom .tab", "padding") == [8, 2]
 
 
+def test_every_box_a_sentence_lands_in_breaks_a_word_too_long_for_its_line() -> None:
+    """A question card's question and options set no overflow-wrap: an absolute path in
+    either ran past the card and pushed the Needs screen sideways, 584 px wide on a 390 px
+    phone with the question cut at the screen's edge, as headless Chromium measured. So did
+    a quick answer's button naming one, a refusal's sentence naming one in a toast, a
+    sheet's status, or a screen's empty line, and the sheet's own lead: a whole card wraps
+    such a word where it must now, and so does every other box a machine's sentence or a
+    typed one lands in, as Chromium measured at 360 px."""
+    css = _text("app.css")
+    for selector in (".card", ".sheet", ".toast", ".empty", ".status", ".muted", ".title"):
+        assert _css_value(css, selector, "overflow-wrap") == "anywhere", selector
+    script = _text("app.js")
+    assert 'mk(doc, "div", "card " + look[1])' in script, "a card is one box, its detail in it"
+    for drawn in ('el("p", "empty", failText(res))', 'el("p", "status")', 'el("div", "toast")'):
+        assert drawn in script, drawn
+
+
 def test_fit_width_sizes_the_pane_inside_the_screens_side_insets() -> None:
     """Fit width scaled the font to the screen's width less 48 px, but in landscape a phone's
     sides give up their safe-area insets too, 59 px a side on an iPhone 15 Pro: the pane ran
@@ -913,8 +930,61 @@ def test_every_text_colour_reads_at_aa_contrast_in_both_themes() -> None:
         for ink in inks:
             for ground in ("--bg", "--panel", "--raise"):
                 assert _contrast(theme[ink], theme[ground]) >= 4.5, (name, ink, ground)
-        assert _contrast(theme["--fg"], theme["--pane"]) >= 4.5, name
+        for ink in ("--pane-fg", "--pane-muted"):
+            assert _contrast(theme[ink], theme["--pane"]) >= 4.5, (name, ink)
     assert _contrast("#ffffff", _themes(css)["dark"]["--alarm"]) < 3, "the control: white on it"
+
+
+TERMINAL_TOKENS = ("--pane", "--pane-fg", "--pane-muted", *(f"--a{n}" for n in range(16)))
+"""What an agent's screen is drawn with: its ground and inks, and the 16 colours of ANSI."""
+
+
+def test_an_agents_screen_keeps_the_dark_ground_its_own_colours_were_picked_for() -> None:
+    """The pane, its card strip and the transcript took their ground from the phone's
+    scheme, white in light mode, while an agent's 256 and true colours arrive as fixed rgb(),
+    picked for its own theme, dark in Claude Code by default: on a light-mode phone its reply
+    bullet was white on white (1.0:1), and the dialog option the pad's ↑ ↓ ⏎ move 1.5:1, as
+    Claude Code 2.1 drew them under the fleet's tmux. The terminal keeps one dark palette in
+    both themes, and every rule that draws in it takes only its tokens."""
+    css = _text("app.css")
+    themes = _themes(css)
+    for token in TERMINAL_TOKENS:
+        assert themes["light"][token] == themes["dark"][token], token
+    assert themes["light"]["--fg"] != themes["dark"]["--fg"], "the control: the page's own change"
+    drawn = {
+        ("pre.pane, pre.transcript", "background"): "var(--pane)",
+        ("pre.pane, pre.transcript", "color"): "var(--pane-fg)",
+        ("pre.strip", "background"): "var(--pane)",
+        ("pre.strip", "color"): "var(--pane-muted)",
+        (".ln.muted", "color"): "var(--pane-muted)",
+        (".rf", "color"): "var(--pane)",
+        (".rb", "background"): "var(--pane-fg)",
+        (".cur", "background"): "var(--pane-fg)",
+        (".cur", "color"): "var(--pane)",
+    }
+    assert {key: _css_value(css, *key) for key in drawn} == drawn
+
+
+def _rgb_hex(value: str) -> str:
+    match = _RGB.fullmatch(value)
+    assert match is not None, value
+    return "#" + "".join(f"{int(part):02x}" for part in match.groups())
+
+
+def test_an_agents_own_colours_read_on_its_screen_in_both_themes(
+    node_report: dict[str, Any],
+) -> None:
+    """Claude Code's dark theme as tmux captured it, through the page's own ``ansiToRuns``:
+    each colour it drew with reads at AA contrast on the pane's ground whatever the phone's
+    scheme, and so does the pane's own ink where it set none."""
+    css = _text("app.css")
+    runs = [run for row in node_report["agentRows"] for run in row if run["text"].strip()]
+    inks = {_rgb_hex(run["color"]) for run in runs if "color" in run}
+    assert {"#ffffff", "#afd7ff", "#ffd700", "#949494"} <= inks, inks
+    assert any("color" not in run for run in runs), "the control: text in the pane's own ink"
+    for name, theme in _themes(css).items():
+        for ink in sorted(inks):
+            assert _contrast(ink, theme["--pane"]) >= 4.5, (name, ink)
 
 
 # --- 10. the service worker -----------------------------------------------------------------
@@ -1014,6 +1084,27 @@ def test_colours_are_clamped_integers_and_the_cursor_cell_is_marked(
         {"text": "c", "classes": ["f1", "cur"]},
         {"text": "d", "classes": ["f1"]},
     ]
+
+
+def test_an_underlines_colour_or_style_changes_nothing_else_on_the_row(
+    node_report: dict[str, Any],
+) -> None:
+    """tmux's capture writes an underline's colour as ``58;2;r;g;b`` or ``58;5;n``, whatever
+    form the app drew it in, and the page read each number after the 58 as a code of its own:
+    ``58;5;7`` inverted the cell, ``58;5;31`` turned it red, and the 0 in ``58;2;0;255;0``
+    undid the bold red underline it came with. A style of none, ``4:0``, underlined."""
+    assert node_report["underlines"] == {
+        "rgb": [
+            {"text": "RED", "classes": ["b", "f1"]},
+            {"text": "UNDER", "classes": ["b", "u", "f1"]},
+            {"text": "after", "classes": ["b", "f1"]},
+        ],
+        "indexed": [{"text": "spell ok", "classes": []}],
+        "red": [{"text": "xy", "classes": []}],
+        "ones": [{"text": "X", "classes": []}],
+        "none": [{"text": "a", "classes": ["u"]}, {"text": "b", "classes": []}],
+        "curly": [{"text": "a", "classes": []}, {"text": "b", "classes": ["u"]}],
+    }
 
 
 def test_a_card_says_once_what_its_detail_shows_in_full(node_report: dict[str, Any]) -> None:
@@ -1310,6 +1401,30 @@ def test_a_retry_lost_too_is_not_confirmed_and_its_result_still_arrives(
     assert "once it reconnects" not in lost["said"]  # no third attempt is coming
     assert lost["orphaned"] and lost["later"] == "Send: done"
     assert lost["send"] == {"busy": False, "disabled": False}
+
+
+def test_an_answer_cut_off_halfway_is_a_lost_request_not_a_remote_that_went_off(
+    boot_report: dict[str, Any],
+) -> None:
+    """The page read an answer's body in the same try as its JSON, so a connection that
+    dropped halfway through a body read as an answer that was not JSON: the off screen, Remote
+    is off, over a send-keys that had run, its result never shown and no retry to fetch it,
+    while the machine was up all along (Chromium, ERR_CONTENT_LENGTH_MISMATCH). It is a lost
+    request now: the write goes again, with its request_id, once the page reconnects, and the
+    machine's ledger answers it; a read says it could not reach the machine."""
+    cut = boot_report["bodyCut"]
+    write = cut["write"]
+    assert write["waiting"]["off"] is None and write["waiting"]["sockets"] == 2
+    assert write["waiting"]["send"] == {"busy": True, "disabled": True}
+    first, retry = write["bodies"]
+    assert first == retry and first["text"] == "hello"  # the same request_id: run at most once
+    assert write["off"] is None and write["typed"] == ""
+    assert write["pending"] == 0 and write["orphans"] == 0
+    assert cut["read"] == {
+        "off": None,
+        "said": "Could not reach the machine — try again in a moment.",
+        "sockets": 1,
+    }
 
 
 def test_a_write_lost_long_ago_is_not_sent_again_when_the_phone_is_back(
@@ -1693,7 +1808,7 @@ def test_an_answer_that_comes_after_the_human_moved_on_acts_on_its_own_sheet_onl
     assert late["restartDone"] == {**told, "toast": "Restarted coder-1 on its own conversation"}
     assert late["restartFailed"] == {
         **told,
-        "toast": "Restart coder-1: The machine could not answer — try again in a moment.",
+        "toast": "Restart coder-1: The machine could not answer: tmux did not answer",
     }
     assert late["restartStale"] == {
         **told,
@@ -2222,9 +2337,40 @@ def test_each_refusal_is_said_in_the_sentence_the_spec_gives_it(
         "other": "coder-1's pane is not running the agent — nothing was sent",
         "tooLong": "Too long (max 8000 characters).",
         "tooMany": "Too many tries — wait 30 s.",
-        "unavailable": "The machine could not answer — try again in a moment.",
+        "unavailable": "The machine could not answer: tmux did not answer",
+        "unavailableBare": "The machine could not answer — try again in a moment.",
+        "unwritable": (
+            "the machine could not save that: its ~/.aisquare/remote.json would not write (a full"
+            " disk, or a home it may not write) — nothing was changed; fix that on the machine,"
+            " then try again"
+        ),
         "notJson": "Remote is off on the machine, or the link changed.",
     }
+
+
+def test_a_503_says_the_machines_reason_and_a_revoke_it_holds_unsaved_leaves_the_list(
+    boot_report: dict[str, Any],
+) -> None:
+    """Every 503 said "try again in a moment", whatever the machine said: Tasks with Team
+    off, a store that would not open, tmux missing, all for good. A revoke the running Remote
+    held but could not save (remote.json would not write) is answered 503 with the command that
+    saves it, and the phone said to try again while the device stayed listed; tapped again it
+    answered 404, which looked like success, and a later change to remote.json from a shell
+    signed the stolen phone back in. The page says the machine's sentence, reads the list
+    again (as after a 404: another tab had revoked it), and a sign-out held that way goes to
+    unlock."""
+    given = boot_report["reasonsGiven"]
+    revoked = given["revoked"]
+    assert "run  aisquare remote revoke dev_4e5f6a7b  on the machine" in revoked["toast"]
+    assert revoked["toast"].startswith("revoked on the running Remote, but")
+    assert revoked["rows"] == ["This device"] and revoked["reads"] == 2
+    signed_out = given["signedOut"]
+    assert signed_out["hash"] == "#/unlock"
+    assert "aisquare remote revoke dev_0a1b2c3d" in signed_out["toast"]
+    assert given["revokedElsewhere"] == {"toast": "no such device", "rows": ["This device"]}
+    assert given["tasks"] == [
+        "The machine could not answer: the agent orchestrator is disabled (AISQUARE_TEAM=0)"
+    ]
 
 
 def test_each_close_code_and_a_failed_handshake_lead_where_the_spec_says(
@@ -2245,6 +2391,45 @@ def test_each_close_code_and_a_failed_handshake_lead_where_the_spec_says(
     }
     assert closes["probedHere"] == {"shown": None, "probes": 1, "timers": ["connect"]}
     assert closes["dropped"] == {"shown": None, "probes": 0, "timers": ["connect"]}
+
+
+def test_a_page_off_asks_again_when_the_phone_wakes_or_a_notification_is_tapped(
+    boot_report: dict[str, Any],
+) -> None:
+    """SPEC §6.4 reconnects on every wake, but the page returned early while off: once Remote
+    went off, or stopped answering, it said so until Retry was tapped, though a fleet UI
+    started again turns Remote back on under the same link. A notification of the Remote
+    back on, tapped, opened on "Remote is off" and no card. A wake asks the machine again, as
+    Retry does, and so does a tap; a link the machine refused (4404) has nothing to ask."""
+    back = boot_report["offAndBack"]
+    assert back["wentOff"] == {
+        "off": "off",
+        "heading": "Remote is off on the machine",
+        "cards": 0,
+        "reads": 1,
+    }
+    assert back["wokeUp"] == {
+        "off": None,
+        "heading": None,
+        "cards": 1,
+        "reads": 2,
+        "sockets": 2,
+        "open": True,
+    }
+    assert back["gone"]["off"] == "gone" and back["gone"]["reads"] == 1
+    assert back["landed"] == {
+        "off": None,
+        "heading": None,
+        "cards": 1,
+        "reads": 2,
+        "hash": "#/n/ny_0123456789abcdef/p/prj_x/a/coder-1",
+    }
+    assert back["link"] == {
+        "off": "link",
+        "heading": "This link is no longer valid",
+        "cards": 0,
+        "reads": 1,
+    }
 
 
 def test_a_page_that_cannot_go_on_keeps_no_timer_extend_or_connecting_dot(
@@ -2377,7 +2562,7 @@ def test_a_refused_read_stays_said_through_the_redraws_that_follow(
     and a needs frame's redraw then left the screen blank."""
     kept = boot_report["failuresKept"]
     assert kept["fleet"] == [["no project matches 'prj_gone'"]] * 4
-    assert kept["projects"] == [["The machine could not answer — try again in a moment."]] * 4
+    assert kept["projects"] == [["The machine could not answer: tmux did not answer"]] * 4
     assert kept["reads"] == 3, "the polls did run"
 
 
@@ -2388,7 +2573,7 @@ def test_a_refused_read_of_the_feed_is_said_where_the_feed_would_be(
     "Loading…" until a frame brought the feed, for good when none came: the class sweep of
     the refused reads above. They say why now, until the feed comes."""
     refused = boot_report["needsRefused"]
-    sentence = "The machine could not answer — try again in a moment."
+    sentence = "The machine could not answer: the scan failed"
     assert refused["feed"] == [[sentence, 0], ["", 1]]
     assert refused["card"] == [sentence]
 

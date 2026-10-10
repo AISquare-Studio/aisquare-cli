@@ -5,13 +5,11 @@
  * relative, routing is by hash, and the server only ever serves the top.
  *
  * Rendering rules (SPEC §6.6), held by tests/test_remote_page.py:
- * - every string the server sends reaches the DOM as text: textContent or a
- *   text node, after plainText() drops escape sequences and controls;
- * - no server string is ever written to an attribute, a URL or a style, with
- *   two exceptions, both numbers the page parses and clamps itself: an ANSI
- *   colour, clamped to 0-255 and written as rgb() through el.style.color /
- *   backgroundColor; and a pane's width, an integer clamped to 20-400, written
- *   as the --cols property that Fit width scales the pane's font by;
+ * - every server string reaches the DOM as text (textContent or a text node),
+ *   after plainText() drops escape sequences and controls;
+ * - no server string is written to an attribute, a URL or a style, but two
+ *   numbers the page parses and clamps itself: an ANSI colour (0-255, as rgb()
+ *   through el.style) and a pane's width (20-400, the --cols Fit width uses);
  * - setAttribute takes only literal names from a short list, handlers are
  *   added with addEventListener, and navigation goes through pageGo(), the
  *   one place location.hash is set (or replaced), from ids it validated.
@@ -35,8 +33,8 @@ const API = Object.freeze({
 });
 const WRITES = Object.freeze(["send-keys", "note", "agent/tell", "agent/stop", "agent/restart", "agent/switch"]);
 
-/* A dispatcher write's path, only ever a name WRITES lists: the CI test holds that list to
- * the server's, where paths typed at each call site were held to nothing. */
+/* A dispatcher write's path, only ever a name WRITES lists, which the CI test holds to the
+ * server's. */
 function writePath(name) {
   if (WRITES.indexOf(name) < 0) throw new Error("not a write: " + name);
   return "api/" + name;
@@ -204,8 +202,13 @@ function sgrCode(state, code) {
   else if (code >= 100 && code <= 107) state.bg = { n: code - 92 };
 }
 
-/* 38/48 in the colon form: 38:5:n, 38:2:r:g:b, or 38:2:<colour space>:r:g:b. */
+/* 38/48 in the colon form: 38:5:n, 38:2:r:g:b, or 38:2:<colour space>:r:g:b; 4:n, an
+ * underline's style, 4:0 none. */
 function colonColour(state, sub) {
+  if (sub[0] === 4 && sub.length > 1) {
+    state.u = sub[1] !== 0;
+    return undefined;
+  }
   const target = sub[0] === 38 ? "fg" : sub[0] === 48 ? "bg" : null;
   if (!target) return sgrCode(state, sub[0]);
   if (sub[1] === 5 && sub.length >= 3) state[target] = xterm256(sub[2]);
@@ -224,18 +227,20 @@ function applySgr(state, params) {
       continue;
     }
     const code = toInt(parts[k]);
-    if (code === 38 || code === 48) {
-      const target = code === 38 ? "fg" : "bg";
+    // 58 (an underline's colour) takes its values as 38 does, and is never drawn.
+    if (code === 38 || code === 48 || code === 58) {
       const mode = toInt(parts[k + 1]);
+      let colour = null;
       if (mode === 5 && k + 2 < parts.length) {
-        state[target] = xterm256(toInt(parts[k + 2]));
+        colour = xterm256(toInt(parts[k + 2]));
         k += 2;
       } else if (mode === 2 && k + 4 < parts.length) {
-        state[target] = rgb(toInt(parts[k + 2]), toInt(parts[k + 3]), toInt(parts[k + 4]));
+        colour = rgb(toInt(parts[k + 2]), toInt(parts[k + 3]), toInt(parts[k + 4]));
         k += 4;
       } else {
         k = parts.length; // a colour with no value: the rest of this sequence means nothing
       }
+      if (colour && code !== 58) state[code === 38 ? "fg" : "bg"] = colour;
       continue;
     }
     sgrCode(state, code);
@@ -471,10 +476,10 @@ function renderDetail(kind, detail, doc) {
   return { box: shown ? box : null, text, lead };
 }
 
-/* Whether an excerpt only says again what the detail shows whole: said twice, it doubled a
- * card on a phone. A text's is cut from the text (all of it, its first 280 characters, its
- * last paragraph, the question it ends on), and one from the end of a long text stays, as
- * its box may hold it below the fold; the others are built from what the box leads with. */
+/* Whether an excerpt only says again what the detail shows whole. A text's is cut from the
+ * text (all of it, its first 280 characters, its last paragraph, the question it ends on);
+ * one from the end of a long text stays, as its box may hold it below the fold. The others
+ * are built from what the box leads with. */
 function excerptRepeats(excerpt, detail) {
   const flat = (value) => plainText(value).replace(/\s+/g, " ").trim();
   const part = flat(excerpt).replace(/…$/, "").trim();
@@ -672,8 +677,8 @@ function rowDetail(row, now) {
   return "limit resets " + (Date.parse(at) > now ? ago(at, now) + " (" + shown + ")" : "now");
 }
 
-/* A transcript turn's time, dim after its speaker: the machine sends when (stamps), and the
- * phone's clock tells it, as every other time here. The machine's own said 17:05 for 10:05. */
+/* A transcript turn's time, dim after its speaker: the instant the machine sends, by the
+ * phone's clock, as every other time here. */
 function turnTime(iso) {
   const shown = typeof iso === "string" ? clock(iso) : "";
   return shown ? "\x1b[2m " + shown + "\x1b[0m" : "";
@@ -734,9 +739,9 @@ function apiPath(template, params) {
 }
 
 /* One request, answered as {ok, status, data, error, message, retryAfter, network, notJson}.
- * A 401 sends the page to unlock (but unlock's own), and an answer that is not
- * JSON is not this server: ngrok's offline page, or a link that moved. The one
- * exception is a bare 500, which is this server failing, said as such. */
+ * A 401 sends the page to unlock (but unlock's own). An answer that is not JSON is not this
+ * server (ngrok's offline page, or a link that moved), except a bare 500, this server
+ * failing. A body cut off halfway is a lost answer. */
 async function apiCall(method, path, options) {
   const o = options || {};
   const init = {
@@ -751,8 +756,10 @@ async function apiCall(method, path, options) {
     if (query.toString()) url += "?" + query.toString();
   }
   let response;
+  let text;
   try {
     response = await fetch(url, init);
+    text = await response.text();
   } catch (error) {
     setOffline(true);
     return { ok: false, status: 0, data: null, error: "offline", message: "", retryAfter: 0, network: true, notJson: false };
@@ -761,7 +768,6 @@ async function apiCall(method, path, options) {
   let data = null;
   let json = true;
   try {
-    const text = await response.text();
     if (text) data = JSON.parse(text);
   } catch (error) {
     json = false;
@@ -797,10 +803,8 @@ async function apiWrite(path, body, verb, onWait, at) {
     let late = 0;
     res = await new Promise((resolve) => {
       pending.resolve = resolve;
-      // The retry waits for a reconnect (flushRetries). A socket that still looks
-      // healthy would never give it one, and may be the half-open twin of the
-      // connection that lost this request: replace it now. Offline, the reconnect
-      // backs off until the phone is back.
+      // The retry waits for a reconnect (flushRetries), which a socket that looks healthy never
+      // gives, and it may be the half-open twin of the one that lost this request: replace it.
       wake(true);
       // Offline, none may come, and past RETRY_WITHIN_MS it would not go again: the wait ends there.
       late = setTimeout(function tooLate() {
@@ -821,14 +825,12 @@ async function apiWrite(path, body, verb, onWait, at) {
   return res;
 }
 
-/* A new socket is open: each write whose request was lost goes out again, with
- * its request_id, but only within RETRY_WITHIN_MS of its tap. An id the machine
- * did receive is answered from its ledger; one it never received runs now, and
- * a key tapped minutes ago would land on whatever the agent shows by then: a
- * "1" or an Enter answering a prompt that came up since. So an older write is
- * not sent again, and neither is one from before the phone had to unlock (the
- * unlock may be a new device, whose ledger knows none of its ids). The page
- * says so, and still shows the result if the machine had it after all. */
+/* A new socket is open: each write whose request was lost goes out again with its
+ * request_id, within RETRY_WITHIN_MS of its tap. An id the machine received is answered
+ * from its ledger; one it never received runs now, and an older key would land on
+ * whatever the agent shows by then (a "1" answering a prompt that came up since), so an
+ * older write is not sent again; nor is one from before an unlock, whose device's ledger
+ * may know none of its ids. The page says so, and shows the result if the machine had it. */
 function flushRetries() {
   const now = Date.now();
   for (const pending of S.pending.values()) {
@@ -852,11 +854,10 @@ function dropRetries() {
   }
 }
 
-/* Keys to one agent go one at a time, each once the one before it was answered. Sent
- * together (two quick taps, or two lost ones resent on a reconnect), the machine could
- * type a later one first: ↓ ↓ ⏎ chose another option. A key queued behind one that did
- * not go through, or that waited past RETRY_WITHIN_MS, is not sent ("held"): it was
- * tapped for a screen that never came. send(at) sends it, at being when it was tapped. */
+/* Keys to one agent go one at a time, each once the one before it was answered: sent
+ * together (two quick taps, or two lost ones resent), the machine could type a later one
+ * first. A key behind one that did not go through, or that waited past RETRY_WITHIN_MS,
+ * is not sent ("held"). send(at) sends it, at being when it was tapped. */
 const keyTurns = new Map();
 
 function keysInTurn(pid, label, send) {
@@ -951,14 +952,15 @@ function failText(res, max) {
   if (res.status === 409 && (res.error === "busy" || res.error === "in_progress")) return "Still running — " + (message || "the result shows here when it finishes.");
   if (res.status === 413) return "Too long (max " + (max || "the limit") + " characters).";
   if (res.status === 429) return "Too many tries — wait " + (res.retryAfter || "a few") + " s.";
-  if (res.status === 503) return "The machine could not answer — try again in a moment.";
+  // A 503 says why: a home it cannot write, Team off, a revoke held unsaved.
+  if (res.status === 503 && !message) return "The machine could not answer — try again in a moment.";
+  if (res.status === 503 && res.error !== "remote_state_unwritable") return "The machine could not answer: " + message;
   return message || plainText(res.error) || "That did not work (" + res.status + ").";
 }
 
-/* What a refusal does beyond its sentence. A read_only means writes are off now: the page
- * shows it at once, where it kept the pad and Send live until the next remote frame. Late,
- * its sheet never takes the place of one opened since (sheet: the one that sent it), and a
- * gone agent sends the page to its fleet only from that agent's own screen. */
+/* What a refusal does beyond its sentence. A read_only shows writes off at once. Late, its
+ * sheet never takes the place of one opened since (sheet: the one that sent it), and a gone
+ * agent sends the page to its fleet only from that agent's own screen. */
 function afterFailure(res, route, sheet) {
   if (res.status === 403 && res.error === "read_only") {
     if (writable()) {
@@ -1123,8 +1125,7 @@ function onFrame(text) {
 }
 
 /* The heartbeat says when the machine last looked for what needs you, by its own clock as
- * the frame's ts is. A watcher that stopped (a tmux call hung in a scan) froze the feed
- * while the link stayed green: the feed now says how old it is instead. */
+ * the frame's ts is: a watcher stuck in a scan leaves the feed saying how old it is. */
 function noteScan(ts, payload) {
   const scanned = payload && typeof payload.needs_scanned_at === "string" ? payload.needs_scanned_at : "";
   const behind = Date.parse(ts) - Date.parse(scanned) > SCAN_BEHIND_MS ? scanned : "";
@@ -1194,9 +1195,8 @@ function setNeeds(items) {
   viewCall("needs");
 }
 
-/* A read answered after a frame of its kind came is no newer than the frame, and may be
- * older (a wake reads and reconnects at once). It is dropped: the socket sends a kind again
- * only once it changes, so an older answer kept stayed, a card hidden until the next. */
+/* A read answered after a frame of its kind came may be older than the frame (a wake reads
+ * and reconnects at once), and the socket sends a kind again only once it changes: dropped. */
 async function refreshNeeds() {
   const heard = S.heard.needs;
   const res = await apiCall("GET", API.needs);
@@ -1204,7 +1204,7 @@ async function refreshNeeds() {
   if (res.ok && res.data && typeof res.data === "object") setNeeds(res.data.items);
   else if (res.status === 404 && !res.notJson && S.needs === null) setNeeds([]);
   else if (S.needs === null && !res.notJson && res.status !== 401) {
-    // Said in the feed's place: it said "Loading…" for good.
+    // Said in the feed's place, not "Loading…" for good.
     S.needsFailed = res;
     viewCall("needs");
   }
@@ -1246,11 +1246,10 @@ function checkStale() {
   drawStatus();
 }
 
-/* Writes off, or nothing heard for 25 s: every action button waits. "w" marks a
- * write, "a" an action that is not one. Sign out is neither: it is always there
- * (SPEC §6.3), and a plain DELETE that needs no live socket. "pk" keys and Send act on
- * the pane the Live tab shows: they also wait until that pane came on this socket, and the
- * pane is greyed until then, as it may be the one from before. */
+/* Writes off, or nothing heard for 25 s: every action button waits. "w" marks a write, "a"
+ * an action that is not one. Sign out is neither (SPEC §6.3): a plain DELETE that needs no
+ * live socket. "pk" keys and Send also wait until the Live tab's pane came on this socket,
+ * and the pane is greyed until then, as it may be the one from before. */
 function gateButtons() {
   const shut = !writable() || S.stale;
   const held = !!(S.view && S.view.held && S.view.held());
@@ -1313,7 +1312,7 @@ function drawStatus() {
   const shut = !!S.off || S.locked;
   const state = S.offline || shut ? "down" : live ? "live" : S.stale ? "stale" : "wait";
   UI.dot.className = "dot " + state;
-  UI.dot.setAttribute("aria-label", DOT_SAID[state]); // its colour alone said stale to sight only
+  UI.dot.setAttribute("aria-label", DOT_SAID[state]); // to a screen reader too
   UI.ro.hidden = !S.remote || writable() || shut;
   const at = S.remote && typeof S.remote.auto_off_at === "string" ? Date.parse(S.remote.auto_off_at) : NaN;
   if (Number.isFinite(at) && !shut) {
@@ -1358,7 +1357,7 @@ function drawNav() {
   ];
   for (const [tab, on] of here) {
     tab.classList.toggle("on", on);
-    tab.setAttribute("aria-current", on ? "page" : "false"); // the class alone said it to sight only
+    tab.setAttribute("aria-current", on ? "page" : "false"); // to a screen reader too
   }
   UI.nav.hidden = name === "unlock" || !!S.off;
 }
@@ -1500,8 +1499,8 @@ function readOnlySheet(message) {
 
 /* THE one place the page navigates (SPEC §6.6): a route object, or a hash that validates
  * like any route (a notification's postMessage brings one). A redirect (replace) takes the
- * place of the entry it leaves: pushed, Back went to #/unlock, or to a gone agent's tab,
- * which sent the page on again, so Back never left it. */
+ * place of the entry it leaves: Back never lands on #/unlock or a gone agent's tab, which
+ * would send the page on again. */
 function pageGo(target, replace) {
   if (UI.entry === "leaving") {
     UI.then = [target, replace];
@@ -1543,9 +1542,9 @@ function renderRoute() {
   return landFocus(from, route);
 }
 
-/* Focus where it was, if still there; else the tab chosen, else the heading, else the screen.
- * Left on what the screen took away, a screen reader lost its place and heard of no change.
- * The page's first screen is left alone, as any page's is when it loads. */
+/* Focus where it was, if still there; else the tab chosen, else the heading, else the
+ * screen, so a screen reader keeps its place and hears of the change. The page's first
+ * screen is left alone, as any page's is when it loads. */
 function landFocus(from, route) {
   const now = document.activeElement;
   const first = !UI.landed;
@@ -1612,13 +1611,18 @@ function drawOff() {
   const text = OFF_SCREENS[S.off] || OFF_SCREENS.gone;
   const box = el("section", "off");
   box.append(el("h2", null, text[0]), el("p", "muted", text[1]));
-  box.appendChild(button("primary", "Retry", () => {
-    S.off = null;
-    S.backoff = 0;
-    start();
-  }));
+  box.appendChild(button("primary", "Retry", () => lookAgain(true)));
   UI.main.appendChild(box);
   drawNav();
+}
+
+/* Off, a wake or a tapped notification asks again, as Retry (any) does: Remote may be on
+ * again under the same link, as a fleet UI started again turns it back on. */
+function lookAgain(any) {
+  if (!any && S.off !== "off" && S.off !== "gone") return;
+  S.off = null;
+  S.backoff = 0;
+  start();
 }
 
 /* Visible again, back on the page, or back online: the socket may be a dead
@@ -1628,8 +1632,9 @@ function wake(force) {
   if (!force && now - S.lastWake < 1000) return;
   S.lastWake = now;
   S.backoff = 0;
+  if (S.off) return lookAgain();
   // Nothing to wake before the first answer: a page still booting, or one not unlocked.
-  if (S.off || S.locked || S.booting) return;
+  if (S.locked || S.booting) return;
   if (S.sockState === "replaced" && !force && document.visibilityState !== "visible") return;
   connect();
   drawBanner();
@@ -1719,8 +1724,7 @@ VIEWS.unlock = (route, main) => {
     }
     if (res.status === 401) said.textContent = "That is not the passphrase.";
     else if (res.status === 429) wait(res.retryAfter || 60, plainText(res.message) || "Too many tries");
-    // The token is wrong (a new link was made) or auto-off passed: no passphrase helps,
-    // and the bare "not_found" under the button never said to open the link anew.
+    // The token is wrong (a new link was made) or auto-off passed: no passphrase helps.
     else if (res.status === 404) offScreen("gone");
     else said.textContent = failText(res);
     return undefined;
@@ -1812,9 +1816,8 @@ VIEWS.home = (route, main) => {
     empty.textContent = S.needs !== null ? "Nothing needs you." : S.needsFailed ? failText(S.needsFailed) : "Loading…";
     empty.hidden = items.length > 0;
     // A strip for each of the first STRIPS_MAX cards that show one, in feed order, worked out
-    // before a card is built: a kept card held its strip while new ones came above it, and
-    // the socket went past its 8 panes. Cards that lose theirs go first, so their
-    // unsubscribes do too, and the socket never holds more.
+    // before a card is built, so the socket never holds more than its 8 panes. Cards that
+    // lose theirs go first, so their unsubscribes do too.
     const wanted = new Map();
     let strips = STRIPS_MAX;
     for (const item of items) {
@@ -2621,7 +2624,6 @@ function drawExplainability(body, card) {
   if (isText(card.model)) lines.push("model: " + plainText(card.model));
   if (typeof card.tokens_in === "number") lines.push("tokens in: " + card.tokens_in);
   if (typeof card.tokens_out === "number") lines.push("tokens out: " + card.tokens_out);
-  if (typeof card.cost_estimate_usd === "number") lines.push("cost estimate: $" + card.cost_estimate_usd.toFixed(2));
   const policy = card.policy && typeof card.policy === "object" ? card.policy : null;
   if (policy) {
     for (const key of ["tracing", "shipping", "target", "gateway", "redaction"]) {
@@ -2797,8 +2799,9 @@ VIEWS.devices = (route, main) => {
           const out = await apiCall("DELETE", apiPath(API.device, { id }));
           revoke.classList.remove("busy");
           gateButtons();
-          if (out.ok) load();
-          else {
+          // A revoke held unsaved (503), or a device gone (404): read the list again.
+          if (out.ok || out.status === 404 || out.error === "remote_state_unwritable") load();
+          if (!out.ok) {
             toast(failText(out));
             afterFailure(out);
           }
@@ -2819,12 +2822,10 @@ VIEWS.devices = (route, main) => {
 async function signOut(id) {
   if (!DEVICE_ID.test(id || "")) return;
   const res = await apiCall("DELETE", apiPath(API.device, { id }));
-  if (!res.ok) {
-    toast(failText(res));
-    return;
-  }
+  const held = res.ok || res.error === "remote_state_unwritable"; // unsaved, but signed out
+  toast(res.ok ? "Signed out" : failText(res));
+  if (!held) return;
   S.me = null;
-  toast("Signed out");
   toUnlock();
 }
 
@@ -2854,10 +2855,9 @@ async function workerRegistration() {
   return existing || navigator.serviceWorker.register("sw.js", { scope: "./" });
 }
 
-/* A subscription only works with the key it was made against. One made against a
- * key the machine no longer has (remote-push.json lost, and its keys made again) is
- * refused by the push service at every push, and only a new one works again. A
- * browser that does not say which key its subscription used is believed. */
+/* A subscription only works with the key it was made against: one made against a key the
+ * machine no longer has (remote-push.json lost and made again) is refused at every push.
+ * A browser that does not say which key its subscription used is believed. */
 function madeWithKey(sub, vapid) {
   const own = sub && sub.options && sub.options.applicationServerKey;
   if (!own) return true;
@@ -3029,8 +3029,8 @@ VIEWS.settings = (route, main) => {
 
 // --- auto-off ---
 
-/* Busy while it runs, as every write button is: a second tap went out under a second
- * request_id, and Remote stayed on another hour the human never asked for. */
+/* Busy while it runs, as every write button is: a second tap would go out under a second
+ * request_id, an hour more no one asked for. */
 async function extendAutoOff() {
   UI.extend.classList.add("busy");
   gateButtons();
@@ -3092,7 +3092,9 @@ function boot() {
     navigator.serviceWorker.register("sw.js", { scope: "./" }).catch(() => undefined);
     navigator.serviceWorker.addEventListener("message", (event) => {
       const data = event.data;
-      if (data && data.type === "open" && typeof data.hash === "string") pageGo(data.hash);
+      if (!data || data.type !== "open" || typeof data.hash !== "string") return;
+      pageGo(data.hash);
+      lookAgain();
     });
   }
   setInterval(onSecond, 1000);

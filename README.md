@@ -541,9 +541,17 @@ ngrok tunnel, and the page it serves ships inside aisquare-cli.
 ```sh
 uv tool install --python 3.13 --with tiktoken 'aisquare-cli[remote]'   # pipx, pip or more extras: docs/remote.md
 export AISQUARE_REMOTE_NGROK_URL=https://your-name.ngrok-free.app   # your static domain
-aisquare remote serve                # or press R in `aisquare ui`
-ngrok http --url=your-name.ngrok-free.app --inspect=false 8750      # in another terminal
 aisquare remote allow-write on       # read-only until you say so
+```
+
+Then press `R` in `aisquare ui` and switch Remote on: the panel starts the server
+and ngrok on that domain itself, and shows the link, a QR code and the passphrase.
+Without the fleet UI, start both yourself instead, never beside the panel: a domain
+holds one tunnel, so a second ngrok on it fails:
+
+```sh
+aisquare remote serve
+ngrok http --url=your-name.ngrok-free.app --inspect=false 8750      # in another terminal
 ```
 
 Every ngrok account has one free static domain: with it the link survives a

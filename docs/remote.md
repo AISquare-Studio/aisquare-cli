@@ -15,7 +15,11 @@ phone loads ships inside aisquare-cli.
 ```
 
 - **One port, loopback only.** The server binds `127.0.0.1:8750` and nothing
-  else. ngrok, or a browser on the same machine, is the only way in.
+  else. ngrok, or a browser on the same machine, is the only way in. Point ngrok at
+  `127.0.0.1:8750`, never at `8750` alone: ngrok reads that as `localhost`, which
+  is IPv6's `::1` first, and anyone on the machine can listen on `[::1]:8750` and be
+  handed every request, the passphrase and the cookies with them. The panel's ngrok
+  and the command `serve` prints both use `127.0.0.1`.
 - **A secret URL, then a passphrase.** Every path lives under `/r/<token>/`, a
   32-character random token; a wrong one is a 404 everywhere. The page then asks
   for the four-word passphrase the machine shows, once per browser.
@@ -87,7 +91,7 @@ the one an exported `AISQUARE_REMOTE_PORT` names, as `serve` does.
 
 ```sh
 aisquare remote serve --auto-off 120 --public-url https://your-name.ngrok-free.app
-ngrok http --url=your-name.ngrok-free.app --inspect=false 8750
+ngrok http --url=your-name.ngrok-free.app --inspect=false 127.0.0.1:8750
 ```
 
 `serve` prints the local link and the passphrase and runs until Ctrl-C or until

@@ -1376,7 +1376,7 @@ def test_cli_serve_prints_link_and_password_then_serves(
     human = CliRunner().invoke(cli, ["remote", "serve", "--port", "9002"])
     assert human.exit_code == 0
     assert "password:" in human.output and "read-only" in human.output
-    assert "ngrok http 9002 --inspect=false" in human.output
+    assert "ngrok http 127.0.0.1:9002 --inspect=false" in human.output
     assert "--public-url <the ngrok URL>" in human.output, "no origin: links open the page"
     public = CliRunner().invoke(
         cli, ["remote", "serve", "--port", "9003", "--public-url", "remote-anmol.ngrok-free.app"]

@@ -1,8 +1,8 @@
 """The ngrok agent as a subprocess: spawn, read its JSON log, learn the public URL, stop.
 
-``ngrok http <port> --log=stdout --log-format=json --log-level=info`` prints one JSON
-object per line; the one that matters is ``{"msg": "started tunnel", "name":
-"command_line", "addr": "http://localhost:<port>", "url": "https://…"}``. Everything
+``ngrok http 127.0.0.1:<port> --log=stdout --log-format=json --log-level=info`` prints one
+JSON object per line; the one that matters is ``{"msg": "started tunnel", "name":
+"command_line", "addr": "http://127.0.0.1:<port>", "url": "https://…"}``. Everything
 else is noise or an error (``{"lvl": "eror", "err": "…"}``), and an error about the
 authtoken is the one a first-time user hits, so it gets its own hint. The binary is the
 human's job (PLAN §7); when it is absent this module returns a sentence that says how to
@@ -44,9 +44,12 @@ Where phones reach the server is learned from this process's own ngrok, by its
 log, never from ngrok's local agent API on ``127.0.0.1:4040``: any user of the
 machine can listen there before the human's ngrok does (which then moves to
 4041) and name any https host, and a push link is where the human types the
-passphrase. And from the log only for the tunnel ``ngrok http <port>`` asked for,
-to this Remote's port: one the API started says so in the same log, and is not
-Remote's. A hand-started ngrok is told about with ``serve --public-url``.
+passphrase. And from the log only for the tunnel ``ngrok http`` asked for, to this
+Remote's port: one the API started says so in the same log, and is not Remote's. A
+hand-started ngrok is told about with ``serve --public-url``.
+
+ngrok is pointed at ``127.0.0.1:<port>``, the one address Remote listens on
+(:data:`UPSTREAM_HOST`), never at the port alone, which ngrok reads as ``localhost``.
 """
 
 from __future__ import annotations
@@ -110,7 +113,15 @@ _OWN_GROUP: dict[str, Any] = {} if sys.platform == "win32" else {"process_group"
 """Popen's word for a process group of ngrok's own: POSIX only, and the fleet UI runs there."""
 
 COMMAND_LINE_TUNNEL = "command_line"
-"""ngrok's name, in its log and its API, for the tunnel ``ngrok http <port>`` asks for."""
+"""ngrok's name, in its log and its API, for the tunnel ``ngrok http`` asks for."""
+UPSTREAM_HOST = "127.0.0.1"
+"""Where ngrok sends the phones' requests: the address Remote listens on, and nothing else
+(``remote_server.BIND``). Given the port alone, ngrok forwards to ``localhost:<port>``,
+which resolves to ``::1`` first, and its dialer (Go's, as curl's) tries that first and
+falls back to ``127.0.0.1`` only when it is refused: any account on the machine may listen
+on ``[::1]:<port>``, before Remote starts or after, and was handed every request, the
+token in its path, the passphrase of an unlock and every device's cookie (sweep 4 of #243).
+So may a dev server that listens on ``localhost`` over IPv6 alone."""
 _LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1"})
 NGROK_CONFIG_NAME = "ngrok.yml"
 API_OFF_CONFIGS = {
@@ -174,7 +185,7 @@ class LogEvent:
     """That tunnel's name: :data:`COMMAND_LINE_TUNNEL` for the one ``ngrok http`` asked for,
     whatever ngrok's agent API named one it started."""
     addr: str | None = None
-    """Where that tunnel forwards to: ``http://localhost:<port>``."""
+    """Where that tunnel forwards to: ``http://127.0.0.1:<port>``."""
     web: str | None = None
     """Where ngrok's local web interface and agent API listen, when the line says it started
     them (``starting web service``)."""
@@ -475,9 +486,9 @@ def ngrok_command(
     url: str | None = None,
     configs: Sequence[Path] | None = None,
 ) -> list[str]:
-    """``ngrok http <port>`` with its log as JSON lines at info level and its traffic inspector
-    off, on the static domain ``url`` if one, with ``configs`` in place of ngrok's own config
-    if given (:func:`api_off_configs`).
+    """``ngrok http 127.0.0.1:<port>`` (:data:`UPSTREAM_HOST`) with its log as JSON lines at
+    info level and its traffic inspector off, on the static domain ``url`` if one, with
+    ``configs`` in place of ngrok's own config if given (:func:`api_off_configs`).
 
     The level as well as the format, since the URL comes only from the info-level "started
     tunnel" line: ngrok reads ``log_level`` from the human's ``ngrok.yml``, which ours is
@@ -486,7 +497,8 @@ def ngrok_command(
     3 of #243). A flag overrides the config, as ``--log`` and ``--log-format`` already do.
     """
     command = [
-        *(binary, "http", str(port), "--log=stdout", "--log-format=json", "--log-level=info"),
+        *(binary, "http", f"{UPSTREAM_HOST}:{port}"),
+        *("--log=stdout", "--log-format=json", "--log-level=info"),
         "--inspect=false",
     ]
     if url:
@@ -846,7 +858,7 @@ class NgrokTunnel:
         return said == AUTHTOKEN_HINT
 
     def _announces_this_tunnel(self, event: LogEvent) -> bool:
-        """Whether a started tunnel is the one ``ngrok http <port>`` asked for: named
+        """Whether a started tunnel is the one ``ngrok http`` asked for: named
         :data:`COMMAND_LINE_TUNNEL`, forwarding to this port. Its log is read whatever
         ngrok's agent API did, and a tunnel started there, under any other name or to any
         other address, became the link, the QR and every notification's origin: a tap

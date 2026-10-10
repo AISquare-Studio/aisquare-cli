@@ -16,6 +16,7 @@ import inspect
 import io
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -64,10 +65,11 @@ OURS = {
     "msg": "started tunnel",
     "obj": "tunnels",
     "name": "command_line",
-    "addr": "http://localhost:8750",
+    "addr": "http://127.0.0.1:8750",
     "url": "https://owner-1234.ngrok-free.app",
 }
-"""The line ngrok logs for the tunnel ``ngrok http 8750`` asked for, as ngrok v3 logs it."""
+"""The line ngrok logs for the tunnel ``ngrok http 127.0.0.1:8750`` asked for, as ngrok v3 logs
+it."""
 WEB_SERVICE = {"lvl": "info", "msg": "starting web service", "obj": "web", "addr": "127.0.0.1:4040"}
 """The line ngrok logs as it starts its local web interface and agent API."""
 PORT_ENV = remote_control.PORT_ENV
@@ -120,7 +122,7 @@ def test_parse_log_line_reads_the_started_tunnel_url_and_ignores_noise() -> None
 
 def test_parse_log_line_reads_which_tunnel_started_and_where_the_api_listens() -> None:
     assert parse_log_line(json.dumps(OURS)) == ngrok_tunnel.LogEvent(
-        url=OURS["url"], name="command_line", addr="http://localhost:8750"
+        url=OURS["url"], name="command_line", addr="http://127.0.0.1:8750"
     )
     assert parse_log_line(json.dumps(WEB_SERVICE)) == ngrok_tunnel.LogEvent(web="127.0.0.1:4040")
 
@@ -143,7 +145,7 @@ def test_ngroks_log_reaches_the_status_line_with_nothing_that_drives_a_terminal(
         tunnel.handle_line(json.dumps({**OURS, "name": f"x{escape}\nmore"}))
         warning = tunnel.api_warning
         assert warning is not None and "\x1b" not in warning and "\n" not in warning
-        assert "(x]0;owned[2J more → http://localhost:8750)" in warning
+        assert "(x]0;owned[2J more → http://127.0.0.1:8750)" in warning
         assert tunnel.public_url is None, "not this Remote's tunnel"
     finally:
         tunnel.stop_tunnel()
@@ -183,9 +185,31 @@ def test_ngrok_command_is_the_documented_one() -> None:
     """``--inspect=false``: ngrok's inspector keeps every request and answer, the unlock's
     passphrase and every cookie included, on a local web interface that asks for nothing."""
     assert ngrok_command(8750) == [
-        "ngrok", "http", "8750", "--log=stdout", "--log-format=json", "--log-level=info",
-        "--inspect=false",
+        "ngrok", "http", "127.0.0.1:8750", "--log=stdout", "--log-format=json",
+        "--log-level=info", "--inspect=false",
     ]  # fmt: skip
+
+
+def test_ngrok_forwards_to_the_one_address_remote_listens_on_never_localhost() -> None:
+    """``ngrok http 8750`` forwards to ``localhost:8750``, which resolves to ``::1`` first, and
+    ngrok's dialer tries that first: any account on the machine could listen on
+    ``[::1]:8750``, beside Remote on ``127.0.0.1:8750``, and be handed every phone's request,
+    the token, an unlock's passphrase and the cookies (sweep 4 of #243). The panel's ngrok,
+    the command ``serve`` prints and the docs' all name ``127.0.0.1``."""
+    assert ngrok_tunnel.UPSTREAM_HOST == remote_server.BIND == "127.0.0.1"
+    assert ngrok_command(8750)[1:3] == ["http", "127.0.0.1:8750"]
+    assert ngrok_command(18750, url="a.ngrok-free.app")[1:3] == ["http", "127.0.0.1:18750"]
+    root = Path(__file__).resolve().parents[1]
+    told = [
+        line
+        for doc in ("README.md", "docs/remote.md")
+        for line in (root / doc).read_text(encoding="utf-8").splitlines()
+        if re.match(r"\s*ngrok http\b", line)
+    ]
+    assert len(told) >= 2, told
+    for line in told:
+        assert re.search(r"\s127\.0\.0\.1:8750(\s|$)", line), line
+        assert not re.search(r"\s8750(\s|$)", line), line
 
 
 # --- the missing binary -------------------------------------------------------------------
@@ -2966,7 +2990,7 @@ def test_serve_says_to_turn_a_hand_started_ngroks_local_api_off(
     monkeypatch.setattr(remote_server, "run_foreground", served)
     result = CliRunner().invoke(cli, ["remote", "serve", "--port", "9004"])
     assert result.exit_code == 0, result.output
-    assert "ngrok http 9004 --inspect=false" in result.output
+    assert "ngrok http 127.0.0.1:9004 --inspect=false" in result.output
     assert "web_addr: false in ngrok.yml" in result.output
 
 

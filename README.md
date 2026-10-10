@@ -551,14 +551,16 @@ holds one tunnel, so a second ngrok on it fails:
 
 ```sh
 aisquare remote serve
-ngrok http --url=your-name.ngrok-free.app --inspect=false 8750      # in another terminal
+ngrok http --url=your-name.ngrok-free.app --inspect=false 127.0.0.1:8750   # in another terminal
 ```
 
-Every ngrok account has one free static domain: with it the link survives a
-restart, and a notification opens its card rather than the feed. On a machine
-others use, also put `web_addr: false` in `ngrok.yml` (`ngrok config edit`): ngrok's
-local API asks no one for a password. The fleet UI's ngrok runs with it off where it
-can, and its panel says when it could not.
+Give ngrok `127.0.0.1:8750`, never `8750` alone: it reads that as `localhost`,
+IPv6's `::1` first, where anyone on the machine can listen and be handed every
+phone's requests. Every ngrok account has one free static domain: with it the
+link survives a restart, and a notification opens its card rather than the feed.
+On a machine others use, also put `web_addr: false` in `ngrok.yml` (`ngrok config
+edit`): ngrok's local API asks no one for a password. The fleet UI's ngrok runs
+with it off where it can, and its panel says when it could not.
 
 **[The phone control guide](docs/remote.md)** covers unlocking, the needs-you
 cards and quick answers, notifications on iPhone, the security model, and a

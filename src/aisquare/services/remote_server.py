@@ -6008,12 +6008,19 @@ def _remote_serve_server(config: uvicorn.Config) -> uvicorn.Server:
             ``last_seen``, nor said to stop the ngrok, and the phones' cookies opened the
             next Remote (sweep 5 of #243). :func:`run_foreground` takes its way out, then
             raises :class:`RemoteSignalled`. A Ctrl-C is raised again, as uvicorn does.
+
+            A hangup that was ignored when ``serve`` started stays ignored: ``nohup`` ignores
+            it so that closing the terminal leaves the process running, and a handler here
+            stopped Remote at the very close it was started to outlive.
             """
             if threading.current_thread() is not threading.main_thread():
                 yield  # signal handlers are the main thread's
                 return
             names = ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK")  # SIGBREAK: Windows' Ctrl-Break
             handled = [getattr(signal, name) for name in names if hasattr(signal, name)]
+            hangup = getattr(signal, "SIGHUP", None)
+            if hangup is not None and signal.getsignal(hangup) is signal.SIG_IGN:
+                handled.remove(hangup)  # nohup's: the terminal's close is not to end it
             before = {sig: signal.signal(sig, self.handle_exit) for sig in handled}
             try:
                 yield

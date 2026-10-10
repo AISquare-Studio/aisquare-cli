@@ -101,10 +101,11 @@ ngrok http --url=your-name.ngrok-free.app --inspect=false 127.0.0.1:8750
 ```
 
 `serve` prints the local link and the passphrase and runs until Ctrl-C or until
-auto-off; a `kill` (SIGTERM) or a closed terminal (SIGHUP) stops it as Ctrl-C does,
-and it then exits 143 or 129. Stop the ngrok you started beside it then too, as `serve` says on its way
-out: left up, ngrok hands the phones' requests, their cookies with them, to whatever
-takes port 8750 next, and any account on the machine can. (The panel stops its own
+auto-off; a `kill` (SIGTERM) or a closed terminal (SIGHUP, unless it runs under
+`nohup`) stops it as Ctrl-C does, and it then exits 143 or 129. Stop the ngrok you
+started beside it then too, as `serve` says on its way out: left up, ngrok hands
+the phones' requests, their cookies with them, to whatever takes port 8750 next,
+and any account on the machine can. (The panel stops its own
 ngrok first, once the phones heard Remote is off, and lets go of the port after.) A
 Ctrl-C while a phone's write is still running (a restart or switch can take 40
 seconds) says which, and waits for it: cut short, it can leave the agent down. A

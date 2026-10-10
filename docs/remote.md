@@ -137,7 +137,10 @@ The screens, along the bottom bar:
   program shows one, with Fit width), **Transcript** (the conversation, wrapped
   to the phone, each turn's time in the phone's own time zone, older pages on
   demand) and **Card** (model, tokens and the explainability verdict). Under Live
-  and Transcript sit the input bar and the key pad.
+  and Transcript sit the input bar and the key pad. Live, Transcript and a Needs
+  card's pane strip stay dark with the phone in light mode too: an agent's colours
+  are picked for its own theme, dark in Claude Code by default, so an agent on a
+  light theme draws its dark text on that ground as well.
 - **Devices** — every device that unlocked, which one is this one, last seen, when
   its sign-in ends. Sign out of this one, or revoke another (a write, so only
   while writes are on).

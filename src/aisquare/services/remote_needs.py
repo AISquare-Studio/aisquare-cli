@@ -61,7 +61,12 @@ from aisquare.models import (
     TeamEvent,
     TeamSession,
 )
-from aisquare.services.transcript import PendingTool, TranscriptTail, read_transcript_tail
+from aisquare.services.transcript import (
+    _TAIL_NOTHING,
+    PendingTool,
+    TranscriptTail,
+    read_transcript_tail,
+)
 
 if TYPE_CHECKING:
     from starlette.requests import Request
@@ -2510,31 +2515,20 @@ _tails_lock = threading.Lock()
 _TAILS_KEPT = 512
 
 
-_NEEDS_NOTHING_WRITTEN = TranscriptTail(
-    pending=(),
-    newest="none",
-    newest_at=None,
-    last_text=None,
-    last_text_at=None,
-    marker_key=None,
-    empty=True,
-)
-"""The tail of a transcript that is not there yet: Claude Code makes the file with the first
-record it writes, so a session that has had no prompt has none."""
-
-
 def _needs_cached_tail(path: str) -> TranscriptTail | None:
     """:func:`read_transcript_tail`, read again only when the file's size or mtime moved.
 
     An unchanged transcript costs one ``stat()``. Shared by the watcher and
     :func:`needs_agent_now`, and bounded: the oldest entries go first. A path the
     session named that does not exist is a conversation with nothing in it yet, as an
-    empty file is; one that cannot be read is ``None``.
+    empty file is (``transcript._TAIL_NOTHING``, its one spelling): Claude Code makes the
+    file with the first record it writes, so a session that has had no prompt has none.
+    One that cannot be read is ``None``.
     """
     try:
         stat = os.stat(path)
     except FileNotFoundError:
-        return _NEEDS_NOTHING_WRITTEN
+        return _TAIL_NOTHING
     except OSError:
         return None
     key = (stat.st_size, stat.st_mtime_ns)

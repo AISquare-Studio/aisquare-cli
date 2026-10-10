@@ -569,15 +569,15 @@ Start ngrok without it (the R panel never uses it).
 one Remote: the fleet UI's panel, or a `serve` in another shell, has it. The panel
 says so whenever it is open, its state reading on in another process, with that
 Remote's auto-off; its own Auto-off picker is off meanwhile, since that timer is
-set where the Remote runs. Turn that one off, or use it. Two would share one link, one passphrase, one auto-off and
-one list of phones, and either going off would sign the other's phones out. One
-turned off while a phone's restart or switch was still running keeps the home
-until that is done, since its notifications go on until then; a restart or
-switch can take 40 seconds. So does one still answering a phone's read, which
-waits as long as tmux takes to answer. Switched on again in the same fleet UI
-meanwhile, the panel says the last Remote is still finishing, and what: the
-write by name, or the requests it still answers, rather than start a second one
-beside it.
+set where the Remote runs. Turn that one off, or use it. Two would share one link,
+one passphrase, one auto-off and one list of phones, and either going off would
+sign the other's phones out. One turned off while a phone's restart or switch was
+still running keeps the home until that is done, since its notifications go on
+until then; a restart or switch can take 40 seconds. So does one still answering a
+phone's read, which waits as long as tmux takes to answer. Switched on again in
+the same fleet UI meanwhile, the panel says the last Remote is still finishing,
+and what: the write by name, or the requests it still answers, rather than start a
+second one beside it.
 
 **`serve` says the port is in use.** Something else took 8750. Pass `--port` and
 give ngrok (and `status`) the same port.

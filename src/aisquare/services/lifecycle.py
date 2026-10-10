@@ -444,11 +444,11 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
     fleet_error: str | None = None
     if reason is None:
         refresh, left = refresh_sites(route.facts)
-        if target is not None and install_route.is_newer(__version__, target):
-            # upgrade() leaves the hooks alone on a move back, to a release that may
-            # predate `agents refresh-hooks`, so the plan must not promise a re-connect:
-            # the plan, its --json, the question and the report agree (review of #257).
-            # Said once, here, with the remedy: a note in the report said it again.
+        if target is not None and lacks_refresh_hooks(target):
+            # upgrade() leaves the hooks alone on a move back to a release before
+            # `agents refresh-hooks`, so the plan must not promise a re-connect: the plan,
+            # its --json, the question and the report agree (review of #257). Said once,
+            # here, with the remedy: a note in the report said it again.
             left = (*left, *(_left_by_move_back(site, target) for site in refresh))
             refresh = ()
         live, _unlistened, fleet_error = running_fleet()
@@ -467,15 +467,23 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
     )
 
 
+def lacks_refresh_hooks(release: str) -> bool:
+    """Whether ``release`` predates ``agents refresh-hooks`` (:data:`REFRESH_HOOKS`), so the
+    install it makes cannot rewrite the hooks without re-importing CLAUDE.md. Decided on the
+    release, not on the direction: from 0.8.1, a move back to 0.8.0 left every site and
+    advised `agents connect` (review of #257)."""
+    return install_route.is_newer(FIRST_REFRESH_HOOKS, release) is True
+
+
 def _left_by_move_back(site: HookSite, target: str) -> HookSite:
-    """``site`` left as it is by a move back to ``target``, with the command that rewrites
-    its hooks for that release (0.7 and earlier have no `agents refresh-hooks`)."""
+    """``site`` left as it is by a move back to ``target``, a release that
+    :func:`lacks_refresh_hooks`, with the command that rewrites its hooks for that release."""
     rewrite = install_route.command_line(
         ["aisquare", "agents", "connect", HOOK_AGENT, "--config-dir", str(site.config_dir)]
     )
     why = (
-        f"{target} is older than {__version__}: a move back leaves the hooks as they are; "
-        f"`{rewrite}` rewrites them for {target}"
+        f"{target} predates `agents refresh-hooks` (new in {FIRST_REFRESH_HOOKS}): the move "
+        f"back leaves the hooks as they are; `{rewrite}` rewrites them for {target}"
     )
     return HookSite(site.config_dir, site.programs, why)
 
@@ -506,8 +514,9 @@ def _cutoff_alone(route: install_route.InstallRoute) -> bool:
 def _latest_for(route: install_route.InstallRoute) -> install_route.LatestRelease:
     """PyPI's newest release, pre-releases counted when this install's upgrade takes them
     (``install_route.takes_prereleases``); under a global uv cutoff alone, the newest
-    uploaded before it. Under any other setting that can hold a release back, PyPI's word
-    says nothing about what uv takes, so it is not asked (:func:`_held_back`).
+    uploaded before it; never one the reinstall's Python cannot take. Under any other
+    setting that can hold a release back, PyPI's word says nothing about what uv takes, so
+    it is not asked (:func:`_held_back`).
 
     Taken as the target under a cutoff, PyPI's newest failed the unchanged version uv
     rightly left as §3.9.1's silent no-op; then, not asked, every run and --check found
@@ -520,9 +529,9 @@ def _latest_for(route: install_route.InstallRoute) -> install_route.LatestReleas
             before = install_route.cutoff_time(route, datetime.now(UTC))
         if before is None:
             return install_route.LatestRelease(None, f"PyPI was not asked: {why}")
-    # Only what is asked for is passed, so a stand-in for the lookup that takes neither
-    # keyword (the damaged-store census) still answers.
-    asked: dict[str, Any] = {}
+    # The Python the reinstall runs on, which uv reads each Requires-Python for; the rest
+    # only when asked for.
+    asked: dict[str, Any] = {"python": install_route.reinstall_python(route)}
     if install_route.takes_prereleases(route, __version__):
         asked["prereleases"] = True
     if before is not None:
@@ -777,9 +786,9 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
         f"asq and `aisquare serve` processes that were already running keep {plan.current} "
         "until they are restarted"
     )
-    if version is not None and install_route.is_newer(plan.current, version):
-        # A move BACK lands on a release that may predate `agents refresh-hooks` (0.7 and
-        # earlier do): the plan left every site, each saying so with its remedy.
+    if version is not None and lacks_refresh_hooks(version):
+        # A move back to a release before `agents refresh-hooks`: the plan left every site,
+        # each saying so with its remedy.
         return UpgradeReport(plan, exit_code=code, version=version, notes=tuple(notes))
     hooks = tuple(_refresh(site, plan.route.facts) for site in plan.refresh)
     return UpgradeReport(plan, exit_code=code, version=version, hooks=hooks, notes=tuple(notes))
@@ -878,6 +887,8 @@ def _verify(plan: UpgradePlan, ran: install_route.InstallRoute) -> tuple[str | N
 #: connect``, which also re-imports the agent's ``CLAUDE.md`` into memory — on every
 #: upgrade it brought back sections the user had removed (review of #251).
 REFRESH_HOOKS = ("agents", "refresh-hooks", HOOK_AGENT)
+#: The first release with ``agents refresh-hooks``: 0.7.0, on PyPI, has none.
+FIRST_REFRESH_HOOKS = "0.8.0"
 
 
 def _refresh(site: HookSite, found: install_route.Facts) -> HookRefresh:

@@ -433,7 +433,9 @@ def test_the_upgrade_check_is_held_to_it(
     monkeypatch.setattr(
         install_route,
         "fetch_latest",
-        lambda timeout=0.0: install_route.LatestRelease(None, "could not reach PyPI (stubbed)"),
+        lambda timeout=0.0, **_asked: install_route.LatestRelease(
+            None, "could not reach PyPI (stubbed)"
+        ),
     )
 
     result = CliRunner().invoke(app, ["--json", "upgrade", "--check"], catch_exceptions=True)

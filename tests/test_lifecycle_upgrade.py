@@ -443,6 +443,10 @@ def test_security_md_lists_what_upgrade_and_the_plugin_change_and_send() -> None
         and f"`aisquare {' '.join(lifecycle.REFRESH_HOOKS[:2])}`" in changed
     )
     assert install_route.PYPI_JSON_URL in sent and "User-Agent" in sent
+    upgrades = " ".join(sent.split("**Upgrades.**")[1].split("\n- **")[0].split())
+    # Not asked for an install whose receipt records its own index or another hold
+    # (lifecycle._latest_for), nor for a pin (a later review of #257).
+    assert "nothing is asked" in upgrades and "--version" in upgrades, upgrades
     assert '--from "$_from" aisquare hook' in launcher, "the launcher still runs uvx --from"
     assert f"uvx --from {DISTRIBUTION}==" in plugin
     assert "--python '>=3.11,<3.14'" in launcher, "the launcher still asks uv for a Python"
@@ -1099,6 +1103,92 @@ def test_an_upgrade_takes_pre_releases_where_uv_does(
     assert install_route.takes_prereleases(pipx, current) is False, "pipx upgrade takes none"
 
 
+#: PyPI's JSON when a release raises Requires-Python: one wheel and one sdist per release,
+#: each with the ``requires_python`` PyPI serves (measured: ">=3.11" on every aisquare-cli
+#: file), and ``info`` describing the newest, as PyPI's does.
+def _pypi_requiring(requires: dict[str, str | None], uploaded: datetime | None = None) -> bytes:
+    newest = max(requires, key=lambda version: install_route.version_key(version) or ())
+    when = {} if uploaded is None else {"upload_time_iso_8601": uploaded.isoformat()}
+    releases = {
+        version: [
+            {"packagetype": kind, "requires_python": spec, "yanked": False, **when}
+            for kind in ("bdist_wheel", "sdist")
+        ]
+        for version, spec in requires.items()
+    }
+    info = {"version": newest, "requires_python": requires[newest]}
+    return json.dumps({"info": info, "releases": releases}).encode()
+
+
+@pytest.mark.parametrize(
+    ("requires", "python", "admits"),
+    [
+        (">=3.11", "3.11", True),
+        (">=3.12", "3.11", False),
+        (">=3.11,<3.14", "3.13", True),
+        (">=3.11,<3.14", "3.14", False),
+        (">=3.11, !=3.12.*", "3.12", False),
+        ("~=3.11", "3.13", True),
+        ("~=3.11.0", "3.12", False),
+        ("==3.*", "3.12", True),
+        (">=3.11.4", "3.11", None),
+        (">=3.11.4", "3.11.9", True),
+        ("<=3.11", "3.11", None),
+        (">=3.12rc1", "3.12", None),
+        ("===3.12", "3.12", None),
+        (None, "3.11", True),
+        ("", "3.11", True),
+    ],
+)
+def test_a_requires_python_is_read_for_every_python_the_reinstall_may_run(
+    requires: str | None, python: str, admits: bool | None
+) -> None:
+    """uv passes over a release whose Requires-Python excludes the interpreter (measured, uv
+    0.12.19: on 3.11 it took 0.8.0 over a 0.9.0 that needs >=3.12, and exited 0 again on the
+    rerun). `3.11` is any 3.11.x, so a bound inside it, or one not read, cannot be told."""
+    assert install_route.admits_python(requires, python) is admits
+
+
+def test_the_lookup_compares_only_a_release_the_reinstalls_python_can_take(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PyPI's newest needing a newer Python read "an update is available", and every run
+    failed as §3.9.1's silent no-op while uv rightly kept the release (review of #257). Such
+    a release is not compared, under a cutoff too; one whose bound cannot be told is said."""
+    cutoff = datetime(2026, 10, 1, tzinfo=UTC)
+    raised = _pypi_requiring({"0.8.0": ">=3.11", "0.9.0": ">=3.12"}, cutoff - timedelta(days=1))
+    told = _pypi_requiring({"0.8.0": ">=3.11", "0.9.0": ">=3.11.4"})
+    body = {"body": raised}
+    monkeypatch.setattr(install_route, "open_url", lambda _r, timeout: _Response(body["body"]))
+    needs = "0.9.0 on PyPI requires Python >=3.12, and this install's upgrade runs on Python 3.11"
+
+    assert _REAL_FETCH_LATEST(python="3.11") == LatestRelease(None, needs)
+    assert _REAL_FETCH_LATEST(python="3.11", uploaded_before=cutoff) == LatestRelease(None, needs)
+    assert _REAL_FETCH_LATEST(python="3.12") == LatestRelease("0.9.0"), "control: it can"
+    assert _REAL_FETCH_LATEST() == LatestRelease("0.9.0"), "control: no Python, no filter"
+    body["body"] = told
+    unknown = _REAL_FETCH_LATEST(python="3.11")
+    assert unknown.version is None, unknown
+    assert unknown.error == (
+        "can't tell whether Python 3.11 meets 0.9.0's Requires-Python (>=3.11.4)"
+    ), unknown
+
+
+def test_the_reinstalls_python_is_the_one_the_command_restates(tmp_path: Path) -> None:
+    """What `--python` says in the reinstall, when it names a version; any other request
+    (a path) was resolved to the interpreter that runs this install."""
+    recorded = _uv_route(tmp_path / "a", _receipt(_OURS_PINNED, python="3.11"))
+    unrecorded = _uv_route(tmp_path / "b", _receipt(_OURS_PINNED, python=None))
+    a_path = _uv_route(tmp_path / "c", _receipt(_OURS_PINNED, python="/usr/bin/python3.11"))
+    pipx = install_route.InstallRoute(install_route.PIPX, recorded.facts)
+
+    assert install_route.reinstall_python(recorded) == "3.11"
+    assert recorded.facts.python_version == "3.13", "the premise: another runs the test"
+    assert install_route.reinstall_python(unrecorded) == "3.13"
+    assert install_route.reinstall_python(a_path) == "3.13"
+    assert install_route.reinstall_python(pipx) == "3.13"
+
+
 # --- the run ---------------------------------------------------------------------------
 
 
@@ -1132,11 +1222,17 @@ def machine(monkeypatch: pytest.MonkeyPatch) -> Machine:
     world = Machine()
 
     def fetch_latest(
-        timeout: float = 5.0, *, prereleases: bool = False, uploaded_before: Any = None
+        timeout: float = 5.0,
+        *,
+        prereleases: bool = False,
+        uploaded_before: Any = None,
+        python: str | None = None,
     ) -> LatestRelease:
-        # Both keywords change what the REAL lookup reads; its tests drive it through open_url.
+        # Each keyword changes what the REAL lookup reads; its tests drive it through open_url.
         world.lookups += 1
-        world.asked.append({"prereleases": prereleases, "uploaded_before": uploaded_before})
+        world.asked.append(
+            {"prereleases": prereleases, "uploaded_before": uploaded_before, "python": python}
+        )
         return world.latest
 
     def run_installer(argv: Any, *, env: Any, to_stderr: bool) -> int:
@@ -1740,7 +1836,7 @@ def test_a_move_back_plans_no_reconnect_and_asks_to_move_back(
 
     assert back["refresh_hooks"] == [], back
     assert [entry["config_dir"] for entry in back["hooks_left"]] == [str(site)], back
-    assert back["hooks_left"][0]["reason"].startswith("0.7.0 is older than 0.9.0"), back
+    assert back["hooks_left"][0]["reason"].startswith("0.7.0 predates"), back
     assert forward["refresh_hooks"] == [str(site)], "control: a move forward re-connects"
     assert asked == ["Move aisquare 0.9.0 back to 0.7.0?", "Upgrade aisquare 0.9.0 → 0.9.1?"]
 
@@ -2247,7 +2343,8 @@ def test_the_refresh_the_upgrade_runs_is_a_command_this_cli_has(runner: CliRunne
 def test_a_move_back_leaves_the_hooks_and_says_how_to_rewrite_them(
     runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path
 ) -> None:
-    """An older release may predate `agents refresh-hooks` (0.8 and earlier do)."""
+    """A release before `agents refresh-hooks` (0.7 and earlier) has only `agents connect`,
+    which also re-imports CLAUDE.md (#251): the hooks are left, with that command named."""
     _record(_hooked(tmp_path / "claude", tool.script))
     machine.new_version = "0.7.0"
 
@@ -2263,10 +2360,41 @@ def test_a_move_back_leaves_the_hooks_and_says_how_to_rewrite_them(
     assert result.exit_code == 0, result.output
     assert machine.connects() == [], "no refresh on a downgrade"
     assert f"`{rewrite}` rewrites them for 0.7.0" in result.stdout, result.stdout
-    assert result.stdout.count("older than 0.9.0") == 1, "said once (review of #257)"
+    assert result.stdout.count("predates `agents refresh-hooks`") == 1, "said once (#257)"
     [left] = report["hooks_left"]
+    assert left["reason"].startswith("0.7.0 predates `agents refresh-hooks` (new in 0.8.0)")
     assert left["reason"].endswith(f"`{rewrite}` rewrites them for 0.7.0"), left
-    assert not any("older than" in note for note in report["notes"]), report["notes"]
+    assert not any("refresh-hooks" in note for note in report["notes"]), report["notes"]
+
+
+def test_a_move_back_to_a_release_with_refresh_hooks_refreshes_them(
+    runner: CliRunner, tool: Tool, machine: Machine, tmp_path: Path
+) -> None:
+    """Every move back left the hooks and advised `agents connect`, which re-imports
+    CLAUDE.md (#251), though a target from 0.8.0 on rewrites them itself (review of #257).
+    The plan and the run read the target's capability, not the direction."""
+    site = _hooked(tmp_path / "claude", tool.script)
+    _record(site)
+    machine.new_version = "0.8.0"
+
+    planned = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.8.0"]).stdout)
+    result = runner.invoke(app, ["upgrade", "--version", "0.8.0", "--yes"])
+
+    assert planned["refresh_hooks"] == [str(site)] and planned["hooks_left"] == [], planned
+    assert result.exit_code == 0, result.output
+    assert machine.connects() == [
+        [str(tool.script), "agents", "refresh-hooks", "claude-code", "--config-dir", str(site)]
+    ], "refreshed BY the 0.8.0 just installed"
+    assert f"✓ hooks re-connected in {site}" in result.stdout, result.stdout
+    assert "agents connect" not in result.stdout, result.stdout
+
+
+def test_the_first_release_with_refresh_hooks_is_not_after_this_one() -> None:
+    """The release that runs has `agents refresh-hooks` (the test above it), so the first
+    one that does cannot be newer."""
+    from aisquare.core.version import __version__
+
+    assert install_route.is_newer(lifecycle.FIRST_REFRESH_HOOKS, __version__) is False
 
 
 @pytest.mark.parametrize(
@@ -2408,6 +2536,45 @@ def test_an_install_under_a_uv_cutoff_is_compared_with_the_newest_release_it_all
             f"aisquare 0.8.0 is up to date (0.8.0 is the newest release your uv cutoff "
             f"allows: {restated}) — nothing to do"
         ) in run.stdout, run.stdout
+
+
+@pytest.mark.parametrize("python", ["3.11", "3.12"], ids=["older-python", "control"])
+def test_a_release_this_installs_python_cannot_take_is_not_an_update(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    python: str,
+) -> None:
+    """A receipt that records Python 3.11, and a 0.9.0 that needs 3.12: --check said "an
+    update is available" and every `aisquare upgrade` failed as §3.9.1's silent no-op over
+    the 0.8.0 uv rightly kept (review of #257). It is said instead, and uv picks."""
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        _receipt(_OURS_PINNED, python=python), encoding="utf-8"
+    )
+    monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
+    body = _pypi_requiring({"0.8.0": ">=3.11", "0.9.0": ">=3.12"})
+    monkeypatch.setattr(install_route, "fetch_latest", _REAL_FETCH_LATEST)
+    monkeypatch.setattr(install_route, "open_url", lambda _request, timeout: _Response(body))
+    older = python == "3.11"
+    machine.new_version = "0.8.0" if older else "0.9.0"
+
+    check = runner.invoke(app, ["upgrade", "--check"])
+    planned = _one_object(runner.invoke(app, ["--json", "upgrade", "--check"]).stdout)
+    run = runner.invoke(app, ["upgrade", "--yes"])
+
+    assert run.exit_code == 0, run.output
+    argv = machine.installs[0][0]
+    assert argv[argv.index("--python") + 1] == python, argv
+    if older:
+        needs = "0.9.0 on PyPI requires Python >=3.12, and this install's upgrade runs on "
+        assert planned["latest"] is None and planned["update_available"] is None, planned
+        assert planned["latest_error"] == f"{needs}Python 3.11", planned
+        assert "can't tell whether anything is newer" in check.stdout, check.stdout
+        assert "✓ aisquare 0.8.0 is the release uv picks for this install" in run.stdout
+    else:
+        assert planned["latest"] == "0.9.0" and planned["update_available"] is True, planned
+        assert "✓ aisquare 0.9.0 (was 0.8.0)" in run.stdout, run.stdout
 
 
 def test_a_no_op_under_a_cooldown_the_plan_compared_fails(

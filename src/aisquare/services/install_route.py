@@ -237,6 +237,66 @@ def is_prerelease(text: str) -> bool:
     return match is not None and bool(match["pre_l"] or match["dev_l"])
 
 
+_PYTHON = re.compile(r"\d+(?:\.\d+)+")
+_REQUIRES_CLAUSE = re.compile(r"(~=|==|!=|<=|>=|<|>)\s*(\d+(?:\.\d+)*)(\.\*)?")
+
+
+def admits_python(requires: object, python: str) -> bool | None:
+    """Whether a release's Requires-Python (``>=3.11``) admits ``python``, as uv reads it
+    before it takes the release: ``python`` is every version it begins (``3.11`` is any
+    3.11.x). ``None`` when it admits only some of those, or cannot be read; a release
+    that declares none admits every Python."""
+    if requires is None or (isinstance(requires, str) and not requires.strip()):
+        return True
+    if not isinstance(requires, str) or not _PYTHON.fullmatch(python):
+        return None
+    ours = tuple(int(part) for part in python.split("."))
+    verdicts: list[bool | None] = []
+    for clause in filter(None, (part.strip() for part in requires.split(","))):
+        match = _REQUIRES_CLAUSE.fullmatch(clause)
+        if match is None:
+            return None
+        bound = tuple(int(part) for part in match[2].split("."))
+        if match[1] == "~=":
+            if len(bound) < 2:
+                return None
+            verdicts += [_clause(">=", bound, ours), _prefix_clause("==", bound[:-1], ours)]
+        elif match[3]:
+            if match[1] not in ("==", "!="):
+                return None
+            verdicts.append(_prefix_clause(match[1], bound, ours))
+        else:
+            verdicts.append(_clause(match[1], bound, ours))
+    if False in verdicts:
+        return False
+    return None if None in verdicts else True
+
+
+def _clause(operator: str, bound: tuple[int, ...], ours: tuple[int, ...]) -> bool | None:
+    """One ``<op> <version>`` clause for every version ``ours`` begins."""
+    head = (bound + (0,) * len(ours))[: len(ours)]
+    if head != ours:
+        # Every version ``ours`` begins is on one side of the bound.
+        above = ours > head
+        verdict = {">=": above, ">": above, "<=": not above, "<": not above, "==": False}
+        return verdict.get(operator, True)  # `!=`
+    lowest = not any(bound[len(ours) :])
+    if lowest and operator in (">=", "<"):
+        return operator == ">="
+    return None
+
+
+def _prefix_clause(operator: str, bound: tuple[int, ...], ours: tuple[int, ...]) -> bool | None:
+    """``==<version>.*`` (or ``!=``) for every version ``ours`` begins."""
+    if len(bound) <= len(ours):
+        matches: bool | None = ours[: len(bound)] == bound
+    else:
+        matches = None if bound[: len(ours)] == ours else False
+    if operator == "!=" and matches is not None:
+        return not matches
+    return matches
+
+
 # --- the latest release -----------------------------------------------------------------
 
 
@@ -256,6 +316,7 @@ def fetch_latest(
     *,
     prereleases: bool = False,
     uploaded_before: datetime | None = None,
+    python: str | None = None,
 ) -> LatestRelease:
     """The newest ``aisquare-cli`` on PyPI. Never raises; an unreachable PyPI is an answer.
 
@@ -270,7 +331,10 @@ def fetch_latest(
     is not yanked, as uv picks: such an install was told "up to date" while uv would
     have installed a newer pre-release (sweep of #257). With ``uploaded_before``, for an
     install under a uv cutoff (:func:`cutoff_time`), it is the newest such release with a
-    file uploaded before then, as uv's ``--exclude-newer`` filters them.
+    file uploaded before then, as uv's ``--exclude-newer`` filters them. With ``python``
+    (:func:`reinstall_python`), a release none of whose files' Requires-Python admits it is
+    not an answer: uv passes over it, and the run that changed nothing failed as §3.9.1's
+    silent no-op (review of #257).
     """
     # Here, not at module top: see the module docstring's one exception.
     from http.client import HTTPException
@@ -287,21 +351,50 @@ def fetch_latest(
     except (URLError, HTTPException, OSError, TimeoutError, ValueError) as exc:
         # HTTPException is not an OSError: a truncated body raises IncompleteRead.
         return LatestRelease(None, f"could not reach PyPI ({exc})")
-    if uploaded_before is not None:
-        releases = payload.get("releases") if isinstance(payload, dict) else None
-        allowed = _newest_listed(releases, finals_only=not prereleases, before=uploaded_before)
-        if allowed is None:
-            return LatestRelease(None, "PyPI lists no release uploaded before the cutoff")
-        return LatestRelease(allowed)
+    releases = payload.get("releases") if isinstance(payload, dict) else None
     info = payload.get("info") if isinstance(payload, dict) else None
-    version = info.get("version") if isinstance(info, dict) else None
-    if not isinstance(version, str) or version_key(version) is None:
-        return LatestRelease(None, "PyPI's answer named no version")
-    if prereleases:
-        listed = _newest_listed(payload.get("releases"))
-        if listed is not None and is_newer(listed, version):
-            version = listed
-    return LatestRelease(version)
+    if uploaded_before is not None:
+        version = _newest_listed(releases, finals_only=not prereleases, before=uploaded_before)
+        if version is None:
+            return LatestRelease(None, "PyPI lists no release uploaded before the cutoff")
+    else:
+        version = info.get("version") if isinstance(info, dict) else None
+        if not isinstance(version, str) or version_key(version) is None:
+            return LatestRelease(None, "PyPI's answer named no version")
+        if prereleases:
+            listed = _newest_listed(releases)
+            if listed is not None and is_newer(listed, version):
+                version = listed
+    if python is None:
+        return LatestRelease(version)
+    return _for_python(version, python, releases, info, uploaded_before)
+
+
+def _for_python(
+    version: str, python: str, releases: object, info: object, before: datetime | None
+) -> LatestRelease:
+    """``version`` when a file of it uv would take admits ``python`` by its Requires-Python,
+    else why it is no answer. With no file listed, ``info``'s, which describes the newest."""
+    files = releases.get(version) if isinstance(releases, dict) else None
+    if isinstance(files, list) and files:
+        specs = [file.get("requires_python") for file in files if _installable(file, before)]
+    elif isinstance(info, dict) and info.get("version") == version:
+        specs = [info.get("requires_python")]
+    else:
+        specs = []
+    verdicts = [admits_python(spec, python) for spec in specs]
+    if not verdicts or True in verdicts:
+        return LatestRelease(version)
+    shown = ", ".join(sorted({str(spec) for spec in specs}))
+    if None in verdicts:
+        return LatestRelease(
+            None, f"can't tell whether Python {python} meets {version}'s Requires-Python ({shown})"
+        )
+    return LatestRelease(
+        None,
+        f"{version} on PyPI requires Python {shown}, and this install's upgrade runs on "
+        f"Python {python}",
+    )
 
 
 def _newest_listed(
@@ -981,6 +1074,16 @@ def _pip_argv(route: InstallRoute, verb: str, *arguments: str) -> list[str]:
         kept = [argument for argument in arguments if argument != "--user"]
         return ["uv", "pip", verb, "--python", str(route.facts.executable), *kept]
     return [str(route.facts.executable), "-m", "pip", verb, *arguments]
+
+
+def reinstall_python(route: InstallRoute) -> str:
+    """The Python the reinstall of ``route`` runs on (:func:`fetch_latest`): the version its
+    uv receipt records, which the command restates as ``--python``, else this interpreter's.
+    A recorded request that names no version (a path) was resolved to the one that runs."""
+    recorded = route.receipt.python if route.receipt is not None else None
+    if recorded is not None and _PYTHON.fullmatch(recorded.strip()):
+        return recorded.strip()
+    return route.facts.python_version
 
 
 def upgrade_argv(

@@ -412,8 +412,8 @@ def regenerate_password(
     if new_link:
         console.print(f"✓ new link: {payload['url_local']}", markup=False)
         console.print(
-            "  the old link is dead everywhere; a running TUI shows the new one after "
-            "Remote is turned off and on",
+            "  the old link is dead everywhere; the R panel of a running fleet UI shows the "
+            "new one, and its QR code",
             markup=False,
         )
 

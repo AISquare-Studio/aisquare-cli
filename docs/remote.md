@@ -495,11 +495,11 @@ aisquare remote regenerate-password --new-link
 `serve`), and lists every device (`--json` too) and any lockout. `revoke --all`
 signs every device out but keeps Remote on. `regenerate-password` makes a new
 passphrase and signs every device out; with `--new-link` it also makes a new
-token, so a leaked link stops working everywhere. The TUI shows the new link
-after Remote is turned off and on. The link `status` and `--new-link` print is
-for port 8750: when `serve` runs on another, give them its `--port` too. An
-exported `AISQUARE_REMOTE_PORT` sets the port for all of them, and for the R
-panel, whose server and ngrok use it as well.
+token, so a leaked link stops working everywhere. The R panel of a running fleet
+UI shows the new link, and its QR code, at once. The link `status` and
+`--new-link` print is for port 8750: when `serve` runs on another, give them its
+`--port` too. An exported `AISQUARE_REMOTE_PORT` sets the port for all of them,
+and for the R panel, whose server and ngrok use it as well.
 
 ---
 

@@ -872,15 +872,17 @@ def test_a_repaint_reads_the_status_once_and_draws_the_qr_only_for_a_new_link(
         modal.repaint()
         assert len(reads) == statuses + 2, "one status read a repaint"
 
-        app.remote.public_url = build_public_url(PUBLIC, info.token)  # ngrok announced it
+        app.remote.public_origin = PUBLIC  # ngrok announced it
+        public = build_public_url(PUBLIC, info.token)
+        assert app.remote.public_url == public
         modal.repaint()
-        assert drawn == [app.remote.public_url]
+        assert drawn == [public]
         modal.repaint()
         modal.repaint()
-        assert drawn == [app.remote.public_url], "the same link: no QR drawn again"
+        assert drawn == [public], "the same link: no QR drawn again"
         await pilot.pause()
-        assert shown(modal.query_one("#remote-qr", Static)) == qr_text(app.remote.public_url)
-        assert shown(modal.query_one("#remote-link", Static)) == app.remote.public_url
+        assert shown(modal.query_one("#remote-qr", Static)) == qr_text(public)
+        assert shown(modal.query_one("#remote-link", Static)) == public
 
     drive(go, tunnel=missing_ngrok)
 
@@ -970,6 +972,53 @@ def test_a_status_sentence_that_reads_as_markup_is_painted_as_it_is() -> None:
         modal.repaint()
         await pilot.pause()
         assert shown(modal.query_one("#remote-status", Static)) == sentence
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def test_the_link_and_its_qr_follow_a_new_link_from_another_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``regenerate-password --new-link`` from a shell retires the old link at the server's
+    next request; the panel showed it still, and drew its QR, beside the new passphrase,
+    until Remote was turned off and on, which signs every phone out (review of #243, round
+    6). The link row and the QR follow the token ``remote.json`` holds, the local link too."""
+    drawn: list[str] = []
+
+    def drawing(url: str) -> str:
+        drawn.append(url)
+        return qr_text(url)
+
+    monkeypatch.setattr(remote_view, "qr_text", drawing)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await written(pilot)
+        info = app.remote.info
+        assert info is not None
+        link = modal.query_one("#remote-link", Static)
+        shell = Runtime(paths.remote_state_path(), paths.remote_audit_path())
+        shell.regenerate_password(new_link=True)
+        new = shell.token
+        assert new != info.token
+        modal.repaint()
+        await pilot.pause()
+        assert shown(link).splitlines()[0] == info.url_local.replace(info.token, new)
+        assert drawn == [], "the local link has no QR"
+        app.remote.public_origin = PUBLIC  # ngrok announced it
+        modal.repaint()
+        await pilot.pause()
+        assert drawn == [build_public_url(PUBLIC, new)] and shown(link) == drawn[0]
+        shell.regenerate_password(new_link=True)
+        newer = shell.token
+        modal.repaint()
+        await pilot.pause()
+        assert drawn[-1] == build_public_url(PUBLIC, newer) and shown(link) == drawn[-1]
+        assert shown(modal.query_one("#remote-qr", Static)) == qr_text(drawn[-1])
+        assert info.token not in shown(link) and new not in shown(link)
 
     drive(go, tunnel=missing_ngrok)
 

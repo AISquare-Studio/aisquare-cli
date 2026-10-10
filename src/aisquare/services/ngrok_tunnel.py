@@ -152,20 +152,24 @@ FOREIGN_TUNNEL = (
 """What the status line says once the panel's ngrok announced a tunnel it did not ask for."""
 
 
-def build_public_url(host: str, token: str) -> str:
-    """``https://<host>/r/<token>/`` — the text the modal shows and the QR encodes.
-
-    ``host`` may be a bare host (``abc.ngrok-free.app``) or the URL ngrok logged
-    (``https://abc.ngrok-free.app``, with or without a trailing slash); the
-    output is one canonical form either way, so the link row and the QR agree.
-    The trailing slash matches the server's ``Mount("/r/{token}")`` and its own
-    ``url_local``, so the phone lands on the SPA without a redirect hop.
-    """
+def ngrok_origin(host: str) -> str:
+    """``https://<host>``: a bare host (``abc.ngrok-free.app``) or the URL ngrok logged
+    (``https://abc.ngrok-free.app``, with or without a trailing slash), in one canonical
+    form either way, so the link row and the QR agree."""
     bare = host.strip()
     for scheme in ("https://", "http://"):
         bare = bare.removeprefix(scheme)
-    bare = bare.rstrip("/")
-    return f"https://{bare}/r/{token}/"
+    return f"https://{bare.rstrip('/')}"
+
+
+def build_public_url(host: str, token: str) -> str:
+    """``https://<host>/r/<token>/`` — the text the modal shows and the QR encodes.
+
+    ``host`` is as :func:`ngrok_origin` takes it. The trailing slash matches the
+    server's ``Mount("/r/{token}")`` and its own ``url_local``, so the phone lands on
+    the SPA without a redirect hop.
+    """
+    return f"{ngrok_origin(host)}/r/{token}/"
 
 
 def missing_binary_message(binary: str = "ngrok") -> str:

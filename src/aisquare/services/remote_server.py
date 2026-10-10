@@ -1193,8 +1193,14 @@ class Runtime:
         return self._state.allow_write
 
     def connection_info(self, port: int = DEFAULT_PORT) -> RemoteInfo:
+        """The link and the passphrase as ``remote.json`` says now, from one state: read before
+        the file was checked, the token was the old one beside a passphrase and a link of
+        the new, after a ``regenerate-password --new-link`` from a shell, and the R panel
+        built ngrok's link from that old token (review of #243, round 6)."""
+        self.reload_if_changed()
         with self._lock:
-            return RemoteInfo(self.token, self.password, build_local_url(self.token, port))
+            state = self._state
+            return RemoteInfo(state.token, state.password, build_local_url(state.token, port))
 
     def token_matches(self, supplied: str) -> bool:
         """Whether ``supplied`` is the whole link token, read fresh from the file first:
@@ -6055,6 +6061,15 @@ def remote_allow_write() -> bool:
 def remote_password() -> str:
     """The passphrase as ``remote.json`` says now, ``regenerate-password`` from a shell included."""
     return runtime().password
+
+
+def remote_link_token() -> str:
+    """The link's token as ``remote.json`` says now: a ``regenerate-password --new-link`` from a
+    shell retires the one a running Remote started with at its next request
+    (:meth:`Runtime.token_matches`), and the R panel's link and QR read the new one here."""
+    state = runtime()
+    state.reload_if_changed()
+    return state.token
 
 
 _flush_failing = False

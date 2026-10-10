@@ -193,10 +193,10 @@ class RemotePanel(ModalScreen[None]):
             "writes reach the fleet" if writes else READ_ONLY_REASON
         )
         self.query_one("#remote-unlocks", Static).update(self._unlocks_text(status))
-        url = controller.link_url()
+        # With the token remote.json holds now: a --new-link from a shell redraws both.
+        url, public = controller.remote_link()
         if (url, elsewhere) != self._qr_url:
             self._qr_url = (url, elsewhere)
-            public = url is not None and url == controller.public_url
             link = Text(ELSEWHERE_LINK) if elsewhere else _link_text(url, public=public)
             self.query_one("#remote-link", Static).update(link)
             # The local link's QR led a phone to its own loopback: "cannot connect", for a
@@ -243,7 +243,7 @@ class RemotePanel(ModalScreen[None]):
                 text.append("  · no auto-off", style="dim")
             return text
         text = Text("on", style="bold green")
-        if controller.public_url is None:
+        if controller.public_origin is None:
             text.append("  · local only — no tunnel yet", style="dim")
         deadline = controller.adopt_server_deadline()  # a phone's extension shows here too
         if deadline is not None:

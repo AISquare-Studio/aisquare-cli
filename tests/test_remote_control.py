@@ -1352,6 +1352,7 @@ SERVER_CALLS = (
     "remote_auto_off_at",
     "remote_allow_write",
     "remote_password",
+    "remote_link_token",
     "remote_served_elsewhere",
     "remote_state_loaded",
     "remote_wait_for_closes",
@@ -1446,6 +1447,8 @@ class FakeServer(types.ModuleType):
 
     def regenerate_password(self, new_link: bool = False) -> str:
         self.password = "ember-glade-heron-indigo"
+        if new_link:
+            self.token = "tok_NEW_LINK"
         self._write_remote_json()
         return self.password
 
@@ -1471,6 +1474,9 @@ class FakeServer(types.ModuleType):
 
     def remote_password(self) -> str:
         return self.password
+
+    def remote_link_token(self) -> str:
+        return self.token
 
     def remote_served_elsewhere(self) -> bool:
         return self.served_elsewhere
@@ -1727,6 +1733,43 @@ def test_the_password_is_read_from_the_server_every_time() -> None:
     controller.turn_on()
     server.password = "anchor-badger-cactus-dolphin"  # what the shell's regenerate wrote
     assert controller.password() == "anchor-badger-cactus-dolphin"
+
+
+def test_the_link_follows_a_new_link_from_a_shell_ngroks_or_the_local_one() -> None:
+    """``regenerate-password --new-link`` from a shell retires the old token at the server's
+    next request, and the panel went on showing the old link and its QR, built when ngrok
+    announced its address, beside the new passphrase: the QR led the phone to "this link is
+    no longer valid" until Remote was turned off and on, which signs every phone out (review
+    of #243, round 6). The link is ngrok's address and the token ``remote.json`` holds now;
+    the token Remote started with only while the file cannot be read."""
+    server = fake_server()
+    controller = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url=STARTED["url"]), url_timeout=2
+    )
+    assert controller.remote_link() == (None, False) and controller.public_url is None
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    started = build_public_url(STARTED["url"], server.token)
+    assert controller.remote_link() == (started, True) and controller.public_url == started
+    server.regenerate_password(new_link=True)  # the shell's, in another process
+    fresh = build_public_url(STARTED["url"], "tok_NEW_LINK")
+    assert controller.remote_link() == (fresh, True)
+    assert controller.link_url() == fresh == controller.public_url
+    assert server.public_urls == [started], "push links take the token from the server itself"
+
+    def unreadable() -> str:
+        raise remote_server.RemoteError("remote.json is not a JSON object")
+
+    server.remote_link_token = unreadable
+    assert controller.link_url() == started, "the token in hand beats no link"
+    local = fake_server()
+    without = RemoteController(
+        server=local, tunnel_factory=fake_tunnel_factory(failure=missing_binary_message())
+    )
+    without.turn_on()
+    local.regenerate_password(new_link=True)
+    assert without.remote_link() == ("http://127.0.0.1:8750/r/tok_NEW_LINK/", False)
 
 
 def tunnel_announced(controller: RemoteController, server: FakeServer) -> None:

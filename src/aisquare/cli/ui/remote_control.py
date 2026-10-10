@@ -54,6 +54,7 @@ from aisquare.services.ngrok_tunnel import (
     NgrokTunnel,
     build_public_url,
     end_every_tunnel_now,
+    ngrok_origin,
 )
 
 # The one sentence every read-only refusal says, re-exported for the modal.
@@ -217,8 +218,9 @@ class RemoteController:
         self.state = state if state is not None else load_remote_state()
         self.info: remote_server.RemoteInfo | None = None
         self.tunnel: NgrokTunnel | None = None
-        self.public_url: str | None = None
-        """``https://<ngrok-host>/r/<token>`` once the tunnel announced itself."""
+        self.public_origin: str | None = None
+        """``https://<ngrok-host>`` once the tunnel announced itself; the link is that and the
+        token ``remote.json`` holds now (:meth:`remote_link`)."""
         self.message: str | None = None
         """What the status line says: waiting for ngrok, the install hint, an error."""
         self.save_problem: str | None = None
@@ -339,9 +341,9 @@ class RemoteController:
         if not self.wait_until_off(OFF_WAIT_SECONDS):
             self.message = STILL_TURNING_OFF
             return False
-        self.public_url = None
+        self.public_origin = None
         # A new Remote: what the last one's tunnels did is none of this one's.
-        self._revived_at = self._link_before_revive = None
+        self._revived_at = self._origin_before_revive = None
         with self._news_lock:  # a new Remote: what the last one said may be news again
             self._last_news, self._unreachable_told = None, False
         if self._port_problem is not None:  # a sentence, never Remote on another port
@@ -470,7 +472,7 @@ class RemoteController:
             self._adopt_tunnel_url(tunnel, url)
             return
         with self._lock:
-            if tunnel is not self.tunnel or self.public_url is not None:
+            if tunnel is not self.tunnel or self.public_origin is not None:
                 return
             self.message = tunnel.error or "ngrok did not announce a tunnel in time"
             self._unreachable(self.message)
@@ -481,27 +483,28 @@ class RemoteController:
 
         From the thread that waited for the URL and from the tunnel's log reader, both:
         the first to land shows it, and the same URL again changes nothing. A restarted
-        tunnel's says so, and whether the link changed (SPEC §5.8).
+        tunnel's says so, and whether ngrok's address changed (SPEC §5.8). The address is
+        kept, not a link: the link's token is ``remote.json``'s (:meth:`remote_link`).
         """
         with self._lock:
             info = self.info
             if tunnel is not self.tunnel or info is None:
                 return
-            link = build_public_url(url, info.token)
-            if link == self.public_url:
+            origin = ngrok_origin(url)
+            if origin == self.public_origin:
                 return
-            self.public_url = link
+            self.public_origin = origin
             # A restart of a tunnel that came up, not of a first one that never did: that one
             # had no link to change, and coming up is all there is to say of it.
-            before = self._link_before_revive if tunnel is self._revived_tunnel else None
-            moved = before is not None and link != before
+            before = self._origin_before_revive if tunnel is self._revived_tunnel else None
+            moved = before is not None and origin != before
             if before is not None:
                 changed = "; the link changed" if moved else ""
                 self.message = f"ngrok stopped — restarted it{changed}"
             else:
                 self.message = None
             # Under the lock, so a Remote turned off meanwhile forgets it after, not before.
-            self._note_public_url(link)
+            self._note_public_url(build_public_url(origin, info.token))
         with self._news_lock:
             told, self._unreachable_told, self._last_news = self._unreachable_told, False, None
         if moved:  # every phone's link is dead: the human at the desk has the new one to give
@@ -559,7 +562,7 @@ class RemoteController:
             served, tunnel = self.info is not None, self.tunnel
             self.info = None
             self.tunnel = None
-            self.public_url = None
+            self.public_origin = None
             self.auto_off_at = None
         if persist:
             self._set_state(remote_enabled=False)
@@ -1048,11 +1051,44 @@ class RemoteController:
         except Exception:  # unreadable for a moment: the panel says nothing of a timer
             return False, None
 
+    def remote_link(self) -> tuple[str | None, bool]:
+        """The link the panel shows and its QR encodes, and whether it is ngrok's: the public
+        link when ngrok is up, else the local one; ``(None, False)`` while Remote is off.
+
+        With the token ``remote.json`` holds now, as :meth:`password` reads the passphrase:
+        a ``regenerate-password --new-link`` from a shell retires the old link at the
+        server's next request, and the panel went on showing it, and its QR, beside the
+        new passphrase, until Remote was turned off and on, which signs every phone out
+        (review of #243, round 6).
+        """
+        with self._lock:
+            info, origin = self.info, self.public_origin
+        if info is None:
+            return None, False
+        token = self._link_token(info)
+        if origin is None:
+            return remote_server.build_local_url(token, self._port), False
+        return build_public_url(origin, token), True
+
     def link_url(self) -> str | None:
-        """The public link when ngrok is up, else the local one — ``None`` while Remote is off."""
-        if self.info is None:
-            return None
-        return self.public_url or self.info.url_local
+        """:meth:`remote_link`'s link alone: the one the Copy button copies."""
+        return self.remote_link()[0]
+
+    @property
+    def public_url(self) -> str | None:
+        """``https://<ngrok-host>/r/<token>/`` once the tunnel announced itself, else ``None``."""
+        url, public = self.remote_link()
+        return url if public else None
+
+    def _link_token(self, info: remote_server.RemoteInfo) -> str:
+        """The link's token as ``remote.json`` says now; the one Remote started with while the
+        file is unreadable, or read for the first time (:meth:`_first_read`)."""
+        if self._first_read() is not None:
+            return info.token
+        try:
+            return str(self._server.remote_link_token())
+        except Exception:  # unreadable for a moment: the token in hand beats no link
+            return info.token
 
     def password(self) -> str | None:
         """The passphrase as ``remote.json`` says now: a ``regenerate-password`` from a shell
@@ -1174,9 +1210,9 @@ class RemoteController:
     _revived_tunnel: NgrokTunnel | None = None
     """The tunnel the last revive started: its URL says ngrok was restarted, and whether the
     link changed (:meth:`_adopt_tunnel_url`)."""
-    _link_before_revive: str | None = None
-    """The public link the Remote had when its tunnel died, so the message can say whether
-    the new one differs, however many restarts it took to get one."""
+    _origin_before_revive: str | None = None
+    """ngrok's address when the Remote's tunnel died, so the message can say whether the new
+    one differs, however many restarts it took to get one."""
 
     def revive_tunnel_if_dead(self) -> bool:
         """Start ngrok again when it died under a Remote that is still on; ``True`` when it did.
@@ -1218,10 +1254,10 @@ class RemoteController:
         # group (a launcher's ngrok, still up) is given its seconds to end.
         threading.Thread(target=dead.stop_tunnel, name="ngrok-stop", daemon=True).start()
         with self._lock:
-            if self.public_url is not None:  # else the last restart never came up: keep it
-                self._link_before_revive = self.public_url
+            if self.public_origin is not None:  # else the last restart never came up: keep it
+                self._origin_before_revive = self.public_origin
             self.tunnel = self._revived_tunnel = tunnel
-            self.public_url = None  # the modal shows the local link until ngrok announces one
+            self.public_origin = None  # the modal shows the local link until ngrok announces one
             self.message = "ngrok stopped — restarting it…"
         # Its URL says ngrok was restarted, and whether the link changed (_adopt_tunnel_url);
         # a restart that dies before it announces leaves ngrok's own error on the status line.

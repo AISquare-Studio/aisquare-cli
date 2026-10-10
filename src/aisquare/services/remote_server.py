@@ -346,6 +346,9 @@ NOTE_TEXT_MAX = 8_000
 NOTE_TO_MAX = 200
 """The longest ``to`` a note may name, a role or a label: what the page's composer takes. The
 board keeps it with the event, and every board read and frame carries it."""
+BOARD_REF_MAX = 64
+"""The longest session or task ref a board write takes (``as``, ``task``, a task's ``ref``):
+an id is 30 characters, and a prefix of one shorter."""
 NOTE_KINDS = frozenset({"note", "decision", "question", "result"})
 """The kinds a phone may post. The others (``attention``, ``limited``, ``agent_exited``,
 ``switched``…) are the fleet's own reports, which wake the manager or set an agent's state."""
@@ -2740,8 +2743,9 @@ def _live_explainability(label: str, project: str | None = None) -> dict[str, ob
     )
 
 
-def _required(body: Mapping[str, Any], key: str) -> str:
-    """A string the write cannot go without; 400 ``invalid`` when it is missing or blank.
+def _required(body: Mapping[str, Any], key: str, *, limit: int | None = None) -> str:
+    """A string the write cannot go without; 400 ``invalid`` when it is missing or blank,
+    413 ``too_large`` over ``limit``.
 
     This and the readers below are the ONE way a write reads its body's fields, the
     agent actions' and the quick answers' included (``remote_actions.action_required``
@@ -2751,6 +2755,8 @@ def _required(body: Mapping[str, Any], key: str) -> str:
     value = body.get(key)
     if not isinstance(value, str) or not value.strip():
         raise RequestError(400, "invalid", f"{key!r} is required")
+    if limit is not None and len(value) > limit:
+        raise RequestError(413, "too_large", f"{key!r} is over {limit} characters")
     return value.strip()
 
 
@@ -2930,6 +2936,29 @@ def _remote_ref_unknown(ref: str, named: list[tuple[str, str]]) -> tuple[str, st
     return named[0]
 
 
+def _remote_author(ref: str | None) -> str | None:
+    """The id of the session a board write's ``as`` names, which the board's service is
+    given in its place and the audit line records: what the server resolved, never what
+    the body said. ``KeyError(ref)`` for one that names none, as the services raise it
+    (:func:`_remote_board_refusals`).
+
+    The store reads a ref as an id prefix and drops the ``*``, ``?`` and ``[`` in it, so
+    ``ses_abc`` with 400 ``*`` after it named ``ses_abc123def``, and the note's line said
+    ``as=ses_abc****…``, cut at 300 characters before its ``to=``, and never named the
+    session the note was posted as; ``ses_a?b?c[`` read as a ref that named nothing
+    (sweep 5 of #243).
+    """
+    if ref is None:
+        return None
+    from aisquare.core.store import store_session
+
+    with store_session() as store:
+        session = store.get_session(ref)
+    if session is None:
+        raise KeyError(ref)
+    return session.id
+
+
 def live_writes() -> Writes:
     """The write endpoints over the services the CLI commands call, then the agent actions."""
     from aisquare.services import remote_actions
@@ -2939,22 +2968,26 @@ def live_writes() -> Writes:
     def task_claim(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.services import team as team_service
 
-        ref, author = _required(body, "ref"), _optional_ref(body, "as")
+        ref = _required(body, "ref", limit=BOARD_REF_MAX)
+        author = _optional_ref(body, "as", limit=BOARD_REF_MAX)
         with _remote_board_refusals(("ref", ref, "task"), ("as", author, "session")):
-            task = team_service.claim_task(ref, session_ref=author)
-        return {"task": task.model_dump(mode="json")}, f"claimed {task.id} as={author or '-'}"
+            session = _remote_author(author)
+            task = team_service.claim_task(ref, session_ref=session)
+        return {"task": task.model_dump(mode="json")}, f"claimed {task.id} as={session or '-'}"
 
     def task_done(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         """Close a task, with a ``note`` held to a note's rules (:func:`check_note_text`)."""
         from aisquare.services import team as team_service
 
-        ref, author = _required(body, "ref"), _optional_ref(body, "as")
+        ref = _required(body, "ref", limit=BOARD_REF_MAX)
+        author = _optional_ref(body, "as", limit=BOARD_REF_MAX)
         note = _optional_ref(body, "note")
         if note is not None:
             check_note_text(note, "note")
         with _remote_board_refusals(("ref", ref, "task"), ("as", author, "session")):
-            task = team_service.finish_task(ref, note=note, session_ref=author)
-        return {"task": task.model_dump(mode="json")}, f"done {task.id} as={author or '-'}"
+            session = _remote_author(author)
+            task = team_service.finish_task(ref, note=note, session_ref=session)
+        return {"task": task.model_dump(mode="json")}, f"done {task.id} as={session or '-'}"
 
     def write_note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         """A note on a project's board: ``project``'s, or the current one's without it, the
@@ -2971,7 +3004,9 @@ def live_writes() -> Writes:
         ``as=`` and bare, ``"to": "coder-1 as=manager"`` read as a note posted as
         the manager, and 300 characters of it cut the real ``as=`` off the line
         (sweep of #243). ``to`` holds only characters that print
-        (:func:`check_note_to`). ``as`` must name a session, or the note is refused,
+        (:func:`check_note_to`). ``as=`` is the id of the session ``as`` resolved to
+        (:func:`_remote_author`), not the ref as sent: a long one cut ``to=`` off the line
+        all the same. ``as`` must name a session, or the note is refused,
         and so is a ``task`` of another project's board: 400 ``invalid``, where it fell to
         ``write_failed``, as if the write had failed (sweep 3 of #243). Said for the
         phone, by its field: the board's sentence names ``asq note``'s ``--task``. Only
@@ -2987,15 +3022,17 @@ def live_writes() -> Writes:
         if kind not in NOTE_KINDS:
             kinds = ", ".join(sorted(NOTE_KINDS))
             raise RequestError(400, "invalid", f"'kind' must be one of {kinds}")
-        author, to = _optional_ref(body, "as"), _optional_ref(body, "to", limit=NOTE_TO_MAX)
+        author = _optional_ref(body, "as", limit=BOARD_REF_MAX)
+        to = _optional_ref(body, "to", limit=NOTE_TO_MAX)
         if to is not None:
             check_note_to(to)
-        task = _optional_ref(body, "task")
+        task = _optional_ref(body, "task", limit=BOARD_REF_MAX)
         try:
             with _remote_board_refusals(("as", author, "session"), ("task", task, "task")):
+                session = _remote_author(author)
                 event = team_service.add_note(
                     text,
-                    session_ref=author,
+                    session_ref=session,
                     task_ref=task,
                     to_role=to,
                     kind=kind,
@@ -3007,7 +3044,7 @@ def live_writes() -> Writes:
             said = f"{task!r} is a task of another project's board (the 'task' field)"
             raise RequestError(400, "invalid", said) from None
         addressed = "-" if to is None else json.dumps(to)
-        summary = f"{event.kind} seq={event.seq} as={author or '-'} to={addressed}"
+        summary = f"{event.kind} seq={event.seq} as={session or '-'} to={addressed}"
         return {"event": event.as_envelope().model_dump(mode="json")}, summary
 
     def project_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -3049,7 +3086,9 @@ def live_writes() -> Writes:
         """Forget a registration, as ``project forget`` does, refusals and their codes
         included: one with live fleet agents is 409 ``project_busy``, where it fell to
         400 ``write_failed`` as if the write had failed (sweep 2 of #243). The ref is read
-        without the server's working directory (:func:`remote_project_ref`)."""
+        without the server's working directory (:func:`remote_project_ref`). The audit line
+        names the project it forgot, as a switch's does: the ref as sent could be padded past
+        the line's 300 characters and still name it (sweep 5 of #243)."""
         from aisquare.services import project as project_service
 
         ref = _required(body, "ref")
@@ -3061,7 +3100,7 @@ def live_writes() -> Writes:
             raise RequestError(400, "ambiguous_project", str(exc)) from None
         except project_service.ProjectBusyError as exc:
             raise RequestError(409, "project_busy", str(exc)) from None
-        return {"report": _as_json(report)}, f"removed {ref}"
+        return {"report": _as_json(report)}, f"removed {report.project.id}"
 
     def write_send_keys(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         """Type into one agent's pane: ``text`` (as hex, nothing parses it), or pad ``keys``.

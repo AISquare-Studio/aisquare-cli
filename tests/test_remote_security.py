@@ -1979,6 +1979,7 @@ def team(monkeypatch: pytest.MonkeyPatch) -> FakeTeam:
     fake = FakeTeam()
     for name in ("add_note", "claim_task", "finish_task"):
         monkeypatch.setattr(team_service, name, getattr(fake, name))
+    monkeypatch.setattr(remote_server, "_remote_author", lambda ref: ref)  # every ref a session
     return fake
 
 
@@ -2384,7 +2385,7 @@ def test_a_remove_from_the_phone_forgets_the_registration(
     assert removed.status_code == 200, removed.text
     assert removed.json()["report"]["project"]["id"] == beta.id
     assert [project.id for project in project_service.list_projects()] == [alpha.id]
-    assert _audit_lines()[-1][2:] == ["project/remove", "removed beta"]
+    assert _audit_lines()[-1][2:] == ["project/remove", f"removed {beta.id}"]
 
 
 @pytest.mark.parametrize("ref", ["docs", "{home}/code/docs", "~/code/docs"])
@@ -2399,7 +2400,8 @@ def test_a_remove_forgets_the_project_it_names_wherever_the_server_runs(
     ``project forget`` reads it from a shell: the server ran in a project with a ``docs/``
     directory, so that project was forgotten, the pin moved off it, and the trail said
     ``removed docs``, while the project named ``docs`` stayed (sweep 4 of #243). A name
-    is a name; an absolute path still names its project."""
+    is a name; an absolute path still names its project. The trail names the project it
+    forgot, whatever ref named it (sweep 5 of #243)."""
     current, docs, other = _projects(home, "code/current", "code/docs", "code/other")
     (current.root / "docs").mkdir()
     monkeypatch.chdir(current.root)
@@ -2411,7 +2413,7 @@ def test_a_remove_forgets_the_project_it_names_wherever_the_server_runs(
     assert removed.json()["report"]["active_changed"] is False
     assert [project.id for project in project_service.list_projects()] == [current.id, other.id]
     assert project_service.info().id == current.id
-    assert _audit_lines()[-1][2:] == ["project/remove", f"removed {said}"]
+    assert _audit_lines()[-1][2:] == ["project/remove", f"removed {docs.id}"]
 
 
 def test_a_project_with_live_agents_is_not_removed_and_the_phone_hears_why(

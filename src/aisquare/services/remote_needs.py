@@ -3015,8 +3015,11 @@ class RemoteNeedsWatcher:
         self._forgotten: set[str] = set()
         """Ids :meth:`needs_forget` dropped that no scan has read from the dismissals file yet."""
         self._answered: dict[str, float] = {}
-        """Ids :meth:`needs_answered` dropped, each with when (``time.monotonic()``), until a
-        scan that began :data:`NEEDS_RESCAN_AFTER_ANSWER` after it publishes."""
+        """Ids :meth:`needs_answered` dropped, each with when (``time.perf_counter()``), until
+        a scan that began :data:`NEEDS_RESCAN_AFTER_ANSWER` after it publishes. That is the
+        clock the rescan's timer waits by: on Windows before Python 3.13 ``time.monotonic``
+        steps by the system tick, and one of 15.6001 ms read the timer's whole second as
+        0.998 s, so the scan it began kept a prompt the keys left up hidden till the next."""
         self._failing: set[object] = set()
         """What has failed since it last worked, the scan itself (``"scan"``) or a listener,
         and ``_failing_projects`` the projects whose part of it has: each streak is told once
@@ -3150,7 +3153,7 @@ class RemoteNeedsWatcher:
         answer for the agent to have acted on it publishes, whatever that scan finds.
         """
         with self._scanning:
-            began = time.monotonic()
+            began = time.perf_counter()
             now = self._clock()
             sources = self._sources()
             projects = sources.list_projects()
@@ -3280,7 +3283,7 @@ class RemoteNeedsWatcher:
         acted on them.
         """
         with self._lock:
-            self._answered[item_id] = time.monotonic()
+            self._answered[item_id] = time.perf_counter()
             self._needs_drop(item_id)
         self.needs_rescan_soon()
 

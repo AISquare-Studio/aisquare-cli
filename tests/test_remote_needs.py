@@ -4832,6 +4832,39 @@ def test_an_answered_prompt_still_up_comes_back_with_the_first_scan_begun_after_
         watcher.stop_watching()
 
 
+def test_an_answered_prompt_still_up_comes_back_by_the_clock_the_rescan_waits_on(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The answer and the scan were stamped by ``time.monotonic``, the rescan's wait kept by
+    the clock a lock's timeout keeps. On Windows before Python 3.13 the first steps by the
+    system tick, and at 15.6001 ms the timer's whole second read as 0.998 s: the scan it
+    began kept the prompt still up hidden, till the next scan 3 s on (round 7 of #243). A
+    ``time.monotonic`` that runs a tenth slow is that disagreement, every time."""
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 0.3)
+
+    class SlowMonotonic:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(time, name)
+
+        @staticmethod
+        def monotonic() -> float:
+            return time.monotonic() * 0.9
+
+    monkeypatch.setattr(remote_needs, "time", SlowMonotonic())
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    status, tail = _asking(datetime.now(UTC))
+    fleet = Fleet(agents=[status])
+    fleet.tails["/transcripts/coder-1.jsonl"] = tail
+    watcher = RemoteNeedsWatcher(app.kit, sources=lambda: _sources(fleet))
+    try:
+        (card,) = watcher.scan_needs_now()
+        watcher.needs_answered(card.id)
+        assert watcher.needs_items_now() == []
+        _until_true(lambda: [item.id for item in watcher.needs_items_now()] == [card.id], 2.0)
+    finally:
+        watcher.stop_watching()
+
+
 def test_an_answer_in_words_is_typed_then_entered(live: Live) -> None:
     live.runtime.set_allow_write(True)
     card = live.card("permission")

@@ -200,7 +200,9 @@ and turning notifications on or off change only what you are shown, not the
 fleet, and need no write switch. Claiming or finishing a task and switching,
 adding or removing a project are write routes of the API (`api/task/claim`,
 `api/task/done`, `api/project/switch`, `add`, `remove`) that the page itself
-does not offer: Tasks is read-only there.
+does not offer: Tasks is read-only there. `remove` takes a project's name,
+codename or id, or its absolute path; a relative path is refused, since it would
+be read from wherever the server was started.
 
 **Retries are safe, and soon or never.** Every write in the table carries a
 `request_id`. If the phone loses the answer (a restart can take 40 seconds, long

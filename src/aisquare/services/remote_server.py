@@ -1936,23 +1936,51 @@ def check_project_add_root(raw: object) -> Path:
     return root
 
 
-def check_project_ref_on_disk(ref: str) -> None:
-    """Refuse the ``project/remove`` ref the system will not look up as a path, before
-    ``project_service.forget`` asks the disk about it: it tries a ref as a path first.
+def remote_project_ref(ref: str) -> ProjectInfo:
+    """The registered project a ``project/remove`` ref names, read as no working directory
+    would read it: a name, codename or id prefix, or an absolute path (``~`` allowed).
 
-    A NUL byte is 400 ``invalid``. A name longer than any file's, or a ``~user`` with
-    no home here, is 404 ``not_found``: no project has it for a root or a name. Left to
-    ``forget``, the NUL's ``ValueError`` read as two projects matching (400
+    ``project forget`` reads a ref that exists on disk, or is spelled with a separator or
+    a leading dot, as a path from where its shell stands. The server stands wherever it
+    was started, which no phone knows: ``{"ref": "docs"}`` forgot the project the server
+    ran in, which has a ``docs/`` directory, rather than the project named ``docs``, and
+    moved the machine's pin with it; ``.`` and ``../x`` acted on the server's own
+    directory and its sibling (sweep 4 of #243). So a bare word is only ever a name, as
+    ``project/switch`` reads it, and a relative path is 400 ``invalid``, as ``project/add``
+    refuses one.
+
+    A path the system will not look up is refused first, before
+    ``project_service.resolve`` asks the disk about it: a NUL byte is 400 ``invalid``,
+    and a name longer than any file's, a ``~user`` with no home here or a directory the
+    server may not read (``/root``) is 404 ``not_found``, as no project has it for a
+    root. Left to ``resolve``, the NUL's ``ValueError`` read as two projects matching (400
     ``ambiguous_project``), and the others fell to 400 ``write_failed``, each with the
-    system's own words (``lstat: embedded null character in path``) for a write that
-    never began (sweep 3 of #243).
+    system's own words (``[Errno 13] Permission denied: '/root/.git'``) for a write that
+    never began (sweeps 3 and 4 of #243). ``KeyError`` and ``ValueError`` are
+    ``project_service.resolve``'s, for nothing and several matching.
     """
+    from aisquare.services import project as project_service
+
+    no_such = RequestError(404, "not_found", f"no project matches {ref!r}")
     if "\x00" in ref:
         raise RequestError(400, "invalid", NUL_IN_A_PATH.format(field="ref"))
     try:
-        Path(ref).expanduser().exists()
-    except (OSError, RuntimeError):
-        raise RequestError(404, "not_found", f"no project matches {ref!r}") from None
+        path = Path(ref).expanduser()
+    except RuntimeError:  # ~user, for a user this machine does not have
+        raise no_such from None
+    if path.is_absolute():
+        try:
+            return project_service.resolve(str(path))
+        except OSError:
+            raise no_such from None
+    if ref in (".", "..") or any(separator in ref for separator in {"/", os.sep}):
+        raise RequestError(
+            400,
+            "invalid",
+            f"{ref} is a relative path: name the project, or give its absolute path "
+            "(start with / or ~)",
+        )
+    return project_service.named(ref)
 
 
 def _holds_repositories(root: Path) -> bool:
@@ -2906,14 +2934,13 @@ def live_writes() -> Writes:
     def project_remove(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         """Forget a registration, as ``project forget`` does, refusals and their codes
         included: one with live fleet agents is 409 ``project_busy``, where it fell to
-        400 ``write_failed`` as if the write had failed (sweep 2 of #243), and a ref the
-        system will not look up is refused first (:func:`check_project_ref_on_disk`)."""
+        400 ``write_failed`` as if the write had failed (sweep 2 of #243). The ref is read
+        without the server's working directory (:func:`remote_project_ref`)."""
         from aisquare.services import project as project_service
 
         ref = _required(body, "ref")
-        check_project_ref_on_disk(ref)
         try:
-            report = project_service.forget(ref, purge=False)
+            report = project_service.forget_project(remote_project_ref(ref), purge=False)
         except KeyError:
             raise RequestError(404, "not_found", f"no project matches {ref!r}") from None
         except ValueError as exc:

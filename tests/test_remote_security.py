@@ -2213,6 +2213,33 @@ def test_a_remove_from_the_phone_forgets_the_registration(
     assert _audit_lines()[-1][2:] == ["project/remove", "removed beta"]
 
 
+@pytest.mark.parametrize("ref", ["docs", "{home}/code/docs", "~/code/docs"])
+def test_a_remove_forgets_the_project_it_names_wherever_the_server_runs(
+    home: Path,
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ref: str,
+) -> None:
+    """``{"ref": "docs"}`` was read as a path from the server's working directory, as
+    ``project forget`` reads it from a shell: the server ran in a project with a ``docs/``
+    directory, so that project was forgotten, the pin moved off it, and the trail said
+    ``removed docs``, while the project named ``docs`` stayed (sweep 4 of #243). A name
+    is a name; an absolute path still names its project."""
+    current, docs, other = _projects(home, "code/current", "code/docs", "code/other")
+    (current.root / "docs").mkdir()
+    monkeypatch.chdir(current.root)
+    client = _project_writes(runtime, tmp_path)
+    said = ref.format(home=home)
+    removed = client.post(f"{base(runtime)}/api/project/remove", json={"ref": said})
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["report"]["project"]["id"] == docs.id
+    assert removed.json()["report"]["active_changed"] is False
+    assert [project.id for project in project_service.list_projects()] == [current.id, other.id]
+    assert project_service.info().id == current.id
+    assert _audit_lines()[-1][2:] == ["project/remove", f"removed {said}"]
+
+
 def test_a_project_with_live_agents_is_not_removed_and_the_phone_hears_why(
     home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2259,6 +2286,11 @@ def test_a_project_with_live_agents_is_not_removed_and_the_phone_hears_why(
         ("remove", {"ref": "~/" + "a" * 300}, 404, "not_found"),
         ("remove", {"ref": "a" * 5_000}, 404, "not_found"),
         ("remove", {"ref": "~no_such_user_here/alpha"}, 404, "not_found"),
+        ("remove", {"ref": "."}, 400, "invalid"),
+        ("remove", {"ref": ".."}, 400, "invalid"),
+        ("remove", {"ref": "../alpha"}, 400, "invalid"),
+        ("remove", {"ref": "./"}, 400, "invalid"),
+        ("remove", {"ref": "code/alpha"}, 400, "invalid"),
     ],
 )
 def test_a_switch_or_a_remove_that_names_no_one_project_changes_nothing(

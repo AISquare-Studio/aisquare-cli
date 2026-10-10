@@ -112,7 +112,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   link.
 - **Devices, not cookies.** A device has a public id (`dev_…`) and its cookie is
   stored only as a digest. It is signed out after 24 h idle (and unlocks back
-  into the same id, notifications included) and removed after 7 days. Remote
+  into the same id, notifications included) and removed after 7 days. At most
+  32 are kept: an unlock past that removes the signed-out device unused longest,
+  and is refused (`too_many_devices`) while all 32 are signed in. Remote
   off and auto-off revoke every device (sockets close 4410); `asq remote revoke
   <id>` and `revoke --all` work from the machine, and a phone can sign itself
   out or, with writes on, revoke another. `remote.json` moves to version 2 and

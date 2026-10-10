@@ -20,19 +20,23 @@ the rest is here:
   stop the agent the same way. With a dialog up, that Enter answers it: it can
   approve a Bash command or take a question's first option. So an open dialog
   refuses the action (409 ``dialog_open``), unless ``dismiss_dialog`` asks for one
-  Escape (No) first. A restart or a switch asks it last, after the fleet's own
+  Escape (No) first. An agent at work gets that Escape unasked, and the ``/exit``
+  waits until its pane is at rest: a prompt could open between the guard's read
+  and the Enter. A restart or a switch asks it last, after the fleet's own
   refusals (:class:`ActionGuardLast`), so its Escape never comes before a
   refusal that needed none. No tell types into a dialog either. ``auto``,
   which is ``fleet tell``, files its text as a board note while one may be up,
-  and ``send-keys`` with ``dialog_guard`` types nothing then
+  and ``send-keys`` with ``dialog_guard`` types only into a pane at rest
   (:func:`action_keys_guard`). A stop, restart or switch that fails after the
   guard's Escape says that the Escape went.
 * **One action per agent at a time.** ``remote_server.remote_agent_lock`` is
   taken without waiting, and the needs card's quick answers take it too (409
   ``busy``).
 * **The fleet's own refusals**, mapped as ``asq fleet`` maps them
-  (:func:`fleet_refusal`). A 200 body is the CLI's ``--json`` payload plus
-  ``project``; a tell's also says its ``mode``.
+  (:func:`fleet_refusal`), save a pinned call's ``NoSuchAgent`` once the row it
+  names is not the live one, which is ``stale`` (:func:`action_pinned_call`). A
+  200 body is the CLI's ``--json`` payload plus ``project``; a tell's also says
+  its ``mode``.
 * **The trail.** The dispatcher audits what went through. A refusal that comes
   after something reached the agent, or may have, is audited too: one after an
   Escape went to its pane, and every fleet call that fails, which may have done
@@ -536,6 +540,43 @@ def action_fleet_call(call: Callable[[], _Result]) -> _Result:
         raise fleet_refusal(exc) from exc
 
 
+def action_pinned_call(
+    target: ProjectInfo, label: str, agent_id: str | None, call: Callable[[], _Result]
+) -> _Result:
+    """:func:`action_fleet_call` of a fleet call the body pinned to ``agent_id``: refused
+    ``NoSuchAgent`` once that row is not the live one holding the label, it is 409
+    ``stale`` with the fleet's own sentence, ``current`` naming the live row or none.
+
+    The lock's check passes a pinned row that has ended, the label's newest still: the
+    gap of a hand-over, after the old row ended and before the replacement's was made,
+    or an agent that exited. The fleet then found no live row, or the replacement
+    recorded just after the check, and its ``NoSuchAgent`` was 404 ``no_such_agent``:
+    the page said "That agent is gone." and left the agent's screen for the fleet,
+    where coder-1 came back a moment later (sweep 4 of #243). Pinned, it is ``stale``,
+    as the lock's own check (:func:`action_gone`) and pinned keys answer it. A refusal
+    while the pinned row is still the live one is the fleet's, and keeps its mapping.
+    """
+    from aisquare.core.store import store_session
+    from aisquare.services import fleet as fleet_service
+
+    try:
+        return action_fleet_call(call)
+    except RequestError as refusal:
+        cause = refusal.__cause__
+        if agent_id is None or not isinstance(cause, fleet_service.NoSuchAgent):
+            raise
+        with store_session() as store:
+            live = store.fleet_agent_by_label(target.id, label, live_only=True)
+        if live is not None and live.id == agent_id:
+            raise
+        raise RequestError(
+            409,
+            "stale",
+            refusal.message,
+            current={"agent_id": None if live is None else live.id},
+        ) from cause
+
+
 # --- which agent: the project, the pin, the lock ---------------------------------------------
 
 
@@ -739,55 +780,85 @@ def action_dialog_guard(
     doing: str,
     audit_start: str,
 ) -> bool:
-    """Refuse to stop an agent that shows a dialog, or with ``dismiss``, press Escape first.
+    """Leave the stop's ``/exit`` and Enter nothing to answer: refuse an agent that shows a
+    dialog, or with ``dismiss`` press Escape first, and press it first, unasked, for an
+    agent that is not at rest (:func:`action_at_rest`).
 
-    ``doing`` names the action for the refusal ("stopping"). Returns whether a
-    dialog was dismissed, which the audit line records. A false alarm costs a
-    refusal with a sentence, or with ``dismiss`` an Escape to an agent about to be
-    stopped anyway. It never costs an Enter into a dialog.
+    ``doing`` names the action for the refusal ("stopping"). Returns whether the
+    Escape went, which the audit line records as ``dismissed``. A false alarm costs a
+    refusal with a sentence, or an Escape to an agent about to be stopped anyway. It
+    never costs an Enter into a dialog.
 
     A pending tool counts as a dialog here (:func:`action_may_answer`): in a
     permission prompt's first seconds nothing else tells it from a tool at work,
     and the ``/exit`` and Enter of a stop would answer it "1. Yes". For a tool
     that is running, the Escape stops it, which a stop was about to do anyway.
 
+    An agent at work with no tool pending showed no dialog when it was read, and
+    the ``/exit`` and Enter went on: a few tmux calls later, more for a restart or
+    a switch. A permission prompt that opened in between took them, the letters
+    doing nothing in its list and the Enter its "1. Yes", and so did one already
+    drawn whose tool use Claude Code had not yet flushed to the transcript, which
+    it writes up to 100 ms late (sweep 4 of #243). So such an agent gets the one
+    Escape first, which answers that prompt "No" and ends the turn the stop was
+    about to end anyway, and the ``/exit`` waits until the pane is at rest. An
+    agent at rest gets none: nothing there opens a prompt until something is typed.
+
     The Escape answers a permission prompt "No", so a refusal after it is audited,
     as ``audit_start`` and then ``dismissed=yes refused=<error>``.
     """
     snap = snap if snap is not None else action_snapshot(target, label, pin)
-    if not action_may_answer(snap):
-        return False
+    if snap.status is None or not snap.pane_is_agent or action_at_rest(snap):
+        return False  # no pane of the agent's to answer anything, or one at rest
     dialog = remote_needs.needs_dialog_open(snap)
-    if not dismiss:
-        if dialog:
-            message = (
-                f"{label} is showing a prompt; {doing} would answer it — "
-                "send dismiss_dialog: true to press Esc (No) first"
-            )
-        else:
-            message = (
-                f"{label} has a tool pending, and a prompt for it may have just opened; "
-                f"{doing} could answer it — send dismiss_dialog: true to press Esc (No) "
-                "first, which also stops a running tool"
-            )
-        raise RequestError(409, "dialog_open", message)
+    pending = not dialog and remote_needs.needs_tool_pending(snap)
+    if not dismiss and dialog:
+        raise RequestError(
+            409,
+            "dialog_open",
+            f"{label} is showing a prompt; {doing} would answer it — "
+            "send dismiss_dialog: true to press Esc (No) first",
+        )
+    if not dismiss and pending:
+        raise RequestError(
+            409,
+            "dialog_open",
+            f"{label} has a tool pending, and a prompt for it may have just opened; "
+            f"{doing} could answer it — send dismiss_dialog: true to press Esc (No) "
+            "first, which also stops a running tool",
+        )
     action_press_escape(snap, label)
     with action_audited(lambda error: f"{audit_start} dismissed=yes refused={error}"):
-        closed = action_settle(
-            target,
-            label,
-            pin,
-            lambda again: not action_may_answer(again),
-            remote_needs.DIALOG_SETTLE_SECONDS,
-        )
-        if closed is None:
-            still = "still shows a prompt" if dialog else "still has its tool pending"
+        rested = action_settle(target, label, pin, action_at_rest, action_interrupt_wait())
+        if rested is None:
+            if dialog or pending:
+                still = "still shows a prompt" if dialog else "still has its tool pending"
+                code = "dialog_open"
+            else:
+                still, code = "has not stopped yet", "still_busy"
             raise RequestError(
-                409,
-                "dialog_open",
-                f"Escape was sent, but {label} {still} — nothing else was done",
+                409, code, f"Escape was sent, but {label} {still} — nothing else was done"
             )
     return True
+
+
+def action_at_rest(snap: AgentNow) -> bool:
+    """Whether the agent's pane is at rest: the agent's own, quiet, and nothing in it waiting
+    on an answer (:func:`action_may_answer`). Keys typed there answer no dialog.
+
+    Quiet is no output for ``fleet.ACTIVITY_WINDOW``, which tmux must say. Claude Code
+    animates while a turn runs and draws a prompt when it opens, so a quiet pane is
+    neither at work nor in a prompt's first seconds, whatever the transcript, which
+    Claude Code writes up to 100 ms after the screen, has caught up with. What reads
+    the transcript (``needs_tool_pending``) sees a prompt too late to stop an Enter
+    already on its way. A turn starts at rest only when something is typed.
+    """
+    return (
+        snap.status is not None
+        and snap.pane_is_agent
+        and snap.pane_quiet is True
+        and not action_may_answer(snap)
+    )
 
 
 def action_may_answer(snap: AgentNow) -> bool:
@@ -859,19 +930,28 @@ def action_prompt_up(label: str) -> RequestError:
 
 
 def action_keys_guard(target: ProjectInfo, label: str, pin: str) -> None:
-    """``send-keys`` with ``dialog_guard``: 409 ``dialog_open``, and nothing typed, while
-    anything typed into the agent's pane may answer a dialog (:func:`action_may_answer`).
+    """``send-keys`` with ``dialog_guard``: nothing is typed unless the agent's pane is at
+    rest (:func:`action_at_rest`) and the agent is not parked on its usage limit. 409
+    ``dialog_open`` while anything typed may answer a dialog (:func:`action_may_answer`),
+    ``agent_busy`` while the agent is at work or limited, and ``not_agent`` for a pane
+    the agent is not running.
 
     For a sender that does not see the pane: the page's Transcript tab, whose Send
     types its text and then Enter, ⏎ being on by default. Into a permission prompt
     the text is keystrokes, a digit in it picks that option, and the Enter takes
     the highlighted one: "1. Yes" to the command the text meant to refuse (sweep
-    of #243, round 4). The agent is read from its own facts
+    of #243, round 4). An agent at work showed none when it was read, but one
+    could open before the text landed, or be on screen already with its tool use
+    not yet in the transcript (sweep 4 of #243): Interrupt & tell is the way to
+    reach it from there. A limited agent is at rest, and a message typed there
+    fails on its limit and parks it anew, as a tell typed there did
+    (:func:`action_type_now`). The agent is read from its own facts
     (``needs_single_agent_now``: its row, its pane, its tail), which must still be
     of the row ``pin`` names, the one the keys were going to.
     """
     snap = action_fleet_call(lambda: remote_needs.needs_single_agent_now(target, label))
     snap = action_still_pinned(target, label, pin, snap, escaped=False)
+    action_pane_agent(snap, label)
     if remote_needs.needs_dialog_open(snap):
         raise action_prompt_up(label)
     if remote_needs.needs_tool_pending(snap):
@@ -881,6 +961,8 @@ def action_keys_guard(target: ProjectInfo, label: str, pin: str) -> None:
             f"{label} has a tool pending, and a prompt for it may have just opened; typing "
             "now could answer it — look at its pane first",
         )
+    if action_state(snap) == "limited" or not action_at_rest(snap):
+        raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))
 
 
 # --- typing into the agent's prompt ------------------------------------------------------------
@@ -971,17 +1053,28 @@ def action_type_now(
 ) -> tuple[bool, str]:
     """``prompt`` and ``interrupt``: type ``text`` at the agent's input prompt, now.
 
-    Both refuse an open dialog, which the Enter would answer, and a pane that is
-    not running the agent. ``prompt`` types only at an idle prompt, and otherwise
-    says what the agent is doing. ``interrupt`` sends one Escape and waits for the
-    prompt to come back. If it does not, nothing is typed. By then the Escape has
-    cut the agent's turn short, so a refusal after it is audited: ``trail`` words
-    the tell's line from how it ended.
+    Both refuse an open dialog, which the Enter would answer, a pane that is not
+    running the agent, and an agent parked on its usage limit. ``prompt`` types
+    only at an idle prompt, and otherwise says what the agent is doing.
+    ``interrupt`` sends one Escape and waits for the prompt to come back. If it does
+    not, nothing is typed. By then the Escape has cut the agent's turn short, so a
+    refusal after it is audited: ``trail`` words the tell's line from how it ended.
+
+    A limited agent sits quiet at its prompt, Claude Code's limit message its newest
+    words, and ``needs_at_input_prompt`` reads that as a prompt to type at. Both
+    modes typed there and answered ``delivered``: the message failed on the same
+    limit, its ``UserPromptSubmit`` took the row off ``limited`` and its card off the
+    feed, and the next failure parked it as a new limit, pushed again under a new id,
+    the manager nudged again and, under ``on_limit = "switch"``, another hand-over
+    asked for (sweep 4 of #243). A switch is what moves it
+    (:func:`action_busy_sentence`), so neither mode sends anything to it.
     """
     snap = snap if snap is not None else action_snapshot(target, label, pin)
     if remote_needs.needs_dialog_open(snap):
         raise action_prompt_up(label)
     action_pane_agent(snap, label)  # refused here, before the interrupt's Escape
+    if action_state(snap) == "limited":
+        raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))
     if not interrupt:
         if not remote_needs.needs_at_input_prompt(snap):
             raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))
@@ -1009,10 +1102,12 @@ def action_tell_auto(
     snap: AgentNow | None,
     *,
     pin: str,
+    agent_id: str | None,
     trail: Callable[[str], str],
 ) -> tuple[bool, str]:
     """``auto``: ``fleet tell`` of the pinned row, or a board note while the agent may be
-    showing a dialog.
+    showing a dialog. ``agent_id`` is the body's: a row it named that is no longer the
+    live one is ``stale`` (:func:`action_pinned_call`).
 
     ``fleet tell`` types into a row that derives ``waiting``, and a permission prompt
     left unanswered for 30 minutes derives it too. The session still says
@@ -1041,8 +1136,11 @@ def action_tell_auto(
         filed = action_fleet_call(lambda: fleet_service._file_note(target, label, text, None))
         return False, f"{why} — {filed}"
     with action_audited(lambda error: trail(f"delivered=no failed={error}")):
-        told = action_fleet_call(
-            lambda: fleet_service.tell(target, label, text, sender=None, agent_id=pin)
+        told = action_pinned_call(
+            target,
+            label,
+            agent_id,
+            lambda: fleet_service.tell(target, label, text, sender=None, agent_id=pin),
         )
     return told.delivered, told.how
 
@@ -1073,7 +1171,9 @@ def action_tell(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     with action_locked(target, label, agent_id) as row:
         snap = action_check_needs(target, label, row.id, needs_id)
         if mode == "auto":
-            delivered, how = action_tell_auto(target, label, text, snap, pin=row.id, trail=trail)
+            delivered, how = action_tell_auto(
+                target, label, text, snap, pin=row.id, agent_id=agent_id, trail=trail
+            )
         else:
             delivered, how = action_type_now(
                 target,
@@ -1128,8 +1228,11 @@ def action_stop(body: dict[str, Any]) -> tuple[dict[str, object], str]:
             lambda error: f"{audit_start} dismissed={action_yes_no(dismissed)} failed={error}",
             escaped=lambda: dismissed,
         ):
-            receipt = action_fleet_call(
-                lambda: fleet_service.stop(target, label, force=force, agent_id=agent_id)
+            receipt = action_pinned_call(
+                target,
+                label,
+                agent_id,
+                lambda: fleet_service.stop(target, label, force=force, agent_id=agent_id),
             )
     released = [task.id for task in receipt.released]
     result: dict[str, object] = {
@@ -1183,7 +1286,10 @@ def action_restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
             reached=guard.action_guard_asked,
             escaped=guard.action_guard_escaped,
         ):
-            receipt = action_fleet_call(
+            receipt = action_pinned_call(
+                target,
+                label,
+                agent_id,
                 lambda: fleet_service.restart(
                     target,
                     label,
@@ -1191,7 +1297,7 @@ def action_restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
                     spawned_by="user",
                     agent_id=agent_id,
                     before_stop=guard,
-                )
+                ),
             )
     result: dict[str, object] = {
         "replaced": receipt.replaced.model_dump(mode="json"),
@@ -1259,7 +1365,10 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
             reached=guard.action_guard_asked,
             escaped=guard.action_guard_escaped,
         ):
-            receipt = action_fleet_call(
+            receipt = action_pinned_call(
+                target,
+                label,
+                agent_id,
                 lambda: fleet_service.switch(
                     target,
                     label,
@@ -1269,7 +1378,7 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
                     spawned_by="user",
                     agent_id=agent_id,
                     before_stop=guard,
-                )
+                ),
             )
     result: dict[str, object] = {
         "stopped": receipt.stopped.model_dump(mode="json"),

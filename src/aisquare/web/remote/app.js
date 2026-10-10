@@ -2015,8 +2015,11 @@ function tellSheet(ctx, mode) {
         return;
       }
       if (res.status === 409 && res.error === "stale" && ctx.item) {
-        sheet.close();
-        noLonger(ctx.item, res.data && res.data.current);
+        // The card gives way, the words typed stay: Tell again is a Tell with no card.
+        const item = ctx.item;
+        ctx.item = ctx.needsId = null;
+        noLonger(item, res.data && res.data.current);
+        sheet.say(noLongerText(item, res.data && res.data.current) + " Tell again to send it anyway.");
         return;
       }
       sheet.say(failText(res, TEXT_MAX.tell));
@@ -2073,7 +2076,7 @@ const AGENT_ACTIONS = {
 
 function effectSentence(kind, label, o) {
   let text;
-  if (kind === "stop") text = o.force ? "Stop " + label + " now: its window is killed without /exit." : "Stop " + label + ": /exit, then its window is killed after 5 s.";
+  if (kind === "stop") text = o.force ? "Stop " + label + " now: its window is killed without /exit." : "Stop " + label + ": Esc if it is busy, then /exit; its window is killed 5 s later.";
   else if (kind === "restart") text = "Restart " + label + ": it stops, then starts again on " + (o.fresh ? "a fresh conversation." : "its own conversation.") + " This can take 40 s.";
   else text = "Switch " + label + (o.to ? " to " + o.to : " to the account with the most headroom") + ": it hands over and carries on there. This can take 40 s.";
   return o.dismiss ? text + " Its prompt is dismissed (No) first." : text;

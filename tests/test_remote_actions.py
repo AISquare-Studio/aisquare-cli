@@ -82,7 +82,7 @@ from aisquare.services.remote_server import (
     write_endpoint_names,
 )
 from aisquare.services.team import TeamDisabledError
-from aisquare.services.transcript import PendingTool, TranscriptTail
+from aisquare.services.transcript import PendingTool, TranscriptTail, read_transcript_tail
 from tests.remote_kit_helpers import (
     base,
     frame_within,
@@ -703,6 +703,11 @@ class FakePane:
         self.sockets: list[str] = []
         self.failing: set[str] = set()
         """``"paste"`` or a key name: that call raises ``TmuxError``."""
+        self.prompt = False
+        """A permission prompt is drawn, for the tests that open one: text does nothing in
+        its list, Escape answers it "No" and Enter its highlighted "1. Yes"."""
+        self.answered: list[str] = []
+        """How each prompt drawn was answered, in order."""
 
     def send_keys(self, pane_id: str, *keys: str) -> None:
         for key in keys:
@@ -710,6 +715,9 @@ class FakePane:
                 raise TmuxError(f"send-keys {key}: lost server")
             self.sent.append((pane_id, "key", key))
             self.log.append(f"key {key}")
+            if self.prompt and key in ("Escape", "Enter"):
+                self.prompt = False
+                self.answered.append("No" if key == "Escape" else "1. Yes")
 
     def paste(self, pane_id: str, text: str) -> None:
         if "paste" in self.failing:
@@ -765,7 +773,8 @@ class FakeNeeds:
 
     ``tail`` and ``pane_quiet`` are handed over as they are, for the predicates that read
     them: an Escape that closes the dialog answers the tail's pending tools too, as Claude
-    Code records a rejected or interrupted tool use.
+    Code records a rejected or interrupted tool use, and one that stops the agent leaves
+    its pane quiet, as Claude Code's is once its redraw is ``fleet.ACTIVITY_WINDOW`` old.
 
     Both reads give the same view: the project's scan (``needs_agent_now``, counted in
     ``scans``) and the one agent's (``needs_single_agent_now``). ``reads`` counts both."""
@@ -845,6 +854,7 @@ class FakeNeeds:
                 self.tail = dataclasses.replace(self.tail, pending=(), newest="interrupted")
         if self.escape_stops_agent and not self.dialog:
             self.at_prompt = True
+            self.pane_quiet = True
 
     def _view(self, snap: AgentNow) -> tuple[bool, bool, bool]:
         """What the pane showed when ``snap`` was read: a dialog, the prompt, an interruption."""
@@ -1443,6 +1453,141 @@ def test_a_row_replaced_while_the_guard_looked_is_stale_before_any_escape(
     assert pane.sent == [] and fleet.calls == []
 
 
+@pytest.fixture
+def exits(fleet: FleetCalls, pane: FakePane, monkeypatch: pytest.MonkeyPatch) -> FleetCalls:
+    """The fleet's stop, restart and switch as above, each then stopping the agent as
+    ``fleet._stop_row`` does: ``/exit`` typed into its pane, then Enter."""
+    for name in ("stop", "restart", "switch"):
+        recorded = fleet.fake(name)
+
+        def stopping(
+            *args: Any, _recorded: Callable[..., object] = recorded, **kwargs: Any
+        ) -> object:
+            answer = _recorded(*args, **kwargs)
+            pane.send_literal("%7", "/exit")
+            pane.send_keys("%7", "Enter")
+            return answer
+
+        monkeypatch.setattr(fleet_service, name, stopping)
+    return fleet
+
+
+@pytest.mark.parametrize("name", PINNED_ACTIONS)
+def test_a_prompt_drawn_as_the_guard_read_an_agent_at_work_is_answered_no_not_yes(
+    phone: Phone,
+    exits: FleetCalls,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    log: list[str],
+    name: str,
+) -> None:
+    """Sweep 4 of #243: coder-1 was at work with no tool pending, so it showed no dialog
+    when the guard read it, and the ``/exit`` and Enter went on. Its permission prompt for
+    ``git push --force`` was drawn meanwhile, its tool use not yet in the transcript, which
+    Claude Code writes up to 100 ms late: the letters did nothing in its list, and the Enter
+    took "1. Yes". An agent at work now gets one Escape, which answers that prompt "No" and
+    ends the turn the stop ends anyway, and the ``/exit`` waits for its pane to rest."""
+    _row(project)
+    needs.state, needs.pane_quiet = "working", False
+
+    def drawn_as_the_guard_reads() -> None:
+        if needs.reads == 1:
+            pane.prompt = True
+
+    needs.before_read = drawn_as_the_guard_reads
+    response = phone.post(name, **PINNED)
+    assert response.status_code == 200, response.text
+    assert pane.answered == ["No"]
+    assert log == ["key Escape", f"fleet {name.removeprefix('agent/')}", "literal", "key Enter"]
+    assert "dismissed=yes" in phone.audit()[0][1]
+
+
+@pytest.mark.parametrize("name", PINNED_ACTIONS)
+def test_an_agent_at_rest_at_its_prompt_is_stopped_with_no_escape(
+    phone: Phone,
+    exits: FleetCalls,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    log: list[str],
+    name: str,
+) -> None:
+    """Quiet, with nothing pending: no turn runs there, so no prompt opens before the Enter,
+    and an Escape would only cost a redraw and five seconds."""
+    _row(project)
+    needs.state = "waiting"
+    response = phone.post(name, **PINNED)
+    assert response.status_code == 200, response.text
+    assert log == [f"fleet {name.removeprefix('agent/')}", "literal", "key Enter"]
+    assert "dismissed=no" in phone.audit()[0][1]
+
+
+@pytest.mark.parametrize("name", PINNED_ACTIONS)
+def test_an_agent_the_escape_does_not_bring_to_rest_is_refused_and_nothing_else_is_done(
+    phone: Phone,
+    fleet: FleetCalls,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    name: str,
+) -> None:
+    """Still printing after the wait: what it does may be a prompt opening, so no ``/exit``
+    and no Enter. The Escape went, which is on the trail."""
+    _row(project)
+    needs.state, needs.pane_quiet = "working", False
+    needs.escape_stops_agent = False
+    response = phone.post(name, **PINNED)
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "still_busy",
+        "message": "Escape was sent, but coder-1 has not stopped yet — nothing else was done",
+    }
+    assert pane.keys() == ["Escape"] and fleet.calls == []
+    assert phone.audit() == [(name, f"{_acted_on(name, project)} dismissed=yes refused=still_busy")]
+
+
+def test_at_rest_is_the_agents_own_pane_quiet_by_tmuxs_word_with_nothing_pending(
+    project: ProjectInfo,
+) -> None:
+    """Quiet is what tmux says of the pane: a transcript can be 100 ms behind the screen."""
+    status = FleetAgentStatus(agent=_agent(project), state="working")
+    snap = AgentNow(
+        project=project, status=status, tail=None, pane_is_agent=True, pane_quiet=True, items=()
+    )
+    assert remote_actions.action_at_rest(snap)
+    assert not remote_actions.action_at_rest(dataclasses.replace(snap, pane_quiet=False))
+    assert not remote_actions.action_at_rest(dataclasses.replace(snap, pane_quiet=None)), (
+        "tmux would not say"
+    )
+    assert not remote_actions.action_at_rest(dataclasses.replace(snap, pane_is_agent=False))
+    assert not remote_actions.action_at_rest(dataclasses.replace(snap, status=None))
+    assert not remote_actions.action_at_rest(dataclasses.replace(snap, tail=_a_prompt_just_drawn()))
+
+
+def test_the_guard_waits_for_rest_as_long_as_the_interrupt_waits_for_its_prompt(
+    phone: Phone,
+    fleet: FleetCalls,
+    needs: FakeNeeds,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At rest is a pane quiet for ``fleet.ACTIVITY_WINDOW``, and the Escape's own redraw is
+    output: a wait of the 3 s settle time alone would have refused every agent stopped at
+    work. Each poll reads the agent alone."""
+    _row(project)
+    fake_time = FakeTime()
+    monkeypatch.setattr(remote_actions, "time", fake_time)
+    monkeypatch.setattr(remote_actions, "ACTION_POLL_SECONDS", 0.25)
+    monkeypatch.setattr(remote_actions, "action_interrupt_wait", action_interrupt_wait)
+    monkeypatch.setattr(remote_needs, "DIALOG_SETTLE_SECONDS", 3.0)
+    needs.pane_quiet, needs.escape_stops_agent = False, False
+    response = phone.post("agent/stop", **PINNED)
+    assert response.status_code == 409 and response.json()["error"] == "still_busy"
+    assert fake_time.slept == [0.25] * 32, "8 s of polls: the quiet window, then the settle time"
+    assert (needs.scans, needs.reads) == (1, 1 + 32)
+
+
 # --- the fleet's own refusals ----------------------------------------------------------------
 
 REFUSALS = [
@@ -1522,6 +1667,80 @@ def test_an_unexpected_failure_of_the_fleet_call_is_a_400_on_the_trail(
     assert phone.audit() == [
         ("agent/restart", f"{_acted_on('agent/restart', project)} dismissed=no failed=write_failed")
     ]
+
+
+@pytest.mark.parametrize(
+    ("name", "body"),
+    [
+        ("agent/tell", {"agent": LABEL, "agent_id": "agt_one", "text": "carry on"}),
+        ("agent/stop", PINNED),
+        ("agent/switch", PINNED),
+    ],
+)
+def test_a_pinned_action_in_a_hand_overs_gap_is_stale_not_a_gone_agent(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    body: dict[str, object],
+) -> None:
+    """Sweep 4 of #243: the hand-over ended agt_one, the row the phone showed, and had not
+    yet made its replacement's. The lock's check passed (the ended row is the label's
+    newest), and the fleet itself, run here as it is, found no live row: 404
+    ``no_such_agent``, which the page reads as "That agent is gone." and leaves the
+    agent's screen for the fleet, where coder-1 came back a moment later. Pinned keys
+    answer that gap ``stale``, and so does every pinned action now. A tell that named no
+    agent is still 404: it asked for whoever holds the label."""
+    _row(project, ended=True)
+    needs.window_gone = True  # and its window went with it
+    monkeypatch.setattr(fleet_service, "_kill_lingering_window", lambda *args: False)
+    response = phone.post(name, **body)
+    assert response.status_code == 409, response.text
+    assert response.json() == {
+        "error": "stale",
+        "message": "no live agent 'coder-1' in api — `aisquare fleet ls` shows who is running",
+        "current": {"agent_id": None},
+    }
+    assert pane.sent == []
+    unpinned = phone.post("agent/tell", agent=LABEL, text="carry on")
+    assert (unpinned.status_code, unpinned.json()["error"]) == (404, "no_such_agent")
+
+
+@pytest.mark.parametrize("name", ["agent/tell", *PINNED_ACTIONS])
+def test_a_pinned_action_whose_label_was_handed_on_during_the_fleet_call_is_stale(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    """The replacement was recorded just after the lock's check, and the fleet's own pin
+    refused it: the same state as a replacement seen at the check, which is ``stale``
+    naming it, and so is this now, with the fleet's sentence. It was 404, and the page
+    said the agent was gone over the server's "is another agent now"."""
+    _row(project)
+
+    def handed_on(*args: object, **kwargs: object) -> object:
+        _replaced(project)
+        with store_session() as store:
+            new = store.get_fleet_agent("agt_new")
+        assert new is not None
+        raise fleet_service._replaced(LABEL, new, "agt_one")
+
+    monkeypatch.setattr(fleet_service, name.removeprefix("agent/"), handed_on)
+    body = {"text": "carry on"} if name == "agent/tell" else {"confirm": LABEL}
+    response = phone.post(name, agent=LABEL, agent_id="agt_one", **body)
+    assert response.status_code == 409, response.text
+    assert response.json() == {
+        "error": "stale",
+        "message": "'coder-1' is another agent now (agt_new) — agt_one ended and was "
+        "replaced since; nothing was done to either (`aisquare fleet ls` shows who is running)",
+        "current": {"agent_id": "agt_new"},
+    }
+    assert pane.sent == []
 
 
 def test_fleet_refusal_maps_the_servers_own_lookups_too() -> None:
@@ -2397,6 +2616,84 @@ def test_prompt_types_into_a_quiet_waiting_agent_that_has_no_transcript(
     assert [kind for _pane, kind, _what in pane.sent] == ["paste", "key"]
 
 
+LIMITED = "coder-1 hit its usage limit, and a message will not get past it — use Switch account"
+
+
+def _parked_on_its_limit(needs: FakeNeeds, project: ProjectInfo, tmp_path: Path) -> None:
+    """coder-1 as a usage limit leaves it: the row reads ``limited`` with its card, the pane
+    is quiet at the prompt, and the transcript ends on the record Claude Code writes for the
+    failed turn, an assistant message of its own, read by the transcript's own reader."""
+    path = tmp_path / "limited.jsonl"
+    records = [
+        {
+            "type": "user",
+            "uuid": "rec-prompt",
+            "timestamp": "2026-10-07T10:04:00Z",
+            "message": {"role": "user", "content": "run the migrations"},
+        },
+        {
+            "type": "assistant",
+            "uuid": "rec-limit",
+            "timestamp": "2026-10-07T10:04:01Z",
+            "isApiErrorMessage": True,
+            "message": {
+                "id": "msg_limit",
+                "role": "assistant",
+                "model": "<synthetic>",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "You've hit your session limit · resets 9:30am (America/Toronto)",
+                    }
+                ],
+            },
+        },
+    ]
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    needs.state = "limited"
+    needs.tail = read_transcript_tail(path)
+    needs.items = (_item(project, "ny_limit"),)
+
+
+@pytest.mark.parametrize("mode", ["prompt", "interrupt"])
+def test_a_tell_that_types_sends_nothing_to_an_agent_parked_on_its_usage_limit(
+    phone: Phone,
+    own_predicates: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    """Sweep 4 of #243: a limited agent reads as one at its prompt, its newest record its
+    own words (the limit's), and both modes typed there, Interrupt & tell after its
+    Escape, and answered ``delivered``. The message failed on the same limit, took the
+    row off ``limited`` and its card off the feed, and the next failure was a new limit,
+    pushed again. Refused before anything is sent, with what does move it."""
+    _row(project)
+    _parked_on_its_limit(own_predicates, project, tmp_path)
+    snap = own_predicates.needs_single_agent_now(project, LABEL)
+    assert needs_at_input_prompt(snap) and not needs_dialog_open(snap), "the trap: it reads idle"
+    response = phone.post("agent/tell", agent=LABEL, text="stop and push what you have", mode=mode)
+    assert response.status_code == 409
+    assert response.json() == {"error": "agent_busy", "message": LIMITED}
+    assert pane.sent == [] and phone.audit() == []
+
+
+def test_send_keys_with_the_dialog_guard_types_nothing_into_an_agent_parked_on_its_limit(
+    phone: Phone, own_predicates: FakeNeeds, pane: FakePane, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """The Transcript tab's Send, the same message by another way: at rest, and refused all
+    the same. The Live tab, which shows the limit, still types."""
+    _row(project)
+    _parked_on_its_limit(own_predicates, project, tmp_path)
+    body = {"agent": LABEL, "text": "carry on", "enter": True}
+    refused = phone.post("send-keys", **body, dialog_guard=True)
+    assert refused.status_code == 409
+    assert refused.json() == {"error": "agent_busy", "message": LIMITED}
+    assert pane.sent == []
+    assert phone.post("send-keys", **body).status_code == 200
+
+
 # --- what may answer a prompt: auto's tell, and send-keys with the guard -----------------------
 #
 # Review of #243, round 4: every path that types an Enter or a digit into an agent reads it
@@ -2564,6 +2861,53 @@ def test_send_keys_with_the_dialog_guard_types_at_a_prompt_that_shows_none(
     assert (needs.scans, needs.reads) == (0, 1)
 
 
+@pytest.mark.parametrize(
+    ("state", "message"),
+    [("working", "coder-1 is working — use Interrupt & tell"), ("waiting", NOT_YET)],
+    ids=["at work", "still drawing"],
+)
+def test_send_keys_with_the_dialog_guard_types_nothing_into_a_pane_not_at_rest(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    state: FleetAgentState,
+    message: str,
+) -> None:
+    """Sweep 4 of #243: coder-1 was at work with no tool pending, so the guard let the text
+    through, and a prompt drawn as it read, its tool use not yet in the transcript, took the
+    text and the Enter: "1. Yes". Typed only into a pane at rest, where no turn runs: the
+    Transcript tab cannot see what the pane shows meanwhile."""
+    _row(project)
+    needs.state, needs.pane_quiet = state, False
+
+    def drawn_as_the_guard_reads() -> None:
+        pane.prompt = True
+
+    needs.before_read = drawn_as_the_guard_reads
+    body = {"agent": LABEL, "text": "1 - no, run the tests instead", "enter": True}
+    refused = phone.post("send-keys", **body, dialog_guard=True)
+    assert refused.status_code == 409
+    assert refused.json() == {"error": "agent_busy", "message": message}
+    assert pane.sent == [] and pane.answered == [] and phone.audit() == []
+
+
+def test_send_keys_with_the_dialog_guard_types_nothing_into_a_pane_not_the_agents(
+    phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
+) -> None:
+    """The agent's own read did not vouch for its pane (it reads ``lost`` or ``unknown``):
+    what the keys would land in, the guard cannot say."""
+    _row(project)
+    needs.state, needs.pane_is_agent = "unknown", False
+    refused = phone.post("send-keys", agent=LABEL, text="go", enter=True, dialog_guard=True)
+    assert refused.status_code == 409
+    assert refused.json() == {
+        "error": "not_agent",
+        "message": "coder-1's pane is not running the agent (it reads unknown) — nothing was sent",
+    }
+    assert pane.sent == []
+
+
 def test_send_keys_whose_label_was_handed_on_while_the_guard_looked_types_nothing(
     phone: Phone, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
 ) -> None:
@@ -2623,7 +2967,9 @@ def test_a_switch_leaves_alone_the_replacement_that_took_the_label_after_the_loc
     agt_one and was recording its replacement while the phone's Switch, pinned to agt_one,
     took the lock. The pin held there, against the ended row, and ``fleet.switch`` read the
     label again: it sent the replacement ``/exit`` and moved it to a third account. The
-    pin goes with the call now, and the replacement is not touched."""
+    pin goes with the call now, and the replacement is not touched. Its refusal is
+    ``stale``, naming the replacement, as one seen at the lock's check is: as 404 it read
+    "That agent is gone." on the phone (sweep 4 of #243)."""
     _row(project, ended=True)
     stopped = _fleet_switch_itself(monkeypatch, AccountChoice(_account(3), "headroom", []))
     newest_row = remote_actions.action_newest_row
@@ -2640,7 +2986,8 @@ def test_a_switch_leaves_alone_the_replacement_that_took_the_label_after_the_loc
     response = phone.post("agent/switch", **PINNED)
     assert reads == ["agt_one", "agt_one"], "the pin held under the lock"
     assert stopped == [] and pane.sent == [], "the replacement was not stopped"
-    assert (response.status_code, response.json()["error"]) == (404, "no_such_agent")
+    assert (response.status_code, response.json()["error"]) == (409, "stale")
+    assert response.json()["current"] == {"agent_id": "agt_new"}
     assert "'coder-1' is another agent now (agt_new)" in response.json()["message"]
 
 

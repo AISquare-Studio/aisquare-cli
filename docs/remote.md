@@ -310,6 +310,8 @@ From an agent's **Actions…** menu, or from a card:
 | Interrupt & tell | one Esc stops what the agent is doing; the message is typed once it is back at its prompt |
 
 When an agent is working, a card's Tell offers **Interrupt & tell** instead.
+Neither types into an agent parked on its usage limit (`agent_busy`): a message
+fails on the same limit until the reset, and **Switch account** is what moves it.
 
 **Stop**, **Restart** and **Switch account** each open a sheet that says in one
 sentence what will happen, and send the agent's name as confirmation. Restart
@@ -322,22 +324,27 @@ when the agent shows a prompt, stop, restart and switch are refused with
 `dialog_open`, and the sheet offers **Press Esc (No) first**, which dismisses the
 prompt and then goes on. For its first few seconds a permission prompt cannot be
 told from a tool at work, so they are refused the same way while any tool the
-agent called has no result yet; there the Esc also stops a running tool. A
+agent called has no result yet; there the Esc also stops a running tool. An
+agent at work gets one Esc first without asking, since a prompt could open just
+before the Enter, and `/exit` is typed once its pane has been still for 5
+seconds; one still busy 8 seconds after the Esc is refused with `still_busy`. A
 restart or a switch checks first what it can, so what it would refuse anyway (a
 task closed meanwhile; for a switch, an account that does not exist, the one the
 agent is on, none with room) is refused before any Esc. A card's Tell and
 Interrupt & tell refuse a dialog the same way. The menu's plain Tell types only
 into an agent waiting at its prompt: while the agent may be showing a prompt,
 even one left unanswered for hours, the message is left as a board note instead.
-Send on the Transcript tab, which does not show the pane, types nothing while
-the agent may be showing a prompt, a tool with no result yet included; send from
-Live, where the pane shows what the keys would answer. Its Send and keys wait
-until the transcript has loaded, which names the agent they go to.
+Send on the Transcript tab, which does not show the pane, types only into an
+agent still at its prompt: nothing while it may be showing a prompt, a tool with
+no result yet included, or is at work or parked on its usage limit
+(`agent_busy`); send from Live, where the pane shows what the keys would answer.
+Its Send and keys wait until the transcript has loaded, which names the agent
+they go to.
 
 Every action, and every key or line you type, is pinned to the agent you
 looked at: if a manager restarted or switched it in the meantime, it is refused
-as `stale` rather than applied to the replacement (as `no_such_agent` when that
-happens while the request runs).
+as `stale` rather than applied to the replacement, also when that happens while
+the request runs, or the replacement has not started yet.
 
 On a phone wide enough for eight keys (412 px is, 390 px is not) the key pad is
 one row, `Esc 1 2 3 ⏎ ↑ ↓ More` (⏎ being Enter), with the rest under More. On
@@ -579,10 +586,11 @@ a retry of one past the 50 but within the 1000 is refused with
 `send-keys` types into the pane whatever it shows, a prompt included. A script
 that cannot see the pane adds `"dialog_guard": true`, as the Transcript tab
 does, and nothing is typed while the agent may be showing a prompt (409
-`dialog_open`). A pane frame, `api/panes` and a transcript page name the agent
-they were read from (`agent_id`); sent with the keys, as the page sends it,
-nothing is typed once another agent holds the label, or none does yet, after a
-restart or a switch (409 `stale`).
+`dialog_open`) or is not still at its prompt (409 `agent_busy`). A pane frame,
+`api/panes` and a transcript page name the agent they were read from
+(`agent_id`); sent with the keys, as the page sends it, nothing is typed once
+another agent holds the label, or none does yet, after a restart or a switch
+(409 `stale`).
 
 The code is `src/aisquare/services/remote_server.py` (the server and its gates)
 and `src/aisquare/services/remote_page.py` (the bundled page, whose files are in

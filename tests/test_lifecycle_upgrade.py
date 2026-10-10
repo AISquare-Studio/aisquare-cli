@@ -2406,13 +2406,16 @@ def test_check_where_nothing_can_be_compared_says_it_cannot_tell(
         ("PT36H", timedelta(hours=36)),
         ("P1DT12H", timedelta(days=1, hours=12)),
         ("PT90M", timedelta(minutes=90)),
+        ("-P1D", timedelta(days=1)),
+        ("-P2W", timedelta(weeks=2)),
     ],
 )
 def test_a_cooldown_falls_its_span_back_from_now(
     tmp_path: Path, value: str, back: timedelta
 ) -> None:
     """The spans uv 0.12.19 records (measured: "14 days" is P14D, "1 week" P1W, "36 hours"
-    PT36H; it refuses months and years)."""
+    PT36H, "1 day ago" -P1D, "2 weeks ago" -P2W, the same cooldowns unsigned; it refuses
+    months, years and spans into the future)."""
     tail = (
         '\n[tool.options]\nexclude-newer = "2026-10-01T00:00:00Z"\n'
         f'exclude-newer-span = "{value}"\n'
@@ -2421,6 +2424,26 @@ def test_a_cooldown_falls_its_span_back_from_now(
     now = datetime(2026, 10, 9, 12, tzinfo=UTC)
 
     assert install_route.cutoff_time(route, now) == now - back
+
+
+@pytest.mark.parametrize("span", ["-P1D", "-PT36H"])
+def test_an_ago_cooldown_is_restated_without_its_sign_so_uv_takes_the_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, span: str
+) -> None:
+    """uv records "1 day ago" as -P1D, the cooldown P1D is (measured, uv 0.12.19: one
+    timestamp for both). Restated as `--exclude-newer -P1D`, uv read the value as a flag
+    and refused the command on every run: "a value is required" (review of #257)."""
+    monkeypatch.setattr(install_route, "find_uv", lambda: "/usr/bin/uv")
+    tail = (
+        f'\n[tool.options]\nexclude-newer = "2026-10-09T04:00:06Z"\nexclude-newer-span = "{span}"\n'
+    )
+    route = _uv_route(tmp_path, _receipt(_OURS_PINNED, tail=tail))
+
+    argv = install_route.upgrade_argv(route, current="0.8.0")
+
+    assert argv[argv.index("--exclude-newer") + 1] == span[1:], argv
+    assert not any(part.startswith("-P") for part in argv), argv
+    assert install_route.cutoff(route) == f"--exclude-newer {span[1:]}"
 
 
 #: A global cooldown as uv records it, for the per-package shapes below.

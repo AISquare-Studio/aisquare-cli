@@ -451,6 +451,12 @@ def _option_flags(options: Mapping[str, Any]) -> tuple[list[str], list[str]]:
         # it, so no later release could be installed, and the span was gone from the
         # receipt the reinstall wrote (sweep of #257).
         options["exclude-newer"] = options.pop("exclude-newer-span")
+    recorded = options.get("exclude-newer")
+    if isinstance(recorded, str) and recorded.startswith("-"):
+        # "1 day ago" is recorded as `-P1D`, the same cooldown as `P1D` (measured, uv 0.12.19:
+        # one timestamp for both). Restated with its sign, uv read it as a flag and refused
+        # the command ("a value is required for '--exclude-newer'") on every run (#257).
+        options["exclude-newer"] = recorded[1:]
     for key, value in options.items():
         if key == "index":
             indexes = _index_flags(value)

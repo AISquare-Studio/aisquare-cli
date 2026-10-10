@@ -2015,8 +2015,11 @@ function tellSheet(ctx, mode) {
         return;
       }
       if (res.status === 409 && res.error === "stale" && ctx.item) {
-        sheet.close();
-        noLonger(ctx.item, res.data && res.data.current);
+        // The card gives way, the words typed stay: Tell again is a Tell with no card.
+        const item = ctx.item;
+        ctx.item = ctx.needsId = null;
+        noLonger(item, res.data && res.data.current);
+        sheet.say(noLongerText(item, res.data && res.data.current) + " Tell again to send it anyway.");
         return;
       }
       sheet.say(failText(res, TEXT_MAX.tell));

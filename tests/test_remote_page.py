@@ -2320,8 +2320,27 @@ def test_a_card_refused_stale_says_so_in_its_place_and_the_feed_is_read_again(
         "later": ["card: coder-1 asks which approach to take"],
     }
     nothing = ["No longer needs you: nothing waits on coder-1 now."]
-    assert stale["tell"] == {"shown": nothing, "sheet": None}
     assert stale["stop"] == {"shown": nothing, "sheet": None}
+
+
+def test_a_cards_tell_refused_stale_keeps_its_sheet_and_what_was_typed(
+    boot_report: dict[str, Any],
+) -> None:
+    """Sweep 4 of #243: a reply takes a minute to write on a phone, and the card's item can
+    clear meanwhile (the manager typed into the agent, a note woke it). The 409 ``stale``
+    closed the sheet, and the message went with it, though the agent might take it still.
+    The card gives way all the same, and the sheet stays with the words and says why. Tell
+    again sends them as a Tell with no card, pinned still to the agent, and closes it."""
+    tell = boot_report["staleCards"]["tell"]
+    text = "yes, merge, but squash the commits first"
+    assert tell == {
+        "shown": ["No longer needs you: nothing waits on coder-1 now."],
+        "sheet": "Tell coder-1",
+        "typed": text,
+        "said": "No longer needs you: nothing waits on coder-1 now. Tell again to send it anyway.",
+        "sent": [[text, "ny_0123456789abcdef", "agt_1"], [text, None, "agt_1"]],
+        "after": None,
+    }
 
 
 def test_each_refusal_is_said_in_the_sentence_the_spec_gives_it(

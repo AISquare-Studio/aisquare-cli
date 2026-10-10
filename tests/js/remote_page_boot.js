@@ -3206,7 +3206,7 @@ async function padOrKeyboard() {
  * follows still listing the card (the machine has not scanned since), then the note's 6 s up
  * and a frame that lists the card still; a Tell from an asked card, nothing waiting on coder-1
  * now; and a crashed card's Stop. What the feed shows, and the reads of api/needs that
- * followed the quick answer. */
+ * followed the quick answer; and the Tell's sheet, kept with what was typed, sent again. */
 async function staleCards() {
   const feed = async (item, routes) => {
     const page = bootPage("#/", signedIn(Object.assign({ "GET api/needs": () => ({ status: 200, json: { items: [item] } }) }, routes)));
@@ -3230,11 +3230,20 @@ async function staleCards() {
   await settle();
   answer.later = shown(answered);
   const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell"] });
-  const told = await feed(asked, { "POST api/agent/tell": stale([]) });
+  let tells = 0;
+  const typed = { status: 200, json: { label: "coder-1", delivered: true, how: "typed", mode: "prompt", project: PROJECT } };
+  const told = await feed(asked, { "POST api/agent/tell": () => (++tells > 1 ? typed : stale([])()) });
+  const box = () => find(told.run("UI.sheet"), (node) => node.tagName === "TEXTAREA");
   click(buttonNamed(told.main(), "Tell…"));
-  find(told.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "yes, merge";
+  box().value = "yes, merge, but squash the commits first";
   click(buttonNamed(told.run("UI.sheet"), "Tell"));
   await settle();
+  const said = find(told.run("UI.sheet"), (node) => node.className === "status");
+  const tell = { shown: shown(told), sheet: sheetTitle(told), typed: box() && box().value, said: said && said.textContent };
+  if (box()) click(buttonNamed(told.run("UI.sheet"), "Tell"));
+  await settle();
+  tell.sent = told.requests.filter((one) => one.path === "api/agent/tell").map((one) => [one.body.text, one.body.needs_id || null, one.body.agent_id || null]);
+  tell.after = sheetTitle(told);
   const crashed = Object.assign({}, ITEM, { kind: "crashed", detail: {}, answers: [], actions: ["stop"] });
   const stopped = await feed(crashed, { "POST api/agent/stop": stale([]) });
   click(buttonNamed(stopped.main(), "Stop…"));
@@ -3242,7 +3251,7 @@ async function staleCards() {
   await settle();
   return {
     answer,
-    tell: { shown: shown(told), sheet: sheetTitle(told) },
+    tell,
     stop: { shown: shown(stopped), sheet: sheetTitle(stopped) },
   };
 }

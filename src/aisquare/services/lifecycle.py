@@ -483,18 +483,49 @@ def _left_by_move_back(site: HookSite, target: str) -> HookSite:
 
 
 def _beyond_pypi(route: install_route.InstallRoute) -> str | None:
-    """Why PyPI's newest says nothing about what this install's upgrade gets, or ``None``:
-    it resolves from its own index, or takes nothing uploaded after a uv cutoff, its own
-    for aisquare-cli (``exclude-newer-package``) or the global one."""
+    """Why PyPI's newest says nothing about what this install's upgrade gets, or ``None``.
+
+    In order: it resolves from its own index; its receipt records what may change the
+    release uv takes and a command line cannot restate (an index, constraints, another
+    package's cutoff: ``UvReceipt.unstated``); aisquare-cli has a uv cutoff of its own;
+    aisquare-cli is exempt from the global cutoff, which still holds the packages it needs;
+    or it takes nothing uploaded after the global cutoff, the one case PyPI's upload times
+    answer (:func:`_latest_for`). An exemption with no global cutoff, or another package's,
+    filters nothing aisquare-cli gets: PyPI's newest is what uv takes (review of #257).
+    """
     own = install_route.own_index(route)
     if own is not None:
         return f"this install resolves from its own index ({own})"
-    if route.receipt is not None and route.receipt.package_cutoff:
+    receipt = route.receipt or install_route.UvReceipt()
+    if receipt.unstated:
+        return (
+            "its uv receipt records what a command line cannot restate: "
+            f"{'; '.join(receipt.unstated)}"
+        )
+    if receipt.package_cutoff:
         return f"this install has a uv cutoff of {DISTRIBUTION}'s own (exclude-newer-package)"
     cutoff = install_route.cutoff(route)
+    if cutoff is not None and receipt.package_exempt:
+        return (
+            f"this install exempts {DISTRIBUTION} from its uv cutoff ({cutoff}), "
+            f"not the packages {DISTRIBUTION} needs"
+        )
     if cutoff is not None:
         return f"this install takes no release uploaded after its uv cutoff ({cutoff})"
     return None
+
+
+def _global_cutoff_alone(route: install_route.InstallRoute) -> bool:
+    """Whether the global uv cutoff is all that stands between this install and PyPI's
+    newest: :func:`_beyond_pypi`'s last case, the one PyPI's upload times answer."""
+    receipt = route.receipt or install_route.UvReceipt()
+    return (
+        install_route.cutoff(route) is not None
+        and install_route.own_index(route) is None
+        and not receipt.unstated
+        and not receipt.package_cutoff
+        and not receipt.package_exempt
+    )
 
 
 def _latest_for(route: install_route.InstallRoute) -> install_route.LatestRelease:
@@ -513,10 +544,7 @@ def _latest_for(route: install_route.InstallRoute) -> install_route.LatestReleas
     why = _beyond_pypi(route)
     before = None
     if why is not None:
-        # Only a cutoff the receipt states in full, one a command line restates, is compared.
-        receipt = route.receipt or install_route.UvReceipt()
-        alone = install_route.own_index(route) is None and not receipt.package_cutoff
-        if alone and not receipt.unrestatable:
+        if _global_cutoff_alone(route):
             before = install_route.cutoff_time(route, datetime.now(UTC))
         if before is None:
             return install_route.LatestRelease(None, f"PyPI was not asked: {why}")

@@ -1115,6 +1115,7 @@ class Machine:
     connect_exit: int = 0
     connect_stderr: str = "✗ claude-code is not installed on this machine\n"
     lookups: int = 0
+    asked: list[dict[str, Any]] = field(default_factory=list)
     installs: list[tuple[list[str], dict[str, str], bool]] = field(default_factory=list)
     captured: list[list[str]] = field(default_factory=list)
 
@@ -1138,6 +1139,7 @@ def machine(monkeypatch: pytest.MonkeyPatch) -> Machine:
     ) -> LatestRelease:
         # Both keywords change what the REAL lookup reads; its tests drive it through open_url.
         world.lookups += 1
+        world.asked.append({"prereleases": prereleases, "uploaded_before": uploaded_before})
         return world.latest
 
     def run_installer(argv: Any, *, env: Any, to_stderr: bool) -> int:
@@ -2484,41 +2486,99 @@ def test_a_span_no_calendar_holds_is_unreadable_not_a_traceback(
 _GLOBAL_COOLDOWN = 'exclude-newer = "2026-09-10T04:00:18Z"\nexclude-newer-span = "P30D"\n'
 
 
+#: An index uv records and a command line cannot restate (`format = "flat"`, measured).
+_FLAT_INDEX = 'index = [{ url = "https://mirror.example/flat", format = "flat" }]'
+
+
 @pytest.mark.parametrize(
-    "options",
+    ("options", "why"),
     [
-        _GLOBAL_COOLDOWN + "exclude-newer-package = { aisquare-cli = false }",
-        _GLOBAL_COOLDOWN + "exclude-newer-package = { aisquare-cli = { timestamp = "
-        '"2026-10-09T04:00:18Z", span = "P1D" } }',
-        'exclude-newer-package = { aisquare-cli = "2026-10-01T04:00:00Z" }',
-        _GLOBAL_COOLDOWN + "exclude-newer-package = { tiktoken = false }",
+        (
+            _GLOBAL_COOLDOWN + "exclude-newer-package = { aisquare-cli = false }",
+            "exempts aisquare-cli from its uv cutoff (--exclude-newer P30D), not the packages "
+            "aisquare-cli needs",
+        ),
+        (
+            _GLOBAL_COOLDOWN + "exclude-newer-package = { aisquare-cli = { timestamp = "
+            '"2026-10-09T04:00:18Z", span = "P1D" } }',
+            "has a uv cutoff of aisquare-cli's own (exclude-newer-package)",
+        ),
+        (
+            'exclude-newer-package = { aisquare-cli = "2026-10-01T04:00:00Z" }',
+            "has a uv cutoff of aisquare-cli's own (exclude-newer-package)",
+        ),
+        (
+            'exclude-newer-package = { tiktoken = "2026-10-01T04:00:00Z" }',
+            "a uv cutoff for tiktoken (exclude-newer-package)",
+        ),
+        (_FLAT_INDEX, "a uv index this CLI cannot restate"),
+        (_GLOBAL_COOLDOWN + _FLAT_INDEX, "a uv index this CLI cannot restate"),
     ],
-    ids=["exempt", "its-own-span", "its-own-date", "another-package-beside-a-cutoff"],
+    ids=[
+        "exempt-beside-a-cutoff",
+        "its-own-span",
+        "its-own-date",
+        "another-packages-cutoff",
+        "an-index-it-cannot-restate",
+        "that-index-beside-a-cutoff",
+    ],
 )
-def test_a_cutoff_the_receipt_does_not_state_in_full_is_not_compared(
-    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch, options: str
+def test_what_may_hold_the_release_back_unstated_is_not_compared_and_is_named(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    options: str,
+    why: str,
 ) -> None:
-    """uv records an `exclude-newer-package` override in the shapes measured here (uv
-    0.12.19, from the flag or uv.toml). Compared under the global cutoff beside one for
-    aisquare-cli, --check said "nothing to upgrade" while the install's own uv command took
-    a newer release (review of #257). Not every cutoff is restated, so none is compared."""
+    """uv records `exclude-newer-package` as `false`, a timestamp or `{ timestamp, span }`
+    (measured, uv 0.12.19, from the flag or uv.toml). Compared under the global cutoff beside
+    one for aisquare-cli, --check said "nothing to upgrade" while uv took a newer release.
+    Then every entry read as "a uv cutoff of aisquare-cli's own", `false` (an exemption)
+    included, and an unrestatable index or another package's entry was compared or not
+    depending on a cutoff, its reason blaming the cutoff (review of #257's fixes). Each is
+    now not compared, wherever it stands, and named as it is."""
     monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
     machine.latest = LatestRelease("0.8.0")
     (tool.prefix / install_route.RECEIPT_NAME).write_text(
-        _receipt(
-            _OURS_PINNED,
-            tail=f"\n[tool.options]\n{options}\n",
-        ),
-        encoding="utf-8",
+        _receipt(_OURS_PINNED, tail=f"\n[tool.options]\n{options}\n"), encoding="utf-8"
     )
 
     check = runner.invoke(app, ["upgrade", "--check"])
     report = _one_object(runner.invoke(app, ["--json", "upgrade", "--check"]).stdout)
 
     assert machine.lookups == 0, "PyPI says nothing about what this install gets"
-    assert "PyPI was not asked" in check.stdout, check.stdout
+    assert "PyPI was not asked: " in check.stdout and why in check.stdout, check.stdout
     assert "nothing to upgrade" not in check.stdout, check.stdout
     assert report["latest"] is None and report["update_available"] is None, report
+    assert why in report["latest_error"], report
+
+
+@pytest.mark.parametrize(
+    ("options", "cutoff"),
+    [
+        ("exclude-newer-package = { aisquare-cli = false }", None),
+        (_GLOBAL_COOLDOWN + "exclude-newer-package = { tiktoken = false }", "--exclude-newer P30D"),
+    ],
+    ids=["exempt-and-no-cutoff", "another-package-exempt-beside-a-cutoff"],
+)
+def test_an_exemption_that_filters_nothing_aisquare_cli_gets_is_still_compared(
+    runner: CliRunner, tool: Tool, machine: Machine, options: str, cutoff: str | None
+) -> None:
+    """`aisquare-cli = false` is an exemption from every cutoff, and with no global one
+    nothing filters what uv takes, so PyPI's newest is the answer: it read "unknown",
+    called a cutoff of aisquare-cli's own (review of #257's fixes). Another package's
+    exemption only widens what it takes, so the global cutoff is compared as alone."""
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        _receipt(_OURS_PINNED, tail=f"\n[tool.options]\n{options}\n"), encoding="utf-8"
+    )
+
+    report = _one_object(runner.invoke(app, ["--json", "upgrade", "--check"]).stdout)
+
+    assert machine.lookups == 1 and report["latest"] == "0.9.1", report
+    assert report["latest_cutoff"] == cutoff and report["update_available"] is True, report
+    [asked] = machine.asked
+    assert (asked["uploaded_before"] is None) is (cutoff is None), asked
 
 
 def test_an_override_for_another_package_alone_leaves_pypis_word_to_compare(

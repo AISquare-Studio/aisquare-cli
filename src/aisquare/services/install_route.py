@@ -378,7 +378,13 @@ class UvReceipt:
     unrestatable: tuple[str, ...] = ()
     package_cutoff: bool = False
     """Whether uv recorded an upload-date cutoff of ``aisquare-cli``'s own
-    (``exclude-newer-package``), beside or in place of the global one."""
+    (``exclude-newer-package``: a timestamp or a span), in place of the global one."""
+    package_exempt: bool = False
+    """Whether uv recorded ``aisquare-cli = false`` there: no cutoff on aisquare-cli itself,
+    while the packages it needs stay under the global one."""
+    unstated: tuple[str, ...] = ()
+    """What of :attr:`unrestatable` may change which aisquare-cli release uv takes: all of
+    it but the per-package entries that cannot (``false`` for another package)."""
 
 
 def _canonical(name: object) -> str:
@@ -537,9 +543,12 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
             refused.append(f"{key} (uv takes those only as files)")
     options = tool.get("options")
     flags: list[str] = []
+    own_cutoff, exempt = False, False
+    others: tuple[str, ...] = ()
     if isinstance(options, dict):
         flags, refused_options = _option_flags(options)
         refused.extend(refused_options)
+        own_cutoff, exempt, others = _per_package(options.get("exclude-newer-package"))
     python = tool.get("python")
     return UvReceipt(
         extras=extras,
@@ -550,21 +559,39 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
         subdirectory=subdirectory,
         bin_dir=_bin_dir(tool.get("entrypoints")),
         unrestatable=tuple(refused),
-        package_cutoff=_names_us(options.get("exclude-newer-package"))
-        if isinstance(options, dict)
-        else False,
+        package_cutoff=own_cutoff,
+        package_exempt=exempt,
+        unstated=(
+            *(item for item in refused if item != _PER_PACKAGE_REFUSED),
+            *(f"a uv cutoff for {name} (exclude-newer-package)" for name in others),
+        ),
     )
 
 
-def _names_us(per_package: object) -> bool:
-    """Whether uv's ``exclude-newer-package`` table holds an entry for ``aisquare-cli``:
-    ``false``, a timestamp, or ``{ timestamp, span }`` (measured). One of another shape
-    cannot be shown not to, so it counts."""
-    if per_package is None:
-        return False
-    if not isinstance(per_package, dict):
-        return True
-    return any(_canonical(name) == DISTRIBUTION for name in per_package)
+#: How :func:`_option_flags` refuses uv's per-package cutoffs, which :func:`_per_package`
+#: reads entry by entry.
+_PER_PACKAGE_REFUSED = "uv option exclude-newer-package"
+
+
+def _per_package(table: object) -> tuple[bool, bool, tuple[str, ...]]:
+    """``(ours, exempt, others)`` from uv's ``exclude-newer-package`` table: whether
+    aisquare-cli has a cutoff of its own, whether it is exempt from every cutoff
+    (``false``), and the other packages that have one. uv writes ``false``, a timestamp or
+    ``{ timestamp, span }`` (measured, uv 0.12.19). An entry or a table of any other shape
+    cannot be shown not to hold a release back, so it counts as a cutoff."""
+    if table is None:
+        return False, False, ()
+    if not isinstance(table, dict):
+        return True, False, ()
+    ours = exempt = False
+    others: list[str] = []
+    for name, entry in table.items():
+        if _canonical(name) == DISTRIBUTION:
+            exempt = exempt or entry is False
+            ours = ours or entry is not False
+        elif entry is not False:
+            others.append(str(name))
+    return ours, exempt and not ours, tuple(others)
 
 
 def _bin_dir(entrypoints: object) -> Path | None:

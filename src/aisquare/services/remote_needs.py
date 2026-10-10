@@ -1095,6 +1095,14 @@ def _needs_pending(tail: TranscriptTail | None, agent: FleetAgent) -> tuple[Pend
     return tuple(tool for tool in tail.pending if tool.at is None or tool.at >= agent.created_at)
 
 
+def _needs_cut_short(tail: TranscriptTail | None, agent: FleetAgent) -> bool:
+    """The tail's walk ran out before the newest message, in a file written since the row
+    began: a tool use of it may be pending unseen (``TranscriptTail.cut_at``). What a
+    stop, a tell or a guarded key reads as a pending tool; no card is made of it, as it
+    names no tool to show."""
+    return tail is not None and tail.cut_at is not None and tail.cut_at >= agent.created_at
+
+
 def _needs_limited_item(
     status: FleetAgentStatus,
     event: TeamEvent | None,
@@ -2543,11 +2551,15 @@ def needs_dialog_open(snap: AgentNow) -> bool:
     ``fleet.ACTIVITY_WINDOW`` (5 s), and the notification that makes the row
     ``attention`` comes at 6 s, so until then a prompt reads like a tool at work.
     An action that would type an Enter asks :func:`needs_tool_pending` as well.
+    A tail whose walk ran out before the newest message (:func:`_needs_cut_short`) may hold
+    a pending tool it did not read, and counts as one here.
     """
     status = snap.status
     if status is None or not snap.pane_is_agent:
         return False
-    pending = _needs_pending(snap.tail, status.agent)
+    pending = bool(_needs_pending(snap.tail, status.agent)) or _needs_cut_short(
+        snap.tail, status.agent
+    )
     if pending and snap.pane_quiet is not False:
         return True
     if _needs_attention(status) and not (
@@ -2573,12 +2585,15 @@ def needs_tool_pending(snap: AgentNow) -> bool:
     apart, so a stop, a restart or a switch, whose ``/exit`` and Enter would
     answer "1. Yes", takes it for a prompt. Tools older than the row do not count
     (a resumed session's leftovers), and neither does a pane that is not the
-    agent's.
+    agent's. A tail whose walk ran out before the newest message
+    (:func:`_needs_cut_short`) may hold one it did not read, so it counts.
     """
     status = snap.status
     if status is None or not snap.pane_is_agent:
         return False
-    return bool(_needs_pending(snap.tail, status.agent))
+    return bool(_needs_pending(snap.tail, status.agent)) or _needs_cut_short(
+        snap.tail, status.agent
+    )
 
 
 def needs_unseen(snap: AgentNow) -> bool:
@@ -2626,7 +2641,7 @@ def needs_at_input_prompt(snap: AgentNow) -> bool:
         return False
     if needs_dialog_open(snap) or snap.tail is None or needs_unseen(snap):
         return False
-    if _needs_pending(snap.tail, status.agent):
+    if _needs_pending(snap.tail, status.agent) or _needs_cut_short(snap.tail, status.agent):
         return False
     if snap.tail.newest in ("interrupted", "assistant_text", "own") or status.state == "waiting":
         return True

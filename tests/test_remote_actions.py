@@ -2945,6 +2945,62 @@ def test_send_keys_whose_label_was_handed_on_while_the_guard_looked_types_nothin
     assert pane.sent == []
 
 
+def test_a_prompt_behind_a_result_too_long_to_read_is_never_answered_by_a_stop(
+    phone: Phone,
+    exits: FleetCalls,
+    own_predicates: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    tmp_path: Path,
+) -> None:
+    """Review of #243, round 7: a screenshot and a Bash called together, the screenshot's
+    700 KB result in, the Bash's permission prompt up and its pane quiet before the
+    notification that makes the row ``attention``. The tail's walk ran out inside the
+    result and read nothing pending, the agent read as at rest, and the stop's ``/exit``
+    and Enter took "1. Yes". What the walk did not read may hold that tool: refused."""
+    _row(project)
+    image = {"type": "image", "source": {"type": "base64", "data": "A" * 700_000}}
+    records = [
+        {"type": "user", "uuid": "u1", "message": {"role": "user", "content": "check, then test"}},
+        {
+            "type": "assistant",
+            "uuid": "a1",
+            "message": {
+                "id": "m1",
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_shot", "name": "screenshot", "input": {}},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_bash",
+                        "name": "Bash",
+                        "input": {"command": "rm -rf build && npm test"},
+                    },
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "uuid": "r1",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"tool_use_id": "toolu_shot", "type": "tool_result", "content": [image]}
+                ],
+            },
+        },
+    ]
+    path = tmp_path / "parallel.jsonl"
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    own_predicates.tail = read_transcript_tail(path)
+    assert own_predicates.tail is not None and own_predicates.tail.pending == (), "the premise"
+    pane.prompt = True
+    response = phone.post("agent/stop", **PINNED)
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == "dialog_open"
+    assert exits.calls == [] and pane.sent == [] and pane.answered == []
+
+
 # --- an agent nothing here reads -----------------------------------------------------------------
 #
 # Review of #243, round 7: a row with no board session (``fleet spawn --bin``, a Claude Code

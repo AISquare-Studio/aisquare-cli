@@ -2517,6 +2517,28 @@ def test_a_tool_older_than_the_row_or_in_no_agents_pane_is_not_pending(
     assert not needs_tool_pending(_now_of(_working(_tail()), FakeTmux(reference=NOW), monkeypatch))
 
 
+def test_a_tail_cut_short_of_the_newest_message_counts_as_a_tool_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #243, round 7: a walk that ran out inside a 700 KB screenshot result never
+    reached the message whose Bash waits on its permission prompt, and read nothing
+    pending. A stop's ``/exit`` and Enter answered "1. Yes" once its pane was quiet. What
+    it did not read may hold a pending tool: one at work while the pane prints, a dialog
+    once it is quiet, never a prompt to type at. Not when the cut is older than the row
+    (a resumed session's), and it makes no card: it names no tool to show."""
+    cut = replace(_tail(newest="tool_result"), cut_at=NOW - timedelta(seconds=2))
+    busy = _now_of(_working(cut), FakeTmux(reference=NOW, quiet_for=2), monkeypatch)
+    assert busy.items == () and not needs_dialog_open(busy)
+    assert needs_tool_pending(busy)
+    quiet = _now_of(_working(cut, state="waiting"), FakeTmux(reference=NOW), monkeypatch)
+    assert needs_dialog_open(quiet) and not needs_at_input_prompt(quiet)
+    assert quiet.items == ()
+    older = replace(cut, cut_at=BORN - timedelta(minutes=1))
+    resumed = _now_of(_working(older, state="waiting"), FakeTmux(reference=NOW), monkeypatch)
+    assert not needs_tool_pending(resumed) and not needs_dialog_open(resumed)
+    assert needs_at_input_prompt(resumed), "the control"
+
+
 def test_a_current_question_is_a_dialog_however_busy_the_pane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

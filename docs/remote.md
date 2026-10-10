@@ -345,7 +345,8 @@ when the agent shows a prompt, stop, restart and switch are refused with
 `dialog_open`, and the sheet offers **Press Esc (No) first**, which dismisses the
 prompt and then goes on. For its first few seconds a permission prompt cannot be
 told from a tool at work, so they are refused the same way while any tool the
-agent called has no result yet; there the Esc also stops a running tool. An
+agent called has no result yet, or when the end of its transcript is too long
+to read; there the Esc also stops a running tool. An
 agent at work gets one Esc first without asking, since a prompt could open just
 before the Enter, and `/exit` is typed once its pane has been still for 5
 seconds; one still busy 8 seconds after the Esc is refused with `still_busy`. A

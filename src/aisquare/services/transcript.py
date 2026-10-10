@@ -566,6 +566,15 @@ class TranscriptTail:
     """The file has nothing in it yet. ``newest`` is also ``none`` for a walk that met no
     conversation record within :data:`TAIL_RECORDS` or its budget (only other kinds of
     record, or lines it could not read): that one says nothing about what was written."""
+    cut_at: datetime | None = None
+    """When the file was last written, for a walk that ran out of its budget or of
+    :data:`TAIL_RECORDS` before it reached the newest assistant message (for records
+    without ids, the human's prompt), on records that do not end a turn: the tool uses
+    of that message went unseen, and one may still wait on its result, its permission
+    prompt up. A screenshot's result of 700 KB, written while a sibling call waits on
+    its prompt, is such a walk: the budget ends inside it, ``pending`` is empty, and the
+    agent read as one at rest (review of #243, round 7). ``None`` when the walk saw what
+    it needed."""
 
 
 _TAIL_NOTHING = TranscriptTail(
@@ -594,7 +603,9 @@ def read_transcript_tail(
     long to parse is read for its ids alone (:func:`_tail_unparsed`): a result
     in it still answers, and a tool use in it still waits. Records without a
     ``message.id`` (an older Claude Code) are read back to the human's prompt
-    instead. Never raises: an unreadable file is ``None``.
+    instead. A walk that ran out before it got there says so (``cut_at``): what
+    it did not read may hold a tool use still waiting. Never raises: an
+    unreadable file is ``None``.
 
     Only a regular file is opened. The path is whatever the agent's own hook
     payload said, and opening a named pipe waits for a writer: the watcher's
@@ -624,7 +635,8 @@ def _tail_walk(file: Path, size: int, budget: int, written: datetime) -> Transcr
     """The body of :func:`read_transcript_tail`, free to raise ``OSError``.
 
     ``written`` is when the file last changed: the time of a newest record too
-    long to parse, which its own ``timestamp`` cannot be read for.
+    long to parse, which its own ``timestamp`` cannot be read for, and of a walk cut
+    short (``TranscriptTail.cut_at``).
     """
     answered: set[str] = set()
     tools: list[list[PendingTool]] = []  # each record's, newest record first
@@ -635,6 +647,7 @@ def _tail_walk(file: Path, size: int, budget: int, written: datetime) -> Transcr
     in_message = False  # the newest assistant message has been reached
     past_message = False  # ...and a user record older than it (records without an id)
     examined = 0
+    cut = False  # the walk ran out before it could stop where nothing older waits
     for offset, raw in _lines_backwards(file, size, budget=budget):
         if len(raw) > MAX_LINE:
             at = written if newest == "none" else None
@@ -652,6 +665,7 @@ def _tail_walk(file: Path, size: int, budget: int, written: datetime) -> Transcr
             continue
         examined += 1
         if examined > TAIL_RECORDS:
+            cut = True
             break
         blocks = _blocks(message.get("content"))
         at = _tail_time(record)
@@ -701,6 +715,11 @@ def _tail_walk(file: Path, size: int, budget: int, written: datetime) -> Transcr
                 newest, newest_at, marker_key = "assistant_text", at, key
             # A record of thinking alone is a message still streaming: the record
             # before it says what the agent is doing.
+    else:
+        cut = size > budget  # the reader stopped on its budget, short of the file's start
+    # An interruption ends the turn: nothing before it waits, however much was not read.
+    unseen = not in_message or message_id is None
+    cut_at = written if cut and unseen and newest != "interrupted" else None
     pending: list[PendingTool] = []
     for record_tools in reversed(tools):
         for tool in record_tools:
@@ -713,6 +732,7 @@ def _tail_walk(file: Path, size: int, budget: int, written: datetime) -> Transcr
         last_text="\n\n".join(reversed(texts)) if texts else None,
         last_text_at=text_at,
         marker_key=marker_key,
+        cut_at=cut_at,
     )
 
 

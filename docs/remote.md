@@ -211,7 +211,9 @@ and turning notifications on or off change only what you are shown, not the
 fleet, and need no write switch. Claiming or finishing a task and switching,
 adding or removing a project are write routes of the API (`api/task/claim`,
 `api/task/done`, `api/project/switch`, `add`, `remove`) that the page itself
-does not offer: Tasks is read-only there.
+does not offer: Tasks is read-only there. `remove` takes a project's name,
+codename or id, or its absolute path; a relative path is refused, since it would
+be read from wherever the server was started.
 
 **Retries are safe, and soon or never.** Every write in the table carries a
 `request_id`. If the phone loses the answer (a restart can take 40 seconds, long
@@ -461,7 +463,10 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   private (it is owner-only); if it leaked, run
   `aisquare remote regenerate-password --new-link`. A device is signed out after
   24 hours unused and removed after 7 days. A phone whose sign-in lapsed unlocks
-  back into the same device, so its notifications carry on.
+  back into the same device, so its notifications carry on. At most 32 devices
+  are kept: a new unlock past that removes the signed-out device unused longest,
+  and while all 32 are signed in it is refused (`too_many_devices`) until one is
+  signed out or revoked.
 - **Remote off revokes every device**: turning it off in the panel, or auto-off,
   signs every phone out (after a goodbye notification), and from that moment
   every request is a 404 and no unlock goes through, while the server is still
@@ -543,7 +548,7 @@ from `POST api/unlock`) except unlock itself; every non-GET request needs an
 | POST | `api/unlock` | `{"password"}` → the device cookie |
 | GET | `api/remote` | `{allow_write, auto_off_at, version}` |
 | POST | `api/remote/extend` | another hour before auto-off |
-| GET | `api/projects`, `api/fleet`, `api/board`, `api/tasks`, `api/memory` | what `aisquare --json` prints for each (the board with its newest 200 events, not 5), `?project=` for one project |
+| GET | `api/projects`, `api/fleet`, `api/board`, `api/tasks`, `api/memory` | what `aisquare --json` prints for each (the board with its newest 200 events, not 5; each project with its agents counted by state), `?project=` for one project |
 | GET | `api/panes/<agent>`, `api/transcript/<agent>`, `api/explainability/<agent>` | one agent's screen (`?history=` adds that many lines of scrollback, 5 000 at most), conversation (`?limit=` turns, `?before=`, `?width=` 20 to 200 columns) and card; `?project=` for another project's agent, the current project's otherwise |
 | GET | `api/needs` | `{"items", "scanned_at"}` |
 | POST | `api/needs/answer`, `api/needs/dismiss` | a quick answer; hide a card |

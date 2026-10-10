@@ -19,7 +19,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -73,6 +73,7 @@ from aisquare.services.remote_server import (
 )
 from aisquare.services.remote_words import REMOTE_PASSPHRASE_WORDS
 from tests.cli_tree import root_command
+from tests.fsperms import can_deny_reads
 from tests.remote_kit_helpers import (
     PASSWORD,
     base,
@@ -1102,6 +1103,53 @@ def test_a_day_idle_signs_a_device_out_and_keeps_its_record(
     (row,) = runtime.device_rows()
     assert (row["id"], row["signed_in"]) == (device_id, False)
     assert runtime.device_ids() == [device_id], "its push subscription keeps working"
+
+
+def test_past_the_device_cap_the_signed_out_device_unused_longest_makes_room(
+    runtime: Runtime, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every unlock without a known cookie added a device kept for 7 days, and only the
+    per-client limit bounded them: about 7,200 a day from one address, each one more record
+    for every request's cookie check, every save of ``remote.json`` and the R panel to go
+    through (sweep 4 of #243). A signed-in device is never the one dropped."""
+    monkeypatch.setattr(remote_server, "DEVICES_MAX", 3)
+    made: list[tuple[str, str]] = []
+    for _ in range(3):
+        unlocked = runtime.unlock_device(PASSWORD, "phone")
+        assert unlocked is not None
+        made.append((unlocked[0], unlocked[1].id))
+        clock.advance(hours=1)
+    (_, first), (_, second), (third_secret, third) = made
+    assert runtime.device_ids() == [first, second, third]
+    clock.advance(hours=22)  # a day since the first two were used: they are signed out
+    assert runtime.device_for_cookie(third_secret) is not None, "and the third is used"
+    fourth = runtime.unlock_device(PASSWORD, "phone")
+    assert fourth is not None
+    assert runtime.device_ids() == [second, third, fourth[1].id], "the one unused longest went"
+    fifth = runtime.unlock_device(PASSWORD, "phone")
+    assert fifth is not None
+    assert runtime.device_ids() == [third, fourth[1].id, fifth[1].id]
+    assert _devices_on_disk() == runtime.device_ids()
+
+
+def test_past_the_device_cap_with_every_device_signed_in_an_unlock_is_refused_409(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Over HTTP, from addresses the per-client limit does not reach: the fourth phone is
+    told what to do, and no device of the three is dropped or saved over."""
+    monkeypatch.setattr(remote_server, "DEVICES_MAX", 3)
+    phones = [_from(app, f"198.51.100.{80 + n}") for n in range(4)]
+    assert [unlock(phone, runtime).status_code for phone in phones[:3]] == [200] * 3
+    kept = runtime.device_ids()
+    refused = unlock(phones[3], runtime)
+    assert refused.status_code == 409, refused.text
+    assert refused.json() == {
+        "error": "too_many_devices",
+        "message": remote_server.TOO_MANY_DEVICES,
+    }
+    assert "set-cookie" not in refused.headers
+    assert runtime.device_ids() == kept and _devices_on_disk() == kept
+    assert all(phone.get(f"{base(runtime)}/api/board").status_code == 200 for phone in phones[:3])
 
 
 def test_an_open_socket_closes_4401_when_its_device_goes(
@@ -2154,6 +2202,66 @@ def test_a_project_outside_home_is_refused(home: Path, tmp_path: Path) -> None:
     assert "outside your home directory" in refused.value.message
 
 
+@contextlib.contextmanager
+def _unsearchable(directory: Path) -> Iterator[Path]:
+    """``directory``, made and then closed to this account as ``/root`` is to everyone but
+    root: it can be seen, and nothing inside it can be looked up."""
+    directory.mkdir(parents=True)
+    directory.chmod(0)
+    try:
+        yield directory
+    finally:
+        directory.chmod(0o700)
+
+
+@pytest.mark.skipif(not can_deny_reads(), reason="chmod(0) denies nothing here (root, or NTFS)")
+@pytest.mark.parametrize(
+    ("where", "says"),
+    [("outside", "is outside your home directory"), ("inside", "cannot be read")],
+)
+def test_a_directory_this_account_may_not_look_inside_is_invalid_not_a_failed_write(
+    home: Path, tmp_path: Path, where: str, says: str
+) -> None:
+    """The root lookup asks for its ``.git``, and the ``PermissionError`` fell to 400
+    ``write_failed`` with the system's own words, ``[Errno 13] Permission denied:
+    '/root/.git'``, for a write that never began (sweep 4 of #243)."""
+    parent = tmp_path / "elsewhere" if where == "outside" else home / "code"
+    with _unsearchable(parent / "locked") as locked, pytest.raises(RequestError) as refused:
+        check_project_add_root(str(locked))
+    assert (refused.value.status, refused.value.error) == (400, "invalid")
+    assert refused.value.message == f"{locked} {says}" + (
+        ": add a project inside it"
+        if where == "outside"
+        else ": add a project this account may look inside"
+    )
+
+
+@pytest.mark.skipif(not can_deny_reads(), reason="chmod(0) denies nothing here (root, or NTFS)")
+def test_adding_or_removing_a_directory_this_account_may_not_look_inside_changes_nothing(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """From the phone: 400 ``invalid`` for the add and 404 ``not_found`` for the remove, as a
+    path that does not exist is answered, never ``write_failed`` (sweep 4 of #243)."""
+    (alpha,) = _projects(home, "code/alpha")
+    monkeypatch.chdir(alpha.root)
+    client = _project_writes(runtime, tmp_path)
+    before = _audit_lines()
+    with (
+        _unsearchable(tmp_path / "elsewhere" / "locked") as outside,
+        _unsearchable(home / "code" / "locked") as inside,
+    ):
+        answers = [
+            client.post(f"{base(runtime)}/api/project/{route}", json={field: value})
+            for route, field in (("add", "path"), ("remove", "ref"))
+            for value in (str(outside), str(inside), "~/code/locked")
+        ]
+    codes = [(answer.status_code, answer.json()["error"]) for answer in answers]
+    assert codes == [(400, "invalid")] * 3 + [(404, "not_found")] * 3, [a.text for a in answers]
+    assert not any("Errno" in answer.text for answer in answers)
+    assert [project.id for project in project_service.list_projects()] == [alpha.id]
+    assert _audit_lines() == before
+
+
 def test_a_path_over_the_cap_is_413(home: Path) -> None:
     with pytest.raises(RequestError) as refused:
         check_project_add_root("/" + "a" * 4_096)
@@ -2250,6 +2358,33 @@ def test_a_remove_from_the_phone_forgets_the_registration(
     assert _audit_lines()[-1][2:] == ["project/remove", "removed beta"]
 
 
+@pytest.mark.parametrize("ref", ["docs", "{home}/code/docs", "~/code/docs"])
+def test_a_remove_forgets_the_project_it_names_wherever_the_server_runs(
+    home: Path,
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ref: str,
+) -> None:
+    """``{"ref": "docs"}`` was read as a path from the server's working directory, as
+    ``project forget`` reads it from a shell: the server ran in a project with a ``docs/``
+    directory, so that project was forgotten, the pin moved off it, and the trail said
+    ``removed docs``, while the project named ``docs`` stayed (sweep 4 of #243). A name
+    is a name; an absolute path still names its project."""
+    current, docs, other = _projects(home, "code/current", "code/docs", "code/other")
+    (current.root / "docs").mkdir()
+    monkeypatch.chdir(current.root)
+    client = _project_writes(runtime, tmp_path)
+    said = ref.format(home=home)
+    removed = client.post(f"{base(runtime)}/api/project/remove", json={"ref": said})
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["report"]["project"]["id"] == docs.id
+    assert removed.json()["report"]["active_changed"] is False
+    assert [project.id for project in project_service.list_projects()] == [current.id, other.id]
+    assert project_service.info().id == current.id
+    assert _audit_lines()[-1][2:] == ["project/remove", f"removed {said}"]
+
+
 def test_a_project_with_live_agents_is_not_removed_and_the_phone_hears_why(
     home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2296,6 +2431,11 @@ def test_a_project_with_live_agents_is_not_removed_and_the_phone_hears_why(
         ("remove", {"ref": "~/" + "a" * 300}, 404, "not_found"),
         ("remove", {"ref": "a" * 5_000}, 404, "not_found"),
         ("remove", {"ref": "~no_such_user_here/alpha"}, 404, "not_found"),
+        ("remove", {"ref": "."}, 400, "invalid"),
+        ("remove", {"ref": ".."}, 400, "invalid"),
+        ("remove", {"ref": "../alpha"}, 400, "invalid"),
+        ("remove", {"ref": "./"}, 400, "invalid"),
+        ("remove", {"ref": "code/alpha"}, 400, "invalid"),
     ],
 )
 def test_a_switch_or_a_remove_that_names_no_one_project_changes_nothing(

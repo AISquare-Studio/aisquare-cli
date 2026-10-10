@@ -139,6 +139,13 @@ DEVICE_IDLE_LIMIT = timedelta(hours=24)
 """Unused this long, a device is signed out (its cookie refused, its record kept)."""
 DEVICE_LIFETIME = timedelta(days=7)
 """After this long from its first unlock a device is removed; its cookie's Max-Age."""
+DEVICES_MAX = 32
+"""Devices ``remote.json`` keeps at most. Every unlock without a known cookie made one, kept for
+:data:`DEVICE_LIFETIME`, and only the per-client limit bounded them: one address could make
+about 7,200 a day, each one more record that every request's cookie check, every save of
+``remote.json``, ``GET api/devices`` and the R panel go through, and four more sockets
+(sweep 4 of #243). Past it, the device unused longest of those signed out makes room
+(:meth:`Runtime.unlock_device`); with every one signed in, the unlock is refused."""
 DEVICE_UA_MAX = 200
 DEVICE_ID = re.compile(r"dev_[0-9a-f]{8}\Z")
 """A device's public id, used ONLY with ``fullmatch``: ``dev_`` and eight hex digits."""
@@ -277,8 +284,17 @@ Marking an unhashed file immutable for a year would create exactly the bug this
 fixes, one build later and with no way to flush it.
 """
 
-_HASHED_ASSET = re.compile(r"-[A-Za-z0-9_-]{8,}$")
-"""Vite's content hash — ``index-DfFvQnFu.js`` — matched on the stem."""
+_HASHED_ASSET = re.compile(r"-(?=[A-Za-z0-9_]{0,7}[0-9A-Z])[A-Za-z0-9_]{8}\Z")
+"""Vite's content hash — ``index-DfFvQnFu.js`` — matched on the stem: a hyphen, then eight
+letters, digits or ``_`` to the end, a digit or a capital among them, as Rollup writes them.
+
+Any eight or more of those or ``-`` after a hyphen read as a hash, so ``runtime-polyfills``,
+``vendor-libraries``, ``apple-touch-icon`` and ``manifest-icon-512``, which Vite copies from
+``public/`` as they are named, were cached for a year, and the next ``install-page`` changed
+them for nobody who had them (sweep 4 of #243). Rollup's hash may hold a ``-`` too; such a
+chunk is revalidated (:data:`MUTABLE_CACHE_CONTROL`), and since ``FileResponse`` answers no
+revalidation with a 304 it is sent again on every load. That is the side to miss on: a chunk
+sent again costs its bytes, a name taken for a hash costs the fix."""
 
 HISTORY_CAP = 5000
 """Most scrollback lines one ``?history=`` request may return (PLAN §4-L).
@@ -293,6 +309,15 @@ REMOTE_SERVER_NEEDS = ("starlette", "uvicorn", "websockets")
 """What the server cannot start without (:func:`_remote_dependency_error`)."""
 REMOTE_EXTRA = (*REMOTE_SERVER_NEEDS, "cryptography")
 """What the ``remote`` extra installs: the server's three, and what Web Push needs."""
+
+NO_DIST_INDEX = (
+    "no index.html in the --dist directory (is it still being built?) — build the page on the "
+    "machine, or serve it without --dist"
+)
+"""404 ``no_dist`` for a request while ``--dist`` has no ``index.html``, a build that is still
+writing it or one that removed it. Without the directory: anyone holding the link reads it
+before any passphrase, and its absolute path is the machine's home and user name. The log
+names it, as :func:`_page_missing` names it to the machine's own terminal."""
 
 NO_PAGE_HINT = "the bundled remote page is missing from this install — reinstall aisquare-cli"
 """Shown by the modal's status line, ``asq remote serve``'s exit, and the raise of
@@ -1395,6 +1420,7 @@ class Runtime:
                 expires_at=_iso_seconds(now + DEVICE_LIFETIME),
             )
             state = self._state
+            self._make_room_for_a_device(now)  # a drop, as a revoke: no undo (_write_state)
             state.devices.append(device)
 
             def unmade() -> None:
@@ -1402,6 +1428,20 @@ class Runtime:
 
             self._write_state(state, undo=unmade)
             return secret, device
+
+    def _make_room_for_a_device(self, now: datetime) -> None:
+        """Under the file lock, before an unlock adds a device: past :data:`DEVICES_MAX`,
+        drop the one unused longest of those signed out or expired, as a revoke would (its
+        push subscription goes at the next push); with every one signed in, 409
+        ``too_many_devices`` and nothing changes."""
+        if len(self._state.devices) < DEVICES_MAX:
+            return
+        idle = [device for device in self._state.devices if not device.device_signed_in(now)]
+        if not idle:
+            raise RequestError(409, "too_many_devices", TOO_MANY_DEVICES)
+        never = datetime.min.replace(tzinfo=UTC)  # a stamp that does not read: unused longest
+        oldest = min(idle, key=lambda device: _remote_instant(device.last_seen) or never)
+        self._drop(oldest.id, WS_CLOSE_UNAUTHORIZED)
 
     def device_for_cookie(self, secret: str | None) -> Device | None:
         """The SIGNED-IN device behind a cookie, its ``last_seen`` refreshed; ``None`` otherwise.
@@ -1926,7 +1966,9 @@ def check_project_add_root(raw: object) -> Path:
     A path the system refuses to look up is refused as such: a NUL byte's
     ``ValueError`` and the ``RuntimeError`` of a ``~user`` with no home here fell
     to 400 ``write_failed``, the system's own words for a write that never began
-    (sweep 3 of #243).
+    (sweep 3 of #243), and so did a directory this account may see but not look
+    inside, ``/root`` or a ``chmod 000`` one, whose ``.git`` the root lookup asks
+    about: ``[Errno 13] Permission denied: '/root/.git'`` (sweep 4).
     """
     from aisquare.core.workspace import find_project_root
     from aisquare.services import fleet as fleet_service
@@ -1949,38 +1991,80 @@ def check_project_add_root(raw: object) -> Path:
         raise RequestError(400, "invalid", f"{path} does not exist") from None
     if not resolved.is_dir():
         raise RequestError(400, "invalid", f"{resolved} is not a directory")
-    root = find_project_root(resolved)
     home = Path.home().resolve()
+    unreadable = RequestError(
+        400,
+        "invalid",
+        f"{resolved} is outside your home directory: add a project inside it"
+        if not resolved.is_relative_to(home)
+        else f"{resolved} cannot be read: add a project this account may look inside",
+    )
+    try:
+        root = find_project_root(resolved)
+    except OSError:  # a directory this account may not search: /root, another user's home
+        raise unreadable from None
     if root == home or not root.is_relative_to(home):
         where = "is your home directory" if root == home else "is outside your home directory"
         raise RequestError(400, "invalid", f"{root} {where}: add a project inside it")
     hidden = next((part for part in root.relative_to(home).parts if part.startswith(".")), None)
     if hidden is not None:
         raise RequestError(400, "invalid", f"{root} is inside the hidden directory {hidden}")
-    if not (fleet_service.is_git_project(root) or _holds_repositories(root)):
+    try:
+        shaped = fleet_service.is_git_project(root) or _holds_repositories(root)
+    except OSError:
+        raise unreadable from None
+    if not shaped:
         raise RequestError(
             400, "invalid", f"{root} is neither a git checkout nor a directory of repositories"
         )
     return root
 
 
-def check_project_ref_on_disk(ref: str) -> None:
-    """Refuse the ``project/remove`` ref the system will not look up as a path, before
-    ``project_service.forget`` asks the disk about it: it tries a ref as a path first.
+def remote_project_ref(ref: str) -> ProjectInfo:
+    """The registered project a ``project/remove`` ref names, read as no working directory
+    would read it: a name, codename or id prefix, or an absolute path (``~`` allowed).
 
-    A NUL byte is 400 ``invalid``. A name longer than any file's, or a ``~user`` with
-    no home here, is 404 ``not_found``: no project has it for a root or a name. Left to
-    ``forget``, the NUL's ``ValueError`` read as two projects matching (400
+    ``project forget`` reads a ref that exists on disk, or is spelled with a separator or
+    a leading dot, as a path from where its shell stands. The server stands wherever it
+    was started, which no phone knows: ``{"ref": "docs"}`` forgot the project the server
+    ran in, which has a ``docs/`` directory, rather than the project named ``docs``, and
+    moved the machine's pin with it; ``.`` and ``../x`` acted on the server's own
+    directory and its sibling (sweep 4 of #243). So a bare word is only ever a name, as
+    ``project/switch`` reads it, and a relative path is 400 ``invalid``, as ``project/add``
+    refuses one.
+
+    A path the system will not look up is refused first, before
+    ``project_service.resolve`` asks the disk about it: a NUL byte is 400 ``invalid``,
+    and a name longer than any file's, a ``~user`` with no home here or a directory the
+    server may not read (``/root``) is 404 ``not_found``, as no project has it for a
+    root. Left to ``resolve``, the NUL's ``ValueError`` read as two projects matching (400
     ``ambiguous_project``), and the others fell to 400 ``write_failed``, each with the
-    system's own words (``lstat: embedded null character in path``) for a write that
-    never began (sweep 3 of #243).
+    system's own words (``[Errno 13] Permission denied: '/root/.git'``) for a write that
+    never began (sweeps 3 and 4 of #243). ``KeyError`` and ``ValueError`` are
+    ``project_service.resolve``'s, for nothing and several matching.
     """
+    from aisquare.services import project as project_service
+
+    no_such = RequestError(404, "not_found", f"no project matches {ref!r}")
     if "\x00" in ref:
         raise RequestError(400, "invalid", NUL_IN_A_PATH.format(field="ref"))
     try:
-        Path(ref).expanduser().exists()
-    except (OSError, RuntimeError):
-        raise RequestError(404, "not_found", f"no project matches {ref!r}") from None
+        path = Path(ref).expanduser()
+    except RuntimeError:  # ~user, for a user this machine does not have
+        raise no_such from None
+    if path.is_absolute():
+        try:
+            return project_service.resolve(str(path))
+        except OSError:
+            raise no_such from None
+    if ref in (".", "..") or any(separator in ref for separator in {"/", os.sep}):
+        raise RequestError(
+            400,
+            "invalid",
+            f"{ref} is a relative path: name the project, or give its absolute path "
+            "(start with / or ~)",
+        )
+    return project_service.named(ref)
 
 
 def _holds_repositories(root: Path) -> bool:
@@ -2365,7 +2449,7 @@ BOARD_EVENTS = 200
 Board tab draws. ``asq board --json`` prints five, a glance in a terminal."""
 
 
-BoardProjects = dict[tuple[Path | None, str], ProjectInfo]
+BoardProjects = dict[tuple[Path, str], ProjectInfo]
 """The board project of each project root under each ``AISQUARE_TEAM_HUB``, resolved once."""
 
 
@@ -2376,7 +2460,11 @@ def remote_board_payload(
 
     The project's root as ``cwd`` is exactly what ``asq board --json`` prints when
     run there, ``AISQUARE_TEAM_HUB`` included (``team_service._project``); ``None``
-    is the current project, as it always was. With :data:`BOARD_EVENTS` events,
+    is the current project, the root :func:`_resolve_project` gives it as it does
+    for the fleet and the actions: the pinned project, else the server's directory's.
+    With ``cwd=None`` the board followed the server's directory alone, so after a
+    ``project/switch`` the fleet was the new project's and the board, the tasks and
+    a note the old one's (sweep 4 of #243). With :data:`BOARD_EVENTS` events,
     not the CLI's five: the Board tab is the board, and with five a question a
     card sent the human to "reply on the board" to was gone from it once five
     newer lines were (review of #243, round 3).
@@ -2404,7 +2492,7 @@ def remote_board_payload(
     from aisquare.core import orchestrator
     from aisquare.services import team as team_service
 
-    cwd = None if project is None else _resolve_project(project).root
+    cwd = _resolve_project(project).root
     board: ProjectInfo | None = None
     if boards is not None:
         key = (cwd, os.environ.get(orchestrator.TEAM_HUB_ENV_VAR, ""))
@@ -2455,7 +2543,7 @@ def live_sources() -> Sources:
     def tasks_payload(project: str | None = None) -> object:
         from aisquare.services import team as team_service
 
-        cwd = None if project is None else _resolve_project(project).root
+        cwd = _resolve_project(project).root  # the current one's as remote_board_payload's
         return [task.model_dump(mode="json") for task in team_service.list_tasks(None, cwd=cwd)]
 
     def memory_payload(project: str | None = None) -> object:
@@ -2844,7 +2932,8 @@ def live_writes() -> Writes:
         return {"task": task.model_dump(mode="json")}, f"done {task.id} as={author or '-'}"
 
     def write_note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
-        """A note on a project's board: ``project``'s, or the current one's without it.
+        """A note on a project's board: ``project``'s, or the current one's without it, the
+        project keys and an agent action without one go to (:func:`_resolve_project`).
 
         The board resolves from the project's root exactly as ``asq note`` run
         there would; with ``as``, the session's own board still wins (the CLI's
@@ -2885,7 +2974,7 @@ def live_writes() -> Writes:
                     task_ref=task,
                     to_role=to,
                     kind=kind,
-                    cwd=None if project is None else _resolve_project(project).root,
+                    cwd=_resolve_project(project).root,
                 )
         except ValueError as exc:  # a task of another project's board, as ``asq note`` says
             if task is None or type(exc) is not ValueError:
@@ -2934,14 +3023,13 @@ def live_writes() -> Writes:
     def project_remove(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         """Forget a registration, as ``project forget`` does, refusals and their codes
         included: one with live fleet agents is 409 ``project_busy``, where it fell to
-        400 ``write_failed`` as if the write had failed (sweep 2 of #243), and a ref the
-        system will not look up is refused first (:func:`check_project_ref_on_disk`)."""
+        400 ``write_failed`` as if the write had failed (sweep 2 of #243). The ref is read
+        without the server's working directory (:func:`remote_project_ref`)."""
         from aisquare.services import project as project_service
 
         ref = _required(body, "ref")
-        check_project_ref_on_disk(ref)
         try:
-            report = project_service.forget(ref, purge=False)
+            report = project_service.forget_project(remote_project_ref(ref), purge=False)
         except KeyError:
             raise RequestError(404, "not_found", f"no project matches {ref!r}") from None
         except ValueError as exc:
@@ -3518,6 +3606,20 @@ LINK_GONE = (
 """404 ``not_found`` at the token gate, in the words of the page's screen for it and of
 docs/remote.md's troubleshooting. A wrong token and a passed auto-off answer alike, and
 with one sentence whatever was sent, so it tells a guess nothing about the token."""
+NO_LINE_BREAKS = "there is nothing here: no address of the remote page holds a line break"
+"""404 ``not_found`` for a path with a line break in it (``api/needs%0A``), refused at the gate
+since no route can be matched against it as written: Starlette's patterns end in ``$``, which a
+final line break passes, and their ``.*`` stops at one. So the mount took ``api/needs`` and handed
+its routes the whole path, which only the page's catch-all matched: a GET read was the page
+(200 ``text/html``), a write was a 405 naming GET and HEAD, and a break mid-path matched no
+route at all, a plain-text 404 (sweep 4 of #243)."""
+NO_SOCKET_HERE = "there is no socket here: the page's stream is at ws"
+"""404 ``not_found`` (4404 without the denial extension) for a socket at any path but ``ws``."""
+TOO_MANY_DEVICES = (
+    f"{DEVICES_MAX} devices are signed in already — sign one out on its Devices screen, or "
+    "revoke one on the machine (aisquare remote revoke), then unlock again"
+)
+"""409 ``too_many_devices``: an unlock past :data:`DEVICES_MAX` with every device signed in."""
 NOT_UNLOCKED = "no unlocked device for this request — unlock with the passphrase"
 """401 ``unauthorized``: no cookie, or one whose device is signed out, revoked or expired."""
 WRONG_PASSWORD = "that is not the passphrase"
@@ -3794,6 +3896,11 @@ class _TokenGate:
                 scope, receive, send, 404, "not_found", LINK_GONE, WS_CLOSE_NOT_FOUND
             )
             return None
+        if "\n" in str(scope.get("path", "")):  # which no route can be matched against
+            await _refuse_at_the_gate(
+                scope, receive, send, 404, "not_found", NO_LINE_BREAKS, WS_CLOSE_NOT_FOUND
+            )
+            return None
         method = scope.get("method")  # a handshake has none, and is always asked
         if method not in ("GET", "HEAD") and not remote_gate_origin(scope):
             await _refuse_at_the_gate(
@@ -3822,6 +3929,18 @@ class _TokenGate:
                 return None
             return replayed
         return receive
+
+
+class _NoSuchSocket:
+    """Any socket but ``ws``, refused as a path with no route is (``api_missing``): a 404
+    denial, or a 4404 close. Unrouted, it was closed 1000, a normal close that said nothing
+    (sweep 4 of #243). An ASGI app, not a function, so Starlette hands it the handshake as
+    it came, to deny."""
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        await _refuse_at_the_gate(
+            scope, receive, send, 404, "not_found", NO_SOCKET_HERE, WS_CLOSE_NOT_FOUND
+        )
 
 
 # --- the kit: what every route of one app shares ---------------------------------------
@@ -4738,16 +4857,26 @@ def build_remote_app(
 
     def page_answer(request: Request) -> Response:
         """:func:`static`'s answer. An installed build's file is typed by the page's own
-        closed list (:func:`remote_page.build_content_type`), not the machine's tables."""
+        closed list (:func:`remote_page.build_content_type`), not the machine's tables.
+
+        No answer names a directory: anyone holding the link reads these before any
+        passphrase. A ``--dist`` without its index said ``no index.html in`` and the
+        directory's absolute path, the machine's home and user name with it (sweep 4 of
+        #243); the log names it now (:data:`NO_DIST_INDEX`). An installed index that went
+        between the two looks at it, as ``install-page`` swaps a build in, is answered as
+        the next request will be, with the bundled page.
+        """
         from aisquare.services import remote_page
 
         rel = request.path_params.get("path", "")
         index = dist / "index.html"
-        if dist_dir is None and not index.is_file():
+
+        def bundled_page() -> Response:
             bundled = remote_page.bundled_page_response(rel, request)
-            if bundled is not None:
-                return bundled
-            response = _json_error(404, "no_dist", NO_PAGE_HINT)
+            return _json_error(404, "no_dist", NO_PAGE_HINT) if bundled is None else bundled
+
+        if dist_dir is None and not index.is_file():
+            response = bundled_page()
         elif rel and (candidate := _built_page_file(dist, rel)) is not None:
             response = FileResponse(
                 candidate,
@@ -4765,8 +4894,11 @@ def build_remote_app(
                 media_type=remote_page.build_content_type(index.name),
                 headers={"cache-control": INDEX_CACHE_CONTROL},
             )
+        elif dist_dir is None:
+            response = bundled_page()
         else:
-            response = _json_error(404, "no_dist", f"no index.html in {dist}")
+            log.warning("remote: no index.html in %s", dist)
+            response = _json_error(404, "no_dist", NO_DIST_INDEX)
         response.headers.update(remote_page.remote_page_headers())
         return response
 
@@ -5055,6 +5187,7 @@ def build_remote_app(
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await reading
 
+    no_socket = _NoSuchSocket()
     api_routes = [
         Route("/api/unlock", unlock_endpoint, methods=["POST"]),
         Route("/api/remote", remote, methods=["GET"]),
@@ -5082,11 +5215,13 @@ def build_remote_app(
         Route("/api/{name:path}", write_endpoint, methods=["POST"]),
         Route("/api/{rest:path}", api_missing),
         WebSocketRoute("/ws", stream),
+        WebSocketRoute("/{rest:path}", no_socket),
         Route("/", static, methods=["GET"]),
         Route("/{path:path}", static, methods=["GET"]),
     ]
     inner = Starlette(
-        routes=[Mount("/r/{token}", routes=api_routes)],
+        # The link without its last /: a page is redirected there, a socket has no route.
+        routes=[Mount("/r/{token}", routes=api_routes), WebSocketRoute("/{rest:path}", no_socket)],
         exception_handlers={405: wrong_method},
         lifespan=lambda app: remote_lifespan(kit),
     )
@@ -5865,16 +6000,23 @@ def install_page(source: Path) -> Path:
     destination = remote_dist_dir()
     staging = destination.with_name(f".{destination.name}.staging-{os.getpid()}")
     shutil.rmtree(staging, ignore_errors=True)
-    shutil.copytree(source, staging, ignore=functools.partial(_page_copy_skips, source))
     previous = destination.with_name(f".{destination.name}.previous-{os.getpid()}")
-    shutil.rmtree(previous, ignore_errors=True)
-    if destination.exists():
-        destination.rename(previous)
     try:
-        staging.rename(destination)
-    except OSError:
-        if previous.exists() and not destination.exists():
-            previous.rename(destination)
+        shutil.copytree(source, staging, ignore=functools.partial(_page_copy_skips, source))
+        shutil.rmtree(previous, ignore_errors=True)
+        if destination.exists():
+            destination.rename(previous)
+        try:
+            staging.rename(destination)
+        except OSError:
+            if previous.exists() and not destination.exists():
+                previous.rename(destination)
+            raise
+    except BaseException:
+        # Named for this process, so no later install's own clean-up ever matched it: each
+        # failed try (a full disk, a file it could not read) left another partial copy
+        # holding the very space the refusal says to free (sweep 4 of #243).
+        shutil.rmtree(staging, ignore_errors=True)
         raise
     shutil.rmtree(previous, ignore_errors=True)
     return destination
@@ -6403,6 +6545,7 @@ __all__ = [
     "DEFAULT_PORT",
     "HISTORY_CAP",
     "INDEX_CACHE_CONTROL",
+    "NO_DIST_INDEX",
     "NO_PAGE_HINT",
     "READ_ONLY_REASON",
     "WRITE_ENDPOINTS",

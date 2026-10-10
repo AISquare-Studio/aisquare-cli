@@ -334,8 +334,9 @@ def test_the_board_of_another_project_is_that_projects_board(
 def test_the_board_is_read_from_the_projects_root_as_asq_board_there_would(
     two_projects: tuple[ProjectInfo, ProjectInfo], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``cwd=root`` is what keeps ``AISQUARE_TEAM_HUB`` and worktree resolution the CLI's."""
-    _current, other = two_projects
+    """``cwd=root`` is what keeps ``AISQUARE_TEAM_HUB`` and worktree resolution the CLI's,
+    the current project's root included."""
+    current, other = two_projects
     asked: list[Path | None] = []
     real = team_service.board_data
 
@@ -346,7 +347,7 @@ def test_the_board_is_read_from_the_projects_root_as_asq_board_there_would(
     monkeypatch.setattr(team_service, "board_data", spy)
     remote_board_payload(other.id)
     remote_board_payload(None)
-    assert asked == [other.root, None]
+    assert asked == [other.root, current.root]
 
 
 def test_the_board_tab_gets_the_newest_events_it_draws_not_the_clis_five(
@@ -563,6 +564,35 @@ def test_a_note_with_a_project_lands_on_that_projects_board(
     assert "for the current board" in _event_texts(remote_board_payload(None))
     with pytest.raises(NoSuchProject):
         write_note({"text": "nowhere", "project": "no-such-project"})
+
+
+def test_no_project_is_the_pinned_one_for_the_board_the_tasks_and_a_note_as_for_the_fleet(
+    two_projects: tuple[ProjectInfo, ProjectInfo],
+) -> None:
+    """Without a project, fleet, panes, keys and the actions resolve the pin, and the board,
+    the tasks and a note resolved the server's directory: after a switch to another
+    project, the fleet was that project's while the board, the tasks and the note were the
+    old one's, so keys and a note sent side by side went to two projects (sweep 4 of
+    #243). The server runs in ``current``; ``other`` is pinned."""
+    from aisquare.services import project as project_service
+
+    current, other = two_projects
+    team_service.add_task("a current task", cwd=current.root)
+    team_service.add_task("the pinned project's task", cwd=other.root)
+    project_service.switch(other.id)
+    reads = live_sources()
+    fleet, tasks = reads.fleet(None), reads.tasks(None)
+    assert isinstance(fleet, dict) and _board_project_id(fleet) == other.id
+    assert _board_project_id(remote_board_payload(None)) == other.id
+    assert isinstance(tasks, list) and [row["title"] for row in tasks] == [
+        "the pinned project's task"
+    ]
+    live_writes().handlers["note"]({"text": "to the current project"})
+    assert "to the current project" in _event_texts(remote_board_payload(other.id))
+    assert "to the current project" not in _event_texts(remote_board_payload(current.id))
+    assert reads.board_frame is not None
+    frame = reads.board_frame(None)
+    assert isinstance(frame, dict) and frame["project"]["id"] == other.id
 
 
 def test_claiming_another_projects_task_needs_no_project(

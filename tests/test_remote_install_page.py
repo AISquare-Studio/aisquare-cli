@@ -17,11 +17,14 @@ gates and its own fixtures, and this file must not inherit them.
 
 from __future__ import annotations
 
+import errno
 import json
+import shutil
 import socket
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -98,6 +101,47 @@ def test_install_page_replaces_an_older_page_and_leaves_no_staging_directory(
     assert not (destination / "assets").exists()  # replaced wholesale, not merged into
     leftovers = [p.name for p in destination.parent.iterdir() if ".remote-dist." in p.name]
     assert leftovers == []  # the staging and previous directories are cleaned up
+
+
+@pytest.mark.parametrize("fails", ["the copy", "the swap"])
+def test_a_failed_install_leaves_no_partial_copy_and_the_page_before_it_served(
+    isolated_home: Path, built: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fails: str
+) -> None:
+    """The staging directory is named for the process, so no later install's clean-up ever
+    matched it: each failed ``install-page`` left a hidden partial copy in ``~/.aisquare``,
+    holding the very space its refusal says to free (sweep 4 of #243)."""
+    remote_server.install_page(built)
+    newer = tmp_path / "newer"
+    (newer / "assets").mkdir(parents=True)
+    (newer / "index.html").write_text("<!doctype html><title>build 2</title>")
+    (newer / "assets" / "big.js").write_text("x" * 4096)
+    full = OSError(errno.ENOSPC, "No space left on device")
+    if fails == "the copy":
+        real_copytree = shutil.copytree
+
+        def copy_then_fill_the_disk(src: Path, dst: Path, *args: Any, **kwargs: Any) -> Any:
+            copied = real_copytree(src, dst, *args, **kwargs)
+            if ".staging-" in Path(dst).name:  # the whole copy made, not one directory of it
+                raise full
+            return copied
+
+        monkeypatch.setattr(shutil, "copytree", copy_then_fill_the_disk)
+    else:
+        real_rename = Path.rename
+
+        def refuse_the_staging_rename(self: Path, target: Path) -> Path:
+            if ".staging-" in self.name:
+                raise full
+            return real_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", refuse_the_staging_rename)
+    with pytest.raises(OSError, match="No space left"):
+        remote_server.install_page(newer)
+    home = remote_dist_dir().parent
+    assert [p.name for p in home.iterdir() if p.name.startswith(".remote-dist.")] == []
+    assert (
+        remote_dist_dir() / "index.html"
+    ).read_text() == "<!doctype html><title>asq remote</title>"
 
 
 def test_install_page_without_an_index_html_refuses_and_installs_nothing(
@@ -242,6 +286,34 @@ def test_an_explicit_dist_is_still_the_callers_business(
     runtime = Runtime(remote_state_path(), remote_audit_path())
     response = make_client(build_app(runtime, dist_dir=missing)).get(f"/r/{runtime.token}/")
     assert response.status_code == 404 and response.json()["error"] == "no_dist"
+
+
+def test_an_installed_index_that_goes_as_a_request_is_answered_is_the_bundled_page(
+    isolated_home: Path, built: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The index is looked at twice, and one an ``install-page`` swap took away in between
+    was answered as a ``--dist`` without its index is: 404 ``no_dist`` naming the
+    directory, ``~/.aisquare/remote-dist`` resolved, to anyone holding the link (sweep 4 of
+    #243). It is answered as the next request will be, with the bundled page."""
+    remote_server.install_page(built)
+    index = remote_dist_dir().resolve() / "index.html"
+    looks: list[Path] = []
+    real_is_file = Path.is_file
+
+    def gone_after_the_first_look(self: Path) -> bool:
+        if self == index:
+            looks.append(self)
+            return len(looks) == 1
+        return real_is_file(self)
+
+    runtime = Runtime(remote_state_path(), remote_audit_path())
+    client = make_client(build_app(runtime))
+    monkeypatch.setattr(Path, "is_file", gone_after_the_first_look)
+    response = client.get(f"/r/{runtime.token}/", headers={"accept": "text/html"})
+    assert len(looks) == 2, "the race this answers: present, then gone"
+    assert response.status_code == 200, response.text
+    assert response.text == remote_page.bundled_page_files()["index.html"].decode("utf-8")
+    assert str(isolated_home) not in response.text
 
 
 def test_after_install_page_the_server_serves_the_spa_with_no_dist_flag(

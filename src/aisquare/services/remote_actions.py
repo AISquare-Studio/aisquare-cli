@@ -335,10 +335,11 @@ def action_pinned(body: dict[str, Any]) -> tuple[str, str]:
 
 def action_tell_text(body: dict[str, Any]) -> str:
     """The tell's ``text``, kept literally: whitespace is content. Empty is a 400, longer
-    than :data:`TELL_TEXT_MAX` a 413, and an ASCII control character other than tab,
-    newline and carriage return a 400 (``remote_server.check_remote_text``). Typed text
-    refuses the tab and the carriage return too, which are the Tab and Enter keys there;
-    inside the paste they are the message's own.
+    than :data:`TELL_TEXT_MAX` a 413, and a control character (C0, DEL or C1) other than
+    tab, newline and carriage return, or a bidi control
+    (``remote_server.REMOTE_BIDI_CONTROLS``), a 400 (``remote_server.check_remote_text``).
+    Typed text refuses the tab and the carriage return too, which are the Tab and Enter
+    keys there; inside the paste they are the message's own.
 
     A tell goes into the pane as one bracketed paste, and tmux before 3.7 pastes the
     buffer's bytes as they are: an ``ESC [201~`` in the text ended the paste early, and

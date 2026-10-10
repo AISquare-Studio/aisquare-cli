@@ -3107,7 +3107,7 @@ class _Cache:
     until they were asked for again, they grew the heap by a full payload per
     spelling for anyone unlocked, read-only included, until the process died.
     So each store first drops what has expired, and at most
-    :data:`CACHE_KINDS_MAX` kinds are kept, the oldest going first.
+    :data:`CACHE_KINDS_MAX` kinds are kept, the first stored going first.
 
     One caller at a time computes a kind, and only that kind's callers wait for
     it. The snapshots were computed under the one lock that guards the table,

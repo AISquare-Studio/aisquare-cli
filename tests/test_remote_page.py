@@ -1443,6 +1443,24 @@ def test_a_retry_lost_too_is_not_confirmed_and_its_result_still_arrives(
     assert lost["send"] == {"busy": False, "disabled": False}
 
 
+def test_results_that_arrive_together_are_each_shown_and_none_takes_anothers_place(
+    boot_report: dict[str, Any],
+) -> None:
+    """SPEC §6.3 toasts the result of each request this page sent. The ledger reports a
+    reloaded tab's writes in one pass, and the page toasted each in turn: every toast took
+    the last one's place at once, so only the oldest result was shown or said, and a Stop
+    that failed read as done. A frame that turned writes off, and a result in the same tick
+    of the socket, went the same way. A line now goes under the ones still shown."""
+    together = boot_report["toastsTogether"]
+    refused = "Stop coder-2: Escape was sent; coder-2 has not stopped yet"
+    assert together["read"] == [refused, "Restart coder-1: done"]
+    frames = [refused, "Restart coder-1: done", "Writes are off — read-only", "Tell coder-3: done"]
+    assert together["frames"] == frames
+    assert together["orphans"] == 0
+    assert together["capped"] == [*frames[1:], "A fifth line"], "four at most, the oldest goes"
+    assert together["newest"] == "A fifth line"
+
+
 def test_an_answer_cut_off_halfway_is_a_lost_request_not_a_remote_that_went_off(
     boot_report: dict[str, Any],
 ) -> None:

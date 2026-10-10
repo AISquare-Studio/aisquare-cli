@@ -390,7 +390,10 @@ function bootPage(hash, answer, globals, base) {
     sockets, location,
     run: (code) => vm.runInContext(code, context),
     main: () => page.run("UI.main"),
-    toast: () => page.run("UI.toast.textContent"),
+    /* What the newest toast says, and every toast line on screen. Timers never fire on their
+     * own here, so a line stays until TOAST_LINES newer ones push it out. */
+    toast: () => page.run("UI.toast.childNodes.length ? UI.toast.childNodes[UI.toast.childNodes.length - 1].textContent : ''"),
+    toasts: () => page.run("UI.toast.classList.contains('show') ? UI.toast.childNodes.map((line) => line.textContent) : []"),
     /* Every socket the page opened and the machine has not answered yet, accepted. */
     acceptSockets() {
       for (const sock of sockets) if (sock.readyState === 0) sock.accept();
@@ -637,6 +640,34 @@ async function lostTwice() {
   page.live().frame("action", { actions: [{ request_id: id, endpoint: "send-keys", status: 200, body: { sent: true }, at: "2026-10-07T10:13:00+00:00" }] });
   await settle();
   return { bodies, said, orphaned, later: page.toast(), send: sendState(page) };
+}
+
+/* Results that arrive together. A tab reloaded with three writes in flight, and the ledger's
+ * first read reports two of them (newest first: a Stop refused, then a Restart done); then,
+ * in one tick of the socket, the frame that turns writes off and the third write's result.
+ * The toast lines on screen after each; then after a fifth line. */
+async function toastsTogether() {
+  const now = Date.now();
+  const kept = storage();
+  kept.setItem("asq.pending", JSON.stringify([
+    ["rq-restart", "Restart coder-1", now - 20000], ["rq-stop", "Stop coder-2", now - 10000], ["rq-tell", "Tell coder-3", now - 5000],
+  ]));
+  const at = "2026-10-07T10:13:00+00:00";
+  const ledger = [
+    { request_id: "rq-stop", endpoint: "agent/stop", status: 409, body: { error: "still_busy", message: "Escape was sent; coder-2 has not stopped yet" }, at },
+    { request_id: "rq-restart", endpoint: "agent/restart", status: 200, body: { label: "coder-1" }, at },
+  ];
+  const page = bootPage("#/", signedIn({ "GET api/actions/recent": () => ({ status: 200, json: { actions: ledger } }) }), { sessionStorage: kept });
+  await settle();
+  const read = page.toasts();
+  page.acceptSockets();
+  await settle();
+  page.live().frame("remote", { allow_write: false, auto_off_at: null, version: "test" });
+  page.live().frame("action", { actions: [{ request_id: "rq-tell", endpoint: "agent/tell", status: 200, body: { delivered: true }, at }] });
+  await settle();
+  const frames = page.toasts();
+  page.run("toast('A fifth line')");
+  return { read, frames, capped: page.toasts(), newest: page.toast(), orphans: page.run("S.orphans.size") };
 }
 
 /* A send-keys the machine ran and answered 200, its connection dropping halfway through the
@@ -3364,6 +3395,7 @@ async function main() {
     unlockWrong: await unlockAnswered(401, { error: "wrong_password", message: "wrong password" }),
     lostWrite: await lostWrite(),
     lostTwice: await lostTwice(),
+    toastsTogether: await toastsTogether(),
     bodyCut: await bodyCut(),
     lostKeyLongAgo: await lostKeyLongAgo(),
     lostThenSignedOut: await lostThenSignedOut(),

@@ -56,6 +56,7 @@ const STRIP_ROWS = 10;
 /* A socket watches at most 8 panes; the agent view keeps one for itself. */
 const STRIPS_MAX = 6;
 const PLAN_LINES = 20;
+const TOAST_LINES = 4;
 /* A card's detail text this short shows whole in its box, on any phone. */
 const SHORT_TEXT = 280;
 const TEXT_MAX = { keys: 2048, tell: 8000, note: 8000 };
@@ -1342,14 +1343,22 @@ function drawNav() {
   UI.nav.hidden = name === "unlock" || !!S.off;
 }
 
+/* A toast goes under any still shown, so results that come together are each read and said. */
 function toast(text) {
   if (!UI.toast || !text) return;
   const shown = plainText(text);
-  UI.toast.textContent = shown;
+  if (!UI.toast.classList.contains("show")) clear(UI.toast);
+  for (const old of Array.from(UI.toast.childNodes)) if (old.textContent === shown) UI.toast.removeChild(old);
+  const line = el("p", null, shown);
+  UI.toast.appendChild(line);
+  while (UI.toast.childNodes.length > TOAST_LINES) UI.toast.removeChild(UI.toast.firstChild);
   UI.toast.classList.add("show");
-  clearTimeout(UI.toastTimer);
   // Four seconds reads a short line; a sentence from the machine gets time to be read.
-  UI.toastTimer = setTimeout(() => UI.toast.classList.remove("show"), Math.min(10000, 4000 + Math.max(0, shown.length - 60) * 60));
+  setTimeout(() => {
+    if (line.parentNode !== UI.toast) return;
+    if (UI.toast.childNodes.length > 1) UI.toast.removeChild(line);
+    else UI.toast.classList.remove("show");
+  }, Math.min(10000, 4000 + Math.max(0, shown.length - 60) * 60));
 }
 
 /* A modal sheet, to a screen reader too: named by its heading, the page behind inert, focus

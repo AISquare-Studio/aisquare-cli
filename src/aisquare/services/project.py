@@ -31,6 +31,7 @@ from aisquare.models import (
     PruneCandidate,
     Snapshot,
 )
+from aisquare.services import install_route
 
 # Files at a project root that imply a fact worth seeding during onboarding.
 _ECOSYSTEM_MARKERS: tuple[tuple[str, str], ...] = (
@@ -120,12 +121,13 @@ class ProjectBusyError(Exception):
         # row on a server it cannot reach, and an operator following that advice
         # after a hand-run `tmux kill-server` reaped nothing, twice. The scoped
         # `fleet shutdown` is the command that can, on their word.
+        # Its folder's name may hold a space or a `$`: quoted for this shell (review of #257).
         scope = project.codename or display_name(project)
+        shutdown = install_route.command_line(["aisquare", "fleet", "shutdown", "--project", scope])
         super().__init__(
             f"{display_name(project)} has {len(agents)} live fleet agent(s): {labels} — "
             "stop them first (aisquare fleet stop <label>), or run aisquare fleet reap if "
-            f"they are already gone; if their tmux server is gone too, aisquare fleet "
-            f"shutdown --project {scope} records them"
+            f"they are already gone; if their tmux server is gone too, {shutdown} records them"
         )
         self.project = project
         self.agents = agents

@@ -47,6 +47,7 @@ from aisquare.services import (
     destinations,
     explainability_ops,
     iam,
+    install_route,
 )
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import credits as credits_service
@@ -589,15 +590,15 @@ def _check_database() -> DoctorCheck:
         counted = "" if count is None else f" ({count} user entries)"
         lacks = f"context.db opens{counted} but lacks part of this build's schema: {shown}"
         database = paths.db_path()
+        keep = install_route.command_line(["cp", str(database), f"{database}.bak"])
         return _fail(
             "database",
             "; ".join([lacks, *costs]),
             "The open that just ran adds back the tables and columns this build knows "
             "another line can skip, and these are not among them: another build or a "
             "hand edit changed the store in a way this build does not know. The history "
-            f"in it is intact, so do not move it aside: keep a copy (cp {database} "
-            f"{database}.bak) and report this line, with the output of `aisquare "
-            f"--version`, at {_ISSUES_URL}",
+            f"in it is intact, so do not move it aside: keep a copy ({keep}) and report "
+            f"this line, with the output of `aisquare --version`, at {_ISSUES_URL}",
         )
     marker = paths.truncation_marker_path()
     if marker.exists():

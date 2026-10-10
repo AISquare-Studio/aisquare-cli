@@ -964,6 +964,43 @@ def test_accounts_add_records_a_landed_sign_in_and_discards_one_that_did_not(
     assert [a.slot for a in core.managed_accounts()] == [2]  # slot 3 was discarded again
 
 
+def test_accounts_add_names_the_connect_to_run_quoted_for_a_slot_under_a_path_with_a_space(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Where the hooks did not install into a new slot, `accounts add` printed the connect to
+    run with the slot's directory bare: under an AISQUARE_HOME with a space, pasted, it
+    split into extra arguments (review of #257). Quoted for this shell, it runs as shown."""
+    from aisquare.services import install_route
+
+    _installed(monkeypatch)
+    monkeypatch.setattr(accounts_cli, "not_interactive_reason", lambda: None)
+    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / "aisquare home"))
+
+    def signs_in(account: ClaudeAccount, *args: Any, **kwargs: Any) -> int:
+        _sign_in(account, "two@example.com")
+        return 0
+
+    real = service.complete_sign_in
+
+    def unhooked(account: ClaudeAccount) -> Any:
+        return real(account).model_copy(update={"hooks_installed": False})
+
+    monkeypatch.setattr(service, "run_session", signs_in)
+    monkeypatch.setattr(service, "complete_sign_in", unhooked)
+    result = runner.invoke(app, ["accounts", "add"])
+    account = core.find_account(2)
+    printed = result.stderr.split("run: ", 1)[-1].splitlines()[0]
+    argv = install_route.split_line(printed)
+    again = runner.invoke(app, argv[1:])
+
+    assert result.exit_code == 0 and account is not None, result.output
+    assert " " in str(account.config_dir), "the slot is under a path with a space"
+    connect = ["aisquare", "agents", "connect", "claude-code", "--config-dir"]
+    assert argv == [*connect, str(account.config_dir)], printed
+    assert printed == install_route.command_line(argv), "quoted for this shell"
+    assert again.exit_code == 0, again.output
+
+
 def test_run_session_leaves_ctrl_c_to_the_child_and_restores_the_handler(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

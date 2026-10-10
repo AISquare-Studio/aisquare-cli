@@ -1926,6 +1926,22 @@ def test_an_aside_or_an_emoji_alone_asks_nothing(text: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "Tests pass? ✅",
+        "- Lint clean? ✔️",
+        "* Types check? ✔",
+        "Migrations reversible? ❌ (the drop is not)",
+    ],
+)
+def test_a_checklist_line_ticked_after_its_question_reports_and_asks_nothing(text: str) -> None:
+    """An emoji may follow a question ("Shall I deploy? 🚀"), but a check or cross mark after
+    one is a closing checklist's result, not a question to the human (review of #243, round
+    5)."""
+    assert not looks_like_a_question(text)
+
+
+@pytest.mark.parametrize(
     ("text", "asks"),
     [
         ("Merge it now? " + "(a) " * 8_000, True),

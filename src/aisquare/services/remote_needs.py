@@ -466,13 +466,14 @@ def looks_like_a_question(text: str) -> bool:
     (Swift's ``String?``, SQL's ``WHERE id = ?``, Ruby's ``admin?``, a lazy
     ``(.*?)``), and a closing summary that showed some was an ``asked`` card,
     pushed again every turn. Each line is read without its markdown (``*_`>#``)
-    and trailing quotes, brackets, spaces and emoji, nor an aside in parentheses
-    or brackets after its question (:func:`_needs_line_asks`). The text asks when
-    a line ending in a question mark (``?``, or a script's own) lies in its last
-    paragraph (after its last blank line outside a code block), or among its last
-    12 non-empty lines and within its last 600 characters. So "Which approach?
-    1. … 2. …" asks, and so does a coder's closing "Want me to commit this?" —
-    which the push policy, not this test, keeps from crying wolf.
+    and trailing quotes, brackets, spaces and emoji (a check or cross mark is a
+    checklist's result, and stays), nor an aside in parentheses or brackets after
+    its question (:func:`_needs_line_asks`). The text asks when a line ending in a
+    question mark (``?``, or a script's own) lies in its last paragraph (after its
+    last blank line outside a code block), or among its last 12 non-empty lines
+    and within its last 600 characters. So "Which approach? 1. … 2. …" asks, and
+    so does a coder's closing "Want me to commit this?" — which the push policy,
+    not this test, keeps from crying wolf.
     """
     lines = _needs_lines(text)
     body = "\n".join(lines)
@@ -512,6 +513,10 @@ Arabic, Persian and Urdu (U+061F), and their variants. Claude answers in the hum
 _NEEDS_SYMBOLS = frozenset({"So", "Sk", "Cf", "Mn", "Me"})
 """Unicode categories a line may also end with after its question: an emoji, and its skin
 tone, variation selector, joiner or keycap."""
+
+_NEEDS_TICKS = frozenset("\u2705\u2611\u2612\u2713\u2714\u2716\u2717\u2718\u274c\u274e")
+"""Check and cross marks, symbols that do not close a question: "Tests pass? ✅" in a closing
+checklist reports a result."""
 
 _NEEDS_FENCE = re.compile(r"[ \t>]*(`{3,}|~{3,})")
 """A line that opens or closes a fenced code block: three backticks or tildes or more, after
@@ -650,7 +655,9 @@ def _needs_line_asks(line: str) -> bool:
 
 def _needs_closes(char: str) -> bool:
     """Whether ``char`` may follow a question's mark at the end of its line."""
-    return char in _NEEDS_TRAILING or unicodedata.category(char) in _NEEDS_SYMBOLS
+    return char in _NEEDS_TRAILING or (
+        char not in _NEEDS_TICKS and unicodedata.category(char) in _NEEDS_SYMBOLS
+    )
 
 
 def _needs_aside_start(line: str, end: int) -> int:

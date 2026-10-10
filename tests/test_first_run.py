@@ -760,6 +760,58 @@ def test_a_git_dir_that_cannot_be_looked_into_is_a_refusal_after_the_steps_befor
     assert [kwargs["worktree"] for _, kwargs in spawns.calls] == [None]
 
 
+def test_the_three_steps_agree_on_a_git_dir_that_cannot_be_looked_into(tmp_path: Path) -> None:
+    """ "Is this root a git repository" was asked three ways: step 1 by one ``stat``, step 2
+    through ``Path.exists`` (every error False on 3.14), step 3 by a second copy of the
+    ``stat`` with errors mapped otherwise; a later change to one would set them apart
+    (round 13 of #257). One answer, ``_git_inside``: for a .git that loops, step 1 leaves
+    the folder out, step 2 asks about the root itself, and step 3 refuses in the words of
+    the same error."""
+    if not can_symlink():
+        pytest.skip("needs a symlink")
+    home = tmp_path / "home"
+    root = _repo(home / "demo")
+    project = ProjectInfo(id="prj_demo", root=root, onboarded_at=T0)
+    git = root / ".git"
+    moved = tmp_path / "git-moved"
+
+    def ask() -> tuple[object, list[Path], Path, first_run.FleetStart, Spawns]:
+        spawns = Spawns()
+        return (
+            first_run._git_inside(root),
+            [
+                c.root
+                for c in first_run.candidates(home, home=home, projects=lambda: [project]).items
+            ],
+            first_run.coder_folder(root),
+            first_run.start_fleet(
+                project, manager=False, spawn=spawns, restart=Restarts(), live=lambda p: []
+            ),
+            spawns,
+        )
+
+    git.rename(moved)
+    git.symlink_to(git)
+    try:
+        if not isinstance(first_run._git_inside(root), OSError):
+            pytest.skip("this OS answers a symlink loop as missing, not as an error")
+        answer, offered, folder, started, spawns = ask()
+    finally:
+        git.unlink()
+        moved.rename(git)
+    assert isinstance(answer, OSError), answer
+    assert root not in offered, "step 1 leaves it out"
+    assert folder == root, "step 2 asks about the root itself"
+    assert [(s.label, s.outcome, s.detail) for s in started.steps] == [
+        ("coder-1", "refused", f"could not look into {git}: {answer.strerror}")
+    ], "step 3 refuses, in the same error's words"
+    assert spawns.calls == []
+    # Control: with its .git back, all three say it is a repository.
+    answer, offered, folder, started, spawns = ask()
+    assert answer is True and offered == [root] and folder == root / ".aisquare-worktrees"
+    assert started.refused is None and [kw["worktree"] for _, kw in spawns.calls] == [None, None]
+
+
 def test_a_crash_in_the_fleet_path_is_a_refusal_not_a_raise(tmp_path: Path) -> None:
     project = ProjectInfo(id="prj_demo", root=_repo(tmp_path / "demo"))
 

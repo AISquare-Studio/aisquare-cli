@@ -169,12 +169,10 @@ def coder_folder(root: Path) -> Path:
     follows a worktree to.
     """
     config = fleet_service.settings()
-    try:
-        worktrees = fleet_service.role_settings("coder", config).worktree
-        git = fleet_service.is_git_project(root)
-    except OSError:  # a root this user cannot look into: no worktree is made there either
-        return root
-    return root / config.worktree_dir if worktrees and git else root
+    worktrees = fleet_service.role_settings("coder", config).worktree
+    # A root whose .git this user cannot look into (OSError): no worktree is made there.
+    git = _git_inside(root)
+    return root / config.worktree_dir if worktrees and git is True else root
 
 
 def _hooks_off_default() -> Path | None:
@@ -403,20 +401,24 @@ def _never_offered(root: Path, home: Path) -> bool:
         return True
 
 
-def _git_inside(root: Path) -> bool | None:
-    """``fleet.is_git_project``'s answer for ``root``, or ``None`` when this user cannot look in.
+def _git_inside(root: Path) -> bool | OSError:
+    """``fleet.is_git_project``'s answer for ``root``, or the ``OSError`` when this user
+    cannot look in: the one answer to "is this root a git repository" for all three steps.
 
-    One ``stat``, with "missing" split out, so every Python answers alike. For a
-    folder this user can see but not enter, ``Path.exists`` raises PermissionError
-    on 3.11 to 3.13 and answers False on 3.14, where step 1 offered the folder as
-    "not a git repository".
+    One ``stat``, with only "missing" as missing, so every Python answers alike. For a
+    folder this user can see but not enter, ``Path.exists`` raises PermissionError on 3.11
+    to 3.13 and answers False on 3.14 (a symlink loop, on every version), where step 1
+    offered the folder as "not a git repository" and step 3 started coders there without
+    worktrees. Step 1 leaves such a folder out, step 2 asks about the root itself
+    (:func:`coder_folder`), and step 3 refuses in the error's words (:func:`start_fleet`).
+    Three copies of this read could drift (round 13 of #257).
     """
     try:
         (root / ".git").stat()
     except (FileNotFoundError, NotADirectoryError):
         return False
-    except OSError:
-        return None
+    except OSError as exc:
+        return exc
     return True
 
 
@@ -475,7 +477,12 @@ def candidates(
             is_git = _git_inside(project.root) if present else False
         except (OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11/3.12
             continue
-        if root in taken or not present or is_git is None or _never_offered(project.root, where):
+        if (
+            root in taken
+            or not present
+            or isinstance(is_git, OSError)
+            or _never_offered(project.root, where)
+        ):
             continue
         taken.add(root)
         items.append(
@@ -625,20 +632,6 @@ def _unworkable(root: Path) -> str | None:
     return None
 
 
-def _git_root(root: Path) -> bool:
-    """``fleet.is_git_project``'s answer, from one ``stat``: only "missing" is missing.
-
-    ``Path.exists`` also answers False for an error it swallows (all of them on 3.14), and
-    a coder was then started without a worktree, with the note "not a git repository".
-    Any other error raises, for :func:`start_fleet` to refuse on.
-    """
-    try:
-        (root / ".git").stat()
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-    return True
-
-
 def _restart(restart: Restarter, project: ProjectInfo, agent: FleetAgent) -> FleetStep:
     try:
         # Pinned to the row the listing read, as the agent view's Restart pins it: a label
@@ -744,14 +737,13 @@ def start_fleet(
         missing -= 1
     if missing:
         held = {status.agent.label for status in listed}  # running or not, as spawn holds them
-        try:
-            git = _git_root(project.root)
-        except OSError as exc:
+        git = _git_inside(project.root)
+        if isinstance(git, OSError):
             # The root was looked into above; its .git could not be (a symlink loop, an
             # I/O error). Raised, it took the steps above with it, and Welcome said only
             # "could not start the fleet" (round 12 of #257): refused on a step instead.
             label = next(_free_labels("coder", 1, held))
-            reason = f"could not look into {project.root / '.git'}: {exc.strerror or _why(exc)}"
+            reason = f"could not look into {project.root / '.git'}: {git.strerror or _why(git)}"
             done(FleetStep(label, "coder", "refused", reason))
             return FleetStart(tuple(steps))
         for label in _free_labels("coder", missing, held):

@@ -3680,6 +3680,51 @@ def test_a_dismissal_of_nothing_is_refused(
     assert not any(" needs/dismiss " in line for line in live.audit())
 
 
+def test_a_dismissal_that_cannot_be_saved_says_so_and_keeps_the_card(live: Live) -> None:
+    """Saved nowhere, it was a 500 with no JSON; hidden in memory alone, the card came back
+    with the next start, the phone told it was gone for good."""
+    card = live.card("permission")
+    remote_needs_path().unlink(missing_ok=True)
+    remote_needs_path().mkdir(parents=True)  # a path no file can be written to
+    response = live.client.post(live.url("needs/dismiss"), json={"id": card["id"]})
+    assert response.status_code == 503, response.text
+    assert response.json()["error"] == "unavailable"
+    assert response.json()["message"].startswith("the dismissal could not be saved: ")
+    assert card["id"] in [item["id"] for item in live.feed()]
+    assert not any(" needs/dismiss " in line for line in live.audit())
+
+
+def test_a_needs_read_over_a_store_that_cannot_be_opened_is_a_503_as_every_read_is(
+    runtime: Runtime, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The feed, a dismissal and an answer scan for themselves when no scan has run, and that
+    scan raised: a bare 500 ``text/plain``, its traceback on the terminal once a request,
+    where ``api/projects`` and every other read answer 503 ``unavailable`` in JSON and the
+    watcher tells a failing scan once a streak (review of #243, sweep 3)."""
+    from aisquare.core.paths import db_path
+
+    db_path().parent.mkdir(parents=True, exist_ok=True)
+    db_path().write_bytes(b"this is not a database\n" * 256)
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    client = make_client(app)
+    assert unlock(client, runtime).status_code == 200
+    runtime.set_allow_write(True)
+    caplog.set_level(logging.DEBUG, logger=remote_needs.__name__)
+    api = f"{base(runtime)}/api"
+    answers = [
+        client.get(f"{api}/needs"),
+        client.get(f"{api}/needs"),
+        client.post(f"{api}/needs/dismiss", json={"id": "ny_0000000000000000"}),
+        client.post(f"{api}/needs/answer", json={"id": "ny_0000000000000000", "keys": ["1"]}),
+    ]
+    for response in answers:
+        assert response.status_code == 503, response.text
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json() == {"error": "unavailable", "message": "file is not a database"}
+    told = [r for r in caplog.records if r.name == remote_needs.__name__ and r.levelno >= 30]
+    assert len(told) == 1 and told[0].exc_info is None, [r.getMessage() for r in told]
+
+
 def test_an_answer_is_refused_while_writes_are_off(live: Live) -> None:
     card = live.card("permission")
     response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
@@ -3899,6 +3944,31 @@ def test_an_answer_needs_the_listing_it_rechecks_against(live: Live) -> None:
     response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
     assert response.status_code == 503
     assert response.json() == {"error": "fleet_unavailable", "message": "tmux is not installed"}
+    assert live.tmux.typed == []
+    assert not remote_agent_lock(PROJECT.id, "coder-1").locked(), "the lock is let go"
+
+
+def test_an_answer_whose_store_fails_as_it_rechecks_is_a_503_not_a_bare_500(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scan read the card, and the store failed as the answer derived the agent again:
+    only the fleet's own errors were answered, and this one was a 500 with no JSON."""
+    from aisquare.core.store import StoreUnopenable
+
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+
+    def unopenable(project: ProjectInfo) -> list[FleetAgentStatus]:
+        raise StoreUnopenable("file is not a database")
+
+    monkeypatch.setattr(
+        remote_needs,
+        "live_needs_sources",
+        lambda: replace(_sources(live.fleet), list_agents=unopenable),
+    )
+    response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
+    assert response.status_code == 503, response.text
+    assert response.json() == {"error": "unavailable", "message": "file is not a database"}
     assert live.tmux.typed == []
     assert not remote_agent_lock(PROJECT.id, "coder-1").locked(), "the lock is let go"
 

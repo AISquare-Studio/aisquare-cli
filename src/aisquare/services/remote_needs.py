@@ -2585,16 +2585,18 @@ class RemoteNeedsWatcher:
                 self._needs_scan_told()
             self._stopping.wait(self._interval)
 
-    def _needs_scan_told(self) -> None:
-        """:meth:`scan_needs_now`, its failure told once a streak, and its recovery once."""
+    def _needs_scan_told(self) -> Exception | None:
+        """:meth:`scan_needs_now`, its failure told once a streak, and its recovery once; the
+        failure, or ``None``."""
         try:
             self.scan_needs_now()
         except Exception as exc:
             _needs_failed("the needs scan", exc, self._failing, "scan")
-            return
+            return exc
         if "scan" in self._failing:
             self._failing.discard("scan")
             log.info("remote: the needs scan works again")
+        return None
 
     def _needs_devices(self) -> bool:
         """Whether any device is on record, signed in or not, and Remote is not past its
@@ -2786,28 +2788,47 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
     from aisquare.services import fleet as fleet_service
     from aisquare.services.remote_server import RequestError, _audit_keys, remote_agent_lock
 
+    async def needs_scanned_here(watcher: RemoteNeedsWatcher) -> Response | None:
+        """One scan for a request that has none to read; ``None``, or the 503 its failure is.
+
+        A scan that raised, over a store that cannot be opened, answered a bare 500
+        ``text/plain`` and printed its traceback on the terminal, where every other read
+        answers 503 ``unavailable`` in JSON and the watcher's own scans are told once a
+        streak (review of #243, sweep 3).
+        """
+        failed = await asyncio.to_thread(watcher._needs_scan_told)
+        return None if failed is None else kit.kit_refuse(503, "unavailable", str(failed))
+
     async def needs_list_endpoint(
         request: Request, device: Device, body: dict[str, Any]
     ) -> Response:
         """The feed. A watcher that is not running (no lifespan) scans for this request."""
         watcher = _needs_watcher(kit)
-        if not watcher.needs_watching() or watcher.needs_scanned_at() is None:
-            await asyncio.to_thread(watcher.scan_needs_now)
+        unread = not watcher.needs_watching() or watcher.needs_scanned_at() is None
+        if unread and (failed := await needs_scanned_here(watcher)) is not None:
+            return failed
         return JSONResponse(watcher.needs_payload_now())
 
     async def needs_dismiss_endpoint(
         request: Request, device: Device, body: dict[str, Any]
     ) -> Response:
-        """Hide one card for good. Not write-gated: it changes what is shown, not the fleet."""
+        """Hide one card for good. Not write-gated: it changes what is shown, not the fleet.
+        A dismissal that could not be saved is a 503, and the card stays: hidden here
+        alone, it came back with the next start."""
         item_id = _needs_id_field(body)
         watcher = _needs_watcher(kit)
-        if watcher.needs_scanned_at() is None:
-            await asyncio.to_thread(watcher.scan_needs_now)
+        unread = watcher.needs_scanned_at() is None
+        if unread and (failed := await needs_scanned_here(watcher)) is not None:
+            return failed
         found = watcher.needs_lookup(item_id)
         if found is None:
             return kit.kit_refuse(404, "not_found", "no such item in the needs feed")
         item, _project = found
-        await asyncio.to_thread(record_needs_dismissal, item.id)
+        try:
+            await asyncio.to_thread(record_needs_dismissal, item.id)
+        except OSError as exc:
+            log.warning("remote: a needs dismissal could not be saved: %s", exc)
+            return kit.kit_refuse(503, "unavailable", f"the dismissal could not be saved: {exc}")
         watcher.needs_forget(item.id)
         summary = f"{item.id} {item.kind} {item.agent or '-'}@{item.project_id}"
         await asyncio.to_thread(kit.kit_audit, device, "needs/dismiss", summary)
@@ -2827,8 +2848,9 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
         """
         item_id, keys, text, enter = _needs_answer_body(body)
         watcher = _needs_watcher(kit)
-        if watcher.needs_scanned_at() is None:
-            await asyncio.to_thread(watcher.scan_needs_now)
+        unread = watcher.needs_scanned_at() is None
+        if unread and (failed := await needs_scanned_here(watcher)) is not None:
+            return failed
         found = watcher.needs_lookup(item_id)
         if found is None:
             return kit.kit_refuse(409, "stale", "that card no longer needs you", current=[])
@@ -2850,6 +2872,9 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
                 return kit.kit_refuse(503, "fleet_unavailable", str(exc))
             except fleet_service.FleetError as exc:
                 return kit.kit_refuse(409, "fleet_error", str(exc))
+            except Exception as exc:  # the store, mid-read: as a failed scan is, not a bare 500
+                log.warning("remote: a needs answer could not read %s: %s", label, exc)
+                return kit.kit_refuse(503, "unavailable", str(exc))
             if not needs_item_current(snap, item.id):
                 current = [now_item.needs_item_json() for now_item in snap.items]
                 gone = f"{label} no longer shows that {item.kind}"

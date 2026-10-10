@@ -695,6 +695,7 @@ def test_step_one_holds_its_folder_while_a_start_runs(tmp_path: Path) -> None:
     during onboarding; ``choose`` is what *Use beta* and an owed Enter run."""
     alpha = ProjectInfo(id="prj_alpha", root=tmp_path / "alpha", onboarded_at=T0)
     beta = ProjectInfo(id="prj_beta", root=tmp_path / "beta", onboarded_at=T0)
+    alpha.root.mkdir()  # the start's folder: start_fleet refuses one that is gone
     other = Candidate(root=beta.root, is_git=True, project=beta)
     machine = HeldStart(claude=[READY], found=Candidates(items=(here(alpha.root, alpha), other)))
 
@@ -892,6 +893,7 @@ def test_a_store_that_will_not_open_costs_the_list_only(tmp_path: Path) -> None:
 
 def _ready_machine(tmp_path: Path, **overrides: Any) -> tuple[Machine, ProjectInfo]:
     project = ProjectInfo(id="prj_demo", root=tmp_path / "demo-app", onboarded_at=T0)
+    project.root.mkdir(parents=True, exist_ok=True)  # start_fleet refuses a folder that is gone
     machine = Machine(claude=[READY], found=Candidates(items=(here(project.root, project),)))
     for key, value in overrides.items():
         setattr(machine, key, value)
@@ -1943,8 +1945,8 @@ def test_a_refusal_goes_once_its_row_is_reaped_while_the_page_is_hidden(
     while it ran, the user had coder-2 reaped there and came back to its refusal under no
     row, as if the restart had ended the row itself (third delta review). It is noted on
     every frame the shell reads, shown or not."""
-    project = ProjectInfo(id="prj_demo", root=tmp_path / "demo-app", onboarded_at=T0)
-    machine = HeldRestart(claude=[READY], found=Candidates(items=(here(project.root, project),)))
+    machine, project = _ready_machine(tmp_path)
+    machine = HeldRestart(claude=machine.claude, found=machine.found)
     listed_by(machine, project, monkeypatch)
     scripted(machine)
     reason = "cannot restart 'coder-2': no Claude account in slot 3 — see: aisquare accounts"

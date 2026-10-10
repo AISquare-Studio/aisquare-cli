@@ -605,55 +605,103 @@ def test_a_refusal_lands_on_its_step_and_stops_the_rest(tmp_path: Path) -> None:
     assert [(s.label, s.outcome) for s in later.steps] == [("coder-1", "refused")]
 
 
-@pytest.mark.parametrize("cause", ["cannot-enter", "io-error"])
-def test_a_root_that_cannot_be_looked_into_is_a_refusal_after_the_steps_before_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cause: str
-) -> None:
-    """``is_git_project`` is ``(root / ".git").exists()``, which raises PermissionError on
-    3.11 to 3.13 for a root this user can no longer enter, and EIO or ESTALE on every
-    version. It ran after the manager and a lost coder's restart, and raised: those steps
-    went with it, and Welcome said only "could not start the fleet" (round 12 of #257).
-    It is a refused step, after them."""
-    root = _repo(tmp_path / "demo")
-    project = ProjectInfo(id="prj_demo", root=root)
-    looks_into = fleet_service.is_git_project
-    if cause == "cannot-enter":
-        if sys.platform == "win32" or not can_deny_reads():
-            pytest.skip("needs a directory this user cannot enter")
-        if sys.version_info >= (3, 14):
-            pytest.skip("Path.exists answers False there instead of raising")
-    else:
-
-        def unreadable(path: Path) -> bool:
-            raise OSError(5, "Input/output error", str(path / ".git"))
-
-        monkeypatch.setattr(fleet_service, "is_git_project", unreadable)
-    listed = [
+def _lost_coder_listing() -> list[FleetAgentStatus]:
+    """A running manager and a coder whose window is gone: a press restarts that coder."""
+    return [
         *_seen(_agent("manager", "manager")),
         *_seen(_agent("coder-1", "coder"), state="lost"),
     ]
+
+
+@pytest.mark.parametrize("before", ["the-manager", "a-lost-coder"])
+@pytest.mark.parametrize("cause", ["cannot-enter", "cannot-list", "gone"])
+def test_a_root_this_user_cannot_work_in_starts_and_restarts_nothing(
+    tmp_path: Path, cause: str, before: str
+) -> None:
+    """tmux cannot start a window in a folder it cannot enter, and starts it in $HOME
+    without a word. The root was asked about only before new coders were spawned, through
+    ``Path.exists``, which raises on 3.11 to 3.13 and answers False on 3.14: the manager
+    and a lost coder's restart went into the root unasked and were reported started, in
+    $HOME (review of the round-12 fixes). The root is asked first, of the OS, and a root
+    this user cannot enter, list, or find refuses the call before anything starts."""
+    root = _repo(tmp_path / "demo")
+    project = ProjectInfo(id="prj_demo", root=root)
+    if cause != "gone" and (sys.platform == "win32" or not can_deny_reads()):
+        pytest.skip("needs a directory this user cannot enter or list")
+    listed = [] if before == "the-manager" else _lost_coder_listing()
+    manager, coders = (True, 0) if before == "the-manager" else (False, first_run.CODERS)
     spawns, restarts = Spawns(), Restarts()
-    if cause == "cannot-enter":
-        root.chmod(0o600)
+
+    def start() -> first_run.FleetStart:
+        return first_run.start_fleet(
+            project,
+            manager=manager,
+            coders=coders,
+            spawn=spawns,
+            restart=restarts,
+            live=lambda p: listed,
+        )
+
+    moved = tmp_path / "moved-away"
+    if cause == "gone":
+        root.rename(moved)
+    else:
+        root.chmod(0o600 if cause == "cannot-enter" else 0o300)
     try:
-        started = first_run.start_fleet(
+        refused = start()
+    finally:
+        if cause == "gone":
+            moved.rename(root)
+        else:
+            root.chmod(0o755)
+    reason = "No such file or directory" if cause == "gone" else "Permission denied"
+    assert [(s.label, s.outcome, s.detail) for s in refused.steps] == [
+        ("fleet", "refused", f"could not look into {root}: {reason}")
+    ]
+    assert spawns.calls == [] and restarts.calls == [], "nothing started or restarted"
+    # Control: the same root, this user's to work in again, gets its agents.
+    started = start()
+    assert started.refused is None, [s.detail for s in started.steps]
+    assert spawns.calls or restarts.calls
+
+
+def test_a_git_dir_that_cannot_be_looked_into_is_a_refusal_after_the_steps_before_it(
+    tmp_path: Path,
+) -> None:
+    """``is_git_project`` is ``Path.exists``, which raised for some errors on 3.11 to 3.13,
+    after the manager and a lost coder's restart, and took their steps with it (round 12
+    of #257); for others (a symlink loop, and every error on 3.14) it answers False, and
+    the coders were started without worktrees as "not a git repository". One ``stat``:
+    only a missing .git is no repository, and any other error is a refusal on a step,
+    after the steps before it."""
+    if not can_symlink():
+        pytest.skip("needs a symlink")
+    root = _repo(tmp_path / "demo")
+    project = ProjectInfo(id="prj_demo", root=root)
+    git = root / ".git"
+    moved = tmp_path / "git-moved"
+    git.rename(moved)
+    git.symlink_to(git)  # a loop: stat raises ELOOP, Path.exists answers False
+    listed = _lost_coder_listing()
+    spawns, restarts = Spawns(), Restarts()
+    try:
+        looped = first_run.start_fleet(
             project, spawn=spawns, restart=restarts, live=lambda p: listed
         )
     finally:
-        root.chmod(0o755)
-    assert [(s.label, s.outcome) for s in started.steps] == [
+        git.unlink()
+        moved.rename(git)
+    assert [(s.label, s.outcome) for s in looped.steps] == [
         ("manager", "running"),
         ("coder-1", "started"),
         ("coder-2", "refused"),
-    ], [s.detail for s in started.steps]
-    detail = started.steps[-1].detail
-    assert detail.startswith(f"could not look into {root}: "), detail
-    assert ("Permission denied" if cause == "cannot-enter" else "Input/output error") in detail
-    assert spawns.calls == [] and restarts.calls == [("coder-1", "agt_coder-1")]
-    # Control: the same root, enterable and readable again, gets its coder.
-    monkeypatch.setattr(fleet_service, "is_git_project", looks_into)
+    ], [s.detail for s in looped.steps]
+    assert looped.steps[-1].detail.startswith(f"could not look into {git}: "), looped.steps
+    assert spawns.calls == [], "no coder started as if the folder were not a repository"
+    # Control: with its .git back, the coder is started, in a worktree (the role's default).
     again = first_run.start_fleet(project, spawn=spawns, restart=Restarts(), live=lambda p: listed)
     assert [(s.label, s.outcome) for s in again.steps][-1] == ("coder-2", "started")
+    assert [kwargs["worktree"] for _, kwargs in spawns.calls] == [None]
 
 
 def test_a_crash_in_the_fleet_path_is_a_refusal_not_a_raise(tmp_path: Path) -> None:

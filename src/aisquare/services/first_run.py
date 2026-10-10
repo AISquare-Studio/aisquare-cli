@@ -33,6 +33,7 @@ Two rules shape :func:`start_fleet`:
 from __future__ import annotations
 
 import dataclasses
+import os
 import shutil
 import sys
 from collections.abc import Callable, Iterator
@@ -605,6 +606,39 @@ def _spawn(
     )
 
 
+def _unworkable(root: Path) -> str | None:
+    """Why this user cannot work in ``root`` (enter it, and list it), else ``None``.
+
+    Asked of the OS, where every Python answers alike: ``Path.exists`` raised on 3.11 to
+    3.13 for a root this user cannot enter and answered False on 3.14. tmux cannot start a
+    window in a folder it cannot enter, and starts it in $HOME without a word, so a
+    manager or a restarted coder was reported started while working there (review of the
+    round-12 fixes). The ``stat`` through the root needs what ``chdir`` needs (search
+    permission); the listing needs read permission.
+    """
+    try:
+        os.stat(os.path.join(root, os.curdir))
+        with os.scandir(root) as entries:
+            next(entries, None)
+    except OSError as exc:
+        return exc.strerror or _why(exc)
+    return None
+
+
+def _git_root(root: Path) -> bool:
+    """``fleet.is_git_project``'s answer, from one ``stat``: only "missing" is missing.
+
+    ``Path.exists`` also answers False for an error it swallows (all of them on 3.14), and
+    a coder was then started without a worktree, with the note "not a git repository".
+    Any other error raises, for :func:`start_fleet` to refuse on.
+    """
+    try:
+        (root / ".git").stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return True
+
+
 def _restart(restart: Restarter, project: ProjectInfo, agent: FleetAgent) -> FleetStep:
     try:
         # Pinned to the row the listing read, as the agent view's Restart pins it: a label
@@ -655,9 +689,11 @@ def start_fleet(
     its place takes the next free label. A manager in either state is
     ``fleet.spawn``'s to refuse, with the way to clear it. Coders take the
     role's worktree default in a git repository and ``worktree=False``
-    elsewhere, with a note. The first refusal (no tmux, the agent cap, a
-    worktree git will not make, a root this user cannot look into) stops the
-    call, and its reason is on its step; the steps before it are kept.
+    elsewhere, with a note. A root this user cannot enter and list is refused
+    first, and nothing is started or restarted: tmux would start every agent in
+    $HOME instead. After that, the first refusal (no tmux, the agent cap, a
+    worktree git will not make) stops the call, and its reason is on its step;
+    the steps before it are kept.
     ``on_step`` hears each step as it lands, for a caller that shows progress.
     Nothing is typed into an agent it starts: see the module docstring.
     """
@@ -671,6 +707,10 @@ def start_fleet(
             on_step(step)
         return step.outcome != "refused"
 
+    unworkable = _unworkable(project.root)
+    if unworkable is not None:
+        done(FleetStep("fleet", "", "refused", f"could not look into {project.root}: {unworkable}"))
+        return FleetStart(tuple(steps))
     try:
         listed = (live or live_agents)(project)
     except Exception as exc:
@@ -705,14 +745,13 @@ def start_fleet(
     if missing:
         held = {status.agent.label for status in listed}  # running or not, as spawn holds them
         try:
-            git = fleet_service.is_git_project(project.root)
+            git = _git_root(project.root)
         except OSError as exc:
-            # A root this user can no longer enter raises on 3.11 to 3.13 (EIO or ESTALE on
-            # every version), after the manager and the restarts above ran: raised, it took
-            # their steps with it, and Welcome said only "could not start the fleet"
-            # (round 12 of #257). Refused on a step, as coder_folder answers it.
+            # The root was looked into above; its .git could not be (a symlink loop, an
+            # I/O error). Raised, it took the steps above with it, and Welcome said only
+            # "could not start the fleet" (round 12 of #257): refused on a step instead.
             label = next(_free_labels("coder", 1, held))
-            reason = f"could not look into {project.root}: {_why(exc)}"
+            reason = f"could not look into {project.root / '.git'}: {exc.strerror or _why(exc)}"
             done(FleetStep(label, "coder", "refused", reason))
             return FleetStart(tuple(steps))
         for label in _free_labels("coder", missing, held):

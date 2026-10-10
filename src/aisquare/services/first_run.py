@@ -409,9 +409,10 @@ def _git_inside(root: Path) -> bool | OSError:
     folder this user can see but not enter, ``Path.exists`` raises PermissionError on 3.11
     to 3.13 and answers False on 3.14 (a symlink loop, on every version), where step 1
     offered the folder as "not a git repository" and step 3 started coders there without
-    worktrees. Step 1 leaves such a folder out, step 2 asks about the root itself
-    (:func:`coder_folder`), and step 3 refuses in the error's words (:func:`start_fleet`).
-    Three copies of this read could drift (round 13 of #257).
+    worktrees. Step 1 leaves such a folder out of its rows and its path box refuses it
+    (:func:`validate_path`), step 2 asks about the root itself (:func:`coder_folder`), and
+    step 3 refuses in the error's words (:func:`start_fleet`). Copies of this read drifted
+    apart (rounds 13 and 14 of #257).
     """
     try:
         (root / ".git").stat()
@@ -422,12 +423,35 @@ def _git_inside(root: Path) -> bool | OSError:
     return True
 
 
+def validate_path(text: str, *, lookup: onboarding.Lookup | None = None) -> PathVerdict:
+    """Step 1's verdict on a folder: the "this folder" row and the path box.
+
+    ``onboarding.validate_path``'s, with its git answer taken from :func:`_git_inside`, as
+    the registered rows and steps 2 and 3 take theirs. onboarding's own read
+    (``Path.exists``, or a worktree's common root) called a looping .git "not a git
+    repository" where step 3 refuses it, and a bare repository's worktree "git" where
+    steps 2 and 3 start coders without worktrees (round 14 of #257). A .git this user
+    cannot look into is a ``problem``: the folder is not offered. The Onboard view (``+``)
+    keeps onboarding's verdict.
+    """
+    verdict = onboarding.validate_path(text, lookup=lookup)
+    if not verdict.ok or verdict.root is None:
+        return verdict
+    git = _git_inside(verdict.root)
+    if isinstance(git, OSError):
+        why = git.strerror or _why(git)
+        return dataclasses.replace(
+            verdict, problem=f"could not look into {verdict.root / '.git'}: {why}"
+        )
+    return dataclasses.replace(verdict, is_git=git)
+
+
 def candidates(
     cwd: Path | None = None,
     *,
     home: Path | None = None,
     projects: Callable[[], list[ProjectInfo]] | None = None,
-    validate: Callable[[str], PathVerdict] = onboarding.validate_path,
+    validate: Callable[[str], PathVerdict] = validate_path,
     limit: int = CANDIDATE_LIMIT,
 ) -> Candidates:
     """The directory ``asq`` started in, then up to ``limit`` registered projects. Never raises.

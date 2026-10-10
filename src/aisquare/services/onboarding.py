@@ -78,11 +78,14 @@ class PathVerdict:
     store_error: str | None = None
     """Why ``registered`` could not be read. Failing open here costs exactly one
     thing — the 'already registered' notice — and that is what this records."""
+    problem: str | None = None
+    """Why the folder cannot be used, in a caller's words, when a caller judges it further
+    (Welcome's path box: a .git it cannot look into). :func:`validate_path` never sets it."""
 
     @property
     def ok(self) -> bool:
         """Whether Onboard may run: a directory, whatever else it is or is not."""
-        return self.path is not None and self.is_dir
+        return self.path is not None and self.is_dir and self.problem is None
 
     @property
     def project_id(self) -> str | None:
@@ -97,6 +100,8 @@ class PathVerdict:
             return f"{self.path} does not exist"
         if not self.is_dir:
             return f"{self.path} is a file, not a directory"
+        if self.problem is not None:
+            return self.problem
         root = self.root if self.root is not None else self.path
         if root == self.path.resolve():
             where = f"will register {root}"

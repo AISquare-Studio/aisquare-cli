@@ -123,12 +123,12 @@ def _find_candidates(listed: list[ProjectInfo] | None) -> Candidates:
     known = {project.id: project for project in listed}
     return first_run.candidates(
         projects=lambda: list(listed),
-        validate=lambda text: onboarding.validate_path(text, lookup=known.get),
+        validate=lambda text: first_run.validate_path(text, lookup=known.get),
     )
 
 
 def _validate(text: str) -> PathVerdict:
-    return onboarding.validate_path(text)
+    return first_run.validate_path(text)
 
 
 def _onboard(path: Path, on_line: Callable[[str], None]) -> OnboardOutcome:

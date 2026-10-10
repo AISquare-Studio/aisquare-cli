@@ -63,6 +63,7 @@ from aisquare.services.first_run import (
     TmuxState,
 )
 from aisquare.services.onboarding import FixResult, OnboardOutcome, PathVerdict
+from tests.fsperms import can_symlink
 from tests.pane_harness import asks_a_server, socket_of
 from tests.ui_workers import settle_page, settle_until
 
@@ -652,6 +653,50 @@ def test_a_typed_folder_is_judged_then_used(tmp_path: Path) -> None:
     before, enabled, text = hosted(machine, go)
     assert not before and enabled  # the verdict decides the button
     assert machine.onboarded == [folder] and "✓ typed" in text
+
+
+@dataclass
+class RealPathBox(Machine):
+    """A machine whose path box judges as Welcome's own seam does (``first_run.validate_path``)."""
+
+    def validate(self, text: str) -> PathVerdict:
+        return welcome._validate(text)
+
+
+def test_step_one_judges_a_git_dir_as_steps_two_and_three_do(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Step 1's "this folder" row and its path box judged git with onboarding's own read, which
+    called a looping .git "not a git repository", while step 3 refused it (round 14 of
+    #257). Welcome's seams for both ask what steps 2 and 3 ask: the row is not offered, and
+    the box refuses the folder, saying why."""
+    if not can_symlink():
+        pytest.skip("needs a symlink")
+    root = tmp_path / "demo"
+    root.mkdir()
+    git = root / ".git"
+    git.symlink_to(git)  # a loop
+    error = first_run._git_inside(root)
+    if not isinstance(error, OSError):
+        pytest.skip("this OS answers a symlink loop as missing, not as an error")
+    refusal = f"could not look into {git}: {error.strerror}"
+    monkeypatch.chdir(root)  # asq started in it
+    found = welcome._find_candidates([])  # the shell's frame lists nothing
+
+    async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> tuple[bool, str]:
+        page.query_one("#welcome-path", Input).value = str(root)
+        await settle_page(host)
+        return visible(page, "welcome-path-use"), card(page, "welcome-path-verdict")
+
+    usable, line = hosted(RealPathBox(), go)
+    assert found.items == (), "the 'this folder' row is not offered"
+    assert not usable and line == f"✗ {refusal}", line
+    # Control: a real .git, offered and judged as the repository it is.
+    git.unlink()
+    git.mkdir()
+    again = welcome._find_candidates([])
+    assert [(c.root, c.is_git) for c in again.items] == [(root, True)]
+    assert hosted(RealPathBox(), go)[0], "control: the folder can be used"
 
 
 def test_choose_another_is_not_undone_by_a_return_to_the_page(tmp_path: Path) -> None:

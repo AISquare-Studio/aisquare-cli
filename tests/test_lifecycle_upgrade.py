@@ -1256,6 +1256,19 @@ def test_the_lookup_says_when_the_pin_needs_another_python(
     assert (latest.version is None) is (python == "3.11"), "the newest is judged as before"
 
 
+def test_the_lookup_says_when_pypi_lists_no_such_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mistyped or unpublished pin passed every check, and `--check --version 0.9.9` said
+    "upgrade with: aisquare upgrade --version 0.9.9", which uv refuses (a later review of
+    #257). An answer without its releases cannot tell, and says nothing."""
+    body = {"body": _pypi_requiring({"0.8.0": ">=3.11"})}
+    monkeypatch.setattr(install_route, "open_url", lambda _r, timeout: _Response(body["body"]))
+
+    assert _REAL_FETCH_LATEST(python="3.12", pin="0.9.9").pin_unlisted is True
+    assert _REAL_FETCH_LATEST(python="3.12", pin="0.8").pin_unlisted is False, "0.8 is 0.8.0"
+    body["body"] = json.dumps({"info": {"version": "0.8.0"}}).encode()
+    assert _REAL_FETCH_LATEST(python="3.12", pin="0.9.9").pin_unlisted is False
+
+
 def test_the_reinstalls_python_is_the_one_the_command_restates(tmp_path: Path) -> None:
     """What `--python` says in the reinstall, when it names a version; any other request
     (a path) was resolved to the interpreter that runs this install."""
@@ -2252,6 +2265,7 @@ def test_sites_running_another_install_are_left_and_named(tool: Tool, tmp_path: 
     other = tmp_path / "checkout" / ".venv" / "bin" / "aisquare"
     other.parent.mkdir(parents=True)
     other.write_text("#!/bin/sh\n", encoding="utf-8")
+    other.chmod(0o755)  # one that starts: another install, as the launcher would run it
     ours = _hooked(tmp_path / "c-ours", tool.script)
     theirs = _hooked(tmp_path / "c-theirs", other)
     _record(ours, theirs)
@@ -2272,6 +2286,28 @@ def test_a_site_whose_program_is_gone_is_refreshed_not_left(tool: Tool, tmp_path
     refresh, left = lifecycle.refresh_sites(tool.facts)
 
     assert [site.config_dir for site in refresh] == [gone]
+    assert left == ()
+
+
+def test_a_site_whose_program_cannot_start_is_refreshed_not_left(
+    tool: Tool, tmp_path: Path
+) -> None:
+    """A console script whose `#!` Python is gone (`uv python uninstall`) exists, so it was
+    "another install of aisquare" and its hooks were left failing every session, while the
+    plugin's launcher passes over it as one that cannot start (a later review of #257)."""
+    if sys.platform == "win32":
+        pytest.skip("Windows starts no script by its #! line")
+    stale = tmp_path / "old" / "bin" / "aisquare"
+    stale.parent.mkdir(parents=True)
+    stale.write_text(f"#!{tmp_path / 'gone' / 'python3.12'}\n", encoding="utf-8")
+    stale.chmod(0o755)
+    site = _hooked(tmp_path / "c-stale", stale)
+    _record(site)
+
+    refresh, left = lifecycle.refresh_sites(tool.facts)
+
+    assert not agent_core._starts(stale), "the premise: the launcher would pass over it"
+    assert [entry.config_dir for entry in refresh] == [site], (refresh, left)
     assert left == ()
 
 
@@ -2765,6 +2801,70 @@ def test_a_route_aisquare_does_not_run_keeps_its_command_beside_the_python_claus
     assert "upgrade with: pipx install --force aisquare-cli==0.9.0" in check.stdout
     assert f"({clause})" in check.stdout, check.stdout
     assert "cannot install it" not in check.stdout, "no command that never runs for pipx"
+
+
+def test_a_pin_pypi_does_not_list_is_said_not_advised(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--check --version 0.9.9`, a typo, said "upgrade with: aisquare upgrade --version
+    0.9.9", and uv found no such release (a later review of #257)."""
+    monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
+    body = _pypi_requiring({"0.8.0": ">=3.11"})
+    monkeypatch.setattr(install_route, "fetch_latest", _REAL_FETCH_LATEST)
+    monkeypatch.setattr(install_route, "open_url", lambda _request, timeout: _Response(body))
+
+    check = runner.invoke(app, ["upgrade", "--check", "--version", "0.9.9"])
+    planned = _one_object(
+        runner.invoke(app, ["--json", "upgrade", "--check", "--version", "0.9.9"]).stdout
+    )
+
+    why = "PyPI lists no aisquare-cli 0.9.9"
+    assert "upgrade with" not in check.stdout, check.stdout
+    assert f"`aisquare upgrade --version 0.9.9` cannot install it: {why}" in check.stdout
+    assert planned["runnable"] is False and planned["reason"] == why, planned
+
+
+@pytest.mark.parametrize("kind", ["homebrew", "editable", "local-source"])
+def test_a_route_whose_command_cannot_pin_says_what_does_instead_of_advising_it(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """`--check --version 0.7.0` on a Homebrew install said "upgrade with: brew upgrade
+    aisquare-cli", which moves to the formula's newest, and a checkout's reinstall installs
+    what the checkout holds (a later review of #257)."""
+    source = str(tool.prefix.parent / "src" / "aisquare-cli")
+    route = {
+        "homebrew": install_route.InstallRoute(
+            install_route.HOMEBREW, tool.facts, formula="aisquare-cli"
+        ),
+        "editable": install_route.InstallRoute(install_route.EDITABLE, tool.facts, source=source),
+        "local-source": install_route.InstallRoute(
+            install_route.LOCAL_SOURCE, tool.facts, source=source
+        ),
+    }[kind]
+    monkeypatch.setattr(install_route, "detect", lambda: route)
+
+    check = runner.invoke(app, ["upgrade", "--check", "--version", "0.7.0"])
+    planned = _one_object(
+        runner.invoke(app, ["--json", "upgrade", "--check", "--version", "0.7.0"]).stdout
+    )
+    run = runner.invoke(app, ["upgrade", "--version", "0.7.0", "--yes"])
+    latest = install_route.upgrade_argv(route)
+
+    assert "upgrade with" not in check.stdout, check.stdout
+    assert planned["runnable"] is False and machine.installs == [], planned
+    assert run.exit_code == 1 and "Upgrade it with" not in run.stderr, run.stderr
+    if kind == "homebrew":
+        why = "Homebrew installs the version its formula has, and brew cannot install 0.7.0"
+        assert planned["reason"] == why and planned["argv"] == [], planned
+        assert why in check.stdout and "brew upgrade" not in check.stdout, check.stdout
+        assert why in run.stderr and "with:" not in run.stderr, "and no command to run"
+        assert latest == ["brew", "upgrade", "aisquare-cli"], "control: no pin, the newest"
+    else:
+        command = install_route.command_line(latest)
+        assert planned["command"] == command, planned
+        assert "0.7.0" in planned["reason"] and source in planned["reason"], planned
+        assert f"then reinstall it with: {command}" in check.stdout, check.stdout
+        assert f"Then reinstall it with: {command}" in run.stderr, run.stderr
 
 
 def test_a_pin_the_uv_cutoff_excludes_is_said_not_advised(

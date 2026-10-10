@@ -136,8 +136,12 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
             # checkout keeps its command: PyPI's number says nothing about its source.
             _say("nothing to upgrade")
             return
-        _say(f"upgrade with: {plan.command}")
-        _say(f"(`aisquare upgrade` does not run it: {plan.reason})")
+        if plan.pin_refused:
+            # Not "upgrade with" a command that installs another version (a later review).
+            _say(f"{plan.reason} with: {plan.command}" if plan.argv else f"{plan.reason}")
+        else:
+            _say(f"upgrade with: {plan.command}")
+            _say(f"(`aisquare upgrade` does not run it: {plan.reason})")
         if plan.pin_unmet is not None:
             _say(f"({plan.pin_unmet})")
 
@@ -322,12 +326,14 @@ def upgrade(
         _emit_check(plan)
         return
     if not plan.runnable:
-        # The command goes in the MESSAGE: `fail` shows a human nothing else.
+        # The command goes in the MESSAGE: `fail` shows a human nothing else. None for a pin
+        # brew cannot install; for a checkout's, the reinstall after it (a later review).
+        then = "Then reinstall it with" if plan.pin_refused else "Upgrade it with"
+        command = f" {then}: {plan.command}" if plan.argv else ""
         fail(
-            f"aisquare does not upgrade this install itself ({plan.reason}). "
-            f"Upgrade it with: {plan.command}",
+            f"aisquare does not upgrade this install itself ({plan.reason}).{command}",
             error="upgrade_unsupported_route",
-            hint=plan.command,
+            hint=plan.command or None,
             detail=plan.route.describe(),
         )
     if plan.up_to_date:

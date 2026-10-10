@@ -37,7 +37,7 @@ from aisquare.core.config import (
 )
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxServer, TmuxUnavailable
-from aisquare.core.version import __version__
+from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import current_project
 from aisquare.models import SetupReport
 from aisquare.services import agents as agents_service
@@ -330,6 +330,13 @@ class UpgradePlan:
         return self.reason is None
 
     @property
+    def pin_refused(self) -> bool:
+        """Whether ``--version`` is one this route's own command cannot install (Homebrew, a
+        checkout): :attr:`reason` then says what does (``install_route.pin_refusal``)."""
+        target = self.target
+        return target is not None and install_route.pin_refusal(self.route, target) is not None
+
+    @property
     def backwards(self) -> bool:
         """Whether this run moves to a release older than the one running (``--version``)."""
         return self.target is not None and install_route.is_newer(self.current, self.target) is True
@@ -440,6 +447,9 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         target = pinned
     route = install_route.detect()
     reason = install_route.not_automated(route)
+    if target is not None:
+        # The pin is what was asked: a route's reason for the newest says how to get that.
+        reason = install_route.pin_refusal(route, target) or reason
     latest: install_route.LatestRelease | None = None
     pin_unmet: str | None = None
     if check or (reason is None and target is None):
@@ -483,6 +493,8 @@ def _pin_unmet(
     route: install_route.InstallRoute, target: str, latest: install_route.LatestRelease
 ) -> str | None:
     """Why uv would refuse ``--version``'s ``target`` here, from the lookup, or ``None``."""
+    if latest.pin_unlisted:
+        return f"PyPI lists no {DISTRIBUTION} {target}"
     if latest.pin_after_cutoff:
         held = install_route.cutoff(route) or "--exclude-newer"
         return f"your uv cutoff ({held}) excludes {target}, uploaded after it"
@@ -622,12 +634,17 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
         if not binaries:
             continue
         programs = tuple(str(binary.program) for binary in binaries)
-        # os.path.exists, not Path.exists: on 3.11 to 3.13 the latter raises PermissionError
-        # (3.14 answers False) for a program in a directory this user cannot enter, and
-        # upgrade crashed. Such a program counts as gone, whose hooks fail every session
-        # (review of #257).
+        # Whether it STARTS, as the plugin's launcher asks (agent_core._starts): a script whose
+        # `#!` Python is gone exists, and was left as "another install", failing every
+        # session (a later review of #257). Its os.path checks, not Path's: on 3.11 to 3.13
+        # those raise PermissionError for a directory this user cannot enter, and upgrade
+        # crashed. A program that cannot start counts as gone, and re-connecting is the fix.
         foreign = next(
-            (b for b in binaries if os.path.exists(b.program) and not runs_this_install(b, found)),
+            (
+                b
+                for b in binaries
+                if agent_core._starts(b.program) and not runs_this_install(b, found)
+            ),
             None,
         )
         unwritable = agents_service.settings_unwritable(directory / "settings.json")

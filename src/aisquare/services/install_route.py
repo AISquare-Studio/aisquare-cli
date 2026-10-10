@@ -322,6 +322,8 @@ class LatestRelease:
     pin_after_cutoff: bool = False
     """Whether every file of the release pinned was uploaded after the cutoff: uv's
     ``--exclude-newer`` refuses a pin too."""
+    pin_unlisted: bool = False
+    """Whether PyPI's answer lists its releases and the one pinned is not among them."""
 
 
 def fetch_latest(
@@ -374,6 +376,9 @@ def fetch_latest(
     found = _newest(releases, info, prereleases, uploaded_before, python)
     if pin is None:
         return found
+    if isinstance(releases, dict) and not any(same_version(str(name), pin) for name in releases):
+        # A typo or an unpublished release: uv finds no such one (a later review of #257).
+        return replace(found, pin_unlisted=True)
     if uploaded_before is not None and _after(_files(pin, releases), uploaded_before):
         return replace(found, pin_after_cutoff=True)
     if python is None:
@@ -1184,7 +1189,8 @@ def upgrade_argv(
             return ["pipx", "install", "--force", pinned]
         return ["pipx", "upgrade", DISTRIBUTION]
     if route.kind == HOMEBREW:
-        return ["brew", "upgrade", route.formula or DISTRIBUTION]
+        # No pin: brew installs its formula's version, and `brew upgrade` the newest of it.
+        return [] if target else ["brew", "upgrade", route.formula or DISTRIBUTION]
     if route.kind == UVX:
         return ["uv", "tool", "install", pinned]  # an install to keep, as uvx keeps none
     user = ["--user"] if route.kind == SYSTEM and route.facts.user_install else []
@@ -1239,6 +1245,26 @@ def not_automated(route: InstallRoute) -> str | None:
             "could not carry over"
         )
     return _uv_tool_blocker(route)
+
+
+def pin_refusal(route: InstallRoute, target: str) -> str | None:
+    """Why this route's own command cannot install ``target`` (``--version``), and what does,
+    or ``None``: brew installs its formula's version, and a checkout or a local source the
+    one it holds. "upgrade with: brew upgrade aisquare-cli" moved to the newest instead
+    (a later review of #257)."""
+    where = route.source or "."
+    if route.kind == HOMEBREW:
+        return f"Homebrew installs the version its formula has, and brew cannot install {target}"
+    if route.kind == EDITABLE:
+        reason = f"an editable install runs what its checkout holds: check out {target} in {where}"
+    elif route.kind == LOCAL_SOURCE:
+        reason = f"it installs what its source holds: point {where} at {target}"
+    else:
+        return None
+    then = ", then reinstall it"
+    if _windows_blocker(route, "replace") is not None:
+        then += " after aisquare exits (Windows locks the files of a running program)"
+    return reason + then
 
 
 def _windows_blocker(route: InstallRoute, verb: str) -> str | None:

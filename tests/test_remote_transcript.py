@@ -386,6 +386,28 @@ def test_wide_characters_are_wrapped_by_the_columns_they_take(tmp_path: Path, sa
         assert "".join(line[2:] for line in body).replace(" ", "") == said.replace(" ", "")
 
 
+def test_a_tool_call_or_a_note_is_one_row_however_wide_its_words(tmp_path: Path) -> None:
+    """A tool call's summary went up to 82 columns, whatever width the page asked for, and a
+    note was cut by characters: either took two of a phone's rows, the second outside the
+    ``⎿`` (review of #243, sweep 5). Each fits the width, cut where it ends."""
+    from rich.cells import cell_len
+
+    command = "git commit -m 'リリース前にキャッシュの無効化を直す' && " + "x" * 60
+    notice = {
+        **_user("バックグラウンドのビルドが終わりました。" * 4, uuid="n"),
+        "origin": {"kind": "task-notification"},
+    }
+    call = {"type": "tool_use", "name": "Bash", "input": {"command": command}}
+    path = _write(tmp_path / "calls.jsonl", [_assistant(call, uuid="a"), notice])
+    for width in (40, 44, 80):
+        notes = [line for line in plain(read_page(path, width=width).lines) if "⎿" in line]
+        call_line, note_line = notes
+        assert call_line.startswith("  ⎿ Bash(git commit") and note_line.startswith("  ⎿ バック")
+        assert all(cell_len(line) <= width and line.endswith("…") for line in notes), notes
+    short = plain(read_page(path, width=200).lines)
+    assert f"  ⎿ Bash({command[:72]})" in short, "the summary as it was, where it fits"
+
+
 # --- paging backwards -------------------------------------------------------------------
 
 

@@ -342,6 +342,23 @@ def _cells(text: str) -> int:
     return split_graphemes(text)[1]
 
 
+def _fit_cells(text: str, room: int) -> int:
+    """How many characters of ``text``, whole graphemes, fit in ``room`` columns."""
+    used = fit = 0
+    for _start, end, width in split_graphemes(text)[0]:
+        if used + width > room:
+            break
+        used, fit = used + width, end
+    return fit
+
+
+def _cut_cells(text: str, room: int) -> str:
+    """``text`` in at most ``room`` columns: itself, or its start and ``…``."""
+    if _cells(text) <= room:
+        return text
+    return text[: _fit_cells(text, max(0, room - 1))] + "…"
+
+
 def _wrap(text: str, width: int, *, indent: str = "  ") -> list[str]:
     """``text`` as lines of at most ``width`` columns, each after ``indent``, its paragraphs
     kept: a run of whitespace is where a line breaks, and a word longer than a line breaks
@@ -470,7 +487,17 @@ def _render_tool_use(block: dict[str, Any], width: int) -> list[str]:
         plan = payload.get("plan")
         if isinstance(plan, str) and plan.strip():
             return [f"{_DIM}  ⎿ plan:{_OFF}", *_wrap(plan, width, indent="    ")]
-    return [f"{_DIM}  ⎿ {_summarise_tool(block)}{_OFF}"]
+    return [_dim_note(_summarise_tool(block), width)]
+
+
+def _dim_note(text: str, width: int) -> str:
+    """One dim ``  ⎿`` line that fits ``width`` columns: ``text``, or its start and ``…``.
+
+    A tool call's summary went as long as 82 columns whatever the width asked for, and a
+    note was cut by characters, as :func:`_wrap` once measured: either took two rows of
+    a phone's (review of #243, sweep 5).
+    """
+    return f"{_DIM}  ⎿ {_cut_cells(text, max(1, width - 4))}{_OFF}"
 
 
 def _render_transcript_record(record: dict[str, Any] | None, width: int) -> list[str]:
@@ -578,9 +605,7 @@ def _render_claude_codes_own(
     first = next((line.strip() for line in note.splitlines() if line.strip()), "")
     if not first:
         return []
-    room = max(1, width - 4)
-    shown = first if len(first) <= room else first[: room - 1] + "…"
-    return [f"{_DIM}  ⎿ {shown}{_OFF}", ""]
+    return [_dim_note(first, width), ""]
 
 
 def _own_tag(text: str, name: str) -> str | None:

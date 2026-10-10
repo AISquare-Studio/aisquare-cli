@@ -285,7 +285,9 @@ def test_mcp_servers_that_run_aisquare_are_listed_and_never_edited(
         ("memory", "/work/repo"),
     }, "playwright does not run aisquare"
     assert result.exit_code == 0, result.output
-    assert "claude mcp remove <name>" in result.stdout
+    for entry in plan.mcp:  # the plan's own command for each, never a bare one
+        assert f"remove it: {lifecycle.mcp_removal(entry)}" in result.stdout, result.stdout
+    assert "claude mcp remove <name>" not in result.stdout
     assert beside.read_bytes() == before, ".claude.json is Claude Code's; uninstall only reads it"
     assert agent_core.hook_commands("claude-code", default) == []
 
@@ -2031,7 +2033,8 @@ def test_an_mcp_server_a_purge_deletes_with_the_home_is_not_kept(
     assert "fleet-memory" not in kept, human
     assert result.exit_code == 0, result.output
     assert not paths.aisquare_home().exists() and world.events[-1][0] == "package"
-    assert "still registered (user-memory);" in result.stdout, result.stdout
+    assert "the MCP server user-memory is still registered" in result.stdout, result.stdout
+    assert "fleet-memory" not in result.stdout, result.stdout
 
 
 @pytest.mark.parametrize("link", ["slot-file", "whole-slot"])
@@ -2073,11 +2076,14 @@ def test_an_mcp_server_reached_through_a_link_in_the_home_is_kept_by_its_own_fil
     kept = human.split("and keep:", 1)[1].splitlines()
     named = [line.strip() for line in kept if line.strip().startswith("linked-memory")]
     assert machine["home"]["action"] == "delete", machine["home"]
-    assert machine["mcp"] == [{"name": "linked-memory", "file": str(held), "project": None}]
+    listed = [{key: value for key, value in m.items() if key != "remove"} for m in machine["mcp"]]
+    assert listed == [{"name": "linked-memory", "file": str(held), "project": None}]
+    remove = machine["mcp"][0]["remove"]  # aimed at the directory the purge leaves
+    assert str(held.parent) in remove and str(slot) not in remove, remove
     assert named == [f"linked-memory in {held}"], human
     assert result.exit_code == 0, result.output
     assert not paths.aisquare_home().exists() and held.is_file()
-    assert "still registered (linked-memory);" in result.stdout, result.stdout
+    assert "the MCP server linked-memory is still registered" in result.stdout, result.stdout
 
 
 def test_one_claude_json_reached_two_ways_is_listed_once(
@@ -2096,7 +2102,8 @@ def test_one_claude_json_reached_two_ways_is_listed_once(
     human = runner.invoke(app, ["uninstall", "--dry-run"]).stdout
 
     named = [line.strip() for line in human.splitlines() if line.strip().startswith("memory in")]
-    assert machine["mcp"] == [{"name": "memory", "file": str(held), "project": None}]
+    listed = [{key: value for key, value in m.items() if key != "remove"} for m in machine["mcp"]]
+    assert listed == [{"name": "memory", "file": str(held), "project": None}]
     assert named == [f"memory in {held}"], human
 
 
@@ -2133,6 +2140,100 @@ def test_a_config_dir_recorded_as_a_tilde_path_still_has_its_mcp_server_found(
     plan = lifecycle.uninstall_plan()
 
     assert [(entry.name, entry.file) for entry in plan.mcp] == [("memory", held)]
+
+
+@pytest.mark.parametrize("shell", ["default", "sibling"], ids=["shell-default", "shell-sibling"])
+def test_each_mcp_server_is_named_with_the_command_that_reaches_it(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shell: str,
+) -> None:
+    """`claude mcp remove <name>` acts on the .claude.json CLAUDE_CONFIG_DIR names, and its
+    local scope is the folder it runs in: for a project's entry run from elsewhere, and for one
+    in a ~/.claude* sibling, it answered "No MCP server named …" and left it (measured on
+    Claude Code 2.1.296, review of #257). Each entry is named with its own command, in the
+    plan, its --json and the run's note: at its scope, from its project, with the variable it
+    needs from this shell, every part quoted. Each shape, run as printed with the real
+    `claude` in a scratch HOME, removed its entry."""
+    if sys.platform == "win32":
+        pytest.skip("POSIX shell syntax; the native Windows wording is checked on its own")
+    spec = {"command": "aisquare", "args": ["serve"]}
+    repo = tmp_path / "my repo"
+    sibling = isolated_agent_home / ".claude-c2"
+    slot = paths.claude_accounts_dir() / "2"
+    (isolated_agent_home / ".claude.json").parent.mkdir(parents=True, exist_ok=True)
+    (isolated_agent_home / ".claude.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {"top": spec, "odd; name": spec},
+                "projects": {str(repo): {"mcpServers": {"proj": spec}}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    for directory, name in ((sibling, "c2"), (slot, "fleet")):
+        directory.mkdir(parents=True)
+        (directory / ".claude.json").write_text(
+            json.dumps({"mcpServers": {name: spec}}), encoding="utf-8"
+        )
+    if shell == "sibling":
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(sibling))
+    quoted = install_route.command_line
+    unset = "env -u CLAUDE_CONFIG_DIR " if shell == "sibling" else ""
+    in_sibling = "" if shell == "sibling" else f"CLAUDE_CONFIG_DIR={quoted([str(sibling)])} "
+    expected = {
+        "top": f"{unset}claude mcp remove --scope user top",
+        "odd; name": f"{unset}claude mcp remove --scope user 'odd; name'",
+        "proj": f"cd {quoted([str(repo)])} && {unset}claude mcp remove --scope local proj",
+        "c2": f"{in_sibling}claude mcp remove --scope user c2",
+        "fleet": f"CLAUDE_CONFIG_DIR={quoted([str(slot)])} claude mcp remove --scope user fleet",
+    }
+
+    machine = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+    human = runner.invoke(app, ["uninstall", "--dry-run"]).stdout
+    ran = _one_object(runner.invoke(app, ["--json", "uninstall", "--yes"]).stdout)
+
+    assert {entry["name"]: entry["remove"] for entry in machine["mcp"]} == expected
+    kept = [line.strip() for line in human.split("and keep:", 1)[1].splitlines()]
+    under = {kept[i].split(" in ", 1)[0]: kept[i + 1] for i in range(len(kept) - 1)}
+    assert {name: under.get(name) for name in expected} == expected, human
+    registered = [note for note in ran["notes"] if "is still registered in" in note]
+    assert sorted(note.split(" remove it: ", 1)[1] for note in registered) == sorted(
+        expected.values()
+    ), ran["notes"]
+    assert "claude mcp remove <name>" not in human and world.events[-1][0] == "package"
+
+
+def test_on_native_windows_what_a_removal_needs_is_said_after_its_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cmd and PowerShell have no `env -u` and no `VAR=value command`, and PowerShell 5.1 has
+    no `&&`: there each command is the one `claude` takes, and the folder and the variable it
+    needs are said after it, never written in a syntax the shell cannot run."""
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    sibling = tmp_path / ".claude-c2"
+    top = lifecycle.McpRegistration("top", tmp_path / ".claude.json")
+    proj = lifecycle.McpRegistration("proj", tmp_path / ".claude.json", "C:\\work\\my repo")
+    other = lifecycle.McpRegistration("c2", sibling / ".claude.json", None, sibling)
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    default_shell = [lifecycle.mcp_removal(entry) for entry in (top, proj, other)]
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(sibling))
+    sibling_shell = [lifecycle.mcp_removal(entry) for entry in (top, other)]
+
+    assert default_shell == [
+        "claude mcp remove --scope user top",
+        "claude mcp remove --scope local proj (run it in C:\\work\\my repo)",
+        f"claude mcp remove --scope user c2 (run it with CLAUDE_CONFIG_DIR set to {sibling})",
+    ]
+    assert sibling_shell == [
+        "claude mcp remove --scope user top (run it with CLAUDE_CONFIG_DIR unset)",
+        "claude mcp remove --scope user c2",
+    ]
 
 
 # --- one entry the scans cannot enter costs no other ------------------------------------------

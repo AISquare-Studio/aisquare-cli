@@ -18,6 +18,7 @@ import re
 import shutil
 import socket
 import sqlite3
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -1011,6 +1012,9 @@ class McpRegistration:
     leaves (sweep 2 of #257)."""
     project: str | None = None
     """The project a local-scope entry belongs to; ``None`` for user scope."""
+    config_dir: Path | None = None
+    """The ``CLAUDE_CONFIG_DIR`` under which ``claude`` reads ``file``: ``None`` for
+    ``~/.claude.json``, which it reads with that variable unset."""
 
 
 @dataclass(frozen=True)
@@ -1323,6 +1327,7 @@ def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ..
     """
     found: list[McpRegistration] = []
     read: set[Path] = set()
+    default = agent_core.dir_identity(accounts_core.home_config_dir().parent / ".claude.json")
     for directory in directories:
         for spelled in agent_core.claude_json_paths(directory):
             # The file itself: a slot linked to ~/.claude, or a ~/.claude* sibling that is a
@@ -1335,11 +1340,21 @@ def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ..
             if path in read:
                 continue
             read.add(path)
+            # Where `claude` reads it: ~/.claude.json with CLAUDE_CONFIG_DIR unset, any other
+            # .claude.json with the variable naming its own directory (which outlives a purge
+            # as the file does), and one linked to a file of another name through the
+            # directory it was found in.
+            if path == default:
+                reach: Path | None = None
+            elif path.name == ".claude.json":
+                reach = path.parent
+            else:
+                reach = directory
             data = agent_core.read_json(path)
             servers = data.get("mcpServers")
             if isinstance(servers, dict):
                 found.extend(
-                    McpRegistration(str(name), path)
+                    McpRegistration(str(name), path, None, reach)
                     for name, spec in servers.items()
                     if _runs_aisquare(spec)
                 )
@@ -1350,11 +1365,63 @@ def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ..
                 servers = block.get("mcpServers") if isinstance(block, dict) else None
                 if isinstance(servers, dict):
                     found.extend(
-                        McpRegistration(str(name), path, str(project))
+                        McpRegistration(str(name), path, str(project), reach)
                         for name, spec in servers.items()
                         if _runs_aisquare(spec)
                     )
     return tuple(found)
+
+
+def mcp_place(entry: McpRegistration) -> str:
+    """Where an MCP registration is: its ``.claude.json``, and the project it belongs to."""
+    return str(entry.file) + (f", project {entry.project}" if entry.project else "")
+
+
+def mcp_removal(entry: McpRegistration) -> str:
+    """The command that removes ``entry``: ``claude mcp remove`` at its scope, aimed at the
+    ``.claude.json`` that holds it, and for a project's entry run from inside the project.
+
+    ``claude mcp remove`` acts on the file ``CLAUDE_CONFIG_DIR`` names (``~/.claude.json``
+    when it is unset), and its local scope is the project it runs in. Bare, it answered
+    "No MCP server named …" for a project's entry run from elsewhere and for one in
+    another config dir, and left both (measured on Claude Code 2.1.296, review of #257).
+    Built as :func:`agent_core.claude_plugin_command` builds the plugin's: nothing for
+    the file this shell's ``claude`` already reads, ``env -u`` for ``~/.claude.json``
+    from a shell that names another, and the directory otherwise, every part quoted.
+    Native Windows has no ``env -u``, ``VAR=value command`` or (in PowerShell 5.1)
+    ``&&``, so there the folder and the variable the command needs are said after it.
+    """
+    scope = "user" if entry.project is None else "local"
+    command = install_route.command_line(["claude", "mcp", "remove", "--scope", scope, entry.name])
+    ambient = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    here = agent_core.dir_identity(Path(ambient)) if ambient else None
+    there = None if entry.config_dir is None else agent_core.dir_identity(entry.config_dir)
+    if sys.platform == "win32":
+        needs = [] if entry.project is None else [f"in {entry.project}"]
+        if there != here:
+            needs.append(
+                "with CLAUDE_CONFIG_DIR unset"
+                if entry.config_dir is None
+                else f"with CLAUDE_CONFIG_DIR set to {entry.config_dir}"
+            )
+        return f"{command} (run it {', '.join(needs)})" if needs else command
+    if there == here:
+        line = command
+    elif entry.config_dir is None:
+        line = f"env -u CLAUDE_CONFIG_DIR {command}"
+    else:
+        line = f"CLAUDE_CONFIG_DIR={install_route.command_line([str(entry.config_dir)])} {command}"
+    if entry.project is None:
+        return line
+    return f"cd {install_route.command_line([entry.project])} && {line}"
+
+
+def mcp_note(entry: McpRegistration) -> str:
+    """What an uninstall leaves registered: one MCP server that runs aisquare, and its removal."""
+    return (
+        f"the MCP server {entry.name} is still registered in {mcp_place(entry)}, and Claude "
+        f"Code owns that file — remove it: {mcp_removal(entry)}"
+    )
 
 
 def _plugins(directories: Iterable[Path]) -> tuple[agent_core.ClaudePlugin, ...]:
@@ -1675,13 +1742,8 @@ def _uninstall_notes(
     notes: list[str] = []
     if any(removal.ok for removal in removals):
         notes.append("open Claude Code sessions keep the hooks they started with — restart them")
-    mcp = plan.lasting_mcp if purged else plan.mcp
-    if mcp:
-        names = ", ".join(sorted({entry.name for entry in mcp}))
-        notes.append(
-            f"MCP servers that run aisquare are still registered ({names}); Claude Code owns "
-            "that file — remove each with: claude mcp remove <name>"
-        )
+    for entry in plan.lasting_mcp if purged else plan.mcp:
+        notes.append(mcp_note(entry))
     for plugin in plan.lasting_plugins if purged else plan.plugins:
         notes.append(plugin_note(plugin))
     notes.append(

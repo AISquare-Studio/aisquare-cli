@@ -445,7 +445,12 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
             for site in plan.unreadable
         ],
         "mcp": [
-            {"name": entry.name, "file": str(entry.file), "project": entry.project}
+            {
+                "name": entry.name,
+                "file": str(entry.file),
+                "project": entry.project,
+                "remove": lifecycle_service.mcp_removal(entry),
+            }
             for entry in plan.mcp
         ],
         "plugins": [
@@ -560,10 +565,10 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
     lasting_mcp = plan.lasting_mcp
     if lasting_mcp:
         _say("  MCP servers that run aisquare (Claude Code owns .claude.json; remove each with")
-        _say("  `claude mcp remove <name>`):")
+        _say("  the command under it):")
         for entry in lasting_mcp:
-            where = f"{entry.file}" + (f", project {entry.project}" if entry.project else "")
-            _say(f"    {entry.name} in {where}")
+            _say(f"    {entry.name} in {lifecycle_service.mcp_place(entry)}")
+            _say(f"      {lifecycle_service.mcp_removal(entry)}")
     for plugin in plan.lasting_plugins:
         # Claude Code's to remove, and it keeps running aisquare: said, never silent.
         where = lifecycle_service.plugin_place(plugin)

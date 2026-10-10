@@ -164,6 +164,14 @@ def painted(app: FleetApp) -> list[str]:
     ]
 
 
+def painted_in(app: FleetApp, widget: Static) -> str:
+    """What the screen paints where ``widget`` is laid out, its rows joined and its spaces
+    collapsed: a sentence wider than what holds it is laid out whole and painted cut."""
+    x, y, width, height = widget.region
+    rows = painted(app)[y : y + height]
+    return " ".join(" ".join(row[x : x + width] for row in rows).split())
+
+
 def shown(widget: Static) -> str:
     visual = widget.visual
     plain = getattr(visual, "plain", None)
@@ -1216,6 +1224,34 @@ def test_a_remote_json_that_cannot_be_read_is_a_sentence_in_the_panel_not_a_sile
     drive(go, tunnel=missing_ngrok)
 
 
+@pytest.mark.parametrize("found", ["missing", "edited by hand"])
+def test_a_remote_json_the_first_read_cannot_write_is_said_as_a_write_in_the_panel(
+    monkeypatch: pytest.MonkeyPatch, found: str
+) -> None:
+    """The process's first read makes ``remote.json`` when it is missing and rewrites one
+    edited by hand. In a home that cannot be written, that write failed and the panel said
+    the file "could not be read": a file that did not exist, or read fine, while ``asq remote
+    status`` said "could not be written" and to make the directory writable (sweep 5 of
+    #243). The panel says what the CLI says."""
+    paths.ensure_home()
+    if found == "edited by hand":
+        Runtime(paths.remote_state_path(), paths.remote_audit_path())
+        compact = json.dumps(json.loads(paths.remote_state_path().read_text()))
+        paths.remote_state_path().write_text(compact)  # readable, not as the server writes it
+    refuse_remote_json(monkeypatch)
+
+    async def go(pilot: Pilot[None]) -> None:
+        modal = await open_panel(pilot)
+        await written(pilot)  # the process's first read is the writer thread's
+        said = shown(modal.query_one("#remote-status", Static))
+        assert said.startswith("remote.json could not be written — "), said
+        assert "Permission denied" in said
+        assert said.endswith("; make its directory writable, or free some space")
+        assert paths.remote_state_path().exists() is (found == "edited by hand")
+
+    drive(go, tunnel=missing_ngrok)
+
+
 def test_a_write_that_lands_takes_away_the_sentence_that_one_did_not_in_the_panel() -> None:
     """The panel said write actions had not been saved for as long as Remote stayed on, after
     the switch, flipped back, had saved them (sweep of #243)."""
@@ -1240,7 +1276,14 @@ def test_a_write_that_lands_takes_away_the_sentence_that_one_did_not_in_the_pane
     drive(go, tunnel=missing_ngrok)
 
 
-def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended() -> None:
+def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The extended deadline is said with its date once it is past midnight here. The machine
+    is put in a zone where it is, two hours ahead of now: in the suite's own zone the date was
+    expected only on runs within two hours of midnight, and a bare ``%H:%M`` passed every
+    other hour of the day (sweep 5 of #243)."""
+
     async def go(pilot: Pilot[None]) -> None:
         app = pilot.app
         assert isinstance(app, FleetApp)
@@ -1254,15 +1297,19 @@ def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended() -> Non
             budget.record_failed_unlock()
         extended = runtime.extend_auto_off(datetime.now(UTC))
         assert extended is not None
+        # A zone where the deadline, two hours off, is in the first hour of tomorrow.
+        zone = timezone(-timedelta(hours=extended.astimezone(UTC).hour))
+        monkeypatch.setattr(remote_view, "LOCAL_ZONE", zone)
+        there = extended.astimezone(zone)
+        assert there.hour == 0 and there.date() != datetime.now(zone).date()
         modal.repaint()
         await pilot.pause()
         line = shown(modal.query_one("#remote-unlocks", Static))
         assert line.startswith(f"{UNLOCK_GLOBAL_FAILURES} failed unlocks in 30 min")
         assert "new unlocks paused" in line and "regenerate-password --new-link" in line
         state_line = shown(modal.query_one("#remote-state", Static))
-        # with its date when it is tomorrow already: an extension can cross midnight
-        assert f"auto-off at {remote_view._auto_off_time(extended)}" in state_line
-        assert f"{extended.astimezone():%H:%M}" in state_line
+        # with its date: an extension can cross midnight
+        assert f"auto-off at {there:%b} {there.day} 00:{there.minute:02d}" in state_line
         assert app.remote.auto_off_at == extended, "the extension holds in the TUI too"
 
     drive(go, tunnel=missing_ngrok)
@@ -1459,6 +1506,47 @@ def test_while_another_process_serves_the_panel_shows_its_auto_off_and_picks_non
         assert not modal.query_one("#remote-auto-off", Select).disabled
 
     drive(go, tunnel=missing_ngrok)
+
+
+@pytest.mark.parametrize("size", [(80, 24), SIZE], ids=["80 columns", "the suite's"])
+def test_the_sentences_beside_the_switches_are_painted_whole_at_any_width(
+    monkeypatch: pytest.MonkeyPatch, size: tuple[int, int]
+) -> None:
+    """Beside a switch, the state and the write hint were laid out on one line as wide as
+    their text, and the box cut them: another process's auto-off, and its "turn it off
+    there", were painted at no width, and at 80 columns the hint lost the command that
+    turns writes on (sweep 5 of #243). They wrap in what the row leaves them."""
+    monkeypatch.setattr(remote_control, "ELSEWHERE_EVERY_SECONDS", 0.0)
+    monkeypatch.setattr(remote_view, "LOCAL_ZONE", UTC)
+    paths.ensure_home()
+    serving = paths.remote_state_path().with_name(remote_server.SERVE_LOCK_NAME)
+    deadline = datetime.now(UTC).replace(hour=21, minute=58) + timedelta(days=2)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        remote_server.set_auto_off(deadline)  # the other process's serve set it
+        fd = os.open(serving, os.O_RDWR | os.O_CREAT, 0o600)
+        lock_exclusive(fd)
+        try:
+            modal = await open_panel(pilot)
+            await written(pilot)
+            state = modal.query_one("#remote-state", Static)
+            for _ in range(100):
+                modal.repaint()
+                if shown(state) != "off":
+                    break
+                await asyncio.sleep(0.02)
+            await pilot.pause()
+            dated = f"auto-off at {deadline:%b} {deadline.day} 21:58"
+            assert painted_in(app, state) == f"{remote_view.ELSEWHERE} · {dated}"
+            hint = modal.query_one("#remote-write-hint", Static)
+            assert painted_in(app, hint) == READ_ONLY_REASON
+        finally:
+            unlock(fd)
+            os.close(fd)
+
+    drive(go, tunnel=missing_ngrok, size=size)
 
 
 def test_a_switch_state_json_refuses_is_toasted_and_said_again_after_quit() -> None:

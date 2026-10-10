@@ -11,6 +11,7 @@ branches — on/off, restore after a restart, auto-off, write actions default OF
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import inspect
 import io
@@ -918,6 +919,31 @@ def test_a_config_of_ours_that_is_no_utf8_is_written_again_not_raised_into_the_u
     assert ours.read_text(encoding="utf-8").endswith('version: "2"\nweb_addr: false\n')
 
 
+@pytest.mark.parametrize(
+    "encoding",
+    ["utf-8-sig", "utf-16-le", "utf-16-be"],
+    ids=["UTF-8 with BOM", "UTF-16 LE (PowerShell 5.1)", "UTF-16 BE"],
+)
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["LF", "CRLF"])
+def test_a_config_of_the_humans_saved_with_a_byte_order_mark_still_turns_the_api_off(
+    tmp_path: Path, encoding: str, newline: str
+) -> None:
+    """``ngrok config add-authtoken`` writes ``version`` first, and Notepad's "UTF-8 with BOM"
+    or PowerShell 5.1's ``Set-Content``/``Out-File`` re-save it with a byte-order mark. Read
+    as plain UTF-8, the mark hid that first line, and ngrok started with its unauthenticated
+    agent API on, which ngrok itself, decoding the mark, had no reason to (sweep 5 of #243)."""
+    text = newline.join(["version: 3", "agent:", "  authtoken: tok_123", ""])
+    raw = text.encode(encoding)
+    if encoding.startswith("utf-16"):  # the codec names its order, so writes no mark itself
+        raw = (codecs.BOM_UTF16_LE if encoding.endswith("le") else codecs.BOM_UTF16_BE) + raw
+    own = write_ngrok_config(tmp_path, "")
+    own.write_bytes(raw)
+    assert api_off_configs(own=own, environ={}) == [
+        own,
+        paths.aisquare_home() / "remote-ngrok-v3.yml",
+    ]
+
+
 def test_an_ngrok_whose_api_off_config_cannot_be_had_starts_as_before(tmp_path: Path) -> None:
     """Whatever finding the config raises is no reason to keep Remote without ngrok, nor to
     raise into the fleet UI, where the watchdog starts ngrok on Textual's thread."""
@@ -1574,7 +1600,8 @@ def test_without_ngrok_remote_is_on_locally_and_the_status_line_says_how_to_inst
     )
     controller.turn_on()
     assert controller.running and server.running
-    assert controller.tunnel is None
+    tunnel = controller.tunnel  # kept, never started, for the watchdog to start
+    assert tunnel is not None and not tunnel.running and tunnel.public_url is None
     assert controller.message == INSTALL_HINT
     assert controller.link_url() == f"http://127.0.0.1:8750/r/{server.token}/"  # §6 fallback
 
@@ -3095,6 +3122,33 @@ def test_serve_says_to_turn_a_hand_started_ngroks_local_api_off(
     assert result.exit_code == 0, result.output
     assert "ngrok http 127.0.0.1:9004 --inspect=false" in result.output
     assert "web_addr: false in ngrok.yml" in result.output
+
+
+def test_serves_ngrok_command_is_on_the_static_domain_its_public_link_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``AISQUARE_REMOTE_NGROK_URL`` set, the banner gave the public link on that domain
+    and an ngrok command without ``--url``: run as given, ngrok served on another domain, and
+    the link, and every notification, opened ngrok's offline page (sweep 5 of #243). The
+    command is the docs' own, on the domain the link names."""
+
+    def served(dist: object, port: int, auto_off: int, *args: object, **kwargs: Any) -> bool:
+        kwargs["ready"]()
+        return False
+
+    monkeypatch.setattr(remote_server, "run_foreground", served)
+    domain = "https://My-Reserved.example-domain.com/"
+    result = CliRunner().invoke(
+        cli, ["remote", "serve", "--port", "9005"], env={ngrok_tunnel.NGROK_URL_ENV: domain}
+    )
+    assert result.exit_code == 0, result.output
+    assert "public link: https://my-reserved.example-domain.com/r/" in result.output
+    expose = "ngrok http --url=my-reserved.example-domain.com --inspect=false 127.0.0.1:9005"
+    assert f"expose with: {expose}" in result.output
+    flagged = CliRunner().invoke(
+        cli, ["remote", "serve", "--port", "9005", "--public-url", "remote-anmol.ngrok-free.app"]
+    )
+    assert "ngrok http --url=remote-anmol.ngrok-free.app --inspect=false" in flagged.output
 
 
 @pytest.mark.parametrize(

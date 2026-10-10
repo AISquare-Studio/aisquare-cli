@@ -84,6 +84,10 @@ class RemotePanel(ModalScreen[None]):
     #remotehint { height: 1; color: $text-muted; }
     #remotebox .row { height: auto; min-height: 3; }
     #remotebox .row Static { padding-top: 1; width: auto; }
+    /* The two sentences beside a switch wrap in what the row has left: as wide as their
+       text, they ran past the box, which cut off another process's auto-off and the
+       command that turns writes on. Two ids, to outweigh the rule above. */
+    #remotebox #remote-state, #remotebox #remote-write-hint { width: 1fr; }
     #remotebox .row Label { width: 22; padding-top: 1; }
     #remotebox .row Switch { margin-right: 1; }
     #remotebox .row Button { margin-top: 1; margin-left: 2; }

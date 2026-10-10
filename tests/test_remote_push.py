@@ -44,11 +44,12 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from starlette.testclient import TestClient
 
-from aisquare.cli.ui.remote_control import RemoteController
+from aisquare.cli.ui.remote_control import STARTING_NGROK, RemoteController
 from aisquare.core.paths import remote_audit_path, remote_push_path
 from aisquare.services import remote_push, remote_server
 from aisquare.services.ngrok_tunnel import (
     AUTHTOKEN_HINT,
+    INSTALL_HINT,
     TOO_OLD_HINT,
     NgrokTunnel,
     ngrok_command,
@@ -2585,6 +2586,43 @@ def test_a_restart_that_fails_is_tried_again_the_next_minute(isolated_home: Path
     assert controller.tunnel is shop.made[0], "the dead one stays, to be revived later"
     clock.now += timedelta(seconds=60)
     assert controller.revive_tunnel_if_dead() is True
+
+
+def test_ngrok_installed_while_remote_is_on_comes_up_within_the_minute(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no ngrok on PATH as Remote came on, the start dropped its tunnel, and the watchdog,
+    finding none, never looked again: an ngrok installed as the status line said left Remote
+    local-only for as long as it was on, and nothing said that only an off and on would
+    start it (sweep 5 of #243). The watchdog tries each minute, and its coming up is news."""
+    same = "https://remote-anmol.ngrok-free.app"
+    shop = TunnelShop(None, None, same, failures=(INSTALL_HINT, INSTALL_HINT))
+    clock = LocalClock()
+    server = FakeServer()
+    controller = RemoteController(server=server, tunnel_factory=shop, now=clock, url_timeout=0.2)
+    heard: list[tuple[str, bool]] = []
+    controller.on_news = lambda news, trouble: heard.append((news, trouble))
+    controller.turn_on()
+    assert controller.message == INSTALL_HINT and len(shop.made) == 1
+    assert controller.info is not None and controller.link_url() == controller.info.url_local
+    assert controller.revive_tunnel_if_dead() is False, "still not installed"
+    assert len(shop.made) == 2 and controller.message == INSTALL_HINT
+    clock.now += timedelta(seconds=59)
+    assert controller.revive_tunnel_if_dead() is False, "a minute has not passed"
+    assert len(shop.made) == 2
+    clock.now += timedelta(seconds=1)  # installed meanwhile
+    waits: list[NgrokTunnel] = []  # the stub's URL is there at once: held back, to see before it
+    monkeypatch.setattr(controller, "_await_url", waits.append)
+    assert controller.revive_tunnel_if_dead() is True
+    assert controller.message == STARTING_NGROK, "it never ran: nothing stopped"
+    RemoteController._await_url(controller, *waits)  # what the waiting thread runs
+    link = f"{same}/r/{server.token}/"
+    assert controller.tunnel is shop.made[2] and controller.link_url() == link
+    assert server.public_urls == [link] and controller.message is None
+    assert heard == [
+        (f"Remote is on, but phones cannot reach it — {INSTALL_HINT}", True),
+        ("ngrok is up — phones can reach Remote now", False),
+    ]
 
 
 def test_a_restart_that_exits_before_it_announces_is_restarted_a_minute_later(

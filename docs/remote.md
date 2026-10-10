@@ -82,8 +82,10 @@ ngrok that has not let go of it yet, say); not a Remote's first ngrok that
 stopped for want of an authtoken, or too old for `--url`, which the panel says
 how to fix. A restart that stopped so is tried each minute all the same: an
 authtoken put back while Remote is on brings the phones back with no off and on,
-which would sign every one out. A link ngrok announces late (a network still
-coming up) is shown, and used for notifications, as soon as it comes. With the
+which would sign every one out. An ngrok missing when Remote came on is looked
+for each minute too, so one installed meanwhile starts within the minute. A link
+ngrok announces late (a network still coming up) is shown, and used for
+notifications, as soon as it comes. With the
 panel closed, a notice says when a Remote that was on could not come back on as
 the UI started, when phones cannot reach it (ngrok missing or not up, and once it
 is up after all), when ngrok came back on a new link, and when auto-off turned

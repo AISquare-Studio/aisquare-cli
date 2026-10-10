@@ -2630,13 +2630,20 @@ class _ExitKeyGuard:
 
 
 @contextlib.contextmanager
-def _remote_board_refusals() -> Iterator[None]:
+def _remote_board_refusals(*refs: tuple[str, str | None, str]) -> Iterator[None]:
     """The board's refusals as ``asq`` gives them, as a write's: 409 ``team_disabled`` with
     the orchestrator off (``AISQUARE_TEAM=0``), as the agent actions answer it too, 409
     ``claim_lost`` for a task another session holds, and 400 ``ambiguous_id`` for a ref
     that names two tasks or sessions. They fell to 400 ``write_failed``, "the write
     failed", where nothing had, and to 404 ``not_found`` where two were found (sweep 2 of
-    #243)."""
+    #243).
+
+    A ref that names nothing is 404 ``not_found`` in a sentence that says which field
+    sent it, from ``refs``, each ``(field, value, "task" | "session")``. The board's
+    services raise a bare ``KeyError(ref)``, and its message was the ref in quotes,
+    ``"'ses_nope'"``: a note whose ``as`` and ``task`` were the same could not say which
+    one named nothing (sweep 3 of #243).
+    """
     from aisquare.core.store import AmbiguousIdError
     from aisquare.services import team as team_service
 
@@ -2649,6 +2656,29 @@ def _remote_board_refusals() -> Iterator[None]:
     except AmbiguousIdError as exc:
         said = f"{exc.ref!r} is ambiguous — use more characters"
         raise RequestError(400, "ambiguous_id", said) from None
+    except KeyError as exc:
+        missing = exc.args[0] if len(exc.args) == 1 else None
+        named = [(field, kind) for field, value, kind in refs if value == missing]
+        if not isinstance(missing, str) or not named:
+            raise
+        field, kind = _remote_ref_unknown(missing, named)
+        said = f"no {kind} matches {missing!r} (the {field!r} field)"
+        raise RequestError(404, "not_found", said) from None
+
+
+def _remote_ref_unknown(ref: str, named: list[tuple[str, str]]) -> tuple[str, str]:
+    """Which of ``named``, the ``(field, kind)`` of every field that sent ``ref``, names
+    nothing: the one field, or when two sent the same ref (``as`` and ``task``), the
+    first one the store has nothing for. The services raise ``KeyError(ref)`` for each."""
+    if len(named) > 1:
+        from aisquare.core.store import store_session
+
+        with contextlib.suppress(Exception), store_session() as store:
+            for field, kind in named:
+                found = store.get_session(ref) if kind == "session" else store.get_task(ref)
+                if found is None:
+                    return field, kind
+    return named[0]
 
 
 def live_writes() -> Writes:
@@ -2660,9 +2690,9 @@ def live_writes() -> Writes:
     def task_claim(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.services import team as team_service
 
-        author = _optional_ref(body, "as")
-        with _remote_board_refusals():
-            task = team_service.claim_task(_required(body, "ref"), session_ref=author)
+        ref, author = _required(body, "ref"), _optional_ref(body, "as")
+        with _remote_board_refusals(("ref", ref, "task"), ("as", author, "session")):
+            task = team_service.claim_task(ref, session_ref=author)
         return {"task": task.model_dump(mode="json")}, f"claimed {task.id} as={author or '-'}"
 
     def task_done(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -2673,7 +2703,7 @@ def live_writes() -> Writes:
         note = _optional_ref(body, "note")
         if note is not None:
             check_note_text(note, "note")
-        with _remote_board_refusals():
+        with _remote_board_refusals(("ref", ref, "task"), ("as", author, "session")):
             task = team_service.finish_task(ref, note=note, session_ref=author)
         return {"task": task.model_dump(mode="json")}, f"done {task.id} as={author or '-'}"
 
@@ -2691,7 +2721,9 @@ def live_writes() -> Writes:
         ``as=`` and bare, ``"to": "coder-1 as=manager"`` read as a note posted as
         the manager, and 300 characters of it cut the real ``as=`` off the line
         (sweep of #243). ``to`` holds only characters that print
-        (:func:`check_note_to`). ``as`` must name a session, or the note is refused.
+        (:func:`check_note_to`). ``as`` must name a session, or the note is refused,
+        and so is a ``task`` of another project's board: 400 ``invalid``, where it fell to
+        ``write_failed``, as if the write had failed (sweep 3 of #243).
         """
         from aisquare.services import team as team_service
 
@@ -2705,15 +2737,19 @@ def live_writes() -> Writes:
         author, to = _optional_ref(body, "as"), _optional_ref(body, "to", limit=NOTE_TO_MAX)
         if to is not None:
             check_note_to(to)
-        with _remote_board_refusals():
-            event = team_service.add_note(
-                text,
-                session_ref=author,
-                task_ref=_optional_ref(body, "task"),
-                to_role=to,
-                kind=kind,
-                cwd=None if project is None else _resolve_project(project).root,
-            )
+        task = _optional_ref(body, "task")
+        try:
+            with _remote_board_refusals(("as", author, "session"), ("task", task, "task")):
+                event = team_service.add_note(
+                    text,
+                    session_ref=author,
+                    task_ref=task,
+                    to_role=to,
+                    kind=kind,
+                    cwd=None if project is None else _resolve_project(project).root,
+                )
+        except ValueError as exc:  # a task of another project's board, as ``asq note`` says
+            raise RequestError(400, "invalid", str(exc)) from None
         addressed = "-" if to is None else json.dumps(to)
         summary = f"{event.kind} seq={event.seq} as={author or '-'} to={addressed}"
         return {"event": event.as_envelope().model_dump(mode="json")}, summary

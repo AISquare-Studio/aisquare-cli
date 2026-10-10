@@ -522,17 +522,27 @@ one still being read when a tick ends follows on a later tick. The connection
 closes with 4401 for a device that is no longer signed in, 4409 when the same
 device opened a fifth connection, and 4410 when Remote is turned off.
 
-With curl, unlock once and keep the cookie:
+With curl, unlock once and keep the cookie in a file of your own:
 
 ```sh
 BASE=http://127.0.0.1:8750/r/<token>
-curl -c jar -H "Origin: http://127.0.0.1:8750" -H "content-type: application/json" \
-  -d '{"password": "amber-birch-cedar-delta"}' "$BASE/api/unlock"
-curl -b jar "$BASE/api/needs"
-curl -b jar -H "Origin: http://127.0.0.1:8750" -H "content-type: application/json" \
+jar=$(mktemp)   # mode 600: it holds a device's sign-in, good for 7 days
+read -rs PASS   # type the passphrase; it is echoed nowhere and sent on stdin, not in argv
+printf '{"password": "%s"}' "$PASS" | curl -c "$jar" -H "Origin: http://127.0.0.1:8750" \
+  -H "content-type: application/json" --data @- "$BASE/api/unlock"
+unset PASS
+curl -b "$jar" "$BASE/api/needs"
+curl -b "$jar" -H "Origin: http://127.0.0.1:8750" -H "content-type: application/json" \
   -d '{"agent": "coder-auth", "project": "prj_8c1e", "keys": ["Escape"], "request_id": "esc-1"}' \
   "$BASE/api/send-keys"
+rm -f "$jar"
 ```
+
+Whoever can read the jar is that device until it is revoked (`aisquare remote
+revoke <id>`), it expires, or Remote is turned off: keep it out of a shared
+directory, and the passphrase off any command line, where every user of the
+machine can read it (`ps`). The link's token is on each command line still: on a
+machine others use, keep the address in a `curl -K` config file only you can read.
 
 A write's `request_id` is optional. Sent again with the same request within 15
 minutes, it is answered with what the first one did instead of running twice;

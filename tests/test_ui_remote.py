@@ -48,6 +48,7 @@ from aisquare.services import remote_page, remote_server
 from aisquare.services.ngrok_tunnel import INSTALL_HINT, NgrokTunnel, build_public_url
 from aisquare.services.remote_server import UNLOCK_GLOBAL_FAILURES, Runtime, UnlockBudget
 from tests.test_remote_control import FakeServer, FakeTunnel, SlowServer, fake_tunnel_factory
+from tests.ui_workers import settle_page
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -110,7 +111,9 @@ def drive(
     tunnel: Callable[[int], NgrokTunnel],
     size: tuple[int, int] = SIZE,
 ) -> T:
-    """Run ``fn`` against a mounted ``FleetApp`` whose Remote uses the stub server + ``tunnel``."""
+    """Run ``fn`` against a mounted ``FleetApp`` whose Remote uses the stub server + ``tunnel``.
+
+    The start-up reads have been painted before ``fn`` starts (``started``)."""
 
     async def run() -> T:
         controller = RemoteController(
@@ -118,7 +121,7 @@ def drive(
         )
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], remote=controller)
         async with app.run_test(size=size, notifications=True) as pilot:
-            await pilot.pause()
+            await started(app)
             result = await fn(pilot)
         # Quit leaves a Remote stopping on its own thread; run_ui waits for it, and so must
         # the next test, whose server would be the one a late stop took down.
@@ -126,6 +129,23 @@ def drive(
         return result
 
     return asyncio.run(run())
+
+
+async def started(app: FleetApp) -> None:
+    """Let the app's start-up reads answer before a test drives it, as ``test_ui_shell``'s
+    ``drive`` lets them.
+
+    The mount starts two thread workers, the doctor run and the Accounts read. A test
+    whose ``fn`` returned before their answers were handled had them handled while
+    ``run_test`` tore the app down, since it shuts the app down beside its running
+    message loop: ``_accounts_read`` queried a default screen already pruned, and the
+    test failed on a ``NoMatches('Sidebar')`` it never asked about. The read here is
+    the real ``claude_accounts.overview``, a PATH walk for ``claude`` (once per PATHEXT
+    on Windows) and a store read, and on windows-latest a ``fn`` that only turns Remote
+    on ended before it (CI run 38027233562). A real quit ends the message loop before
+    the screens are pruned, so only a test meets this.
+    """
+    await settle_page(app)
 
 
 def painted(app: FleetApp) -> list[str]:
@@ -1402,7 +1422,7 @@ def drive_controller(
     async def run() -> tuple[T, float]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], remote=controller)
         async with app.run_test(size=SIZE, notifications=True) as pilot:
-            await pilot.pause()
+            await started(app)
             result = await fn(pilot)
             leaving = time.monotonic()
         return result, time.monotonic() - leaving

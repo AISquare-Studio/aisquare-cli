@@ -969,9 +969,10 @@ const SWITCHED = {
  * says, and of a restart whose line was typed. And the same switch answered only by the
  * ledger, after its request and the retry were lost. */
 async function notTyped() {
+  const answers = { restart: { resumed: true, prompt_typed: true, how: "resumed its session", failures: [] } };
   const page = await agentView({
     "POST api/agent/switch": () => ({ status: 200, json: SWITCHED }),
-    "POST api/agent/restart": () => ({ status: 200, json: { resumed: true, prompt_typed: true, how: "resumed its session", failures: [] } }),
+    "POST api/agent/restart": () => ({ status: 200, json: answers.restart }),
   });
   page.live().frame("fleet", FLEET);
   await settle();
@@ -984,6 +985,8 @@ async function notTyped() {
   };
   const switched = await act("Switch account…", "Switch account");
   const restarted = await act("Restart…", "Restart");
+  answers.restart = { resumed: false, prompt_typed: true, how: "started fresh with a hand-off prompt", failures: ["claims: 1 claim could not be released (database is locked)"] };
+  const unreleased = await act("Restart…", "Restart");
   const lost = await agentView({ "POST api/agent/switch": () => "network" });
   lost.live().frame("fleet", FLEET);
   await settle();
@@ -997,7 +1000,7 @@ async function notTyped() {
   const id = lost.sent("api/agent/switch")[0].request_id;
   lost.live().frame("action", { actions: [{ request_id: id, endpoint: "agent/switch", status: 200, body: SWITCHED, at: "2026-10-07T10:13:00+00:00" }] });
   await settle();
-  return { switched, restarted, ledger: lost.toast() };
+  return { switched, restarted, unreleased, ledger: lost.toast() };
 }
 
 /* Stop, on an agent that shows a prompt: the machine refuses in its API's words, the

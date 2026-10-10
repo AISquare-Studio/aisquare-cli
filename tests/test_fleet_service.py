@@ -8309,6 +8309,7 @@ def test_a_restart_says_a_release_its_stop_could_not_make(
     assert receipt.started.ended_at is None
     [said] = [note for note in receipt.notes if note.startswith("claims:")]
     assert "could not be released" in said and "locked" in said
+    assert receipt.failures[0] == said, "what did not happen, as a switch's receipt says it"
     assert _task_now(mine.id).claimed_by == first
 
 

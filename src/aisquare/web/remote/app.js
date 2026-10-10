@@ -926,7 +926,7 @@ function settleFromLedger(entries) {
       const verb = S.orphans.get(entry.request_id).verb;
       S.orphans.delete(entry.request_id);
       savePending();
-      toast(verb + ": " + (res.ok ? untold(res.data) || "done" : failText(res)));
+      toast(verb + ": " + (res.ok ? "done" + (untold(res.data) && " — " + untold(res.data)) : failText(res)));
     }
   }
 }
@@ -2003,7 +2003,7 @@ function tellSheet(ctx, mode) {
         sheet.close();
         const told = res.data && typeof res.data === "object" ? res.data : {};
         const delivered = told.delivered === true;
-        // Not typed: the machine says what came of it, a board note or text left unsent.
+        // Not typed: the machine says what came of it (a board note, unsent text).
         if (delivered) toast("Typed into " + label);
         else if (isText(told.how)) toast(label + ": " + plainText(told.how));
         else toast(current === "auto" ? "Left a note for " + label + " — it reads it at its next prompt" : "Not typed into " + label + " — look at its pane");
@@ -2018,7 +2018,7 @@ function tellSheet(ctx, mode) {
         noLonger(item, now);
         if (Array.isArray(now)) return sheet.say(noLongerText(item, now) + " Tell again to send it anyway.");
       }
-      // A pin's refusal (a restart since) names the new row, which Tell again tells.
+      // A pin's refusal names the label's new row: Tell again tells it.
       if (now && REF.test(now.agent_id || "")) {
         ctx.agentId = now.agent_id;
         return sheet.say(failText(res) + ". Tell again to send it to the new " + label + ".");
@@ -2083,19 +2083,18 @@ function effectSentence(kind, label, o) {
   return o.dismiss ? text + " Its prompt is dismissed (No) first." : text;
 }
 
-/* A replacement whose first line was NOT typed idles: how it began, and why. */
+/* What a restart or switch left undone: an untyped first line idles the replacement. */
 function untold(d) {
-  if (!d || d.prompt_typed !== false) return "";
-  const why = Array.isArray(d.failures) && d.failures.length ? " — " + plainText(d.failures.join("; ")) : "";
-  return plainText(d.how) + why + ". Tell it what to do";
+  const why = Array.isArray(d.failures) ? plainText(d.failures.join("; ")) : "";
+  return d.prompt_typed === false ? plainText(d.how) + (why && " — " + why) + ". Tell it what to do" : why;
 }
 
 function doneSentence(kind, label, data) {
   const d = data && typeof data === "object" ? data : {};
   if (kind === "stop" && isText(d.release_failed)) return "Stopped " + label + ", but its claims were not released: " + plainText(d.release_failed);
-  if (untold(d)) return AGENT_ACTIONS[kind].done + " " + label + ": " + untold(d);
-  if (kind === "restart" && d.resumed === true) return "Restarted " + label + " on its own conversation";
-  return AGENT_ACTIONS[kind].done + " " + label;
+  const done = AGENT_ACTIONS[kind].done + " " + label;
+  if (untold(d)) return done + (d.prompt_typed === false ? ": " : ", but not all of it: ") + untold(d);
+  return kind === "restart" && d.resumed === true ? done + " on its own conversation" : done;
 }
 
 /* Stop, restart or switch: says what it will do, sends confirm and the pins, offers Esc. */

@@ -339,7 +339,8 @@ sentence what will happen, and send the agent's name as confirmation. Restart
 and switch can take 40 seconds; the page waits, and shows the result even if the
 phone slept meanwhile. A replacement whose first line (the hand-off prompt, or
 the line telling a resumed session to go on) could not be typed sits idle at an
-empty prompt: the page says so and why, and that it needs a Tell.
+empty prompt: the page says so and why, and that it needs a Tell. What else a
+restart or a switch could not do (claims not released or moved) it says too.
 
 **The dialog guard.** Stopping types `/exit` and Enter, and an Enter into an open
 dialog would answer it: approve a command, pick an option, accept a plan. So

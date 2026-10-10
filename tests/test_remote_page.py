@@ -1647,7 +1647,12 @@ def test_a_replacement_whose_first_line_was_not_typed_is_said_and_told_to_be_tol
         "sheet": None,
         "toast": "Restarted coder-1 on its own conversation",
     }
-    assert report["ledger"] == f"Switch account coder-1: {said}"
+    assert report["unreleased"] == {
+        "sheet": None,
+        "toast": "Restarted coder-1, but not all of it: claims: 1 claim could not be "
+        "released (database is locked)",
+    }, "what else did not happen, said as the CLI and the TUI say it"
+    assert report["ledger"] == f"Switch account coder-1: done — {said}"
 
 
 def test_a_stop_refused_at_a_prompt_is_explained_in_the_pages_own_words(

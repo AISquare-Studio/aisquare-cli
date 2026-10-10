@@ -70,6 +70,12 @@ from aisquare.services.onboarding import FixResult, OnboardOutcome, PathVerdict
 WORKER_GROUP = "welcome"
 """Every worker the page starts; one of each name runs at a time."""
 
+
+def worker_name(step: str) -> str:
+    """The name of the page's worker for ``step`` (``onboard``, ``connect``, ``manager``…)."""
+    return f"welcome-{step}"
+
+
 FRAME_WAITS = 50
 FRAME_WAIT_SECONDS = 0.1
 """How long step 1 waits for the shell's first frame (5 s) before reading the store itself."""
@@ -499,12 +505,12 @@ class WelcomeView(VerticalScroll):
 
     def _run(self, name: str, work: Callable[[], object]) -> None:
         self.run_worker(
-            work, name=f"welcome-{name}", group=WORKER_GROUP, thread=True, exit_on_error=False
+            work, name=worker_name(name), group=WORKER_GROUP, thread=True, exit_on_error=False
         )
 
     def _in_flight(self, name: str) -> bool:
         return any(
-            worker.name == f"welcome-{name}" and not worker.is_finished for worker in self.workers
+            worker.name == worker_name(name) and not worker.is_finished for worker in self.workers
         )
 
     def look(self, *, full: bool) -> None:
@@ -569,7 +575,7 @@ class WelcomeView(VerticalScroll):
         event.stop()
         if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
             return
-        name = (worker.name or "").removeprefix("welcome-")
+        name = (worker.name or "").removeprefix(worker_name(""))
         self.busy.discard(name)
         if event.state is WorkerState.CANCELLED:
             return

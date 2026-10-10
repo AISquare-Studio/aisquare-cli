@@ -37,6 +37,7 @@ from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, DoctorSection, ProjectSelected
 from aisquare.cli.ui.views import welcome
+from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.onboard import ProjectOnboarded
 from aisquare.cli.ui.views.welcome import FLEET_UP, Seams, WelcomeView
 from aisquare.core import claude_accounts as accounts_core
@@ -2029,6 +2030,41 @@ def test_a_refusal_goes_once_its_row_is_reaped_while_the_page_is_hidden(
     assert not shown and outcome == "refused", "premise: refused, with the page hidden"
     assert reason not in back, back
     assert "✓ coder-1" in back and "coder-2" not in back, back
+
+
+def test_update_waits_for_welcomes_real_start_by_its_workers_name(
+    captain: str | None,
+    scripted: Callable[[Machine], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Update and Uninstall wait for every worker that writes, found by name on the app's
+    worker manager (round 16 of #257). Welcome's real Start manager, held in its spawn, is
+    found by the name the page gives it, and the toast says what it is."""
+    ready, project = _ready_machine(tmp_path)
+    machine = HeldStart(claude=ready.claude, found=ready.found)
+    listed_by(machine, project, monkeypatch)
+    scripted(machine)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[Any]:
+        said: list[str] = []
+        app.notify = lambda message, **_: said.append(str(message))  # type: ignore[method-assign]
+        page.query_one("#fleet-manager", Button).press()
+        # The start is held on purpose: settle no worker group while it is.
+        await settle_until(app, machine.entered.is_set, group="held")
+        app.post_message(DoctorView.HandOff(("upgrade", "--reopen")))
+        await settle_page(app, group="held")
+        refused = app.hand_off
+        machine.release.set()  # the manager start lands
+        await settle_page(app)
+        app.post_message(DoctorView.HandOff(("upgrade", "--reopen")))
+        await settle_page(app)
+        return [refused, said, app.hand_off]
+
+    refused, said, after = in_shell(machine, go)
+    assert refused is None, "the manager start is still running"
+    assert said == ["a manager start is still running — try again when it ends"]
+    assert after == ("upgrade", "--reopen"), "control: once it has landed, Update quits"
 
 
 def test_a_spawn_refusal_is_not_said_under_a_row_that_came_later(

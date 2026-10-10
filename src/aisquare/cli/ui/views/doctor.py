@@ -34,6 +34,8 @@ from aisquare.services.onboarding import FixCommand, FixResult, Runner
 
 _SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "✗"}
 _STYLE = {CheckStatus.ok: "green", CheckStatus.warn: "yellow", CheckStatus.fail: "bold red"}
+FIX_WORKER = "doctor-fix"
+"""The worker a one-click fix runs in (and the doctor after it): it writes."""
 
 Refresh = Callable[[Path | None], list[DoctorCheck]]
 """``cwd -> checks``: how the view re-runs the doctor after a fix. Raising is
@@ -260,7 +262,7 @@ class DoctorView(VerticalScroll):
         self._set_status(Text(f"… running {fix.label}", style="dim"))
         self._apply(fix)
 
-    @work(thread=True, exclusive=True, group="doctor-fix", exit_on_error=False)
+    @work(thread=True, exclusive=True, name=FIX_WORKER, group=FIX_WORKER, exit_on_error=False)
     def _apply(self, fix: FixCommand) -> None:
         """Run the fix, then the doctor, off the UI thread; report back on it."""
         result = onboarding.apply_fix(fix, self.cwd, run=self._run)

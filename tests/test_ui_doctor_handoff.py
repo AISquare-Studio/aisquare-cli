@@ -29,11 +29,14 @@ from typer.testing import CliRunner
 from aisquare.cli import install as install_cli
 from aisquare.cli.app import app as cli_app
 from aisquare.cli.ui import app as ui_app
-from aisquare.cli.ui.sidebar import AccountsSelected, AddProject, ProjectSelected
+from aisquare.cli.ui.sidebar import AddProject, ProjectSelected
 from aisquare.cli.ui.views import accounts as accounts_view
+from aisquare.cli.ui.views import agent as agent_view
+from aisquare.cli.ui.views import doctor as doctor_view
+from aisquare.cli.ui.views import explainability as explainability_view
+from aisquare.cli.ui.views import project as project_view
+from aisquare.cli.ui.views import welcome as welcome_view
 from aisquare.cli.ui.views.doctor import DoctorView
-from aisquare.cli.ui.views.onboard import OnboardView
-from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core import selfcli
 from aisquare.services.install_route import LatestRelease
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
@@ -136,11 +139,15 @@ def test_only_asqs_own_doctor_is_machine_wide_and_no_doctor_may_be_busy(
         await settle_page(app)
         doctors = {str(view.id): view.machine for view in app.query(DoctorView)}
         project = next(v for v in app.query(DoctorView) if v.id == "project-doctor")
-        project.busy = True
+        release = threading.Event()
+        project.run_worker(
+            lambda: release.wait(10), name=doctor_view.FIX_WORKER, thread=True, exit_on_error=False
+        )  # its fix, still writing
         app.query_one("#doctor-update", Button).press()
-        await settle_page(app)
+        await settle_page(app, group="held")  # the fix is held on purpose: settle no group
         refused = app.hand_off
-        project.busy = False
+        release.set()
+        await settle_page(app)
         app.query_one("#doctor-update", Button).press()
         await settle_page(app)
         return doctors, refused, app.hand_off
@@ -152,54 +159,82 @@ def test_only_asqs_own_doctor_is_machine_wide_and_no_doctor_may_be_busy(
     assert after == ("upgrade", "--reopen"), "control: with no fix running it quits"
 
 
-WAIT = "a fix, a setup, a start or an account change is still running — try again when it ends"
-"""What Update and Uninstall say while work they would cut off still runs."""
+WRITING = ui_app._writing_workers()
+"""Every worker Update and Uninstall wait for, by name, with the toast's words for it."""
 
 
-@pytest.mark.parametrize(
-    "work",
-    ["welcome-onboard", "welcome-connect", "welcome-manager", "welcome-coders", "onboard-init"],
-)
-def test_update_waits_for_welcome_and_onboard_work_as_for_a_fix(
-    isolated_home: Path,
-    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
-    monkeypatch: pytest.MonkeyPatch,
-    work: str,
-) -> None:
-    """Update and Uninstall waited only for Doctor-view fixes. Welcome's setup (init, then
-    doctor), its Connect and its fleet starts, and the Onboard view's init, were cut off:
-    asq quit, asyncio.run joined their thread with the terminal blank, their outcome was
-    never shown, and the hand-over could replace the install under a running init (round
-    15 of #257). Each is waited for, with the toast saying so."""
-    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
+def _held_hand_off(name: str) -> tuple[Any, list[str], Any]:
+    """Update pressed while a worker called ``name`` runs, held; then again once it ended."""
+    release = threading.Event()
 
     async def fn(pilot: Pilot[None]) -> tuple[Any, list[str], Any]:
         app = pilot.app
         assert isinstance(app, ui_app.FleetApp)
-        await app.on_add_project(AddProject())  # the Onboard view, really open
-        await settle_page(app)
         said: list[str] = []
-        monkeypatch.setattr(app, "notify", lambda message, **_: said.append(str(message)))
-        welcome = app.query_one(WelcomeView)
-        onboard = app.query_one(OnboardView)
-        if work == "onboard-init":
-            onboard.running = True
-        else:
-            welcome.busy.add(work.removeprefix("welcome-"))
+        app.notify = lambda message, **_: said.append(str(message))  # type: ignore[method-assign]
+        app.run_worker(lambda: release.wait(10), name=name, thread=True, exit_on_error=False)
         app.query_one("#doctor-update", Button).press()
-        await settle_page(app)
+        await settle_page(app, group="held")  # the worker is held on purpose: settle no group
         refused = app.hand_off
-        onboard.running = False
-        welcome.busy.clear()
+        release.set()
+        await settle_page(app)
         app.query_one("#doctor-update", Button).press()
         await settle_page(app)
         return refused, said, app.hand_off
 
-    while_busy, said, after = drive(fn)
+    return drive(fn)
 
-    assert while_busy is None, f"{work} is still running"
-    assert said == [WAIT]
+
+@pytest.mark.parametrize("name", sorted(WRITING))
+def test_update_waits_for_every_worker_that_writes(
+    isolated_home: Path,
+    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    """Update and Uninstall quit asq and hand the terminal over. Each view kept its own flag
+    for them to ask, and the next writer was missed: Welcome's setup, Connect and starts and
+    the Onboard view's init (round 15 of #257), then the Project tab's Start manager, an
+    agent's Stop and Restart and Explainability's writes (round 16). asq quit under them,
+    asyncio.run joined their thread with the terminal blank, and the outcome was never
+    shown. One rule on the app's workers, by the views' own names; the toast says which."""
+    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
+
+    while_busy, said, after = _held_hand_off(name)
+
+    assert while_busy is None, f"{name} is still running"
+    assert said == [f"{WRITING[name]} is still running — try again when it ends"]
     assert after == ("upgrade", "--reopen"), "control: once it has ended, Update quits"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        accounts_view.SIGN_IN_WORKER,
+        accounts_view.USAGE_WORKER,
+        accounts_view.CREDITS_WORKER,
+        project_view.DOCTOR_WORKER,
+        agent_view.LABELS_WORKER,
+        explainability_view.STATUS_WORKER,
+        welcome_view.worker_name("look"),
+    ],
+)
+def test_update_does_not_wait_for_a_worker_that_only_reads_or_waits(
+    isolated_home: Path,
+    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    """A worker that only reads holds nothing a quit could cut off. Nor does a pending
+    AISquare sign-in: it waits for the browser until a token arrives, a quit cancels the
+    wait (``on_unmount``) and nothing is stored past a cancel. Counted, it held Update and
+    Uninstall for as long as the device code lived, 10 to 15 minutes (round 16 of #257)."""
+    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
+
+    while_running, said, _ = _held_hand_off(name)
+
+    assert name not in WRITING
+    assert while_running == ("upgrade", "--reopen") and said == [], said
 
 
 class _FakeApp:
@@ -360,44 +395,3 @@ def test_reopen_is_hidden_from_help(runner: CliRunner) -> None:
 
     assert shown.exit_code == 0 and "--dry-run" in text, "control: help lists flags"
     assert "--reopen" not in text
-
-
-@pytest.mark.parametrize("worker", sorted(accounts_view.WRITING_WORKERS))
-def test_update_waits_for_the_accounts_pages_writing_work(
-    isolated_home: Path,
-    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
-    monkeypatch: pytest.MonkeyPatch,
-    worker: str,
-) -> None:
-    """The Accounts page signs in and out of AISquare, completes a Claude sign-in, removes and
-    arranges accounts, each in a thread worker that writes the session or the account
-    registry. Update and Uninstall quit under it as under Welcome's work (round 15 of #257);
-    they wait for it. A worker of that name really runs, held, on the page."""
-    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
-    release = threading.Event()
-
-    async def fn(pilot: Pilot[None]) -> tuple[Any, list[str], Any]:
-        app = pilot.app
-        assert isinstance(app, ui_app.FleetApp)
-        await app.on_accounts_selected(AccountsSelected())
-        await settle_page(app)
-        said: list[str] = []
-        monkeypatch.setattr(app, "notify", lambda message, **_: said.append(str(message)))
-        page = app.query_one(accounts_view.AccountsView)
-        page.run_worker(
-            lambda: release.wait(10), name=worker, group=worker, thread=True, exit_on_error=False
-        )
-        app.query_one("#doctor-update", Button).press()
-        await settle_page(app, group="held")  # the page's worker is held: settle no group
-        refused = app.hand_off
-        release.set()
-        await settle_page(app)
-        app.query_one("#doctor-update", Button).press()
-        await settle_page(app)
-        return refused, said, app.hand_off
-
-    while_busy, said, after = drive(fn)
-
-    assert while_busy is None, f"{worker} is still running"
-    assert said == [WAIT]
-    assert after == ("upgrade", "--reopen"), "control: once it has ended, Update quits"

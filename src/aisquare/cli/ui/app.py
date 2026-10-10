@@ -1122,27 +1122,22 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
         Never under work that is still writing, which quitting would cut off (asyncio.run
         then joins its thread with the terminal blank, and the hand-over can replace the
-        install under it): a fix in ANY Doctor view (the Project tab's and Onboard's run
-        their own), Welcome's setup, Connect or fleet start, the Onboard view's init, or
-        the Accounts page's sign-in, sign-out or account change (round 15 of #257).
+        install under it): any worker :func:`_writing_workers` names, in any view, shown
+        or not (rounds 15 and 16 of #257).
         """
-        if self._work_running():
-            self.notify(
-                "a fix, a setup, a start or an account change is still running — try again "
-                "when it ends",
-                severity="warning",
-            )
+        running = self._work_running()
+        if running is not None:
+            self.notify(f"{running} is still running — try again when it ends", severity="warning")
             return
         self.hand_off = event.args
         self.exit()
 
-    def _work_running(self) -> bool:
-        """Whether a view runs work a quit would cut off (see ``on_doctor_view_hand_off``)."""
-        return (
-            any(view.busy for view in self.query(DoctorView))
-            or any(view.busy for view in self.query(WelcomeView))
-            or any(view.running for view in self.query(OnboardView))
-            or any(view.busy for view in self.query(AccountsView))
+    def _work_running(self) -> str | None:
+        """What writing work still runs, in the toast's words, else ``None``."""
+        writing = _writing_workers()
+        return next(
+            (writing[w.name] for w in self.workers if w.name in writing and not w.is_finished),
+            None,
         )
 
     def on_doctor_refreshed(self, event: DoctorRefreshed) -> None:
@@ -1178,6 +1173,47 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def projects() -> list[ProjectInfo]:
         with store_session() as store:
             return store.list_projects()
+
+
+def _writing_workers() -> dict[str, str]:
+    """Every worker that writes, by name, with what it is in a toast's words.
+
+    One rule on the app's worker manager, where views kept a flag each (a bool, a set, a
+    property) and the next writer was missed: the Project tab's Start manager, an agent's
+    Stop and Restart, and Explainability's writes all quit under an Update (round 16 of
+    #257). The views' own name constants, imported here so the import block stays as it
+    is. The AISquare sign-in is left out: it waits for the browser until a token arrives,
+    a quit cancels that wait (``AccountsView.on_unmount``) and nothing is stored past a
+    cancel, and counted it held Update for the device code's lifetime.
+    """
+    from aisquare.cli.ui.views import (
+        accounts,
+        agent,
+        doctor,
+        explainability,
+        onboard,
+        project,
+        welcome,
+    )
+
+    return {
+        doctor.FIX_WORKER: "a fix",
+        onboard.ONBOARD_WORKER: "a folder's setup",
+        welcome.worker_name("onboard"): "a folder's setup",
+        welcome.worker_name("connect"): "Connect",
+        welcome.worker_name("manager"): "a manager start",
+        welcome.worker_name("coders"): "the coders' start",
+        project.SPAWN_WORKER: "a manager start",
+        agent.STOP_WORKER: "an agent's stop",
+        agent.RESTART_WORKER: "an agent's restart",
+        explainability.SAVE_WORKER: "Explainability's setup",
+        explainability.REGISTER_WORKER: "Explainability's registration",
+        explainability.SHIP_WORKER: "Explainability's ship",
+        accounts.SIGN_OUT_WORKER: "an AISquare sign-out",
+        accounts.COMPLETE_WORKER: "a Claude sign-in",
+        accounts.REMOVE_WORKER: "an account's removal",
+        accounts.ARRANGE_WORKER: "an account change",
+    }
 
 
 def run_ui(**options: Any) -> None:

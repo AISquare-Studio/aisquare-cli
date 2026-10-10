@@ -10,6 +10,7 @@ that must NOT be spawned twice, the ``prompt`` that must NOT reach a spawn.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -613,6 +614,15 @@ def _lost_coder_listing() -> list[FleetAgentStatus]:
     ]
 
 
+def _entering_error(root: Path) -> str:
+    """The operating system's own words for entering ``root``, which this user cannot now."""
+    try:
+        os.stat(os.path.join(root, os.curdir))
+    except OSError as exc:
+        return str(exc.strerror)
+    raise AssertionError(f"{root} can be entered")
+
+
 def _starter(
     project: ProjectInfo, before: str
 ) -> tuple[Callable[[], first_run.FleetStart], Spawns, Restarts]:
@@ -657,12 +667,12 @@ def test_a_root_this_user_cannot_enter_starts_and_restarts_nothing(
         root.chmod(0o600)
     try:
         refused = start()
+        reason = _entering_error(root)  # the OS's words: Windows says "cannot find the file"
     finally:
         if cause == "gone":
             moved.rename(root)
         else:
             root.chmod(0o755)
-    reason = "No such file or directory" if cause == "gone" else "Permission denied"
     assert [(s.label, s.outcome, s.detail) for s in refused.steps] == [
         ("fleet", "refused", f"could not look into {root}: {reason}")
     ]
@@ -720,6 +730,14 @@ def test_a_git_dir_that_cannot_be_looked_into_is_a_refusal_after_the_steps_befor
     moved = tmp_path / "git-moved"
     git.rename(moved)
     git.symlink_to(git)  # a loop: stat raises ELOOP, Path.exists answers False
+    try:
+        os.stat(git)
+    except FileNotFoundError:
+        git.unlink()
+        moved.rename(git)
+        pytest.skip("this OS answers a symlink loop as missing, not as an error")
+    except OSError:
+        pass  # the premise: an error other than "missing"
     listed = _lost_coder_listing()
     spawns, restarts = Spawns(), Restarts()
     try:

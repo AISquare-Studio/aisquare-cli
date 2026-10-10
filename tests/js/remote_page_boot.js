@@ -958,6 +958,84 @@ async function paneCursor() {
   return { shown: await cells(true), hidden: await cells(false), unsaid: await cells(undefined) };
 }
 
+const NOT_TYPED = "the agent did not come up within 20 s and the prompt has several lines — NOT typed";
+const SWITCHED = {
+  stopped: { id: "agt_1", label: "coder-1" }, started: { id: "agt_2", label: "coder-1" }, from_slot: 1, to_slot: 2,
+  resumed: false, prompt_typed: false, how: "started fresh, but its hand-off prompt was NOT typed",
+  failures: [NOT_TYPED], notes: ["headroom: slot 2 has the most left", NOT_TYPED], project: PROJECT,
+};
+
+/* Switch account answered 200 with its replacement's first line NOT typed: what the page
+ * says, and of a restart whose line was typed. And the same switch answered only by the
+ * ledger, after its request and the retry were lost. */
+async function notTyped() {
+  const answers = { restart: { resumed: true, prompt_typed: true, how: "resumed its session", failures: [] } };
+  const page = await agentView({
+    "POST api/agent/switch": () => ({ status: 200, json: SWITCHED }),
+    "POST api/agent/restart": () => ({ status: 200, json: answers.restart }),
+  });
+  page.live().frame("fleet", FLEET);
+  await settle();
+  const act = async (item, go) => {
+    click(buttonNamed(page.main(), "Actions…"));
+    click(buttonNamed(page.run("UI.sheet"), item));
+    click(buttonNamed(page.run("UI.sheet"), go));
+    await settle();
+    return { sheet: sheetTitle(page), toast: page.toast() };
+  };
+  const switched = await act("Switch account…", "Switch account");
+  const restarted = await act("Restart…", "Restart");
+  answers.restart = { resumed: false, prompt_typed: true, how: "started fresh with a hand-off prompt", failures: ["claims: 1 claim could not be released (database is locked)"] };
+  const unreleased = await act("Restart…", "Restart");
+  const lost = await agentView({ "POST api/agent/switch": () => "network" });
+  lost.live().frame("fleet", FLEET);
+  await settle();
+  click(buttonNamed(lost.main(), "Actions…"));
+  click(buttonNamed(lost.run("UI.sheet"), "Switch account…"));
+  click(buttonNamed(lost.run("UI.sheet"), "Switch account"));
+  await settle();
+  lost.acceptSockets();
+  paneCame(lost);
+  await settle();
+  const id = lost.sent("api/agent/switch")[0].request_id;
+  lost.live().frame("action", { actions: [{ request_id: id, endpoint: "agent/switch", status: 200, body: SWITCHED, at: "2026-10-07T10:13:00+00:00" }] });
+  await settle();
+  return { switched, restarted, unreleased, ledger: lost.toast() };
+}
+
+/* A stop that could not release its agent's claims, and a Tell the machine left as a board
+ * note, each answered only by the ledger after its request and the retry were lost: what
+ * the page says of each. And the same stop answered at once. */
+async function ledgerUndone() {
+  const kept = { agent: { id: "agt_1", label: "coder-1" }, claims_released: [], release_failed: "database is locked", project: PROJECT };
+  const noted = { label: "coder-1", delivered: false, how: "it is working — filed as board note #12 to coder-1", mode: "auto", project: PROJECT };
+  const act = async (endpoint, answer, item, go) => {
+    const page = await agentView({ ["POST api/" + endpoint]: () => answer });
+    page.live().frame("fleet", FLEET);
+    await settle();
+    click(buttonNamed(page.main(), "Actions…"));
+    click(buttonNamed(page.run("UI.sheet"), item));
+    const text = find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA");
+    if (text) text.value = "merge it";
+    click(buttonNamed(page.run("UI.sheet"), go));
+    await settle();
+    if (answer !== "network") return page.toast();
+    page.acceptSockets();
+    paneCame(page);
+    await settle();
+    const id = page.sent("api/" + endpoint)[0].request_id;
+    const body = endpoint === "agent/stop" ? kept : noted;
+    page.live().frame("action", { actions: [{ request_id: id, endpoint, status: 200, body, at: "2026-10-07T10:13:00+00:00" }] });
+    await settle();
+    return page.toast();
+  };
+  return {
+    stopped: await act("agent/stop", { status: 200, json: kept }, "Stop…", "Stop"),
+    stopLedger: await act("agent/stop", "network", "Stop…", "Stop"),
+    toldLedger: await act("agent/tell", "network", "Tell…", "Tell"),
+  };
+}
+
 /* Stop, on an agent that shows a prompt: the machine refuses in its API's words, the
  * sheet says why in its own and adds the dismissal to what Stop will do, and the next tap
  * sends dismiss_dialog. */
@@ -1788,10 +1866,10 @@ async function keysInOrder() {
 }
 
 /* The pad's guards, which only the page keeps: ^C and ^D each ask first; a second Esc within
- * 1.5 s asks first (two open Claude Code's Rewind), at once or 1.4 s after the last, and one
- * 2 s after the last does not; a second ^C the machine refuses double_press goes again, with
- * confirm_exit, only once the human says so. After each step: the sheet on screen and how
- * many keys were sent. */
+ * 1.5 s asks first (two open Claude Code's Rewind), at once or 1.4 s after the last, again
+ * once its sheet was closed, and one 2 s (or 1.6 s) after the last does not; a second ^C the
+ * machine refuses double_press goes again, with confirm_exit, only once the human says so.
+ * After each step: the sheet on screen and how many keys were sent. */
 async function padConfirms() {
   let ctrlC = 0;
   const page = await agentView({
@@ -1822,6 +1900,10 @@ async function padConfirms() {
   page.run("Date.now = ((then) => () => then + 1400)(Date.now());");
   await act("pad", "Esc");
   await act("sheet", "Close");
+  await act("pad", "Esc");
+  await act("sheet", "Close");
+  page.run("Date.now = ((then) => () => then + 200)(Date.now());");
+  await act("pad", "Esc");
   return { steps, keys: sent().map((body) => (body.confirm_exit === true ? body.keys.concat("confirm_exit") : body.keys)) };
 }
 
@@ -1865,6 +1947,49 @@ async function transcriptSendGuarded() {
     return copy;
   });
   return { bodies, refused, typed: say.value };
+}
+
+/* The key pad on the Transcript tab, which draws no pane: 1, ⏎ and More's y each ask the
+ * machine to type nothing while a prompt may be up (dialog_guard), as Send does; the first is
+ * refused dialog_open, and what the page says then. Esc goes as it does from Live, and a
+ * second Esc straight after it is not sent at all, nor a third, nor one 1.4 s after that;
+ * one 1.5 s after the last refused tap goes. Each body as [keys, dialog_guard]. */
+async function transcriptPad() {
+  let answer = { status: 409, json: { error: "dialog_open", message: "coder-1 is showing a prompt" } };
+  const page = bootPage("#/p/" + PROJECT + "/a/coder-1/transcript", signedIn({
+    "GET api/transcript/coder-1": () => transcriptPage([], null, false),
+    "POST api/send-keys": () => answer,
+  }));
+  await settle();
+  page.acceptSockets();
+  page.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  await settle();
+  click(buttonNamed(page.main(), "1"));
+  await settle();
+  const refused = page.toast();
+  answer = { status: 200, json: { sent: true } };
+  const later = (ms) => page.run("Date.now = ((then) => () => then + " + ms + ")(Date.now());");
+  later(0); // the taps below at one instant, however slow the run
+  for (const name of ["⏎", "y", "Esc", "Esc", "Esc"]) {
+    click(buttonNamed(page.main(), name));
+    await settle();
+  }
+  const twice = { toast: page.toast(), sheet: sheetTitle(page) };
+  const escapes = () => page.sent("api/send-keys").filter((body) => body.keys[0] === "Escape").length;
+  const thrice = escapes();
+  later(1400);
+  click(buttonNamed(page.main(), "Esc"));
+  await settle();
+  const soon = escapes();
+  later(1500);
+  click(buttonNamed(page.main(), "Esc"));
+  await settle();
+  return {
+    bodies: page.sent("api/send-keys").map((body) => [body.keys, body.dialog_guard === true]),
+    refused,
+    twice,
+    escapes: [thrice, soon],
+  };
 }
 
 /* Keys and Send carry the agent_id of the screen they were typed at. On Live: a pad key at
@@ -3376,6 +3501,57 @@ async function staleCards() {
   };
 }
 
+/* A Tell refused stale for its pin: a restart replaced the agent, and the refusal names the
+ * row that holds the label now. From a card, and from the agent's own Actions menu: what
+ * the sheet says, and what Tell again sends. Then one whose label no row holds now. */
+async function pinnedTell() {
+  const replaced = (agent) => ({
+    status: 409,
+    json: { error: "stale", message: "'coder-1' is another agent now (" + agent + ") — nothing was done", current: { agent_id: agent } },
+  });
+  const typed = { status: 200, json: { label: "coder-1", delivered: true, how: "typed", mode: "prompt", project: PROJECT } };
+  const asked = Object.assign({}, ITEM, { kind: "asked", detail: { text: "Shall I merge?" }, answers: [], actions: ["tell"] });
+  const tells = (page, answers) => {
+    const said = [];
+    const sheet = () => page.run("UI.sheet");
+    return async (open) => {
+      await open();
+      find(sheet(), (node) => node.tagName === "TEXTAREA").value = "merge it";
+      for (let n = 0; n < answers; n++) {
+        click(buttonNamed(sheet(), "Tell"));
+        await settle();
+        const status = find(sheet(), (node) => node.className === "status");
+        said.push(sheetTitle(page) ? status.textContent : null);
+      }
+      return { said, sent: page.requests.filter((one) => one.path === "api/agent/tell").map((one) => [one.body.agent_id || null, one.body.needs_id || null]) };
+    };
+  };
+  let n = 0;
+  const card = bootPage("#/", signedIn({
+    "GET api/needs": () => ({ status: 200, json: { items: [asked] } }),
+    "POST api/agent/tell": () => (++n > 1 ? typed : replaced("agt_2")),
+  }));
+  await settle();
+  card.acceptSockets();
+  await settle();
+  const fromCard = await tells(card, 2)(async () => click(buttonNamed(card.main(), "Tell…")));
+  const view = await agentView({ "POST api/agent/tell": () => replaced("agt_3") });
+  view.live().frame("fleet", FLEET);
+  await settle();
+  const fromMenu = await tells(view, 1)(async () => {
+    click(buttonNamed(view.main(), "Actions…"));
+    click(buttonNamed(view.run("UI.sheet"), "Tell…"));
+  });
+  const gone = await agentView({ "POST api/agent/tell": () => ({ status: 409, json: { error: "stale", message: "there is no agent 'coder-1' in x now — nothing was done", current: { agent_id: null } } }) });
+  gone.live().frame("fleet", FLEET);
+  await settle();
+  const noneNow = await tells(gone, 2)(async () => {
+    click(buttonNamed(gone.main(), "Actions…"));
+    click(buttonNamed(gone.run("UI.sheet"), "Tell…"));
+  });
+  return { fromCard, fromMenu, noneNow };
+}
+
 async function main() {
   const report = {
     bareLink: await openedSignedOut(""),
@@ -3403,6 +3579,8 @@ async function main() {
     tellNotSent: await tellNotSent(),
     paneCursor: await paneCursor(),
     stopAtAPrompt: await stopAtAPrompt(),
+    notTyped: await notTyped(),
+    ledgerUndone: await ledgerUndone(),
     refusedReadOnly: await refusedReadOnly(),
     keyNames: await keyNames(),
     liveScroll: await liveScroll(),
@@ -3427,6 +3605,7 @@ async function main() {
     backoffAcrossAnUnlock: await backoffAcrossAnUnlock(),
     transcriptSend: await transcriptSend(),
     transcriptSendGuarded: await transcriptSendGuarded(),
+    transcriptPad: await transcriptPad(),
     pinnedKeys: await pinnedKeys(),
     sheetFocus: await sheetFocus(),
     focusLands: await focusLands(),
@@ -3461,6 +3640,7 @@ async function main() {
     writeBodies: await writeBodies(),
     padOrKeyboard: await padOrKeyboard(),
     staleCards: await staleCards(),
+    pinnedTell: await pinnedTell(),
   };
   process.stdout.write(JSON.stringify(report) + "\n");
 }

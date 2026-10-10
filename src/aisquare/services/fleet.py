@@ -4122,6 +4122,11 @@ class RestartReceipt:
     notes: list[str] = field(default_factory=list)
     prompt_typed: bool = True
     """Whether the replacement's first line reached its pane, as on :class:`SwitchReceipt`."""
+    failures: list[str] = field(default_factory=list)
+    """The notes that say what did NOT happen, as on :class:`SwitchReceipt`: the stop's
+    claims not released, the hand-over mark not taken back, the replacement's first line
+    not typed (and why), its claims not moved. Each is in ``notes`` too, among the ones
+    every restart has (the account ladder's, the launch replayed)."""
 
     @property
     def how(self) -> str:
@@ -4240,6 +4245,7 @@ def restart(
     # The ladder's notes travel with the slot it chose; with none chosen, `spawn`
     # asks the same ladder and gives them itself.
     notes = [f"accounts: {note}" for note in choice.notes] if account is not None else []
+    failures: list[str] = []  # the notes that say what did not happen (`RestartReceipt`)
     if before_stop is not None:
         before_stop()
     was_running = False
@@ -4277,6 +4283,7 @@ def restart(
                 # the mark (the #205 fold's rule, met by #163 at the stack's fold).
                 if session is not None and (left := _unmark_handing_over(session)) is not None:
                     notes.append(left)
+                    failures.append(left)
             agent = handed_over.agent
         else:
             # A dead pane no listing has recorded yet is recorded as a listing
@@ -4297,6 +4304,7 @@ def restart(
                     # session is one a fresh replacement cannot take back until its
                     # lease lapses.
                     notes.append(f"claims: {stopped.release_failed}")
+                    failures.append(notes[-1])
             held_back = True
     # An exited agent's dead window is NOT removed here: `spawn` supersedes it
     # once the replacement is up and recorded, so a restart that is refused on
@@ -4347,6 +4355,7 @@ def restart(
         tmux_session=receipt.tmux_session,
         notes=notes,
         prompt_typed=bool(receipt.prompt_typed),
+        failures=[*failures, *receipt.failures],
     )
 
 

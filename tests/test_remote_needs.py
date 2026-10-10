@@ -61,6 +61,7 @@ from aisquare.services.remote_needs import (
     needs_push_safe,
     needs_single_agent_now,
     needs_tool_pending,
+    needs_unseen,
     record_needs_dismissal,
     scan_needs_you,
 )
@@ -790,6 +791,29 @@ def test_rule_9_a_turn_that_ends_on_a_question_is_asked() -> None:
     assert item.actions == ("tell", "open", "dismiss")
     done = _tail(newest="assistant_text", text="Done. All tests pass.")
     assert _classify(_status(row, "waiting", _session(row)), done) == []
+
+
+def test_a_question_a_local_command_follows_is_still_asked_under_its_own_id() -> None:
+    """The class of sweep 5 of #243's interruption: a ``/model`` or a ``!`` command typed at
+    the agent's prompt runs no turn, and its records became the newest. The agent's closing
+    question was no longer its newest record, and the card went, the question unanswered.
+    It is the same card, its id and time the question's."""
+    row = _row()
+    text = "Two ways to do it.\n\nWhich approach?"
+    asked_at = NOW - timedelta(minutes=2)
+    said = _tail(newest="assistant_text", text=text, key="txt-1", at=asked_at)
+    behind = replace(
+        _tail(newest="own", text=text, key="own-1", at=NOW - timedelta(seconds=30)),
+        under_own="assistant_text",
+        under_own_at=asked_at,
+        under_own_key="txt-1",
+    )
+    waiting = _status(row, "waiting", _session(row))
+    first, again = (_one(_classify(waiting, tail)) for tail in (said, behind))
+    assert (again.kind, again.id, again.since) == (first.kind, first.id, first.since)
+    assert first.kind == "asked" and first.since == asked_at
+    turned = replace(behind, under_own="user_prompt")
+    assert _classify(waiting, turned) == [], "a prompt since: the question was answered"
 
 
 def test_a_question_is_asked_only_while_the_agent_waits() -> None:
@@ -2588,6 +2612,28 @@ def test_a_tool_older_than_the_row_or_in_no_agents_pane_is_not_pending(
     assert not needs_tool_pending(_now_of(_working(_tail()), FakeTmux(reference=NOW), monkeypatch))
 
 
+def test_a_tail_cut_short_of_the_newest_message_counts_as_a_tool_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #243, round 7: a walk that ran out inside a 700 KB screenshot result never
+    reached the message whose Bash waits on its permission prompt, and read nothing
+    pending. A stop's ``/exit`` and Enter answered "1. Yes" once its pane was quiet. What
+    it did not read may hold a pending tool: one at work while the pane prints, a dialog
+    once it is quiet, never a prompt to type at. Not when the cut is older than the row
+    (a resumed session's), and it makes no card: it names no tool to show."""
+    cut = replace(_tail(newest="tool_result"), cut_at=NOW - timedelta(seconds=2))
+    busy = _now_of(_working(cut), FakeTmux(reference=NOW, quiet_for=2), monkeypatch)
+    assert busy.items == () and not needs_dialog_open(busy)
+    assert needs_tool_pending(busy)
+    quiet = _now_of(_working(cut, state="waiting"), FakeTmux(reference=NOW), monkeypatch)
+    assert needs_dialog_open(quiet) and not needs_at_input_prompt(quiet)
+    assert quiet.items == ()
+    older = replace(cut, cut_at=BORN - timedelta(minutes=1))
+    resumed = _now_of(_working(older, state="waiting"), FakeTmux(reference=NOW), monkeypatch)
+    assert not needs_tool_pending(resumed) and not needs_dialog_open(resumed)
+    assert needs_at_input_prompt(resumed), "the control"
+
+
 def test_a_current_question_is_a_dialog_however_busy_the_pane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2610,6 +2656,42 @@ def test_attention_is_a_dialog_until_an_interruption_follows_it(
     assert needs_at_input_prompt(after), (
         "Esc fired no Stop: the row says attention, the pane a prompt"
     )
+
+
+@pytest.mark.parametrize("state", ["attention", "waiting"])
+def test_an_interruption_behind_a_local_command_is_still_where_the_agent_sits(
+    state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sweep 5 of #243: a prompt answered with Esc fires no Stop, so the session stays
+    ``attention``, and a ``/model`` or a ``!`` command typed at the prompt after it fires
+    no hook either. Its records were the newest, the interruption under them unseen: the
+    idle agent was a "shows a dialog" card, pushed at once, and Prompt, Tell, Send, Stop,
+    Restart and Switch were each refused ``dialog_open`` until someone typed at the
+    machine. It is the interruption's card still, under the same id, and at its prompt.
+    ``waiting`` is the row 30 minutes on, the session still marked ``attention``."""
+    row = _row()
+    escaped_at = NOW - timedelta(minutes=1)
+    plain = _tail(newest="interrupted", at=escaped_at, text="Pushing now.", key="rec-esc")
+    behind = replace(
+        _tail(newest="own", at=NOW - timedelta(seconds=20), text="Pushing now.", key="rec-model"),
+        under_own="interrupted",
+        under_own_at=escaped_at,
+        under_own_key="rec-esc",
+    )
+    cards = []
+    for tail in (plain, behind):
+        fleet = Fleet(agents=[_status(row, state, _session(row, state="attention"))])
+        fleet.tails[f"/transcripts/{row.label}.jsonl"] = tail
+        snap = _now_of(fleet, FakeTmux(reference=NOW), monkeypatch)
+        assert not needs_dialog_open(snap) and needs_at_input_prompt(snap)
+        cards.append([(item.kind, item.id, item.since) for item in snap.items])
+    assert cards[0] == cards[1] and cards[0][0][0] == "interrupted"
+    assert cards[0][0][2] == escaped_at
+    unmarked = replace(behind, under_own="none", under_own_at=None, under_own_key=None)
+    fleet = Fleet(agents=[_status(row, state, _session(row, state="attention"))])
+    fleet.tails[f"/transcripts/{row.label}.jsonl"] = unmarked
+    snap = _now_of(fleet, FakeTmux(reference=NOW), monkeypatch)
+    assert needs_dialog_open(snap), "the control: no interruption, a dialog may be up"
 
 
 def _printed_since_the_notice(tail: TranscriptTail | None, *, printed: datetime) -> Fleet:
@@ -2763,7 +2845,7 @@ def test_a_pane_on_a_server_younger_than_the_row_is_another_agents(
 
 
 def test_at_the_prompt_takes_a_quiet_pane_tmux_vouches_for(monkeypatch: pytest.MonkeyPatch) -> None:
-    waiting = _working(None, state="waiting")
+    waiting = _working(_tail(newest="tool_result"), state="waiting")
     assert needs_at_input_prompt(_now_of(waiting, FakeTmux(reference=NOW), monkeypatch))
     busy = FakeTmux(reference=NOW, quiet_for=0)
     assert not needs_at_input_prompt(_now_of(waiting, busy, monkeypatch))
@@ -2773,6 +2855,33 @@ def test_at_the_prompt_takes_a_quiet_pane_tmux_vouches_for(monkeypatch: pytest.M
     assert not needs_at_input_prompt(
         _now_of(_working(mid_turn), FakeTmux(reference=NOW), monkeypatch)
     )
+
+
+def test_an_agent_nothing_here_reads_is_never_at_its_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #243, round 7: a row with no board session (``fleet spawn --bin``, a Claude
+    Code started without aisquare's hooks) has no transcript read, so a permission prompt
+    there is no pending tool and no ``attention``, and ``fleet._derive`` reads its pane,
+    quiet for 5 s, as ``waiting``. That was all ``needs_at_input_prompt`` had, and a
+    prompt-mode tell pasted and pressed Enter into the prompt. A session whose transcript
+    cannot be read hides a tool use's first seconds the same way. Neither shows a dialog
+    here either: nothing says one is up, and the actions take the unseen for one."""
+    hookless = _row().model_copy(update={"session_id": None})
+    snap = _now_of(
+        Fleet(agents=[_status(hookless, "waiting")]), FakeTmux(reference=NOW), monkeypatch
+    )
+    assert snap.pane_is_agent and snap.pane_quiet is True and snap.tail is None
+    assert needs_unseen(snap)
+    assert not needs_at_input_prompt(snap) and not needs_dialog_open(snap)
+    unread = _now_of(_working(None, state="waiting"), FakeTmux(reference=NOW), monkeypatch)
+    assert unread.status is not None and unread.status.session is not None
+    assert needs_unseen(unread) and not needs_at_input_prompt(unread)
+    read = _working(_tail(newest="tool_result"), state="waiting")
+    snap = _now_of(read, FakeTmux(reference=NOW), monkeypatch)
+    assert not needs_unseen(snap) and needs_at_input_prompt(snap), "the control"
+    gone = _now_of(Fleet(agents=[_status(hookless, "waiting")]), FakeTmux(gone=True), monkeypatch)
+    assert not needs_unseen(gone), "no pane of its own: not_agent says so"
 
 
 _NOTHING_WRITTEN = TranscriptTail(

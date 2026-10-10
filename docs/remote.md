@@ -343,7 +343,12 @@ fails on the same limit until the reset, and **Switch account** is what moves it
 **Stop**, **Restart** and **Switch account** each open a sheet that says in one
 sentence what will happen, and send the agent's name as confirmation. Restart
 and switch can take 40 seconds; the page waits, and shows the result even if the
-phone slept meanwhile.
+phone slept meanwhile. A replacement whose first line (the hand-off prompt, or
+the line telling a resumed session to go on) could not be typed sits idle at an
+empty prompt: the page says so and why, and that it needs a Tell. What else a
+restart or a switch could not do (claims not released or moved) it says too, as
+it says a stop that could not release its agent's claims and a Tell left as a
+board note, also of a result that came back only after the phone slept.
 
 **The dialog guard.** Stopping types `/exit` and Enter, and an Enter into an open
 dialog would answer it: approve a command, pick an option, accept a plan. So
@@ -351,7 +356,8 @@ when the agent shows a prompt, stop, restart and switch are refused with
 `dialog_open`, and the sheet offers **Press Esc (No) first**, which dismisses the
 prompt and then goes on. For its first few seconds a permission prompt cannot be
 told from a tool at work, so they are refused the same way while any tool the
-agent called has no result yet; there the Esc also stops a running tool. An
+agent called has no result yet, or when the end of its transcript is too long
+to read; there the Esc also stops a running tool. An
 agent at work gets one Esc first without asking, since a prompt could open just
 before the Enter, and `/exit` is typed once its pane has been still for 5
 seconds; one still busy 8 seconds after the Esc is refused with `still_busy`. A
@@ -361,27 +367,43 @@ agent is on, none with room) is refused before any Esc. A card's Tell and
 Interrupt & tell refuse a dialog the same way. The menu's plain Tell types only
 into an agent waiting at its prompt: while the agent may be showing a prompt,
 even one left unanswered for hours, the message is left as a board note instead.
-Send on the Transcript tab, which does not show the pane, types only into an
-agent still at its prompt: nothing while it may be showing a prompt, a tool with
-no result yet included, or is at work or parked on its usage limit
-(`agent_busy`); send from Live, where the pane shows what the keys would answer.
-Its Send and keys wait until the transcript has loaded, which names the agent
-they go to.
+Send and the key pad on the Transcript tab, which does not show the pane, type
+only into an agent still at its prompt: nothing while it may be showing a
+prompt, a tool with no result yet included, or is at work or parked on its usage
+limit (`agent_busy`); send from Live, where the pane shows what the keys would
+answer. Esc, which answers a prompt only No, goes from there as from Live, but
+not twice in a row. Its Send and keys wait until the transcript has loaded,
+which names the agent they go to.
+
+An agent the machine cannot read, one started without aisquare's hooks (`no
+hooks` in `fleet ls`, as `fleet spawn --bin` can start one) or whose transcript
+it cannot open, never shows it a prompt, so it is taken to be showing one. Stop,
+restart and switch are refused with `dialog_open`, and **Press Esc (No) first**
+types `/exit` once its pane has been still for 5 seconds after the Esc. A card's
+Tell does not type into it (`agent_busy`, and the sheet offers Interrupt & tell,
+whose Esc goes first), the menu's Tell leaves a board note (which one without
+the hooks is not shown, and the toast says so), and Send on the Transcript tab
+types nothing; Live shows its pane.
 
 Every action, and every key or line you type, is pinned to the agent you
 looked at: if a manager restarted or switched it in the meantime, it is refused
 as `stale` rather than applied to the replacement, also when that happens while
 the request runs. In the moment before the replacement has started, a key, the
 menu's Tell, Stop and Switch account are refused as `stale` too, and a Tell that
-types into the pane is refused before it types anything.
+types into the pane is refused before it types anything. A Tell refused because
+another agent holds the name now keeps its words, and Tell again sends them to
+that one.
 
 On a phone wide enough for eight keys (412 px is, 390 px is not) the key pad is
 one row, `Esc 1 2 3 ⏎ ↑ ↓ More` (⏎ being Enter), with the rest under More. On
 a narrower phone More takes the line under the seven, and below 360 px the
 eight are two rows of four, More last.
 Ctrl-C and Ctrl-D ask first, and a second one within 3 seconds asks again,
-because Claude Code exits on it. A second Esc within a second and a half asks
-too: two in a row open Claude Code's Rewind selector. The pad and the phone's
+because Claude Code exits on it. A second Esc within a second and a half of the
+last one sent asks too, again after its sheet was closed unanswered, and from
+the Transcript tab is not sent, nor is any Esc there until a second and a half
+passes with none tapped: two in a row open Claude Code's Rewind selector. The
+pad and the phone's
 keyboard never share the screen. Keys reach an agent one at a time, in the order
 they were tapped, and a key shows in the accent colour until the machine has
 answered it; one that waits behind a key that did not get through, or for longer

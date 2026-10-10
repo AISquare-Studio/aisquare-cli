@@ -1628,6 +1628,53 @@ def test_the_live_pane_draws_no_cursor_where_the_program_hid_it(
     assert boot_report["paneCursor"] == {"shown": 1, "hidden": 0, "unsaid": 1}
 
 
+def test_a_replacement_whose_first_line_was_not_typed_is_said_and_told_to_be_told(
+    boot_report: dict[str, Any],
+) -> None:
+    """Sweep 5 of #243: a restart or a switch whose replacement came up too slowly for its
+    multi-line hand-off (or that tmux would not type into) answers ``prompt_typed: false``,
+    and the page said "Switched coder-1" all the same. The agent sat idle at an empty
+    prompt, the task stalled, and only the Board tab said so. The page says how it began,
+    in the board's words, what did not happen, and to tell it what to do; also of a
+    result only the ledger brought back."""
+    report = boot_report["notTyped"]
+    said = (
+        "started fresh, but its hand-off prompt was NOT typed — the agent did not come up "
+        "within 20 s and the prompt has several lines — NOT typed. Tell it what to do"
+    )
+    assert report["switched"] == {"sheet": None, "toast": f"Switched coder-1: {said}"}
+    assert report["restarted"] == {
+        "sheet": None,
+        "toast": "Restarted coder-1 on its own conversation",
+    }
+    assert report["unreleased"] == {
+        "sheet": None,
+        "toast": "Restarted coder-1, but not all of it: claims: 1 claim could not be "
+        "released (database is locked)",
+    }, "what else did not happen, said as the CLI and the TUI say it"
+    assert report["ledger"] == f"Switch account coder-1: done — {said}"
+
+
+def test_what_a_stop_or_a_tell_left_undone_is_said_also_when_only_the_ledger_answers(
+    boot_report: dict[str, Any],
+) -> None:
+    """The class of sweep5-14 (a result fact the page drops), on the ledger's toast: a stop
+    that could not release its agent's claims, and a Tell left as a board note because the
+    agent was working, read "Stop coder-1: done" and "Tell coder-1: done" once the phone
+    woke to them, and the human took the claims for released and the words for typed. The
+    page says what was not done there as it does when the answer comes at once."""
+    report = boot_report["ledgerUndone"]
+    assert report["stopped"] == (
+        "Stopped coder-1, but its claims were not released: database is locked"
+    )
+    assert report["stopLedger"] == (
+        "Stop coder-1: done — its claims were not released: database is locked"
+    )
+    assert report["toldLedger"] == (
+        "Tell coder-1: done — it is working — filed as board note #12 to coder-1"
+    )
+
+
 def test_a_stop_refused_at_a_prompt_is_explained_in_the_pages_own_words(
     boot_report: dict[str, Any],
 ) -> None:
@@ -1956,7 +2003,9 @@ def test_the_pads_exit_and_rewind_guards_each_ask_before_a_key_goes(
     """Only the page asks before ^C or ^D (one interrupts the agent, a second within 3 s exits
     Claude Code) and before a second Esc within 1.5 s (two open its Rewind selector): the
     machine lets the first of each through. Nothing tested any of them, nor the resend of a
-    second ^C the machine refused. Each step: the key, the sheet it left, the keys sent."""
+    second ^C the machine refused. Round-7 verifier: an Esc sheet closed unanswered ended the
+    window, so the next tap went with no sheet as the second Esc; only a confirmed one does.
+    Each step: the key, the sheet it left, the keys sent."""
     pad = boot_report["padConfirms"]
     assert pad["steps"] == [
         ["^C", "Send Ctrl-C?", 0],
@@ -1973,8 +2022,11 @@ def test_the_pads_exit_and_rewind_guards_each_ask_before_a_key_goes(
         ["Esc", None, 7],  # the confirmed one starts no new pair
         ["Esc", "Press Esc again?", 7],  # 1.4 s after the last: still within 1.5 s
         ["Close", None, 7],
+        ["Esc", "Press Esc again?", 7],  # the sheet closed unanswered sent nothing
+        ["Close", None, 7],
+        ["Esc", None, 8],  # 1.6 s after the last one sent
     ]
-    escapes = [["Escape"]] * 4
+    escapes = [["Escape"]] * 5
     assert pad["keys"] == [["C-c"], ["C-c"], ["C-c", "confirm_exit"], *escapes]
 
 
@@ -2099,6 +2151,36 @@ def test_send_on_the_transcript_tab_types_nothing_while_a_prompt_may_be_up(
         "typed": "no - run the tests instead",
     }
     assert guarded["typed"] == "", "sent, so the box is cleared"
+
+
+def test_the_transcript_tabs_key_pad_types_nothing_while_a_prompt_may_be_up(
+    boot_report: dict[str, Any],
+) -> None:
+    """Sweep 5 of #243: the round-4 fix guarded the Transcript tab's Send, and its pad posted
+    ``1``, ⏎ and ``y`` with no ``dialog_guard``. Into a Bash prompt the tab does not draw,
+    ⏎ or ``1`` took "1. Yes" and ran the command blind. Each such key asks the machine to
+    type nothing while a prompt may be up, and a refusal says where to look. Esc answers a
+    prompt only No and stops a turn, so it goes as it does from Live, but a second Esc
+    straight after it, which opens Claude Code's Rewind selector, is not sent from here.
+    Round-7 verifier: the refused tap reset the window, so a third tap went as the second
+    Esc. Each refused tap runs the window on, and an Esc goes once 1.5 s pass without one."""
+    pad = boot_report["transcriptPad"]
+    assert pad["bodies"] == [
+        [["1"], True],
+        [["Enter"], True],
+        [["y"], True],
+        [["Escape"], False],
+        [["Escape"], False],
+    ]
+    assert pad["escapes"] == [1, 1], "the third tap, and one 1.4 s after it, sent nothing"
+    assert pad["refused"] == (
+        "Not sent — coder-1 may be showing a prompt that this would answer. "
+        "Look at it on Live first."
+    )
+    assert pad["twice"] == {
+        "toast": "Not sent — two Esc open the Rewind selector. Send it from Live.",
+        "sheet": None,
+    }
 
 
 def test_keys_and_send_carry_the_agent_id_of_the_screen_they_were_typed_at(
@@ -2421,6 +2503,29 @@ def test_a_cards_tell_refused_stale_keeps_its_sheet_and_what_was_typed(
         "sent": [[text, "ny_0123456789abcdef", "agt_1"], [text, None, "agt_1"]],
         "after": None,
     }
+
+
+def test_a_tell_refused_because_the_agent_was_replaced_goes_to_the_new_one_when_told_again(
+    boot_report: dict[str, Any],
+) -> None:
+    """Sweep 5 of #243: a restart replaced coder-1 while a card's Tell sheet was open, and the
+    pin's refusal (``current: {"agent_id": ...}``) was read as the card's: "nothing waits on
+    coder-1 now. Tell again to send it anyway", but Tell again stayed pinned to the row
+    gone and was refused the same way, every time. The sheet says the machine's words and
+    that Tell again goes to the new agent, and it does, from a card and from the agent's
+    own menu alike. When no row holds the label, nothing is promised."""
+    report = boot_report["pinnedTell"]
+    new = ". Tell again to send it to the new coder-1."
+    assert report["fromCard"] == {
+        "said": [f"'coder-1' is another agent now (agt_2) — nothing was done{new}", None],
+        "sent": [["agt_1", "ny_0123456789abcdef"], ["agt_2", None]],
+    }
+    assert report["fromMenu"] == {
+        "said": [f"'coder-1' is another agent now (agt_3) — nothing was done{new}"],
+        "sent": [["agt_1", None]],
+    }
+    gone = "there is no agent 'coder-1' in x now — nothing was done"
+    assert report["noneNow"] == {"said": [gone, gone], "sent": [["agt_1", None]] * 2}
 
 
 def test_each_refusal_is_said_in_the_sentence_the_spec_gives_it(

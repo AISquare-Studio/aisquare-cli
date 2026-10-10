@@ -926,7 +926,8 @@ function settleFromLedger(entries) {
       const verb = S.orphans.get(entry.request_id).verb;
       S.orphans.delete(entry.request_id);
       savePending();
-      toast(verb + ": " + (res.ok ? "done" : failText(res)));
+      const not = res.ok && untold(res.data);
+      toast(verb + ": " + (res.ok ? "done" + (not && " — " + not) : failText(res)));
     }
   }
 }
@@ -2003,23 +2004,23 @@ function tellSheet(ctx, mode) {
         sheet.close();
         const told = res.data && typeof res.data === "object" ? res.data : {};
         const delivered = told.delivered === true;
-        // Not typed in, the machine says what happened instead: in "auto" a board note
-        // the agent reads at its next prompt; in the other two, text pasted at the
-        // prompt that tmux could not send with Enter, which holds the agent's next
-        // question back until Enter is pressed on the pad.
-        if (delivered) toast("Typed into " + label);
-        else if (isText(told.how)) toast(label + ": " + plainText(told.how));
-        else toast(current === "auto" ? "Left a note for " + label + " — it reads it at its next prompt" : "Not typed into " + label + " — look at its pane");
+        // Not typed: the machine says what came of it (a board note, unsent text).
+        toast(delivered ? "Typed into " + label : label + ": " + (untold(told) || "not typed — look at its pane"));
         if (delivered && ctx.needsId) dismissItem({ id: ctx.needsId });
         return;
       }
-      if (res.status === 409 && res.error === "stale" && ctx.item) {
-        // The card gives way, the words typed stay: Tell again is a Tell with no card.
+      const now = res.status === 409 && res.error === "stale" ? (res.data && res.data.current) || [] : null;
+      if (now && ctx.item) {
+        // The card gives way, the words stay: Tell again is a Tell with no card.
         const item = ctx.item;
         ctx.item = ctx.needsId = null;
-        noLonger(item, res.data && res.data.current);
-        sheet.say(noLongerText(item, res.data && res.data.current) + " Tell again to send it anyway.");
-        return;
+        noLonger(item, now);
+        if (Array.isArray(now)) return sheet.say(noLongerText(item, now) + " Tell again to send it anyway.");
+      }
+      // A pin's refusal names the label's new row: Tell again tells it.
+      if (now && REF.test(now.agent_id || "")) {
+        ctx.agentId = now.agent_id;
+        return sheet.say(failText(res) + ". Tell again to send it to the new " + label + ".");
       }
       sheet.say(failText(res, TEXT_MAX.tell));
       if (res.status === 409 && res.error === "agent_busy" && current !== "interrupt") {
@@ -2081,15 +2082,23 @@ function effectSentence(kind, label, o) {
   return o.dismiss ? text + " Its prompt is dismissed (No) first." : text;
 }
 
-function doneSentence(kind, label, data) {
-  const d = data && typeof data === "object" ? data : {};
-  if (kind === "stop" && isText(d.release_failed)) return "Stopped " + label + ", but its claims were not released: " + plainText(d.release_failed);
-  if (kind === "restart" && d.resumed === true) return "Restarted " + label + " on its own conversation";
-  return AGENT_ACTIONS[kind].done + " " + label;
+/* What a write to an agent left undone: a Tell not typed, the claims a stop kept, what a
+ * restart or switch did not do (an untyped first line idles the replacement). */
+function untold(d) {
+  if (d.delivered === false) return plainText(d.how);
+  if (isText(d.release_failed)) return "its claims were not released: " + plainText(d.release_failed);
+  const why = Array.isArray(d.failures) ? plainText(d.failures.join("; ")) : "";
+  return d.prompt_typed === false ? plainText(d.how) + (why && " — " + why) + ". Tell it what to do" : why;
 }
 
-/* Stop, restart or switch: a sheet that says what will happen, sends confirm and
- * agent_id (and needs_id from a card), and offers Esc first on dialog_open. */
+function doneSentence(kind, label, data) {
+  const d = data && typeof data === "object" ? data : {};
+  const done = AGENT_ACTIONS[kind].done + " " + label, not = untold(d);
+  if (not) return done + (d.prompt_typed === false ? ": " : isText(d.release_failed) ? ", but " : ", but not all of it: ") + not;
+  return kind === "restart" && d.resumed === true ? done + " on its own conversation" : done;
+}
+
+/* Stop, restart or switch: says what it will do, sends confirm and the pins, offers Esc. */
 function actionSheet(kind, ctx) {
   const label = plainText(ctx.label);
   const meta = AGENT_ACTIONS[kind];
@@ -2152,8 +2161,7 @@ function actionSheet(kind, ctx) {
         return;
       }
       if (res.status === 409 && res.error === "dialog_open" && !dismiss) {
-        // The machine's sentence is for curl ("send dismiss_dialog: true"); here that
-        // is the button. "May": a tool still waiting on its result counts as a prompt.
+        // The machine's sentence is for curl; here the button. "May": a pending tool counts.
         const why = label + " may be showing a prompt that " + meta.busy.toLowerCase() + " it now would answer.";
         sheet.say(sheet.isOpen() ? why + " Press Esc (No) first to dismiss it." : why);
         dismiss = true;
@@ -2634,10 +2642,9 @@ function drawExplainability(body, card) {
   body.appendChild(el("pre", "mono", lines.join("\n")));
 }
 
-/* The bar under the pane: a growing textarea, ⏎ on by default (text left in Claude Code's
- * input box holds back its next question), Send, and the key pad, which the soft keyboard
- * and it never share the screen with. blind: no pane (Transcript), so Send types nothing
- * while a prompt may be up. pin(): the agent_id of what the tab shows, each tap carries. */
+/* The bar: a growing textarea, ⏎ on by default (text left unsent holds back the next
+ * question), Send and the pad, never on screen with the keyboard. blind (Transcript): Send
+ * and keys but Esc (a No) type nothing while a prompt may be up. pin(): each tap's agent_id. */
 function inputBar(pid, label, cleanups, blind, pin) {
   const bar = el("div", "inputbar");
   const line = el("div", "row-inline");
@@ -2666,8 +2673,7 @@ function inputBar(pid, label, cleanups, blind, pin) {
   pad.appendChild(more);
   bar.append(line, pad);
   const setPad = (open) => {
-    // The pad grows the bar over the foot of the pane, where the prompt it answers waits:
-    // a view at its foot stays there. One scrolled up to read is left where it is.
+    // The pad covers the pane's foot, where its prompt waits: a view at the foot stays there.
     const main = UI.main;
     const atFoot = main.scrollHeight - main.scrollTop - main.clientHeight < 2;
     pad.classList.toggle("open", open);
@@ -2685,8 +2691,7 @@ function inputBar(pid, label, cleanups, blind, pin) {
     setPad(true);
   }
   let lastEsc = 0;
-  // A pad key says "sending" until every tap of it was answered, and stays live: keys go one
-  // at a time (keysInTurn), so a tap behind a slow one would show nothing until its toast.
+  // A key says "sending" until each tap of it is answered (keysInTurn: one at a time).
   const sending = (tapped, by) => {
     if (!tapped) return;
     tapped.sending = (tapped.sending || 0) + by;
@@ -2698,8 +2703,7 @@ function inputBar(pid, label, cleanups, blind, pin) {
     sending(tapped, -1);
     if (res.ok) return true;
     if (res.status === 409 && res.error === "double_press") {
-      // Asked on this agent's own screen, over no other sheet: the answer can come after the
-      // human moved on, where Send and exit would sit on another's button. what: Ctrl-C or Ctrl-D.
+      // Asked on this agent's screen over no sheet: a late answer would sit on another's.
       if (onAgent({ pid, label }) && !sheetOpen()) {
         confirmSheet("Send " + what + " to " + label + " again?", "A second " + what + " within 3 s exits Claude Code, and " + label + " with it.",
           "Send and exit", () => post(Object.assign({}, body, { confirm_exit: true }), what, tapped));
@@ -2716,12 +2720,13 @@ function inputBar(pid, label, cleanups, blind, pin) {
   };
   const sendKey = (key, tapped) => {
     const body = { keys: [key], agent_id: pin() };
+    if (blind && key !== "Escape") body.dialog_guard = true;
     if (key === "Escape") {
       const now = Date.now();
       if (now - lastEsc < ESC_REPEAT_MS) {
-        lastEsc = 0;
-        confirmSheet("Press Esc again?", "Two Esc in a row open Claude Code's Rewind selector.", "Send Esc", () => post(body, "Esc", tapped));
-        return;
+        if (!blind) return confirmSheet("Press Esc again?", "Two Esc in a row open Claude Code's Rewind selector.", "Send Esc", () => { lastEsc = 0; post(body, "Esc", tapped); });
+        lastEsc = now; // not sent, so the window runs on
+        return toast("Not sent — two Esc open the Rewind selector. Send it from Live.");
       }
       lastEsc = now;
     }
@@ -2733,7 +2738,7 @@ function inputBar(pid, label, cleanups, blind, pin) {
     }
     post(body, "Key " + key, tapped);
   };
-  // Send needs words: a bare Enter picks a dialog's highlighted option ("1. Yes"), and is the pad's.
+  // Send needs words: a bare Enter (a dialog's "1. Yes") is the pad's ⏎.
   const sendText = async () => {
     const value = text.value;
     if (!value) {

@@ -353,17 +353,120 @@ def test_the_walk_is_bounded_by_records_and_by_bytes(tmp_path: Path) -> None:
     many += [_result(f"other{n}", uuid=f"r{n}", second=2) for n in range(TAIL_RECORDS + 5)]
     tail = read_transcript_tail(_write(tmp_path / "records.jsonl", many))
     assert tail is not None and tail.pending == ()
+    assert tail.cut_at == _written(tmp_path / "records.jsonl"), "but it says it may be pending"
     near = many[: 2 + 50]
     found = read_transcript_tail(_write(tmp_path / "near.jsonl", near))
     assert found is not None and [t.tool_use_id for t in found.pending] == ["toolu_old"]
+    assert found.cut_at is None
     padded = [
         *near[:2],
         *(_result(f"p{n}", "y" * 2_000, uuid=f"p{n}", second=3) for n in range(300)),
     ]
     beyond = read_transcript_tail(_write(tmp_path / "bytes.jsonl", padded), budget=200_000)
     assert beyond is not None and beyond.pending == ()
+    assert beyond.cut_at == _written(tmp_path / "bytes.jsonl")
     unbounded = read_transcript_tail(tmp_path / "bytes.jsonl", budget=10_000_000)
     assert unbounded is not None and [t.tool_use_id for t in unbounded.pending] == ["toolu_old"]
+    assert unbounded.cut_at is None
+
+
+def _written(path: Path) -> datetime:
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+
+
+def _screenshot(tool_use_id: str, size: int, *, uuid: str, second: int) -> dict[str, Any]:
+    """A screenshot's result as Claude Code writes one: its ``tool_use_id`` first, then the
+    image, base64, so a read of the line's end finds no id."""
+    source = {"type": "base64", "media_type": "image/png", "data": "A" * size}
+    image = {"type": "image", "source": source}
+    return {
+        "type": "user",
+        "uuid": uuid,
+        "timestamp": _stamp(second),
+        "isSidechain": False,
+        "message": {
+            "role": "user",
+            "content": [{"tool_use_id": tool_use_id, "type": "tool_result", "content": [image]}],
+        },
+    }
+
+
+def _two_calls(image: int) -> list[dict[str, Any]]:
+    """Two tools called together, the screenshot's result in and the Bash's prompt up."""
+    shot = _tool("toolu_shot", "mcp__playwright__browser_take_screenshot")
+    bash = _tool("toolu_bash", "Bash", command="rm -rf build && npm test")
+    return [
+        _prompt("check the page, then clean and test", uuid="u1"),
+        _said(shot, uuid="a1", message="m1", second=1),
+        _said(bash, uuid="a2", message="m1", second=2),
+        _screenshot("toolu_shot", image, uuid="r1", second=3),
+    ]
+
+
+def test_a_walk_that_runs_out_inside_a_result_says_a_tool_may_be_pending(tmp_path: Path) -> None:
+    """Review of #243, round 7: a newest line longer than the budget is read from its end,
+    where neither a ``tool_use_id`` nor a tool use is, and the walk ended there with
+    nothing pending: the Bash waiting on its permission prompt went unseen, and the
+    agent read as one at rest. It says it ran out before the message that may hold one,
+    and when the file was written, which is when what it read was. Read whole, the
+    Bash is pending and nothing is cut."""
+    big = _write(tmp_path / "big.jsonl", _two_calls(700_000))
+    assert len(big.read_bytes().splitlines()[-1]) > transcript_service.TAIL_BUDGET, "the premise"
+    tail = read_transcript_tail(big)
+    assert tail is not None and tail.pending == ()
+    assert tail.cut_at == _written(big)
+    small = read_transcript_tail(_write(tmp_path / "small.jsonl", _two_calls(400_000)))
+    assert small is not None and [tool.tool_use_id for tool in small.pending] == ["toolu_bash"]
+    assert small.cut_at is None
+
+
+def test_a_walk_cut_after_the_newest_message_or_an_interruption_is_not_cut_short(
+    tmp_path: Path,
+) -> None:
+    """The newest message read, a message after the results, holds every tool use that can
+    wait; an interruption ends the turn, and nothing before it waits on anyone."""
+    answered = [
+        *_two_calls(700_000)[:2],
+        _screenshot("toolu_shot", 700_000, uuid="r1", second=3),
+        _said(_text("The page renders."), uuid="a3", message="m2", second=4),
+    ]
+    tail = read_transcript_tail(_write(tmp_path / "said.jsonl", answered))
+    assert tail is not None and (tail.newest, tail.pending, tail.cut_at) == (
+        "assistant_text",
+        (),
+        None,
+    )
+    stopped = [*_two_calls(700_000), _prompt("[Request interrupted by user]", uuid="i1", second=5)]
+    tail = read_transcript_tail(_write(tmp_path / "esc.jsonl", stopped))
+    assert tail is not None and (tail.newest, tail.cut_at) == ("interrupted", None)
+
+
+def test_a_walk_cut_inside_the_newest_message_after_one_of_its_calls_may_hide_another(
+    tmp_path: Path,
+) -> None:
+    """Tools run while their message streams, so a block of the newest message can come
+    after a result. Here a Read of the message the screenshot and the Bash are in, its
+    result in: the walk met the Read, then ran out inside the screenshot's 700 KB result,
+    short of the Bash waiting on its permission prompt. Having reached the message is
+    not having read it: a tool use before the cut may still wait. Read whole, the Bash is
+    pending and nothing is cut."""
+    bash = _tool("toolu_bash", "Bash", command="rm -rf build && npm test")
+    shot = _tool("toolu_shot", "mcp__playwright__browser_take_screenshot")
+    records = [
+        _prompt("check the page, then clean and test", uuid="u1"),
+        _said(bash, uuid="a1", message="m1", second=1),
+        _said(shot, uuid="a2", message="m1", second=2),
+        _screenshot("toolu_shot", 700_000, uuid="r1", second=3),
+        _said(_tool("toolu_read", "Read", file_path="/x"), uuid="a3", message="m1", second=4),
+        _result("toolu_read", uuid="r2", second=5),
+    ]
+    path = _write(tmp_path / "later.jsonl", records)
+    tail = read_transcript_tail(path)
+    assert tail is not None and tail.pending == ()
+    assert tail.cut_at == _written(path)
+    whole = read_transcript_tail(path, budget=10_000_000)
+    assert whole is not None and [tool.tool_use_id for tool in whole.pending] == ["toolu_bash"]
+    assert whole.cut_at is None
 
 
 # --- what the newest record says -----------------------------------------------------------
@@ -412,6 +515,70 @@ def test_a_rejected_tool_use_is_an_interruption(tmp_path: Path) -> None:
     records.append(_prompt("[Request interrupted by user for tool use]", uuid="esc", second=9))
     marker = read_transcript_tail(_write(tmp_path / "t.jsonl", records))
     assert marker is not None and (marker.newest, marker.marker_key) == ("interrupted", "esc")
+
+
+def test_an_interruption_that_only_local_commands_follow_is_still_read(tmp_path: Path) -> None:
+    """Sweep 5 of #243: a ``/model`` or a ``!`` command typed at the prompt an Esc left runs no
+    turn and fires no hook. Its records are the newest, and the walk went past the
+    interruption under them without a word: a session still marked ``attention`` read as
+    a dialog up. The record they follow is kept, the interruption, its time and its
+    marker; once a turn ran after it, what the agent said since."""
+    rejection = "The user doesn't want to proceed with this tool use. STOP what you are doing."
+    records = [
+        _prompt("push it", uuid="u1"),
+        _said(
+            _tool("toolu_push", "Bash", command="git push --force"),
+            uuid="a1",
+            message="m1",
+            second=2,
+        ),
+        _result("toolu_push", rejection, uuid="r1", second=9, is_error=True),
+        _prompt("[Request interrupted by user for tool use]", uuid="esc", second=9),
+    ]
+    model = [
+        _prompt(
+            "<command-name>/model</command-name>\n<command-args></command-args>",
+            uuid="o1",
+            second=20,
+        ),
+        _prompt(
+            "<local-command-stdout>Set model to opus</local-command-stdout>", uuid="o2", second=21
+        ),
+    ]
+    shell = [
+        _prompt("<bash-input>git status</bash-input>", uuid="b1", second=30),
+        _prompt("<bash-stdout>main</bash-stdout><bash-stderr></bash-stderr>", uuid="b2", second=31),
+    ]
+    for after, newest in ((model, "o2"), (shell, "b2"), ([*model, *shell], "b2")):
+        tail = read_transcript_tail(_write(tmp_path / "t.jsonl", [*records, *after]))
+        assert tail is not None and (tail.newest, tail.marker_key) == ("own", newest)
+        assert (tail.under_own, tail.under_own_at, tail.under_own_key) == (
+            "interrupted",
+            _at(9),
+            "esc",
+        )
+    turn = [
+        _prompt("go on", uuid="u2", second=40),
+        _said(_text("Done."), uuid="a2", message="m2", second=41),
+        *model,
+    ]
+    tail = read_transcript_tail(_write(tmp_path / "t.jsonl", [*records, *turn]))
+    assert tail is not None and tail.newest == "own"
+    assert (tail.under_own, tail.under_own_at, tail.under_own_key) == (
+        "assistant_text",
+        _at(41),
+        "a2",
+    )
+    plain = read_transcript_tail(_write(tmp_path / "t.jsonl", records))
+    assert plain is not None and (plain.newest, plain.marker_key) == ("interrupted", "esc")
+    assert plain.under_own == "none", "the newest record says it"
+    escaped = _prompt("[Request interrupted by user for tool use]", uuid="esc", second=9)
+    long = read_transcript_tail(
+        _write(tmp_path / "t.jsonl", [*_two_calls(700_000), escaped, *model])
+    )
+    assert long is not None and (long.under_own, long.cut_at) == ("interrupted", None), (
+        "a walk cut short under an interruption: nothing before it waits"
+    )
 
 
 REJECTED_WITH_WORDS = (

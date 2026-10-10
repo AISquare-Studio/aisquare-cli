@@ -7143,7 +7143,8 @@ def test_restart_and_switch_say_in_their_headline_that_the_first_line_was_not_ty
     line reached its pane (FLEET-5), but the commands' own headline still said "started
     fresh with a hand-off prompt", above a note saying the prompt was NOT typed (review of
     the side/ff-fleet fold). The headline is the board's words, and ``--json`` carries
-    ``prompt_typed``."""
+    ``prompt_typed``, those words (``how``) and the note on why (``failures``), which the
+    phone says them from (sweep 5 of #243)."""
     _two_slots_with_usage(monkeypatch, work=95, personal=10)
     agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
     _with_transcript(agent, tmp_path / "missing.jsonl")  # named, not on disk: a fresh start
@@ -7162,6 +7163,9 @@ def test_restart_and_switch_say_in_their_headline_that_the_first_line_was_not_ty
     assert again.exit_code == 0, again.output
     payload = json.loads(again.stdout)
     assert (payload["resumed"], payload["prompt_typed"]) == (False, False)
+    assert payload["how"] == "started fresh, but its hand-off prompt was NOT typed"
+    (why,) = [note for note in payload["failures"] if "NOT typed" in note]
+    assert why in payload["notes"]
 
 
 @pytest.mark.parametrize(
@@ -8305,6 +8309,7 @@ def test_a_restart_says_a_release_its_stop_could_not_make(
     assert receipt.started.ended_at is None
     [said] = [note for note in receipt.notes if note.startswith("claims:")]
     assert "could not be released" in said and "locked" in said
+    assert receipt.failures[0] == said, "what did not happen, as a switch's receipt says it"
     assert _task_now(mine.id).claimed_by == first
 
 

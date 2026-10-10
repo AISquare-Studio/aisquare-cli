@@ -823,11 +823,14 @@ def needs_from_agent(
        one's words are not on the board, and nothing tells a form asked then from its
        tool's own prompt: it reads as the prompt, whose digits would go into the form;
     6. no pending tool, and the newest record an interruption later than the session's last
-       hook → ``interrupted``, whatever the row reads (Esc fires no Stop, so a dismissed
-       prompt still reads ``attention`` and an interrupted turn ``working``);
+       hook, or one only Claude Code's own records follow (a local or ``!`` command run at
+       the prompt since, which fires no hook either) → ``interrupted``, whatever the row
+       reads (Esc fires no Stop, so a dismissed prompt still reads ``attention`` and an
+       interrupted turn ``working``);
     7. attention, and its notification is the usage-limit dialog → ``limited``;
     8. attention → ``permission``, the dialog form: an MCP elicitation, Claude Code's own;
-    9. ``waiting`` on its own words, which end on a question → ``asked``;
+    9. ``waiting`` on its own words, which end on a question → ``asked``, a local or ``!``
+       command run at its prompt since, which runs no turn, changing nothing (as for 6);
     10. ``waiting`` since its turn ended on an API error (the session's ``turn_failed``
         event, no hook since) → ``failed``.
 
@@ -950,20 +953,21 @@ def needs_from_agent(
                 push_after=seen,
             )
         ]
+    said, said_at, said_key = ("none", None, None) if tail is None else _needs_settled(tail)
     if (
         status.state == "waiting"
         and tail is not None
-        and tail.newest == "assistant_text"
+        and said == "assistant_text"
         and tail.last_text
-        and (tail.newest_at is None or tail.newest_at >= agent.created_at)
+        and (said_at is None or said_at >= agent.created_at)
         and looks_like_a_question(tail.last_text)
     ):
-        since = tail.newest_at or now
+        since = said_at or now
         prompt_now = _needs_is_manager(agent.role) or agent.spawned_by == "user" or not manager_live
         return [
             _needs_item(
                 "asked",
-                tail.marker_key or since.isoformat(),
+                said_key or since.isoformat(),
                 project=project,
                 agent=agent,
                 reason=f"{name} ended its turn with a question",
@@ -1081,13 +1085,27 @@ def _needs_unanswered(
     return tail.newest_at <= session.last_seen_at
 
 
+def _needs_settled(tail: TranscriptTail) -> tuple[str, datetime | None, str | None]:
+    """Where the agent is by its transcript, as a record's kind, time and key: the newest,
+    or, under Claude Code's own records (``own``), the one they follow.
+
+    A local command or a ``!`` command typed at the agent's prompt runs no turn and fires
+    no hook. Taken for where the agent is, it hid an interruption: the session, still
+    ``attention`` from the prompt an Esc answered, read as a dialog up, a card pushed at
+    once, and every action refused ``dialog_open`` (sweep 5 of #243).
+    """
+    if tail.newest == "own" and tail.under_own != "none":
+        return tail.under_own, tail.under_own_at, tail.under_own_key
+    return tail.newest, tail.newest_at, tail.marker_key
+
+
 def _needs_marker_later(status: FleetAgentStatus, tail: TranscriptTail) -> bool:
-    """The newest record is an interruption this process made after its session's last hook."""
-    if tail.newest != "interrupted" or tail.newest_at is None:
+    """The agent sits at an interruption this process made after its session's last hook
+    (:func:`_needs_settled`)."""
+    kind, at, _key = _needs_settled(tail)
+    if kind != "interrupted" or at is None or at < status.agent.created_at:
         return False
-    if tail.newest_at < status.agent.created_at:
-        return False
-    return status.session is None or tail.newest_at > status.session.last_seen_at
+    return status.session is None or at > status.session.last_seen_at
 
 
 def _needs_pending(tail: TranscriptTail | None, agent: FleetAgent) -> tuple[PendingTool, ...]:
@@ -1095,6 +1113,14 @@ def _needs_pending(tail: TranscriptTail | None, agent: FleetAgent) -> tuple[Pend
     if tail is None:
         return ()
     return tuple(tool for tool in tail.pending if tool.at is None or tool.at >= agent.created_at)
+
+
+def _needs_cut_short(tail: TranscriptTail | None, agent: FleetAgent) -> bool:
+    """The tail's walk ran out before the newest message, in a file written since the row
+    began: a tool use of it may be pending unseen (``TranscriptTail.cut_at``). What a
+    stop, a tell or a guarded key reads as a pending tool; no card is made of it, as it
+    names no tool to show."""
+    return tail is not None and tail.cut_at is not None and tail.cut_at >= agent.created_at
 
 
 def _needs_limited_item(
@@ -1486,13 +1512,15 @@ def _needs_failed_item(
 def _needs_interrupted_item(
     tail: TranscriptTail, *, project: ProjectInfo, agent: FleetAgent, name: str, now: datetime
 ) -> NeedsItem:
-    """An agent stopped by an Esc (or a rejected prompt), back at its prompt waiting."""
+    """An agent stopped by an Esc (or a rejected prompt), back at its prompt waiting: about
+    its marker, also when a local command run since is the newest record."""
     text = tail.last_text or ""
     paragraphs = [part for part in re.split(r"\n\s*\n", text.strip()) if part.strip()]
-    since = tail.newest_at or now
+    _kind, at, key = _needs_settled(tail)
+    since = at or now
     return _needs_item(
         "interrupted",
-        tail.marker_key or since.isoformat(),
+        key or since.isoformat(),
         project=project,
         agent=agent,
         reason=f"{name} was interrupted and waits for you",
@@ -2545,11 +2573,15 @@ def needs_dialog_open(snap: AgentNow) -> bool:
     ``fleet.ACTIVITY_WINDOW`` (5 s), and the notification that makes the row
     ``attention`` comes at 6 s, so until then a prompt reads like a tool at work.
     An action that would type an Enter asks :func:`needs_tool_pending` as well.
+    A tail whose walk ran out before the newest message (:func:`_needs_cut_short`) may hold
+    a pending tool it did not read, and counts as one here.
     """
     status = snap.status
     if status is None or not snap.pane_is_agent:
         return False
-    pending = _needs_pending(snap.tail, status.agent)
+    pending = bool(_needs_pending(snap.tail, status.agent)) or _needs_cut_short(
+        snap.tail, status.agent
+    )
     if pending and snap.pane_quiet is not False:
         return True
     if _needs_attention(status) and not (
@@ -2575,12 +2607,35 @@ def needs_tool_pending(snap: AgentNow) -> bool:
     apart, so a stop, a restart or a switch, whose ``/exit`` and Enter would
     answer "1. Yes", takes it for a prompt. Tools older than the row do not count
     (a resumed session's leftovers), and neither does a pane that is not the
-    agent's.
+    agent's. A tail whose walk ran out before the newest message
+    (:func:`_needs_cut_short`) may hold one it did not read, so it counts.
     """
     status = snap.status
     if status is None or not snap.pane_is_agent:
         return False
-    return bool(_needs_pending(snap.tail, status.agent))
+    return bool(_needs_pending(snap.tail, status.agent)) or _needs_cut_short(
+        snap.tail, status.agent
+    )
+
+
+def needs_unseen(snap: AgentNow) -> bool:
+    """Whether the agent's pane is its own, and nothing read here can say what it shows: its
+    row has no board session, or its transcript cannot be read.
+
+    A row with no session is an agent no aisquare hook reports on (``fleet spawn --bin``,
+    a Claude Code started without the hooks: ``no hooks`` in ``fleet ls``), or one whose
+    session could not be found. Its tail is never read, so a permission prompt there is
+    no pending tool and never ``attention``, and ``fleet._derive`` reads its pane quiet
+    for 5 s as ``waiting``. Taken for an agent at rest, a stop typed ``/exit`` and Enter
+    into the prompt, which took "1. Yes", and a tell's Enter did the same (review of
+    #243, round 7). A session whose transcript cannot be read hides a tool use's first
+    seconds the same way. Such an agent is a dialog that may be up: nothing is typed
+    into it without an Escape before it.
+    """
+    status = snap.status
+    if status is None or not snap.pane_is_agent:
+        return False
+    return status.session is None or snap.tail is None
 
 
 def needs_at_input_prompt(snap: AgentNow) -> bool:
@@ -2590,8 +2645,9 @@ def needs_at_input_prompt(snap: AgentNow) -> bool:
     pending, and the newest record is an interruption, the agent's own words or
     one Claude Code wrote itself (a local command's output, a compaction's
     summary: ``own``), or this process has written no conversation yet
-    (:func:`_needs_nothing_said`) — or the row derives ``waiting``, the only sign
-    there is without a tail.
+    (:func:`_needs_nothing_said`), or the row derives ``waiting``. Never for an
+    agent nothing here reads (:func:`needs_unseen`): a quiet pane that derives
+    ``waiting`` was all it had, and a permission prompt left 5 s is that too.
 
     A session starts ``working`` on the board, and the board is trusted for 30
     minutes: an agent just spawned with no prompt, or after a ``/clear``, read as
@@ -2605,11 +2661,9 @@ def needs_at_input_prompt(snap: AgentNow) -> bool:
     status = snap.status
     if status is None or not snap.pane_is_agent or snap.pane_quiet is not True:
         return False
-    if needs_dialog_open(snap):
+    if needs_dialog_open(snap) or snap.tail is None or needs_unseen(snap):
         return False
-    if snap.tail is None:
-        return status.state == "waiting"
-    if _needs_pending(snap.tail, status.agent):
+    if _needs_pending(snap.tail, status.agent) or _needs_cut_short(snap.tail, status.agent):
         return False
     if snap.tail.newest in ("interrupted", "assistant_text", "own") or status.state == "waiting":
         return True
@@ -3600,6 +3654,7 @@ __all__ = [
     "needs_scanned_iso",
     "needs_single_agent_now",
     "needs_tool_pending",
+    "needs_unseen",
     "needs_ws_frames",
     "record_needs_dismissal",
     "scan_needs_you",

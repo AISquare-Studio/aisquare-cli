@@ -327,6 +327,8 @@ def restart(
                     "started": receipt.started.model_dump(mode="json"),
                     "resumed": receipt.resumed,
                     "prompt_typed": receipt.prompt_typed,
+                    "how": receipt.how,
+                    "failures": receipt.failures,
                     "was_running": receipt.was_running,
                     "tmux_session": receipt.tmux_session,
                     "notes": receipt.notes,
@@ -402,6 +404,8 @@ def switch(
                     "to_slot": receipt.to_slot,
                     "resumed": receipt.resumed,
                     "prompt_typed": receipt.prompt_typed,
+                    "how": receipt.how,
+                    "failures": receipt.failures,
                     "tmux_session": receipt.tmux_session,
                     "notes": receipt.notes,
                 }

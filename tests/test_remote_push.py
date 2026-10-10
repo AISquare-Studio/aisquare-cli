@@ -1455,6 +1455,62 @@ def test_what_a_throttle_held_is_not_pushed_past_the_auto_off_deadline(world: Wo
     assert second.id not in load_push_state().pushed
 
 
+class Meanwhile(Transport):
+    """A push service that takes each push, and while it does, ``then`` happens: Remote turned
+    off on the machine, a deadline passed during a slow handshake."""
+
+    def __init__(self, then: Callable[[], object]) -> None:
+        super().__init__()
+        self.then = then
+
+    def __call__(self, endpoint: str, headers: dict[str, str], body: bytes) -> int:
+        status = super().__call__(endpoint, headers, body)
+        self.then()
+        return status
+
+
+def _sending_while(world: World, then: Callable[[], object]) -> None:
+    """A new sender on ``world``, whose every push lets ``then`` happen as it goes."""
+    world.transport = Meanwhile(then)
+    world.sender = RemotePushSender(world.kit, transport=world.transport, clock=world.clock)
+    world.sender.push_run_due()
+
+
+@pytest.mark.parametrize("turned_off", ["by its switch", "past its deadline", "on a quit"])
+def test_a_pass_under_way_when_remote_goes_off_sends_the_next_phone_nothing(
+    world: World, turned_off: str
+) -> None:
+    """``push_run_due`` asked once a pass whether Remote was off, and a pass sends to each
+    phone in turn, each send up to 10 s: Remote turned off during the first phone's push,
+    the farewell went, and the second phone heard "coder-auth needs you" after the farewell
+    that promised no more, its link a 404 (review of #243, sweep 5). A sender that was told
+    to stop, whose 2 s wait for it ran out, went on sending as well."""
+    world.kit.runtime.set_auto_off(T0 + timedelta(minutes=30))
+    if turned_off == "by its switch":
+        _sending_while(world, world.kit.runtime.remote_going_off)
+    elif turned_off == "past its deadline":
+        _sending_while(world, lambda: world.clock.advance(31 * 60))  # a slow handshake
+    else:
+        _sending_while(world, lambda: world.sender.push_end(0))
+    item = needs_item(1)
+    world.scan(item)
+    world.scan(item)
+    world.later(5)
+    assert world.titles() == [(DEVICES[0], "aisquare-cli: coder-auth needs you")]
+    world.later(30)
+    assert len(world.transport.sent) == 1, "nor at the second phone's next turn"
+
+
+def test_a_warning_under_way_when_remote_goes_off_reaches_the_next_phone_no_more(
+    world: World,
+) -> None:
+    world.kit.runtime.set_auto_off(T0 + timedelta(minutes=8))
+    _sending_while(world, world.kit.runtime.remote_going_off)
+    for _ in range(4):
+        world.later(30)
+    assert world.titles() == [(DEVICES[0], auto_off_title(8))]
+
+
 def test_no_warning_goes_out_past_the_auto_off_deadline(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:

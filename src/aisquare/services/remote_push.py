@@ -1116,6 +1116,8 @@ class RemotePushSender:
         """``remote-push.json``'s ``pushed``, read once, then kept current by :meth:`_push_mark`."""
         self._next_system_check: datetime | None = None
         self._failing = False
+        self._stopping = threading.Event()
+        """Set by :meth:`push_end`: a pass in flight sends nothing more."""
 
     # --- the thread ---
 
@@ -1127,7 +1129,9 @@ class RemotePushSender:
         self._thread.start()
 
     def push_end(self, timeout: float = PUSH_STOP_SECONDS) -> None:
-        """Stop the thread, waiting at most ``timeout`` for a send in flight."""
+        """Stop the thread, waiting at most ``timeout`` for a send in flight. A pass that
+        outlives the wait starts no other send (:meth:`_push_gone_off`)."""
+        self._stopping.set()
         self._queue.put(_STOP)
         if self._thread is not None:
             self._thread.join(timeout)
@@ -1213,9 +1217,7 @@ class RemotePushSender:
         go unmarked: an extension that comes after pushes it then.
         """
         now = self._clock()
-        if self._kit.runtime.auto_off_passed(now):
-            self._window, self._window_closes, self._owed = set(), None, {}
-            self._untaken, self._system_sends = {}, {}
+        if self._push_gone_off(now):
             return PUSH_SYSTEM_CHECK_SECONDS
         if self._window_closes is not None and now >= self._window_closes:
             self._push_close_window(now)
@@ -1225,6 +1227,21 @@ class RemotePushSender:
             self._next_system_check = now + timedelta(seconds=PUSH_SYSTEM_CHECK_SECONDS)
             self._push_system_checks(now)
         return self._push_next_due(now)
+
+    def _push_gone_off(self, now: datetime) -> bool:
+        """Whether Remote is past its auto-off deadline or turning off, or this sender is
+        stopping: then nothing more is sent, and what was gathered is let go unmarked.
+
+        Asked before every send, not once a pass: each send may wait 10 s on a push
+        service, and a pass that began before Remote went off sent the next phone "coder-1
+        needs you" after the farewell that promised no more, its link a 404 (review of
+        #243, sweep 5).
+        """
+        if not self._stopping.is_set() and not self._kit.runtime.auto_off_passed(now):
+            return False
+        self._window, self._window_closes, self._owed = set(), None, {}
+        self._untaken, self._system_sends = {}, {}
+        return True
 
     def deliver_one_push(
         self, device_id: str, record: PushSubscriptionRecord, message: PushMessage
@@ -1290,6 +1307,8 @@ class RemotePushSender:
             last = self._last_sent.get(device_id)
             if last is not None and now - last < self._push_gap(device_id):
                 continue
+            if self._push_gone_off(self._clock()):
+                return
             owed = self._owed.pop(device_id)
             items = [item for item in feed if item.id in owed]
             if not items:  # every one of them cleared while the throttle ran
@@ -1389,9 +1408,11 @@ class RemotePushSender:
         """
         tries, done = self._system_sends.get(key, (0, frozenset()))
         for device_id, record in targets.items():
-            if device_id not in done and not push_untaken(
-                self.deliver_one_push(device_id, record, message)
-            ):
+            if device_id in done:
+                continue
+            if self._push_gone_off(self._clock()):
+                return
+            if not push_untaken(self.deliver_one_push(device_id, record, message)):
                 done |= {device_id}
         if done.issuperset(targets) or tries >= PUSH_RETRIES_MAX:
             self._system_sends.pop(key, None)

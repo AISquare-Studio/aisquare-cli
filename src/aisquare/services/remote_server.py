@@ -337,14 +337,23 @@ REMOTE_KEY_VOCABULARY = (
     "Enter, Escape, Tab, BTab, BSpace, Space, Up, Down, Left, Right, Home, End, PageUp, "
     "PageDown, Delete, F1-F12, C-c, C-d, C-l, C-o, C-r, C-u, 0-9, y, n"
 )
-_TEXT_CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
-"""What typed ``text`` may not hold: a C0 control other than newline, or DEL
+REMOTE_BIDI_CONTROLS = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+"""The bidi embeddings, overrides and isolates. Each reorders the text after it wherever
+bidi is applied, the phone's page and some terminals: ``approve`` then an override and
+``deleted`` reads as something else than was written. The marks (U+200E, U+200F) only
+place the neutral characters beside them, and a line of right-to-left text keeps them."""
+_TEXT_CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
+"""What typed ``text`` may not hold: a control character, C0 other than newline, DEL or C1
 (:func:`check_remote_text`). A carriage return is the Enter key, byte for byte, and a tab
 the Tab key."""
-_PASTED_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_PASTED_CONTROL = re.compile(
+    "[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f-\\x9f" + "".join(sorted(REMOTE_BIDI_CONTROLS)) + "]"
+)
 """What a paste (a tell, or a note an agent's fresh replacement is handed) may not hold: the
 same, but for the tab and the carriage return, which inside a bracketed paste are a tab and
-a line break of the message and press nothing."""
+a line break of the message and press nothing; and a bidi control
+(:data:`REMOTE_BIDI_CONTROLS`), since a tell may be filed as a note, and ``aisquare board``
+prints a note's text as it came, past Rich, which strips only BEL, BS, VT, FF and CR."""
 _TEXT_CONTROL_KEYS = {
     "\x03": "C-c",
     "\x04": "C-d",
@@ -1747,9 +1756,9 @@ def check_remote_key_names(keys: object) -> list[str]:
 
 
 def check_remote_text(text: str, *, pasted: bool = False) -> None:
-    """Refuse typed ``text`` holding an ASCII control character (C0, or DEL) other than
+    """Refuse typed ``text`` holding a control character (C0, DEL or C1) other than
     newline: 400 ``invalid``, naming the pad's key for it. A ``pasted`` text (a tell)
-    may also hold a tab and a carriage return.
+    may also hold a tab and a carriage return, and no bidi control (:data:`_PASTED_CONTROL`).
 
     Text reaches the pane as hex, byte for byte, so a control character in it IS a
     keystroke: ``"\\x03"`` was a Ctrl-C past the double-press guard, ``"\\x1a"`` the
@@ -1768,16 +1777,24 @@ def check_remote_text(text: str, *, pasted: bool = False) -> None:
         return
     char = found.group()
     key = _TEXT_CONTROL_KEYS.get(char)
-    instead = f"send the pad's {key} key instead" if key else "no key of the pad sends it"
-    raise RequestError(
-        400, "invalid", f"'text' holds the control character U+{ord(char):04X} — {instead}"
-    )
+    if char in REMOTE_BIDI_CONTROLS:
+        instead = "it reorders how the text after it reads"
+    else:
+        instead = f"send the pad's {key} key instead" if key else "no key of the pad sends it"
+    raise RequestError(400, "invalid", f"'text' holds {_remote_char_named(char)} — {instead}")
+
+
+def _remote_char_named(char: str) -> str:
+    """How a refusal names a character that text may not hold: by its code point, as a
+    control character or a bidi control (:data:`REMOTE_BIDI_CONTROLS`)."""
+    kind = "the bidi control" if char in REMOTE_BIDI_CONTROLS else "the control character"
+    return f"{kind} U+{ord(char):04X}"
 
 
 def check_note_text(text: str, field: str) -> None:
     """A note's ``field`` as a phone may post it: at most :data:`NOTE_TEXT_MAX` characters
-    (413), and no ASCII control character but tab, newline and carriage return (400
-    ``invalid``), which is a tell's rule.
+    (413), and no control character but tab, newline and carriage return, and no bidi
+    control (400 ``invalid``), which is a tell's rule.
 
     A note posted ``as`` an agent's session is one of that session's newest board
     entries, and the first prompt of a fresh replacement repeats them
@@ -1789,6 +1806,12 @@ def check_note_text(text: str, field: str) -> None:
     (review of #243, round 3). A finished task's note is the text of its
     ``task_done`` event, so ``task/done`` holds it to the same rule. A line break
     inside the paste is the note's own, as it is in a tell.
+
+    ``team.event_line`` puts the text on the line ``aisquare board`` prints, as it does
+    ``to`` (:func:`check_note_to`), and Rich passes C1 and bidi controls through: a C1
+    CSI or OSC (``"\\x9b2J"``, ``"\\x9d52;c;…\\x9c"``) reached a terminal that reads UTF-8
+    C1 as controls, as xterm and VTE do, and an override made ``approve`` and ``deleted``
+    read in another order. Only the ASCII ones were refused (sweep 3 of #243).
     """
     if len(text) > NOTE_TEXT_MAX:
         raise RequestError(413, "too_large", f"a note is at most {NOTE_TEXT_MAX} characters")
@@ -1797,8 +1820,8 @@ def check_note_text(text: str, field: str) -> None:
         raise RequestError(
             400,
             "invalid",
-            f"{field!r} holds the control character U+{ord(found.group()):04X} — a note may "
-            "hold tabs and line breaks, and no other ASCII control character",
+            f"{field!r} holds {_remote_char_named(found.group())} — a note may hold tabs and "
+            "line breaks, and no other control character and no bidi control",
         )
 
 

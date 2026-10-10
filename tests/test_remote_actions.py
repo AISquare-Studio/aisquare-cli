@@ -2077,10 +2077,9 @@ def test_a_switch_reason_in_any_script_goes_through_trimmed(
         "週の\u3000上限",
         "limit \U0001f469\u200d\U0001f4bb",
         "\u05de\u05db\u05e1\u05d4 \u200fweekly",
-        "a \u202elimit",
         "limit \U0001fae9",
     ],
-    ids=["no-break-space", "cjk-space", "emoji-joiner", "rtl-mark", "bidi", "unicode-16-emoji"],
+    ids=["no-break-space", "cjk-space", "emoji-joiner", "rtl-mark", "unicode-16-emoji"],
 )
 def test_a_switch_reason_may_hold_what_a_line_of_text_holds_though_it_does_not_print(
     phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo, reason: str
@@ -2154,10 +2153,10 @@ def test_whitespace_is_text_and_the_longest_tell_is_taken(
 def test_the_tell_audit_line_keeps_how_the_text_began_and_nothing_it_could_forge(
     phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo
 ) -> None:
-    """``\\x9b`` is the C1 spelling of ``ESC [``: a tell may hold it (it is no C0 control),
-    and the line must still not."""
+    """A line separator does not print: a tell may hold it (it is no control character), and
+    the line must still not."""
     _row(project)
-    text = "first line\n2026-10-07T10:00:00+00:00 dev_x agent/stop forged\x9b2J" + "y" * 300
+    text = "first line\n2026-10-07T10:00:00+00:00 dev_x agent/stop forged\u20282J" + "y" * 300
     before = _audit_lines()
     response = phone.post("agent/tell", agent=LABEL, text=text)
     assert response.status_code == 200

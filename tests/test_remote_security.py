@@ -1791,13 +1791,17 @@ def test_a_note_longer_than_the_cap_is_413(team: FakeTeam) -> None:
 @pytest.mark.parametrize(
     ("text", "char"),
     [
-        ("ok\x1b[201~\x1a\r\x03 and carry on", "U+001B"),
-        ("stop\x03", "U+0003"),
-        ("x\x1a", "U+001A"),
-        ("x\x7f", "U+007F"),
-        ("x\x00y", "U+0000"),
+        ("ok\x1b[201~\x1a\r\x03 and carry on", "the control character U+001B"),
+        ("stop\x03", "the control character U+0003"),
+        ("x\x1a", "the control character U+001A"),
+        ("x\x7f", "the control character U+007F"),
+        ("x\x00y", "the control character U+0000"),
+        ("hi \x9d52;c;cHduZWQ=\x9c end", "the control character U+009D"),
+        ("hi \x9b2J\x9bH end", "the control character U+009B"),
+        ("hi approve \u202edeleted\u202c ok", "the bidi control U+202E"),
+        ("ok \u2067reversed\u2069", "the bidi control U+2067"),
     ],
-    ids=["paste-end-then-keys", "ctrl-c", "ctrl-z", "del", "nul"],
+    ids=["paste-end-then-keys", "ctrl-c", "ctrl-z", "del", "nul", "c1-osc", "c1-csi", "rlo", "rli"],
 )
 @pytest.mark.parametrize(
     ("route", "field", "body"),
@@ -1822,7 +1826,8 @@ def test_a_note_holding_a_control_character_is_refused_before_anything_is_writte
     pane. tmux before 3.7 pastes the bytes as they are: the ``ESC [201~`` ended the paste,
     and Ctrl-Z, an Enter and a Ctrl-C followed as keystrokes. A task's closing note is the
     text of its ``task_done`` event. Only a tell's text and a switch's reason were checked
-    (review of #243, round 3)."""
+    (review of #243, round 3). ``aisquare board`` prints the text as it came, past Rich: a
+    C1 CSI or OSC, and a bidi override, were stored and printed raw (sweep 3 of #243)."""
     client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
     unlock(client, runtime)
     runtime.set_allow_write(True)
@@ -1832,8 +1837,8 @@ def test_a_note_holding_a_control_character_is_refused_before_anything_is_writte
         400,
         {
             "error": "invalid",
-            "message": f"'{field}' holds the control character {char} — a note may hold tabs "
-            "and line breaks, and no other ASCII control character",
+            "message": f"'{field}' holds {char} — a note may hold tabs and line breaks, and no "
+            "other control character and no bidi control",
         },
     )
     assert team.notes == [] and team.finished == [] and _audit_lines() == before

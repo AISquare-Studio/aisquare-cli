@@ -115,13 +115,14 @@ def test_serve_ended_by_a_signal_takes_its_way_out_and_exits_as_the_signal_says(
     assert ran_out is (deadline == "passed"), err
 
 
-@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="a hangup is POSIX's")
 def test_serve_under_nohup_outlives_the_hangup_it_was_started_to_outlive(
     isolated_home: Path,
 ) -> None:
     """``nohup`` ignores SIGHUP so that closing the terminal leaves the process running; a
     handler for it, installed whatever ``serve`` found, stopped Remote at that very close.
     Ignored when ``serve`` started, a hangup changes nothing, and a SIGTERM still ends it."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("a hangup is POSIX's")
     runtime = make_runtime()
     port = _free_port()
     child = subprocess.Popen(

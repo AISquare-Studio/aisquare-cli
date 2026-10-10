@@ -1273,6 +1273,39 @@ async function limitTimes() {
   }
 }
 
+/* The Board tab on a phone in UTC-7, from a machine in UTC+5:30 whose board's limited lines
+ * say the reset by its own clock: coder-1 parked on a limit that lifts at 13:10 UTC (18:40
+ * on the machine, 06:10 on the phone), an older limited line of coder-1's, one of coder-2's
+ * (back at work), and a note that quotes such a line. Each line's text, newest first. */
+async function boardLimitTimes() {
+  const zone = process.env.TZ;
+  process.env.TZ = "America/Los_Angeles";
+  try {
+    const switchIt = (label) => " — `aisquare fleet switch " + label + "` moves it to the account with the most headroom (or wait for the reset)";
+    const limited = (seq, session, text) => ({ kind: "team.limited", ts: "2026-10-07T10:00:00+00:00", payload: { seq, text, session_id: session } });
+    const board = {
+      project: { id: PROJECT },
+      sessions: [
+        { id: "ses_1", label: "coder-1", role: "coder", state: "limited", limit_resets_at: "2026-10-07T13:10:00+00:00" },
+        { id: "ses_2", label: "coder-2", role: "coder", state: "working", limit_resets_at: "2026-10-07T10:12:00+00:00" },
+      ],
+      events: [
+        limited(1, "ses_1", "coder-1 hit its session limit · resets in 2d 4h (Fri 02:00)" + switchIt("coder-1")),
+        limited(2, "ses_2", "coder-2 hit its session limit · resets in 12m" + switchIt("coder-2")),
+        limited(3, "ses_1", "coder-1 hit its session limit · resets in 3h 10m (18:40)" + switchIt("coder-1")),
+        note(4, "coder-1 said: hit its session limit · resets in 3h 10m (18:40)"),
+      ],
+    };
+    const page = bootPage("#/p/" + PROJECT + "/board", signedIn({ "GET api/board": () => ({ status: 200, json: board }) }));
+    page.run("Date.now = () => Date.parse('2026-10-07T10:00:07+00:00');");
+    await settle();
+    return page.main().querySelectorAll("p.text").map((line) => line.textContent);
+  } finally {
+    if (zone === undefined) delete process.env.TZ;
+    else process.env.TZ = zone;
+  }
+}
+
 const OLDER_REMOTE = { allow_write: false, auto_off_at: null, version: "test" };
 
 function note(seq, text) {
@@ -3490,6 +3523,7 @@ async function main() {
     boardAnswers: await boardAnswers(),
     transcriptTimes: await transcriptTimes(),
     limitTimes: await limitTimes(),
+    boardLimitTimes: await boardLimitTimes(),
     readsAfterFrames: await readsAfterFrames(),
     backLeaves: await backLeaves(),
     lateAnswers: await lateAnswers(),

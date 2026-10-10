@@ -1820,6 +1820,32 @@ def test_a_usage_limits_reset_is_told_by_the_phones_own_clock(
     assert "13:10" not in rows[1]
 
 
+def test_the_board_tab_tells_a_limits_reset_by_the_phones_clock_or_not_at_all(
+    boot_report: dict[str, Any],
+) -> None:
+    """The board's ``limited`` line says the reset by the machine's clock, ``(18:40)`` from a
+    machine in UTC+5:30, and the Board tab drew it as it came: a phone in UTC-7 read that
+    the limit lifts this evening beside a card that says 06:10, and a distance that never
+    moved. The newest line of a session still parked says when by the phone's clock; an
+    older one, or one whose session went back to work, only that it hit the limit."""
+    switch_it = " — `aisquare fleet switch {}` moves it to the account with the most headroom"
+    quoted, newest, coder_2, older = boot_report["boardLimitTimes"]
+    assert quoted == "coder-1 said: hit its session limit · resets in 3h 10m (18:40)"
+    assert newest.startswith("coder-1 hit its session limit · resets at ") and "06:10" in newest
+    assert "18:40" not in newest and "3h 10m" not in newest
+    assert newest.endswith(" (or wait for the reset)")
+    assert older.startswith("coder-1 hit its session limit" + switch_it.format("coder-1"))
+    assert coder_2.startswith("coder-2 hit its session limit" + switch_it.format("coder-2"))
+
+
+def test_the_page_finds_a_limits_reset_in_a_board_line_as_the_card_does() -> None:
+    """The page's copy of how a ``limited`` line says its reset is the server's, which cuts
+    the same words out of the card's text: two copies of it would drift apart."""
+    found = re.search(r"^const RESET_SAID = /(.*)/;$", _text("app.js"), re.MULTILINE)
+    assert found is not None
+    assert found.group(1) == remote_needs._NEEDS_RESET_SAID.pattern
+
+
 def test_a_read_answered_after_a_newer_frame_of_its_kind_is_dropped(
     boot_report: dict[str, Any],
 ) -> None:

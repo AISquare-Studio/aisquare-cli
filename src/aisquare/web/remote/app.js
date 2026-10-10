@@ -663,6 +663,15 @@ function resetClock(iso, now) {
   return at.toLocaleString([], Object.assign(day, { hour: "2-digit", minute: "2-digit" }));
 }
 
+/* A limited line's reset, by the machine's clock (remote_needs._NEEDS_RESET_SAID), is told
+ * by the phone's from resetsAt, its session's while parked, or not at all. */
+const RESET_SAID = / · resets (?:now|in \d+[dhm](?: \d+[hm])?)(?: \([^()]*\))?/;
+function boardText(kind, text, resetsAt, now) {
+  if (kind !== "limited" || typeof text !== "string") return text;
+  const shown = Date.parse(resetsAt) > now ? resetClock(resetsAt, now) : "";
+  return text.replace(RESET_SAID, shown ? " · resets at " + shown : "");
+}
+
 /* A fleet row's detail; a limited row's reset as resetClock tells it. */
 function rowDetail(row, now) {
   const at = row.state === "limited" && row.session ? row.session.limit_resets_at : null;
@@ -2294,20 +2303,25 @@ VIEWS.project = (route, main) => {
       if (!board) return list.appendChild(el("p", "empty", failed ? failText(failed) : "Loading…"));
       if (isText(board.error)) return list.appendChild(el("p", "empty", plainText(board.error)));
       const authors = new Map();
+      const parked = new Map(); // a session on its limit: when it lifts, for its newest limited line
       for (const session of Array.isArray(board.sessions) ? board.sessions : []) {
-        if (session && typeof session.id === "string") authors.set(session.id, plainText(session.label || session.role || "an agent"));
+        if (!session || typeof session.id !== "string") continue;
+        authors.set(session.id, plainText(session.label || session.role || "an agent"));
+        if (session.state === "limited") parked.set(session.id, session.limit_resets_at);
       }
       const events = (Array.isArray(board.events) ? board.events : []).filter((one) => one && one.payload && typeof one.payload === "object");
       events.sort((a, b) => toInt(b.payload.seq) - toInt(a.payload.seq));
       if (!events.length) list.appendChild(el("p", "empty", "Nothing on the board yet."));
+      const now = Date.now();
       for (const event of events.slice(0, 200)) {
         const p = event.payload;
         const kind = typeof event.kind === "string" ? event.kind.replace(/^team\./, "") : "note";
         const card = el("div", "event");
         const by = p.session_id ? authors.get(p.session_id) || "an agent" : "you";
         const to = isText(p.to_role) ? " → " + plainText(p.to_role) : "";
-        card.appendChild(el("p", "muted", plainText(kind) + " · " + by + to + " · " + ago(event.ts, Date.now())));
-        card.appendChild(el("p", "text", p.text));
+        card.appendChild(el("p", "muted", plainText(kind) + " · " + by + to + " · " + ago(event.ts, now)));
+        card.appendChild(el("p", "text", boardText(kind, p.text, parked.get(p.session_id), now)));
+        if (kind === "limited") parked.delete(p.session_id);
         list.appendChild(card);
       }
       return undefined;

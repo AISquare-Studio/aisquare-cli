@@ -6322,6 +6322,13 @@ def install_page(source: Path) -> Path:
     in a staging directory beside the destination and is swapped in with two renames —
     same filesystem, so each rename is atomic — rather than removing the destination
     first, so a server reading the old page mid-swap never sees a half-written one.
+
+    The staging directory is made inside one only this account may enter (``mkdtemp``'s
+    0700), and leaves it only once its modes are narrowed. Made beside the destination,
+    the copy took the build's 0666 and 0777 as each file and directory was written, and
+    another account could open a file for writing in that moment and keep it open past
+    the narrowing, or put its own file in a directory before the walk reached it, which
+    the walk then left as it was, its owner's (sweep of #243, round 7).
     """
     resolved = _remote_resolved(source)
     if resolved is None:
@@ -6332,10 +6339,12 @@ def install_page(source: Path) -> Path:
     project = _page_project_not_build(source)
     if project is not None:
         raise NoRemotePage(project)
+    import tempfile
+
     ensure_home()
     destination = remote_dist_dir()
-    staging = destination.with_name(f".{destination.name}.staging-{os.getpid()}")
-    shutil.rmtree(staging, ignore_errors=True)
+    private = Path(tempfile.mkdtemp(prefix=f".{destination.name}.private-", dir=destination.parent))
+    staging = private / f".{destination.name}.staging-{os.getpid()}"
     previous = destination.with_name(f".{destination.name}.previous-{os.getpid()}")
     try:
         shutil.copytree(source, staging, ignore=functools.partial(_page_copy_skips, source))
@@ -6350,11 +6359,12 @@ def install_page(source: Path) -> Path:
                 previous.rename(destination)
             raise
     except BaseException:
-        # Named for this process, so no later install's own clean-up ever matched it: each
+        # Unique to this try, so no later install's own clean-up would ever find it: each
         # failed try (a full disk, a file it could not read) left another partial copy
         # holding the very space the refusal says to free (sweep 4 of #243).
-        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(private, ignore_errors=True)
         raise
+    shutil.rmtree(private, ignore_errors=True)
     shutil.rmtree(previous, ignore_errors=True)
     return destination
 

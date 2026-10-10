@@ -112,6 +112,40 @@ def test_an_installed_page_is_writable_by_no_one_else_whatever_the_builds_modes(
     assert modes == {".": 0o755, "assets": 0o755, "index.html": 0o644, "assets/app.js": 0o644}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows keeps no group or other bits")
+def test_an_installed_page_is_copied_where_no_other_account_can_reach_it(
+    isolated_home: Path, built: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Narrowed only once copied, the copy took the build's 0666 and 0777 as it was written
+    beside the destination: another account could open a file for writing then and keep it
+    open past the narrowing, or put its own file in a directory the walk then left as it
+    was (sweep of #243, round 7). The copy is made inside a directory only this account may
+    enter, and the swap leaves nothing of it behind."""
+    for path in (built, built / "assets"):
+        path.chmod(0o777)
+    for path in (built / "index.html", built / "assets" / "app.js"):
+        path.chmod(0o666)
+    home = remote_dist_dir().parent
+    reachable: list[str] = []
+    real_copytree = shutil.copytree
+
+    def copy_and_look(src: Path, dst: Path, *args: Any, **kwargs: Any) -> Any:
+        copied = real_copytree(src, dst, *args, **kwargs)
+        within = [Path(dst), *Path(dst).parents]
+        between = within[: within.index(home)]
+        if not any(stat.S_IMODE(path.stat().st_mode) & 0o077 == 0 for path in between):
+            reachable.append(str(Path(dst).relative_to(home)))
+        return copied
+
+    monkeypatch.setattr(shutil, "copytree", copy_and_look)
+
+    destination = remote_server.install_page(built)
+
+    assert reachable == [], "the copy, its build's modes still on it, was in reach"
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o755
+    assert [p.name for p in home.iterdir() if p.name.startswith(".remote-dist.")] == []
+
+
 def test_install_page_replaces_an_older_page_and_leaves_no_staging_directory(
     isolated_home: Path, built: Path, tmp_path: Path
 ) -> None:

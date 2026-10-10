@@ -323,10 +323,24 @@ def test_text_holding_a_control_character_is_refused_and_names_the_key(
     assert pane.sent == []
 
 
-def test_tab_and_newline_are_still_text(pane: FakePane) -> None:
+def test_a_newline_is_still_text(pane: FakePane) -> None:
     send = live_writes().handlers["send-keys"]
-    send({"agent": "coder-1", "text": "a\tb\nc"})
-    assert pane.sent == [("literal", "a\tb\nc")]
+    send({"agent": "coder-1", "text": "a b\nc"})
+    assert pane.sent == [("literal", "a b\nc")]
+
+
+def test_a_tab_typed_is_the_tab_key_and_is_refused(pane: FakePane) -> None:
+    """``"\\t"`` is the Tab key's own byte, and Claude Code's prompt takes it as the key (an
+    open suggestion accepted), never as a tab of the message: a table row pasted into the
+    input bar arrived as other text than was sent (review of #243, round 5)."""
+    send = live_writes().handlers["send-keys"]
+    with pytest.raises(RequestError) as refused:
+        send({"agent": "coder-1", "text": "name\tvalue", "enter": True})
+    assert (refused.value.status, refused.value.error) == (400, "invalid")
+    assert refused.value.message == (
+        "'text' holds the control character U+0009 — send the pad's Tab key instead"
+    )
+    assert pane.sent == []
 
 
 @pytest.mark.parametrize("text", ["\r", "first line\r\nsecond line"], ids=repr)
@@ -1777,13 +1791,17 @@ def test_a_note_longer_than_the_cap_is_413(team: FakeTeam) -> None:
 @pytest.mark.parametrize(
     ("text", "char"),
     [
-        ("ok\x1b[201~\x1a\r\x03 and carry on", "U+001B"),
-        ("stop\x03", "U+0003"),
-        ("x\x1a", "U+001A"),
-        ("x\x7f", "U+007F"),
-        ("x\x00y", "U+0000"),
+        ("ok\x1b[201~\x1a\r\x03 and carry on", "the control character U+001B"),
+        ("stop\x03", "the control character U+0003"),
+        ("x\x1a", "the control character U+001A"),
+        ("x\x7f", "the control character U+007F"),
+        ("x\x00y", "the control character U+0000"),
+        ("hi \x9d52;c;cHduZWQ=\x9c end", "the control character U+009D"),
+        ("hi \x9b2J\x9bH end", "the control character U+009B"),
+        ("hi approve \u202edeleted\u202c ok", "the bidi control U+202E"),
+        ("ok \u2067reversed\u2069", "the bidi control U+2067"),
     ],
-    ids=["paste-end-then-keys", "ctrl-c", "ctrl-z", "del", "nul"],
+    ids=["paste-end-then-keys", "ctrl-c", "ctrl-z", "del", "nul", "c1-osc", "c1-csi", "rlo", "rli"],
 )
 @pytest.mark.parametrize(
     ("route", "field", "body"),
@@ -1808,7 +1826,8 @@ def test_a_note_holding_a_control_character_is_refused_before_anything_is_writte
     pane. tmux before 3.7 pastes the bytes as they are: the ``ESC [201~`` ended the paste,
     and Ctrl-Z, an Enter and a Ctrl-C followed as keystrokes. A task's closing note is the
     text of its ``task_done`` event. Only a tell's text and a switch's reason were checked
-    (review of #243, round 3)."""
+    (review of #243, round 3). ``aisquare board`` prints the text as it came, past Rich: a
+    C1 CSI or OSC, and a bidi override, were stored and printed raw (sweep 3 of #243)."""
     client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
     unlock(client, runtime)
     runtime.set_allow_write(True)
@@ -1818,8 +1837,8 @@ def test_a_note_holding_a_control_character_is_refused_before_anything_is_writte
         400,
         {
             "error": "invalid",
-            "message": f"'{field}' holds the control character {char} — a note may hold tabs "
-            "and line breaks, and no other ASCII control character",
+            "message": f"'{field}' holds {char} — a note may hold tabs and line breaks, and no "
+            "other control character and no bidi control",
         },
     )
     assert team.notes == [] and team.finished == [] and _audit_lines() == before
@@ -1930,6 +1949,8 @@ def test_a_git_checkout_or_a_folder_of_repos_inside_home_is_a_project(home: Path
         ("~/.config/thing", "hidden directory .config"),
         ("~/linked", "hidden directory .aisquare"),
         ("~/plain", "neither a git checkout nor a directory of repositories"),
+        ("~/co\x00de/app", "'path' holds a NUL byte"),
+        ("~no_such_user_here/app", "does not exist"),
     ],
 )
 def test_project_add_refuses_what_is_not_a_project_inside_home(
@@ -2095,6 +2116,10 @@ def test_a_project_with_live_agents_is_not_removed_and_the_phone_hears_why(
         ("remove", {"ref": "app"}, 400, "ambiguous_project"),
         ("remove", {"ref": ["alpha"]}, 400, "invalid"),
         ("remove", {"name": "alpha"}, 400, "invalid"),
+        ("remove", {"ref": "/al\x00pha"}, 400, "invalid"),
+        ("remove", {"ref": "~/" + "a" * 300}, 404, "not_found"),
+        ("remove", {"ref": "a" * 5_000}, 404, "not_found"),
+        ("remove", {"ref": "~no_such_user_here/alpha"}, 404, "not_found"),
     ],
 )
 def test_a_switch_or_a_remove_that_names_no_one_project_changes_nothing(

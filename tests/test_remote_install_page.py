@@ -258,3 +258,156 @@ def test_after_install_page_the_server_serves_the_spa_with_no_dist_flag(
     assert index.status_code == 200 and index.text.startswith("<!doctype html>")
     assert deep.status_code == 200 and deep.text.startswith("<!doctype html>")
     assert asset.status_code == 200 and asset.text == "console.log('remote')"
+
+
+# --- what a request may name in an installed build -------------------------------------------
+
+
+@pytest.mark.parametrize("installed", [False, True], ids=["dist", "install-page"])
+@pytest.mark.parametrize(
+    ("path", "status"),
+    [
+        ("%00", 200),
+        ("a%00.js", 404),
+        ("assets/%00", 404),
+        ("x" * 300 + ".js", 404),
+        ("x" * 3_000, 200),
+        ("a/" * 2_100 + "b.js", 404),
+    ],
+    ids=[
+        "nul",
+        "nul-in-a-name",
+        "nul-in-assets",
+        "a-name-past-255",
+        "a-path-past-the-limit",
+        "deep",
+    ],
+)
+def test_a_page_path_the_system_refuses_is_a_miss_not_a_500(
+    isolated_home: Path, built: Path, installed: bool, path: str, status: int
+) -> None:
+    """A NUL byte made ``resolve`` raise ``ValueError``, and a name past 255 bytes made
+    ``is_file`` raise ``ENAMETOOLONG``: each answered a bare 500 ``text/plain`` with a
+    traceback in the log and no page headers, to anyone holding the link (sweep 3 of
+    #243). A miss is a miss: a file request's JSON 404, a navigation's document."""
+    if installed:
+        remote_server.install_page(built)
+    runtime = Runtime(remote_state_path(), remote_audit_path())
+    app = build_app(runtime) if installed else build_app(runtime, dist_dir=built)
+    response = make_client(app).get(f"/r/{runtime.token}/{path}")
+    assert response.status_code == status, response.text[:200]
+    assert response.headers["referrer-policy"] == "no-referrer"
+    if status == 404:
+        assert response.json()["error"] == "not_found"
+    else:
+        assert response.text.startswith("<!doctype html>")
+
+
+SECRET = "OPENAI_API_KEY=sk-test-123"
+
+
+def _hidden_files(root: Path) -> None:
+    """What a project keeps beside its page and must never be handed to a link holder."""
+    (root / ".env").write_text(SECRET)
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text(f"url = https://user:{SECRET}@github.com/x/y")
+    (root / "assets" / ".secret.js").write_text(SECRET)
+
+
+@pytest.fixture
+def project_root(tmp_path: Path) -> Path:
+    """A web project's own directory, as Vite lays it out: its SOURCE index.html at the top."""
+    root = tmp_path / "aisquare-remote"
+    (root / "assets").mkdir(parents=True)
+    (root / "index.html").write_text('<!doctype html><script src="/src/main.ts"></script>')
+    (root / "package.json").write_text('{"name": "aisquare-remote"}')
+    (root / "node_modules" / "vite").mkdir(parents=True)
+    (root / "node_modules" / "vite" / "package.json").write_text('{"name": "vite"}')
+    _hidden_files(root)
+    return root
+
+
+def test_install_page_refuses_a_projects_own_directory_and_installs_nothing(
+    isolated_home: Path, project_root: Path
+) -> None:
+    """Its source ``index.html`` passed for a page, and the whole project was copied in,
+    ``.env``, ``.git`` and ``node_modules`` included, and served to anyone holding the
+    link, with no passphrase (sweep 3 of #243)."""
+    with pytest.raises(NoRemotePage) as refused:
+        remote_server.install_page(project_root)
+    assert str(refused.value) == (
+        f"{project_root.resolve()} holds package.json: it is the project, not its build — "
+        "point at its dist/ after npm run build"
+    )
+    assert not remote_dist_dir().exists()
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--json", "remote", "install-page", str(project_root)])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"] == "invalid_dist"
+    human = runner.invoke(cli, ["remote", "install-page", str(project_root)])
+    assert human.exit_code == 1 and "it is the project, not its build" in human.stderr
+    assert not remote_dist_dir().exists()
+
+
+def test_serve_refuses_a_projects_own_directory_as_its_dist(
+    isolated_home: Path, project_root: Path
+) -> None:
+    problem = remote_server._page_missing(project_root)
+    assert problem is not None and "it is the project, not its build" in problem
+    with pytest.raises(NoRemotePage):
+        remote_server.run_foreground(dist_dir=project_root, port=free_port())
+
+
+def test_install_page_leaves_behind_what_a_server_would_not_serve(
+    isolated_home: Path, built: Path, tmp_path: Path
+) -> None:
+    """Hidden files, and a link out of the build or to a hidden file, whose content the
+    copy held under the link's own name: the installed page is what ``--dist`` of the
+    same build would serve, and no more (sweep 3 of #243)."""
+    _hidden_files(built)
+    (tmp_path / "elsewhere.txt").write_text(SECRET)
+    links = {"linked.js": built / ".env", "away.js": tmp_path / "elsewhere.txt"}
+    try:
+        for name, target in links.items():
+            (built / name).symlink_to(target)
+        (built / "kept.js").symlink_to(built / "assets" / "app.js")
+    except OSError:
+        links = {}
+    destination = remote_server.install_page(built)
+    copied = sorted(path.relative_to(destination).as_posix() for path in destination.rglob("*"))
+    expected = ["assets", "assets/app.js", "index.html", *(["kept.js"] if links else [])]
+    assert copied == sorted(expected)
+    assert all(SECRET not in path.read_text() for path in destination.rglob("*.*"))
+
+
+@pytest.mark.parametrize("installed", [False, True], ids=["dist", "install-page"])
+@pytest.mark.parametrize(
+    "path", [".env", ".git/config", "assets/.secret.js", "assets/../.env", "linked.js"]
+)
+@pytest.mark.parametrize("accept", ["*/*", "text/html"])
+def test_a_hidden_file_of_the_build_is_never_served(
+    isolated_home: Path, built: Path, installed: bool, path: str, accept: str
+) -> None:
+    """The bundled page leaves its dotfiles out; a build's were served whole, to anyone
+    holding the link, with no passphrase (sweep 3 of #243). Judged where a link resolves
+    too: ``linked.js`` points at ``.env``."""
+    _hidden_files(built)
+    try:
+        (built / "linked.js").symlink_to(built / ".env")
+    except OSError:
+        if path == "linked.js":
+            pytest.skip("this platform cannot make the symlink")
+    if installed:
+        remote_server.install_page(built)
+        target = remote_dist_dir()
+        _hidden_files(target)  # put there by hand: a server still never serves them
+        if (built / "linked.js").is_symlink():
+            (target / "linked.js").unlink(missing_ok=True)
+            (target / "linked.js").symlink_to(target / ".env")
+    runtime = Runtime(remote_state_path(), remote_audit_path())
+    app = build_app(runtime) if installed else build_app(runtime, dist_dir=built)
+    response = make_client(app).get(f"/r/{runtime.token}/{path}", headers={"accept": accept})
+    assert SECRET not in response.text
+    assert response.status_code in (200, 404)
+    if response.status_code == 200:
+        assert response.text.startswith("<!doctype html>"), "only ever the document"

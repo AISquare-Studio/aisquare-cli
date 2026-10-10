@@ -105,8 +105,11 @@ and ngrok to stop, then for the write, and a Ctrl-C in either wait quits at once
 
 The page is part of aisquare-cli, so a fresh machine needs no other step.
 `aisquare remote install-page <dist>` installs another build over it (it lands in
-`~/.aisquare/remote-dist`), and `--dist` overrides both. To go back to the
-bundled page:
+`~/.aisquare/remote-dist`), and `--dist` overrides both. Each takes the build's
+`dist/`, never the project that builds it (a directory holding `package.json` or
+`node_modules`), and neither copies nor serves a hidden file such as `.env` or
+`.git`: what is served is open to anyone with the link, before the passphrase. To
+go back to the bundled page:
 
 ```sh
 rm -rf ~/.aisquare/remote-dist
@@ -439,14 +442,15 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   `ngrok.yml` (`ngrok config edit`; under `agent:` in a version 3 file).
 - **Keys**: the pad sends key names from a fixed list (no `;`, nothing that
   tmux reads as a command); typed text travels as literal text, never as keys.
-  Typed text may hold no ASCII control character other than a tab or a
-  newline; a tell and a note, which reach a pane only inside a paste, a carriage
-  return as well (a finished task's note is a note, and an agent's fresh
-  replacement is handed its newest notes); a switch's `reason` is one line
-  with no control character at all; and whom a note is `to`, a role or a label
-  that `aisquare board` prints, holds only characters that print. The pad sends
-  Esc, Ctrl-C, Enter and its other control keys by name (a carriage return typed
-  is the Enter key itself).
+  Typed text may hold no control character (ASCII or C1) other than a newline;
+  a tell and a note, which reach a pane only inside a paste, a tab and a
+  carriage return as well (a finished task's note is a note, and an agent's
+  fresh replacement is handed its newest notes), and no bidi control, which
+  would reorder the line `aisquare board` prints; a switch's `reason` is one
+  line with no control character or bidi control at all; and whom a note is
+  `to`, a role or a label that `aisquare board` prints, holds only characters
+  that print. The pad sends Esc, Ctrl-C, Tab, Enter and its other control keys
+  by name (a tab or a carriage return typed is the Tab or the Enter key itself).
 - **Caps**: 64 KiB per request, 2 048 characters per keystroke message, 8 000
   per note or tell and 200 for whom a note is to, 4 live connections per device,
   64 writes per device waiting for the machine (`busy` past that).
@@ -518,17 +522,27 @@ one still being read when a tick ends follows on a later tick. The connection
 closes with 4401 for a device that is no longer signed in, 4409 when the same
 device opened a fifth connection, and 4410 when Remote is turned off.
 
-With curl, unlock once and keep the cookie:
+With curl, unlock once and keep the cookie in a file of your own:
 
 ```sh
 BASE=http://127.0.0.1:8750/r/<token>
-curl -c jar -H "Origin: http://127.0.0.1:8750" -H "content-type: application/json" \
-  -d '{"password": "amber-birch-cedar-delta"}' "$BASE/api/unlock"
-curl -b jar "$BASE/api/needs"
-curl -b jar -H "Origin: http://127.0.0.1:8750" -H "content-type: application/json" \
+jar=$(mktemp)   # mode 600: it holds a device's sign-in, good for 7 days
+read -rs PASS   # type the passphrase; it is echoed nowhere and sent on stdin, not in argv
+printf '{"password": "%s"}' "$PASS" | curl -c "$jar" -H "Origin: http://127.0.0.1:8750" \
+  -H "content-type: application/json" --data @- "$BASE/api/unlock"
+unset PASS
+curl -b "$jar" "$BASE/api/needs"
+curl -b "$jar" -H "Origin: http://127.0.0.1:8750" -H "content-type: application/json" \
   -d '{"agent": "coder-auth", "project": "prj_8c1e", "keys": ["Escape"], "request_id": "esc-1"}' \
   "$BASE/api/send-keys"
+rm -f "$jar"
 ```
+
+Whoever can read the jar is that device until it is revoked (`aisquare remote
+revoke <id>`), it expires, or Remote is turned off: keep it out of a shared
+directory, and the passphrase off any command line, where every user of the
+machine can read it (`ps`). The link's token is on each command line still: on a
+machine others use, keep the address in a `curl -K` config file only you can read.
 
 A write's `request_id` is optional. Sent again with the same request within 15
 minutes, it is answered with what the first one did instead of running twice;

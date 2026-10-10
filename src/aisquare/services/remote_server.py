@@ -325,6 +325,8 @@ NOTE_KINDS = frozenset({"note", "decision", "question", "result"})
 """The kinds a phone may post. The others (``attention``, ``limited``, ``agent_exited``,
 ``switched``…) are the fleet's own reports, which wake the manager or set an agent's state."""
 PROJECT_ADD_PATH_MAX = 4_096
+NUL_IN_A_PATH = "{field!r} holds a NUL byte, which no file's name or path holds"
+"""The refusal of a path or a project ref the system would not look up (``field`` named)."""
 
 REMOTE_KEY_NAME = re.compile(
     r"(?:Enter|Escape|Tab|BTab|BSpace|Space|Up|Down|Left|Right|Home|End|PageUp|PageDown|Delete"
@@ -337,16 +339,27 @@ REMOTE_KEY_VOCABULARY = (
     "Enter, Escape, Tab, BTab, BSpace, Space, Up, Down, Left, Right, Home, End, PageUp, "
     "PageDown, Delete, F1-F12, C-c, C-d, C-l, C-o, C-r, C-u, 0-9, y, n"
 )
-_TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
-"""What typed ``text`` may not hold: a C0 control other than tab and newline, or DEL
-(:func:`check_remote_text`). A carriage return is the Enter key, byte for byte."""
-_PASTED_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+REMOTE_BIDI_CONTROLS = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+"""The bidi embeddings, overrides and isolates. Each reorders the text after it wherever
+bidi is applied, the phone's page and some terminals: ``approve`` then an override and
+``deleted`` reads as something else than was written. The marks (U+200E, U+200F) only
+place the neutral characters beside them, and a line of right-to-left text keeps them."""
+_TEXT_CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
+"""What typed ``text`` may not hold: a control character, C0 other than newline, DEL or C1
+(:func:`check_remote_text`). A carriage return is the Enter key, byte for byte, and a tab
+the Tab key."""
+_PASTED_CONTROL = re.compile(
+    "[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f-\\x9f" + "".join(sorted(REMOTE_BIDI_CONTROLS)) + "]"
+)
 """What a paste (a tell, or a note an agent's fresh replacement is handed) may not hold: the
-same, but for the carriage return, which inside a bracketed paste is a line break of the
-message and submits nothing."""
+same, but for the tab and the carriage return, which inside a bracketed paste are a tab and
+a line break of the message and press nothing; and a bidi control
+(:data:`REMOTE_BIDI_CONTROLS`), since a tell may be filed as a note, and ``aisquare board``
+prints a note's text as it came, past Rich, which strips only BEL, BS, VT, FF and CR."""
 _TEXT_CONTROL_KEYS = {
     "\x03": "C-c",
     "\x04": "C-d",
+    "\t": "Tab",
     "\x0c": "C-l",
     "\r": "Enter",
     "\x0f": "C-o",
@@ -1745,9 +1758,9 @@ def check_remote_key_names(keys: object) -> list[str]:
 
 
 def check_remote_text(text: str, *, pasted: bool = False) -> None:
-    """Refuse typed ``text`` holding an ASCII control character (C0, or DEL) other than tab
-    and newline: 400 ``invalid``, naming the pad's key for it. A ``pasted`` text (a tell)
-    may also hold a carriage return.
+    """Refuse typed ``text`` holding a control character (C0, DEL or C1) other than
+    newline: 400 ``invalid``, naming the pad's key for it. A ``pasted`` text (a tell)
+    may also hold a tab and a carriage return, and no bidi control (:data:`_PASTED_CONTROL`).
 
     Text reaches the pane as hex, byte for byte, so a control character in it IS a
     keystroke: ``"\\x03"`` was a Ctrl-C past the double-press guard, ``"\\x1a"`` the
@@ -1756,24 +1769,34 @@ def check_remote_text(text: str, *, pasted: bool = False) -> None:
     the allowlist, the guard and the trail see them by name. A carriage return is the
     Enter key's own byte: ``{"text": "\\r"}`` took a dialog's highlighted option while
     the trail said ``enter=False``, and each line of a CRLF text was a prompt of its own
-    (review of #243, round 3). Inside a tell's bracketed paste it is a line break of
-    the message, as a newline is.
+    (review of #243, round 3). A tab is the Tab key's: Claude Code's prompt takes it as
+    a key (an open suggestion accepted), never as a tab of the message, so a pasted
+    table row arrived as other text than was sent (review of #243, round 5). Inside a
+    tell's bracketed paste both are the message's own, as a newline is.
     """
     found = (_PASTED_CONTROL if pasted else _TEXT_CONTROL).search(text)
     if found is None:
         return
     char = found.group()
     key = _TEXT_CONTROL_KEYS.get(char)
-    instead = f"send the pad's {key} key instead" if key else "no key of the pad sends it"
-    raise RequestError(
-        400, "invalid", f"'text' holds the control character U+{ord(char):04X} — {instead}"
-    )
+    if char in REMOTE_BIDI_CONTROLS:
+        instead = "it reorders how the text after it reads"
+    else:
+        instead = f"send the pad's {key} key instead" if key else "no key of the pad sends it"
+    raise RequestError(400, "invalid", f"'text' holds {_remote_char_named(char)} — {instead}")
+
+
+def _remote_char_named(char: str) -> str:
+    """How a refusal names a character that text may not hold: by its code point, as a
+    control character or a bidi control (:data:`REMOTE_BIDI_CONTROLS`)."""
+    kind = "the bidi control" if char in REMOTE_BIDI_CONTROLS else "the control character"
+    return f"{kind} U+{ord(char):04X}"
 
 
 def check_note_text(text: str, field: str) -> None:
     """A note's ``field`` as a phone may post it: at most :data:`NOTE_TEXT_MAX` characters
-    (413), and no ASCII control character but tab, newline and carriage return (400
-    ``invalid``), which is a tell's rule.
+    (413), and no control character but tab, newline and carriage return, and no bidi
+    control (400 ``invalid``), which is a tell's rule.
 
     A note posted ``as`` an agent's session is one of that session's newest board
     entries, and the first prompt of a fresh replacement repeats them
@@ -1785,6 +1808,12 @@ def check_note_text(text: str, field: str) -> None:
     (review of #243, round 3). A finished task's note is the text of its
     ``task_done`` event, so ``task/done`` holds it to the same rule. A line break
     inside the paste is the note's own, as it is in a tell.
+
+    ``team.event_line`` puts the text on the line ``aisquare board`` prints, as it does
+    ``to`` (:func:`check_note_to`), and Rich passes C1 and bidi controls through: a C1
+    CSI or OSC (``"\\x9b2J"``, ``"\\x9d52;c;…\\x9c"``) reached a terminal that reads UTF-8
+    C1 as controls, as xterm and VTE do, and an override made ``approve`` and ``deleted``
+    read in another order. Only the ASCII ones were refused (sweep 3 of #243).
     """
     if len(text) > NOTE_TEXT_MAX:
         raise RequestError(413, "too_large", f"a note is at most {NOTE_TEXT_MAX} characters")
@@ -1793,8 +1822,8 @@ def check_note_text(text: str, field: str) -> None:
         raise RequestError(
             400,
             "invalid",
-            f"{field!r} holds the control character U+{ord(found.group()):04X} — a note may "
-            "hold tabs and line breaks, and no other ASCII control character",
+            f"{field!r} holds {_remote_char_named(found.group())} — a note may hold tabs and "
+            "line breaks, and no other control character and no bidi control",
         )
 
 
@@ -1831,6 +1860,10 @@ def check_project_add_root(raw: object) -> Path:
     (``~/.ssh``, ``~/.aisquare``, ``~/.claude*``, ``~/.config``), and a project in
     fact: a git checkout, or a directory holding repos. Symlinks are resolved
     before any check, so a link into a hidden directory is judged where it points.
+    A path the system refuses to look up is refused as such: a NUL byte's
+    ``ValueError`` and the ``RuntimeError`` of a ``~user`` with no home here fell
+    to 400 ``write_failed``, the system's own words for a write that never began
+    (sweep 3 of #243).
     """
     from aisquare.core.workspace import find_project_root
     from aisquare.services import fleet as fleet_service
@@ -1839,7 +1872,12 @@ def check_project_add_root(raw: object) -> Path:
         raise RequestError(400, "invalid", "'path' is required")
     if len(raw) > PROJECT_ADD_PATH_MAX:
         raise RequestError(413, "too_large", f"'path' is over {PROJECT_ADD_PATH_MAX} characters")
-    path = Path(raw.strip()).expanduser()
+    if "\x00" in raw:
+        raise RequestError(400, "invalid", NUL_IN_A_PATH.format(field="path"))
+    try:
+        path = Path(raw.strip()).expanduser()
+    except RuntimeError:  # ~user, for a user this machine does not have
+        raise RequestError(400, "invalid", f"{raw.strip()} does not exist") from None
     if not path.is_absolute():
         raise RequestError(400, "invalid", f"{path} is not an absolute path (start with / or ~)")
     try:
@@ -1861,6 +1899,25 @@ def check_project_add_root(raw: object) -> Path:
             400, "invalid", f"{root} is neither a git checkout nor a directory of repositories"
         )
     return root
+
+
+def check_project_ref_on_disk(ref: str) -> None:
+    """Refuse the ``project/remove`` ref the system will not look up as a path, before
+    ``project_service.forget`` asks the disk about it: it tries a ref as a path first.
+
+    A NUL byte is 400 ``invalid``. A name longer than any file's, or a ``~user`` with
+    no home here, is 404 ``not_found``: no project has it for a root or a name. Left to
+    ``forget``, the NUL's ``ValueError`` read as two projects matching (400
+    ``ambiguous_project``), and the others fell to 400 ``write_failed``, each with the
+    system's own words (``lstat: embedded null character in path``) for a write that
+    never began (sweep 3 of #243).
+    """
+    if "\x00" in ref:
+        raise RequestError(400, "invalid", NUL_IN_A_PATH.format(field="ref"))
+    try:
+        Path(ref).expanduser().exists()
+    except (OSError, RuntimeError):
+        raise RequestError(404, "not_found", f"no project matches {ref!r}") from None
 
 
 def _holds_repositories(root: Path) -> bool:
@@ -2603,13 +2660,20 @@ class _ExitKeyGuard:
 
 
 @contextlib.contextmanager
-def _remote_board_refusals() -> Iterator[None]:
+def _remote_board_refusals(*refs: tuple[str, str | None, str]) -> Iterator[None]:
     """The board's refusals as ``asq`` gives them, as a write's: 409 ``team_disabled`` with
     the orchestrator off (``AISQUARE_TEAM=0``), as the agent actions answer it too, 409
     ``claim_lost`` for a task another session holds, and 400 ``ambiguous_id`` for a ref
     that names two tasks or sessions. They fell to 400 ``write_failed``, "the write
     failed", where nothing had, and to 404 ``not_found`` where two were found (sweep 2 of
-    #243)."""
+    #243).
+
+    A ref that names nothing is 404 ``not_found`` in a sentence that says which field
+    sent it, from ``refs``, each ``(field, value, "task" | "session")``. The board's
+    services raise a bare ``KeyError(ref)``, and its message was the ref in quotes,
+    ``"'ses_nope'"``: a note whose ``as`` and ``task`` were the same could not say which
+    one named nothing (sweep 3 of #243).
+    """
     from aisquare.core.store import AmbiguousIdError
     from aisquare.services import team as team_service
 
@@ -2622,6 +2686,29 @@ def _remote_board_refusals() -> Iterator[None]:
     except AmbiguousIdError as exc:
         said = f"{exc.ref!r} is ambiguous — use more characters"
         raise RequestError(400, "ambiguous_id", said) from None
+    except KeyError as exc:
+        missing = exc.args[0] if len(exc.args) == 1 else None
+        named = [(field, kind) for field, value, kind in refs if value == missing]
+        if not isinstance(missing, str) or not named:
+            raise
+        field, kind = _remote_ref_unknown(missing, named)
+        said = f"no {kind} matches {missing!r} (the {field!r} field)"
+        raise RequestError(404, "not_found", said) from None
+
+
+def _remote_ref_unknown(ref: str, named: list[tuple[str, str]]) -> tuple[str, str]:
+    """Which of ``named``, the ``(field, kind)`` of every field that sent ``ref``, names
+    nothing: the one field, or when two sent the same ref (``as`` and ``task``), the
+    first one the store has nothing for. The services raise ``KeyError(ref)`` for each."""
+    if len(named) > 1:
+        from aisquare.core.store import store_session
+
+        with contextlib.suppress(Exception), store_session() as store:
+            for field, kind in named:
+                found = store.get_session(ref) if kind == "session" else store.get_task(ref)
+                if found is None:
+                    return field, kind
+    return named[0]
 
 
 def live_writes() -> Writes:
@@ -2633,9 +2720,9 @@ def live_writes() -> Writes:
     def task_claim(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.services import team as team_service
 
-        author = _optional_ref(body, "as")
-        with _remote_board_refusals():
-            task = team_service.claim_task(_required(body, "ref"), session_ref=author)
+        ref, author = _required(body, "ref"), _optional_ref(body, "as")
+        with _remote_board_refusals(("ref", ref, "task"), ("as", author, "session")):
+            task = team_service.claim_task(ref, session_ref=author)
         return {"task": task.model_dump(mode="json")}, f"claimed {task.id} as={author or '-'}"
 
     def task_done(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -2646,7 +2733,7 @@ def live_writes() -> Writes:
         note = _optional_ref(body, "note")
         if note is not None:
             check_note_text(note, "note")
-        with _remote_board_refusals():
+        with _remote_board_refusals(("ref", ref, "task"), ("as", author, "session")):
             task = team_service.finish_task(ref, note=note, session_ref=author)
         return {"task": task.model_dump(mode="json")}, f"done {task.id} as={author or '-'}"
 
@@ -2664,7 +2751,9 @@ def live_writes() -> Writes:
         ``as=`` and bare, ``"to": "coder-1 as=manager"`` read as a note posted as
         the manager, and 300 characters of it cut the real ``as=`` off the line
         (sweep of #243). ``to`` holds only characters that print
-        (:func:`check_note_to`). ``as`` must name a session, or the note is refused.
+        (:func:`check_note_to`). ``as`` must name a session, or the note is refused,
+        and so is a ``task`` of another project's board: 400 ``invalid``, where it fell to
+        ``write_failed``, as if the write had failed (sweep 3 of #243).
         """
         from aisquare.services import team as team_service
 
@@ -2678,15 +2767,19 @@ def live_writes() -> Writes:
         author, to = _optional_ref(body, "as"), _optional_ref(body, "to", limit=NOTE_TO_MAX)
         if to is not None:
             check_note_to(to)
-        with _remote_board_refusals():
-            event = team_service.add_note(
-                text,
-                session_ref=author,
-                task_ref=_optional_ref(body, "task"),
-                to_role=to,
-                kind=kind,
-                cwd=None if project is None else _resolve_project(project).root,
-            )
+        task = _optional_ref(body, "task")
+        try:
+            with _remote_board_refusals(("as", author, "session"), ("task", task, "task")):
+                event = team_service.add_note(
+                    text,
+                    session_ref=author,
+                    task_ref=task,
+                    to_role=to,
+                    kind=kind,
+                    cwd=None if project is None else _resolve_project(project).root,
+                )
+        except ValueError as exc:  # a task of another project's board, as ``asq note`` says
+            raise RequestError(400, "invalid", str(exc)) from None
         addressed = "-" if to is None else json.dumps(to)
         summary = f"{event.kind} seq={event.seq} as={author or '-'} to={addressed}"
         return {"event": event.as_envelope().model_dump(mode="json")}, summary
@@ -2729,10 +2822,12 @@ def live_writes() -> Writes:
     def project_remove(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         """Forget a registration, as ``project forget`` does, refusals and their codes
         included: one with live fleet agents is 409 ``project_busy``, where it fell to
-        400 ``write_failed`` as if the write had failed (sweep 2 of #243)."""
+        400 ``write_failed`` as if the write had failed (sweep 2 of #243), and a ref the
+        system will not look up is refused first (:func:`check_project_ref_on_disk`)."""
         from aisquare.services import project as project_service
 
         ref = _required(body, "ref")
+        check_project_ref_on_disk(ref)
         try:
             report = project_service.forget(ref, purge=False)
         except KeyError:
@@ -3210,6 +3305,47 @@ def _width_param(raw: str | None) -> int | None:
     return value
 
 
+def _built_page_file(dist: Path, rel: str) -> Path | None:
+    """The file of an installed or ``--dist`` build that ``rel`` names, or ``None``: one
+    inside ``dist``, no part of it hidden, that the system will look up.
+
+    A path the system refuses, a NUL byte (``ValueError``) or a name past its limit
+    (``ENAMETOOLONG``), is a file this build does not have, and the request goes on to
+    the 404 or the document as any other miss does: it raised, and the page answered a
+    bare 500 with a traceback in the log for each, to anyone with the link (sweep 3 of
+    #243).
+
+    A hidden file is not the page's either, as the bundled page leaves its dotfiles out
+    (:func:`remote_page.bundled_page_files`), judged as asked and where it resolves:
+    every file below the directory was served without the passphrase, and a project's
+    own directory installed or served in place of its ``dist/`` gave out its ``.env``
+    and ``.git/config`` (sweep 3 of #243).
+    """
+    if any(part.startswith(".") for part in PurePosixPath(rel).parts):
+        return None
+    candidate = _built_page_target(dist, dist / rel)
+    try:
+        return candidate if candidate is not None and candidate.is_file() else None
+    except (OSError, ValueError):
+        return None
+
+
+def _built_page_target(dist: Path, path: Path) -> Path | None:
+    """Where ``path`` resolves when a build in ``dist`` may serve what is there: inside
+    ``dist``, with no hidden part; else ``None``, a path the system refuses included.
+    The one rule for what is served (:func:`_built_page_file`) and what ``install-page``
+    copies (:func:`_page_copy_skips`)."""
+    try:
+        resolved = path.resolve()
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_relative_to(dist):
+        return None
+    if any(part.startswith(".") for part in resolved.relative_to(dist).parts):
+        return None
+    return resolved
+
+
 def _is_navigation(rel: str, accept: str) -> bool:
     """Whether this is a page navigation, which is the ONLY thing the SPA fallback serves.
 
@@ -3329,12 +3465,42 @@ def remote_gate_origin(scope: Any) -> bool:
     return len(origins) == 1 and _scope_header(scope, b"origin") == allowed_origin(scope)
 
 
-def remote_gate_device(runtime: Runtime, scope: Any) -> Device | None:
-    """Gate 4: the unlocked device behind the request's ``asq_remote`` cookie, or ``None``."""
-    from starlette.requests import HTTPConnection
+COOKIE_VALUES_MAX = 8
+"""How many ``asq_remote`` values of one request are asked about: a browser sends one per
+path and domain that set one, the device's own first (:func:`remote_cookie_values`)."""
 
-    secret = HTTPConnection(scope).cookies.get(COOKIE)
-    return runtime.device_for_cookie(secret) if secret else None
+
+def remote_cookie_values(scope: Any) -> list[str]:
+    """Every ``asq_remote`` value the request's ``Cookie`` headers carry, in the order sent,
+    at most :data:`COOKIE_VALUES_MAX`.
+
+    Starlette keeps the LAST value of a name sent twice, and a browser sends the one
+    with the longer path first (RFC 6265 §5.4): the device's own, ``Path=/r/<token>``.
+    So an ``asq_remote=x; Path=/`` set by any page of the same host on another port,
+    or by a sibling subdomain, was the one read, and the phone was a stranger from then
+    on: 401 at every request, its unlocks counted against every phone's budget, a new
+    device at each (sweep 3 of #243). Every value is read instead, and the first that
+    names a device is the device.
+    """
+    values: list[str] = []
+    for name, raw in scope.get("headers") or []:
+        if name != b"cookie":
+            continue
+        for chunk in raw.decode("latin-1").split(";"):
+            key, _sep, value = chunk.partition("=")
+            if key.strip() == COOKIE and value.strip():
+                values.append(value.strip())
+    return values[:COOKIE_VALUES_MAX]
+
+
+def remote_gate_device(runtime: Runtime, scope: Any) -> Device | None:
+    """Gate 4: the unlocked device behind the request's ``asq_remote`` cookie, or ``None``:
+    the first of its values that names one (:func:`remote_cookie_values`)."""
+    for secret in remote_cookie_values(scope):
+        device = runtime.device_for_cookie(secret)
+        if device is not None:
+            return device
+    return None
 
 
 async def remote_gate_body(scope: Any, receive: Any) -> Any | None:
@@ -3672,8 +3838,26 @@ class RemoteKit:
         return JSONResponse(body, status_code=status, headers=dict(headers or {}))
 
     def kit_audit(self, device: Device, endpoint: str, summary: str) -> None:
-        """One line in ``remote-audit.log`` for a write that went through."""
-        self.runtime.audit(device.id, endpoint, summary)
+        """One line in ``remote-audit.log`` for what a device did, best effort: every caller
+        has done it already, so a log that will not write is told in the server's log
+        and the answer stands.
+
+        An unlock's line that raised answered a bare 500 with no cookie, the device on
+        disk and signed in (sweep 2 of #243). Every write's did the same after the
+        write had run, the ledger holding its 200: on a full disk the phone said a
+        send-keys, an extend or a note had failed, and the human sent it again, typed
+        twice (sweep 3 of #243). The summary in the server's log is cleaned as the
+        audit line's would be: it holds what the body said.
+        """
+        try:
+            self.runtime.audit(device.id, endpoint, summary)
+        except OSError as exc:
+            log.warning(
+                "remote: a %s audit line could not be written (%s): %s",
+                endpoint,
+                exc,
+                _audit_clean(summary, AUDIT_SUMMARY_MAX),
+            )
 
     def kit_write_allowed(self) -> bool:
         """Whether writes are on right now (``remote.json``, re-read when it changes)."""
@@ -4085,21 +4269,8 @@ def build_remote_app(
     """Unlocks are decided one at a time: the budget's check and its record are then one
     step, so guesses that arrive together cannot all get past a budget with one left."""
 
-    def audited(device_id: str, endpoint: str, summary: str) -> None:
-        """An audit line for what has happened already, best effort, the log told when it
-        would not write: an unlock's audit log that would not write answered a bare 500
-        with no cookie, the device on disk and signed in, a phantom on every Devices
-        screen (sweep 2 of #243). A revoke that took effect but could not be saved is
-        recorded here too, before its 503 says so."""
-        try:
-            runtime.audit(device_id, endpoint, summary)
-        except OSError as exc:
-            log.warning(
-                "remote: a %s audit line could not be written (%s): %s", endpoint, exc, summary
-            )
-
     def unlock_decision(
-        password: str, ua: str, cookie: str | None, direct: bool
+        password: str, ua: str, cookies: list[str], direct: bool
     ) -> tuple[str, Device, bool] | datetime | None:
         """What an unlock comes to, decided in a worker thread: ``(secret, device,
         reactivated)`` for a right passphrase, ``None`` for a wrong one, and, while the
@@ -4113,7 +4284,9 @@ def build_remote_app(
         otherwise find only a device gone.
         """
         with unlock_turn:
-            known = runtime.known_device_for_cookie(cookie)
+            known = next(
+                (found for found in map(runtime.known_device_for_cookie, cookies) if found), None
+            )
             if known is None and not budget.unlock_budget_allows(direct):
                 return budget.budget_exhausted_until() or _remote_now()
             if known is None:
@@ -4135,19 +4308,19 @@ def build_remote_app(
                         f"{KNOWN_DEVICE_FAILURES_MAX} wrong passwords sent with its cookie"
                     )
                     log.warning("remote: %s", revoked)
-                    audited(known.id, "unlock", revoked)
+                    kit.kit_audit(known, "unlock", revoked)
                 return None
             secret, device = unlocked
             reactivated = known is not None and device.id == known.id
             summary = f"device {device.id} " + ("reactivated" if reactivated else f"ua={ua[:60]}")
-            audited(device.id, "unlock", summary)
+            kit.kit_audit(device, "unlock", summary)
             return secret, device, reactivated
 
     async def unlock_endpoint(request: Request) -> Response:
         """``POST api/unlock``: the passphrase for a cookie (SPEC §2.2).
 
         In order: the per-client limiter (every unlock); then, unless this is a
-        phone that unlocked here before (its cookie names a known device) or the
+        phone that unlocked here before (a cookie it sends names a known device) or the
         machine itself, the global failed-unlock budget, which refuses a spent
         budget WITHOUT evaluating the guess; then the passphrase. A wrong one counts
         against the known device's own cap, or against the budget (the machine's
@@ -4176,7 +4349,7 @@ def build_remote_app(
                 unlock_decision,
                 password,
                 request.headers.get("user-agent", ""),
-                request.cookies.get(COOKIE),
+                remote_cookie_values(request.scope),
                 is_direct_loopback(request.scope),
             )
         except OSError as exc:  # its device was taken back (Runtime._write_state's undo)
@@ -4277,7 +4450,7 @@ def build_remote_app(
         except OSError as exc:  # it holds in memory, where the gate reads it: recorded
             log.warning("remote: a revoke could not be saved: %s", exc)
             target = "self" if own else device_id
-            await asyncio.to_thread(audited, device.id, "devices/revoke", f"{target} unsaved")
+            await asyncio.to_thread(kit.kit_audit, device, "devices/revoke", f"{target} unsaved")
             unsaved = REVOKE_UNSAVED.format(device=device_id)
             return kit.kit_refuse(503, "remote_state_unwritable", unsaved)
         if not revoked:
@@ -4384,10 +4557,10 @@ def build_remote_app(
             return JSONResponse(payload, status_code=status)
 
         response = await kit.kit_gated(request, device, name, dispatched)
-        # After the ledger has the ending: an audit log that cannot be written fails
-        # the request, and must not make a write that went through read as failed. In a
-        # worker thread: the first line creates the log and restricts it to this account,
-        # on Windows an icacls run, and every line opens and appends to a file.
+        # After the ledger has the ending, and best effort (RemoteKit.kit_audit): a write
+        # that went through must not read as failed for its line. In a worker thread: the
+        # first line creates the log and restricts it to this account, on Windows an
+        # icacls run, and every line opens and appends to a file.
         if summary is not None:
             await asyncio.to_thread(kit.kit_audit, device, name, summary)
         return response
@@ -4437,11 +4610,7 @@ def build_remote_app(
             if bundled is not None:
                 return bundled
             response = _json_error(404, "no_dist", NO_PAGE_HINT)
-        elif (
-            rel
-            and (candidate := (dist / rel).resolve()).is_relative_to(dist)
-            and candidate.is_file()
-        ):
+        elif rel and (candidate := _built_page_file(dist, rel)) is not None:
             response = FileResponse(
                 candidate,
                 media_type=remote_page.build_content_type(candidate.name),
@@ -5450,11 +5619,14 @@ def _page_missing(dist_dir: Path | None) -> str | None:
     (:func:`install_page`) is served, else the page aisquare-cli bundles, so a
     fresh machine's first ``R`` press just works. Only an install that lost its
     bundled page gets :data:`NO_PAGE_HINT` instead of a server that answers every
-    request with nothing.
+    request with nothing. A ``--dist`` that is a web project's own directory, not its
+    build, is refused as ``install-page`` refuses it (:func:`_page_project_not_build`).
     """
     if dist_dir is not None:
         dist = dist_dir.resolve()
-        return None if (dist / "index.html").is_file() else f"no index.html in {dist}"
+        if not (dist / "index.html").is_file():
+            return f"no index.html in {dist}"
+        return _page_project_not_build(dist)
     if (remote_dist_dir().resolve() / "index.html").is_file():
         return None
     from aisquare.services import remote_page
@@ -5462,24 +5634,68 @@ def _page_missing(dist_dir: Path | None) -> str | None:
     return None if remote_page.bundled_page_present() else NO_PAGE_HINT
 
 
+_PAGE_PROJECT_FILES = ("package.json", "node_modules")
+"""What a web project's own directory holds beside its source ``index.html``, and its built
+``dist/`` never does."""
+
+
+def _page_project_not_build(source: Path) -> str | None:
+    """The refusal of ``source`` when it is a web project's own directory, not its build;
+    ``None`` otherwise.
+
+    Its ``index.html`` is the source the build starts from, so it passed for a page,
+    and the whole project was then copied or served: ``node_modules``, the sources,
+    whatever else the project keeps there (sweep 3 of #243).
+    """
+    held = next((name for name in _PAGE_PROJECT_FILES if (source / name).exists()), None)
+    if held is None:
+        return None
+    return (
+        f"{source} holds {held}: it is the project, not its build — point at its dist/ "
+        "after npm run build"
+    )
+
+
+def _page_copy_skips(source: Path, directory: str, names: list[str]) -> set[str]:
+    """What :func:`install_page` leaves behind of ``names`` in ``directory`` of ``source``,
+    what a server would not serve from ``source`` (:func:`_built_page_target`): a hidden
+    name, and a link that leads out of ``source`` or to a hidden file there."""
+    return {
+        name
+        for name in names
+        if name.startswith(".")
+        or (
+            (Path(directory) / name).is_symlink()
+            and _built_page_target(source, Path(directory) / name) is None
+        )
+    }
+
+
 def install_page(source: Path) -> Path:
     """Copy a built ``aisquare-remote`` dist into :func:`remote_dist_dir`, atomically.
 
     ``source`` must contain ``index.html`` (re-checked here even though the CLI
-    command already does, so a direct caller gets the same guard). The copy
-    lands in a staging directory beside the destination and is swapped in with
-    two renames — same filesystem, so each rename is atomic — rather than
-    removing the destination first, so a server reading the old page mid-swap
-    never sees a half-written one.
+    command already does, so a direct caller gets the same guard), and be no web
+    project's own directory (:func:`_page_project_not_build`). What a server would not
+    serve from ``source`` stays behind (:func:`_built_page_file`): its hidden files, as
+    the bundled page's do, which is where a project keeps ``.env`` and ``.git``, and a
+    link that leads out of it or to a hidden file, whose content the copy would
+    otherwise hold under the link's own name. The copy lands in a staging directory
+    beside the destination and is swapped in with two renames — same filesystem, so
+    each rename is atomic — rather than removing the destination first, so a server
+    reading the old page mid-swap never sees a half-written one.
     """
     source = source.resolve()
     if not (source / "index.html").is_file():
         raise NoRemotePage(f"no index.html in {source} — build aisquare-remote first")
+    project = _page_project_not_build(source)
+    if project is not None:
+        raise NoRemotePage(project)
     ensure_home()
     destination = remote_dist_dir()
     staging = destination.with_name(f".{destination.name}.staging-{os.getpid()}")
     shutil.rmtree(staging, ignore_errors=True)
-    shutil.copytree(source, staging)
+    shutil.copytree(source, staging, ignore=functools.partial(_page_copy_skips, source))
     previous = destination.with_name(f".{destination.name}.previous-{os.getpid()}")
     shutil.rmtree(previous, ignore_errors=True)
     if destination.exists():

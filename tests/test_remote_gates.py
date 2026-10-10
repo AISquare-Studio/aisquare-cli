@@ -34,7 +34,14 @@ from aisquare.services.remote_server import (
     remote_gate_body,
     write_endpoint_names,
 )
-from tests.remote_kit_helpers import base, make_client, make_runtime, mounted_routes, unlock
+from tests.remote_kit_helpers import (
+    PASSWORD,
+    base,
+    make_client,
+    make_runtime,
+    mounted_routes,
+    unlock,
+)
 
 SERVICES = Path(remote_server.__file__).parent
 
@@ -159,6 +166,61 @@ def test_a_forged_cookie_is_401_before_any_route(app: Any, runtime: Runtime) -> 
     client.cookies.set(remote_server.COOKIE, "made-up")
     assert client.get(f"{base(runtime)}/api/board").status_code == 401
     assert client.post(f"{base(runtime)}/api/note", json={}).status_code == 401
+
+
+def _device_secret(app: Any, runtime: Runtime, peer: str = "198.51.100.40") -> str:
+    """A phone's unlock, through a hop (not the machine itself): its cookie's secret."""
+    phone = make_client(app, client=(peer, 4000))
+    assert unlock(phone, runtime).status_code == 200
+    return str(phone.cookies[remote_server.COOKIE])
+
+
+@pytest.mark.parametrize(
+    "cookies",
+    [
+        ["asq_remote={real}; asq_remote=tossed"],
+        ["asq_remote=tossed; asq_remote={real}"],
+        ["asq_remote={real}", "asq_remote=tossed"],
+        ["theme=dark; asq_remote={real}; asq_remote=tossed; asq_remote=other"],
+    ],
+    ids=["device-first", "device-last", "two-headers", "among-others"],
+)
+def test_a_cookie_of_the_same_name_set_by_another_page_does_not_shadow_the_devices(
+    app: Any, runtime: Runtime, cookies: list[str]
+) -> None:
+    """Starlette kept the LAST value of a name sent twice, and a browser sends the device's
+    own first, its path the longer (``/r/<token>``): an ``asq_remote=x; Path=/`` set by a
+    page on another port of the same host, or by a sibling subdomain, made the phone a
+    stranger, 401 at every request (sweep 3 of #243)."""
+    real = _device_secret(app, runtime)
+    bare = make_client(app)  # no cookie jar: only what the headers say
+    headers = [("cookie", value.format(real=real)) for value in cookies]
+    assert bare.get(f"{base(runtime)}/api/board", headers=headers).status_code == 200
+    joined = {"cookie": "; ".join(value for _name, value in headers)}
+    with bare.websocket_connect(f"{base(runtime)}/ws", headers=joined) as ws:
+        ws.send_json({"subscribe_board": None})
+    tossed = [("cookie", "asq_remote=tossed; asq_remote=other")]
+    assert bare.get(f"{base(runtime)}/api/board", headers=tossed).status_code == 401
+
+
+def test_unlock_finds_the_phones_own_device_past_a_cookie_set_by_another_page(
+    app: Any, runtime: Runtime
+) -> None:
+    """Unlock read the last value too: the phone's own device went unseen, so its guesses
+    counted against every phone's budget and, once that was spent, it was refused 429
+    with the right passphrase, where its own device unlocks through a spent budget (SPEC
+    §2.2 item 4; sweep 3 of #243)."""
+    real = _device_secret(app, runtime)
+    (device,) = runtime.device_rows()
+    for n in range(remote_server.UNLOCK_GLOBAL_FAILURES):
+        stranger = make_client(app, client=(f"203.0.113.{n}", 4000))
+        assert unlock(stranger, runtime, "wrong").status_code == 401
+    phone = make_client(app, client=("198.51.100.41", 4000))
+    headers = {"cookie": f"asq_remote={real}; asq_remote=tossed"}
+    again = phone.post(f"{base(runtime)}/api/unlock", json={"password": PASSWORD}, headers=headers)
+    assert again.status_code == 200, again.text
+    assert again.json()["device"]["id"] == device["id"], "its own device, not a new one"
+    assert [row["id"] for row in runtime.device_rows()] == [device["id"]]
 
 
 def test_the_socket_without_a_cookie_is_a_401_denial(app: Any, runtime: Runtime) -> None:

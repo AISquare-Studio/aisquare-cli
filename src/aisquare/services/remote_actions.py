@@ -337,8 +337,8 @@ def action_tell_text(body: dict[str, Any]) -> str:
     """The tell's ``text``, kept literally: whitespace is content. Empty is a 400, longer
     than :data:`TELL_TEXT_MAX` a 413, and an ASCII control character other than tab,
     newline and carriage return a 400 (``remote_server.check_remote_text``). Typed text
-    refuses the carriage return too, which is the Enter key there; inside the paste it is
-    a line break.
+    refuses the tab and the carriage return too, which are the Tab and Enter keys there;
+    inside the paste they are the message's own.
 
     A tell goes into the pane as one bracketed paste, and tmux before 3.7 pastes the
     buffer's bytes as they are: an ``ESC [201~`` in the text ended the paste early, and
@@ -378,7 +378,10 @@ def action_switch_reason(body: dict[str, Any]) -> str | None:
     are, and an ``ESC [201~`` ended the paste early. A line break made the one line
     two, and the fleet types no prompt of two lines once the replacement is slow to
     start; a tab typed past that wait is the Tab key. Half a surrogate pair cannot
-    be sent to tmux at all. Whatever else a line of text holds stays, though it
+    be sent to tmux at all. No bidi control either, as no tell or note holds one
+    (``remote_server.REMOTE_BIDI_CONTROLS``): ``aisquare board`` prints the
+    ``switched`` event as it came, and an override made the line read in another
+    order (sweep 3 of #243). Whatever else a line of text holds stays, though it
     does not print on its own: a no-break space, a CJK space, the joiner inside an
     emoji, a right-to-left mark, a character newer than this Python's Unicode
     (review of #243, sweep of round 3).
@@ -386,6 +389,8 @@ def action_switch_reason(body: dict[str, Any]) -> str | None:
     reason = action_ref(body, "reason", limit=ACTION_FIELD_MAX)
     for char in reason or "":
         refused = _REASON_REFUSED.get(unicodedata.category(char))
+        if refused is None and char in remote_server.REMOTE_BIDI_CONTROLS:
+            refused = "a bidi control"
         if refused is not None:
             raise RequestError(
                 400,

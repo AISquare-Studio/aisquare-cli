@@ -3465,12 +3465,42 @@ def remote_gate_origin(scope: Any) -> bool:
     return len(origins) == 1 and _scope_header(scope, b"origin") == allowed_origin(scope)
 
 
-def remote_gate_device(runtime: Runtime, scope: Any) -> Device | None:
-    """Gate 4: the unlocked device behind the request's ``asq_remote`` cookie, or ``None``."""
-    from starlette.requests import HTTPConnection
+COOKIE_VALUES_MAX = 8
+"""How many ``asq_remote`` values of one request are asked about: a browser sends one per
+path and domain that set one, the device's own first (:func:`remote_cookie_values`)."""
 
-    secret = HTTPConnection(scope).cookies.get(COOKIE)
-    return runtime.device_for_cookie(secret) if secret else None
+
+def remote_cookie_values(scope: Any) -> list[str]:
+    """Every ``asq_remote`` value the request's ``Cookie`` headers carry, in the order sent,
+    at most :data:`COOKIE_VALUES_MAX`.
+
+    Starlette keeps the LAST value of a name sent twice, and a browser sends the one
+    with the longer path first (RFC 6265 §5.4): the device's own, ``Path=/r/<token>``.
+    So an ``asq_remote=x; Path=/`` set by any page of the same host on another port,
+    or by a sibling subdomain, was the one read, and the phone was a stranger from then
+    on: 401 at every request, its unlocks counted against every phone's budget, a new
+    device at each (sweep 3 of #243). Every value is read instead, and the first that
+    names a device is the device.
+    """
+    values: list[str] = []
+    for name, raw in scope.get("headers") or []:
+        if name != b"cookie":
+            continue
+        for chunk in raw.decode("latin-1").split(";"):
+            key, _sep, value = chunk.partition("=")
+            if key.strip() == COOKIE and value.strip():
+                values.append(value.strip())
+    return values[:COOKIE_VALUES_MAX]
+
+
+def remote_gate_device(runtime: Runtime, scope: Any) -> Device | None:
+    """Gate 4: the unlocked device behind the request's ``asq_remote`` cookie, or ``None``:
+    the first of its values that names one (:func:`remote_cookie_values`)."""
+    for secret in remote_cookie_values(scope):
+        device = runtime.device_for_cookie(secret)
+        if device is not None:
+            return device
+    return None
 
 
 async def remote_gate_body(scope: Any, receive: Any) -> Any | None:
@@ -4235,7 +4265,7 @@ def build_remote_app(
             )
 
     def unlock_decision(
-        password: str, ua: str, cookie: str | None, direct: bool
+        password: str, ua: str, cookies: list[str], direct: bool
     ) -> tuple[str, Device, bool] | datetime | None:
         """What an unlock comes to, decided in a worker thread: ``(secret, device,
         reactivated)`` for a right passphrase, ``None`` for a wrong one, and, while the
@@ -4249,7 +4279,9 @@ def build_remote_app(
         otherwise find only a device gone.
         """
         with unlock_turn:
-            known = runtime.known_device_for_cookie(cookie)
+            known = next(
+                (found for found in map(runtime.known_device_for_cookie, cookies) if found), None
+            )
             if known is None and not budget.unlock_budget_allows(direct):
                 return budget.budget_exhausted_until() or _remote_now()
             if known is None:
@@ -4283,7 +4315,7 @@ def build_remote_app(
         """``POST api/unlock``: the passphrase for a cookie (SPEC §2.2).
 
         In order: the per-client limiter (every unlock); then, unless this is a
-        phone that unlocked here before (its cookie names a known device) or the
+        phone that unlocked here before (a cookie it sends names a known device) or the
         machine itself, the global failed-unlock budget, which refuses a spent
         budget WITHOUT evaluating the guess; then the passphrase. A wrong one counts
         against the known device's own cap, or against the budget (the machine's
@@ -4312,7 +4344,7 @@ def build_remote_app(
                 unlock_decision,
                 password,
                 request.headers.get("user-agent", ""),
-                request.cookies.get(COOKIE),
+                remote_cookie_values(request.scope),
                 is_direct_loopback(request.scope),
             )
         except OSError as exc:  # its device was taken back (Runtime._write_state's undo)

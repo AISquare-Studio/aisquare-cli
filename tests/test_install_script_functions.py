@@ -2445,6 +2445,23 @@ def test_the_doctor_runs_from_root_only_where_this_folder_could_answer_different
     assert runs == ([str(here.resolve()), "/"] if asked_from_root else [str(here.resolve())]), runs
 
 
+def test_a_folder_that_was_removed_may_load_a_repo_plugin(tmp_path: Path) -> None:
+    """In a folder that was removed, dash and BusyBox ash answer `pwd -P` with nothing and
+    succeed. Walked up, "" became "." for ever, and the installer hung (review of round
+    14's fixes for #257). A path that cannot be read answers "may", as a failing `pwd -P`
+    (bash) already did."""
+    gone = tmp_path / "gone"
+    gone.mkdir()
+
+    result = sh(
+        f'cd "{gone}" && rmdir "{gone}" && {{ _folder_may_load_a_repo_plugin; echo "may=$?"; }}',
+        env={"HOME": str(tmp_path)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1:] == ["may=0"], result.stdout
+
+
 def test_the_gh_advice_matches_whether_gh_exists(tmp_path: Path) -> None:
     """ "Log in" is wrong advice for a binary that is not installed.
 

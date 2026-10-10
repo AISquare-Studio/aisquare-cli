@@ -1765,6 +1765,12 @@ doctor_json() {
 # S2-C19 again, so a folder whose own path cannot be read answers "may".
 _folder_may_load_a_repo_plugin() {
     _rp_dir=$(pwd -P 2>/dev/null) || return 0
+    # dash and BusyBox ash print nothing, and succeed, in a folder that was
+    # removed: walked up, "" became "." for ever and the installer hung.
+    case $_rp_dir in
+        /*) ;;
+        *) return 0 ;;
+    esac
     _rp_home=$(cd "$HOME" 2>/dev/null && pwd -P) || _rp_home=""
     if [ "$_rp_dir" != "$_rp_home" ] && [ -e "$_rp_dir/.claude/settings.json" ]; then
         return 0

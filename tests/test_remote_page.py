@@ -2006,6 +2006,36 @@ def test_a_socket_that_died_without_a_close_is_replaced_once_the_page_goes_stale
     assert silent["taken"] == {"sockets": 1, "stale": True, "state": "replaced"}
 
 
+def test_a_socket_made_after_the_page_went_stale_has_its_own_span_to_bring_a_frame(
+    boot_report: dict[str, Any],
+) -> None:
+    """The tick replaced a stale page's socket a stale span after the last wake, and only a
+    wake marked one. An unlock, a Retry on the off screen and the backoff's reconnect connect
+    without one, after a lock, an off screen or a drop that left the page stale: the next
+    second closed the socket each had just made, still in its handshake, opened another and
+    read the feed, the remote and the actions again (sweep4-13). The span now runs from the
+    socket's own connect, so a silent one is still replaced 25 s after it was made. Each step
+    is the sockets opened, whether the newest is still connecting, stale, and the reads since
+    it was made."""
+    made = {"sockets": 2, "connecting": True, "stale": True, "reads": 0}
+    replaced = {"sockets": 3, "connecting": True, "stale": True, "reads": 3}
+    for how, steps in boot_report["staleBeforeASocket"].items():
+        assert steps == [made, made, replaced], how  # made; a second on; 26 s on, still silent
+
+
+def test_the_first_socket_after_an_unlock_that_fails_is_tried_again_after_a_second(
+    boot_report: dict[str, Any],
+) -> None:
+    """A sign-in that ran out while the link was down locks the page from a probe, with the
+    backoff as far on as those failures took it. A wake and Retry start it again from the first
+    step (SPEC §6.4); the unlock kept it, so the first socket after the passphrase that failed
+    waited 8 s here, and up to 30 s, with the machine just heard from and every button held.
+    Each is how long the reconnect it set waits: the drop, two handshakes the machine was away
+    for, and the first after the unlock."""
+    across = boot_report["backoffAcrossAnUnlock"]
+    assert across == {"waits": [1, 2, 4, 1], "locked": True}
+
+
 def test_the_live_tabs_keys_wait_from_the_moment_its_socket_is_lost(
     boot_report: dict[str, Any],
 ) -> None:

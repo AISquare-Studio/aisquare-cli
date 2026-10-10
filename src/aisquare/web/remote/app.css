@@ -156,6 +156,7 @@ pre.mono, pre.text {
 pre.strip {
   font: 11px/1.25 var(--mono); white-space: pre; overflow-x: auto; margin: 8px 0; padding: 6px 8px;
   background: var(--pane); border: 1px solid var(--line); border-radius: 8px; color: var(--pane-muted);
+  color-scheme: dark;
 }
 .answers, .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .answers .qa { border-color: var(--accent); }
@@ -185,6 +186,7 @@ body.ro .ro-note { display: block; }
 pre.pane, pre.transcript {
   font: 12px/1.25 var(--mono); white-space: pre; overflow-x: auto; margin: 0 0 8px; padding: 8px;
   background: var(--pane); color: var(--pane-fg); border: 1px solid var(--line); border-radius: 8px; min-height: 40vh;
+  color-scheme: dark;
 }
 pre.transcript { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 0; }
 /* Fit width: the screen less what pads the pane across it, the side insets of a phone in

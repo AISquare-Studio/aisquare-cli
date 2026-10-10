@@ -945,7 +945,8 @@ def test_an_agents_screen_keeps_the_dark_ground_its_own_colours_were_picked_for(
     picked for its own theme, dark in Claude Code by default: on a light-mode phone its reply
     bullet was white on white (1.0:1), and the dialog option the pad's ↑ ↓ ⏎ move 1.5:1, as
     Claude Code 2.1 drew them under the fleet's tmux. The terminal keeps one dark palette in
-    both themes, and every rule that draws in it takes only its tokens."""
+    both themes, and every rule that draws in it takes only its tokens. Its scrollbars are
+    dark too: in the root's scheme they were drawn light across that dark ground."""
     css = _text("app.css")
     themes = _themes(css)
     for token in TERMINAL_TOKENS:
@@ -956,6 +957,8 @@ def test_an_agents_screen_keeps_the_dark_ground_its_own_colours_were_picked_for(
         ("pre.pane, pre.transcript", "color"): "var(--pane-fg)",
         ("pre.strip", "background"): "var(--pane)",
         ("pre.strip", "color"): "var(--pane-muted)",
+        ("pre.pane, pre.transcript", "color-scheme"): "dark",
+        ("pre.strip", "color-scheme"): "dark",
         (".ln.muted", "color"): "var(--pane-muted)",
         (".rf", "color"): "var(--pane)",
         (".rb", "background"): "var(--pane-fg)",

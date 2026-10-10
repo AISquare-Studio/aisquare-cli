@@ -258,3 +258,46 @@ def test_after_install_page_the_server_serves_the_spa_with_no_dist_flag(
     assert index.status_code == 200 and index.text.startswith("<!doctype html>")
     assert deep.status_code == 200 and deep.text.startswith("<!doctype html>")
     assert asset.status_code == 200 and asset.text == "console.log('remote')"
+
+
+# --- what a request may name in an installed build -------------------------------------------
+
+
+@pytest.mark.parametrize("installed", [False, True], ids=["dist", "install-page"])
+@pytest.mark.parametrize(
+    ("path", "status"),
+    [
+        ("%00", 200),
+        ("a%00.js", 404),
+        ("assets/%00", 404),
+        ("x" * 300 + ".js", 404),
+        ("x" * 3_000, 200),
+        ("a/" * 2_100 + "b.js", 404),
+    ],
+    ids=[
+        "nul",
+        "nul-in-a-name",
+        "nul-in-assets",
+        "a-name-past-255",
+        "a-path-past-the-limit",
+        "deep",
+    ],
+)
+def test_a_page_path_the_system_refuses_is_a_miss_not_a_500(
+    isolated_home: Path, built: Path, installed: bool, path: str, status: int
+) -> None:
+    """A NUL byte made ``resolve`` raise ``ValueError``, and a name past 255 bytes made
+    ``is_file`` raise ``ENAMETOOLONG``: each answered a bare 500 ``text/plain`` with a
+    traceback in the log and no page headers, to anyone holding the link (sweep 3 of
+    #243). A miss is a miss: a file request's JSON 404, a navigation's document."""
+    if installed:
+        remote_server.install_page(built)
+    runtime = Runtime(remote_state_path(), remote_audit_path())
+    app = build_app(runtime) if installed else build_app(runtime, dist_dir=built)
+    response = make_client(app).get(f"/r/{runtime.token}/{path}")
+    assert response.status_code == status, response.text[:200]
+    assert response.headers["referrer-policy"] == "no-referrer"
+    if status == 404:
+        assert response.json()["error"] == "not_found"
+    else:
+        assert response.text.startswith("<!doctype html>")

@@ -3305,6 +3305,24 @@ def _width_param(raw: str | None) -> int | None:
     return value
 
 
+def _built_page_file(dist: Path, rel: str) -> Path | None:
+    """The file of an installed or ``--dist`` build that ``rel`` names, or ``None``: one
+    inside ``dist`` that the system will look up.
+
+    A path the system refuses, a NUL byte (``ValueError``) or a name past its limit
+    (``ENAMETOOLONG``), is a file this build does not have, and the request goes on to
+    the 404 or the document as any other miss does: it raised, and the page answered a
+    bare 500 with a traceback in the log for each, to anyone with the link (sweep 3 of
+    #243).
+    """
+    try:
+        candidate = (dist / rel).resolve()
+        found = candidate.is_relative_to(dist) and candidate.is_file()
+    except (OSError, ValueError):
+        return None
+    return candidate if found else None
+
+
 def _is_navigation(rel: str, accept: str) -> bool:
     """Whether this is a page navigation, which is the ONLY thing the SPA fallback serves.
 
@@ -4532,11 +4550,7 @@ def build_remote_app(
             if bundled is not None:
                 return bundled
             response = _json_error(404, "no_dist", NO_PAGE_HINT)
-        elif (
-            rel
-            and (candidate := (dist / rel).resolve()).is_relative_to(dist)
-            and candidate.is_file()
-        ):
+        elif rel and (candidate := _built_page_file(dist, rel)) is not None:
             response = FileResponse(
                 candidate,
                 media_type=remote_page.build_content_type(candidate.name),

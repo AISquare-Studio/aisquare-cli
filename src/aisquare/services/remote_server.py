@@ -3547,6 +3547,15 @@ LINK_GONE = (
 """404 ``not_found`` at the token gate, in the words of the page's screen for it and of
 docs/remote.md's troubleshooting. A wrong token and a passed auto-off answer alike, and
 with one sentence whatever was sent, so it tells a guess nothing about the token."""
+NO_LINE_BREAKS = "there is nothing here: no address of the remote page holds a line break"
+"""404 ``not_found`` for a path with a line break in it (``api/needs%0A``), refused at the gate
+since no route can be matched against it as written: Starlette's patterns end in ``$``, which a
+final line break passes, and their ``.*`` stops at one. So the mount took ``api/needs`` and handed
+its routes the whole path, which only the page's catch-all matched: a GET read was the page
+(200 ``text/html``), a write was a 405 naming GET and HEAD, and a break mid-path matched no
+route at all, a plain-text 404 (sweep 4 of #243)."""
+NO_SOCKET_HERE = "there is no socket here: the page's stream is at ws"
+"""404 ``not_found`` (4404 without the denial extension) for a socket at any path but ``ws``."""
 NOT_UNLOCKED = "no unlocked device for this request — unlock with the passphrase"
 """401 ``unauthorized``: no cookie, or one whose device is signed out, revoked or expired."""
 WRONG_PASSWORD = "that is not the passphrase"
@@ -3823,6 +3832,11 @@ class _TokenGate:
                 scope, receive, send, 404, "not_found", LINK_GONE, WS_CLOSE_NOT_FOUND
             )
             return None
+        if "\n" in str(scope.get("path", "")):  # which no route can be matched against
+            await _refuse_at_the_gate(
+                scope, receive, send, 404, "not_found", NO_LINE_BREAKS, WS_CLOSE_NOT_FOUND
+            )
+            return None
         method = scope.get("method")  # a handshake has none, and is always asked
         if method not in ("GET", "HEAD") and not remote_gate_origin(scope):
             await _refuse_at_the_gate(
@@ -3851,6 +3865,18 @@ class _TokenGate:
                 return None
             return replayed
         return receive
+
+
+class _NoSuchSocket:
+    """Any socket but ``ws``, refused as a path with no route is (``api_missing``): a 404
+    denial, or a 4404 close. Unrouted, it was closed 1000, a normal close that said nothing
+    (sweep 4 of #243). An ASGI app, not a function, so Starlette hands it the handshake as
+    it came, to deny."""
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        await _refuse_at_the_gate(
+            scope, receive, send, 404, "not_found", NO_SOCKET_HERE, WS_CLOSE_NOT_FOUND
+        )
 
 
 # --- the kit: what every route of one app shares ---------------------------------------
@@ -5097,6 +5123,7 @@ def build_remote_app(
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await reading
 
+    no_socket = _NoSuchSocket()
     api_routes = [
         Route("/api/unlock", unlock_endpoint, methods=["POST"]),
         Route("/api/remote", remote, methods=["GET"]),
@@ -5124,11 +5151,13 @@ def build_remote_app(
         Route("/api/{name:path}", write_endpoint, methods=["POST"]),
         Route("/api/{rest:path}", api_missing),
         WebSocketRoute("/ws", stream),
+        WebSocketRoute("/{rest:path}", no_socket),
         Route("/", static, methods=["GET"]),
         Route("/{path:path}", static, methods=["GET"]),
     ]
     inner = Starlette(
-        routes=[Mount("/r/{token}", routes=api_routes)],
+        # The link without its last /: a page is redirected there, a socket has no route.
+        routes=[Mount("/r/{token}", routes=api_routes), WebSocketRoute("/{rest:path}", no_socket)],
         exception_handlers={405: wrong_method},
         lifespan=lambda app: remote_lifespan(kit),
     )

@@ -255,6 +255,82 @@ def test_without_the_denial_extension_the_socket_is_closed_4401(runtime: Runtime
     assert sent == [{"type": "websocket.close", "code": remote_server.WS_CLOSE_UNAUTHORIZED}]
 
 
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "api/needs%0A"),
+        ("GET", "api/fleet%0Ajunk"),
+        ("GET", "api/panes/coder%0A-1"),
+        ("POST", "api/send-keys%0A"),
+        ("POST", "api/note%0A"),
+        ("GET", "fleet%0A"),
+        ("GET", "%0A"),
+    ],
+)
+def test_a_path_with_a_line_break_is_a_json_404_never_the_page_or_a_405(
+    app: Any, runtime: Runtime, ran: list[str], method: str, path: str
+) -> None:
+    """Starlette's route patterns cannot be matched against a line break: ``api/needs%0A``
+    was the page (200 ``text/html``) to a script reading a read, ``POST api/send-keys%0A``
+    a 405 saying the route takes GET and HEAD, and a break mid-path a plain-text 404
+    (sweep 4 of #243). Each is the one refusal shape, and nothing runs."""
+    client = make_client(app)
+    unlock(client, runtime)
+    runtime.set_allow_write(True)
+    response = client.request(method, f"{base(runtime)}/{path}", json={"text": "hi"})
+    assert response.status_code == 404, response.text
+    assert response.json() == {"error": "not_found", "message": remote_server.NO_LINE_BREAKS}
+    assert ran == []
+
+
+@pytest.mark.parametrize(
+    ("path", "message"),
+    [
+        ("/ws%0A", "NO_LINE_BREAKS"),
+        ("/other", "NO_SOCKET_HERE"),
+        ("/", "NO_SOCKET_HERE"),
+        ("", "NO_SOCKET_HERE"),
+    ],
+    ids=["ws-and-a-line-break", "another-path", "the-page", "the-link-without-its-slash"],
+)
+def test_a_socket_anywhere_but_ws_is_a_404_denial_or_a_4404_close(
+    app: Any, runtime: Runtime, path: str, message: str
+) -> None:
+    """Unrouted, it was closed 1000, a normal close that said nothing (sweep 4 of #243)."""
+    client = make_client(app)
+    unlock(client, runtime)
+    with (
+        pytest.raises(WebSocketDenialResponse) as denied,
+        client.websocket_connect(f"{base(runtime)}{path}"),
+    ):
+        pass
+    assert denied.value.status_code == 404
+    said = getattr(remote_server, message)
+    assert denied.value.json() == {"error": "not_found", "message": said}
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    cookie = f"{remote_server.COOKIE}={client.cookies[remote_server.COOKIE]}".encode()
+    scope = {
+        "type": "websocket",
+        "scheme": "ws",
+        "path": f"{base(runtime)}{path}".replace("%0A", "\n"),
+        "headers": [
+            (b"host", b"testserver"),
+            (b"origin", b"http://testserver"),
+            (b"cookie", cookie),
+        ],
+        "extensions": {},
+    }
+    asyncio.run(app(scope, receive, send))
+    assert sent == [{"type": "websocket.close", "code": remote_server.WS_CLOSE_NOT_FOUND}]
+
+
 def test_the_page_and_unlock_need_no_device(app: Any, runtime: Runtime) -> None:
     client = make_client(app)
     assert client.get(f"{base(runtime)}/").status_code != 401

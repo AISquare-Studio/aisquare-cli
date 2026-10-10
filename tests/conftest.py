@@ -8,6 +8,7 @@ the narrow one nobody selects it with.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 from collections.abc import Iterator
@@ -186,6 +187,16 @@ AMBIENT_ENV_VARS = (
     # show-token tests, which print the port a client should dial.
     "AISQUARE_SERVE_PORT",
     "AISQUARE_SERVE_CLOSE_AFTER",
+    # `aisquare remote serve`'s --port (`status` and `regenerate-password` read it
+    # too, for their link), --auto-off and --public-url, the same typer `envvar=`
+    # kind; the last is also the static domain the TUI's ngrok serves on
+    # (`services.ngrok_tunnel.NGROK_URL_ENV`), which an operator with a reserved
+    # domain keeps exported. Measured: AISQUARE_REMOTE_AUTO_OFF=1 and
+    # AISQUARE_REMOTE_NGROK_URL set in the shell fail test_remote_server.py's
+    # serve test, which asserts the hour of auto-off and no public URL.
+    "AISQUARE_REMOTE_PORT",
+    "AISQUARE_REMOTE_AUTO_OFF",
+    "AISQUARE_REMOTE_NGROK_URL",
     "AISQUARE_TEAM_HUB",
     "AISQUARE_TEAM_DELTA",
     "AISQUARE_TEAM_LEASE_MIN",
@@ -334,6 +345,81 @@ AMBIENT_ENV_VARS = (
 #: ``cli.launch.ROLES``' eight roles; tester, reviewer, manager and ui-tester
 #: were read and not cleared.
 AMBIENT_ENV_PREFIXES = ("AISQUARE_BIN_", "AISQUARE_MODEL_", "AISQUARE_EFFORT_")
+
+#: The home the shell named, if it named one; ``None`` leaves the run to name its own
+#: for wherever no test's own home is in force (:func:`home_outside_a_test`).
+SHELL_HOME: str | None = os.environ.get(HOME_ENV_VAR) or None
+
+#: The developer's home directory as the run found it, and which project markers
+#: (``core.workspace.ROOT_MARKERS``) it held already: one that appears in it during the
+#: run is named in the summary (:func:`pytest_terminal_summary`).
+_DEVELOPERS_HOME = Path.home()
+_ROOT_MARKERS = (".git", ".hg", ".aisquare")
+_MARKERS_AT_START = frozenset(m for m in _ROOT_MARKERS if (_DEVELOPERS_HOME / m).exists())
+_RUN_HOME: list[Path] = []
+_OUTSIDE_A_TEST: dict[str, str] = {}
+"""What appeared outside every test's own home, and the test that had just ended."""
+
+
+@pytest.fixture(scope="session", autouse=True)
+def home_outside_a_test(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The home ``aisquare_home()`` names wherever no test's own home is in force.
+
+    ``isolated_home`` names a home for each test, and its ``monkeypatch`` takes it away
+    again at teardown, but what a test started can outlive it: the needs watcher's scan
+    runs on past its lifespan's five-second join, and the R panel's writer thread runs
+    the writes still queued on it. Between two tests ``AISQUARE_HOME`` was unset, so
+    what they read and wrote then went to ``~/.aisquare``: the developer's own home, and
+    on Windows ``%USERPROFILE%``, which holds ``%TEMP%`` and so every ``tmp_path``. Once
+    anything of theirs landed there with no ``config.toml``, ``context.db`` or
+    ``agents.json`` beside it (a ``remote-needs.json``, a ``state.json``), the marker
+    walk took it for a project's ``.aisquare``, and every markerless directory of every
+    later test resolved to the user's home as its project root: 49 failures and errors
+    on the windows-latest leg of #243, in tests that never started a Remote.
+
+    So the run names a home of its own, in its own temp tree beside the tests' and above
+    none of them, for module-scoped fixtures and for what outlives a test. Left set at
+    the end on purpose: the panel's writer thread is joined at the interpreter's exit,
+    and what it still had to write lands here, not in the developer's home. A home the
+    shell named is kept: the CI ``ambient`` job names a configured one, and a fixture
+    reading it outside a test is the leak that job exists to catch.
+    """
+    if SHELL_HOME is not None:
+        return Path(SHELL_HOME)
+    home = tmp_path_factory.mktemp("home-outside-a-test", numbered=False)
+    os.environ[HOME_ENV_VAR] = str(home)
+    _RUN_HOME.append(home)
+    return home
+
+
+def pytest_runtest_logfinish(nodeid: str, location: tuple[str, int | None, str]) -> None:
+    """Note what appeared outside every test's own home by the time ``nodeid`` ended."""
+    appeared: list[Path] = []
+    for home in _RUN_HOME:
+        with contextlib.suppress(OSError):  # a run home something removed holds nothing
+            appeared += home.iterdir()
+    appeared += [
+        _DEVELOPERS_HOME / name
+        for name in _ROOT_MARKERS
+        if name not in _MARKERS_AT_START and (_DEVELOPERS_HOME / name).exists()
+    ]
+    for path in appeared:
+        _OUTSIDE_A_TEST.setdefault(str(path), nodeid)
+
+
+def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
+    """Say what a test left running wrote outside its own home, and after which test.
+
+    Said, not failed: when it lands depends on how fast the machine is, and in the
+    run's own home it does no harm. A project marker new in the developer's home does:
+    every markerless ``tmp_path`` below it resolves to that home from then on, and the
+    failures that follow are in other tests, so this names the test it came after.
+    """
+    if not _OUTSIDE_A_TEST:
+        return
+    terminalreporter.section("written outside every test's own home")
+    for path, nodeid in _OUTSIDE_A_TEST.items():
+        terminalreporter.write_line(f"{path}  (there when {nodeid} ended)")
 
 
 @pytest.fixture(autouse=True)

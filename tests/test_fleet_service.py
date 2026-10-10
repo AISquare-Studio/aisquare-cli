@@ -6625,7 +6625,8 @@ def test_a_hand_over_that_does_not_complete_leaves_nothing_parked(
         rows = store.fleet_agents(project.id)
     assert released is not None and released.status == "todo" and released.claimed_by is None
     assert any(kind == "task_released" and "hand-over failed" in text for kind, text in kinds)
-    assert any(kind == "agent_exited" for kind, _ in kinds)
+    exited = f"{agent.label} exited (0): {fleet_service.HANDOVER_FAILED}"
+    assert ("agent_exited", exited) in kinds, "not the clean exit a stop announces"
     assert all(row.ended_at is not None for row in rows)  # the old row ended; no replacement
 
 
@@ -7142,7 +7143,8 @@ def test_restart_and_switch_say_in_their_headline_that_the_first_line_was_not_ty
     line reached its pane (FLEET-5), but the commands' own headline still said "started
     fresh with a hand-off prompt", above a note saying the prompt was NOT typed (review of
     the side/ff-fleet fold). The headline is the board's words, and ``--json`` carries
-    ``prompt_typed``."""
+    ``prompt_typed``, those words (``how``) and the note on why (``failures``), which the
+    phone says them from (sweep 5 of #243)."""
     _two_slots_with_usage(monkeypatch, work=95, personal=10)
     agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
     _with_transcript(agent, tmp_path / "missing.jsonl")  # named, not on disk: a fresh start
@@ -7161,6 +7163,9 @@ def test_restart_and_switch_say_in_their_headline_that_the_first_line_was_not_ty
     assert again.exit_code == 0, again.output
     payload = json.loads(again.stdout)
     assert (payload["resumed"], payload["prompt_typed"]) == (False, False)
+    assert payload["how"] == "started fresh, but its hand-off prompt was NOT typed"
+    (why,) = [note for note in payload["failures"] if "NOT typed" in note]
+    assert why in payload["notes"]
 
 
 @pytest.mark.parametrize(
@@ -7827,6 +7832,114 @@ def test_a_pinned_row_is_never_mistaken_for_the_agent_that_took_its_label(
     assert (new.pane_id, "literal", "/exit") in tmux.typed
 
 
+def test_a_pinned_switch_or_tell_never_reaches_the_agent_that_took_its_label(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The phone's Switch and Tell, as a sweep of #243 found them (round 4). The manager's
+    own ``fleet switch``, in another process, handed coder-1 on just after the phone had
+    checked its pin. By label, the phone's switch then stopped the replacement and moved
+    it to a third account, and its tell typed into it. Pinned (``agent_id``), as stop
+    and restart were, both refuse the replacement before anything is looked up, typed or
+    filed. Pinned to the row that is there, each goes on as before."""
+    old = _coder(project, label="coder-1")
+    tmux.die(old.pane_id, 1)
+    fleet_service.list_agents(project)
+    new = fleet_service.restart(project, "coder-1").started
+    _board_session(new, "waiting")
+    tmux.set_command(new.pane_id, "claude")
+    typed, killed, spawned = list(tmux.typed), list(tmux.killed), len(tmux.spawned)
+
+    replaced = rf"'coder-1' is another agent now \({new.id}\)"
+    with pytest.raises(NoSuchAgent, match=replaced):
+        fleet_service.switch(project, "coder-1", to="2", agent_id=old.id)
+    with pytest.raises(NoSuchAgent, match=replaced):
+        fleet_service.tell(project, "coder-1", "carry on", agent_id=old.id)
+    assert (tmux.typed, tmux.killed, len(tmux.spawned)) == (typed, killed, spawned)
+    assert _events(project, "note") == []
+
+    with pytest.raises(FleetError, match="no Claude account in slot 2"):
+        fleet_service.switch(project, "coder-1", to="2", agent_id=new.id)
+    assert fleet_service.tell(project, "coder-1", "carry on", agent_id=new.id).delivered
+    assert tmux.typed[len(typed) :] == [
+        (new.pane_id, "paste", "carry on"),
+        (new.pane_id, "key", "Enter"),
+    ]
+
+
+def test_a_switchs_last_check_comes_after_its_own_refusals_and_before_anything_is_stopped(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``before_stop`` is the caller's last word: the phone's dialog guard, whose Escape
+    answers a prompt "No". Asked before the switch's own refusals, that Escape went to an
+    agent the switch then would not move, for a ``to`` that named no account (sweep of
+    #243, round 4). It is asked after them, once, before the session is marked or
+    ``/exit`` typed, and a check that refuses leaves the agent as it was."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, None)
+    before = (len(tmux.typed), len(tmux.killed))
+    asked: list[tuple[int, int]] = []
+
+    def check() -> None:
+        asked.append((len(tmux.typed), len(tmux.killed)))
+
+    with pytest.raises(FleetError, match="no Claude account in slot 9"):
+        fleet_service.switch(project, agent.label, to="9", before_stop=check)
+    with pytest.raises(FleetError, match="already runs on"):
+        fleet_service.switch(project, agent.label, to="2", before_stop=check)
+    assert asked == [], "the switch's own refusals come first"
+
+    def refuse() -> None:
+        check()
+        raise RuntimeError("the dialog guard said no")
+
+    with pytest.raises(RuntimeError, match="the dialog guard said no"):
+        fleet_service.switch(project, agent.label, before_stop=refuse)
+    assert asked == [before] and (len(tmux.typed), len(tmux.killed)) == before
+    assert _session_state(agent.session_id or "") != team_service.HANDOVER_STATE
+
+    receipt = fleet_service.switch(project, agent.label, before_stop=check)
+    assert asked == [before, before], "asked once, before /exit was typed"
+    assert receipt.to_slot == 3 and agent.pane_id in tmux.killed
+
+
+def test_a_restarts_last_check_comes_after_its_own_refusals_and_before_anything_is_stopped(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """As a switch's (sweep of #243, round 4): ``before_stop`` is the phone's dialog guard,
+    whose Escape answers a prompt "No". It is asked after the restart's own refusals, a
+    task closed meanwhile here, and before ``/exit`` is typed. A check that refuses leaves
+    the running agent as it was, and one that passes is asked once."""
+    task = _add_task(project, "Ship auth")
+    closed = _coder(project, label="coder-closed", task_id=task.id)
+    with store_session() as store:
+        store.set_task_status(task.id, "done")
+    agent = _coder(project)
+    before = (len(tmux.typed), len(tmux.killed))
+    asked: list[tuple[int, int]] = []
+
+    def check() -> None:
+        asked.append((len(tmux.typed), len(tmux.killed)))
+
+    with pytest.raises(FleetError, match="is done"):
+        fleet_service.restart(project, closed.label, before_stop=check)
+    assert asked == [], "the restart's own refusals come first"
+
+    def refuse() -> None:
+        check()
+        raise RuntimeError("the dialog guard said no")
+
+    with pytest.raises(RuntimeError, match="the dialog guard said no"):
+        fleet_service.restart(project, agent.label, before_stop=refuse)
+    assert asked == [before] and (len(tmux.typed), len(tmux.killed)) == before
+    with store_session() as store:
+        assert store.fleet_agent_by_label(project.id, agent.label) is not None  # still live
+
+    receipt = fleet_service.restart(project, agent.label, before_stop=check)
+    assert asked == [before, before], "asked once, before /exit was typed"
+    assert receipt.was_running and agent.pane_id in tmux.killed
+
+
 def test_a_refused_restart_of_a_death_no_listing_has_recorded_keeps_the_window(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8196,6 +8309,7 @@ def test_a_restart_says_a_release_its_stop_could_not_make(
     assert receipt.started.ended_at is None
     [said] = [note for note in receipt.notes if note.startswith("claims:")]
     assert "could not be released" in said and "locked" in said
+    assert receipt.failures[0] == said, "what did not happen, as a switch's receipt says it"
     assert _task_now(mine.id).claimed_by == first
 
 
@@ -8267,7 +8381,9 @@ def test_restarting_a_running_agent_hands_its_claims_to_the_replacement_and_anno
 
     freed = _task_now(mine.id)
     assert freed.claimed_by is None and freed.status == "todo"
-    assert _events(project, "agent_exited") == [f"{agent.label} exited (0)"]
+    assert _events(project, "agent_exited") == [
+        f"{agent.label} exited (0): {fleet_service.HANDOVER_FAILED}"
+    ]
     assert nudges == [f"{agent.label} exited"]
 
 

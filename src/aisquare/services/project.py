@@ -73,6 +73,17 @@ def switch(name: str) -> ProjectInfo:
     return project
 
 
+def named(term: str) -> ProjectInfo:
+    """The single registered project ``term`` names — a name, codename or id prefix, never a
+    path: :func:`resolve` without the disk, for a caller with no working directory of its
+    own to read a path against (the remote's ``project/remove``).
+
+    ``KeyError`` when nothing matches, ``ValueError`` when several do, as :func:`resolve`.
+    """
+    with store_session() as store:
+        return _one_match(store, term)
+
+
 def _one_match(store: ContextStore, term: str) -> ProjectInfo:
     """The single registered project ``term`` names — a name, codename or id prefix.
 
@@ -155,7 +166,13 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
     directory resolves to — the pin moves to the most recently touched
     remaining project, or is cleared when none remain; the report says which.
     """
-    project = resolve(ref)
+    return forget_project(resolve(ref), purge=purge)
+
+
+def forget_project(project: ProjectInfo, *, purge: bool = False) -> ProjectForgetReport:
+    """:func:`forget` of a project its caller resolved: the remote's ``project/remove``
+    reads its ``ref`` without the server's working directory, which :func:`resolve` would
+    read a path against."""
     with store_session() as store:
         live = store.fleet_agents(project.id, live_only=True)
         if live:

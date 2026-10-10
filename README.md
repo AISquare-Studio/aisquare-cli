@@ -529,6 +529,44 @@ The clock counts **inbound** messages only — it assumes request/response
 traffic, so a deadline shorter than your slowest tool call would cut a
 client mid-wait (at the 300s default no current tool comes anywhere close).
 
+### Phone control (`aisquare remote`)
+
+The fleet on your phone: one feed of everything waiting on you across every
+project (a permission prompt, a question, a crash, a usage limit), each agent's
+live screen and conversation, the board, and notifications when something needs
+you. Once you allow writes, the phone can answer a prompt, type to an agent, or
+stop, restart or switch it. It is one server on `127.0.0.1:8750` behind your own
+ngrok tunnel, and the page it serves ships inside aisquare-cli.
+
+```sh
+uv tool install --python 3.13 --with tiktoken 'aisquare-cli[remote]'   # pipx, pip or more extras: docs/remote.md
+export AISQUARE_REMOTE_NGROK_URL=https://your-name.ngrok-free.app   # your static domain
+aisquare remote allow-write on       # read-only until you say so
+```
+
+Then press `R` in `aisquare ui` and switch Remote on: the panel starts the server
+and ngrok on that domain itself, and shows the link, a QR code and the passphrase.
+Without the fleet UI, start both yourself instead, never beside the panel: a domain
+holds one tunnel, so a second ngrok on it fails:
+
+```sh
+aisquare remote serve
+ngrok http --url=your-name.ngrok-free.app --inspect=false 127.0.0.1:8750   # in another terminal
+```
+
+Give ngrok `127.0.0.1:8750`, never `8750` alone: it reads that as `localhost`,
+IPv6's `::1` first, where anyone on the machine can listen and be handed every
+phone's requests; and stop it when `serve` stops, or it hands them to whatever
+takes the port next. Every ngrok account has one free static domain: with it the
+link survives a restart, and a notification opens its card rather than the feed.
+On a machine others use, also put `web_addr: false` in `ngrok.yml` (`ngrok config
+edit`): ngrok's local API asks no one for a password. The fleet UI's ngrok runs
+with it off where it can, and its panel says when it could not.
+
+**[The phone control guide](docs/remote.md)** covers unlocking, the needs-you
+cards and quick answers, notifications on iPhone, the security model, and a
+checklist for before you leave the desk.
+
 ### Tuning (environment variables)
 
 Orchestration has no config files — a handful of env knobs:
@@ -759,6 +797,8 @@ aisquare
 │                   have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
 ├── ui              the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
+├── remote          serve · needs · status · allow-write on|off · revoke · regenerate-password
+│                   install-page <dist>   — the fleet on your phone (docs/remote.md)
 ├── fleet           spawn <role> [--label L] [--task ID] [--worktree/--no-worktree]
 │                             [--permission-mode M] [--bin B] [--prompt TEXT] [--account SLOT]
 │                             [-- agent args]

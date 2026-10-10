@@ -56,6 +56,7 @@ from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
 from aisquare.core.tmux import (
     DEFAULT_WINDOW_HEIGHT,
     DEFAULT_WINDOW_WIDTH,
+    PaneFacts,
     TmuxError,
     TmuxServer,
     TmuxUnavailable,
@@ -2401,7 +2402,14 @@ def manager_of(project: ProjectInfo) -> FleetAgent | None:
     return agent if agent is not None and agent.role == "manager" else None
 
 
-def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = None) -> TellResult:
+def tell(
+    project: ProjectInfo,
+    label: str,
+    text: str,
+    *,
+    sender: str | None = None,
+    agent_id: str | None = None,
+) -> TellResult:
     """Type ``text`` into a WAITING agent; otherwise file it as a board note to it.
 
     Typing into a working agent would interleave with its turn; into one that
@@ -2418,9 +2426,13 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     documents and refuses to cause. So the same readiness test decides here —
     the one :func:`nudge_manager` already applies — and a pane that is not the
     agent's gets the board note instead.
+
+    ``agent_id`` pins the row, as for :func:`stop`: the phone's tell means the
+    agent it showed, and a replacement that took the label since (a manager's
+    restart or switch, in another process) is refused, not typed into.
     """
     with store_session() as store:
-        agent = _live_agent(store, project, label)
+        agent = _live_agent(store, project, label, agent_id=agent_id)
     status = status_of(agent)
     if status.state == "waiting":
         srv = server_for(agent.tmux_socket)
@@ -2452,6 +2464,11 @@ def _pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
         facts = srv.pane_facts(pane_id)
     except TmuxError:
         return False
+    return _runs_the_agent(facts)
+
+
+def _runs_the_agent(facts: PaneFacts | None) -> bool:
+    """:func:`_pane_is_the_agent`'s answer, for a caller that holds the pane's facts already."""
     return facts is not None and not facts.dead and _agent_running(facts.current_command)
 
 
@@ -3747,6 +3764,8 @@ def switch(
     reason: str | None = None,
     spawned_by: str = "user",
     automatic: bool = False,
+    agent_id: str | None = None,
+    before_stop: Callable[[], None] | None = None,
 ) -> SwitchReceipt:
     """Move a running agent to another Claude account — the hand-over of #146.
 
@@ -3792,9 +3811,20 @@ def switch(
     (:func:`_refuse_a_replay_that_cannot_start`), the role, a task that is
     closed — is refused before the agent is stopped, as :func:`restart`
     refuses it.
+
+    ``agent_id`` pins the row, as for :func:`stop` and :func:`restart`: the
+    phone's Switch means the agent it showed, and a manager's switch or the
+    automatic hand-over runs in another process, which can hand the label to
+    a replacement between the phone's check and this read. By label, that
+    replacement was stopped and moved again (sweep of #243). ``before_stop``
+    is the caller's last check, asked once every refusal above has passed and
+    before anything is marked or stopped. It raises to refuse, and nothing has
+    been done then. The phone's dialog guard is one: the Escape it may send
+    must not come before a refusal this function makes up front, such as a
+    ``to`` that names no account.
     """
     with store_session() as store:
-        agent = _live_agent(store, project, label)
+        agent = _live_agent(store, project, label, agent_id=agent_id)
         session = store.get_session(agent.session_id) if agent.session_id else None
         if _handed_over(agent, session, _now()):
             # The automatic path refuses a session already in flight
@@ -3860,6 +3890,8 @@ def switch(
             f"{label!r} already runs on {claude_accounts_core.label(target)} (slot {target.slot})"
         )
     _refuse_a_replay_that_cannot_start(agent, session)
+    if before_stop is not None:
+        before_stop()
     # A hand-over whether it resumes or not: the agent is coming back, so its
     # claims wait for the replacement and no exit is announced. A fresh start
     # used to stop the agent as `fleet stop` does — the task went back to the
@@ -4090,6 +4122,11 @@ class RestartReceipt:
     notes: list[str] = field(default_factory=list)
     prompt_typed: bool = True
     """Whether the replacement's first line reached its pane, as on :class:`SwitchReceipt`."""
+    failures: list[str] = field(default_factory=list)
+    """The notes that say what did NOT happen, as on :class:`SwitchReceipt`: the stop's
+    claims not released, the hand-over mark not taken back, the replacement's first line
+    not typed (and why), its claims not moved. Each is in ``notes`` too, among the ones
+    every restart has (the account ladder's, the launch replayed)."""
 
     @property
     def how(self) -> str:
@@ -4106,6 +4143,7 @@ def restart(
     spawned_by: str = "user",
     agent_id: str | None = None,
     permission_mode: str | None = None,
+    before_stop: Callable[[], None] | None = None,
 ) -> RestartReceipt:
     """Start an agent again under its own label — the **Restart** of #138.
 
@@ -4150,6 +4188,9 @@ def restart(
     flag). The replacement records it, so a typo was replayed by every later
     restart, switch and hand-over, and it stopped a running agent for a
     replacement that could not start (review of #169, round 1).
+    ``before_stop`` is the caller's last check, as for :func:`switch`: asked
+    once every refusal above has passed, before anything is stopped or
+    recorded, and it raises to refuse.
     """
     if permission_mode is not None and permission_mode not in ("", *CLAUDE_PERMISSION_MODES):
         raise FleetError(
@@ -4204,6 +4245,9 @@ def restart(
     # The ladder's notes travel with the slot it chose; with none chosen, `spawn`
     # asks the same ladder and gives them itself.
     notes = [f"accounts: {note}" for note in choice.notes] if account is not None else []
+    failures: list[str] = []  # the notes that say what did not happen (`RestartReceipt`)
+    if before_stop is not None:
+        before_stop()
     was_running = False
     handed_over: StopReceipt | None = None
     # Set when THIS restart ended a dead or vanished pane's row with the manager's
@@ -4239,6 +4283,7 @@ def restart(
                 # the mark (the #205 fold's rule, met by #163 at the stack's fold).
                 if session is not None and (left := _unmark_handing_over(session)) is not None:
                     notes.append(left)
+                    failures.append(left)
             agent = handed_over.agent
         else:
             # A dead pane no listing has recorded yet is recorded as a listing
@@ -4259,6 +4304,7 @@ def restart(
                     # session is one a fresh replacement cannot take back until its
                     # lease lapses.
                     notes.append(f"claims: {stopped.release_failed}")
+                    failures.append(notes[-1])
             held_back = True
     # An exited agent's dead window is NOT removed here: `spawn` supersedes it
     # once the replacement is up and recorded, so a restart that is refused on
@@ -4309,6 +4355,7 @@ def restart(
         tmux_session=receipt.tmux_session,
         notes=notes,
         prompt_typed=bool(receipt.prompt_typed),
+        failures=[*failures, *receipt.failures],
     )
 
 
@@ -4403,11 +4450,19 @@ def _unmark_handing_over(session: TeamSession) -> str | None:
     return None
 
 
+#: What the exit :func:`_abandon_handover` announces says after its status. The hand-over's own
+#: ``/exit`` ended the row with status 0, so the board read "exited (0)" as a ``fleet stop``
+#: does, and whoever reads it (the manager, ``remote``'s needs-you for the manager itself) took
+#: an agent nothing replaced for one whose work was done.
+HANDOVER_FAILED = "its replacement did not start"
+
+
 def _abandon_handover(stopped: FleetAgent) -> None:
-    """The replacement never started: release what was parked and record the exit withheld."""
+    """The replacement never started: release what was parked and record the exit withheld,
+    saying so (:data:`HANDOVER_FAILED`)."""
     with contextlib.suppress(Exception), store_session() as store:
         _team().release_agent_claims(store, stopped, why="hand-over failed")
-        _emit_exit(store, stopped)
+        _emit_exit(store, stopped, why=HANDOVER_FAILED)
     nudge_manager(stopped.project_id, reason=f"{stopped.label} exited")
 
 
@@ -4606,8 +4661,9 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
     return report
 
 
-def _emit_exit(store: ContextStore, agent: FleetAgent) -> None:
-    """The ``agent_exited`` board event the manager's Stop hook wakes on (§7.3)."""
+def _emit_exit(store: ContextStore, agent: FleetAgent, *, why: str | None = None) -> None:
+    """The ``agent_exited`` board event the manager's Stop hook wakes on (§7.3), with
+    ``why`` after the status when the status does not say it all."""
     status = "?" if agent.exit_status is None else str(agent.exit_status)
     # The row is already ended; the event is the courtesy, not the record.
     with contextlib.suppress(Exception):
@@ -4615,7 +4671,7 @@ def _emit_exit(store: ContextStore, agent: FleetAgent) -> None:
             store,
             agent.project_id,
             "agent_exited",
-            f"{agent.label} exited ({status})",
+            f"{agent.label} exited ({status})" + (f": {why}" if why else ""),
             session_id=agent.session_id,
         )
 

@@ -1,0 +1,515 @@
+"""``aisquare remote`` — the Remote Control server on one local port.
+
+Each command imports ``services.remote_server`` in its own body. ``cli/app.py``
+imports this module to register it, so an import here at module scope put the
+server on every command's import path, every hook's included: about thirty more
+modules, asyncio among them, and on Windows asyncio loads ``_overlapped``, which
+opens a socket at import. A child started without ``SYSTEMROOT`` cannot (WinError
+10106), so ``asq --json`` and every hook died before typer ran (PR #243's
+windows leg). ``tests/test_remote_stays_off_the_hook_path.py`` keeps it off.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Any
+
+import typer
+
+from aisquare.cli.common import fail
+from aisquare.core.console import stderr_console, stdout_console
+from aisquare.core.state import get_state
+
+if TYPE_CHECKING:
+    from aisquare.services.remote_server import RemoteInfo, Runtime
+
+#: ``remote_server.DEFAULT_PORT``, spelled out so ``--port`` needs no import (the
+#: ``cli/serve.py`` shape); the hook-path test pins the two equal.
+DEFAULT_PORT = 8750
+#: ``serve --auto-off``: an hour, like the TUI's. A server nobody turns off is a link
+#: anyone holding it can keep reaching; ``0`` (never) is a choice the banner names.
+DEFAULT_AUTO_OFF_MINUTES = 60
+#: The longest ``--auto-off``: a week, the longest a phone stays signed in (the server's
+#: ``DEVICE_LIFETIME``); longer is what ``0`` says. Unbounded, a value past year 9999
+#: ended ``serve`` in an ``OverflowError`` traceback (sweep of #243).
+MAX_AUTO_OFF_MINUTES = 7 * 24 * 60
+
+#: Every option naming the port takes a port, as the R panel reads ``AISQUARE_REMOTE_PORT``
+#: (``remote_control._panel_port``). ``0`` served on whatever port the system picked while
+#: the banner and ``status`` printed ``:0`` links that refused every connection, and one
+#: past 65535 ended ``serve`` in an ``OverflowError`` traceback, with no ``--json`` answer
+#: (sweep of #243). Out of range, each is a usage error, in ``--json`` too.
+MIN_PORT, MAX_PORT = 1, 65535
+
+#: What a hand-started ngrok does once ``serve`` has let go of its port: the banner and the
+#: way out both say to stop it. The R panel stops its own ngrok before its server lets go.
+NGROK_LEFT_UP = "left up, it hands the phones' requests to whatever takes {address} next"
+
+#: The port in the link ``status`` and ``regenerate-password --new-link`` print: serve's,
+#: from the same option and variable. Built for the default port, the link of a serve on
+#: ``--port 18750`` or an exported ``AISQUARE_REMOTE_PORT`` refused every connection.
+LinkPort = Annotated[
+    int,
+    typer.Option(
+        "--port",
+        help="The port serve runs on, for the link (serve's --port).",
+        envvar="AISQUARE_REMOTE_PORT",
+        min=MIN_PORT,
+        max=MAX_PORT,
+    ),
+]
+
+app = typer.Typer(
+    help="Remote Control: show the fleet to a phone over one local port (ngrok exposes it).",
+    no_args_is_help=True,
+)
+
+
+def _fail_if_missing() -> None:
+    from aisquare.services import remote_server
+
+    problem = remote_server._remote_dependency_error()
+    if problem is not None:
+        fail(problem, error="remote_not_installed")
+
+
+def _fail_if_no_page(dist: Path | None) -> None:
+    from aisquare.services import remote_server
+
+    problem = remote_server._page_missing(dist)
+    if problem is not None:
+        fail(problem, error="no_remote_page")
+
+
+def _remote_runtime() -> Runtime:
+    """The server's state from ``remote.json``, or a clean failure when it cannot be used.
+
+    Every command that reads or writes the file starts here, so an unreadable or
+    corrupt one is the same answer everywhere, its reason in ``--json``'s
+    ``detail`` too (``fail`` keeps the message for the human surface alone). A
+    missing one is made here, which a home that refuses it fails as any write does
+    (:func:`_writing_remote_json`).
+    """
+    from aisquare.services import remote_server
+
+    with _writing_remote_json():
+        try:
+            return remote_server.runtime()
+        except remote_server.RemoteError as exc:
+            fail(str(exc), error="remote_state_unreadable", detail=str(exc))
+
+
+@contextmanager
+def _writing_remote_json() -> Iterator[None]:
+    """A ``remote.json`` that will not be replaced is a clean failure, not a traceback.
+
+    A file that cannot be READ already was (:func:`_remote_runtime`); a write that
+    failed raised its ``OSError`` through ``allow-write``, ``regenerate-password`` and
+    ``revoke``, and through ``status`` and ``serve`` making the file the first time:
+    a hundred lines of traceback, and nothing on stdout under ``--json`` (sweep of
+    #243). Any ``OSError``, as ``serve`` already took them: a read-only or full home,
+    a quota, a Windows rename still refused after its retry. The rename is a write's
+    last step, so a write that failed changed nothing.
+    """
+    from aisquare.core.paths import remote_state_path
+
+    try:
+        yield
+    except OSError as exc:
+        fail(
+            f"{remote_state_path()} could not be written ({exc}) — nothing was changed; "
+            "make its directory writable, or free some space, and try again",
+            error="remote_state_unwritable",
+            detail=str(exc),
+        )
+
+
+def _describe_remote(info: RemoteInfo, *, allow_write: bool) -> dict[str, object]:
+    from aisquare.services import remote_server
+
+    return {
+        "url_local": info.url_local,
+        "token": info.token,
+        "password": info.password,
+        "allow_write": allow_write,
+        "bind": remote_server.BIND,
+    }
+
+
+@app.command("serve")
+def serve_remote(
+    port: Annotated[
+        int,
+        typer.Option(
+            "--port", help="Local port.", envvar="AISQUARE_REMOTE_PORT", min=MIN_PORT, max=MAX_PORT
+        ),
+    ] = DEFAULT_PORT,
+    dist: Annotated[
+        Path | None,
+        typer.Option(
+            "--dist",
+            help="Serve this built page instead of the installed or bundled one.",
+        ),
+    ] = None,
+    auto_off: Annotated[
+        int,
+        typer.Option(
+            "--auto-off",
+            min=0,
+            max=MAX_AUTO_OFF_MINUTES,
+            metavar="MINUTES",
+            envvar="AISQUARE_REMOTE_AUTO_OFF",
+            help="Turn Remote off after this many minutes, a week at most; a phone can "
+            "extend it while writes are on. 0: never.",
+        ),
+    ] = DEFAULT_AUTO_OFF_MINUTES,
+    public_url: Annotated[
+        str | None,
+        typer.Option(
+            "--public-url",
+            envvar="AISQUARE_REMOTE_NGROK_URL",
+            help="The https URL phones reach this server at (ngrok's), for links in pushes.",
+        ),
+    ] = None,
+) -> None:
+    """Serve the page, the JSON API and the live stream on 127.0.0.1 until Ctrl-C or auto-off."""
+    from aisquare.services import remote_server
+    from aisquare.services.ngrok_tunnel import ngrok_static_host
+
+    _fail_if_missing()
+    _fail_if_no_page(dist)
+    if public_url is not None and "://" not in public_url:
+        public_url = f"https://{public_url}"  # ngrok's --url takes a bare host; so may this
+    if public_url is not None:
+        try:
+            remote_server.check_public_origin(public_url)
+        except ValueError as exc:
+            fail(str(exc), error="invalid_public_url", ref=public_url)
+    state = _remote_runtime()
+    address = f"{remote_server.BIND}:{port}"
+    left_up = NGROK_LEFT_UP.format(address=address)
+    served: list[bool] = []
+
+    def banner() -> None:
+        """Printed once the port is bound: a link for a server that never came up is a lie.
+
+        Extending auto-off is a write, so the auto-off line offers it only with writes
+        on: it said a phone could extend it under "write actions: off", where the page's
+        Extend is greyed out (review of #243, round 3, 12/13). The switch is read once,
+        for both lines.
+        """
+        served.append(True)
+        info = state.connection_info(port)
+        writes = state.allow_write
+        payload = _describe_remote(info, allow_write=writes)
+        deadline = state.auto_off_deadline()
+        payload["auto_off_at"] = None if deadline is None else deadline.isoformat()
+        if get_state().json_output:
+            typer.echo(json.dumps(payload), err=False)
+            return
+        console = stderr_console()
+        console.print(f"Remote Control on {info.url_local}", markup=False)
+        console.print(f"password: {info.password}", markup=False)
+        gate = "ON — writes are audited" if writes else "off (read-only)"
+        console.print(
+            f"write actions: {gate}   · toggle: aisquare remote allow-write on|off", markup=False
+        )
+        if deadline is None:
+            console.print("auto-off: never (--auto-off 0)", markup=False)
+        else:
+            local = deadline.astimezone()
+            extend = (
+                "a phone can extend it" if writes else "no phone can extend it while writes are off"
+            )
+            console.print(
+                f"auto-off: at {local:%H:%M} (in {auto_off} min) · {extend}", markup=False
+            )
+        origin = None if public_url is None else remote_server.check_public_origin(public_url)
+        if origin is not None:
+            console.print(f"public link: {origin}/r/{info.token}/", markup=False)
+        else:  # never learned from ngrok's local API, which anyone here can answer first
+            console.print(
+                "notifications open the page, not their card: --public-url <the ngrok URL> "
+                "fixes that",
+                markup=False,
+            )
+        # The inspector off: it keeps every request (the passphrase, the cookies) on a local
+        # web interface that any user of this machine can read, and the agent API there,
+        # which starts and stops tunnels for anyone, off too (ngrok_tunnel says more). And
+        # to 127.0.0.1, where this listens: the port alone is localhost to ngrok, ::1 first,
+        # which any account here can listen on (ngrok_tunnel.UPSTREAM_HOST). And on the
+        # public link's domain (``--url``), as the docs give it: without it ngrok serves on
+        # another, and the link, and every notification, opened ngrok's offline page.
+        if origin is None:
+            expose = f"ngrok http {address} --inspect=false"
+        else:
+            expose = f"ngrok http --url={ngrok_static_host(origin)} --inspect=false {address}"
+        console.print(f"expose with: {expose}   · Ctrl-C stops", markup=False)
+        console.print(f"  stop that ngrok when this stops: {left_up}", markup=False)
+        console.print(
+            "  on a machine others use, also web_addr: false in ngrok.yml (ngrok config edit):"
+            " its local API asks no one",
+            markup=False,
+        )
+
+    ended_by: int | None = None
+    try:
+        timed_out = remote_server.run_foreground(dist, port, auto_off, public_url, ready=banner)
+    except remote_server.RemoteSignalled as exc:  # a SIGTERM or SIGHUP: its way out ran
+        ended_by = exc.signum
+        if exc.fired:
+            _remote_said("Remote turned off — the auto-off timer ran out")
+    except remote_server.RemoteBindError as exc:
+        fail(str(exc), error="remote_bind_failed", detail=str(exc))
+    except remote_server.RemoteOffIncomplete as exc:  # auto-off ended it, not all of it done
+        fail(str(exc), error="remote_state_unwritable", detail=str(exc))
+    except remote_server.RemoteError as exc:
+        fail(str(exc), error="remote_failed", detail=str(exc))
+    except OSError as exc:  # remote.json would not write, say: anything but the port
+        fail(f"the remote server could not run — {exc}", error="remote_failed", detail=str(exc))
+    else:
+        if timed_out:
+            stderr_console().print("Remote turned off — the auto-off timer ran out", markup=False)
+    finally:
+        # Whatever ended it, once it served: the ngrok started beside it (the banner's) is the
+        # human's, and forwarded the public link on, to the port anyone here may bind now,
+        # with every page's reconnect, push tap and Home Screen launch (sweep 4 of #243).
+        if served:
+            _remote_said(f"Remote is off — stop the ngrok you exposed it with, if any: {left_up}")
+    if ended_by is not None:  # as the signal would have ended it, once all of that is done
+        raise typer.Exit(128 + ended_by)
+
+
+def _remote_said(line: str) -> None:
+    """One line on stderr from ``serve``'s way out, which a SIGHUP takes: the terminal it
+    would go to is gone then, and the line with it, never the exit."""
+    with suppress(OSError):
+        stderr_console().print(line, markup=False)
+
+
+@app.command("install-page")
+def install_page(
+    dist: Annotated[
+        Path,
+        typer.Argument(help="Built aisquare-remote dist/ directory (must contain index.html)."),
+    ],
+) -> None:
+    """Copy a built ``aisquare-remote`` page into ``~/.aisquare/remote-dist`` (atomic replace).
+
+    A page installed here overrides the one bundled with aisquare-cli, for the
+    Remote modal (``R``) and ``asq remote serve`` alike.
+    """
+    from aisquare.core.paths import remote_dist_dir
+    from aisquare.services import remote_server
+
+    source = remote_server._remote_resolved(dist)
+    if source is None:  # a symlink loop: RuntimeError on 3.11 and 3.12, never a traceback
+        message = remote_server.PAGE_DOES_NOT_RESOLVE.format(path=dist)
+        fail(message, error="invalid_dist", ref=str(dist))
+    if not (source / "index.html").is_file():
+        fail(
+            f"no index.html in {source} — build aisquare-remote first (npm run build)",
+            error="invalid_dist",
+            ref=str(source),
+        )
+    try:
+        destination = remote_server.install_page(source)
+    except remote_server.NoRemotePage as exc:  # a web project's own directory, not its build
+        fail(str(exc), error="invalid_dist", ref=str(source))
+    except OSError as exc:  # as remote.json's writes: a clean failure, never a traceback
+        target = remote_dist_dir()
+        fail(
+            f"the page could not be installed into {target} ({exc}) — the page served "
+            "before is unchanged; make its directory writable, or free some space, and try "
+            "again",
+            error="remote_page_unwritable",
+            detail=str(exc),
+        )
+    if get_state().json_output:
+        typer.echo(json.dumps({"installed": str(destination)}))
+    else:
+        stdout_console().print(f"✓ installed the remote page → {destination}", markup=False)
+
+
+@app.command("status")
+def status_command(port: LinkPort = DEFAULT_PORT) -> None:
+    """Whether Remote is on, the link, the password, the devices and failed unlocks, from
+    ~/.aisquare/remote.json."""
+    from aisquare.services import remote_server
+
+    state = _remote_runtime()
+    payload = _describe_remote(state.connection_info(port), allow_write=state.allow_write)
+    # Whether a process serves this home (the fleet UI's R panel, a serve): status said
+    # nothing of it, and neither did the panel of another process's (sweep of #243).
+    payload["serving"] = serving = remote_server.remote_served_elsewhere()
+    status = remote_server.remote_server_status()
+    rows = status["devices"]
+    devices = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    payload["devices"] = devices
+    payload["failed_unlocks"] = status["failed_unlocks"]
+    payload["locked_out_until"] = status["locked_out_until"]
+    if get_state().json_output:
+        typer.echo(json.dumps(payload))
+        return
+    console = stdout_console()
+    on = "on — a process serves this home (the fleet UI's R panel, or a serve)"
+    console.print(f"remote:      {on if serving else 'off'}", markup=False)
+    console.print(f"url:         {payload['url_local']}", markup=False)
+    console.print(f"password:    {payload['password']}", markup=False)
+    console.print(f"allow_write: {'on' if state.allow_write else 'off'}", markup=False)
+    console.print(f"unlocks:     {_unlock_failures_line(status)}", markup=False)
+    console.print(f"devices:     {len(devices)}", markup=False)
+    # markup=False everywhere: a User-Agent is the phone's own text, and `x [/b]` in one
+    # raised MarkupError here, taking `status` down with it.
+    for device in devices:
+        state_word = "signed-in" if device.get("signed_in") else "signed-out"
+        console.print(
+            f"  {device.get('id')}  {str(device.get('ua') or '')[:40]}  "
+            f"last {device.get('last_seen')}  expires {device.get('expires_at')}  {state_word}",
+            markup=False,
+        )
+
+
+def _unlock_failures_line(status: dict[str, object]) -> str:
+    """``0 failed in 30 min``, or the lockout and what to do about it."""
+    failed = status.get("failed_unlocks")
+    until = status.get("locked_out_until")
+    line = f"{failed} failed in 30 min"
+    if until:
+        line += (
+            f" — new unlocks paused until {until}; if that is not you, rotate the link: "
+            "aisquare remote regenerate-password --new-link"
+        )
+    return line
+
+
+@app.command("allow-write")
+def allow_write(
+    switch: Annotated[str, typer.Argument(help="on or off (default off; never on by itself).")],
+) -> None:
+    """Turn the write endpoints on or off for the running/next server."""
+    if switch not in ("on", "off"):
+        fail(f"say 'on' or 'off', not {switch!r}", error="invalid_switch", ref=switch)
+    with _writing_remote_json():
+        _remote_runtime().set_allow_write(switch == "on")
+    if get_state().json_output:
+        typer.echo(json.dumps({"allow_write": switch == "on"}))
+    else:
+        stdout_console().print(f"✓ write actions {switch}", markup=False)
+
+
+@app.command("regenerate-password")
+def regenerate_password(
+    new_link: Annotated[
+        bool,
+        typer.Option(
+            "--new-link",
+            help="Also mint a new link: the old one stops working everywhere (it leaked).",
+        ),
+    ] = False,
+    port: LinkPort = DEFAULT_PORT,
+) -> None:
+    """Mint a new password; every unlocked device has to unlock again."""
+    from aisquare.services import remote_server
+
+    state = _remote_runtime()
+    with _writing_remote_json():
+        password = remote_server.regenerate_password(new_link=new_link)
+    payload: dict[str, object] = {"password": password}
+    if new_link:
+        info = state.connection_info(port)
+        payload |= {"token": info.token, "url_local": info.url_local}
+    if get_state().json_output:
+        typer.echo(json.dumps(payload))
+        return
+    console = stdout_console()
+    console.print(f"✓ new password: {password}", markup=False)
+    if new_link:
+        console.print(f"✓ new link: {payload['url_local']}", markup=False)
+        console.print(
+            "  the old link is dead everywhere; the R panel of a running fleet UI shows the "
+            "new one, and its QR code",
+            markup=False,
+        )
+
+
+@app.command("revoke")
+def revoke_command(
+    device_id: Annotated[
+        str | None, typer.Argument(help="Device id (dev_…, see status).", show_default=False)
+    ] = None,
+    every: Annotated[
+        bool,
+        typer.Option("--all", help="Revoke every device; Remote stays on and phones unlock again."),
+    ] = False,
+) -> None:
+    """Drop one device by id, or every device with --all."""
+    from aisquare.services import remote_server
+
+    if every == (device_id is not None):
+        fail("give one device id, or --all", error="invalid_arguments")
+    state = _remote_runtime()
+    if device_id is None:  # --all: exactly one of the two was given
+        with _writing_remote_json():
+            count = state.revoke_every_device(
+                "revoked", close_code=remote_server.WS_CLOSE_UNAUTHORIZED
+            )
+        if get_state().json_output:
+            typer.echo(json.dumps({"revoked_all": count}))
+        else:
+            stdout_console().print(f"✓ revoked {count} device(s)", markup=False)
+        return
+    with _writing_remote_json():
+        revoked = remote_server.revoke_remote_device(device_id)
+    if not revoked:
+        fail(f"no device {device_id}", error="not_found", ref=device_id)
+    if get_state().json_output:
+        typer.echo(json.dumps({"revoked": device_id}))
+    else:
+        stdout_console().print(f"✓ revoked {device_id}", markup=False)
+
+
+@app.command("needs")
+def needs_command() -> None:
+    """What needs you right now, across every project: prompts, questions, crashes, limits."""
+    from aisquare.services import remote_needs
+
+    payload = remote_needs.needs_cli_payload()
+    if get_state().json_output:
+        typer.echo(json.dumps(payload))
+        return
+    items = payload.get("items")
+    rows = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+    console = stdout_console()
+    if not rows:
+        console.print("nothing needs you", markup=False)
+        return
+    now = datetime.now(UTC)
+    for item in rows:
+        # markup=False: a reason carries labels and roles, which are agents' own text.
+        console.print(_needs_line(item, now), markup=False)
+
+
+def _needs_line(item: dict[str, Any], now: datetime) -> str:
+    """``⚑ <kind> · <project> · <agent> — <reason> (<age>)``: one item of the feed."""
+    project = item.get("project")
+    name = project.get("name") if isinstance(project, dict) else None
+    return (
+        f"⚑ {item.get('kind') or '?'} · {name or '-'} · {item.get('agent') or '-'}"
+        f" — {item.get('reason') or ''} ({_needs_age(item.get('since'), now)})"
+    )
+
+
+def _needs_age(since: object, now: datetime) -> str:
+    """How long an item has waited, as the board says it (``team.age_text``): ``12m``,
+    ``3h05m``; ``?`` for a ``since`` that is no stamp. Read as the server reads every stamp
+    it wrote."""
+    from aisquare.services import team as team_service
+    from aisquare.services.remote_server import _remote_instant
+
+    when = _remote_instant(since)
+    return "?" if when is None else team_service.age_text(when, now)

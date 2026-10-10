@@ -1013,6 +1013,9 @@ class ContextStore(Protocol):
     def upsert_session(self, session: TeamSession) -> TeamSession: ...
     def get_session(self, session_id: str) -> TeamSession | None: ...
     def team_sessions(self, project_id: str) -> list[TeamSession]: ...
+    def team_sessions_seen_since(
+        self, project_id: str, since: datetime | None, *, ids: Sequence[str] = ()
+    ) -> list[TeamSession]: ...
     def update_session(
         self,
         session_id: str,
@@ -1084,6 +1087,17 @@ class ContextStore(Protocol):
         task_id: str | None = None,
         limit: int = 30,
     ) -> list[TeamEvent]: ...
+    def team_events_since(
+        self,
+        project_id: str,
+        since: datetime,
+        *,
+        kinds: Sequence[str],
+        human_kinds: Sequence[str] = (),
+    ) -> list[TeamEvent]: ...
+    def newest_session_event(
+        self, project_id: str, session_id: str, kind: str, *, since: datetime
+    ) -> TeamEvent | None: ...
     def latest_seq(self, project_id: str) -> int: ...
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
@@ -1091,6 +1105,7 @@ class ContextStore(Protocol):
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
+    def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
     def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
@@ -2006,6 +2021,36 @@ class SqliteStore:
         ).fetchall()
         return [_row_to_session(row) for row in rows]
 
+    def team_sessions_seen_since(
+        self, project_id: str, since: datetime | None, *, ids: Sequence[str] = ()
+    ) -> list[TeamSession]:
+        """The project's sessions seen at or after ``since``, and those named in ``ids`` however
+        long ago they were seen; newest seen first. ``None`` for ``since``: those named alone.
+
+        For a reader that runs every few seconds and needs the live few (``remote``'s needs
+        scan), or the few its events name (``remote``'s board frame): :meth:`team_sessions`
+        is every session the project ever had, and every Claude Code start adds one that is
+        never deleted. The window rides the ``(project_id, last_seen_at)`` index; ``since``
+        compares as the stored ISO-8601 UTC strings do.
+        """
+        rows: list[sqlite3.Row] = []
+        if since is not None:
+            rows = self._conn.execute(
+                f"SELECT {_SESSION_COLUMNS} FROM team_session "
+                "WHERE project_id = ? AND last_seen_at >= ?",
+                (project_id, since.astimezone(UTC).isoformat()),
+            ).fetchall()
+        named = sorted(set(ids))
+        for start in range(0, len(named), 500):  # well under SQLite's bound on parameters
+            chunk = named[start : start + 500]
+            rows += self._conn.execute(
+                f"SELECT {_SESSION_COLUMNS} FROM team_session "
+                f"WHERE project_id = ? AND id IN ({', '.join('?' * len(chunk))})",
+                (project_id, *chunk),
+            ).fetchall()
+        sessions = {row["id"]: _row_to_session(row) for row in rows}
+        return sorted(sessions.values(), key=lambda session: session.last_seen_at, reverse=True)
+
     def update_session(
         self,
         session_id: str,
@@ -2748,6 +2793,69 @@ class SqliteStore:
         ).fetchall()
         return [_row_to_event(row) for row in reversed(rows)]
 
+    def team_events_since(
+        self,
+        project_id: str,
+        since: datetime,
+        *,
+        kinds: Sequence[str],
+        human_kinds: Sequence[str] = (),
+    ) -> list[TeamEvent]:
+        """The project's events of ``kinds`` written at or after ``since``, and those of
+        ``human_kinds`` the human wrote (no session), oldest first.
+
+        For a reader that runs every few seconds over the last day of a board (``remote``'s
+        needs scan), however busy that day was. ``created_at`` has no index, so a filter on
+        it alone walks every event the project ever had. Events are written in ``seq``
+        order, each stamped as it is written, so the read starts past the newest event
+        written before ``since``, found walking back from the newest on the ``(project_id,
+        seq)`` index: it costs the events since ``since``, not the project's history.
+        ``since`` compares as the stored ISO-8601 UTC strings do.
+        """
+        moment = since.astimezone(UTC).isoformat()
+        wanted: list[str] = []
+        params: list[str] = [project_id, project_id, moment, moment]
+        if kinds:
+            wanted.append(f"kind IN ({', '.join('?' * len(kinds))})")
+            params += kinds
+        if human_kinds:
+            wanted.append(f"(session_id IS NULL AND kind IN ({', '.join('?' * len(human_kinds))}))")
+            params += human_kinds
+        if not wanted:
+            return []
+        rows = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE project_id = ? AND seq > COALESCE("
+            "(SELECT seq FROM team_event WHERE project_id = ? AND created_at < ? "
+            "ORDER BY seq DESC LIMIT 1), 0) "
+            f"AND created_at >= ? AND ({' OR '.join(wanted)}) ORDER BY seq",
+            params,
+        ).fetchall()
+        return [_row_to_event(row) for row in rows]
+
+    def newest_session_event(
+        self, project_id: str, session_id: str, kind: str, *, since: datetime
+    ) -> TeamEvent | None:
+        """The session's newest event of ``kind`` written at or after ``since``; ``None``.
+
+        For a reader that asks every few seconds (``remote``'s needs scan). It walks back
+        from the newest event on the ``(project_id, seq)`` index and stops at the first
+        that is either the one asked for or written before ``since``, so a session that
+        has no such event costs the events since ``since``: asked with a filter on the
+        session and the kind alone, it cost every event the project ever had, each time.
+        ``since`` compares as the stored ISO-8601 UTC strings do.
+        """
+        moment = since.astimezone(UTC).isoformat()
+        row = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE project_id = ? "
+            "AND ((session_id = ? AND kind = ?) OR created_at < ?) ORDER BY seq DESC LIMIT 1",
+            (project_id, session_id, kind, moment),
+        ).fetchone()
+        if row is None:
+            return None
+        event = _row_to_event(row)
+        asked = event.session_id == session_id and event.kind == kind and event.created_at >= since
+        return event if asked else None
+
     def latest_seq(self, project_id: str) -> int:
         row = self._conn.execute(
             "SELECT COALESCE(MAX(seq), 0) FROM team_event WHERE project_id = ?",
@@ -3327,6 +3435,21 @@ class SqliteStore:
             f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
             f"WHERE project_id = ?{clause} ORDER BY created_at, id",
             (project_id,),
+        ).fetchall()
+        return [_row_to_fleet_agent(row) for row in rows]
+
+    def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]:
+        """The project's rows that ended at or after ``since``, oldest first.
+
+        Filtered here, not by the caller: every spawn, restart and switch adds a row that is
+        never deleted, and a reader that runs every few seconds for the last day's endings
+        (``remote``'s needs scan) built every row the project ever had to keep a handful.
+        ``since`` compares as the stored ISO-8601 UTC strings do.
+        """
+        rows = self._conn.execute(
+            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            "WHERE project_id = ? AND ended_at >= ? ORDER BY created_at, id",
+            (project_id, since.astimezone(UTC).isoformat()),
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 

@@ -1,0 +1,718 @@
+# Phone control: `aisquare remote`
+
+`aisquare remote` puts the fleet on your phone: what needs you across every
+project, each agent's live screen and conversation, the board, and, once you
+allow it, the keys and actions to answer a prompt, tell an agent something, or
+stop, restart or switch it. It is one small web server on your machine, reached
+through your own ngrok tunnel. Nothing is hosted anywhere else, and the page the
+phone loads ships inside aisquare-cli.
+
+```text
+  phone ──https──▶ ngrok (your tunnel) ──▶ 127.0.0.1:8750/r/<token>/ ──▶ the fleet
+  (the page)                                 aisquare remote              (tmux, the board)
+       ▲                                           │
+       └──── Web Push (FCM · Mozilla · Apple · Windows) ◀── "something needs you"
+```
+
+- **One port, loopback only.** The server binds `127.0.0.1:8750` and nothing
+  else. ngrok, or a browser on the same machine, is the only way in. Point ngrok at
+  `127.0.0.1:8750`, never at `8750` alone: ngrok reads that as `localhost`, which
+  is IPv6's `::1` first, and anyone on the machine can listen on `[::1]:8750` and be
+  handed every request, the passphrase and the cookies with them. The panel's ngrok
+  and the command `serve` prints both use `127.0.0.1`.
+- **A secret URL, then a passphrase.** Every path lives under `/r/<token>/`, a
+  32-character random token; a wrong one is a 404 everywhere. The page then asks
+  for the four-word passphrase the machine shows, once per browser.
+- **Read-only until you say otherwise.** Everything you can see is a read. Every
+  change to the fleet is refused until `aisquare remote allow-write on`.
+
+---
+
+## Install
+
+```sh
+uv tool install --python 3.13 --with tiktoken 'aisquare-cli[remote]'   # installed by install.sh or uv
+pipx inject aisquare-cli starlette uvicorn websockets cryptography     # installed with pipx
+pipx install 'aisquare-cli[remote]'                                    # not installed yet, with pipx
+pip install 'aisquare-cli[remote]'                                     # in a virtualenv
+```
+
+The `remote` extra adds the web server (starlette, uvicorn, websockets) and
+`cryptography`, which Web Push needs; without it the page works and says
+notifications are unavailable. Use the line for how aisquare-cli was installed.
+uv cannot add a package to a tool, so the first line installs it again, and that
+keeps only what the line names: tiktoken, as install.sh installs it. A tool
+installed with more needs that named too, or it goes: another extra such as
+`serve` (`'aisquare-cli[remote,serve]'`), another `--with`. Without the extra,
+`aisquare remote serve` and the R panel print the line for this machine, with
+everything its tool was installed with. An upgrade through install.sh installs
+aisquare-cli again without its extras, and Remote then says its line again.
+
+Then ngrok, which gives the machine an https address a phone can reach. Install
+it from ngrok.com, then sign in once:
+
+```sh
+ngrok config add-authtoken <your-ngrok-token>
+```
+
+**Use a static domain.** ngrok's free plan gives every account one, and it is
+what keeps the link, the phone's sign-in and a Home Screen app working across
+restarts. Without it the URL changes each time ngrok starts, and the phone has
+to open the new link and unlock again. Tell aisquare which one is yours:
+
+```sh
+export AISQUARE_REMOTE_NGROK_URL=https://your-name.ngrok-free.app
+```
+
+With it set, the fleet UI starts ngrok on that domain (`--url=`), and the server
+uses it for the links in notifications.
+
+---
+
+## Start
+
+**From the fleet UI.** Run `aisquare ui` and press `R`. Switch Remote on: the
+panel starts the server and ngrok, shows the link, a QR code and the passphrase,
+the write switch, the auto-off timer (30, 60 or 120 minutes, or Never) and the
+devices that have unlocked. Scan the QR code with the phone; until ngrok is up
+the panel shows the local link alone, and no QR, since no phone can open that
+link. If ngrok stops, the UI restarts it within half a minute, and once a minute
+until it is up, the first ngrok of a Remote too (its static domain still held by an
+ngrok that has not let go of it yet, say); not a Remote's first ngrok that
+stopped for want of an authtoken, or too old for `--url`, which the panel says
+how to fix. A restart that stopped so is tried each minute all the same: an
+authtoken put back while Remote is on brings the phones back with no off and on,
+which would sign every one out. An ngrok missing when Remote came on is looked
+for each minute too, so one installed meanwhile starts within the minute. A link
+ngrok announces late (a network still coming up) is shown, and used for
+notifications, as soon as it comes. With the
+panel closed, a notice says when a Remote that was on could not come back on as
+the UI started, when phones cannot reach it (ngrok missing or not up, and once it
+is up after all), when ngrok came back on a new link, and when auto-off turned
+Remote off. A Remote another `serve` or fleet UI has on is not news: the panel
+says it is on in another process. One that cannot come back is tried at every
+start until a press of the switch fails as well; that leaves it off for the next
+start too. The panel serves on port 8750, or on the one an exported
+`AISQUARE_REMOTE_PORT` names, as `serve` does.
+
+**From a shell**, for a machine without the UI open:
+
+```sh
+aisquare remote serve --auto-off 120 --public-url https://your-name.ngrok-free.app
+ngrok http --url=your-name.ngrok-free.app --inspect=false 127.0.0.1:8750
+```
+
+`serve` prints the local link and the passphrase and runs until Ctrl-C or until
+auto-off; a `kill` (SIGTERM) or a closed terminal (SIGHUP, unless it runs under
+`nohup`) stops it as Ctrl-C does, and it then exits 143 or 129. Stop the ngrok you
+started beside it then too, as `serve` says on its way out: left up, ngrok hands
+the phones' requests, their cookies with them, to whatever takes port 8750 next,
+and any account on the machine can. (The panel stops its own
+ngrok first, once the phones heard Remote is off, and lets go of the port after.) A
+Ctrl-C while a phone's write is still running (a restart or switch can take 40
+seconds) says which, and waits for it: cut short, it can leave the agent down. A
+second Ctrl-C quits at once and leaves it unfinished, giving a notification still on
+its way, such as auto-off's farewell, two seconds at most. Quitting the fleet UI
+waits, and says so, the same way: first for Remote's ngrok and server to stop, then
+for the write, and a Ctrl-C in either wait quits at once (ngrok stopped first). Its
+options:
+
+| option | default | what it does |
+| --- | --- | --- |
+| `--port N` | 8750 (`AISQUARE_REMOTE_PORT`) | the local port, 1 to 65535 |
+| `--auto-off MINUTES` | 60 (`AISQUARE_REMOTE_AUTO_OFF`) | Remote turns itself off after this long, a week (10080) at most; `0` means never, and the banner says so |
+| `--public-url URL` | `AISQUARE_REMOTE_NGROK_URL` | the https address phones use, for the links in notifications; without it a notification opens the page, not its card |
+| `--dist DIR` | the page aisquare-cli carries | serve another build of the page |
+
+The page is part of aisquare-cli, so a fresh machine needs no other step.
+`aisquare remote install-page <dist>` installs another build over it (it lands in
+`~/.aisquare/remote-dist`), and `--dist` overrides both. Each takes the build's
+`dist/`, never the project that builds it (a directory holding `package.json` or
+`node_modules`), and neither copies nor serves a hidden file such as `.env` or
+`.git`: what is served is open to anyone with the link, before the passphrase. To
+go back to the bundled page:
+
+```sh
+rm -rf ~/.aisquare/remote-dist
+```
+
+---
+
+## Unlock, and the screens
+
+Open the link. The page asks for the passphrase: four words, typed with spaces,
+dashes or capitals as the phone likes (`Amber river, cedar delta` works). The
+browser is then a **device**: it stays signed in for 7 days, and is signed out
+after 24 hours without use; unlocking again brings the same device back.
+
+On iPhone and iPad, notifications need the page added to the Home Screen
+(below), and **the installed app has its own sign-in**: it unlocks once more and
+shows as a second device.
+
+The screens, along the bottom bar:
+
+- **Needs** — one feed across every project of what is waiting on you, most
+  urgent first. Each item is a card; the feed is empty when nothing needs you.
+- **Projects** — each project with its agents' states and how many items need
+  you. Inside one: **Fleet** (every agent and its state), **Board** (newest first,
+  with a composer for a note, a decision, a question or a result), **Tasks** and
+  **Memory**, both read-only.
+- **An agent** — **Live** (its pane, colours included, the cursor where the
+  program shows one, with Fit width), **Transcript** (the conversation, wrapped
+  to the phone, each turn's time in the phone's own time zone, older pages on
+  demand) and **Card** (model, tokens and the explainability verdict). Under Live
+  and Transcript sit the input bar and the key pad. Live, Transcript and a Needs
+  card's pane strip stay dark with the phone in light mode too: an agent's colours
+  are picked for its own theme, dark in Claude Code by default, so an agent on a
+  light theme draws its dark text on that ground as well.
+- **Devices** — every device that unlocked, which one is this one, last seen, when
+  its sign-in ends. Sign out of this one, or revoke another (a write, so only
+  while writes are on).
+- **Settings** — notifications for this device, the version, sign out.
+
+The strip at the top shows the connection (green: live), **READ-ONLY** while
+writes are off (tap it for the reason), and "off in 23 min" with **Extend 1 h**
+when an auto-off is set. When nothing has arrived for 25 seconds, the page greys
+what it shows and holds every action until the next update: a phone that slept
+must not act on a screen that went stale. It then opens a new connection, as a
+connection can die without a word (Wi-Fi giving way to mobile data). Waking the
+phone reconnects at once, and from the moment a connection is lost an agent's
+Live tab stays grey, its keys and Send held, until its pane has come through
+again. They are held too while the pane cannot be read.
+If the machine stops checking what needs you while the link is fine, the feed
+greys and says when it last looked.
+
+---
+
+## Writes
+
+Every change is refused with `read_only` until you allow it:
+
+```sh
+aisquare remote allow-write on
+aisquare remote allow-write off
+```
+
+The R panel's **Allow write actions** switch sets the same value. There is one
+write switch, the server's own, in `~/.aisquare/remote.json`: the shell and the
+panel both set it there, whether Remote is on or off, so they always agree and
+starting the TUI never changes it. The page's READ-ONLY sentence names both.
+Switching writes off, signing a phone out, or turning Remote off in the panel or
+by auto-off, also stops what that phone sent and the machine has not started
+yet: a write waiting behind a restart is refused, not run. One already running
+(a restart takes up to 40 seconds) finishes.
+
+The writes, and the routes they use:
+
+| from the page | route |
+| --- | --- |
+| type into an agent, or press keys on the pad | `POST api/send-keys` |
+| post on the board | `POST api/note` |
+| a quick answer on a card | `POST api/needs/answer` |
+| tell, stop, restart, switch | `POST api/agent/tell`, `…/stop`, `…/restart`, `…/switch` |
+| another hour before auto-off | `POST api/remote/extend` |
+
+Revoking another device from **Devices** (`DELETE api/devices/<id>`) is a write
+as well, refused while writes are off. Dismissing a card, signing this device out
+and turning notifications on or off change only what you are shown, not the
+fleet, and need no write switch. Claiming or finishing a task and switching,
+adding or removing a project are write routes of the API (`api/task/claim`,
+`api/task/done`, `api/project/switch`, `add`, `remove`) that the page itself
+does not offer: Tasks is read-only there. `remove` takes a project's name,
+codename or id, or its absolute path; a relative path is refused, since it would
+be read from wherever the server was started.
+
+**Retries are safe, and soon or never.** Every write in the table carries a
+`request_id`. If the phone loses the answer (a restart can take 40 seconds, long
+enough for a phone to sleep), the page asks again with the same id once it
+reconnects, and the server answers from what it recorded instead of doing it
+twice, even if writes were switched off meanwhile. A request that never reached
+the machine runs when the retry does, and a key pressed long before could
+answer a prompt that came up since, so the page sends it again only within 15
+seconds of the tap, and never after the phone had to unlock again. Past that it
+says the write was not sent again, and still shows the result if the machine had
+it after all.
+
+**Every write is audited** in `~/.aisquare/remote-audit.log`, owner-only, one
+line each:
+
+```text
+2026-10-07T10:12:05+00:00 dev_3fa9c2d1 send-keys coder-auth@prj_8c1e… text=12ch keys=0 enter=True
+2026-10-07T10:13:40+00:00 dev_3fa9c2d1 agent/tell tell coder-auth@prj_8c1e… mode=prompt delivered=yes text=14ch "yes, commit it"
+```
+
+That is the time, the device, the route and what it did. Typed text is recorded
+as a length; a tell keeps its first 120 characters, and a switch the start of the
+`reason` it types into the replacement's prompt, because they hand an agent
+free-form instructions. A write refused after part of it already reached the
+agent is on the trail too, with how it ended: keys typed before tmux failed
+(`failed`), an Esc sent before the action stopped short (`refused=<error>`), a
+restart that stopped the agent and could not start its replacement
+(`failed=<error>`). A write that went through still answers when its line will
+not write (a full disk, a home that is not writable), so that the phone does
+not send it again: the server's log then warns, with the line that is missing.
+
+---
+
+## Needs you
+
+While a phone has the page open, or has notifications on, the server scans
+every project every 3 seconds and keeps one list of what is waiting on you; with
+neither, it scans only when a page asks for the list. The page shows it as
+cards; `aisquare remote needs` prints it:
+
+```sh
+aisquare remote needs
+aisquare --json remote needs
+```
+
+| kind | means |
+| --- | --- |
+| permission | an agent waits for you to allow a tool (a Bash command, an edit), or shows one of Claude Code's own dialogs |
+| question | an agent asks you a question with options |
+| plan | an agent asks you to approve its plan |
+| board_question | the manager asks on the board, or a coder asks you (no `--to`, or `--to user`, `human`, `owner`, `all` or `everyone`), or asks a manager that is not there to answer (stopped, or parked on its usage limit) |
+| manager_down | the manager crashed; or, while agents still work and before it reported a result, it was killed or lost (no exit status), or a switch or a restart could not start its replacement. A manager that exits cleanly (`fleet stop`, the phone's Stop, its own `/exit`) is taken to be done |
+| crashed | an agent exited with an error in the last hour, or was stopped for a switch or a restart that could not start its replacement, its task unfinished, while no manager runs to handle it (one parked on its usage limit does not count) |
+| limited | an agent hit its usage limit; when the limit named its reset, the card tells it by the phone's clock, and the Board tab leaves out the reset its line says by the machine's |
+| failed | an agent's turn ended on an API error (a login that expired, credit that ran out, the API overloaded past Claude Code's own retries), and it waits at its prompt |
+| lost | an agent's pane is gone |
+| fleet_down | tmux is not answering for a project |
+| asked | an agent ended its turn with a question in plain text |
+| board_result | the manager (or a coder with no manager left) reports a result |
+| interrupted | you pressed Esc on an agent, or turned its prompt down without saying what to do instead, and it waits for you |
+
+The board a project's cards come from is the one `aisquare board` shows in its
+directory: under `AISQUARE_TEAM_HUB` it is the hub's, and a question on a board
+that several projects share is one card, in the project of the agent that asked.
+
+A card holds what you must read before answering: the exact call a permission
+is for, every field of it (the command or the path first, a list or an object
+as its JSON), every question with its options, the plan, the text. What is too
+long for a card is cut, a permission's each field at 2,000 characters and all it
+shows at 4 KiB, a question's at 8 KiB and a plan at 16 KiB, and the card says so
+and how long the whole is; past 20 fields it says how many it leaves out; a call
+whose input is over 16 KiB never reaches the phone, and its card says that
+instead. A permission a sub-agent asks for shows the task the sub-agent was
+given, and says that the call it answers is the sub-agent's own, which the card
+cannot show. Open the agent to read such a call before you answer it. Under a
+permission, a question or a plan, the bottom of the agent's live screen is shown
+too, so the real option labels are on screen next to the buttons.
+
+**Quick answers** are the card's buttons: `1`, `2` and No for a tool's
+permission; one per option, and Cancel, for a single question with one answer to
+pick from at most nine; `1` to `3` and Keep planning for a plan. A quick answer
+is checked against the agent **as it is now**: if the prompt has already gone,
+the card says "No longer needs you" and nothing is typed. An answered card leaves
+the feed at once, on every phone and before any notification goes out, and is
+back a second later if the prompt is still there. Anything else (one of
+Claude Code's own dialogs, a form an MCP server asks you to fill in, a question of
+several answers) is answered from the agent's key pad. The board keeps the words
+of only the first thing a turn asks for. A form an MCP server asks for while its
+tool runs is a card without quick answers when it is that first thing, or when
+it comes straight after the tool's own permission prompt. When the agent already
+went on past an earlier prompt in the same turn, the form reads as its tool's
+permission card, with `1`, `2` and No: read the live screen under a permission
+card before you answer it.
+
+The other buttons follow the kind: **Tell** for a question asked in text,
+**Reply** on the board, **Switch account** for a usage limit, **Tell** (to go on)
+or **Switch account** for a failed turn, **Restart** for a crash. **Dismiss**
+hides a card for good, on every phone and through a restart of Remote, however
+long what it is about lasts. A tell or a reply dismisses its card itself once it
+was delivered.
+
+A reply is a board note to whoever asked, and a note to the manager wakes it.
+Any other agent the fleet runs reads a note only at its next prompt, and nothing
+prompts one that asked and waits, so a reply to one goes as Tell from its menu
+does: typed into its prompt while it waits there, otherwise left as that note.
+When the agent that asked has ended since, or its name is another agent's now,
+the reply is that note.
+
+---
+
+## Agent actions
+
+From an agent's **Actions…** menu, or from a card:
+
+**Tell** sends one message, typed as a single paste:
+
+| mode | what happens |
+| --- | --- |
+| Tell (from the menu) | typed into the agent's prompt when it is waiting there; otherwise left as a board note it reads at its next prompt |
+| Tell (from a card) | typed now, and refused if the agent is working or showing a dialog of its own |
+| Interrupt & tell | one Esc stops what the agent is doing; the message is typed once it is back at its prompt |
+
+When an agent is working, a card's Tell offers **Interrupt & tell** instead.
+Neither types into an agent parked on its usage limit (`agent_busy`): a message
+fails on the same limit until the reset, and **Switch account** is what moves it.
+
+**Stop**, **Restart** and **Switch account** each open a sheet that says in one
+sentence what will happen, and send the agent's name as confirmation. Restart
+and switch can take 40 seconds; the page waits, and shows the result even if the
+phone slept meanwhile. A replacement whose first line (the hand-off prompt, or
+the line telling a resumed session to go on) could not be typed sits idle at an
+empty prompt: the page says so and why, and that it needs a Tell. What else a
+restart or a switch could not do (claims not released or moved) it says too, as
+it says a stop that could not release its agent's claims and a Tell left as a
+board note, also of a result that came back only after the phone slept.
+
+**The dialog guard.** Stopping types `/exit` and Enter, and an Enter into an open
+dialog would answer it: approve a command, pick an option, accept a plan. So
+when the agent shows a prompt, stop, restart and switch are refused with
+`dialog_open`, and the sheet offers **Press Esc (No) first**, which dismisses the
+prompt and then goes on. For its first few seconds a permission prompt cannot be
+told from a tool at work, so they are refused the same way while any tool the
+agent called has no result yet, or when the end of its transcript is too long
+to read; there the Esc also stops a running tool. An agent at work gets one Esc
+first without asking, since a prompt could open just before the Enter, and
+`/exit` is typed once its pane has been still for 5 seconds; one still busy 8
+seconds after the Esc is refused with `still_busy`. A restart or a switch checks
+first what it can, so what it would refuse anyway (a task closed meanwhile; for
+a switch, an account that does not exist, the one the agent is on, none with
+room) is refused before any Esc. A card's Tell and Interrupt & tell refuse a
+dialog the same way. The menu's plain Tell types only into an agent waiting at
+its prompt: while the agent may be showing a prompt, even one left unanswered
+for hours, the message is left as a board note instead. Send and the key pad on
+the Transcript tab, which does not show the pane, type only into an agent still
+at its prompt: nothing while it may be showing a prompt, a tool with no result
+yet included, or is at work or parked on its usage limit (`agent_busy`); send
+from Live, where the pane shows what the keys would answer. Esc, which answers a
+prompt only No, goes from there as from Live, but not twice in a row. Its Send
+and keys wait until the transcript has loaded, which names the agent they go to.
+
+An agent the machine cannot read, one started without aisquare's hooks (`no
+hooks` in `fleet ls`, as `fleet spawn --bin` can start one) or whose transcript
+it cannot open, never shows it a prompt, so it is taken to be showing one. Stop,
+restart and switch are refused with `dialog_open`, and **Press Esc (No) first**
+types `/exit` once its pane has been still for 5 seconds after the Esc. A card's
+Tell does not type into it (`agent_busy`, and the sheet offers Interrupt & tell,
+whose Esc goes first), the menu's Tell leaves a board note (which one without
+the hooks is not shown, and the toast says so), and Send on the Transcript tab
+types nothing; Live shows its pane.
+
+Every action, and every key or line you type, is pinned to the agent you
+looked at: if a manager restarted or switched it in the meantime, it is refused
+as `stale` rather than applied to the replacement, also when that happens while
+the request runs. In the moment before the replacement has started, a key, the
+menu's Tell, Stop and Switch account are refused as `stale` too, and a Tell that
+types into the pane is refused before it types anything. A Tell refused because
+another agent holds the name now keeps its words, and Tell again sends them to
+that one.
+
+On a phone wide enough for eight keys (412 px is, 390 px is not) the key pad is
+one row, `Esc 1 2 3 ⏎ ↑ ↓ More` (⏎ being Enter), with the rest under More. On
+a narrower phone More takes the line under the seven, and below 360 px the
+eight are two rows of four, More last.
+Ctrl-C and Ctrl-D ask first, and a second one within 3 seconds asks again,
+because Claude Code exits on it. A second Esc within a second and a half of the
+last one sent asks too, again after its sheet was closed unanswered, and from
+the Transcript tab is not sent, nor is any Esc there until a second and a half
+passes with none tapped: two in a row open Claude Code's Rewind selector. The
+pad and the phone's keyboard never share the screen. Keys reach an agent one at
+a time, in the order they were tapped, and a key shows in the accent colour
+until the machine has answered it; one that waits behind a key that did not get
+through, or for longer than 15 seconds, is not sent, and the page says so.
+
+---
+
+## Notifications
+
+Settings → **Turn on** asks the browser for permission, subscribes, and tells
+the machine. **Send test** checks the whole path. A notification goes out when an
+item has been there for two scans in a row, once for each item, however long it
+stays and through a restart of Remote: at once for a permission, a
+question, a plan, a board question or result and a failed turn, and later for
+the kinds that often clear by themselves, or that someone else is already on:
+
+- a crash: after 30 seconds;
+- a lost pane, a stopped manager, or tmux not answering: after a minute, since
+  they flash during a restart;
+- a usage limit: never when it lifts within
+  `[accounts] wait_if_reset_within_minutes` (15 by default), since Claude Code
+  carries on by itself at the reset; after 90 seconds when `on_limit = "switch"`
+  or a live manager is on it; at once otherwise. Claude Code's "Session paused"
+  dialog, which a limit can show instead, goes at once: no hand-over starts on
+  it, and no manager hears of it;
+- a turn that ended with a question: after 5 minutes while a manager is live,
+  for an agent that is neither the manager nor one you started yourself, since
+  the manager is to answer it first; at once otherwise;
+- an interruption: after 10 minutes, since it follows your own Esc.
+
+Several at once come as one notification, at most one every 20 seconds per
+phone; a new one takes the place of the one still shown and sounds all the
+same. One that the phone's push service did not take (no answer, a 429 or a
+5xx) goes again, at most three more times, 40, 80 and 160 seconds apart.
+Tapping it opens the card, at the address the panel's ngrok announced or
+`serve --public-url` named; a `serve` told neither opens the page the phone
+subscribed from.
+
+The machine also sends: a warning 10 minutes before auto-off ("open to extend
+it" while writes are on; with writes off, that the phone cannot extend it), a
+goodbye when Remote is turned off, an alert when someone is guessing the
+passphrase, and a warning a day before a phone's 7-day sign-in ends. Either
+warning, when a phone's push service did not take it, goes again at most three
+more times, 30 seconds apart. Once the auto-off time has come, nothing goes out
+but the goodbye.
+
+**What a notification holds.** A title and a line built from fixed sentences
+(`coder-auth asks you a question`), with every name cut to 40 plain characters,
+the link to the card, and the item ids. Never an excerpt, a command, a
+question's text or anything else from the agent. The payload is encrypted to the
+browser's own key (RFC 8291), so the push service sees only that a message went.
+
+**Platforms.**
+
+- **iPhone and iPad (iOS 16.4+)**: notifications work only from the page added to
+  the Home Screen (Share → Add to Home Screen) and opened from there, and the
+  permission must be asked from a tap inside it. The installed app has its own
+  sign-in: unlock it once more; it shows as a second device.
+- **Android, desktop Chrome, Firefox and Edge** need no install.
+- **A changing ngrok URL**: an existing subscription keeps working, and its links
+  open the new address once the machine knows it. The new address has no
+  sign-in, so the phone unlocks again; the Home Screen app is tied to the old
+  address. A static domain avoids all of it.
+- **ngrok's browser warning page** (free plan): if notifications cannot be turned
+  on, reload once after passing it.
+
+---
+
+## Before you leave the desk
+
+- [ ] A static ngrok domain is set (`AISQUARE_REMOTE_NGROK_URL`), so the link and the phone's sign-in survive a restart.
+- [ ] Writes are on, if you want to act and not only watch: `aisquare remote allow-write on`.
+- [ ] Auto-off is 120 minutes or Never in the R panel, or writes are on, so the phone can extend it an hour at a time.
+- [ ] A test notification arrived on the phone (Settings → Send test).
+- [ ] The passphrase is in the phone's password manager.
+
+---
+
+## The security model
+
+- **The token** in the path is the first secret: without it every request is a
+  404, so the URL leaks nothing about what is behind it. The page sends no
+  referrer, so the token never leaves in a link.
+- **The passphrase** is four distinct words from a list of 512 (about 36 bits),
+  typed once per browser. Unlocking is limited to 5 attempts a minute per client,
+  and to 20 failures in 30 minutes across everyone: past that, new unlocks pause
+  (the machine and phones that unlocked before can still unlock, and subscribed
+  phones get an alert).
+- **Devices** are named by public ids (`dev_3fa9c2d1`); the cookie behind each is
+  stored only as a digest, so a copy of `~/.aisquare/remote.json` replays no
+  existing sign-in. It does hold the link and the passphrase, though, so keep it
+  private (it is owner-only); if it leaked, run
+  `aisquare remote regenerate-password --new-link`. A device is signed out after
+  24 hours unused and removed after 7 days. A phone whose sign-in lapsed unlocks
+  back into the same device, so its notifications carry on. At most 32 devices
+  are kept: a new unlock past that removes the signed-out device unused longest,
+  and while all 32 are signed in it is refused (`too_many_devices`) until one is
+  signed out or revoked.
+- **Remote off revokes every device**: turning it off in the panel, or auto-off,
+  signs every phone out (after a goodbye notification), and from that moment
+  every request is a 404 and no unlock goes through, while the server is still
+  stopping. Closing the UI or stopping `serve` with Ctrl-C does not; expiry
+  bounds them. Either, once the auto-off time has come, is auto-off. A Remote that
+  ended with no way out at all (killed, or a fleet UI ended by a signal) has its
+  auto-off run when Remote next comes on, if its time came meanwhile.
+- **Auto-off** is enforced by the server itself: past the deadline every request
+  is a 404, and within half a minute Remote turns off, phones signed out, even
+  on a machine that slept through the deadline. With writes on, a phone can
+  extend it an hour at a time, up to 8 hours ahead.
+- **Origin**: every write and every live connection must come from the page's own
+  origin, so another site cannot use your cookie.
+- **Where a notification leads** is only the address the panel's ngrok announced
+  for the tunnel the panel asked for, to Remote's own port, or `--public-url`
+  named: never what a request or ngrok's local API says, since anyone on the
+  machine can answer on that API's port before your ngrok does, or start a tunnel
+  of their own through it.
+- **ngrok's inspector and local API are off.** Left on, ngrok keeps every request
+  and answer on its local web interface (`127.0.0.1:4040`), which asks for no
+  password: the passphrase you unlock with, every device's cookie, the token and
+  the transcripts, readable by any user of the machine. The agent API on that
+  port asks for none either, and starts, stops and inspects tunnels. The panel
+  starts ngrok with `--inspect=false` and, in a config it merges over your own
+  `ngrok.yml`, `web_addr: false`. Where it cannot (no `ngrok.yml` where ngrok keeps
+  it; an ngrok that says it cannot read yours or that config, as a snap's may not; or
+  one that cannot sign in once that config is merged over a version 3 `ngrok.yml`)
+  ngrok starts as before, and the panel says its API is on; an ngrok that stops for
+  any other reason is not started again without it. Start yours with
+  `--inspect=false`, and on a machine others use, put `web_addr: false` in
+  `ngrok.yml` (`ngrok config edit`; under `agent:` in a version 3 file).
+- **Keys**: the pad sends key names from a fixed list (no `;`, nothing that
+  tmux reads as a command); typed text travels as literal text, never as keys.
+  Typed text may hold no control character (ASCII or C1) other than a newline;
+  a tell and a note, which reach a pane only inside a paste, a tab and a
+  carriage return as well (a finished task's note is a note, and an agent's
+  fresh replacement is handed its newest notes), and no bidi control, which
+  would reorder the line `aisquare board` prints; a switch's `reason` is one
+  line with no control character or bidi control at all; and whom a note is
+  `to`, a role or a label that `aisquare board` prints, holds only characters
+  that print. The pad sends Esc, Ctrl-C, Tab, Enter and its other control keys
+  by name (a tab or a carriage return typed is the Tab or the Enter key itself).
+- **Caps**: 64 KiB per request, 2 048 characters per keystroke message, 8 000
+  per note or tell and 200 for whom a note is to, 4 live connections per device,
+  64 writes per device waiting for the machine (`busy` past that).
+  A device turns its notifications on or off at most 6 times a minute and sends
+  one test every 10 seconds; a subscription sent again unchanged, or an
+  unsubscribe with nothing to remove, writes no audit line.
+
+From the machine:
+
+```sh
+aisquare remote status
+aisquare remote revoke dev_3fa9c2d1
+aisquare remote revoke --all
+aisquare remote regenerate-password --new-link
+```
+
+`status` says whether Remote is on for this home (served by the fleet UI or a
+`serve`), and lists every device (`--json` too) and any lockout. `revoke --all`
+signs every device out but keeps Remote on. `regenerate-password` makes a new
+passphrase and signs every device out; with `--new-link` it also makes a new
+token, so a leaked link stops working everywhere. The R panel of a running fleet
+UI shows the new link, and its QR code, at once. The link `status` and
+`--new-link` print is for port 8750: when `serve` runs on another, give them its
+`--port` too. An exported `AISQUARE_REMOTE_PORT` sets the port for all of them,
+and for the R panel, whose server and ngrok use it as well.
+
+---
+
+## HTTP and WebSocket reference
+
+Everything is under `/r/<token>/`. `api/*` needs the device cookie (`asq_remote`,
+from `POST api/unlock`) except unlock itself; every non-GET request needs an
+`Origin` header equal to the page's origin; bodies are JSON objects of at most
+64 KiB. A refusal is always `{"error": "<code>", "message": "<sentence>"}`.
+
+| method | path | what |
+| --- | --- | --- |
+| GET | `/` | the page |
+| POST | `api/unlock` | `{"password"}` → the device cookie |
+| GET | `api/remote` | `{allow_write, auto_off_at, version}` |
+| POST | `api/remote/extend` | another hour before auto-off |
+| GET | `api/projects`, `api/fleet`, `api/board`, `api/tasks`, `api/memory` | what `aisquare --json` prints for each (the board with its newest 200 events, not 5; each project with its agents counted by state), `?project=` for one project |
+| GET | `api/panes/<agent>`, `api/transcript/<agent>`, `api/explainability/<agent>` | one agent's screen (`?history=` adds that many lines of scrollback, 5 000 at most), conversation (`?limit=` turns, `?before=`, `?width=` 20 to 200 columns) and card; `?project=` for another project's agent, the current project's otherwise |
+| GET | `api/needs` | `{"items", "scanned_at"}` |
+| POST | `api/needs/answer`, `api/needs/dismiss` | a quick answer; hide a card |
+| GET, POST, DELETE | `api/push`, `api/push/subscribe`, `api/push/subscription`, `api/push/test` | notifications for this device |
+| GET, DELETE | `api/devices`, `api/devices/<id>` | the devices; sign out (own id), or revoke another (a write) |
+| GET | `api/actions/recent` | this device's recent writes and how they ended |
+| POST | `api/send-keys`, `api/note`, `api/agent/{tell,stop,restart,switch}`, `api/task/…`, `api/project/…` | the writes; keys, a note and an agent action take `"project"` in the body, as a read takes `?project=`, and without it go to the current project |
+| WS | `ws` | the live stream |
+
+The stream sends `{"type", "payload", "ts"}` frames, each kind when it changed:
+
+- `remote`, `needs_you` and `action` (this device's write results), and a
+  `heartbeat` every 10 seconds, changed or not.
+- `fleet` and `board` once asked for, with `{"subscribe_fleet": "<id>"}` and
+  `{"subscribe_board": "<id>"}` (`""` or `null` for the current project, `false`
+  to stop). A `board` frame is the board's events and the sessions they name, and
+  carries the `project` it was asked for, when one was named: under
+  `AISQUARE_TEAM_HUB` every project's board is the hub's.
+- `pane` for each pane subscribed to with `{"subscribe": "<agent>", "project":
+  "<id>"}` (no `project` for the current project's agent), until the same with
+  `unsubscribe`. A pane frame carries `agent`, and `project` when the
+  subscription named one. A connection watches 8 panes at most; one more is
+  refused with an `error` frame, `{"error": "too_many_subscriptions", "message"}`.
+
+A pane, a board or a fleet that could not be read is a frame whose `error` says
+why, and one still being read when a tick ends follows on a later tick. The connection
+closes with 4401 for a device that is no longer signed in, 4409 when the same
+device opened a fifth connection, and 4410 when Remote is turned off.
+
+With curl, unlock once and keep the cookie in a file of your own:
+
+```sh
+BASE=http://127.0.0.1:8750/r/<token>
+jar=$(mktemp)   # mode 600: it holds a device's sign-in, good for 7 days
+read -rs PASS   # type the passphrase; it is echoed nowhere and sent on stdin, not in argv
+printf '{"password": "%s"}' "$PASS" | curl -c "$jar" -H "Origin: http://127.0.0.1:8750" \
+  -H "content-type: application/json" --data @- "$BASE/api/unlock"
+unset PASS
+curl -b "$jar" "$BASE/api/needs"
+curl -b "$jar" -H "Origin: http://127.0.0.1:8750" -H "content-type: application/json" \
+  -d '{"agent": "coder-auth", "project": "prj_8c1e", "keys": ["Escape"], "request_id": "esc-1"}' \
+  "$BASE/api/send-keys"
+rm -f "$jar"
+```
+
+Whoever can read the jar is that device until it is revoked (`aisquare remote
+revoke <id>`), it expires, or Remote is turned off: keep it out of a shared
+directory, and the passphrase off any command line, where every user of the
+machine can read it (`ps`). The link's token is on each command line still: on a
+machine others use, keep the address in a `curl -K` config file only you can read.
+
+A write's `request_id` is optional. Sent again with the same request within 15
+minutes, it is answered with what the first one did instead of running twice;
+give every other write an id of its own, since for those 15 minutes an id sent
+with another endpoint or body is refused with `request_id_reused`. The server
+keeps the answers of a device's 50 newest writes and the ids of its 1000 newest:
+a retry of one past the 50 but within the 1000 is refused with
+`already_answered`, which says how it ended, and does not run again.
+
+`send-keys` types into the pane whatever it shows, a prompt included. A script
+that cannot see the pane adds `"dialog_guard": true`, as the Transcript tab
+does, and nothing is typed while the agent may be showing a prompt (409
+`dialog_open`) or is not still at its prompt (409 `agent_busy`). A pane frame,
+`api/panes` and a transcript page name the agent they were read from
+(`agent_id`); sent with the keys, as the page sends it, nothing is typed once
+another agent holds the label, or none does yet, after a restart or a switch
+(409 `stale`).
+
+The code is `src/aisquare/services/remote_server.py` (the server and its gates)
+and `src/aisquare/services/remote_page.py` (the bundled page, whose files are in
+`src/aisquare/web/remote/`); `tests/test_remote_page.py` holds the page to the
+rules above.
+
+---
+
+## Troubleshooting
+
+**The phone shows ngrok's warning page, or notifications will not turn on.**
+The free plan shows a warning before a tunnel's first page. Pass it, then reload
+once: the page sends the header that skips it on every request it makes.
+
+**Every write says `bad_origin`.** Something between the phone and the server
+rewrote the `Host` header; ngrok's `--host-header=rewrite` does exactly that.
+Start ngrok without it (the R panel never uses it).
+
+**`serve`, or the R panel, says another Remote is on.** One `~/.aisquare` serves
+one Remote: the fleet UI's panel, or a `serve` in another shell, has it. The panel
+says so whenever it is open, its state reading on in another process, with that
+Remote's auto-off; its own Auto-off picker is off meanwhile, since that timer is
+set where the Remote runs. Turn that one off, or use it. Two would share one link,
+one passphrase, one auto-off and one list of phones, and either going off would
+sign the other's phones out. One turned off while a phone's restart or switch was
+still running keeps the home until that is done, since its notifications go on
+until then; a restart or switch can take 40 seconds. So does one still answering a
+phone's read, which waits as long as tmux takes to answer. Switched on again in
+the same fleet UI meanwhile, the panel says the last Remote is still finishing,
+and what: the write by name, or the requests it still answers, rather than start a
+second one beside it.
+
+**`serve` says the port is in use.** Something else took 8750. Pass `--port` and
+give ngrok (and `status`) the same port.
+
+**Unlocking, extending or revoking fails with `remote_state_unwritable`** (503,
+and the page shows the machine's sentence). `~/.aisquare/remote.json` would not
+write: the disk is full, or the home is not writable, and the log says which.
+Nothing was changed but a revoke, which holds on the running Remote and is saved
+by its next write that works, unless a change to the file from a shell is read
+first, or Remote is turned on again; its audit line ends in `unsaved`. Free some
+space or fix the permissions, then try again, and run `aisquare remote revoke
+<id>` for a revoke that was not saved. `serve` reaching its auto-off on such a
+home says so too, and exits 1: the phones were not signed out, so run
+`aisquare remote revoke --all` once it can write.
+
+**ngrok says `--url` is an unknown flag.** That ngrok is too old for static
+domains; run `ngrok update`.
+
+**The page is a build you installed, and you want the bundled one back.**
+Remove what `install-page` installed: `rm -rf ~/.aisquare/remote-dist`.
+
+**"Remote is off on the machine, or the link changed".** Remote was turned off,
+auto-off passed, ngrok came back on a new address, or
+`regenerate-password --new-link` replaced the link (a phone still on the old one
+is told so when it tries to unlock). Turn it on again, or open the link the
+machine shows now. A page showing this asks again when the phone wakes or a
+notification is tapped, and at once on **Retry**.

@@ -123,6 +123,8 @@ DOCUMENTED = (
     # The live-wiring handoff: doctor, the hooks by hand, metrics — all meant to
     # be typed against the staging server.
     "docs/ci-live-wiring-handoff.md",
+    # Phone control: serve, allow-write, needs, revoke, regenerate-password.
+    "docs/remote.md",
 )
 
 #: Directories the staleness sweep never enters. Everything else under the repo
@@ -870,8 +872,9 @@ CENSUS = {
     ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
     "docs/runbooks/MORNING-HANDOFF.md": (1, 0),
     # Re-measured 2026-09-05 when `project forget` / `project prune` (#83) added a
-    # fenced example to the memory section.
-    "README.md": (58, 5),
+    # fenced example to the memory section. Re-measured 2026-10-07 at 84 when the
+    # Phone control section (#243) added its fence; the rest had grown unrecorded.
+    "README.md": (84, 9),
     # Re-measured 2026-09-13 when "Choose where traces land with your sign-in"
     # (#142) added its fence: 20 commands, the same four classified mentions.
     # Re-measured 2026-09-24 at 21 when #142 took in #141's review (its key
@@ -898,6 +901,9 @@ CENSUS = {
     # Measured 2026-09-02: eight commands, two path mentions (`../aisquare-ci`,
     # `src/aisquare/...`).
     "docs/ci-live-wiring-handoff.md": (8, 2),
+    # Measured 2026-10-07, the day it was written: nine commands, and two
+    # mentions (the `aisquare-cli[remote]` requirement, `~/.aisquare/remote-dist`).
+    "docs/remote.md": (9, 2),
 }
 
 

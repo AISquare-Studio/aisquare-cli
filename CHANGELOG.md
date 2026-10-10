@@ -6,6 +6,136 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Phone control: `aisquare remote`.** The fleet on a phone, through the
+  user's own ngrok tunnel: one server on `127.0.0.1:8750` (never anything else;
+  8747 to 8749 belong to `serve`, cliXR and the captain's voice). Every path
+  sits under `/r/<32-char token>/`, and a wrong token is a 404 everywhere. The
+  guide is [docs/remote.md](docs/remote.md).
+- **A page that ships with aisquare-cli.** `aisquare.web.remote` is a
+  hand-written page (HTML, one script, one stylesheet, a service worker and a
+  manifest; no build step, nothing from another origin) served whenever no
+  other is installed, so a fresh machine just works. `asq remote install-page
+  <dist>` and `serve --dist` still override it. It is served with a strict
+  Content-Security-Policy (this origin only, no inline script or style), no
+  referrer and no framing, and every string the server sends reaches it as
+  text: escape sequences are dropped (an OSC link with its target), colours are
+  clamped integers, and no server string ever becomes a URL or an attribute.
+  Screens: the needs-you feed, projects (fleet, board with a note composer,
+  tasks, memory), an agent (its live pane, its transcript wrapped to the phone,
+  its explainability card, an input bar and a key pad), devices and settings.
+  It greys out and holds every action after 25 s without an update, and
+  reconnects and re-reads everything when the phone wakes.
+- **In the fleet UI, on `R`.** A panel that turns Remote on and off (the server
+  plus ngrok), shows the link, a QR (`segno`, a new core dependency imported only
+  by the QR renderer) and the passphrase, lists the devices with revoke, and
+  holds the write switch (off by default) and an auto-off timer (30/60/120
+  minutes or Never). Whether Remote is on and the timer live in `state.json`
+  beside the theme; the write switch is the server's, in `remote.json`, the one
+  `asq remote allow-write` sets, so a TUI start never changes it. No
+  ngrok outlives the UI, a Remote that was on comes back on at the next start,
+  and a dead ngrok is restarted within 30 s. With `AISQUARE_REMOTE_NGROK_URL`
+  set, ngrok runs on that static domain (`--url=`), so the link survives.
+- **`asq remote serve [--port] [--auto-off MINUTES] [--public-url URL] [--dist DIR]`**,
+  for a machine without the UI open. Auto-off defaults to 60 minutes (`0` is
+  never, and the banner says so); the phone can extend it an hour at a time,
+  up to 8 hours ahead. `status` and `regenerate-password --new-link` take the
+  same `--port` (and `AISQUARE_REMOTE_PORT`) for the link they print.
+- **Needs you.** Every 3 s, while a phone has the page open or notifications on,
+  the server works out what waits on the human across every project: a
+  permission prompt (each prompt of a turn on its own), a
+  question, a plan to approve, a board question or result, a crashed agent, a
+  stopped manager, a usage limit, a turn that died on an API error (an expired
+  login, credit run out), a lost pane, tmux not answering, a turn that ended
+  with a question, an interruption. Each card carries what must be read
+  first (the command, every question and its options, the plan, and what of
+  them it had to cut) and the quick answers it offers, checked against the
+  agent as it is now before a key is typed (`409 stale` otherwise).
+  `GET api/needs`, a `needs_you` frame, `POST api/needs/answer`,
+  `POST api/needs/dismiss`, and `asq remote needs`.
+- **Notifications (Web Push).** When an item has stood for two scans, the phone
+  gets a notification that opens its card: encrypted to the browser
+  (RFC 8291 and VAPID, through `cryptography`, now in the `remote` extra), built
+  from fixed sentences with every name cut to 40 characters, and never holding
+  an excerpt or anything else from an agent. Plus warnings before auto-off and
+  before a phone's sign-in ends, a goodbye at Remote off, and an alert on a
+  password-guessing lockout. iOS needs the page on the Home Screen.
+- **Agent actions.** `agent/tell` (modes `auto`, `prompt` and `interrupt`: one
+  Esc, then the text once the agent is back at its prompt), `agent/stop`,
+  `agent/restart` and `agent/switch`. Each is pinned to the agent the phone
+  looked at (`agent_id`, and a card's `needs_id`), refused while the agent shows
+  a dialog that an Enter would answer, has a tool pending that may be a prompt
+  just opened, or cannot be read at all (`no hooks`, or a transcript the machine
+  cannot open) (`dialog_open`, with `dismiss_dialog` to press Esc first),
+  and run at most once per `request_id`: a retry after the phone slept is
+  answered from the server's ledger (`GET api/actions/recent`, and an `action`
+  frame). A restart or a switch answers how its replacement began and what did
+  not happen (`how`, `failures`, in `fleet restart|switch --json` too), and the
+  page says when the replacement's first line was not typed, so it needs a Tell.
+- **Reads by project.** `api/board`, `api/tasks`, `api/memory` and
+  `api/explainability/<agent>` take `?project=` as `api/fleet` does, each cached
+  per project; `api/transcript/<agent>` takes `?width=`; pane subscriptions name
+  their project. Reads are built by the builders `asq --json` prints with
+  (`projects_json`, `agents_json` and `board_json`), with two differences: the
+  board carries its newest 200 events where `asq board --json` has five, and
+  `api/projects` adds each project's agents counted by state.
+- **`GET api/explainability/<agent>`**: `{available, reason?, model?, tokens_in?,
+  tokens_out?, policy?, updated_at?}`, `available` only when the explainability
+  SDK is present and no doctor check is RED. It never raises; an unknown agent
+  is a 404 like `panes/<agent>`.
+- **Writes, off until `asq remote allow-write on`.** `send-keys`, `note`,
+  `task/claim`, `task/done`, `project/switch|add|remove`, the agent actions,
+  quick answers and extend answer 403 `read_only` until then. Each write that
+  goes through is one line in `~/.aisquare/remote-audit.log` (owner-only), with
+  control characters scrubbed; a tell keeps its first 120 characters, a note or
+  a task change the author it claimed. When the log will not write (a full
+  disk, a home that is not writable) the write still answers, so that the phone
+  does not send it again, and the server's log warns with the line that is
+  missing. A running server re-reads
+  `~/.aisquare/remote.json` when its content changes, so `allow-write`,
+  `regenerate-password` and `revoke` from another shell reach it within a second.
+
+### Security
+- **One choke point.** Every request and every socket handshake passes the
+  token, auto-off, `Origin` (every write and socket must come from the page's
+  own origin; `X-Forwarded-Host` and `Origin: null` are never trusted), the
+  device behind the cookie, and a 64 KiB body cap, before any route sees it.
+  One body parser, field caps (2 048 characters a keystroke message, 8 000 a
+  note or tell), at most 4 sockets per device and a pane-capture pool of its own.
+- **Keys reach tmux as keys only.** `send-keys` accepts names from a fixed list
+  (no `;`, no flags, `C-c`/`C-d`/`C-l`/`C-o`/`C-r`/`C-u` only), text travels as
+  literal text, and a second Ctrl-C or Ctrl-D within 3 s is refused unless
+  confirmed; `core.tmux` ends flag parsing and escapes a trailing `;` for every
+  caller.
+- **Unlocking.** The passphrase is 4 words of 512 (about 36 bits), typed with
+  spaces, dashes or capitals as the phone likes. Unlocks are limited per client
+  (keyed on the real peer, never a client-supplied `X-Forwarded-For`) and to 20
+  failures in 30 minutes across everyone; a phone that unlocked before still
+  can, and `asq remote regenerate-password --new-link` also replaces a leaked
+  link.
+- **Devices, not cookies.** A device has a public id (`dev_…`) and its cookie is
+  stored only as a digest. It is signed out after 24 h idle (and unlocks back
+  into the same id, notifications included) and removed after 7 days. At most
+  32 are kept: an unlock past that removes the signed-out device unused longest,
+  and is refused (`too_many_devices`) while all 32 are signed in. Remote
+  off and auto-off revoke every device (sockets close 4410); `asq remote revoke
+  <id>` and `revoke --all` work from the machine, and a phone can sign itself
+  out or, with writes on, revoke another. `remote.json` moves to version 2 and
+  drops the sessions it held.
+- **`project/add`** accepts only a git checkout (or a folder of them) under the
+  home directory, never a hidden one.
+- **Where a notification leads** comes only from the panel's own ngrok, for the
+  tunnel it asked for to Remote's port, or `serve --public-url`
+  (`AISQUARE_REMOTE_NGROK_URL`), never from a request's `Host` or from ngrok's
+  local API, which any user of the machine can answer before the human's ngrok
+  does, or start a tunnel through. Without one a notification opens the page.
+- **ngrok without its inspector or its local API.** The panel starts ngrok with
+  `--inspect=false` and, merged over the human's own `ngrok.yml`, `web_addr:
+  false`, and says when its ngrok's API is on all the same; the docs and `serve`
+  give that advice: left on, ngrok keeps every request and answer, the
+  passphrase and every cookie included, on a local web interface any user of the
+  machine can read, and its agent API there starts and stops tunnels for anyone.
+
 ## [0.7.0] - 2026-09-25
 
 **Accounts, project groups and destinations, and a fleet that survives

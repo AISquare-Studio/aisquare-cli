@@ -915,8 +915,61 @@ def test_every_text_colour_reads_at_aa_contrast_in_both_themes() -> None:
         for ink in inks:
             for ground in ("--bg", "--panel", "--raise"):
                 assert _contrast(theme[ink], theme[ground]) >= 4.5, (name, ink, ground)
-        assert _contrast(theme["--fg"], theme["--pane"]) >= 4.5, name
+        for ink in ("--pane-fg", "--pane-muted"):
+            assert _contrast(theme[ink], theme["--pane"]) >= 4.5, (name, ink)
     assert _contrast("#ffffff", _themes(css)["dark"]["--alarm"]) < 3, "the control: white on it"
+
+
+TERMINAL_TOKENS = ("--pane", "--pane-fg", "--pane-muted", *(f"--a{n}" for n in range(16)))
+"""What an agent's screen is drawn with: its ground and inks, and the 16 colours of ANSI."""
+
+
+def test_an_agents_screen_keeps_the_dark_ground_its_own_colours_were_picked_for() -> None:
+    """The pane, its card strip and the transcript took their ground from the phone's
+    scheme, white in light mode, while an agent's 256 and true colours arrive as fixed rgb(),
+    picked for its own theme, dark in Claude Code by default: on a light-mode phone its reply
+    bullet was white on white (1.0:1), and the dialog option the pad's ↑ ↓ ⏎ move 1.5:1, as
+    Claude Code 2.1 drew them under the fleet's tmux. The terminal keeps one dark palette in
+    both themes, and every rule that draws in it takes only its tokens."""
+    css = _text("app.css")
+    themes = _themes(css)
+    for token in TERMINAL_TOKENS:
+        assert themes["light"][token] == themes["dark"][token], token
+    assert themes["light"]["--fg"] != themes["dark"]["--fg"], "the control: the page's own change"
+    drawn = {
+        ("pre.pane, pre.transcript", "background"): "var(--pane)",
+        ("pre.pane, pre.transcript", "color"): "var(--pane-fg)",
+        ("pre.strip", "background"): "var(--pane)",
+        ("pre.strip", "color"): "var(--pane-muted)",
+        (".ln.muted", "color"): "var(--pane-muted)",
+        (".rf", "color"): "var(--pane)",
+        (".rb", "background"): "var(--pane-fg)",
+        (".cur", "background"): "var(--pane-fg)",
+        (".cur", "color"): "var(--pane)",
+    }
+    assert {key: _css_value(css, *key) for key in drawn} == drawn
+
+
+def _rgb_hex(value: str) -> str:
+    match = _RGB.fullmatch(value)
+    assert match is not None, value
+    return "#" + "".join(f"{int(part):02x}" for part in match.groups())
+
+
+def test_an_agents_own_colours_read_on_its_screen_in_both_themes(
+    node_report: dict[str, Any],
+) -> None:
+    """Claude Code's dark theme as tmux captured it, through the page's own ``ansiToRuns``:
+    each colour it drew with reads at AA contrast on the pane's ground whatever the phone's
+    scheme, and so does the pane's own ink where it set none."""
+    css = _text("app.css")
+    runs = [run for row in node_report["agentRows"] for run in row if run["text"].strip()]
+    inks = {_rgb_hex(run["color"]) for run in runs if "color" in run}
+    assert {"#ffffff", "#afd7ff", "#ffd700", "#949494"} <= inks, inks
+    assert any("color" not in run for run in runs), "the control: text in the pane's own ink"
+    for name, theme in _themes(css).items():
+        for ink in sorted(inks):
+            assert _contrast(ink, theme["--pane"]) >= 4.5, (name, ink)
 
 
 # --- 10. the service worker -----------------------------------------------------------------

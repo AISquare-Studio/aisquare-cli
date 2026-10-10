@@ -84,6 +84,11 @@ SIGN_OUT_WORKER = "aisquare-sign-out"
 COMPLETE_WORKER = "claude-complete-sign-in"
 REMOVE_WORKER = "claude-remove"
 ARRANGE_WORKER = "claude-arrange"
+WRITING_WORKERS: frozenset[str] = frozenset(
+    {SIGN_IN_WORKER, SIGN_OUT_WORKER, COMPLETE_WORKER, REMOVE_WORKER, ARRANGE_WORKER}
+)
+"""The page's workers that write (the AISquare session, the Claude account registry and its
+slots' folders), which an Update or Uninstall quit would cut off. Usage and credits only read."""
 
 _BAR_CELLS = 5
 _WARN_AT = 50.0
@@ -483,6 +488,15 @@ class AccountsView(Vertical):
     """
 
     BINDINGS: ClassVar = []
+
+    @property
+    def busy(self) -> bool:
+        """Whether a worker of this page that writes (:data:`WRITING_WORKERS`) still runs:
+        Update and Uninstall wait for it (``FleetApp._work_running``)."""
+        return any(
+            worker.node is self and worker.name in WRITING_WORKERS and not worker.is_finished
+            for worker in self.workers
+        )
 
     def __init__(
         self,

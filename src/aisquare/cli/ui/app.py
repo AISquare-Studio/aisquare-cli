@@ -1123,12 +1123,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         Never under work that is still writing, which quitting would cut off (asyncio.run
         then joins its thread with the terminal blank, and the hand-over can replace the
         install under it): a fix in ANY Doctor view (the Project tab's and Onboard's run
-        their own), Welcome's setup, Connect or fleet start, or the Onboard view's init
-        (round 15 of #257).
+        their own), Welcome's setup, Connect or fleet start, the Onboard view's init, or
+        the Accounts page's sign-in, sign-out or account change (round 15 of #257).
         """
         if self._work_running():
             self.notify(
-                "a fix, a setup or a start is still running — try again when it ends",
+                "a fix, a setup, a start or an account change is still running — try again "
+                "when it ends",
                 severity="warning",
             )
             return
@@ -1141,6 +1142,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             any(view.busy for view in self.query(DoctorView))
             or any(view.busy for view in self.query(WelcomeView))
             or any(view.running for view in self.query(OnboardView))
+            or any(view.busy for view in self.query(AccountsView))
         )
 
     def on_doctor_refreshed(self, event: DoctorRefreshed) -> None:

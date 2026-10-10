@@ -14,6 +14,7 @@ import builtins
 import os
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,8 @@ from typer.testing import CliRunner
 from aisquare.cli import install as install_cli
 from aisquare.cli.app import app as cli_app
 from aisquare.cli.ui import app as ui_app
-from aisquare.cli.ui.sidebar import AddProject, ProjectSelected
+from aisquare.cli.ui.sidebar import AccountsSelected, AddProject, ProjectSelected
+from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.onboard import OnboardView
 from aisquare.cli.ui.views.welcome import WelcomeView
@@ -150,6 +152,10 @@ def test_only_asqs_own_doctor_is_machine_wide_and_no_doctor_may_be_busy(
     assert after == ("upgrade", "--reopen"), "control: with no fix running it quits"
 
 
+WAIT = "a fix, a setup, a start or an account change is still running — try again when it ends"
+"""What Update and Uninstall say while work they would cut off still runs."""
+
+
 @pytest.mark.parametrize(
     "work",
     ["welcome-onboard", "welcome-connect", "welcome-manager", "welcome-coders", "onboard-init"],
@@ -192,7 +198,7 @@ def test_update_waits_for_welcome_and_onboard_work_as_for_a_fix(
     while_busy, said, after = drive(fn)
 
     assert while_busy is None, f"{work} is still running"
-    assert said == ["a fix, a setup or a start is still running — try again when it ends"]
+    assert said == [WAIT]
     assert after == ("upgrade", "--reopen"), "control: once it has ended, Update quits"
 
 
@@ -354,3 +360,44 @@ def test_reopen_is_hidden_from_help(runner: CliRunner) -> None:
 
     assert shown.exit_code == 0 and "--dry-run" in text, "control: help lists flags"
     assert "--reopen" not in text
+
+
+@pytest.mark.parametrize("worker", sorted(accounts_view.WRITING_WORKERS))
+def test_update_waits_for_the_accounts_pages_writing_work(
+    isolated_home: Path,
+    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    monkeypatch: pytest.MonkeyPatch,
+    worker: str,
+) -> None:
+    """The Accounts page signs in and out of AISquare, completes a Claude sign-in, removes and
+    arranges accounts, each in a thread worker that writes the session or the account
+    registry. Update and Uninstall quit under it as under Welcome's work (round 15 of #257);
+    they wait for it. A worker of that name really runs, held, on the page."""
+    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
+    release = threading.Event()
+
+    async def fn(pilot: Pilot[None]) -> tuple[Any, list[str], Any]:
+        app = pilot.app
+        assert isinstance(app, ui_app.FleetApp)
+        await app.on_accounts_selected(AccountsSelected())
+        await settle_page(app)
+        said: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda message, **_: said.append(str(message)))
+        page = app.query_one(accounts_view.AccountsView)
+        page.run_worker(
+            lambda: release.wait(10), name=worker, group=worker, thread=True, exit_on_error=False
+        )
+        app.query_one("#doctor-update", Button).press()
+        await settle_page(app, group="held")  # the page's worker is held: settle no group
+        refused = app.hand_off
+        release.set()
+        await settle_page(app)
+        app.query_one("#doctor-update", Button).press()
+        await settle_page(app)
+        return refused, said, app.hand_off
+
+    while_busy, said, after = drive(fn)
+
+    assert while_busy is None, f"{worker} is still running"
+    assert said == [WAIT]
+    assert after == ("upgrade", "--reopen"), "control: once it has ended, Update quits"

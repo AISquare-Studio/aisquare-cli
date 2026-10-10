@@ -69,7 +69,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot open) (`dialog_open`, with `dismiss_dialog` to press Esc first),
   and run at most once per `request_id`: a retry after the phone slept is
   answered from the server's ledger (`GET api/actions/recent`, and an `action`
-  frame).
+  frame). A restart or a switch answers how its replacement began and what did
+  not happen (`how`, `failures`, in `fleet restart|switch --json` too), and the
+  page says when the replacement's first line was not typed, so it needs a Tell.
 - **Reads by project.** `api/board`, `api/tasks`, `api/memory` and
   `api/explainability/<agent>` take `?project=` as `api/fleet` does, each cached
   per project; `api/transcript/<agent>` takes `?width=`; pane subscriptions name

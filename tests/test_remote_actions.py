@@ -1108,6 +1108,31 @@ def test_an_action_answers_what_the_cli_prints_plus_its_project(
     assert answered == json.loads(printed.stdout)
 
 
+@pytest.mark.parametrize("name", ["agent/restart", "agent/switch"])
+def test_a_replacement_whose_first_line_was_not_typed_says_how_it_began_and_why(
+    phone: Phone, fleet: FleetCalls, needs: FakeNeeds, project: ProjectInfo, name: str
+) -> None:
+    """Sweep 5 of #243: the answer said ``prompt_typed: false`` and nothing a page could say
+    it with. It carries the receipt's ``how``, the board line's words, and its
+    ``failures``, the notes on what did not happen, as ``fleet restart --json`` does."""
+    _row(project)
+    why = "the agent exited before the prompt could be typed"
+    verb = name.removeprefix("agent/")
+    fleet.answers[verb] = dataclasses.replace(
+        cast(RestartReceipt | SwitchReceipt, fleet.answers[verb]),
+        resumed=False,
+        prompt_typed=False,
+        notes=["headroom: slot 2 has the most left", why],
+        failures=[why],
+    )
+    response = phone.post(name, **PINNED)
+    assert response.status_code == 200, response.text
+    answered = response.json()
+    assert answered["prompt_typed"] is False
+    assert answered["how"] == "started fresh, but its hand-off prompt was NOT typed"
+    assert answered["failures"] == [why]
+
+
 def test_a_named_project_is_the_one_acted_on_and_an_unknown_one_is_404(
     phone: Phone, fleet: FleetCalls, needs: FakeNeeds, tmp_path: Path
 ) -> None:

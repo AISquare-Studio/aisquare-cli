@@ -337,7 +337,9 @@ fails on the same limit until the reset, and **Switch account** is what moves it
 **Stop**, **Restart** and **Switch account** each open a sheet that says in one
 sentence what will happen, and send the agent's name as confirmation. Restart
 and switch can take 40 seconds; the page waits, and shows the result even if the
-phone slept meanwhile.
+phone slept meanwhile. A replacement whose first line (the hand-off prompt, or
+the line telling a resumed session to go on) could not be typed sits idle at an
+empty prompt: the page says so and why, and that it needs a Tell.
 
 **The dialog guard.** Stopping types `/exit` and Enter, and an Enter into an open
 dialog would answer it: approve a command, pick an option, accept a plan. So

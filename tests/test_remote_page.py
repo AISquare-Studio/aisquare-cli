@@ -1628,6 +1628,28 @@ def test_the_live_pane_draws_no_cursor_where_the_program_hid_it(
     assert boot_report["paneCursor"] == {"shown": 1, "hidden": 0, "unsaid": 1}
 
 
+def test_a_replacement_whose_first_line_was_not_typed_is_said_and_told_to_be_told(
+    boot_report: dict[str, Any],
+) -> None:
+    """Sweep 5 of #243: a restart or a switch whose replacement came up too slowly for its
+    multi-line hand-off (or that tmux would not type into) answers ``prompt_typed: false``,
+    and the page said "Switched coder-1" all the same. The agent sat idle at an empty
+    prompt, the task stalled, and only the Board tab said so. The page says how it began,
+    in the board's words, what did not happen, and to tell it what to do; also of a
+    result only the ledger brought back."""
+    report = boot_report["notTyped"]
+    said = (
+        "started fresh, but its hand-off prompt was NOT typed — the agent did not come up "
+        "within 20 s and the prompt has several lines — NOT typed. Tell it what to do"
+    )
+    assert report["switched"] == {"sheet": None, "toast": f"Switched coder-1: {said}"}
+    assert report["restarted"] == {
+        "sheet": None,
+        "toast": "Restarted coder-1 on its own conversation",
+    }
+    assert report["ledger"] == f"Switch account coder-1: {said}"
+
+
 def test_a_stop_refused_at_a_prompt_is_explained_in_the_pages_own_words(
     boot_report: dict[str, Any],
 ) -> None:

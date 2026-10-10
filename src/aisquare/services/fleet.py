@@ -4122,6 +4122,10 @@ class RestartReceipt:
     notes: list[str] = field(default_factory=list)
     prompt_typed: bool = True
     """Whether the replacement's first line reached its pane, as on :class:`SwitchReceipt`."""
+    failures: list[str] = field(default_factory=list)
+    """The notes that say what did NOT happen once the replacement was up, as on
+    :class:`SwitchReceipt`: its first line not typed (and why), its claims not moved.
+    Each is in ``notes`` too, among the ones every restart has."""
 
     @property
     def how(self) -> str:
@@ -4347,6 +4351,7 @@ def restart(
         tmux_session=receipt.tmux_session,
         notes=notes,
         prompt_typed=bool(receipt.prompt_typed),
+        failures=list(receipt.failures),
     )
 
 

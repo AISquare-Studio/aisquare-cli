@@ -958,6 +958,48 @@ async function paneCursor() {
   return { shown: await cells(true), hidden: await cells(false), unsaid: await cells(undefined) };
 }
 
+const NOT_TYPED = "the agent did not come up within 20 s and the prompt has several lines — NOT typed";
+const SWITCHED = {
+  stopped: { id: "agt_1", label: "coder-1" }, started: { id: "agt_2", label: "coder-1" }, from_slot: 1, to_slot: 2,
+  resumed: false, prompt_typed: false, how: "started fresh, but its hand-off prompt was NOT typed",
+  failures: [NOT_TYPED], notes: ["headroom: slot 2 has the most left", NOT_TYPED], project: PROJECT,
+};
+
+/* Switch account answered 200 with its replacement's first line NOT typed: what the page
+ * says, and of a restart whose line was typed. And the same switch answered only by the
+ * ledger, after its request and the retry were lost. */
+async function notTyped() {
+  const page = await agentView({
+    "POST api/agent/switch": () => ({ status: 200, json: SWITCHED }),
+    "POST api/agent/restart": () => ({ status: 200, json: { resumed: true, prompt_typed: true, how: "resumed its session", failures: [] } }),
+  });
+  page.live().frame("fleet", FLEET);
+  await settle();
+  const act = async (item, go) => {
+    click(buttonNamed(page.main(), "Actions…"));
+    click(buttonNamed(page.run("UI.sheet"), item));
+    click(buttonNamed(page.run("UI.sheet"), go));
+    await settle();
+    return { sheet: sheetTitle(page), toast: page.toast() };
+  };
+  const switched = await act("Switch account…", "Switch account");
+  const restarted = await act("Restart…", "Restart");
+  const lost = await agentView({ "POST api/agent/switch": () => "network" });
+  lost.live().frame("fleet", FLEET);
+  await settle();
+  click(buttonNamed(lost.main(), "Actions…"));
+  click(buttonNamed(lost.run("UI.sheet"), "Switch account…"));
+  click(buttonNamed(lost.run("UI.sheet"), "Switch account"));
+  await settle();
+  lost.acceptSockets();
+  paneCame(lost);
+  await settle();
+  const id = lost.sent("api/agent/switch")[0].request_id;
+  lost.live().frame("action", { actions: [{ request_id: id, endpoint: "agent/switch", status: 200, body: SWITCHED, at: "2026-10-07T10:13:00+00:00" }] });
+  await settle();
+  return { switched, restarted, ledger: lost.toast() };
+}
+
 /* Stop, on an agent that shows a prompt: the machine refuses in its API's words, the
  * sheet says why in its own and adds the dismissal to what Stop will do, and the next tap
  * sends dismiss_dialog. */
@@ -3406,6 +3448,7 @@ async function main() {
     tellNotSent: await tellNotSent(),
     paneCursor: await paneCursor(),
     stopAtAPrompt: await stopAtAPrompt(),
+    notTyped: await notTyped(),
     refusedReadOnly: await refusedReadOnly(),
     keyNames: await keyNames(),
     liveScroll: await liveScroll(),

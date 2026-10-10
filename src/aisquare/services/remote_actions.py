@@ -1341,7 +1341,9 @@ def action_restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
     stop (:class:`ActionGuardLast`): what the restart refuses up front, such as a
     task that was closed, it refuses before any Escape. The service gets
     ``agent_id`` as well, and refuses a row that was replaced after the pin was
-    checked.
+    checked. The answer says how the replacement began in the board line's words
+    (``how``) and what did not happen (``failures``): one whose first line was not
+    typed sits idle at an empty prompt, and the page says so (sweep 5 of #243).
     """
     from aisquare.services import fleet as fleet_service
 
@@ -1390,6 +1392,8 @@ def action_restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         "started": receipt.started.model_dump(mode="json"),
         "resumed": receipt.resumed,
         "prompt_typed": receipt.prompt_typed,
+        "how": receipt.how,
+        "failures": list(receipt.failures),
         "was_running": receipt.was_running,
         "tmux_session": receipt.tmux_session,
         "notes": list(receipt.notes),
@@ -1421,7 +1425,8 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
 
     A ``reason`` (:func:`action_switch_reason`) is typed into the replacement's
     prompt, so once the hand-over has been asked for, the audit line keeps how it
-    began, last, as a tell's keeps its text.
+    began, last, as a tell's keeps its text. The answer carries ``how`` and
+    ``failures`` as a restart's does.
     """
     from aisquare.services import fleet as fleet_service
 
@@ -1473,6 +1478,8 @@ def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         "to_slot": receipt.to_slot,
         "resumed": receipt.resumed,
         "prompt_typed": receipt.prompt_typed,
+        "how": receipt.how,
+        "failures": list(receipt.failures),
         "tmux_session": receipt.tmux_session,
         "notes": list(receipt.notes),
         "project": target.id,

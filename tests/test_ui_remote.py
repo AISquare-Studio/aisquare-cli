@@ -164,6 +164,14 @@ def painted(app: FleetApp) -> list[str]:
     ]
 
 
+def painted_in(app: FleetApp, widget: Static) -> str:
+    """What the screen paints where ``widget`` is laid out, its rows joined and its spaces
+    collapsed: a sentence wider than what holds it is laid out whole and painted cut."""
+    x, y, width, height = widget.region
+    rows = painted(app)[y : y + height]
+    return " ".join(" ".join(row[x : x + width] for row in rows).split())
+
+
 def shown(widget: Static) -> str:
     visual = widget.visual
     plain = getattr(visual, "plain", None)
@@ -1459,6 +1467,47 @@ def test_while_another_process_serves_the_panel_shows_its_auto_off_and_picks_non
         assert not modal.query_one("#remote-auto-off", Select).disabled
 
     drive(go, tunnel=missing_ngrok)
+
+
+@pytest.mark.parametrize("size", [(80, 24), SIZE], ids=["80 columns", "the suite's"])
+def test_the_sentences_beside_the_switches_are_painted_whole_at_any_width(
+    monkeypatch: pytest.MonkeyPatch, size: tuple[int, int]
+) -> None:
+    """Beside a switch, the state and the write hint were laid out on one line as wide as
+    their text, and the box cut them: another process's auto-off, and its "turn it off
+    there", were painted at no width, and at 80 columns the hint lost the command that
+    turns writes on (sweep 5 of #243). They wrap in what the row leaves them."""
+    monkeypatch.setattr(remote_control, "ELSEWHERE_EVERY_SECONDS", 0.0)
+    monkeypatch.setattr(remote_view, "LOCAL_ZONE", UTC)
+    paths.ensure_home()
+    serving = paths.remote_state_path().with_name(remote_server.SERVE_LOCK_NAME)
+    deadline = datetime.now(UTC).replace(hour=21, minute=58) + timedelta(days=2)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        remote_server.set_auto_off(deadline)  # the other process's serve set it
+        fd = os.open(serving, os.O_RDWR | os.O_CREAT, 0o600)
+        lock_exclusive(fd)
+        try:
+            modal = await open_panel(pilot)
+            await written(pilot)
+            state = modal.query_one("#remote-state", Static)
+            for _ in range(100):
+                modal.repaint()
+                if shown(state) != "off":
+                    break
+                await asyncio.sleep(0.02)
+            await pilot.pause()
+            dated = f"auto-off at {deadline:%b} {deadline.day} 21:58"
+            assert painted_in(app, state) == f"{remote_view.ELSEWHERE} · {dated}"
+            hint = modal.query_one("#remote-write-hint", Static)
+            assert painted_in(app, hint) == READ_ONLY_REASON
+        finally:
+            unlock(fd)
+            os.close(fd)
+
+    drive(go, tunnel=missing_ngrok, size=size)
 
 
 def test_a_switch_state_json_refuses_is_toasted_and_said_again_after_quit() -> None:

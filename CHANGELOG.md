@@ -71,8 +71,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Reads by project.** `api/board`, `api/tasks`, `api/memory` and
   `api/explainability/<agent>` take `?project=` as `api/fleet` does, each cached
   per project; `api/transcript/<agent>` takes `?width=`; pane subscriptions name
-  their project. Reads return exactly what `asq --json` prints (the same
-  builders, `projects_json`, `agents_json` and `board_json`).
+  their project. Reads are built by the builders `asq --json` prints with
+  (`projects_json`, `agents_json` and `board_json`), with two differences: the
+  board carries its newest 200 events where `asq board --json` has five, and
+  `api/projects` adds each project's agents counted by state.
 - **`GET api/explainability/<agent>`**: `{available, reason?, model?, tokens_in?,
   tokens_out?, policy?, updated_at?}`, `available` only when the explainability
   SDK is present and no doctor check is RED. It never raises; an unknown agent
@@ -82,7 +84,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   quick answers and extend answer 403 `read_only` until then. Each write that
   goes through is one line in `~/.aisquare/remote-audit.log` (owner-only), with
   control characters scrubbed; a tell keeps its first 120 characters, a note or
-  a task change the author it claimed. A running server re-reads
+  a task change the author it claimed. When the log will not write (a full
+  disk, a home that is not writable) the write still answers, so that the phone
+  does not send it again, and the server's log warns with the line that is
+  missing. A running server re-reads
   `~/.aisquare/remote.json` when its content changes, so `allow-write`,
   `regenerate-password` and `revoke` from another shell reach it within a second.
 

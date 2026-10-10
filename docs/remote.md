@@ -510,7 +510,7 @@ from `POST api/unlock`) except unlock itself; every non-GET request needs an
 | POST | `api/unlock` | `{"password"}` → the device cookie |
 | GET | `api/remote` | `{allow_write, auto_off_at, version}` |
 | POST | `api/remote/extend` | another hour before auto-off |
-| GET | `api/projects`, `api/fleet`, `api/board`, `api/tasks`, `api/memory` | what `aisquare --json` prints for each (the board with its newest 200 events, not 5), `?project=` for one project |
+| GET | `api/projects`, `api/fleet`, `api/board`, `api/tasks`, `api/memory` | what `aisquare --json` prints for each (the board with its newest 200 events, not 5; each project with its agents counted by state), `?project=` for one project |
 | GET | `api/panes/<agent>`, `api/transcript/<agent>`, `api/explainability/<agent>` | one agent's screen (`?history=` adds that many lines of scrollback, 5 000 at most), conversation (`?limit=` turns, `?before=`, `?width=` 20 to 200 columns) and card; `?project=` for another project's agent, the current project's otherwise |
 | GET | `api/needs` | `{"items", "scanned_at"}` |
 | POST | `api/needs/answer`, `api/needs/dismiss` | a quick answer; hide a card |

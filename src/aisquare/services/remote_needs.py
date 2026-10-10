@@ -2309,8 +2309,15 @@ def needs_at_input_prompt(snap: AgentNow) -> bool:
     """Whether the agent sits at its input prompt, where typed text is a message to it.
 
     No dialog, the pane is the agent and quiet (tmux must say so), no tool
-    pending, and the newest record is an interruption or the agent's own words —
-    or the row derives ``waiting``, the only sign there is without a tail.
+    pending, and the newest record is an interruption or the agent's own words,
+    or this process has written no conversation yet (:func:`_needs_nothing_said`)
+    — or the row derives ``waiting``, the only sign there is without a tail.
+
+    A session starts ``working`` on the board, and the board is trusted for 30
+    minutes: an agent just spawned with no prompt, or after a ``/clear``, read as
+    busy at its fresh prompt. Prompt mode refused it, Interrupt & tell sent its Escape
+    and gave up, and the only way to reach it was the Live tab (review of #243, sweep
+    3). A turn writes the human's prompt first, and Claude Code animates while one runs.
     """
     status = snap.status
     if status is None or not snap.pane_is_agent or snap.pane_quiet is not True:
@@ -2321,7 +2328,19 @@ def needs_at_input_prompt(snap: AgentNow) -> bool:
         return status.state == "waiting"
     if _needs_pending(snap.tail, status.agent):
         return False
-    return snap.tail.newest in ("interrupted", "assistant_text") or status.state == "waiting"
+    if snap.tail.newest in ("interrupted", "assistant_text") or status.state == "waiting":
+        return True
+    return _needs_nothing_said(snap.tail, status.agent)
+
+
+def _needs_nothing_said(tail: TranscriptTail, agent: FleetAgent) -> bool:
+    """The row's process has written no conversation: its transcript is empty or not made
+    yet (Claude Code makes it with the first record), or every record in it is older than
+    the row, a resumed session's before its first prompt. A walk that met no conversation
+    record is not this: it says nothing of what was written."""
+    if tail.empty:
+        return True
+    return tail.newest_at is not None and tail.newest_at < agent.created_at
 
 
 def needs_item_current(snap: AgentNow, item_id: str) -> bool:
@@ -2413,14 +2432,31 @@ _tails_lock = threading.Lock()
 _TAILS_KEPT = 512
 
 
+_NEEDS_NOTHING_WRITTEN = TranscriptTail(
+    pending=(),
+    newest="none",
+    newest_at=None,
+    last_text=None,
+    last_text_at=None,
+    marker_key=None,
+    empty=True,
+)
+"""The tail of a transcript that is not there yet: Claude Code makes the file with the first
+record it writes, so a session that has had no prompt has none."""
+
+
 def _needs_cached_tail(path: str) -> TranscriptTail | None:
     """:func:`read_transcript_tail`, read again only when the file's size or mtime moved.
 
     An unchanged transcript costs one ``stat()``. Shared by the watcher and
-    :func:`needs_agent_now`, and bounded: the oldest entries go first.
+    :func:`needs_agent_now`, and bounded: the oldest entries go first. A path the
+    session named that does not exist is a conversation with nothing in it yet, as an
+    empty file is; one that cannot be read is ``None``.
     """
     try:
         stat = os.stat(path)
+    except FileNotFoundError:
+        return _NEEDS_NOTHING_WRITTEN
     except OSError:
         return None
     key = (stat.st_size, stat.st_mtime_ns)

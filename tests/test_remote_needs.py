@@ -2173,6 +2173,9 @@ class FakeTmux:
     def send_literal(self, pane_id: str, text: str) -> None:
         self.typed.append(("text", pane_id, text))
 
+    def paste(self, pane_id: str, text: str) -> None:
+        self.typed.append(("paste", pane_id, text))
+
 
 def _now_of(
     fleet: Fleet, tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch, label: str = "coder-1"
@@ -2419,6 +2422,43 @@ def test_at_the_prompt_takes_a_quiet_pane_tmux_vouches_for(monkeypatch: pytest.M
     assert not needs_at_input_prompt(
         _now_of(_working(mid_turn), FakeTmux(reference=NOW), monkeypatch)
     )
+
+
+_NOTHING_WRITTEN = TranscriptTail(
+    pending=(), newest="none", newest_at=None, last_text=None, last_text_at=None,
+    marker_key=None, empty=True,
+)  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("tail", "quiet_for", "at_prompt"),
+    [
+        pytest.param(_NOTHING_WRITTEN, 60.0, True, id="nothing written yet"),
+        pytest.param(
+            _tail(newest="tool_result", at=BORN - timedelta(minutes=1)),
+            60.0,
+            True,
+            id="only a resumed session's records",
+        ),
+        pytest.param(_NOTHING_WRITTEN, 1.0, False, id="a pane at work"),
+        pytest.param(_tail(newest="user_prompt"), 60.0, False, id="its first prompt written"),
+        pytest.param(None, 60.0, False, id="a transcript that cannot be read"),
+    ],
+)
+def test_a_session_at_its_fresh_prompt_is_at_its_prompt_though_the_board_says_working(
+    tail: TranscriptTail | None, quiet_for: float, at_prompt: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session starts ``working`` on the board, which is trusted for 30 minutes: an agent
+    spawned with no prompt, or after a ``/clear``, read as busy at its fresh prompt, and
+    neither prompt mode nor Interrupt & tell could reach it (review of #243, sweep 3). A
+    turn writes the human's prompt before anything else, and its pane animates while it
+    runs: a quiet pane over a transcript this process has written nothing in is a prompt.
+    A transcript that cannot be read says nothing of what was written."""
+    snap = _now_of(_working(tail), FakeTmux(reference=NOW, quiet_for=quiet_for), monkeypatch)
+    assert snap.status is not None and snap.status.state == "working"
+    assert needs_at_input_prompt(snap) is at_prompt
+    noticed = _now_of(_working(tail, state="attention"), FakeTmux(reference=NOW), monkeypatch)
+    assert not needs_at_input_prompt(noticed), "a dialog at its start is still a dialog"
 
 
 def test_quiet_is_unknown_when_tmux_will_not_say(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3181,6 +3221,51 @@ def test_the_live_sources_ask_tmux_when_a_sub_agents_pane_last_printed(
         "coder-1 waits for a permission answer (in a sub-agent)",
     )
     assert [card.id for card in needs_agent_now(project, "coder-1", now=now).items] == [item.id]
+
+
+def test_a_session_at_its_fresh_prompt_is_told_now_in_prompt_and_interrupt_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the store, the fleet's listing, the cached tail and the tell itself: a session
+    the board has as ``working`` since it started, its transcript not made yet (Claude Code
+    makes it with the first record), its pane quiet. Prompt mode answered ``agent_busy``,
+    and Interrupt & tell sent its Escape, waited 8 s and typed nothing (review of #243,
+    sweep 3). Once its first prompt is written, a turn runs, and both refuse again."""
+    from aisquare.services import remote_actions
+    from aisquare.services.remote_server import RequestError
+
+    now = datetime.now(UTC)
+    transcript = tmp_path / "coder-1.jsonl"
+    with store_session() as store:
+        project = store.onboard_project(ProjectInfo(id="prj_alpha", root=tmp_path / "alpha"))
+        _live_agent(
+            store, project, "coder-1", state="working", seen=now - timedelta(seconds=10),
+            born=now - timedelta(seconds=12), transcript=transcript,
+        )  # fmt: skip
+    tmux = FakeTmux(quiet_for=8)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    snap = needs_agent_now(project, "coder-1")
+    assert snap.status is not None and snap.status.state == "working"
+    assert snap.tail is not None and snap.tail.empty and needs_at_input_prompt(snap)
+    body = {"agent": "coder-1", "text": "start on the cache", "project": project.id}
+    for mode in ("prompt", "interrupt"):
+        result, _line = remote_actions.action_tell({**body, "mode": mode})
+        assert result["delivered"] is True, result
+    assert tmux.typed == [
+        ("paste", "%1", "start on the cache"), ("keys", "%1", "Enter"),
+        ("keys", "%1", "Escape"), ("paste", "%1", "start on the cache"), ("keys", "%1", "Enter"),
+    ]  # fmt: skip
+    prompted = {
+        "type": "user",
+        "uuid": "u1",
+        "timestamp": now.isoformat(),
+        "message": {"role": "user", "content": "start on the cache"},
+    }
+    _transcript(transcript, prompted)
+    assert not needs_at_input_prompt(needs_agent_now(project, "coder-1"))
+    with pytest.raises(RequestError) as busy:
+        remote_actions.action_tell({**body, "mode": "prompt"})
+    assert (busy.value.status, busy.value.error) == (409, "agent_busy")
 
 
 # --- the watcher --------------------------------------------------------------------------

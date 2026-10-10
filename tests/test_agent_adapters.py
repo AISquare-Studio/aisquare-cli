@@ -75,11 +75,16 @@ _REPOINT_FIX = (
     "then start asq or aisquare again from that shell"
 )
 
-#: Welcome step 2's remedies for a refusal of the directory this shell reads.
+#: Welcome step 2's remedies for a refusal of the directory this shell reads; and where a
+#: file stands where that directory must be, which no surface tells anyone to repair.
 _STEP_TWO_REMEDY = (
     "Connect cannot change that. Repair it and this page checks again within a few seconds, "
     "or point CLAUDE_CONFIG_DIR at another directory this user can write, then start asq "
     "again from that shell."
+)
+_UNREPAIRABLE = (
+    "Connect cannot change that. Point CLAUDE_CONFIG_DIR at another directory this user can "
+    "write, then start asq again from that shell."
 )
 
 
@@ -833,9 +838,12 @@ def test_a_config_dir_connect_cannot_make_is_named_everywhere_and_never_offered_
     assert clicked.exit_code == 1 and reason == f"can't create {where}: {fact}", reason
     assert f"hooks cannot be written in {where}: {reason}" in row.detail, row
     assert [f.argv for f in fix_commands([row]) if f.argv[:2] == ("agents", "connect")] == []
-    assert row.fix == f"repair {blocking} ({fact}), then connect again; or {repoint}", row.fix
+    # A file where a directory must be is never offered a repair, which would destroy it.
+    a_file = not (os.path.isdir(blocking) or os.path.islink(blocking))
+    repair = None if a_file else f"repair {blocking} ({fact}), then connect again"
+    assert row.fix == "; or ".join(filter(None, [repair, repoint])), row.fix
     assert welcome.refused == reason, welcome
-    assert _STEP_TWO_REMEDY in step_two, step_two
+    assert (_UNREPAIRABLE if a_file else _STEP_TWO_REMEDY) in step_two, step_two
     assert not made, "nothing written before the refusal"
     # Each remedy, done as worded (the variable's in a shell started again), connects and
     # clears the row.
@@ -852,11 +860,14 @@ def test_a_config_dir_connect_cannot_make_is_named_everywhere_and_never_offered_
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", named_env)
     if os.path.isdir(blocking):  # repaired: one this user may write
         os.chmod(blocking, 0o755)
-    else:  # repaired: a directory where a file or a link was
+    elif not a_file:  # repaired: a directory where the link was
         blocking.unlink()
         blocking.mkdir()
-    done["repair"] = [runner.invoke(app, ["agents", "connect", "claude-code"])]
-    rows["repair"] = diagnostics._check_claude_code()
+    if repair is not None:
+        done["repair"] = [runner.invoke(app, ["agents", "connect", "claude-code"])]
+        rows["repair"] = diagnostics._check_claude_code()
+    else:
+        assert blocking.read_text(encoding="utf-8") == "not a directory", "the file is kept"
     codes = {words: [result.exit_code for result in results] for words, results in done.items()}
     assert codes == {words: [0] * len(results) for words, results in done.items()}, {
         words: [result.output for result in results] for words, results in done.items()
@@ -948,22 +959,15 @@ def test_a_settings_json_linked_nowhere_is_refused_first_with_a_remedy_that_work
     assert all("cannot be written" not in row.detail for row in rows.values()), rows
 
 
+_BESIDE_NO_CLAUDE = "beside a connected ~/.claude, no claude on PATH"
 _NOT_A_DIRECTORY_TO_READ = [
     pytest.param("Claude Code's state file", id="state file"),
     pytest.param("Claude Code's state file, beside a connected ~/.claude", id="state file beside"),
-    pytest.param(
-        "Claude Code's state file, beside a connected ~/.claude, no claude on PATH",
-        id="state file beside, no claude",
-    ),
+    pytest.param(f"Claude Code's state file, {_BESIDE_NO_CLAUDE}", id="state file, no claude"),
     pytest.param("in a folder this user cannot enter", id="unenterable", marks=_NEEDS_DENIED_READS),
     pytest.param(
-        "in a folder this user cannot enter, beside a connected ~/.claude",
-        id="unenterable beside",
-        marks=_NEEDS_DENIED_READS,
-    ),
-    pytest.param(
-        "in a folder this user cannot enter, beside a connected ~/.claude, no claude on PATH",
-        id="unenterable beside, no claude",
+        f"in a folder this user cannot enter, {_BESIDE_NO_CLAUDE}",
+        id="unenterable, no claude",
         marks=_NEEDS_DENIED_READS,
     ),
 ]
@@ -978,13 +982,16 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
     shape: str,
 ) -> None:
     """`CLAUDE_CONFIG_DIR=~/.claude.json`, a slip for ~/.claude that names Claude Code's own
-    state file, or a directory in a folder this user cannot enter: the only remedy printed
-    was to make a settings.json inside it, with no word of the variable; beside a connected
-    ~/.claude the row was green, and with no `claude` on the doctor's PATH it still was. In
-    the folder this user cannot enter, `doctor --json` printed nothing and `uninstall
-    --dry-run` ended in a traceback (review of #257). Named with the operating system's
-    answer on any PATH, and each remedy, done as worded, lets connect write and clears the
-    row: repairing it, or the variable in a shell started again."""
+    state file, or a directory in a folder this user cannot enter: the remedy named the
+    settings.json inside it, which for ~/.claude.json meant destroying that file; beside a
+    connected ~/.claude the row was green, and with no `claude` on the doctor's PATH it
+    still was; `doctor --json` printed nothing and `uninstall --dry-run` ended in a
+    traceback in the folder this user cannot enter (review of #257). Named on any PATH,
+    with the first path that blocks and what the operating system says of it; a file
+    there is never offered a repair. Each remedy, done as worded, lets connect write and
+    clears the row, and the file is left as it was."""
+    if os.name == "nt" and "link" in shape:
+        pytest.skip("links need a privilege on Windows")
     on_path = None if "no claude" in shape else "/opt/homebrew/bin/claude"
     monkeypatch.setattr(agent_core, "claude_on_path", lambda: on_path)
     home = isolated_agent_home
@@ -994,22 +1001,23 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
         _connect(runner)
     locked = home / "locked"
     if "enter" in shape:
-        where = locked / "claude"
+        where = blocking = locked / "claude"
         where.mkdir(parents=True)
+        blocking = locked
+    elif "state file" in shape:
+        where = blocking = home / ".claude.json"
+        where.write_text('{"numStartups": 7}', encoding="utf-8")
+    elif "under a file" in shape:
+        blocking = home / "notes"
+        blocking.write_text('{"numStartups": 7}', encoding="utf-8")
+        where = blocking / "claude"
     else:
-        where = home / ".claude.json"
-        where.write_text("{}", encoding="utf-8")
+        where = blocking = home / ".claude-work"
+        where.symlink_to(where.name if "loop" in shape else home / "gone" / "claude")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(where))
     if "enter" in shape:
         locked.chmod(0)
     try:
-        error: str | None = None  # Windows: a path through a file is one not there
-        try:
-            (where / "settings.json").read_text(encoding="utf-8")
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            error = exc.strerror
         built = paths.db_path().exists()
         row = diagnostics._check_claude_code()
         welcome = first_run.probe_claude(sign_in=False, which=lambda _name: "/opt/claude")
@@ -1017,20 +1025,33 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
         made = paths.db_path().exists() != built
         doctor = runner.invoke(app, ["--json", "doctor"])
         uninstall = runner.invoke(app, ["--json", "uninstall", "--dry-run"])
+        if "enter" in shape:
+            fact = f"this user may not enter {locked}"
+        elif os.path.islink(blocking):
+            fact = f"{blocking} is a link to {os.readlink(blocking)}: {_stat_error(blocking)}"
+        else:
+            fact = f"{blocking} is not a directory"
     finally:
         if locked.exists():
-            locked.chmod(0o755)  # repaired, for the remedies below
+            locked.chmod(0o755)
     from aisquare.cli.ui.views.welcome import claude_text
 
-    settings = where / "settings.json"
-    fact = error if error is not None else f"{where} is not a directory"
-    reason = f"can't {'read' if error is not None else 'write'} {settings}: {fact}"
-    assert json.loads(clicked.stdout)["detail"] == reason, clicked.stdout
-    assert f"hooks cannot be written in {where}: {reason}" in row.detail, row
-    assert row.fix == f"repair {settings} ({fact}), then connect again; or {_REPOINT_FIX}", row.fix
+    a_file = os.path.isfile(blocking) and not os.path.islink(blocking)
+    repair = None if a_file else f"repair {blocking} ({fact}), then connect again"
+    # With no `claude` on PATH and nothing Claude Code made there, connect says it is not
+    # installed; the doctor names what stands in the way all the same.
+    unmade = on_path is None and not agent_core.present(where)
+    clicked_said = json.loads(clicked.stdout)
+    assert clicked.exit_code == 1, clicked.stdout
+    if unmade:
+        assert clicked_said["error"] == "not_installed", clicked_said
+    else:
+        assert clicked_said["detail"] == welcome.refused, (clicked_said, welcome)
+    assert f"hooks cannot be written in {where}: {welcome.refused}" in row.detail, row
+    assert row.fix == "; or ".join(filter(None, [repair, _REPOINT_FIX])), row.fix
     assert fix_commands([row]) == [], "no Connect: the click could only fail"
-    assert welcome.refused == reason, welcome
-    assert _STEP_TWO_REMEDY in claude_text(welcome, platform="linux").plain
+    step_two = claude_text(welcome, platform="linux").plain
+    assert (_UNREPAIRABLE if a_file else _STEP_TWO_REMEDY) in step_two, step_two
     assert not made, "nothing written before the refusal"
     for result in (doctor, uninstall):
         lines = [line for line in result.stdout.splitlines() if line.strip()]
@@ -1043,17 +1064,23 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(writable))
     done = {"repoint": runner.invoke(app, ["agents", "connect", "claude-code"])}
     rows = {"repoint": diagnostics._check_claude_code()}
-    assert where.is_file() or "enter" in shape, "Claude Code's state file is left as it was"
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(where))
-    if where.is_file():  # repaired: a directory where the file was
-        where.unlink()
-        where.mkdir()
-    done["repair"] = runner.invoke(app, ["agents", "connect", "claude-code"])
-    rows["repair"] = diagnostics._check_claude_code()
+    if repair is not None:  # repaired as worded: only the path it names
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(where))
+        if "enter" in shape:
+            locked.chmod(0o755)  # already, above: a folder this user may enter
+        elif "loop" in shape:
+            blocking.unlink()
+            blocking.mkdir()
+        else:
+            (home / "gone" / "claude").mkdir(parents=True)  # the link leads somewhere
+        done["repair"] = runner.invoke(app, ["agents", "connect", "claude-code"])
+        rows["repair"] = diagnostics._check_claude_code()
     assert {words: result.exit_code for words, result in done.items()} == dict.fromkeys(done, 0), {
         words: result.output for words, result in done.items()
     }
     assert all("cannot be written" not in row.detail for row in rows.values()), rows
+    if a_file:
+        assert blocking.read_text(encoding="utf-8") == '{"numStartups": 7}', "left as it was"
 
 
 def test_a_link_loop_windows_reports_as_einval_is_named_in_its_own_words(
@@ -1131,9 +1158,9 @@ def test_the_variables_remedy_is_never_unset_and_done_as_worded_clears_the_row(
     same refused directory. For a recorded ~/.claude, pointing the variable elsewhere was
     offered, and done, the row still named it: the doctor grades a recorded directory
     whatever the variable says (review of #257). The variable's remedy never says unset
-    and never comes first; for a recorded one it comes with the disconnect that takes it
-    out, and only where that disconnect would work. Each remedy printed, done as worded,
-    lets connect write and clears the row."""
+    and never comes first; for a recorded one it comes
+    with the disconnect that takes it out, and only where that disconnect would work.
+    Each remedy printed, done as worded, lets connect write and clears the row."""
     if os.name == "nt" and "may not write" in shape:
         pytest.skip("mode 555 denies nothing on NTFS")
     monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
@@ -1147,6 +1174,15 @@ def test_the_variables_remedy_is_never_unset_and_done_as_worded_clears_the_row(
         (claude / "settings.json").write_text("[1]", encoding="utf-8")
     elif "may not write" in shape:
         home.chmod(0o555)
+    elif "outside" in shape:
+        claude.mkdir()
+        _connect(runner)
+        claude = home / "work" / "claude"
+        claude.mkdir(parents=True)
+        shutil.copy(home / ".claude" / "settings.json", claude / "settings.json")
+        _hooks_run(claude / "settings.json", str(tmp_path / "old" / "bin" / "aisquare"))
+        (claude / "settings.json").chmod(0o444)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
     else:
         claude.mkdir()
         _connect(runner)
@@ -1167,6 +1203,9 @@ def test_the_variables_remedy_is_never_unset_and_done_as_worded_clears_the_row(
         home.chmod(0o555)
 
     fixes = [_repair(refusal)]
+    if "outside" in shape:
+        generated = "or point its hooks at this install where that file is generated"
+        fixes = [f"{fixes[0]}, {generated}"]
     if "recorded" not in shape:
         fixes.append(_REPOINT_FIX)
     elif "CLAUDE.md" in shape:  # disconnect would take it out: no hooks to rewrite there
@@ -1191,6 +1230,8 @@ def test_the_variables_remedy_is_never_unset_and_done_as_worded_clears_the_row(
             monkeypatch.setenv("CLAUDE_CONFIG_DIR", named)
     if "may not write" in shape:  # repaired: a HOME this user may write
         home.chmod(0o755)
+    elif "outside" in shape:  # repaired: a settings.json this user may write
+        (claude / "settings.json").chmod(0o644)
     elif "CLAUDE.md" in shape:
         (claude / "CLAUDE.md").write_text("# Prefs\n", encoding="utf-8")
     else:

@@ -252,8 +252,8 @@ class Refusal:
     writes anything (:func:`access`)."""
 
     path: Path
-    """The path that blocks it: settings.json, a context file, the directory itself, or the
-    nearest path on the way to a directory connect would make."""
+    """The first path that blocks it: what stands where the config dir or a folder on the
+    way to it must be (:func:`in_the_way`), else the file connect read or would write."""
     why: str
     """The refusal, in the command's own words."""
     fact: str = ""
@@ -263,6 +263,10 @@ class Refusal:
     this_shell: bool = False
     """Whether the directory is the one sessions from this shell read, which pointing
     ``CLAUDE_CONFIG_DIR`` at another directory moves them off."""
+    repairable: bool = True
+    """False for a file standing where a directory must be (``CLAUDE_CONFIG_DIR`` naming
+    ``~/.claude.json``, Claude Code's own state file): repairing that path in place would
+    destroy it, so no surface offers to (review of #257)."""
 
 
 @dataclass(frozen=True)
@@ -318,21 +322,35 @@ def _connect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
         if where is not None:
             blocked = _cannot_make(where)
             if blocked is not None:
-                blocking, fact = blocked
-                return Refusal(blocking, f"can't create {where}: {fact}", fact, here)
+                return _blocked(f"can't create {where}: {blocked[1]}", *blocked, here)
         elif config_dir is not None:
             _check_found(name, config_dir)
         _read_before_writing(name, config_dir)
     except (AgentFileUnreadableError, AgentNotInstalledError) as exc:
-        path = getattr(exc, "path", None) or spec.home
-        return Refusal(path, str(exc), str(exc).partition(f"{path}: ")[2] or str(exc), here)
+        return _refused(spec, str(exc), getattr(exc, "path", None) or spec.home, here)
     except OSError as exc:
         # Fails open into a named refusal: the doctor and `agents list` ask this for every
         # directory, and a traceback here cost them their whole output (review of #257).
         path = Path(os.fsdecode(exc.filename)) if exc.filename else spec.home
-        fact = exc.strerror or str(exc)
-        return Refusal(path, f"can't read {path}: {fact}", fact, here)
+        return _refused(spec, f"can't read {path}: {exc.strerror or exc}", path, here)
     return None
+
+
+def _refused(spec: agent_core.AgentSpec, why: str, path: Path, here: bool) -> Refusal:
+    """Connect's refusal ``why``, naming the first path that blocks: what stands in the way
+    of the config dir itself (:func:`in_the_way`), else ``path``, the file it names. A
+    settings.json inside ~/.claude.json was named, and its repair destroyed that file."""
+    blocked = in_the_way(spec.home)
+    if blocked is not None:
+        return _blocked(why, *blocked, here)
+    return Refusal(path, why, why.partition(f"{path}: ")[2] or why, here)
+
+
+def _blocked(why: str, blocking: Path, fact: str, here: bool) -> Refusal:
+    """A refusal naming ``blocking``, where a directory must be: repairable where it is a
+    directory or a link, never a file, which a repair would destroy."""
+    repairable = os.path.isdir(blocking) or os.path.islink(blocking)
+    return Refusal(blocking, why, fact, here, repairable=repairable)
 
 
 def _disconnect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
@@ -439,9 +457,35 @@ def _cannot_make(where: Path) -> tuple[Path, str] | None:
     Connect is offered that this first step refuses. It is the nearest path on the way
     that is there: "no directory it can be made in" named none (review of #257).
     """
-    blocking = next((p for p in (where, *where.parents) if os.path.lexists(p)), None)
+    blocking = _nearest(where)
     stopped = None if blocking is None else _no_room(blocking)
     return None if blocking is None or stopped is None else (blocking, stopped)
+
+
+def in_the_way(directory: Path) -> tuple[Path, str] | None:
+    """The first path that stops this user entering ``directory``, and what the operating
+    system says of it, or ``None`` where it is a directory this user can enter, or is
+    simply not there yet under one: it, or the nearest path on the way that is there
+    (:func:`_cannot_make`'s walk), as a file, a link to nothing, or a folder this user may
+    not enter. Where a read failed under such a path, the settings.json it read was named,
+    and its repair meant destroying the file in the way (review of #257)."""
+    if _enterable(directory):
+        return None
+    blocking = _nearest(directory)
+    if blocking is None or (blocking != directory and _enterable(blocking)):
+        return None
+    if os.path.isdir(blocking):
+        return blocking, f"this user may not enter {blocking}"
+    return blocking, _no_room(blocking) or f"{blocking} is not a directory"
+
+
+def _nearest(path: Path) -> Path | None:
+    """``path`` or the nearest of its parents that is there (a link counts as there)."""
+    return next((p for p in (path, *path.parents) if os.path.lexists(p)), None)
+
+
+def _enterable(path: Path) -> bool:
+    return os.path.isdir(path) and os.access(path, os.X_OK)
 
 
 def _no_room(folder: Path) -> str | None:

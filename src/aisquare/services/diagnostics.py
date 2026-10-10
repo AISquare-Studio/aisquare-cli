@@ -1120,7 +1120,7 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     if coders is not None:
         problems.append(coders[0])
         fixes.extend(coders[1])
-    return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
+    return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(filter(None, fixes)))
 
 
 def _coders_missed(
@@ -1203,7 +1203,7 @@ def _short_timeouts(
     if coders is not None:  # the coders' gap, said on this branch too (_coders_missed)
         problems.append(coders[0])
         fixes.extend(coders[1])
-    return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(fixes))
+    return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(filter(None, fixes)))
 
 
 #: For the directory sessions from this shell read; asq and aisquare read the variable
@@ -1218,30 +1218,34 @@ def _refused_fix(
     directory: Path, refusal: agents_service.Refusal, *, also: str | None = None
 ) -> str:
     """What changes ``refusal``, connect's for ``directory`` (``agents_service.access``): to
-    repair the path that blocks, or what generates a settings.json read-only by design
-    (``also``); for the directory sessions from this shell read, CLAUDE_CONFIG_DIR, with
-    the disconnect that takes out one the doctor grades anyway (recorded, or holding
-    aisquare), where it would work and leave no plugin; for another recorded, forgetting
+    repair the path that blocks, unless it is a file where a directory must be, or what
+    generates a settings.json read-only by design (``also``); for the directory sessions
+    from this shell read, CLAUDE_CONFIG_DIR, with the disconnect that takes out one the
+    doctor grades anyway (recorded, or holding aisquare), where it would work and leave
+    no plugin; for another recorded, forgetting
     it. Each step made for one state of the path met a state it failed in (review of #257).
+    Empty where none applies: the row's fact is all there is.
     """
     spec = agent_core.spec("claude-code", directory)
-    fix = f"repair {refusal.path} ({refusal.fact}), then connect again"
-    if also is not None and spec is not None and refusal.path == spec.settings_path:
-        fix += f", or {also} where that file is generated"
+    fixes: list[str] = []
+    if refusal.repairable:
+        fixes.append(f"repair {refusal.path} ({refusal.fact}), then connect again")
+        if also is not None and spec is not None and refusal.path == spec.settings_path:
+            fixes[0] += f", or {also} where that file is generated"
     key = agent_core.dir_identity(directory)
     recorded = key in {agent_core.dir_identity(p) for p in agent_core.connected_dirs("claude-code")}
-    held = agent_core.holds_aisquare(directory)
     leaves = agents_service.access("claude-code", directory).disconnect is None and not (
         agent_core.plugin_route_supported() and agent_core.claude_plugin(directory)
     )
     disconnect = f"aisquare agents disconnect claude-code --config-dir {directory}"
+    held = agent_core.holds_aisquare(directory)
     if refusal.this_shell and not (recorded or held):
-        return f"{fix}; or {_REPOINT}"
-    if refusal.this_shell and leaves:
-        return f"{fix}; or {_REPOINT}, and disconnect this one: {disconnect}"
-    if recorded and leaves:
-        return f"{fix}; or forget it: {disconnect}"
-    return fix
+        fixes.append(_REPOINT)
+    elif refusal.this_shell and leaves:
+        fixes.append(f"{_REPOINT}, and disconnect this one: {disconnect}")
+    elif recorded and leaves:
+        fixes.append(f"forget it: {disconnect}")
+    return "; or ".join(fixes)
 
 
 def _disconnect_fix(directory: Path, lead: str) -> str:

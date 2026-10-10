@@ -128,6 +128,9 @@ class ClaudeState:
     that is not a JSON object or that this user may not write, or a CLAUDE.md it cannot
     read (``agents.connect_refusal``). Connect could only fail, so step 2 says why
     instead of offering it (review of #257)."""
+    refused_repairable: bool = True
+    """False where what blocks is a file standing where the config dir must be
+    (``agents.Refusal.repairable``): step 2 never tells anyone to repair that."""
     signed_in: bool | None = None
     """``None`` when this probe did not look (the periodic one skips it)."""
     problem: str | None = None
@@ -247,11 +250,13 @@ def probe_claude(
         except Exception as exc:
             problems.append(f"could not read the hook settings: {_why(exc)}")
     refused: str | None = None
+    refused_repairable = True
     if not is_connected and switched_off is None:
         try:
-            refused = (
-                refusal() if refusal is not None else agents_service.connect_refusal("claude-code")
-            )
+            if refusal is not None:
+                refused = refusal()
+            elif (found := agents_service.access("claude-code").connect) is not None:
+                refused, refused_repairable = found.why, found.repairable
         except Exception as exc:
             problems.append(f"could not read the hook settings: {_why(exc)}")
     signed: bool | None = None
@@ -269,6 +274,7 @@ def probe_claude(
         manager_only=manager_only,
         hooks_off=switched_off,
         refused=refused,
+        refused_repairable=refused_repairable,
         signed_in=signed,
         problem="; ".join(problems) or None,
     )

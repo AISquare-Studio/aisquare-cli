@@ -224,6 +224,34 @@ def test_a_missing_binary_is_flagged_and_nothing_is_run(
     assert check.fix == f"aisquare agents connect claude-code --config-dir {config}"
 
 
+def test_a_script_whose_interpreter_is_gone_cannot_start_and_nothing_is_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path
+) -> None:
+    """A console script whose ``#!`` Python is gone (``uv python uninstall``) exists, so it was
+    probed for a version that could only fail and graded "whose version could not be
+    read", while the plugin's launcher already counts it dead (review of #257). One
+    verdict, the launcher's (``_starts``): it cannot start, and no process is run."""
+    if os.name == "nt":
+        pytest.skip("a #! interpreter is a POSIX shape")
+    _this_install(monkeypatch, tmp_path)
+    _never_probe(monkeypatch)
+    orphan = tmp_path / "old" / "bin" / "aisquare"
+    orphan.parent.mkdir(parents=True)
+    orphan.write_text("#!/nonexistent/python3.11\nprint('never')\n", encoding="utf-8")
+    orphan.chmod(0o755)
+    config = isolated_agent_home / ".claude"
+    _write_hooks(config, str(orphan))
+    _connect(config)
+
+    verdict = agents.classify_hook_binary(agents.HookBinary(orphan))
+    check = diagnostics._check_claude_code()
+
+    assert verdict == (agents.HOOK_BINARY_MISSING, None)
+    assert check.status is CheckStatus.warn
+    assert f"{orphan}, which cannot start" in check.detail, check.detail
+    assert check.fix == f"aisquare agents connect claude-code --config-dir {config}"
+
+
 def test_a_binary_that_will_not_say_its_version_is_not_trusted(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path
 ) -> None:

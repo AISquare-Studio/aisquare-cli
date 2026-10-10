@@ -818,6 +818,7 @@ def test_a_stale_aisquare_the_plugin_runs_is_graded(
     old = tmp_path / "pipx" / "aisquare"
     old.parent.mkdir()
     old.write_text("#!/bin/sh\n", encoding="utf-8")
+    old.chmod(0o755)  # a program that can start: one that cannot is graded gone
     monkeypatch.setattr(agent_core, "plugin_runner", lambda: old)
     monkeypatch.setattr(agent_core, "hook_binary_version", lambda argv, **_kwargs: "0.6.0")
     _install_plugin(claude)

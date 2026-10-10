@@ -1806,6 +1806,7 @@ def _claude_code_state(
         other = tmp_path / "old" / "aisquare"
         other.parent.mkdir()
         other.write_text("#!/bin/sh\n", encoding="utf-8")
+        other.chmod(0o755)  # one that can start: one that cannot is graded gone
         _run_another_install(claude, other)
         monkeypatch.setattr(agent_core, "hook_binary_version", lambda argv, **_kwargs: "0.7.0")
     elif state == "switched off beside missing hooks":

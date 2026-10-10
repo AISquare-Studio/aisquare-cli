@@ -812,7 +812,11 @@ def _hook_binary_problems(sites: list[agent_core.HookSiteHealth]) -> list[str]:
     for (state, binary, version), dirs in groups.items():
         where = ", ".join(dirs)
         if state == agent_core.HOOK_BINARY_MISSING:
-            clauses.append(f"hooks in {where} point at {binary}, which does not exist")
+            gone = binary is None or not os.path.exists(binary)
+            clauses.append(
+                f"hooks in {where} point at {binary}, which "
+                + ("does not exist" if gone else "cannot start")
+            )
         elif state == agent_core.HOOK_BINARY_UNKNOWN:
             clauses.append(f"hooks in {where} point at {binary}, whose version could not be read")
         else:
@@ -962,10 +966,10 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
         if site.plugin is not None and agent_core.hook_commands("claude-code", site.config_dir)
     ]
     # Doubled directories are graded too. The plugin's copies stand down only beside
-    # hooks whose program can start, as its launcher decides (``agent_core.hooks_start``),
-    # so beside dead ones the plugin runs instead: that is not "two ways", and those hooks
-    # fail on every event (review of #249).
-    dead = [site for site in doubled if not agent_core.hooks_start("claude-code", site.config_dir)]
+    # hooks whose program can start, as its launcher decides (``agent_core._starts``, the
+    # MISSING verdict), so beside dead ones the plugin runs instead: that is not "two
+    # ways", and those hooks fail on every event (review of #249).
+    dead = [site for site in doubled if site.binary_state == agent_core.HOOK_BINARY_MISSING]
     wrong_binary = [
         site
         for site in graded

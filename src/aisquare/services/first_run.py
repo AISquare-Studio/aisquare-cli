@@ -235,6 +235,20 @@ def probe_claude(
         # worktree enables it too: unconfirmed, the coders may run without aisquare under
         # "Your fleet is up." (sweep 2 of #257).
         is_connected = connected() if connected is not None else _connected_default(cwd)
+        ambient = agent_core.ambient_hook_dir("claude-code")
+        if (
+            is_connected
+            and connected is None
+            and ambient is not None
+            and not agent_core.hooks_can_start("claude-code", ambient)
+            and not (agent_core.plugin_route_supported() and agent_core.claude_plugin(ambient))
+        ):
+            # The shared check reads aisquare's hook text, never what it runs: hooks naming
+            # a program that is gone or cannot start fail every event, unless the plugin
+            # runs in their place, and the fleet started under "Your fleet is up" (review of
+            # #257). Connect points them at this install.
+            problems.append("aisquare's hooks name a program that does not exist or cannot start")
+            is_connected = False
         if is_connected and connected is None and cwd is not None:
             coders = coder_folder(cwd)
             manager_only = coders != cwd and not _connected_default(coders)

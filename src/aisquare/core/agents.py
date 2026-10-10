@@ -828,15 +828,12 @@ def _starts(program: Path) -> bool:
     return os.path.isfile(interpreter) and os.access(interpreter, os.X_OK)
 
 
-def hooks_start(name: str, config_dir: Path) -> bool:
-    """Whether any of aisquare's hooks in ``config_dir`` names a program that can start
-    (:func:`_starts`; for a module-form hook, its interpreter): the plugin's launcher
-    stands down beside such a hook, and runs in its place beside any other (its
-    ``_runnable``). Counted as dead only when gone, a script whose ``#!`` interpreter is
-    gone was graded "two ways", and the fix offered to uninstall the one route that ran
-    (review of #257)."""
+def hooks_can_start(name: str, config_dir: Path) -> bool:
+    """Whether every aisquare hook in ``config_dir`` names a program that can start
+    (:func:`_starts`; for a module-form hook, its interpreter): the path-only half of
+    :func:`classify_hook_binary`'s verdict, asked with no process, as Welcome asks it."""
     found = (hook_binary(command) for command in hook_commands(name, config_dir))
-    return any(binary is not None and _starts(binary.program) for binary in found)
+    return all(binary is None or _starts(binary.program) for binary in found)
 
 
 def launcher_finds(name: str) -> Path | None:
@@ -1112,7 +1109,8 @@ that reports the same version."""
 HOOK_BINARY_STALE = "stale"
 """The hooks run an aisquare that reports a different version from this one."""
 HOOK_BINARY_MISSING = "missing"
-"""The program the hooks name is not on disk — every hook fails, every session."""
+"""The program the hooks name is not on disk, or cannot start (:func:`_starts`: a script
+whose ``#!`` interpreter is gone) — every hook fails, every session."""
 HOOK_BINARY_UNKNOWN = "unknown"
 """The program is on disk but its version could not be read: it did not run, exited
 non-zero, or printed nothing that parses as a version."""
@@ -1338,10 +1336,10 @@ def classify_hook_binary(binary: HookBinary) -> tuple[str, str | None]:
     directory is asked its version, and it is asked ONCE per doctor run however
     many directories name it (see ``hook_site_health``'s cache).
     """
-    # os.path.exists: Path.exists raises PermissionError on 3.11 to 3.13 (3.14 answers
-    # False) for a program in a directory this user cannot enter, which cost `doctor` its
-    # report; such a program is as good as gone.
-    if not os.path.exists(binary.program):
+    # The launcher's own test (_starts), which never raises: a program that is gone, in a
+    # directory this user cannot enter, or a script whose #! interpreter is gone fails
+    # every event, and its --version probe could only fail (review of #257).
+    if not _starts(binary.program):
         return HOOK_BINARY_MISSING, None
     if _same_install(binary):
         return HOOK_BINARY_CURRENT, __version__

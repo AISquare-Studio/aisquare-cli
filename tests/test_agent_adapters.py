@@ -1542,6 +1542,56 @@ def test_a_sibling_that_enables_the_plugin_is_found_with_one_read_of_its_setting
     assert reads.count(str(work / "plugins" / "installed_plugins.json")) == 1, reads
 
 
+@pytest.mark.parametrize(
+    "program", ["gone", "a script whose #! interpreter is gone", "gone, the plugin runs instead"]
+)
+def test_welcome_calls_hooks_that_cannot_start_not_connected_and_connect_points_them_here(
+    runner: CliRunner,
+    claude_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    program: str,
+) -> None:
+    """Hooks naming /opt/gone/venv/bin/aisquare, or a script whose ``#!`` Python is gone:
+    the shared check reads the hook text, so Welcome step 2 said connected and enabled
+    Start manager, and every event of the fleet failed while the doctor warned (review
+    of #257). Not connected, with the reason, and Connect points them at this install.
+    Beside the plugin, whose launcher runs in their place, they are connected."""
+    from aisquare.cli.ui.views.welcome import claude_text
+
+    if os.name == "nt" and program != "gone":
+        pytest.skip("a #! interpreter and the plugin route are POSIX shapes")
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    _connect(runner)
+    lost = tmp_path / "opt" / "gone" / "venv" / "bin" / "aisquare"
+    if "script" in program:
+        lost.parent.mkdir(parents=True)
+        lost.write_text("#!/nonexistent/python3.11\n", encoding="utf-8")
+        lost.chmod(0o755)
+    settings = claude_home / "settings.json"
+    _hooks_run(settings, str(lost))
+    if "plugin" in program:
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        data["enabledPlugins"] = {agent_core.CLAUDE_PLUGIN_ID: True}
+        settings.write_text(json.dumps(data), encoding="utf-8")
+        (claude_home / "plugins").mkdir()
+        records = {"version": 2, "plugins": {agent_core.CLAUDE_PLUGIN_ID: [{"scope": "user"}]}}
+        (claude_home / "plugins" / "installed_plugins.json").write_text(json.dumps(records))
+
+    state = first_run.probe_claude(sign_in=False, which=lambda _name: "/opt/claude")
+    if "plugin" in program:
+        assert state.connected, "the plugin's launcher runs in the dead hooks' place"
+        return
+    step_two = claude_text(state, platform="linux").plain
+    connected = runner.invoke(app, ["agents", "connect", "claude-code"])
+    after = first_run.probe_claude(sign_in=False, which=lambda _name: "/opt/claude")
+
+    assert not state.connected and not state.ready, state
+    assert state.problem == "aisquare's hooks name a program that does not exist or cannot start"
+    assert "not connected — Connect installs aisquare's hooks" in step_two, step_two
+    assert connected.exit_code == 0 and after.connected, (connected.output, after)
+
+
 def test_a_welcome_tick_reads_settings_json_fewer_times(
     claude_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

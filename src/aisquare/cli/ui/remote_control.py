@@ -280,7 +280,8 @@ class RemoteController:
         self._reading_lock = threading.Lock()
         self._last_write: Future[None] | None = None
         self._writing_since: float | None = None
-        """When the writes in hand began, while any is queued or running."""
+        """When the writes the controls asked for began, while any is queued or running; the
+        process's first read is not one (:meth:`_remote_json_write`)."""
         self._writes_queued = 0
         self._deadline_writes = 0
         """Writes queued or running that hand the server a deadline already in hand
@@ -913,7 +914,9 @@ class RemoteController:
         with self._reading_lock:
             reading = self._reading
             if reading is None or reading.done():
-                reading = self._reading = self._remote_json_write(self._read_remote_json)
+                reading = self._reading = self._remote_json_write(
+                    self._read_remote_json, saving=False
+                )
             return reading
 
     def _read_remote_json(self) -> None:
@@ -937,11 +940,17 @@ class RemoteController:
             self.read_problem = None
 
     def _remote_json_write(
-        self, job: Callable[[], None], *, deadline: bool = False
+        self, job: Callable[[], None], *, deadline: bool = False, saving: bool = True
     ) -> Future[None]:
         """Hand ``job``, a write of ``remote.json`` and what follows it, to the writer's thread,
         after every write asked for before it. ``deadline``: it hands the server the deadline
-        in hand (:meth:`adopt_server_deadline` waits for it)."""
+        in hand (:meth:`adopt_server_deadline` waits for it).
+
+        ``saving``: a write a control asked for, which the status line says is saving once it
+        has waited :data:`SAVING_AFTER`. The process's first read is not one: in a home that
+        cannot be written it is asked for again at every paint, and each time it ran that
+        long, on a loaded machine, the panel said "saving to remote.json…" above "remote.json
+        could not be written", a save nobody had asked for in a home it says takes none."""
 
         def remote_json_run() -> None:
             try:
@@ -950,16 +959,18 @@ class RemoteController:
                 log.warning("remote: a write of remote.json failed", exc_info=True)
             finally:
                 with self._writes_lock:
-                    self._writes_queued -= 1
+                    if saving:
+                        self._writes_queued -= 1
+                        if not self._writes_queued:
+                            self._writing_since = None
                     if deadline:
                         self._deadline_writes -= 1
-                    if not self._writes_queued:
-                        self._writing_since = None
 
         with self._writes_lock:
-            if not self._writes_queued:
-                self._writing_since = time.monotonic()
-            self._writes_queued += 1
+            if saving:
+                if not self._writes_queued:
+                    self._writing_since = time.monotonic()
+                self._writes_queued += 1
             if deadline:
                 self._deadline_writes += 1
             written = self._writes.submit(remote_json_run)
@@ -1004,9 +1015,9 @@ class RemoteController:
     def status_line(self) -> str:
         """The status line: what Remote is doing or why it is not, then what ngrok's agent API
         allows while it is on (:attr:`NgrokTunnel.api_warning`), :data:`SAVING` while a write
-        of ``remote.json`` waits, one that did not land (:attr:`save_problem`), why the file
-        could not be read (:attr:`read_problem`) and a switch ``state.json`` refused, each on
-        a line of its own."""
+        of ``remote.json`` a control asked for waits, one that did not land
+        (:attr:`save_problem`), why the file could not be read (:attr:`read_problem`) and a
+        switch ``state.json`` refused, each on a line of its own."""
         tunnel = self.tunnel
         api = tunnel.api_warning if tunnel is not None else None
         since = self._writing_since

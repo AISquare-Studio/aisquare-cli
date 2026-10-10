@@ -1967,6 +1967,48 @@ def test_a_restore_starts_remote_once_remote_json_is_read_on_the_writers_thread(
     assert controller.running and server.running
 
 
+class UnwritableHomeServer(FakeServer):
+    """A server in a home that cannot be written: each first read of ``remote.json`` waits
+    for :attr:`reading`, then fails as the write it makes of the file fails there."""
+
+    def runtime(self) -> None:
+        assert self.reading is not None and self.reading.wait(10), "the read was never let go"
+        raise PermissionError(13, "Permission denied", "remote.json")
+
+
+def test_a_first_read_of_remote_json_that_waits_is_no_save_on_the_status_line() -> None:
+    """In a home that cannot be written, the process's first read of ``remote.json`` fails
+    and every paint asks for it again. Each one counted as a save, so one that ran past
+    :data:`SAVING_AFTER`, as on a loaded runner, put "saving to remote.json…" above
+    "remote.json could not be written" (CI of #243): a save nobody had asked for, in a home
+    the same line says takes none. A control's write is still said once it has waited."""
+    server = UnwritableHomeServer()
+    server.state_loaded, server.reading = False, threading.Event()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    unwritten = (
+        "remote.json could not be written — [Errno 13] Permission denied: 'remote.json'; "
+        "make its directory writable, or free some space"
+    )
+    assert controller.write_actions_allowed() is False  # a paint asks for the first read
+    time.sleep(remote_control.SAVING_AFTER)
+    assert controller.status_line() == ""
+    server.reading.set()
+    assert controller.writes_done(5)
+    assert controller.status_line() == unwritten
+
+    server.reading.clear()
+    assert controller.write_actions_allowed() is False  # the next paint asks again
+    time.sleep(remote_control.SAVING_AFTER)
+    assert controller.status_line() == unwritten, "the read again, said as a save"
+    controller.set_allow_write(True, wait=False)  # queued behind the read
+    time.sleep(remote_control.SAVING_AFTER)
+    assert controller.status_line().splitlines() == [remote_control.SAVING, unwritten]
+    server.reading.set()
+    assert controller.writes_done(5)
+    assert server.allow_write_calls == [True]
+    assert controller.status_line() == unwritten
+
+
 def test_a_url_ngrok_announces_after_the_wait_is_the_link_and_the_push_origin_all_the_same(
     tmp_path: Path,
 ) -> None:

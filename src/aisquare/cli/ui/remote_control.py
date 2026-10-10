@@ -77,6 +77,9 @@ OFF_WAIT_SECONDS = 1.0
 must be down, its tunnel gone and ``remote.json`` cleared before another starts, or the old
 Remote's last steps would undo the new one's. Past that, the switch says to try again rather
 than hold Textual's thread for the rest of a slow stop."""
+OFF_CLOSES_SECONDS = 2.0
+"""How long turning Remote off waits for the phones' sockets to close (4410) before it stops
+ngrok, through which alone the close reaches them (:meth:`RemoteController.turn_off`)."""
 
 UNREACHABLE = "Remote is on, but phones cannot reach it"
 """How news of a tunnel that is not up begins (:attr:`RemoteController.on_news`)."""
@@ -507,9 +510,15 @@ class RemoteController:
         Turning Remote off (the switch, auto-off) revokes every device after the
         farewell push, so no phone keeps a cookie for a Remote that is off: their
         sockets close with 4410, which the page reads as "Remote is off", and the
-        tunnel goes last so those closes can still reach them. Leaving the TUI
-        revokes nothing: ``restore()`` brings Remote back at the next start, and
-        the devices' own expiry bounds them meanwhile.
+        tunnel goes once those closes have reached them, :data:`OFF_CLOSES_SECONDS` at
+        most. Leaving the TUI revokes nothing: ``restore()`` brings Remote back at the
+        next start, and the devices' own expiry bounds them meanwhile.
+
+        ngrok stops before the server: uvicorn lets go of the port as it begins to stop,
+        then waits up to 5 s for a phone's write, and ngrok, stopped after it, forwarded
+        the public link to a free ``127.0.0.1:<port>`` all that while. Any account on the
+        machine may bind it, and a page's reconnect carried the token and its cookie
+        there, a cookie the next Remote takes after a quit (sweep 4 of #243).
 
         The controller reads off at once, and the stopping runs on a thread of its
         own (``remote-off``); ``wait=False`` returns without waiting for it, which is
@@ -569,33 +578,23 @@ class RemoteController:
 
         The writes the controls asked for before it land first (:meth:`_remote_json_write`): a
         start's deadline, written after this cleared it, would hold ``remote.json`` past
-        Remote."""
+        Remote. ngrok stops before the server, which holds the port until then."""
         failure: str | None = None
         self.writes_done()
         try:
             if served:
-                if persist:
-                    try:
-                        self._server.revoke_every_remote_device(reason)
-                    except Exception as exc:  # remote.json unwritable: Remote still goes off
-                        failure = f"Remote is off, but its devices could not be revoked — {exc}"
-                try:
-                    self._server.note_public_url(None)
-                    self._server.set_auto_off(None)
-                except Exception as exc:  # a deadline left in the file ends nothing
-                    failure = failure or f"Remote is off, but remote.json was not updated — {exc}"
-                else:
-                    self.save_problem = None  # that write put the whole state
-                try:
-                    self._server.stop_remote_server()
-                except Exception as exc:
-                    failure = failure or f"Remote is off, but stopping its server failed — {exc}"
+                failure = self._revoke_and_clear(persist, reason)
         finally:
             if tunnel is not None:
                 try:
                     tunnel.stop_tunnel()
                 except Exception as exc:  # a thread of its own: nobody else would hear of it
                     failure = failure or f"Remote is off, but ngrok did not stop cleanly — {exc}"
+            if served:
+                try:
+                    self._server.stop_remote_server()
+                except Exception as exc:
+                    failure = failure or f"Remote is off, but stopping its server failed — {exc}"
             if status is None:
                 self.message = failure
             elif failure is None or not report:
@@ -606,6 +605,31 @@ class RemoteController:
                 self.message = f"{status}. {failure}"
             if report:
                 self._remote_news(failure)
+
+    def _revoke_and_clear(self, persist: bool, reason: str) -> str | None:
+        """What turning off does while the server still holds its port: every device revoked
+        (``persist``), the public origin and the deadline cleared, and the revoked sockets'
+        closes waited for. What it could not do, as the status line says it; ``None`` when
+        it did all of it."""
+        failure: str | None = None
+        if persist:
+            try:
+                self._server.revoke_every_remote_device(reason)
+            except Exception as exc:  # remote.json unwritable: Remote still goes off
+                failure = f"Remote is off, but its devices could not be revoked — {exc}"
+        try:
+            self._server.note_public_url(None)
+            self._server.set_auto_off(None)
+        except Exception as exc:  # a deadline left in the file ends nothing
+            failure = failure or f"Remote is off, but remote.json was not updated — {exc}"
+        else:
+            self.save_problem = None  # that write put the whole state
+        if persist:
+            try:  # the 4410s reach the phones through ngrok alone, which stops next
+                self._server.remote_wait_for_closes(OFF_CLOSES_SECONDS)
+            except Exception:  # a close that never lands costs its phone the reason, no more
+                log.warning("remote: the phones' closes could not be waited for", exc_info=True)
+        return failure
 
     def wait_until_off(self, timeout: float | None = None) -> bool:
         """Wait for the server and ngrok of a Remote turned off to stop; whether they had.
@@ -624,9 +648,10 @@ class RemoteController:
         """Stop the ngrok of a Remote still turning off, on the calling thread, server or not.
 
         For a process about to end at once (a Ctrl-C while ``run_ui`` waits here): the
-        thread :meth:`turn_off` left stopping stops ngrok only once the server has stopped,
-        and it ends with the process, so the ngrok it had not reached yet ran on, its
-        tunnel still up. One that thread stopped already is stopped again for nothing.
+        thread :meth:`turn_off` left stopping stops ngrok only once the phones' sockets have
+        closed and ``remote.json`` is written, and it ends with the process, so the ngrok it
+        had not reached yet ran on, its tunnel still up. One that thread stopped already is
+        stopped again for nothing.
         """
         tunnel = self._stopping_tunnel
         if tunnel is not None:

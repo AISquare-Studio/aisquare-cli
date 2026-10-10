@@ -45,6 +45,10 @@ MAX_AUTO_OFF_MINUTES = 7 * 24 * 60
 #: (sweep of #243). Out of range, each is a usage error, in ``--json`` too.
 MIN_PORT, MAX_PORT = 1, 65535
 
+#: What a hand-started ngrok does once ``serve`` has let go of its port: the banner and the
+#: way out both say to stop it. The R panel stops its own ngrok before its server lets go.
+NGROK_LEFT_UP = "left up, it hands the phones' requests to whatever takes {address} next"
+
 #: The port in the link ``status`` and ``regenerate-password --new-link`` print: serve's,
 #: from the same option and variable. Built for the default port, the link of a serve on
 #: ``--port 18750`` or an exported ``AISQUARE_REMOTE_PORT`` refused every connection.
@@ -185,6 +189,9 @@ def serve_remote(
         except ValueError as exc:
             fail(str(exc), error="invalid_public_url", ref=public_url)
     state = _remote_runtime()
+    address = f"{remote_server.BIND}:{port}"
+    left_up = NGROK_LEFT_UP.format(address=address)
+    served: list[bool] = []
 
     def banner() -> None:
         """Printed once the port is bound: a link for a server that never came up is a lie.
@@ -194,6 +201,7 @@ def serve_remote(
         Extend is greyed out (review of #243, round 3, 12/13). The switch is read once,
         for both lines.
         """
+        served.append(True)
         info = state.connection_info(port)
         writes = state.allow_write
         payload = _describe_remote(info, allow_write=writes)
@@ -234,9 +242,9 @@ def serve_remote(
         # to 127.0.0.1, where this listens: the port alone is localhost to ngrok, ::1 first,
         # which any account here can listen on (ngrok_tunnel.UPSTREAM_HOST).
         console.print(
-            f"expose with: ngrok http {remote_server.BIND}:{port} --inspect=false   · Ctrl-C stops",
-            markup=False,
+            f"expose with: ngrok http {address} --inspect=false   · Ctrl-C stops", markup=False
         )
+        console.print(f"  stop that ngrok when this stops: {left_up}", markup=False)
         console.print(
             "  on a machine others use, also web_addr: false in ngrok.yml (ngrok config edit):"
             " its local API asks no one",
@@ -253,8 +261,18 @@ def serve_remote(
         fail(str(exc), error="remote_failed", detail=str(exc))
     except OSError as exc:  # remote.json would not write, say: anything but the port
         fail(f"the remote server could not run — {exc}", error="remote_failed", detail=str(exc))
-    if timed_out:
-        stderr_console().print("Remote turned off — the auto-off timer ran out", markup=False)
+    else:
+        if timed_out:
+            stderr_console().print("Remote turned off — the auto-off timer ran out", markup=False)
+    finally:
+        # Whatever ended it, once it served: the ngrok started beside it (the banner's) is the
+        # human's, and forwarded the public link on, to the port anyone here may bind now,
+        # with every page's reconnect, push tap and Home Screen launch (sweep 4 of #243).
+        if served:
+            stderr_console().print(
+                f"Remote is off — stop the ngrok you exposed it with, if any: {left_up}",
+                markup=False,
+            )
 
 
 @app.command("install-page")

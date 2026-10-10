@@ -556,7 +556,8 @@ ngrok http --url=your-name.ngrok-free.app --inspect=false 127.0.0.1:8750   # in 
 
 Give ngrok `127.0.0.1:8750`, never `8750` alone: it reads that as `localhost`,
 IPv6's `::1` first, where anyone on the machine can listen and be handed every
-phone's requests. Every ngrok account has one free static domain: with it the
+phone's requests; and stop it when `serve` stops, or it hands them to whatever
+takes the port next. Every ngrok account has one free static domain: with it the
 link survives a restart, and a notification opens its card rather than the feed.
 On a machine others use, also put `web_addr: false` in `ngrok.yml` (`ngrok config
 edit`): ngrok's local API asks no one for a password. The fleet UI's ngrok runs

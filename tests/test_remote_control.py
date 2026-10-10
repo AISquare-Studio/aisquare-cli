@@ -1354,6 +1354,7 @@ SERVER_CALLS = (
     "remote_password",
     "remote_served_elsewhere",
     "remote_state_loaded",
+    "remote_wait_for_closes",
     "runtime",
 )
 
@@ -1457,6 +1458,10 @@ class FakeServer(types.ModuleType):
     def note_public_url(self, url: str | None) -> None:
         self.calls.append("note_public_url")
         self.public_urls.append(url)
+
+    def remote_wait_for_closes(self, timeout: float) -> bool:
+        self.calls.append("remote_wait_for_closes")
+        return True
 
     def remote_auto_off_at(self) -> datetime | None:
         return self.server_auto_off_at
@@ -1735,25 +1740,80 @@ def tunnel_announced(controller: RemoteController, server: FakeServer) -> None:
     server.public_urls.clear()
 
 
+def told_tunnels(server: FakeServer) -> remote_control.TunnelFactory:
+    """Tunnels whose stop is one of ``server``'s calls, so its place among them is asserted."""
+
+    class Told(FakeTunnel):
+        def stop_tunnel(self) -> None:
+            server.calls.append("stop_tunnel")
+            super().stop_tunnel()
+
+    return lambda port: Told(port, url="https://x.ngrok-free.app", failure=None)
+
+
 def test_turning_remote_off_revokes_every_device_before_the_server_stops() -> None:
     """The farewell push goes from inside the revoke, so the order is the contract: revoke
     (farewell first), forget the public origin, then stop. Leaving the TUI revokes nothing."""
     server = fake_server()
-    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    controller = RemoteController(server=server, tunnel_factory=told_tunnels(server))
     controller.turn_on()
     tunnel_announced(controller, server)
     controller.turn_off()
-    assert server.calls == ["revoke_every_remote_device", "note_public_url", "stop_remote_server"]
+    assert server.calls == [
+        "revoke_every_remote_device",
+        "note_public_url",
+        "remote_wait_for_closes",
+        "stop_tunnel",
+        "stop_remote_server",
+    ]
     assert server.revoked_every == ["remote off"] and server.public_urls == [None]
     exiting = fake_server()
-    leaving = RemoteController(server=exiting, tunnel_factory=fake_tunnel_factory(url="x"))
+    leaving = RemoteController(server=exiting, tunnel_factory=told_tunnels(exiting))
     leaving.turn_on()
     tunnel_announced(leaving, exiting)
     leaving.shutdown_for_exit()
     assert exiting.revoked_every == [] and exiting.calls == [
         "note_public_url",
+        "stop_tunnel",
         "stop_remote_server",
     ]
+
+
+def test_ngrok_stops_once_the_phones_heard_remote_is_off_and_before_the_port_is_let_go() -> None:
+    """uvicorn lets go of the port as it begins to stop, then waits up to 5 s for a phone's
+    write, and ngrok stopped only after it: all that while the public link led to a free
+    ``127.0.0.1:8750``, which any account on the machine may bind, and a page's reconnect
+    carried the token and its cookie there (sweep 4 of #243). ngrok goes before the server,
+    and after the revoked sockets' 4410s, which reach the phones through it alone: by the
+    switch (above), by auto-off and by a quit, and while the server's stop takes its time
+    (:class:`SlowServer`, below)."""
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
+    timed = fake_server()
+    controller = RemoteController(
+        server=timed, tunnel_factory=told_tunnels(timed), now=lambda: clock[0]
+    )
+    controller.turn_on()
+    tunnel_announced(controller, timed)
+    clock[0] += timedelta(minutes=61)
+    assert controller.enforce_auto_off() is True
+    assert timed.calls == [
+        "revoke_every_remote_device",
+        "note_public_url",
+        "remote_wait_for_closes",
+        "stop_tunnel",
+        "stop_remote_server",
+    ]
+    assert timed.revoked_every == ["auto-off"]
+    slow = SlowServer()
+    controller = RemoteController(server=slow, tunnel_factory=told_tunnels(slow))
+    controller.turn_on()
+    tunnel_announced(controller, slow)
+    controller.shutdown_for_exit(wait=False)
+    assert slow.stopping.wait(5), "the server's stop began"
+    assert slow.calls == ["note_public_url", "stop_tunnel"] and slow.running, "ngrok went first"
+    slow.release.set()
+    assert controller.wait_until_off(5) and not slow.running
+    assert slow.calls == ["note_public_url", "stop_tunnel", "stop_remote_server"]
 
 
 def test_quitting_after_the_auto_off_time_came_turns_remote_off_as_auto_off() -> None:
@@ -2421,7 +2481,7 @@ def test_turning_remote_off_reads_off_at_once_and_stops_on_a_thread_of_its_own(
     assert not controller.running and controller.link_url() is None
     assert controller.message == remote_control.TURNING_OFF
     assert read_state()["remote_enabled"] is False
-    assert server.running and not tunnel.stopped, "still winding down"
+    assert server.running and tunnel.stopped, "ngrok went before the server let go of its port"
     assert controller.wait_until_off(0.05) is False
 
     controller.turn_on()
@@ -2430,7 +2490,7 @@ def test_turning_remote_off_reads_off_at_once_and_stops_on_a_thread_of_its_own(
 
     server.release.set()
     assert controller.wait_until_off(5)
-    assert not server.running and tunnel.stopped, "ngrok goes last, as ever"
+    assert not server.running and tunnel.stopped
     assert server.revoked_every == ["remote off"] and server.public_urls[-1] is None
     assert controller.message is None
     controller.turn_on()
@@ -2992,6 +3052,45 @@ def test_serve_says_to_turn_a_hand_started_ngroks_local_api_off(
     assert result.exit_code == 0, result.output
     assert "ngrok http 127.0.0.1:9004 --inspect=false" in result.output
     assert "web_addr: false in ngrok.yml" in result.output
+
+
+@pytest.mark.parametrize(
+    "ended", ["ctrl-c", "auto-off", "auto-off, not all of it done"], ids=lambda ended: ended
+)
+def test_serve_says_to_stop_the_ngrok_beside_it_once_it_lets_go_of_its_port(
+    monkeypatch: pytest.MonkeyPatch, ended: str
+) -> None:
+    """The ngrok the banner has the human start forwards the public link on once ``serve``
+    ends, Ctrl-C or auto-off, to a port any account on the machine may bind then: every
+    page's reconnect, push tap and Home Screen launch carried the token, and a cookie, to
+    whatever took it, and nothing said to stop it (sweep 4 of #243). The banner says so, and
+    so does the way out, after what ended it. A serve that never bound its port says
+    nothing of an ngrok."""
+    said = "left up, it hands the phones' requests to whatever takes 127.0.0.1:9005 next"
+
+    def served(dist: object, port: int, auto_off: int, *args: object, **kwargs: Any) -> bool:
+        kwargs["ready"]()
+        if ended == "auto-off, not all of it done":
+            raise remote_server.RemoteOffIncomplete("Remote turned off — but not all of it")
+        return ended == "auto-off"
+
+    monkeypatch.setattr(remote_server, "run_foreground", served)
+    result = CliRunner().invoke(cli, ["remote", "serve", "--port", "9005"])
+    assert result.exit_code == (1 if "not all" in ended else 0), result.output
+    assert f"stop that ngrok when this stops: {said}" in result.stderr
+    last = result.stderr.strip().splitlines()[-1]
+    assert last == f"Remote is off — stop the ngrok you exposed it with, if any: {said}"
+    if ended == "auto-off":
+        assert "Remote turned off — the auto-off timer ran out\n" in result.stderr
+    scripted = CliRunner().invoke(cli, ["--json", "remote", "serve", "--port", "9005"])
+    assert said in scripted.stderr and said not in scripted.stdout, "stdout stays JSON"
+
+    def unbound(*args: object, **kwargs: object) -> bool:
+        raise remote_server.RemoteBindError("cannot bind 127.0.0.1:9005 — in use")
+
+    monkeypatch.setattr(remote_server, "run_foreground", unbound)
+    refused = CliRunner().invoke(cli, ["remote", "serve", "--port", "9005"])
+    assert refused.exit_code == 1 and "ngrok" not in refused.stderr
 
 
 # --- another process serving this home (sweep of #243) ----------------------------------------

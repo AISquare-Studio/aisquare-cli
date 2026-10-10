@@ -624,6 +624,43 @@ def test_devices_lists_devices_and_delete_revokes(client: TestClient, runtime: R
     assert client.delete(f"{base(runtime)}/api/devices/{second}").status_code == 404
 
 
+def test_a_revoke_sent_again_with_its_request_id_gets_the_first_answer(
+    client: TestClient, runtime: Runtime
+) -> None:
+    """Revoking another device is a write, and every write takes a ``request_id`` (SPEC
+    §1.5); this one dropped it, so a retry of a revoke whose answer was lost read 404
+    ``not_found``, as if it had failed, and a malformed id was taken (sweep 5 of #243)."""
+    unlock(client, runtime)
+    second = unlock(make_client(client.app), runtime).json()["device"]["id"]
+    third = unlock(make_client(client.app), runtime).json()["device"]["id"]
+    runtime.set_allow_write(True)
+
+    def revoke(device_id: str, request_id: str) -> Any:
+        return client.request(
+            "DELETE", f"{base(runtime)}/api/devices/{device_id}", json={"request_id": request_id}
+        )
+
+    first = revoke(second, "rv-1")
+    assert (first.status_code, first.json()) == (
+        200,
+        {"ok": True, "id": second, "signed_out": False},
+    )
+    assert (revoke(second, "rv-1").status_code, revoke(second, "rv-1").json()) == (
+        200,
+        first.json(),
+    )
+    runtime.set_allow_write(False)
+    assert revoke(second, "rv-1").json() == first.json(), "a retry is answered before the gate"
+    runtime.set_allow_write(True)
+    reused = revoke(third, "rv-1")
+    assert (reused.status_code, reused.json()["error"]) == (409, "request_id_reused")
+    malformed = revoke(third, "bad id!!")
+    assert (malformed.status_code, malformed.json()["error"]) == (400, "invalid")
+    assert third in runtime.device_ids(), "neither revoked it"
+    recent = client.get(f"{base(runtime)}/api/actions/recent").json()["actions"]
+    assert [entry["request_id"] for entry in recent] == ["rv-1"]
+
+
 def test_regenerate_password_drops_every_device(client: TestClient, runtime: Runtime) -> None:
     unlock(client, runtime)
     new = runtime.regenerate_password()

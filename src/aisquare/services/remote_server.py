@@ -4795,17 +4795,35 @@ def build_remote_app(
         the write switch says. Another id is a change to who can reach the fleet,
         so a read-only phone cannot sign every other phone out, the owner's
         included. An id that is not a device's shape, or no device's, is a 404.
-        The revoke writes ``remote.json`` in a worker thread, as an unlock does, and
-        that thread asks the gates again first for another device's
-        (:meth:`RemoteKit.kit_write_still_allowed`): it may have waited for the pool.
+
+        Another device's revoke is a write like any other (SPEC §1.5), through
+        :meth:`RemoteKit.kit_gated`: its optional ``request_id``, sent again, is
+        answered with what the first one did, where the retry of a revoke whose answer
+        was lost read 404 ``not_found``, as if it had failed, and a malformed id went
+        unread (sweep 5 of #243). The ledger knows it by the device it names, so an id
+        reused for another device's revoke is 409 ``request_id_reused``, not the first
+        one's answer.
         """
         device = kit.kit_device(request)
         device_id = request.path_params["device_id"]
         own = device_id == device.id
         if not own and not DEVICE_ID.fullmatch(device_id):
             return kit.kit_refuse(404, "not_found", "no such device")
-        if not own and not kit.kit_write_allowed():
-            return kit.kit_refuse(403, "read_only", READ_ONLY_REASON)
+        if own:
+            return await devices_revoked(request, device, device_id)
+        return await kit.kit_gated(
+            request,
+            device,
+            f"devices/{device_id}",
+            lambda _body: devices_revoked(request, device, device_id),
+        )
+
+    async def devices_revoked(request: Request, device: Device, device_id: str) -> Response:
+        """:func:`devices_delete_endpoint`'s answer once it is let through. The revoke writes
+        ``remote.json`` in a worker thread, as an unlock does, and that thread asks the
+        gates again first for another device's (:meth:`RemoteKit.kit_write_still_allowed`):
+        it may have waited for the pool."""
+        own = device_id == device.id
 
         def revoke_now() -> bool:
             if not own:

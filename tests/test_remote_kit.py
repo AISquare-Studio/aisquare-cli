@@ -1078,6 +1078,28 @@ def _frame_within(ws: Any) -> dict[str, Any]:
     return frame
 
 
+def _frames_until(
+    ws: Any,
+    done: Callable[[list[dict[str, Any]]], bool],
+    frames: list[dict[str, Any]] | None = None,
+    *,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Frames appended to ``frames`` until ``done(frames)``; a failed test after ``limit`` of
+    them. A stream with a short heartbeat never goes silent, so :func:`_frame_within` keeps
+    answering, and a frame that never came was waited for unbounded: a regression hung CI
+    for its six hours instead of failing (sweep 5 of #243)."""
+    frames = [] if frames is None else frames
+    for _ in range(limit):
+        if done(frames):
+            return frames
+        frames.append(_frame_within(ws))
+    if done(frames):
+        return frames
+    kinds = [frame.get("agent", frame["type"]) for frame in frames[-10:]]
+    raise AssertionError(f"not there in {limit} frames; the last ones: {kinds}")
+
+
 def _lane_bug(*args: object) -> Any:
     raise RuntimeError("a bug in a lane")
 
@@ -1145,16 +1167,18 @@ def test_a_snapshot_that_hangs_holds_back_its_own_frame_and_no_other(
             ws.send_text(json.dumps({"subscribe": "stuck"}))
             ws.send_text(json.dumps({"subscribe": "free"}))
             started = time.monotonic()
-            while sum(frame["type"] == "heartbeat" for frame in seen) < 3:
-                seen.append(_frame_within(ws))
+            _frames_until(ws, lambda got: sum(f["type"] == "heartbeat" for f in got) >= 3, seen)
             runtime.set_allow_write(True)
-            while not (seen[-1]["type"] == "remote" and seen[-1]["payload"]["allow_write"]):
-                seen.append(_frame_within(ws))
+            _frames_until(
+                ws,
+                lambda got: got[-1]["type"] == "remote" and got[-1]["payload"]["allow_write"],
+                seen,
+            )
             held = time.monotonic() - started
             release.set()
-            after = [_frame_within(ws)]
-            while {"fleet", "stuck"} - {frame.get("agent", frame["type"]) for frame in after}:
-                after.append(_frame_within(ws))
+            after = _frames_until(
+                ws, lambda got: {"fleet", "stuck"} <= {f.get("agent", f["type"]) for f in got}
+            )
     finally:
         release.set()
     assert held < 5, f"the frames waited {held:.1f} s for the reads that hung"
@@ -1223,9 +1247,12 @@ def test_while_a_read_hangs_the_other_frames_still_come_once_a_tick(
                 if hang:
                     ws.send_text(json.dumps({"subscribe_fleet": None}))
                 ws.send_text(json.dumps({"subscribe": "coder-1"}))
-                while len(came) < 8:
+                for _ in range(100):  # bounded: a heartbeat may keep the socket from silence
+                    if len(came) == 8:
+                        break
                     if _frame_within(ws)["type"] == "pane":
                         came.append(time.monotonic())
+                assert len(came) == 8, f"{len(came)} pane frames in 100"
                 release.set()  # before the socket's end waits for the read's thread
         finally:
             release.set()
@@ -1432,8 +1459,9 @@ def test_a_socket_cycling_through_pane_labels_keeps_none_of_the_old_ones(
     def cycle(ws: Any, n: int) -> None:
         label = f"{n:03d}" + "x" * 4_000
         ws.send_text(json.dumps({"subscribe": label}))
-        while _until(ws, "pane")["agent"] != label:
-            pass
+        _frames_until(
+            ws, lambda got: bool(got) and got[-1]["type"] == "pane" and got[-1]["agent"] == label
+        )
         ws.send_text(json.dumps({"unsubscribe": label}))
 
     tracemalloc.start(32)

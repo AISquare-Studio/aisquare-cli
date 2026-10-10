@@ -1333,6 +1333,30 @@ def test_a_retry_lost_too_is_not_confirmed_and_its_result_still_arrives(
     assert lost["send"] == {"busy": False, "disabled": False}
 
 
+def test_an_answer_cut_off_halfway_is_a_lost_request_not_a_remote_that_went_off(
+    boot_report: dict[str, Any],
+) -> None:
+    """The page read an answer's body in the same try as its JSON, so a connection that
+    dropped halfway through a body read as an answer that was not JSON: the off screen, Remote
+    is off, over a send-keys that had run, its result never shown and no retry to fetch it,
+    while the machine was up all along (Chromium, ERR_CONTENT_LENGTH_MISMATCH). It is a lost
+    request now: the write goes again, with its request_id, once the page reconnects, and the
+    machine's ledger answers it; a read says it could not reach the machine."""
+    cut = boot_report["bodyCut"]
+    write = cut["write"]
+    assert write["waiting"]["off"] is None and write["waiting"]["sockets"] == 2
+    assert write["waiting"]["send"] == {"busy": True, "disabled": True}
+    first, retry = write["bodies"]
+    assert first == retry and first["text"] == "hello"  # the same request_id: run at most once
+    assert write["off"] is None and write["typed"] == ""
+    assert write["pending"] == 0 and write["orphans"] == 0
+    assert cut["read"] == {
+        "off": None,
+        "said": "Could not reach the machine — try again in a moment.",
+        "sockets": 1,
+    }
+
+
 def test_a_write_lost_long_ago_is_not_sent_again_when_the_phone_is_back(
     boot_report: dict[str, Any],
 ) -> None:

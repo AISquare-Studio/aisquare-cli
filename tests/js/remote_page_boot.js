@@ -266,8 +266,10 @@ function deferred() {
 
 /* Boot app.js at `hash`, the machine answering every request through `answer`:
  * (method, path, body) -> {status, json}, or "network" for a request that never
- * arrives, or a promise of either. `globals` adds to the browser (fakePush); `base` is
- * the page's own URL, the machine's at http by default. */
+ * arrives, or a promise of either; {status, json, cut: true} is an answer whose
+ * connection dropped halfway through its body, after its headers came. `globals` adds
+ * to the browser (fakePush); `base` is the page's own URL, the machine's at http by
+ * default. */
 function bootPage(hash, answer, globals, base) {
   const address = base || BASE;
   const doc = {
@@ -348,7 +350,11 @@ function bootPage(hash, answer, globals, base) {
     const reply = await answer(init.method, where, body);
     if (reply === "network") throw new TypeError("Failed to fetch");
     const text = JSON.stringify(reply.json);
-    return { ok: reply.status >= 200 && reply.status < 300, status: reply.status, headers: { get: () => null }, text: async () => text };
+    const read = async () => {
+      if (reply.cut) throw new TypeError("network error"); // as Chrome's ERR_CONTENT_LENGTH_MISMATCH
+      return text;
+    };
+    return { ok: reply.status >= 200 && reply.status < 300, status: reply.status, headers: { get: () => null }, text: read };
   };
   Object.assign(win, {
     document: doc,
@@ -631,6 +637,35 @@ async function lostTwice() {
   page.live().frame("action", { actions: [{ request_id: id, endpoint: "send-keys", status: 200, body: { sent: true }, at: "2026-10-07T10:13:00+00:00" }] });
   await settle();
   return { bodies, said, orphaned, later: page.toast(), send: sendState(page) };
+}
+
+/* A send-keys the machine ran and answered 200, its connection dropping halfway through the
+ * body, the socket healthy throughout; then the reconnect, and the retry answered whole. And
+ * the feed's first read cut the same way. Where the page is, what it sent, and what it says. */
+async function bodyCut() {
+  let calls = 0;
+  const page = await agentView({
+    "POST api/send-keys": () => {
+      calls += 1;
+      return { status: 200, json: { agent: "coder-1", project: PROJECT, sent: true }, cut: calls === 1 };
+    },
+  });
+  const say = await typeAndSend(page, "hello");
+  const shown = buttonNamed(page.main(), "Send") ? sendState(page) : null; // the off screen has none
+  const waiting = { off: page.run("S.off"), sockets: page.sockets.length, send: shown };
+  page.acceptSockets();
+  paneCame(page);
+  await settle();
+  const feed = bootPage("#/", signedIn({ "GET api/needs": () => ({ status: 200, json: { items: [] }, cut: true }) }));
+  await settle();
+  const said = find(feed.main(), (node) => node.className === "empty");
+  return {
+    write: {
+      waiting, off: page.run("S.off"), bodies: page.sent("api/send-keys"), typed: say.value,
+      pending: page.run("S.pending.size"), orphans: page.run("S.orphans.size"), toast: page.toast(),
+    },
+    read: { off: feed.run("S.off"), said: said ? said.textContent : null, sockets: feed.sockets.length },
+  };
 }
 
 /* Send with nothing typed, ⏎ on as it is by default. */
@@ -3014,6 +3049,7 @@ async function main() {
     unlockWrong: await unlockAnswered(401, { error: "wrong_password", message: "wrong password" }),
     lostWrite: await lostWrite(),
     lostTwice: await lostTwice(),
+    bodyCut: await bodyCut(),
     lostKeyLongAgo: await lostKeyLongAgo(),
     lostThenSignedOut: await lostThenSignedOut(),
     lostRead: await lostRead(),

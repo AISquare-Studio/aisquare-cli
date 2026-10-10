@@ -743,7 +743,8 @@ function apiPath(template, params) {
 /* One request, answered as {ok, status, data, error, message, retryAfter, network, notJson}.
  * A 401 sends the page to unlock (but unlock's own), and an answer that is not
  * JSON is not this server: ngrok's offline page, or a link that moved. The one
- * exception is a bare 500, which is this server failing, said as such. */
+ * exception is a bare 500, which is this server failing, said as such. A body cut
+ * off halfway is a lost answer, not one that is not JSON. */
 async function apiCall(method, path, options) {
   const o = options || {};
   const init = {
@@ -758,8 +759,10 @@ async function apiCall(method, path, options) {
     if (query.toString()) url += "?" + query.toString();
   }
   let response;
+  let text;
   try {
     response = await fetch(url, init);
+    text = await response.text();
   } catch (error) {
     setOffline(true);
     return { ok: false, status: 0, data: null, error: "offline", message: "", retryAfter: 0, network: true, notJson: false };
@@ -768,7 +771,6 @@ async function apiCall(method, path, options) {
   let data = null;
   let json = true;
   try {
-    const text = await response.text();
     if (text) data = JSON.parse(text);
   } catch (error) {
     json = false;

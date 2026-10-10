@@ -1230,7 +1230,13 @@ def _refused_fix(
     spec = agent_core.spec("claude-code", directory)
     fixes: list[str] = []
     if refusal.repairable:
-        fixes.append(f"repair {refusal.path} ({refusal.fact}), then connect again")
+        # A folder on the way repaired, connect makes only the directory sessions from this
+        # shell read, with `claude` on PATH: any other that is not there must be again.
+        there = ""
+        made = refusal.this_shell and agent_core.claude_on_path() is not None
+        if refusal.path in directory.parents and not (made or agent_core.present(directory)):
+            there = f" so that {directory} is there"
+        fixes.append(f"repair {refusal.path} ({refusal.fact}){there}, then connect again")
         if also is not None and spec is not None and refusal.path == spec.settings_path:
             fixes[0] += f", or {also} where that file is generated"
     key = agent_core.dir_identity(directory)

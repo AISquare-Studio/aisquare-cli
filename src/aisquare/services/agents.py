@@ -326,6 +326,11 @@ def _connect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
                 return _blocked(f"can't create {where}: {blocked[1]}", *blocked, here)
         elif config_dir is not None:
             _check_found(name, config_dir)
+        elif not agent_core.present(spec.home) and (blocked := in_the_way(spec.home)):
+            # Not there, and connect will not make it (no `claude` on PATH): what stands in
+            # its way, as with `claude` there; read as Claude Code not having made it yet,
+            # it was offered a Connect that could only say not installed (review of #257).
+            return _blocked(f"can't create {spec.home}: {blocked[1]}", *blocked, here)
         _read_before_writing(name, config_dir)
     except (AgentFileUnreadableError, AgentNotInstalledError) as exc:
         return _refused(spec, str(exc), getattr(exc, "path", None) or spec.home, here)

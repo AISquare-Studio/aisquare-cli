@@ -980,6 +980,10 @@ _NOT_A_DIRECTORY_TO_READ = [
     pytest.param(f"a link to nothing, {_BESIDE_NO_CLAUDE}", id="dangling, no claude"),
     pytest.param(f"a link loop, {_BESIDE_NO_CLAUDE}", id="loop, no claude"),
     pytest.param(f"under a file, {_BESIDE_NO_CLAUDE}", id="under a file, no claude"),
+    pytest.param(f"under a link to nothing, {_BESIDE_NO_CLAUDE}", id="under a link, no claude"),
+    pytest.param(
+        f"under a chain of links to nothing, {_BESIDE_NO_CLAUDE}", id="under a chain, no claude"
+    ),
 ]
 
 
@@ -1021,6 +1025,12 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
         blocking = home / "notes"
         blocking.write_text('{"numStartups": 7}', encoding="utf-8")
         where = blocking / "claude"
+    elif shape.startswith("under a"):  # a link to a folder that is not there
+        blocking = home / "link"
+        if "chain" in shape:
+            (home / "hop").symlink_to(home / "gone")
+        blocking.symlink_to(home / ("hop" if "chain" in shape else "gone"))
+        where = blocking / "claude"
     else:
         where = blocking = home / ".claude-work"
         where.symlink_to(where.name if "loop" in shape else home / "gone" / "claude")
@@ -1047,7 +1057,11 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
     from aisquare.cli.ui.views.welcome import claude_text
 
     a_file = os.path.isfile(blocking) and not os.path.islink(blocking)
-    repair = None if a_file else f"repair {blocking} ({fact}), then connect again"
+    # A folder on the way repaired, connect with no `claude` on PATH makes nothing there.
+    there = f" so that {where} is there" if blocking != where and on_path is None else ""
+    if "enter" in shape:
+        there = ""  # it is there, beyond the folder this user cannot enter
+    repair = None if a_file else f"repair {blocking} ({fact}){there}, then connect again"
     # With no `claude` on PATH and nothing Claude Code made there, connect says it is not
     # installed; the doctor names what stands in the way all the same.
     unmade = on_path is None and not agent_core.present(where)
@@ -1082,7 +1096,7 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
             blocking.unlink()
             blocking.mkdir()
         else:
-            (home / "gone" / "claude").mkdir(parents=True)  # the link leads somewhere
+            (home / "gone" / "claude").mkdir(parents=True)  # the link leads to it there
         done["repair"] = runner.invoke(app, ["agents", "connect", "claude-code"])
         rows["repair"] = diagnostics._check_claude_code()
     assert {words: result.exit_code for words, result in done.items()} == dict.fromkeys(done, 0), {
@@ -1186,14 +1200,17 @@ def test_the_variables_remedy_is_never_unset_and_done_as_worded_clears_the_row(
         (claude / "settings.json").write_text("[1]", encoding="utf-8")
     elif "may not write" in shape:
         home.chmod(0o555)
-    elif "outside" in shape:
+    elif "lost program" in shape:
         claude.mkdir()
         _connect(runner)
-        claude = home / "work" / "claude"
+        claude = home / ("work/claude" if "outside" in shape else ".claude-work")
         claude.mkdir(parents=True)
         shutil.copy(home / ".claude" / "settings.json", claude / "settings.json")
         _hooks_run(claude / "settings.json", str(tmp_path / "old" / "bin" / "aisquare"))
-        (claude / "settings.json").chmod(0o444)
+        if "outside" in shape:
+            (claude / "settings.json").chmod(0o444)
+        else:
+            _utf16(claude / "CLAUDE.md")
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
     else:
         claude.mkdir()
@@ -1218,9 +1235,9 @@ def test_the_variables_remedy_is_never_unset_and_done_as_worded_clears_the_row(
     if "outside" in shape:
         generated = "or point its hooks at this install where that file is generated"
         fixes = [f"{fixes[0]}, {generated}"]
-    if "recorded" not in shape:
+    if "recorded" not in shape and "never connected" not in shape:
         fixes.append(_REPOINT_FIX)
-    elif "CLAUDE.md" in shape:  # disconnect would take it out: no hooks to rewrite there
+    elif "CLAUDE.md" in shape:  # graded anyway; disconnect would take it out
         fixes.append(
             f"{_REPOINT_FIX}, and disconnect this one: {_DISCONNECT} --config-dir {claude}"
         )
@@ -1255,6 +1272,43 @@ def test_the_variables_remedy_is_never_unset_and_done_as_worded_clears_the_row(
         words: [result.output for result in results] for words, results in done.items()
     }
     assert all("cannot be written" not in row.detail for row in rows.values()), rows
+
+
+def test_a_recorded_profile_under_a_link_to_nothing_is_repaired_as_worded(
+    runner: CliRunner, claude_home: Path, tmp_path: Path
+) -> None:
+    """A profile connected with `--config-dir` through a link into a dotfiles volume that
+    is no longer mounted: the doctor said to repair the link and connect again, and done
+    as worded (the link leading to a folder again) connect still refused, since it never
+    makes a --config-dir (review of #257). The repair says what must be there again, and
+    each remedy, done as worded, clears the row."""
+    if os.name == "nt":
+        pytest.skip("links need a privilege on Windows")
+    _connect(runner)
+    volume = claude_home.parent / "dotfiles"
+    (volume / "claude").mkdir(parents=True)
+    link = claude_home.parent / "dots"
+    link.symlink_to(volume)
+    profile = link / "claude"
+    _connect(runner, profile)
+    shutil.rmtree(volume)
+
+    row = diagnostics._check_claude_code()
+    fact = f"{link} is a link to {volume}: {_stat_error(link)}"
+    forget = f"forget it: {_DISCONNECT} --config-dir {profile}"
+    assert f"hooks cannot be written in {profile}: " in row.detail, row
+    assert row.fix == (
+        f"repair {link} ({fact}) so that {profile} is there, then connect again; or {forget}"
+    ), row.fix
+    forgot = runner.invoke(app, _commands(str(row.fix))[0])
+    rows = [diagnostics._check_claude_code()]
+    (volume / "claude").mkdir(parents=True)  # repaired as worded: the link leads to it there
+    connected = runner.invoke(
+        app, ["agents", "connect", "claude-code", "--config-dir", str(profile)]
+    )
+    rows.append(diagnostics._check_claude_code())
+    assert (forgot.exit_code, connected.exit_code) == (0, 0), (forgot.output, connected.output)
+    assert all(r.status is CheckStatus.ok for r in rows), rows
 
 
 def _hooks_run(settings: Path, program: str) -> None:

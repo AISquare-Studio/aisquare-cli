@@ -1888,7 +1888,7 @@ def test_with_pypi_unreachable_an_unchanged_version_is_the_newest_the_index_has(
 
     assert result.exit_code == 0, result.output
     assert machine.installs[0][0][-1] == "aisquare-cli[serve]>=0.9.0"
-    assert "is the newest release uv allows this install" in result.stdout
+    assert "is the release uv picks for this install" in result.stdout
 
 
 def test_a_pin_is_confirmed_against_the_pin_and_names_both_on_a_mismatch(
@@ -2288,27 +2288,36 @@ def test_a_settings_file_that_cannot_be_read_as_hooks_is_left_not_raised(
     assert named == ([str(bad)] if left else [])
 
 
+@pytest.mark.parametrize(
+    ("option", "key"),
+    [
+        ('index-url = "https://mirror.example/simple"', "index-url"),
+        ('resolution = "lowest-direct"', "resolution"),
+    ],
+    ids=["own-index", "lowest-direct"],
+)
 def test_an_install_on_its_own_index_does_not_take_pypis_word_for_latest(
-    runner: CliRunner, tool: Tool, machine: Machine
+    runner: CliRunner, tool: Tool, machine: Machine, option: str, key: str
 ) -> None:
     """Finding 3: uv resolves @latest against the restated index, so PyPI's number is
-    neither "nothing to do" nor proof of a silent no-op there."""
+    neither "nothing to do" nor proof of a silent no-op there. Under `resolution =
+    "lowest-direct"` uv picks the lowest release the floor allows: "the newest release uv
+    allows" was false there, and the release uv picks is said (review of #257's fixes)."""
     (tool.prefix / install_route.RECEIPT_NAME).write_text(
-        _receipt(
-            _OURS_PINNED, tail='\n[tool.options]\nindex-url = "https://mirror.example/simple"\n'
-        ),
-        encoding="utf-8",
+        _receipt(_OURS_PINNED, tail=f"\n[tool.options]\n{option}\n"), encoding="utf-8"
     )
-    machine.new_version = "0.9.0"  # the mirror has nothing newer
+    machine.new_version = "0.9.0"  # what uv picks is the release that runs
 
     check = runner.invoke(app, ["--json", "upgrade", "--check"])
     run = runner.invoke(app, ["upgrade", "--yes"])
 
     assert machine.lookups == 0, "PyPI is not asked for an install that resolves elsewhere"
     report = _one_object(check.stdout)
-    assert report["latest"] is None and "(index-url)" in report["latest_error"]
+    assert report["latest"] is None and f"({key})" in report["latest_error"]
     assert run.exit_code == 0, run.output
-    assert "is the newest release uv allows this install" in run.stdout
+    assert "upgrading aisquare 0.9.0 → the release uv picks:" in run.stdout, run.stdout
+    assert "✓ aisquare 0.9.0 is the release uv picks for this install" in run.stdout
+    assert "newest" not in run.stdout, run.stdout
 
 
 def _pypi_with_uploads(**uploaded: datetime) -> bytes:
@@ -2384,6 +2393,29 @@ def test_an_install_under_a_uv_cutoff_is_compared_with_the_newest_release_it_all
             f"aisquare 0.8.0 is up to date (0.8.0 is the newest release your uv cutoff "
             f"allows: {restated}) — nothing to do"
         ) in run.stdout, run.stdout
+
+
+def test_a_no_op_under_a_cooldown_the_plan_compared_fails(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under a global cutoff alone the plan compares by upload time. When it found a newer
+    release the cutoff allows and uv still left the version, the recorded cutoff excused it
+    as ✓ (review of #257's fixes): a real silent no-op, now a failure."""
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        _receipt(_OURS_PINNED, tail=_COOLDOWN), encoding="utf-8"
+    )
+    monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
+    old = datetime.now(UTC) - timedelta(days=30)
+    body = _pypi_with_uploads(**{"0.8.0": old, "0.8.1": old + timedelta(hours=1)})
+    monkeypatch.setattr(install_route, "fetch_latest", _REAL_FETCH_LATEST)
+    monkeypatch.setattr(install_route, "open_url", lambda _request, timeout: _Response(body))
+    machine.new_version = "0.8.0"  # uv reported success and changed nothing
+
+    result = runner.invoke(app, ["upgrade", "--yes"])
+
+    assert result.exit_code == 1, result.output
+    assert "still reports 0.8.0, not 0.8.1" in result.stderr, result.stderr
+    assert "✓" not in result.stdout, result.stdout
 
 
 @pytest.mark.parametrize(
@@ -2524,6 +2556,10 @@ _FLAT_INDEX = 'index = [{ url = "https://mirror.example/flat", format = "flat" }
         ),
         ('exclude-newer-package = { rich = "2026-01-02T05:00:00Z" }', "exclude-newer-package"),
         (_GLOBAL_COOLDOWN + _FLAT_INDEX, "exclude-newer, exclude-newer-span, index"),
+        ('resolution = "lowest-direct"', "resolution"),
+        ('prerelease-package = { aisquare-cli = "allow" }', "prerelease-package"),
+        ("exclude-newer-package = { tiktoken = false }", "exclude-newer-package"),
+        ("something-uv-adds-later = true", "something-uv-adds-later"),
     ],
     ids=[
         "index-url",
@@ -2535,6 +2571,10 @@ _FLAT_INDEX = 'index = [{ url = "https://mirror.example/flat", format = "flat" }
         "aisquare-clis-own-cutoff",
         "another-packages-cutoff",
         "a-cutoff-beside-an-index",
+        "lowest-direct",
+        "prerelease-package",
+        "another-package-exempt",
+        "a-key-uv-adds-later",
     ],
 )
 def test_settings_that_can_hold_a_release_back_are_named_as_recorded_and_not_compared(
@@ -2575,8 +2615,9 @@ def test_a_receipt_that_cannot_say_what_holds_it_back_is_not_compared(
     runner: CliRunner, tool: Tool, machine: Machine, receipt: str | None
 ) -> None:
     """An unreadable receipt, or one with no [tool] table, was compared against PyPI while a
-    receipt with one odd entry was not (review of #257's fixes). Neither says what holds a
-    release back; constraints can."""
+    receipt with one odd entry was not, and then reported as settings that "can hold releases
+    back" when nobody could read them (review of #257's fixes). It is said as it is; a
+    readable `constraints` list does hold."""
     text = receipt
     if text is None:
         text = (
@@ -2589,9 +2630,9 @@ def test_a_receipt_that_cannot_say_what_holds_it_back_is_not_compared(
 
     assert machine.lookups == 0, report
     assert report["latest"] is None, report
-    assert report["latest_error"].startswith(
-        "PyPI was not asked: this install's uv settings can hold releases back ("
-    ), report
+    unread = f"PyPI was not asked: this install's uv receipt could not be read ({tool.prefix}"
+    held = "PyPI was not asked: this install's uv settings can hold releases back (constraints)"
+    assert report["latest_error"].startswith(unread if receipt else held), report
 
 
 @pytest.mark.parametrize(
@@ -2601,16 +2642,14 @@ def test_a_receipt_that_cannot_say_what_holds_it_back_is_not_compared(
         ('config-settings = { foo = "bar" }', None),
         ('build-isolation = "shared"', None),
         ('extra-build-dependencies = { pkg = ["setuptools"] }', None),
-        ("exclude-newer-package = { tiktoken = false }", None),
-        (_GLOBAL_COOLDOWN + "exclude-newer-package = { tiktoken = false }", "--exclude-newer P30D"),
+        (_GLOBAL_COOLDOWN + 'torch-backend = "cpu"', "--exclude-newer P30D"),
     ],
     ids=[
         "torch-backend",
         "config-settings",
         "build-isolation",
         "extra-build-dependencies",
-        "another-package-exempt",
-        "another-package-exempt-beside-a-cutoff",
+        "a-build-setting-beside-a-cutoff",
     ],
 )
 def test_settings_that_cannot_change_the_release_leave_pypis_word_to_compare(
@@ -2618,8 +2657,8 @@ def test_settings_that_cannot_change_the_release_leave_pypis_word_to_compare(
 ) -> None:
     """Options that change only how a release is built or installed counted as holding one
     back, so a true "an update is available" read "unknown" and an unchanged version passed
-    as no silent no-op (review of #257's fixes). Another package's `false` only lifts that
-    package's cutoff: beside a global cutoff alone, that cutoff is compared."""
+    as no silent no-op (review of #257's fixes). Beside a global cutoff alone, the cutoff is
+    compared as if alone."""
     (tool.prefix / install_route.RECEIPT_NAME).write_text(
         _receipt(_OURS_PINNED, tail=f"\n[tool.options]\n{options}\n"), encoding="utf-8"
     )
@@ -2630,23 +2669,6 @@ def test_settings_that_cannot_change_the_release_leave_pypis_word_to_compare(
     assert report["latest_cutoff"] == cutoff and report["update_available"] is True, report
     [asked] = machine.asked
     assert (asked["uploaded_before"] is None) is (cutoff is None), asked
-
-
-def test_an_override_for_another_package_alone_leaves_pypis_word_to_compare(
-    runner: CliRunner, tool: Tool, machine: Machine
-) -> None:
-    """Control for the one above: with no global cutoff, an override for another package
-    says nothing about aisquare-cli, so PyPI's newest is read as for any install."""
-    (tool.prefix / install_route.RECEIPT_NAME).write_text(
-        _receipt(
-            _OURS_PINNED, tail="\n[tool.options]\nexclude-newer-package = { tiktoken = false }\n"
-        ),
-        encoding="utf-8",
-    )
-
-    report = _one_object(runner.invoke(app, ["--json", "upgrade", "--check"]).stdout)
-
-    assert machine.lookups == 1 and report["latest"] == "0.9.1", report
 
 
 @pytest.mark.parametrize(
@@ -2699,12 +2721,11 @@ def test_an_unchanged_version_under_uvs_own_settings_is_the_newest_they_allow(
     runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch, tail: str
 ) -> None:
     """A setting in uv's own config (uv.toml, UV_EXCLUDE_NEWER) is in no receipt the plan can
-    read, so PyPI's newer release was the target, and the version uv rightly left failed as
-    §3.9.1's silent no-op (sweep of #257). uv records it in the receipt it writes (measured,
-    uv 0.12.19), read after the install. The report then named a cause, "your package index
-    served", where the index had served the newer one: it says only what is always true."""
+    read, so the plan compared PyPI's newer release, and an unchanged version fails: passed as
+    ✓, a real no-op went unreported (review of #257's fixes). The failure names what the
+    receipt uv wrote records instead of §3.9.1 or "your package index" (an index that had
+    served the newer one). The next run's plan sees it."""
     machine.new_version = "0.9.0"  # PyPI says 0.9.1; uv's settings allow nothing newer
-    plain = _receipt(_OURS_PINNED, _TIKTOKEN)
     installer = install_route.run_installer
 
     def install_under_settings(argv: Any, *, env: Any, to_stderr: bool) -> int:
@@ -2717,16 +2738,15 @@ def test_an_unchanged_version_under_uvs_own_settings_is_the_newest_they_allow(
     monkeypatch.setattr(install_route, "run_installer", install_under_settings)
 
     result = runner.invoke(app, ["upgrade", "--yes"])
-    (tool.prefix / install_route.RECEIPT_NAME).write_text(plain, encoding="utf-8")
-    report = _one_object(runner.invoke(app, ["--json", "upgrade", "--yes"]).stdout)
 
-    assert machine.lookups == 2, "PyPI was asked: the plan's receipt named nothing"
-    assert result.exit_code == 0, result.output
-    assert "✓ aisquare 0.9.0 is the newest release uv allows this install" in result.stdout
-    assert "· PyPI's latest is 0.9.1; uv allows 0.9.0 here" in result.stdout, result.stdout
+    added = install_route.read_receipt(tool.prefix)
+    assert added is not None and added.holds, added
+    assert result.exit_code == 1, "the plan compared and PyPI has 0.9.1: a no-op fails"
+    assert (
+        "uv reported success but aisquare still reports 0.9.0, not 0.9.1; the receipt uv wrote "
+        f"records uv settings that can hold releases back ({', '.join(added.holds)})"
+    ) in result.stderr, result.stderr
     assert "package index" not in result.output and "§3.9.1" not in result.output, result.output
-    assert report["upgraded"] is True and report["version"] == "0.9.0", report
-    assert "PyPI's latest is 0.9.1; uv allows 0.9.0 here" in report["notes"], report
 
 
 def test_check_with_a_pin_advises_the_pin(runner: CliRunner, tool: Tool, machine: Machine) -> None:
@@ -2769,29 +2789,24 @@ def test_check_tells_a_newer_build_from_the_latest_and_advises_only_an_upgrade(
 
 
 @pytest.mark.parametrize(
-    ("option", "running", "offered"),
-    [
-        (None, "1.0.0rc1", "1.0.0rc2"),
-        (None, "0.9.0", None),
-    ],
-    ids=["running-an-rc", "neither"],
+    ("running", "offered"),
+    [("1.0.0rc1", "1.0.0rc2"), ("0.9.0", None)],
+    ids=["running-an-rc", "a-final"],
 )
-def test_an_install_that_takes_pre_releases_is_offered_the_newest_one(
+def test_an_install_running_a_pre_release_is_offered_the_newest_one(
     runner: CliRunner,
     tool: Tool,
     machine: Machine,
     monkeypatch: pytest.MonkeyPatch,
-    option: str | None,
     running: str,
     offered: str | None,
 ) -> None:
-    """An install made with `--prerelease allow`, which the command restates, or one running a
-    pre-release, which its `>=` names, gets uv's newest pre-release. PyPI's info.version is
-    its newest final, so --check said "(you have it)" or "(yours is newer)" and "nothing to
-    upgrade", and `upgrade --yes` and asq's Update "nothing to do" (sweep of #257)."""
-    tail = f"\n[tool.options]\n{option}\n" if option else ""
+    """An install running a pre-release, which the command's `>=` names, gets uv's newest
+    pre-release, while PyPI's info.version is its newest final: --check said "(yours is
+    newer)" and "nothing to upgrade", and `upgrade --yes` and asq's Update "nothing to do"
+    (sweep of #257). A recorded `prerelease` setting is not compared at all (it holds)."""
     (tool.prefix / install_route.RECEIPT_NAME).write_text(
-        _receipt(_OURS_PINNED, _TIKTOKEN, tail=tail), encoding="utf-8"
+        _receipt(_OURS_PINNED, _TIKTOKEN), encoding="utf-8"
     )
     monkeypatch.setattr(lifecycle, "__version__", running)
     releases = {version: [{"yanked": False}] for version in ("0.9.0", "1.0.0rc1", "1.0.0rc2")}

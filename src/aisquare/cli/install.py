@@ -112,7 +112,7 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
             # sent every run to a reinstall that changed nothing (review of #257).
             _say(
                 "can't tell whether anything is newer: `aisquare upgrade` reinstalls the "
-                "newest release uv allows this install, which may be the one you have"
+                "release uv picks for this install, which may be the one you have"
             )
             return
         pin = f" --version {plan.target}" if plan.target else ""
@@ -142,7 +142,7 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
     _say(f"aisquare {plan.current} → {where}")
     if plan.target is None and plan.latest is not None and plan.latest.version is None:
         _say(
-            f"  {plan.latest.error}; uv will install the newest release it allows this "
+            f"  {plan.latest.error}; uv will install the release it picks for this "
             "install, which may be the one you have"
         )
     _say(f"  install: {plan.route.describe()}")
@@ -200,7 +200,7 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
         # Only reachable when PyPI was not asked or could not answer, or when the receipt uv
         # wrote records a setting that can hold releases back: otherwise an unchanged
         # version is a failure (lifecycle._verify). Which setting did, it does not guess.
-        _say(f"✓ aisquare {report.version} is the newest release uv allows this install")
+        _say(f"✓ aisquare {report.version} is the release uv picks for this install")
     else:
         _say(f"✓ aisquare {report.version} (was {plan.current}) — checked in a new process")
     for hook in report.hooks:

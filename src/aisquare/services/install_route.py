@@ -377,8 +377,10 @@ class UvReceipt:
     """Where uv put the ``aisquare`` executable — so a reinstall puts it there again."""
     unrestatable: tuple[str, ...] = ()
     holds: tuple[str, ...] = ()
-    """The settings uv recorded that can change which aisquare-cli release it resolves, by
-    their receipt keys (:data:`_RELEASE_SETTINGS`), or why the receipt says nothing."""
+    """The settings uv recorded that may change which aisquare-cli release it resolves, by
+    their receipt keys: every ``[tool.options]`` key but :data:`_BUILD_ONLY`'s."""
+    unreadable: str | None = None
+    """``<path>: <reason>`` when the receipt could not be read for what it records."""
 
 
 def _canonical(name: object) -> str:
@@ -492,12 +494,14 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         return UvReceipt(
             unrestatable=(f"an unreadable {RECEIPT_NAME} ({exc})",),
-            holds=(f"an unreadable {RECEIPT_NAME}",),
+            unreadable=f"{path}: {exc}",
         )
     tool = data.get("tool")
     if not isinstance(tool, dict):
-        missing = f"a {RECEIPT_NAME} with no [tool] table"
-        return UvReceipt(unrestatable=(missing,), holds=(missing,))
+        return UvReceipt(
+            unrestatable=(f"a {RECEIPT_NAME} with no [tool] table",),
+            unreadable=f"{path}: no [tool] table",
+        )
     refused: list[str] = []
     requirements = tool.get("requirements")
     if not isinstance(requirements, list):
@@ -545,7 +549,7 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
     if isinstance(options, dict):
         flags, refused_options = _option_flags(options)
         refused.extend(refused_options)
-        holds.extend(key for key, value in options.items() if _holds(key, value))
+        holds.extend(key for key in options if key not in _BUILD_ONLY)
     python = tool.get("python")
     return UvReceipt(
         extras=extras,
@@ -560,45 +564,25 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
     )
 
 
-#: What a receipt can record that changes which aisquare-cli release uv resolves, listed
-#: conservatively: where releases come from, which of them count, and upload-date cutoffs.
-#: Every other option uv records (torch-backend, config-settings, build isolation, link
-#: mode …) changes only how a release is built or installed (review of #257).
-_RELEASE_SETTINGS = frozenset(
+#: Recorded options that change only how a release is built or installed, never which one
+#: uv resolves. Every other key holds, unknown ones included, so a setting uv adds later
+#: is never compared by mistake (review of #257's fixes).
+_BUILD_ONLY = frozenset(
     {
-        "index-url",
-        "extra-index-url",
-        "find-links",
-        "no-index",
-        "index-strategy",
-        "index",
-        "prerelease",
-        "resolution",
-        "fork-strategy",
-        "exclude-newer",
-        "exclude-newer-span",
-        "exclude-newer-package",
-        "no-build",
-        "no-binary",
-        "no-build-package",
-        "no-binary-package",
+        "torch-backend",
+        "config-settings",
+        "config-settings-package",
+        "build-isolation",
+        "no-build-isolation",
+        "no-build-isolation-package",
+        "extra-build-dependencies",
+        "extra-build-variables",
+        "link-mode",
+        "compile-bytecode",
     }
 )
 #: The receipt's own lists that constrain the resolution.
 _HOLDING_LISTS = ("constraints", "overrides")
-
-
-def _holds(key: str, value: object) -> bool:
-    """Whether the recorded option ``key`` can hold an aisquare-cli release back. Of
-    :data:`_RELEASE_SETTINGS`, only an ``exclude-newer-package`` whose every entry is
-    another package's ``false`` cannot: that lifts a cutoff, from that package alone."""
-    if key not in _RELEASE_SETTINGS or value is False:
-        return False
-    if key == "exclude-newer-package" and isinstance(value, dict):
-        return any(
-            _canonical(name) == DISTRIBUTION or entry is not False for name, entry in value.items()
-        )
-    return True
 
 
 def _bin_dir(entrypoints: object) -> Path | None:
@@ -1126,7 +1110,7 @@ def takes_prereleases(route: InstallRoute, current: str) -> bool:
     """Whether uv takes pre-releases when this install upgrades to the latest release, so
     PyPI's ``info.version``, its newest FINAL release, is not what it gets: when the release
     that runs, ``current``, is itself one, which a uv tool's ``>=`` names (measured, uv
-    0.12.19). A recorded ``prerelease`` setting is never compared (:data:`_RELEASE_SETTINGS`)."""
+    0.12.19). A recorded ``prerelease`` setting holds, so it is never compared."""
     return route.kind == UV_TOOL and is_prerelease(current)
 
 

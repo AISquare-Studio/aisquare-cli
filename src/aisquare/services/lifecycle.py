@@ -361,7 +361,8 @@ class UpgradePlan:
     @property
     def destination(self) -> str:
         """Where the upgrade goes, for a person: a version, or what ``@latest`` means."""
-        return self.target or self.latest_version or "the latest release"
+        # Not "the latest release": a recorded setting may pick another (`resolution`).
+        return self.target or self.latest_version or "the release uv picks"
 
     @property
     def update_available(self) -> bool | None:
@@ -482,15 +483,17 @@ def _left_by_move_back(site: HookSite, target: str) -> HookSite:
 def _held_back(route: install_route.InstallRoute) -> str | None:
     """Why PyPI's newest may not be what uv takes for this install, or ``None``.
 
-    The settings its uv receipt records that can hold a release back
-    (``UvReceipt.holds``), named as recorded. Nothing more is claimed: three reviews in a
-    row found each finer account of WHY (an index, a cutoff of aisquare-cli's own, an
-    exemption) false for some combination of uv settings (#257).
+    The settings its uv receipt records that may change the release (``UvReceipt.holds``),
+    named as recorded, or that the receipt could not be read. Nothing more is claimed:
+    review after review found each finer account of WHY false for some combination of uv
+    settings (#257).
     """
-    holds = route.receipt.holds if route.receipt is not None else ()
-    if not holds:
+    receipt = route.receipt
+    if receipt is not None and receipt.unreadable is not None:
+        return f"this install's uv receipt could not be read ({receipt.unreadable})"
+    if receipt is None or not receipt.holds:
         return None
-    return f"this install's uv settings can hold releases back ({', '.join(holds)})"
+    return f"this install's uv settings can hold releases back ({', '.join(receipt.holds)})"
 
 
 def _cutoff_alone(route: install_route.InstallRoute) -> bool:
@@ -764,8 +767,9 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
     moved_elsewhere = latest is not None and not install_route.same_version(version or "", latest)
     pypis = plan.latest is not None and plan.latest.cutoff is None
     if plan.target is None and version is not None and moved_elsewhere and pypis:
-        # Not why: "your package index served" named an index that had served the newer one.
-        notes.append(f"PyPI's latest is {latest}; uv allows {version} here")
+        # Not why: "your package index served" named an index that had served the newer one,
+        # and "newest" was false where a setting picks (`resolution = "lowest"`).
+        notes.append(f"PyPI's latest is {latest}; uv picks {version} here")
     notes.append(
         f"asq and `aisquare serve` processes that were already running keep {plan.current} "
         "until they are restarted"
@@ -830,9 +834,11 @@ def _verify(plan: UpgradePlan, ran: install_route.InstallRoute) -> tuple[str | N
     process reports — the pin when one was asked for, otherwise any move that is
     not BACK: a downgrade is only done by asking for one with ``--version``. An
     unchanged version is a failure exactly when PyPI said there is something
-    newer; when PyPI was not asked or could not answer, or the receipt uv wrote for the
-    install that ``ran`` (:func:`_as_recorded`) records a setting that can hold releases
-    back (:func:`_held_back`), it is the newest release uv allows this install.
+    newer, whatever the receipt records: then the plan compared (plain, or under a global
+    cutoff alone), and a recorded cutoff it compared excused a real no-op (#257). When PyPI
+    was not asked or could not answer, it is the release uv picks for this install. Settings
+    the receipt uv wrote for the install that ``ran`` (:func:`_as_recorded`) records, and the
+    plan's did not, are named in the failure rather than §3.9.1.
     """
     found, problem = _installed_version(plan)
     if found is None:
@@ -849,10 +855,14 @@ def _verify(plan: UpgradePlan, ran: install_route.InstallRoute) -> tuple[str | N
     latest = plan.latest_version
     if not install_route.same_version(found, plan.current) or latest is None:
         return found, None
-    if _held_back(ran) is not None:
-        # A setting from uv's own config, which only the receipt uv just wrote shows:
-        # blamed on §3.9.1, the newest release it allows failed (sweep of #257).
-        return found, None
+    seen = set(plan.route.receipt.holds) if plan.route.receipt is not None else set()
+    unseen = [key for key in (ran.receipt.holds if ran.receipt else ()) if key not in seen]
+    if unseen:
+        # From uv's own config, which only the receipt uv just wrote shows: not §3.9.1's.
+        return found, (
+            f"uv reported success but aisquare still reports {found}, not {latest}; the receipt "
+            f"uv wrote records uv settings that can hold releases back ({', '.join(unseen)})"
+        )
     return found, (
         f"uv reported success but aisquare still reports {found}, not {latest} — the "
         "silent no-op docs/plans/one-line-install.md §3.9.1 describes"

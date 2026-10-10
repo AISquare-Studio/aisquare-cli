@@ -1949,6 +1949,8 @@ def test_a_git_checkout_or_a_folder_of_repos_inside_home_is_a_project(home: Path
         ("~/.config/thing", "hidden directory .config"),
         ("~/linked", "hidden directory .aisquare"),
         ("~/plain", "neither a git checkout nor a directory of repositories"),
+        ("~/co\x00de/app", "'path' holds a NUL byte"),
+        ("~no_such_user_here/app", "does not exist"),
     ],
 )
 def test_project_add_refuses_what_is_not_a_project_inside_home(
@@ -2114,6 +2116,10 @@ def test_a_project_with_live_agents_is_not_removed_and_the_phone_hears_why(
         ("remove", {"ref": "app"}, 400, "ambiguous_project"),
         ("remove", {"ref": ["alpha"]}, 400, "invalid"),
         ("remove", {"name": "alpha"}, 400, "invalid"),
+        ("remove", {"ref": "/al\x00pha"}, 400, "invalid"),
+        ("remove", {"ref": "~/" + "a" * 300}, 404, "not_found"),
+        ("remove", {"ref": "a" * 5_000}, 404, "not_found"),
+        ("remove", {"ref": "~no_such_user_here/alpha"}, 404, "not_found"),
     ],
 )
 def test_a_switch_or_a_remove_that_names_no_one_project_changes_nothing(

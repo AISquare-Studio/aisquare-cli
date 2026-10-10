@@ -325,6 +325,8 @@ NOTE_KINDS = frozenset({"note", "decision", "question", "result"})
 """The kinds a phone may post. The others (``attention``, ``limited``, ``agent_exited``,
 ``switched``…) are the fleet's own reports, which wake the manager or set an agent's state."""
 PROJECT_ADD_PATH_MAX = 4_096
+NUL_IN_A_PATH = "{field!r} holds a NUL byte, which no file's name or path holds"
+"""The refusal of a path or a project ref the system would not look up (``field`` named)."""
 
 REMOTE_KEY_NAME = re.compile(
     r"(?:Enter|Escape|Tab|BTab|BSpace|Space|Up|Down|Left|Right|Home|End|PageUp|PageDown|Delete"
@@ -1858,6 +1860,10 @@ def check_project_add_root(raw: object) -> Path:
     (``~/.ssh``, ``~/.aisquare``, ``~/.claude*``, ``~/.config``), and a project in
     fact: a git checkout, or a directory holding repos. Symlinks are resolved
     before any check, so a link into a hidden directory is judged where it points.
+    A path the system refuses to look up is refused as such: a NUL byte's
+    ``ValueError`` and the ``RuntimeError`` of a ``~user`` with no home here fell
+    to 400 ``write_failed``, the system's own words for a write that never began
+    (sweep 3 of #243).
     """
     from aisquare.core.workspace import find_project_root
     from aisquare.services import fleet as fleet_service
@@ -1866,7 +1872,12 @@ def check_project_add_root(raw: object) -> Path:
         raise RequestError(400, "invalid", "'path' is required")
     if len(raw) > PROJECT_ADD_PATH_MAX:
         raise RequestError(413, "too_large", f"'path' is over {PROJECT_ADD_PATH_MAX} characters")
-    path = Path(raw.strip()).expanduser()
+    if "\x00" in raw:
+        raise RequestError(400, "invalid", NUL_IN_A_PATH.format(field="path"))
+    try:
+        path = Path(raw.strip()).expanduser()
+    except RuntimeError:  # ~user, for a user this machine does not have
+        raise RequestError(400, "invalid", f"{raw.strip()} does not exist") from None
     if not path.is_absolute():
         raise RequestError(400, "invalid", f"{path} is not an absolute path (start with / or ~)")
     try:
@@ -1888,6 +1899,25 @@ def check_project_add_root(raw: object) -> Path:
             400, "invalid", f"{root} is neither a git checkout nor a directory of repositories"
         )
     return root
+
+
+def check_project_ref_on_disk(ref: str) -> None:
+    """Refuse the ``project/remove`` ref the system will not look up as a path, before
+    ``project_service.forget`` asks the disk about it: it tries a ref as a path first.
+
+    A NUL byte is 400 ``invalid``. A name longer than any file's, or a ``~user`` with
+    no home here, is 404 ``not_found``: no project has it for a root or a name. Left to
+    ``forget``, the NUL's ``ValueError`` read as two projects matching (400
+    ``ambiguous_project``), and the others fell to 400 ``write_failed``, each with the
+    system's own words (``lstat: embedded null character in path``) for a write that
+    never began (sweep 3 of #243).
+    """
+    if "\x00" in ref:
+        raise RequestError(400, "invalid", NUL_IN_A_PATH.format(field="ref"))
+    try:
+        Path(ref).expanduser().exists()
+    except (OSError, RuntimeError):
+        raise RequestError(404, "not_found", f"no project matches {ref!r}") from None
 
 
 def _holds_repositories(root: Path) -> bool:
@@ -2792,10 +2822,12 @@ def live_writes() -> Writes:
     def project_remove(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         """Forget a registration, as ``project forget`` does, refusals and their codes
         included: one with live fleet agents is 409 ``project_busy``, where it fell to
-        400 ``write_failed`` as if the write had failed (sweep 2 of #243)."""
+        400 ``write_failed`` as if the write had failed (sweep 2 of #243), and a ref the
+        system will not look up is refused first (:func:`check_project_ref_on_disk`)."""
         from aisquare.services import project as project_service
 
         ref = _required(body, "ref")
+        check_project_ref_on_disk(ref)
         try:
             report = project_service.forget(ref, purge=False)
         except KeyError:

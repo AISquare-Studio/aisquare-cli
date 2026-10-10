@@ -513,10 +513,6 @@ _NEEDS_SYMBOLS = frozenset({"So", "Sk", "Cf", "Mn", "Me"})
 """Unicode categories a line may also end with after its question: an emoji, and its skin
 tone, variation selector, joiner or keycap."""
 
-_NEEDS_ASIDE = re.compile(r"[ \t]*(?:\([^()]*\)|\[[^\[\]]*\])[^()\[\]\w]*$")
-"""An aside in parentheses or brackets that ends a line, and what may close the line after
-it but words: ``Merge it? (y/n)``, ``Proceed? [y/N]``."""
-
 _NEEDS_FENCE = re.compile(r"[ \t>]*(`{3,}|~{3,})")
 """A line that opens or closes a fenced code block: three backticks or tildes or more, after
 an indent or a blockquote's marks."""
@@ -604,23 +600,53 @@ def _needs_line_asks(line: str) -> bool:
     ``?`` alone, then quotes and brackets alone, missed "Merge it? (y/n)", "Shall I deploy
     to staging? 🚀", and every question asked in Chinese, Japanese or Arabic: no card and
     no push for an agent waiting on its human's answer (review of #243, sweep 3).
+
+    One pass from the end, each aside read once: searching the line for its last aside
+    again after each one took seconds to minutes on a long line of links or ``(a)``s, run
+    every scan and every quarter second of an interrupt (review of #243, round 5).
     """
-    while True:
-        if _needs_ends_asking(line):
-            return True
-        aside = _NEEDS_ASIDE.search(line)
-        if aside is None or not aside.start():
-            return False
-        line = line[: aside.start()]
-
-
-def _needs_ends_asking(line: str) -> bool:
     end = len(line)
-    while end and (
-        line[end - 1] in _NEEDS_TRAILING or unicodedata.category(line[end - 1]) in _NEEDS_SYMBOLS
-    ):
-        end -= 1
-    return end > 0 and line[end - 1] in _NEEDS_QUESTION_MARKS
+    while True:
+        mark = end
+        while mark and _needs_closes(line[mark - 1]):
+            mark -= 1
+        if mark and line[mark - 1] in _NEEDS_QUESTION_MARKS:
+            return True
+        end = _needs_aside_start(line, end)
+        if not end:
+            return False
+
+
+def _needs_closes(char: str) -> bool:
+    """Whether ``char`` may follow a question's mark at the end of its line."""
+    return char in _NEEDS_TRAILING or unicodedata.category(char) in _NEEDS_SYMBOLS
+
+
+def _needs_aside_start(line: str, end: int) -> int:
+    """Where an aside that ends ``line[:end]`` starts, the blanks before it included: ``(…)``
+    or ``[…]`` with none of its own kind inside, then nothing but what is neither a word nor a
+    bracket (``Merge it? (y/n)``, ``Proceed? [y/N].``); 0 when there is none, or it is all the
+    line holds."""
+    close = end
+    while close and line[close - 1] not in "()[]" and not _needs_wordy(line[close - 1]):
+        close -= 1
+    if not close or line[close - 1] not in ")]":
+        return 0
+    pair = "()" if line[close - 1] == ")" else "[]"
+    start = close - 1
+    while start and line[start - 1] not in pair:
+        start -= 1
+    if not start or line[start - 1] != pair[0]:
+        return 0
+    start -= 1
+    while start and line[start - 1] in " \t":
+        start -= 1
+    return start
+
+
+def _needs_wordy(char: str) -> bool:
+    """Whether ``char`` is a word's, as a regular expression's ``\\w`` reads it."""
+    return char.isalnum() or char == "_"
 
 
 def _needs_asked_tail(text: str) -> str:

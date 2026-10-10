@@ -1926,6 +1926,24 @@ def test_an_aside_or_an_emoji_alone_asks_nothing(text: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("text", "asks"),
+    [
+        ("Merge it now? " + "(a) " * 8_000, True),
+        (" ".join(f"[#{n}](https://example.com/pull/{n})" for n in range(1_000)), False),
+    ],
+    ids=["asides", "links"],
+)
+def test_a_long_line_of_asides_or_links_is_read_in_one_pass(text: str, asks: bool) -> None:
+    """The question test runs every scan, and every quarter second of an interrupt, on an
+    assistant's last text, up to a 256 KiB record. Searching the line for its last aside again
+    after each one took seconds on a line of 1 000 links, and minutes on a 256 KiB one of
+    ``(a)``s (review of #243, round 5). Each aside is read once now: milliseconds."""
+    started = time.perf_counter()
+    assert looks_like_a_question(text) is asks
+    assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "",

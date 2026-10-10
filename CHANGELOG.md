@@ -52,9 +52,10 @@ and an aisquare that upgrades and uninstalls itself.**
   keeps its extras and rewrites the hooks without re-importing `CLAUDE.md`. It
   never moves an install back to an older release, under a uv cooldown either,
   and says when the release you have is the newest the cooldown allows.
-  `--check` says whether PyPI has a newer release, any other install is shown
-  the command that updates it, and fleet agents still running are named
-  before their hooks' program is replaced (#251).
+  `--check` says whether PyPI has a newer release (under a uv cooldown, one
+  the cooldown allows), any other install is shown the command that updates
+  it, and fleet agents still running are named before their hooks' program is
+  replaced (#251).
 - **`aisquare uninstall`** takes aisquare's hooks out of every Claude Code
   directory, then removes the package of a uv tool install, whatever it was
   installed from; any other install, and any install on native Windows, is

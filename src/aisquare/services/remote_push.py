@@ -1299,7 +1299,7 @@ class RemotePushSender:
         subscriptions = self._push_live_subscriptions()
         feed = self._push_feed()
         for device_id in list(self._owed):
-            record = subscriptions.get(device_id)
+            record = subscriptions.get(device_id) if self._push_reaches(device_id) else None
             if record is None:  # unsubscribed, or gone, since: owed nothing any more
                 del self._owed[device_id]
                 self._untaken.pop(device_id, None)
@@ -1412,6 +1412,9 @@ class RemotePushSender:
                 continue
             if self._push_gone_off(self._clock()):
                 return
+            if not self._push_reaches(device_id):  # revoked while this pass sent to another
+                done |= {device_id}
+                continue
             if not push_untaken(self.deliver_one_push(device_id, record, message)):
                 done |= {device_id}
         if done.issuperset(targets) or tries >= PUSH_RETRIES_MAX:
@@ -1435,6 +1438,13 @@ class RemotePushSender:
         """The watcher's latest items, ranked; none without a watcher."""
         watcher = self._kit.lane_state.get("needs")
         return [] if watcher is None else list(watcher.needs_items_now())
+
+    def _push_reaches(self, device_id: str) -> bool:
+        """Whether the runtime still has this device, asked again for each send: the
+        subscriptions are read once a pass, which may spend 10 s on each push service ahead,
+        and a phone revoked meanwhile, a lost one, said "coder-1 needs you" on its lock screen
+        (review of #243, sweep 5)."""
+        return device_id in push_device_ids(self._kit)
 
     def _push_live_subscriptions(self) -> dict[str, PushSubscriptionRecord]:
         """Every subscription of a device the runtime still has; the others dropped first."""

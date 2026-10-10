@@ -1511,6 +1511,30 @@ def test_a_warning_under_way_when_remote_goes_off_reaches_the_next_phone_no_more
     assert world.titles() == [(DEVICES[0], auto_off_title(8))]
 
 
+@pytest.mark.parametrize("push", ["needs you", "auto-off warning"])
+def test_a_phone_revoked_while_the_pass_sent_to_another_is_pushed_nothing(
+    world: World, push: str
+) -> None:
+    """A pass read the subscriptions once, and each send may wait 10 s on a push service: a
+    phone revoked meanwhile, a lost one, still showed "coder-auth needs you" on its lock
+    screen, project and agent named (review of #243, sweep 5)."""
+    lost = DEVICES[1]
+    _sending_while(world, lambda: world.roster.discard(lost))
+    if push == "needs you":
+        item = needs_item(1)
+        world.scan(item)
+        world.scan(item)
+        world.later(5)
+        title = "aisquare-cli: coder-auth needs you"
+    else:
+        world.kit.runtime.set_auto_off(T0 + timedelta(minutes=8))
+        world.later(30)
+        title = auto_off_title(8)
+    for _ in range(4):
+        world.later(30)
+    assert world.titles() == [(DEVICES[0], title)]
+
+
 def test_no_warning_goes_out_past_the_auto_off_deadline(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:

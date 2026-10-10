@@ -48,7 +48,13 @@ from typing import Any
 
 from aisquare.core.state_file import StateUnwritableError, read_state, update_state
 from aisquare.services import remote_server
-from aisquare.services.ngrok_tunnel import NgrokTunnel, build_public_url, end_every_tunnel_now
+from aisquare.services.ngrok_tunnel import (
+    AUTHTOKEN_HINT,
+    TOO_OLD_HINT,
+    NgrokTunnel,
+    build_public_url,
+    end_every_tunnel_now,
+)
 
 # The one sentence every read-only refusal says, re-exported for the modal.
 from aisquare.services.remote_server import READ_ONLY_REASON as READ_ONLY_REASON
@@ -95,6 +101,11 @@ ELSEWHERE_EVERY_SECONDS = 3.0
 taken for a moment each time (``remote_server.remote_served_elsewhere``)."""
 ALREADY_ON = f"Remote could not start — {remote_server.REMOTE_ALREADY_ON}"
 """What a start says that another Remote, on this home, kept off."""
+
+LASTING_TUNNEL_ERRORS = (AUTHTOKEN_HINT, TOO_OLD_HINT)
+"""Why an ngrok ended before it announced a URL that a restart would hit again, until the
+human acts (an authtoken added, ngrok updated) and turns Remote on again, as each says: that
+tunnel is left to its error (:meth:`RemoteController.revive_tunnel_if_dead`)."""
 
 TunnelFactory = Callable[[int], NgrokTunnel]
 CallBack = Callable[[Callable[[], None]], object]
@@ -329,6 +340,8 @@ class RemoteController:
             self.message = STILL_TURNING_OFF
             return False
         self.public_url = None
+        # A new Remote: what the last one's tunnels did is none of this one's.
+        self._revived_at = self._link_before_revive = None
         with self._news_lock:  # a new Remote: what the last one said may be news again
             self._last_news, self._unreachable_told = None, False
         if self._port_problem is not None:  # a sentence, never Remote on another port
@@ -478,8 +491,11 @@ class RemoteController:
             if link == self.public_url:
                 return
             self.public_url = link
-            moved = tunnel is self._revived_tunnel and link != self._link_before_revive
-            if tunnel is self._revived_tunnel:
+            # A restart of a tunnel that came up, not of a first one that never did: that one
+            # had no link to change, and coming up is all there is to say of it.
+            before = self._link_before_revive if tunnel is self._revived_tunnel else None
+            moved = before is not None and link != before
+            if before is not None:
                 changed = "; the link changed" if moved else ""
                 self.message = f"ngrok stopped — restarted it{changed}"
             else:
@@ -1156,8 +1172,8 @@ class RemoteController:
     _revived_at: datetime | None = None
     """When :meth:`revive_tunnel_if_dead` last started ngrok."""
     _revived_tunnel: NgrokTunnel | None = None
-    """The tunnel the last revive started. Should it die before it announces a URL, it is
-    revived all the same: a tunnel of this Remote did come up before it."""
+    """The tunnel the last revive started: its URL says ngrok was restarted, and whether the
+    link changed (:meth:`_adopt_tunnel_url`)."""
     _link_before_revive: str | None = None
     """The public link the Remote had when its tunnel died, so the message can say whether
     the new one differs, however many restarts it took to get one."""
@@ -1167,20 +1183,24 @@ class RemoteController:
 
         The app runs this every 30 s. Without it, a tunnel that died in the night
         left the server up and unreachable, and the phone's link dead until
-        someone at the desk noticed. The FIRST tunnel of a Remote, when it never
-        announced a URL, is left alone: it failed for a reason the status line
-        already shows (no authtoken, an ngrok too old for ``--url``), and would
-        fail the same way again. Once one came up, every dead tunnel is revived,
-        a restarted one that died before announcing included: a static domain
-        still held by the session that just died (``ERR_NGROK_334``), or a network
-        that is down for a while, clears within minutes, and the watchdog must
-        still be trying then. The new link is shown, and noted for push links, as
-        soon as ngrok announces it.
+        someone at the desk noticed. Every dead tunnel is revived, one that died
+        before announcing a URL included, a Remote's first among them: a static
+        domain still held by a session that has not ended yet (``ERR_NGROK_334``:
+        another machine's, one a restart replaced, an ngrok of a fleet UI killed with
+        ``-9``), the account's one agent session busy (``ERR_NGROK_108``), or a
+        network that is down for a while, clears within minutes, and the watchdog
+        must still be trying then. A first one was left alone, and its Remote stayed
+        local-only for as long as it was on, though turning it off and on to try
+        again signs every phone out (sweep 4 of #243). But not one that ended before
+        announcing for a reason a restart would hit again (:data:`LASTING_TUNNEL_ERRORS`:
+        no authtoken, an ngrok too old for ``--url``), which the status line says, with
+        what to do. The new link is shown, and noted for push links, as soon as
+        ngrok announces it.
         """
         dead = self.tunnel
         if not self.running or dead is None or dead.running:
             return False
-        if dead.public_url is None and dead is not self._revived_tunnel:
+        if dead.public_url is None and dead.error in LASTING_TUNNEL_ERRORS:
             return False
         now = self._now()
         if self._revived_at is not None and now - self._revived_at < timedelta(

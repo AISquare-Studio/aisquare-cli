@@ -76,7 +76,10 @@ panel starts the server and ngrok, shows the link, a QR code and the passphrase,
 the write switch, the auto-off timer (30, 60 or 120 minutes, or Never) and the
 devices that have unlocked. Scan the QR code with the phone; until ngrok is up
 the panel shows the local link alone, and no QR, since no phone can open that
-link. If ngrok stops, the UI restarts it within half a minute, and a link ngrok
+link. If ngrok stops, the UI restarts it within half a minute, and once a minute
+until it is up, the first ngrok of a Remote too (its static domain still held by an
+ngrok that has not let go of it yet, say); not one that stopped for want of an
+authtoken, or too old for `--url`, which the panel says how to fix. A link ngrok
 announces late (a network still coming up) is shown, and used for notifications,
 as soon as it comes. With the panel closed, a notice says when a Remote that was
 on could not come back on as the UI started, when phones cannot reach it (ngrok

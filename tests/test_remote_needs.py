@@ -4038,7 +4038,9 @@ def test_the_scan_after_quick_answers_is_one_and_never_runs_once_the_watcher_sto
     scans: list[float] = []
 
     def counted() -> list[ProjectInfo]:
-        scans.append(time.monotonic())
+        # The clock a Timer's wait keeps everywhere: Windows' time.monotonic stepped 15.6 ms
+        # before Python 3.13, and read a 0.3 s wait as 0.297 s.
+        scans.append(time.perf_counter())
         return []
 
     watcher = RemoteNeedsWatcher(
@@ -4046,7 +4048,7 @@ def test_the_scan_after_quick_answers_is_one_and_never_runs_once_the_watcher_sto
     )
     for _ in range(4):
         watcher.needs_rescan_soon()
-    last = time.monotonic()
+    last = time.perf_counter()
     watcher.needs_rescan_soon()
     if then == "the watcher stops":
         watcher.stop_watching()

@@ -183,7 +183,8 @@ def test_ngrok_command_is_the_documented_one() -> None:
     """``--inspect=false``: ngrok's inspector keeps every request and answer, the unlock's
     passphrase and every cookie included, on a local web interface that asks for nothing."""
     assert ngrok_command(8750) == [
-        "ngrok", "http", "8750", "--log=stdout", "--log-format=json", "--inspect=false"
+        "ngrok", "http", "8750", "--log=stdout", "--log-format=json", "--log-level=info",
+        "--inspect=false",
     ]  # fmt: skip
 
 
@@ -319,6 +320,50 @@ def test_an_ngrok_that_ignores_the_terminate_is_killed() -> None:
     assert process.calls == [reader_asked, "terminate", waited, "kill", waited]
     assert ngrok_tunnel.STOP_SECONDS == 5
     assert not tunnel.running
+
+
+def test_an_ngrok_group_that_ignores_the_terminate_is_killed_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where ngrok runs in a process group of its own (Linux, macOS), stopping SIGTERMs the
+    group and SIGKILLs what is left of it: the stand-in above has no pid, so it reaches only
+    the group-less terminate() and kill(), and no test held the group's SIGKILL. Without it,
+    an ngrok, or a launcher's child, that ignored the SIGTERM kept its tunnel and the static
+    domain (ERR_NGROK_334 for the next Remote) while the panel said Remote was off (sweep 3
+    of #243)."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("process groups are POSIX")
+    monkeypatch.setattr(ngrok_tunnel, "STOP_SECONDS", 0.5)
+    pids = tmp_path / "pids"
+    body = (
+        "import os, signal\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "child = os.fork()\n"  # a child in ngrok's group, deaf to SIGTERM as well
+        "if child == 0:\n"
+        "    time.sleep(60)\n"
+        "    os._exit(0)\n"
+        f"open({str(pids)!r}, 'w').write(str(os.getpid()) + ' ' + str(child))\n"
+        f"print({json.dumps(json.dumps(STARTED))}, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    tunnel = NgrokTunnel(8750, command=ngrok_printing(tmp_path, body))
+    assert tunnel.start_tunnel() is None
+    deadline = time.monotonic() + 10
+    while len(pids.read_text().split()) < 2 if pids.exists() else True:
+        assert time.monotonic() < deadline, "the stand-in ngrok never started"
+        time.sleep(0.02)
+    leader, child = (int(pid) for pid in pids.read_text().split())
+    try:
+        assert tunnel.wait_for_url(timeout=10) == STARTED["url"]
+        started = time.monotonic()
+        assert finished(tunnel.stop_tunnel, 10), "stopping hung"
+        assert time.monotonic() - started >= ngrok_tunnel.STOP_SECONDS, "the SIGTERM was heeded"
+        assert gone(leader) and gone(child), "what ignored the SIGTERM was left running"
+        assert not tunnel.running
+    finally:
+        for pid in (leader, child):
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
 
 
 def test_a_url_its_listener_could_not_take_never_ends_the_log_reader(
@@ -924,6 +969,57 @@ def panels_ngrok(port: int, own: Path, popen: Callable[..., subprocess.Popen[str
     )
 
 
+def level_minding_ngrok(tmp_path: Path) -> Callable[..., subprocess.Popen[str]]:
+    """A ``popen`` running a stand-in for ngrok that logs as ngrok does by level: its
+    "started tunnel" line is info, kept at ``--log-level`` when given, else at the last
+    ``log_level`` its ``--config`` files set, else at info."""
+    script = tmp_path / "level-ngrok.py"
+    script.write_text(
+        "import re, sys, time\n"
+        "level = None\n"
+        "for arg in sys.argv[1:]:\n"
+        "    if arg.startswith('--config='):\n"
+        "        for path in arg.split('=', 1)[1].split(','):\n"
+        "            found = re.findall(r'^\\s*log_level:\\s*(\\w+)', open(path).read(), re.M)\n"
+        "            level = found[-1] if found else level\n"
+        "for arg in sys.argv[1:]:\n"
+        "    if arg.startswith('--log-level='):\n"
+        "        level = arg.split('=', 1)[1]\n"
+        "if (level or 'info') in ('debug', 'info'):\n"
+        f"    print({json.dumps(json.dumps(OURS))}, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+
+    def popen(command: list[str], **kwargs: Any) -> subprocess.Popen[str]:
+        return subprocess.Popen([sys.executable, str(script), *command[1:]], **kwargs)
+
+    return popen
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'version: "2"\nauthtoken: tok_123\nlog_level: warn\n',
+        'version: "3"\nagent:\n  authtoken: tok_123\n  log_level: error\n',
+    ],
+    ids=["v2 warn", "v3 error"],
+)
+def test_a_log_level_in_the_humans_ngrok_yml_never_hides_the_tunnels_url(
+    tmp_path: Path, text: str
+) -> None:
+    """The URL comes only from ngrok's info-level "started tunnel" line, and ngrok merges our
+    config over the human's own: ``log_level: warn`` there hid it, and the panel said ngrok
+    did not announce a tunnel in time, with no link and no QR, while ngrok held the tunnel
+    (sweep 3 of #243)."""
+    own = write_ngrok_config(tmp_path, text)
+    tunnel = panels_ngrok(8750, own, level_minding_ngrok(tmp_path))
+    assert tunnel.start_tunnel() is None
+    try:
+        assert tunnel.wait_for_url(10) == OURS["url"]
+    finally:
+        tunnel.stop_tunnel()
+
+
 def test_the_panels_ngrok_runs_with_its_agent_api_off(tmp_path: Path) -> None:
     """The panel's ngrok served its agent API, which any user of the machine could use to stop
     Remote's tunnel and start it again with the inspector on, reading the passphrase and every
@@ -986,6 +1082,79 @@ def test_an_ngrok_that_cannot_read_our_config_runs_as_before_and_the_panel_says_
         assert controller.status_line() == API_ON.format(addr="127.0.0.1:4040")
     finally:
         controller.turn_off()
+
+
+def test_an_ngrok_stopped_after_it_blamed_our_config_is_not_started_again(
+    tmp_path: Path,
+) -> None:
+    """ngrok said our config is why it cannot go on, and was stopped (Remote turned off)
+    before it ended by itself. The reader then saw it end, and only the check that this
+    tunnel was not stopped meanwhile kept it from starting ngrok again without our config:
+    a tunnel up, its API on, for a Remote that is off. No test held that check (sweep 3 of
+    #243)."""
+    own = write_ngrok_config(tmp_path, 'version: "2"\nauthtoken: tok_123\n')
+    script = tmp_path / "blaming-ngrok.py"
+    script.write_text(
+        "import sys, time\n"
+        "if any(arg.startswith('--config=') for arg in sys.argv):\n"
+        f"    print({f'ERROR:  open /home/u/.aisquare/{OUR_CONFIG}: permission denied'!r},"
+        " flush=True)\n"
+        "else:\n"
+        f"    print({json.dumps(json.dumps(OURS))}, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    runs: list[list[str]] = []
+
+    def popen(command: list[str], **kwargs: Any) -> subprocess.Popen[str]:
+        runs.append(command)
+        return subprocess.Popen([sys.executable, str(script), *command[1:]], **kwargs)
+
+    tunnel = panels_ngrok(8750, own, popen)
+    assert tunnel.start_tunnel() is None
+    try:
+        deadline = time.monotonic() + 10
+        while not tunnel._configs_refused:  # its log reader has the blame
+            assert time.monotonic() < deadline, "the stand-in never said it"
+            time.sleep(0.02)
+        tunnel.stop_tunnel()
+        assert tunnel._reader is not None
+        tunnel._reader.join(10)
+        assert len(runs) == 1, "an ngrok was started for a tunnel that was stopped"
+        assert not tunnel.running
+    finally:
+        tunnel.stop_tunnel()
+
+
+def test_what_an_ngrok_left_in_its_group_as_it_exited_is_stopped_with_it(
+    tmp_path: Path,
+) -> None:
+    """An ngrok, or a launcher, that exits on its own may leave a process in its group that
+    no longer holds the log's pipe. Its group is kept for stopping while anything is left in
+    it: forgotten, the stop signalled nobody, and the one left ran on (sweep 3 of #243)."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("process groups are POSIX")
+    pid_file = tmp_path / "left.pid"
+    body = (
+        "import subprocess\n"
+        "left = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],"
+        " stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        f"open({str(pid_file)!r}, 'w').write(str(left.pid))\n"
+        f"print({json.dumps(json.dumps(STARTED))}, flush=True)\n"
+        "sys.exit(0)\n"
+    )
+    tunnel = NgrokTunnel(8750, command=ngrok_printing(tmp_path, body))
+    assert tunnel.start_tunnel() is None
+    left = pid_in(pid_file)
+    try:
+        assert tunnel.wait_for_url(timeout=10) == STARTED["url"]
+        assert tunnel._reader is not None
+        tunnel._reader.join(10)  # it saw the log end, and the exit
+        assert not tunnel.running
+        tunnel.stop_tunnel()
+        assert gone(left), "what ngrok left in its group ran on"
+    finally:
+        with contextlib.suppress(OSError):
+            os.kill(left, signal.SIGKILL)
 
 
 @pytest.mark.parametrize(
@@ -1160,6 +1329,8 @@ SERVER_CALLS = (
     "remote_allow_write",
     "remote_password",
     "remote_served_elsewhere",
+    "remote_state_loaded",
+    "runtime",
 )
 
 
@@ -1198,6 +1369,11 @@ class FakeServer(types.ModuleType):
         self.calls: list[str] = []
         self.served_elsewhere = False
         """What ``remote_served_elsewhere()`` answers: another process serves this home."""
+        self.state_loaded = True
+        """What ``remote_state_loaded()`` answers: ``remote.json`` was read in this process. A
+        test sets it ``False`` for a process that has not, whose first read ``runtime()`` is."""
+        self.reading: threading.Event | None = None
+        """When set, ``runtime()`` waits for it, as a first read waits for the file's lock."""
         self.DEFAULT_PORT = 8750
         self.RemoteInfo = remote_server.RemoteInfo
 
@@ -1269,6 +1445,14 @@ class FakeServer(types.ModuleType):
 
     def remote_served_elsewhere(self) -> bool:
         return self.served_elsewhere
+
+    def remote_state_loaded(self) -> bool:
+        return self.state_loaded
+
+    def runtime(self) -> None:
+        if self.reading is not None:
+            self.reading.wait(10)
+        self.state_loaded = True
 
 
 def _positional(function: Any) -> int:
@@ -1548,6 +1732,87 @@ def test_turning_remote_off_revokes_every_device_before_the_server_stops() -> No
     ]
 
 
+def test_quitting_after_the_auto_off_time_came_turns_remote_off_as_auto_off() -> None:
+    """The check runs every 30 s. A quit in between left the deadline to the exit, which
+    revoked nothing: every phone stayed signed in on the Remote the next start brought back,
+    where a quit half a minute later found them all signed out."""
+    clock = [datetime(2026, 9, 11, 18, 0, tzinfo=UTC)]
+    server = fake_server()
+    saved: dict[str, object] = {}
+    controller = RemoteController(
+        server=server, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    controller.save_switch = saved.__setitem__
+    controller.turn_on()
+    assert saved == {"remote_enabled": True}
+    clock[0] += timedelta(minutes=61)  # past the hour; the 30 s check has not run yet
+    controller.shutdown_for_exit()
+    assert server.revoked_every == ["auto-off"]
+    assert saved == {"remote_enabled": False}, "the next start brings back no Remote"
+    assert not controller.running and "stop_remote_server" in server.calls
+    in_time = fake_server()
+    leaving = RemoteController(
+        server=in_time, tunnel_factory=fake_tunnel_factory(url="x"), now=lambda: clock[0]
+    )
+    leaving.save_switch = saved.__setitem__
+    leaving.turn_on()
+    clock[0] += timedelta(minutes=59)
+    leaving.shutdown_for_exit()
+    assert in_time.revoked_every == [] and saved == {"remote_enabled": True}
+
+
+def test_the_first_read_of_remote_json_never_waits_for_its_lock_on_the_callers_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The process's first read makes ``remote.json`` when it is missing (and rewrites one
+    old or edited by hand) under ``remote.json.lock``: the R panel's first paint made it on
+    Textual's thread, which froze for the 2 s another process held that lock (sweep 3 of
+    #243). The paint gets what it gets for a file it cannot read; the read is the writer's."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "STATE_LOCK_WAIT_SECONDS", 10.0)
+    controller = RemoteController(tunnel_factory=fake_tunnel_factory(url="x"))
+    state = paths.remote_state_path()
+    state.parent.mkdir(parents=True, exist_ok=True)
+    held = os.open(state.with_name(f"{state.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    lock_exclusive(held)  # another process, in the middle of its write
+    try:
+        started = time.monotonic()
+        assert controller.write_actions_allowed() is False
+        assert controller.remote_status() == {} and controller.devices() == []
+        assert time.monotonic() - started < 1.0, "the caller waited for remote.json's lock"
+        assert not state.exists(), "made on the writer's thread, once the lock is free"
+    finally:
+        unlock(held)
+        os.close(held)
+    assert controller.writes_done(10)
+    assert state.exists() and remote_server.remote_state_loaded()
+    assert controller.remote_status()["devices"] == [] and controller.read_problem is None
+
+
+def test_a_restore_starts_remote_once_remote_json_is_read_on_the_writers_thread() -> None:
+    """``restore`` runs at the fleet UI's mount, and the start reads ``remote.json``: the
+    first read is the writer's, and the start follows on the thread that drives the
+    controller, once it is done."""
+    server = fake_server()
+    server.state_loaded, server.reading = False, threading.Event()
+    controller = RemoteController(
+        server=server,
+        tunnel_factory=fake_tunnel_factory(url="x"),
+        state=RemoteState(remote_enabled=True),
+    )
+    handed: list[Callable[[], None]] = []
+    controller.call_back = handed.append
+    controller.restore(wait=False)
+    assert not controller.running and not server.running and handed == []
+    server.reading.set()
+    assert controller.writes_done(5)
+    deadline = time.monotonic() + 5
+    while not handed and time.monotonic() < deadline:
+        time.sleep(0.01)
+    handed[0]()  # on the thread that drives the controller
+    assert controller.running and server.running
+
+
 def test_a_url_ngrok_announces_after_the_wait_is_the_link_and_the_push_origin_all_the_same(
     tmp_path: Path,
 ) -> None:
@@ -1699,6 +1964,68 @@ def test_a_remote_that_does_not_come_back_at_start_is_news() -> None:
     assert back.running is False and heard == [], "a Remote back as it was, and turned off, is none"
 
 
+def test_a_remote_another_process_serves_is_no_news_at_start_and_keeps_the_saved_switch() -> None:
+    """A second fleet UI, or one started beside ``asq remote serve``, warned at every start
+    that Remote "could not start — turn it off first", pointing at the Remote that was on,
+    which is what the saved switch asks for (sweep 3 of #243)."""
+    server = fake_server()
+    server.fail_start = remote_server.RemoteAlreadyOn(remote_server.REMOTE_ALREADY_ON)
+    update_state("remote_enabled", True)
+    for _start in range(2):
+        second = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+        heard = heard_news(second)
+        second.restore()
+        assert heard == [] and second.message is None and not second.running
+    second.turn_on()  # pressed from the panel: that one stays on, and so does its switch
+    assert second.message == remote_control.ALREADY_ON
+    assert load_remote_state().remote_enabled is True
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        remote_server.RemoteUnavailable("the remote extra is not installed (uvicorn missing)"),
+        remote_server.RemoteError("the remote server did not come up — is the port in use?"),
+    ],
+    ids=["no extra", "port taken"],
+)
+def test_a_saved_on_that_cannot_come_back_is_left_off_by_a_press_that_fails_too(
+    failure: Exception,
+) -> None:
+    """A Remote that cannot start warned at every UI start, while the panel's switch read off
+    and a press of it failed before any turn-off could save the off: only installing the
+    extra or editing state.json stopped it (sweep 3 of #243). A press that fails leaves the
+    saved switch off, as the panel shows it, and the next start says nothing."""
+    server = fake_server()
+    server.fail_start = failure
+    update_state("remote_enabled", True)
+    for _start in range(2):  # what the human saved on is tried, and its failure told, each time
+        controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+        heard = heard_news(controller)
+        controller.restore()
+        assert heard == [(f"Remote could not start — {failure}", True)]
+    controller.turn_on()
+    assert controller.message == f"Remote could not start — {failure}"
+    assert load_remote_state().remote_enabled is False
+    after = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    heard = heard_news(after)
+    after.restore()
+    assert heard == [] and not after.running
+
+
+def test_a_press_whose_deadline_will_not_write_leaves_the_saved_switch_off_too() -> None:
+    server = fake_server()
+    server.unwritable = OSError(28, "No space left on device")
+    update_state("remote_enabled", True)
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    controller.turn_on()  # the server starts; its deadline will not write, so it stops again
+    assert not controller.running
+    assert controller.message is not None and "remote.json could not be written" in (
+        controller.message
+    )
+    assert load_remote_state().remote_enabled is False
+
+
 def test_a_tunnel_that_does_not_come_up_is_news_and_so_is_its_url_when_it_comes() -> None:
     server = fake_server()
     tunnels: list[FakeTunnel] = []
@@ -1759,6 +2086,82 @@ def test_a_url_that_lands_as_the_wait_runs_out_is_told_as_up_after_the_trouble(
         ),
         ("ngrok is up — phones can reach Remote now", False),
     ]
+
+
+def test_a_url_adopted_after_the_wait_ran_out_and_before_its_verdict_is_no_trouble() -> None:
+    """The log reader can adopt the URL after the waiter's wait ran out and before it takes
+    the lock to say so: adoption tells nothing then, as nothing was told yet. Only the
+    waiter's check for a URL now in hand keeps it from saying ngrok did not announce a
+    tunnel, and toasting that phones cannot reach a Remote that has its link: no test
+    held that check (sweep 3 of #243)."""
+    server = fake_server()
+    tunnels: list[FakeTunnel] = []
+
+    def factory(port: int) -> FakeTunnel:
+        tunnels.append(FakeTunnel(port, url=None, failure=None))
+        tunnel = tunnels[-1]
+        waited = tunnel.wait_for_url
+
+        def wait_then_the_url_lands(timeout: float = 15.0) -> str | None:
+            url = waited(timeout)  # ran out: None
+            reader = threading.Thread(target=tunnel.handle_line, args=(json.dumps(STARTED),))
+            reader.start()
+            reader.join(5)  # adopted before the waiter decides
+            return url
+
+        tunnel.wait_for_url = wait_then_the_url_lands  # type: ignore[method-assign]
+        return tunnel
+
+    controller = RemoteController(server=server, tunnel_factory=factory, url_timeout=0.1)
+    heard = heard_news(controller)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    assert controller.link_url() == build_public_url(STARTED["url"], server.token)
+    assert controller.message is None
+    assert heard == []
+
+
+class StartingTunnel(FakeTunnel):
+    """A tunnel whose ngrok takes a while to spawn: ``start_tunnel`` waits for ``release``,
+    then starts as :class:`FakeTunnel` does, or fails with ``failure``."""
+
+    def __init__(self, port: int, *, failure: str | None = None) -> None:
+        super().__init__(port, url="https://abcd-12.ngrok-free.app", failure=failure)
+        self.entered, self.release = threading.Event(), threading.Event()
+        self.stop_calls = 0
+
+    def start_tunnel(self) -> str | None:
+        self.entered.set()
+        self.release.wait(10)
+        return super().start_tunnel()
+
+    def stop_tunnel(self) -> None:
+        self.stop_calls += 1
+        super().stop_tunnel()
+
+
+@pytest.mark.parametrize("failure", [None, INSTALL_HINT], ids=["it started", "it failed"])
+def test_a_remote_turned_off_while_its_ngrok_starts_leaves_no_ngrok_running(
+    failure: str | None,
+) -> None:
+    """A switch-off landing while ngrok spawns finds no tunnel to stop yet: the start alone
+    knows it, and stops it once it has started, so no ngrok of a Remote that is off holds
+    the static domain for the next one (ERR_NGROK_334). No test spawned slowly enough for
+    a turn-off to land there (sweep 3 of #243). One that failed to start has nothing to
+    stop."""
+    server = fake_server()
+    tunnel = StartingTunnel(8750, failure=failure)
+    controller = RemoteController(server=server, tunnel_factory=lambda port: tunnel)
+    controller.turn_on(wait=False)
+    assert tunnel.entered.wait(5), "ngrok never began to start"
+    controller.turn_off(wait=False)  # wait=True would wait for the start, on the writer
+    assert tunnel.stop_calls == 0 and not controller.running
+    tunnel.release.set()
+    assert controller.writes_done(5) and controller.wait_until_off(5)
+    assert tunnel.stop_calls == (1 if failure is None else 0)
+    assert tunnel.stopped is (failure is None)
+    assert controller.tunnel is None and controller.link_url() is None
 
 
 def test_auto_off_and_what_turning_off_could_not_do_are_news() -> None:
@@ -1940,6 +2343,24 @@ def test_a_remote_still_starting_as_the_ui_quits_is_saved_as_on_for_the_next_sta
     assert controller.wait_until_off(5) and controller.writes_done(5)
     assert read_state()["remote_enabled"] is True
     assert load_remote_state().remote_enabled is True
+
+
+def test_a_start_turned_off_before_its_switch_was_saved_leaves_the_switch_off() -> None:
+    """A start hands the save of its switch to the thread that drives the controller once its
+    deadline is written; a turn-off there before that step ran has saved the off already. The
+    start's late save is for a Remote that is gone, and saved, it brought back at the next
+    start a Remote the human had turned off. No test held that check (sweep 3 of #243)."""
+    server = fake_server()
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    handed: list[Callable[[], None]] = []
+    controller.call_back = handed.append  # Textual's queue, not yet run
+    controller.turn_on(wait=False)
+    assert controller.writes_done(5) and handed, "the start's save is queued"
+    controller.turn_off()  # the human's switch, on that thread, before the queued save runs
+    assert load_remote_state().remote_enabled is False
+    for step in handed:
+        step()
+    assert load_remote_state().remote_enabled is False, "the next start brings back nothing"
 
 
 def test_a_starts_failure_found_on_the_writers_thread_stops_only_that_start() -> None:

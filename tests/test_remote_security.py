@@ -1295,6 +1295,57 @@ def test_serves_auto_off_reads_the_wall_clock_every_30_s_so_a_sleep_cannot_hide_
     assert off == ["off"] and timer.fired
 
 
+def test_serves_auto_off_turns_off_once_when_its_check_and_the_way_out_both_find_it_past(
+    runtime: Runtime, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel cannot stop a check already running, and ``serve``'s way out fires the
+    auto-off itself once the deadline has passed and the timer has not fired. A Ctrl-C
+    while the 30 s check was between reading the deadline and saying it fired turned
+    Remote off from both threads: two farewells, two revokes."""
+    FakeTimer.made = []
+    off: list[str] = []
+    timer = _AutoOffTimer(runtime, lambda: off.append("off"), timer=FakeTimer)
+    runtime.set_auto_off(clock.now - timedelta(seconds=1))
+    read, way_out_done = threading.Event(), threading.Event()
+    deadline_of = runtime.auto_off_deadline
+
+    def slow_read() -> datetime | None:  # the check's thread waits on the way out once read
+        deadline = deadline_of()
+        if threading.current_thread() is not threading.main_thread():
+            read.set()
+            way_out_done.wait(5)
+        return deadline
+
+    monkeypatch.setattr(runtime, "auto_off_deadline", slow_read)
+    check = threading.Thread(target=timer.auto_off_fire, daemon=True)
+    check.start()
+    assert read.wait(5)
+    timer.auto_off_cancel()  # serve's way out, as run_foreground does it
+    timer.auto_off_fire()
+    way_out_done.set()
+    check.join(5)
+    assert not check.is_alive()
+    assert off == ["off"] and timer.fired
+
+
+def test_a_check_running_when_serve_cancels_its_auto_off_arms_no_other(
+    runtime: Runtime, clock: Clock
+) -> None:
+    """``serve``'s way out cancels the timer, but a check already past its wait found the
+    deadline still ahead and armed the next one, which nothing would cancel: the checks
+    went on after ``serve`` had returned, for as long as the process lived."""
+    FakeTimer.made = []
+    off: list[str] = []
+    timer = _AutoOffTimer(runtime, lambda: off.append("off"), timer=FakeTimer)
+    runtime.set_auto_off(clock.now + timedelta(minutes=5))
+    timer.auto_off_arm()
+    (check,) = FakeTimer.made
+    timer.auto_off_cancel()  # as the check began: a Timer's cancel cannot stop it now
+    check.fire()
+    assert FakeTimer.made == [check] and check.cancelled
+    assert off == [] and not timer.fired
+
+
 def _free_port() -> int:
     import socket
 
@@ -1541,6 +1592,44 @@ def test_serves_auto_off_on_a_full_disk_says_the_phones_were_not_signed_out(
     assert "No space left on device" in out[0].getMessage()
 
 
+@pytest.mark.parametrize("past", [True, False], ids=["past the deadline", "before it"])
+def test_a_ctrl_c_of_serve_once_its_auto_off_time_came_is_auto_off(
+    page: Path, monkeypatch: pytest.MonkeyPatch, past: bool
+) -> None:
+    """``serve``'s timer counts the monotonic clock, so a machine that slept past the deadline
+    checks it up to half a minute after waking. A Ctrl-C then cleared the deadline and
+    signed no phone out, where one a moment later found them all signed out by auto-off.
+    Before the deadline, a Ctrl-C still revokes nothing (SPEC §2.4)."""
+    import uvicorn
+
+    class CtrlC:
+        def __init__(self, config: Any) -> None:
+            self.should_exit = False
+
+        def run(self, sockets: Any = None) -> None:
+            raise KeyboardInterrupt  # uvicorn re-raises the Ctrl-C it caught, once stopped
+
+    state = remote_server.runtime()
+    state._state.password = PASSWORD
+    state._save_state()
+    unlocked = state.unlock_device(PASSWORD, "Pixel")
+    assert unlocked is not None
+    now = [datetime.now(UTC)]
+    monkeypatch.setattr(remote_server, "_remote_now", lambda: now[0])
+    monkeypatch.setattr(remote_push, "push_farewell", lambda ids, reason: None)
+    monkeypatch.setattr(uvicorn, "Server", CtrlC)
+
+    def banner() -> None:
+        now[0] += timedelta(minutes=2 if past else 0.5)  # the deadline is a minute away
+
+    ended_by_auto_off = remote_server.run_foreground(
+        port=_free_port(), auto_off_minutes=1, ready=banner
+    )
+    assert ended_by_auto_off is past
+    assert _devices_on_disk() == ([] if past else [unlocked[1].id])
+    assert remote_server.remote_auto_off_at() is None, "no deadline left behind either way"
+
+
 def test_serves_way_out_waits_for_the_auto_off_to_say_what_it_could_not_do(
     page: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1644,6 +1733,56 @@ def test_remote_off_says_farewell_then_revokes_every_device_with_4410(
         assert _closed_with(ws) == WS_CLOSE_REMOTE_OFF
     assert farewells == [([device_id], "remote off", [device_id])], "sent while they existed"
     assert runtime.device_rows() == []
+
+
+def test_once_remote_turns_off_no_unlock_gets_in_while_its_server_stops(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turning off revokes every device, clears the deadline, then stops the server, which
+    uvicorn sees at its next tick: an unlock in between made a device the revoke never saw,
+    saved on the way out, its cookie good on the next Remote for 7 days, and past the
+    deadline the clearing opened the gate again (review of #243, round 5)."""
+    monkeypatch.setattr(remote_server, "_runtime", runtime)
+    monkeypatch.setattr(remote_push, "push_farewell", lambda ids, reason: None)
+    client = make_client(app)
+    runtime.set_auto_off(remote_server._remote_now() - timedelta(minutes=1))
+    assert unlock(client, runtime).status_code == 404, "past the deadline"
+    remote_server.revoke_every_remote_device("auto-off")
+    runtime.set_auto_off(None)  # as the panel and serve clear it, before the server stops
+    refused = unlock(client, runtime)
+    assert (refused.status_code, refused.json()) == (
+        404,
+        {"error": "not_found", "message": LINK_GONE},
+    )
+    assert client.get(f"{base(runtime)}/api/remote").status_code == 404
+    runtime.flush_last_seen()  # the flush on the way out
+    assert Runtime(remote_state_path(), remote_audit_path()).device_rows() == []
+    runtime.remote_coming_on()  # what the next start does
+    assert unlock(client, runtime).status_code == 200
+
+
+def test_an_unlock_already_past_the_gate_as_remote_turns_off_makes_no_device(
+    app: Any, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One the gate let in before, still waiting for its turn or for remote.json's lock while
+    the revoke held it, is answered as the gate answers now: no device, new or renewed, and
+    no wrong guess counted against the budget or the device."""
+    client = make_client(app)
+    known = unlock(client, runtime)
+    assert known.status_code == 200
+    secret = client.cookies.get(COOKIE)
+    assert secret is not None
+    monkeypatch.setattr(remote_server, "remote_gate_auto_off", lambda runtime, scope: True)
+    runtime.remote_going_off()
+    cookies: dict[str, str]
+    for cookies in ({}, {COOKIE: secret}):  # a new phone, then the known one again
+        client.cookies.clear()
+        client.cookies.update(cookies)
+        response = unlock(client, runtime)
+        assert (response.status_code, response.json()["error"]) == (404, "not_found")
+    assert [row["id"] for row in runtime.device_rows()] == [known.json()["device"]["id"]]
+    assert runtime.device_for_cookie(secret) is not None, "the known cookie was not replaced"
+    assert UnlockBudget(runtime).budget_failures() == 0
 
 
 def test_a_farewell_that_cannot_be_queued_still_turns_remote_off(

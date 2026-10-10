@@ -103,7 +103,8 @@ PUSH_TIMEOUT_SECONDS = 10.0
 PUSH_RESPONSE_MAX = 4_096
 """The most of a push service's answer that is read; only its status matters."""
 PUSH_FAILURES_MAX = 3
-"""Refusals in a row (400/401/403) after which a subscription is dropped as broken."""
+"""Refusals in a row (400/401/403) after which a subscription is dropped as broken
+(:attr:`PushSubscriptionRecord.refusals`)."""
 PUSH_TEST_INTERVAL_SECONDS = 10.0
 """One test push per device this often: a test is a tap, never a loop."""
 PUSH_SUBSCRIPTION_CALLS = 6
@@ -442,7 +443,13 @@ class PushSubscriptionRecord:
     """base64url of the browser's 16-byte auth secret."""
     created_at: str
     failures: int = 0
-    """Sends in a row that failed (SPEC §5.7); a success resets it."""
+    """Sends in a row that failed, whatever the failure (SPEC §5.7); a success resets it."""
+    refusals: int = 0
+    """Of those, the refusals in a row (400/401/403), which alone drop the subscription, at
+    :data:`PUSH_FAILURES_MAX`: any other answer, and no answer at all, ends the row. Counted
+    in :attr:`failures`, a 401 after two timeouts of a laptop waking with no network dropped
+    the phone's subscription, as if it were the third refusal in a row (review of #243,
+    round 5)."""
 
 
 @dataclass
@@ -473,6 +480,7 @@ class PushState:
                     "auth": record.auth,
                     "created_at": record.created_at,
                     "failures": record.failures,
+                    "refusals": record.refusals,
                 }
                 for device_id, record in self.subscriptions.items()
             },
@@ -500,13 +508,14 @@ def _push_state_from_json(raw: object) -> PushState:
                 isinstance(endpoint, str) and isinstance(p256dh, str) and isinstance(auth, str)
             ):
                 continue
-            failures = row.get("failures")
+            failures, refusals = row.get("failures"), row.get("refusals")
             state.subscriptions[str(device_id)] = PushSubscriptionRecord(
                 endpoint=endpoint,
                 p256dh=p256dh,
                 auth=auth,
                 created_at=str(row.get("created_at") or ""),
                 failures=failures if type(failures) is int and failures >= 0 else 0,
+                refusals=refusals if type(refusals) is int and refusals >= 0 else 0,
             )
     pushed = raw.get("pushed")
     if isinstance(pushed, dict):
@@ -725,18 +734,21 @@ def push_record_outcome(device_id: str, endpoint: str, status: int | None) -> No
     """Apply a push service's answer to the subscription it was about (SPEC §5.7).
 
     2xx resets the failures; 404/410 drop it (it expired, or the phone
-    unsubscribed); 400/401/403 count, and drop it at the third; 413 is our bug,
-    logged and kept; 429, 5xx and no answer at all count and keep it, with no
-    retry loop: the next push is the retry. An answer about an endpoint the
-    device has since replaced is about nothing any more.
+    unsubscribed); 400/401/403 count, and drop it at the third in a row; 413 is
+    our bug, logged and kept; 429, 5xx and no answer at all count and keep it,
+    with no retry loop: the next push is the retry. Only refusals make the row
+    that drops a subscription (:attr:`PushSubscriptionRecord.refusals`): any
+    other answer ends it. An answer about an endpoint the device has since
+    replaced is about nothing any more.
     """
     with _push_state_edit() as state:
         record = state.subscriptions.get(device_id)
         if record is None or record.endpoint != endpoint:
             return
+        refused = status in (400, 401, 403)
         if status is not None and 200 <= status < 300:
-            if record.failures:
-                state.subscriptions[device_id] = replace(record, failures=0)
+            if record.failures or record.refusals:
+                state.subscriptions[device_id] = replace(record, failures=0, refusals=0)
         elif status in (404, 410):
             del state.subscriptions[device_id]
             log.info("remote: %s's push subscription is gone (%s); dropped it", device_id, status)
@@ -746,7 +758,9 @@ def push_record_outcome(device_id: str, endpoint: str, status: int | None) -> No
                 device_id,
                 PUSH_PLAINTEXT_MAX,
             )
-        elif status in (400, 401, 403) and record.failures + 1 >= PUSH_FAILURES_MAX:
+            if record.refusals:
+                state.subscriptions[device_id] = replace(record, refusals=0)
+        elif refused and record.refusals + 1 >= PUSH_FAILURES_MAX:
             del state.subscriptions[device_id]
             log.info(
                 "remote: %s's push service refused %d times in a row (%s); dropped it",
@@ -755,7 +769,11 @@ def push_record_outcome(device_id: str, endpoint: str, status: int | None) -> No
                 status,
             )
         else:
-            state.subscriptions[device_id] = replace(record, failures=record.failures + 1)
+            state.subscriptions[device_id] = replace(
+                record,
+                failures=record.failures + 1,
+                refusals=record.refusals + 1 if refused else 0,
+            )
 
 
 def push_plaintext(message: Mapping[str, object]) -> bytes:

@@ -203,6 +203,9 @@ class RemotePanel(ModalScreen[None]):
             # first-time user without ngrok most of all (sweep of #243).
             self.query_one("#remote-qr", Static).update(qr_art(url) if url and public else "")
         self.query_one("#remote-regen", Button).disabled = not running
+        # The timer of a Remote another process serves is that process's: a pick here saved
+        # this UI's next one and changed nothing on the Remote the panel said was on.
+        self.query_one("#remote-auto-off", Select).disabled = elsewhere
         self.query_one("#remote-copy", Button).disabled = url is None
         self._paint_devices(controller.devices(status))
 
@@ -225,10 +228,20 @@ class RemotePanel(ModalScreen[None]):
         self._painted[switch_id] = value
 
     def _state_text(self, *, elsewhere: bool = False) -> Text:
-        """Whether Remote is on, and how; ``elsewhere``: another process serves this home."""
+        """Whether Remote is on, and how; ``elsewhere``: another process serves this home, and
+        that Remote's auto-off is said, not this UI's picker's, which beside it read as a
+        timer the public Remote did not have (sweep 3 of #243)."""
         controller = self.controller
+        if not controller.running and not elsewhere:
+            return Text("off", style="dim")
         if not controller.running:
-            return Text(ELSEWHERE, style="bold yellow") if elsewhere else Text("off", style="dim")
+            text = Text(ELSEWHERE, style="bold yellow")
+            read, served = controller.served_auto_off()
+            if read and served is not None:
+                text.append(f"  · auto-off at {served.astimezone(LOCAL_ZONE):%H:%M}", style="dim")
+            elif read:
+                text.append("  · no auto-off", style="dim")
+            return text
         text = Text("on", style="bold green")
         if controller.public_url is None:
             text.append("  · local only — no tunnel yet", style="dim")

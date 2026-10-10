@@ -77,7 +77,10 @@ announces late (a network still coming up) is shown, and used for notifications,
 as soon as it comes. With the panel closed, a notice says when a Remote that was
 on could not come back on as the UI started, when phones cannot reach it (ngrok
 missing or not up, and once it is up after all), when ngrok came back on a new
-link, and when auto-off turned Remote off. The panel serves on port 8750, or on
+link, and when auto-off turned Remote off. A Remote another `serve` or fleet UI
+has on is not news: the panel says it is on in another process. One that cannot
+come back is tried at every start until a press of the switch fails as well;
+that leaves it off for the next start too. The panel serves on port 8750, or on
 the one an exported `AISQUARE_REMOTE_PORT` names, as `serve` does.
 
 **From a shell**, for a machine without the UI open:
@@ -417,8 +420,10 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   24 hours unused and removed after 7 days. A phone whose sign-in lapsed unlocks
   back into the same device, so its notifications carry on.
 - **Remote off revokes every device**: turning it off in the panel, or auto-off,
-  signs every phone out (after a goodbye notification). Closing the UI or
-  stopping `serve` with Ctrl-C does not; expiry bounds them.
+  signs every phone out (after a goodbye notification), and from that moment
+  every request is a 404 and no unlock goes through, while the server is still
+  stopping. Closing the UI or stopping `serve` with Ctrl-C does not; expiry
+  bounds them. Either, once the auto-off time has come, is auto-off.
 - **Auto-off** is enforced by the server itself: past the deadline every request
   is a 404, and within half a minute Remote turns off, phones signed out, even
   on a machine that slept through the deadline. With writes on, a phone can
@@ -582,14 +587,17 @@ Start ngrok without it (the R panel never uses it).
 
 **`serve`, or the R panel, says another Remote is on.** One `~/.aisquare` serves
 one Remote: the fleet UI's panel, or a `serve` in another shell, has it. The panel
-says so whenever it is open, its state reading on in another process. Turn that
-one off, or use it. Two would share one link, one passphrase, one auto-off and
-one list of phones, and either going off would sign the other's phones out. One
-turned off while a phone's restart or switch was still running keeps the home
-until that is done, since its notifications go on until then; a restart or
-switch can take 40 seconds. Switched on again in the same fleet UI meanwhile,
-the panel says the last Remote is still finishing, rather than start a second
-one beside it.
+says so whenever it is open, its state reading on in another process, with that
+Remote's auto-off; its own Auto-off picker is off meanwhile, since that timer is
+set where the Remote runs. Turn that one off, or use it. Two would share one link,
+one passphrase, one auto-off and one list of phones, and either going off would
+sign the other's phones out. One turned off while a phone's restart or switch was
+still running keeps the home until that is done, since its notifications go on
+until then; a restart or switch can take 40 seconds. So does one still answering a
+phone's read, which waits as long as tmux takes to answer. Switched on again in
+the same fleet UI meanwhile, the panel says the last Remote is still finishing,
+and what: the write by name, or the requests it still answers, rather than start a
+second one beside it.
 
 **`serve` says the port is in use.** Something else took 8750. Pass `--port` and
 give ngrok (and `status`) the same port.

@@ -694,6 +694,38 @@ def test_a_fresh_home_opens_with_write_actions_off() -> None:
     )
 
 
+def test_the_panels_first_paint_never_waits_for_another_processs_lock_on_remote_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The panel's first paint was the process's first read of ``remote.json``, which makes
+    a missing file under ``remote.json.lock``: on Textual's thread, the fleet UI froze for
+    the 2 s another process held it (sweep 3 of #243). It opens at once, and paints the file
+    once the writer's thread has read it."""
+    monkeypatch.setattr(remote_server, "STATE_LOCK_WAIT_SECONDS", 10.0)
+    state = paths.remote_state_path()
+    state.parent.mkdir(parents=True, exist_ok=True)
+    held = os.open(state.with_name(f"{state.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+
+    async def go(pilot: Pilot[None]) -> tuple[float, bool]:
+        lock_exclusive(held)  # another process, in the middle of its write
+        try:
+            started = time.monotonic()
+            modal = await open_panel(pilot)
+            took = time.monotonic() - started
+            made_meanwhile = state.exists()
+        finally:
+            unlock(held)
+            os.close(held)
+        await written(pilot)
+        assert modal.query_one("#remote-allow-write", Switch).value is False
+        assert modal.controller.read_problem is None
+        return took, made_meanwhile
+
+    took, made_meanwhile = drive(go, tunnel=missing_ngrok)
+    assert took < 1.5, f"the panel took {took:.1f} s to open"
+    assert not made_meanwhile and state.exists() and remote_server.remote_state_loaded()
+
+
 # --- devices -----------------------------------------------------------------------------------
 
 
@@ -1085,14 +1117,15 @@ def test_a_remote_json_that_cannot_be_read_is_a_sentence_in_the_panel_not_a_sile
 
     async def go(pilot: Pilot[None]) -> None:
         modal = await open_panel(pilot)
+        await written(pilot)  # the process's first read is the writer thread's
         status = modal.query_one("#remote-status", Static)
         said = shown(status)
         assert said.startswith("remote.json could not be read — ")
         assert "is not a JSON object" in said
         assert modal.query_one("#remote-allow-write", Switch).value is False
         paths.remote_state_path().unlink()  # moved aside: a new link and passphrase
-        modal.repaint()
-        await pilot.pause()
+        modal.repaint()  # asks the writer's thread to read it again
+        await written(pilot)
         assert shown(status) == ""
 
     drive(go, tunnel=missing_ngrok)
@@ -1265,7 +1298,7 @@ def test_the_panel_says_remote_is_on_while_another_process_serves_this_home(
                 if shown(state) != "off":
                     break
                 await asyncio.sleep(0.02)
-            assert shown(state) == remote_view.ELSEWHERE
+            assert shown(state) == f"{remote_view.ELSEWHERE}  · no auto-off"
             assert shown(modal.query_one("#remote-link", Static)) == remote_view.ELSEWHERE_LINK
             assert shown(modal.query_one("#remote-password", Static)) == passphrase
             modal.query_one("#remote-on", Switch).toggle()
@@ -1284,6 +1317,49 @@ def test_the_panel_says_remote_is_on_while_another_process_serves_this_home(
         assert shown(state) == "off"
         assert shown(status) == "", "the home is free: the start may be tried again"
         assert shown(modal.query_one("#remote-link", Static)) == "turn Remote on for a link"
+
+    drive(go, tunnel=missing_ngrok)
+
+
+@pytest.mark.parametrize("minutes", [45, None], ids=["a timer", "never"])
+def test_while_another_process_serves_the_panel_shows_its_auto_off_and_picks_none(
+    monkeypatch: pytest.MonkeyPatch, minutes: int | None
+) -> None:
+    """The Auto-off picker beside "on in another process" showed this UI's saved 60 min, and a
+    pick of it was taken without a word while the serving Remote kept its own deadline, or
+    none at all with ``serve --auto-off 0`` (sweep 3 of #243). The state says that Remote's
+    timer, and the picker is off until this UI's Remote is the one to set."""
+    monkeypatch.setattr(remote_control, "ELSEWHERE_EVERY_SECONDS", 0.0)
+    monkeypatch.setattr(remote_view, "LOCAL_ZONE", UTC)
+    paths.ensure_home()
+    serving = paths.remote_state_path().with_name(remote_server.SERVE_LOCK_NAME)
+    deadline = None if minutes is None else datetime(2026, 10, 9, 21, 58, tzinfo=UTC)
+    said = "no auto-off" if deadline is None else "auto-off at 21:58"
+
+    async def go(pilot: Pilot[None]) -> None:
+        remote_server.set_auto_off(deadline)  # the other process's serve set it
+        fd = os.open(serving, os.O_RDWR | os.O_CREAT, 0o600)
+        lock_exclusive(fd)
+        try:
+            modal = await open_panel(pilot)
+            await written(pilot)
+            state = modal.query_one("#remote-state", Static)
+            for _ in range(100):
+                modal.repaint()
+                if shown(state) != "off":
+                    break
+                await asyncio.sleep(0.02)
+            assert shown(state) == f"{remote_view.ELSEWHERE}  · {said}"
+            assert modal.query_one("#remote-auto-off", Select).disabled
+        finally:
+            unlock(fd)
+            os.close(fd)
+        for _ in range(100):
+            modal.repaint()
+            if shown(state) == "off":
+                break
+            await asyncio.sleep(0.02)
+        assert not modal.query_one("#remote-auto-off", Select).disabled
 
     drive(go, tunnel=missing_ngrok)
 

@@ -23,7 +23,8 @@ timer, a new passphrase, a revoke, a start's deadline) runs on a thread of its o
 one at a time and in the order asked: each waits for ``remote.json.lock``, two
 seconds while another process holds it, and on Textual's thread that froze the
 fleet UI (sweep of #243). The panel shows what was asked at once, and what landed
-once it has.
+once it has. So does the process's first read of the file, which may write it
+(:meth:`RemoteController._first_read`).
 """
 
 from __future__ import annotations
@@ -254,6 +255,10 @@ class RemoteController:
         thread is joined at the interpreter's exit, so a write asked for before a quit
         lands."""
         self._writes_lock = threading.Lock()
+        self._reading: Future[None] | None = None
+        """The process's first read of ``remote.json`` on the writer's thread, once a paint or a
+        restore asked for it (:meth:`_first_read`)."""
+        self._reading_lock = threading.Lock()
         self._last_write: Future[None] | None = None
         self._writing_since: float | None = None
         """When the writes in hand began, while any is queued or running."""
@@ -297,7 +302,8 @@ class RemoteController:
         and the ``PermissionError`` raised out of ``restore()`` in ``FleetApp.on_mount``
         ended the fleet UI at start with uvicorn still serving in its thread. The server
         is stopped again instead, which leaves Remote as any start that fails does: off,
-        the saved switch as it was, and the status line saying why.
+        and the status line saying why. A press that fails saves the switch off too
+        (:meth:`_start_failed`); a TUI start that fails (:meth:`restore`) keeps it on.
 
         The server starts on the caller's thread; the deadline's write, the saved switch
         and ngrok follow on the writer's (:meth:`_finish_start`), and ``wait=False``
@@ -324,14 +330,18 @@ class RemoteController:
             self._last_news, self._unreachable_told = None, False
         if self._port_problem is not None:  # a sentence, never Remote on another port
             self.message = f"Remote could not start — {self._port_problem}"
+            if not restoring:
+                self._start_failed()
             return False
         try:
             info = self._server.start_remote_server(self._dist_dir, port=self._port)
         except Exception as exc:  # the remote extra is missing, or the port is taken
             # RemoteUnavailable / RemoteError carry the sentence to show; Remote stays
-            # off and the saved switch is not flipped, so a restart does not retry blindly.
+            # off, and a press saves its switch off, so a restart does not retry blindly.
             self.info = None
             self.message = f"Remote could not start — {exc}"
+            if not restoring:
+                self._start_failed()
             return False
         # The write switch is not touched: it is remote.json's, as the shell left it.
         self.info, self.message = info, STARTING
@@ -355,7 +365,8 @@ class RemoteController:
         try:
             self._write_deadline(deadline)
         except Exception as exc:  # remote.json will not write: no Remote without its deadline
-            # Never raises, and keeps the saved switch. The stopping's own failures are this
+            # Never raises, and saves no switch: a press saves it off once this is stopped
+            # (_start_failed), a TUI start keeps it on. The stopping's own failures are this
             # one again (the deadline cleared in the same file), so the sentence stands alone.
             stopped = self.turn_off(
                 persist=False,
@@ -366,6 +377,8 @@ class RemoteController:
             )
             if stopped and restoring:
                 self._remote_news(self.message)
+            elif stopped:
+                self.call_back(self._start_failed)
             return
         with self._lock:
             if self.info is not info:
@@ -395,6 +408,19 @@ class RemoteController:
             target=self._await_url, args=(tunnel,), name="ngrok-url", daemon=True
         )
         self._waiter.start()
+
+    def _start_failed(self) -> None:
+        """A start the switch asked for failed: the saved switch is off too, as the panel shows
+        it, on the thread that drives the controller.
+
+        One that a TUI start could not bring back stayed on, and every start tried again and
+        warned again, while the panel's switch read off and a press of it failed before
+        any turn-off could save the off: nothing in the UI let a human who no longer wanted
+        Remote stop it (sweep 3 of #243). Not while another Remote is on for this home (a
+        ``serve``, another fleet UI): what it saved is its own, in the same ``state.json``.
+        """
+        if self.info is None and self.state.remote_enabled and self.message != ALREADY_ON:
+            self._set_state(remote_enabled=False)
 
     def _save_started(self, info: remote_server.RemoteInfo) -> None:
         """Save that Remote is on, on the thread that drives the controller, where a turn-off
@@ -610,12 +636,37 @@ class RemoteController:
         """At TUI start: a Remote that was on when the TUI last exited comes back on.
 
         What kept it off, or kept ngrok from starting, is news (:attr:`on_news`): this runs
-        as the human sits down, often just before leaving the desk with the phone.
+        as the human sits down, often just before leaving the desk with the phone. Another
+        process serving this home is no news: Remote is on, which is what the switch was
+        saved for, and the panel says where. "Could not start — turn it off first", at every
+        start of a second fleet UI, pointed at the Remote that worked (sweep 3 of #243).
+
+        ``remote.json`` is read first, on the writer's thread (:meth:`_first_read`), and
+        with ``wait=False`` the start follows on the thread that drives the controller
+        (:attr:`call_back`) once it has been, read or not: a file that could not be read is
+        the start's to say.
         """
         if not self.state.remote_enabled or self.running:
             return
-        if not self._turn_on(wait=wait, restoring=True):
-            self._remote_news(self.message)  # what came after the server is said as it ends
+        reading = self._first_read()
+        if reading is not None and not wait:
+            reading.add_done_callback(lambda _read: self.call_back(self._restore_read))
+            return
+        if reading is not None:
+            wait_for_futures([reading])
+        self._restore_read(wait=wait)
+
+    def _restore_read(self, *, wait: bool = False) -> None:
+        """:meth:`restore`'s start, ``remote.json`` read; nothing for a Remote turned on, or its
+        switch turned off, meanwhile."""
+        if not self.state.remote_enabled or self.running:
+            return
+        if self._turn_on(wait=wait, restoring=True):
+            return  # what came after the server is said as it ends
+        if self.message == ALREADY_ON:
+            self.message = None  # on elsewhere: the panel's state says so (served_elsewhere)
+            return
+        self._remote_news(self.message)
 
     def shutdown_for_exit(self, *, wait: bool = True) -> None:
         """At TUI exit: end the processes, keep the saved switches for ``restore``.
@@ -627,7 +678,16 @@ class RemoteController:
         deadline is written (:meth:`_save_started`), on the thread that drives the
         controller, and a fleet UI that quit before then took no more steps, so a Remote
         turned on and left at once did not come back at the next start.
+
+        A Remote whose auto-off time has come is turned off as auto-off turns it off, its
+        phones signed out and its switch saved off. The check runs every 30 s, and a quit
+        in between left the deadline to the exit's stopping: it cleared it before the
+        server stopped, which let unlocks in again past it, and revoked nothing, so every
+        phone stayed signed in on the Remote the next start brought back (review of #243,
+        round 5).
         """
+        if self.enforce_auto_off(wait=wait):
+            return
         with self._lock:
             starting = self.info is not None and not self.state.remote_enabled
         if starting:
@@ -642,6 +702,8 @@ class RemoteController:
         wanted = self._write_switch_wanted
         if wanted is not None:
             return wanted
+        if self._first_read() is not None:
+            return False
         try:
             return bool(self._server.remote_allow_write())
         except Exception:  # a remote.json that cannot be read shows writes as off
@@ -735,8 +797,11 @@ class RemoteController:
 
     def remote_status(self) -> dict[str, Any]:
         """``remote_server_status()``; ``{}`` while ``remote.json`` cannot be read, which the
-        status line then says (:attr:`read_problem`). A paint reads it once and hands it to
-        :meth:`devices` and :meth:`unlock_failures`."""
+        status line then says (:attr:`read_problem`), or is being read for the first time
+        (:meth:`_first_read`). A paint reads it once and hands it to :meth:`devices` and
+        :meth:`unlock_failures`."""
+        if self._first_read() is not None:
+            return {}
         try:
             status = self._server.remote_server_status()
         except Exception as exc:  # the file costs the list and the switches, not the modal
@@ -779,6 +844,35 @@ class RemoteController:
         return bool(revoked)
 
     # --- the writes of remote.json ------------------------------------------------------------
+
+    def _first_read(self) -> Future[None] | None:
+        """``None`` once this process has read ``remote.json``, so that reading it only reads;
+        until then the read on the writer's thread, asked for now unless one is in flight.
+
+        The process's first read makes the file when it is missing and rewrites one that is
+        old or edited by hand, under ``remote.json.lock`` (``remote_server.runtime``): the R
+        panel's first paint did it on Textual's thread, and so did a Remote restored at the
+        UI's start, which froze for two seconds while another process held that lock (sweep
+        3 of #243). Meanwhile the panel paints what it paints for a file it cannot read: writes
+        off, no devices, no passphrase. A read that failed is asked for again at the next
+        paint, and why it failed is the status line's (:attr:`read_problem`).
+        """
+        if self._server.remote_state_loaded():
+            return None
+        with self._reading_lock:
+            reading = self._reading
+            if reading is None or reading.done():
+                reading = self._reading = self._remote_json_write(self._read_remote_json)
+            return reading
+
+    def _read_remote_json(self) -> None:
+        """The first read of ``remote.json``, on the writer's thread (:meth:`_first_read`)."""
+        try:
+            self._server.runtime()
+        except Exception as exc:  # the paints say why, as a read of theirs did
+            self.read_problem = f"remote.json could not be read — {exc}"
+        else:
+            self.read_problem = None
 
     def _remote_json_write(
         self, job: Callable[[], None], *, deadline: bool = False
@@ -902,6 +996,17 @@ class RemoteController:
         with self._elsewhere_lock:
             self._elsewhere_looking = False
 
+    def served_auto_off(self) -> tuple[bool, datetime | None]:
+        """Whether ``remote.json`` could be read, and when the Remote serving this home turns
+        itself off as it says now (``None``: Never): for the panel while another process
+        serves it (:attr:`elsewhere`), whose timer is that process's own, not this UI's."""
+        if self._first_read() is not None:
+            return False, None
+        try:
+            return True, self._server.remote_auto_off_at()
+        except Exception:  # unreadable for a moment: the panel says nothing of a timer
+            return False, None
+
     def link_url(self) -> str | None:
         """The public link when ngrok is up, else the local one — ``None`` while Remote is off."""
         if self.info is None:
@@ -915,6 +1020,8 @@ class RemoteController:
         info = self.info
         if info is None and not self.elsewhere:
             return None
+        if self._first_read() is not None:
+            return None if info is None else info.password
         try:
             return str(self._server.remote_password())
         except Exception:  # unreadable for a moment: the one in hand beats a blank

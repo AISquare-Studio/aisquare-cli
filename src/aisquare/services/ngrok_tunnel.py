@@ -1,12 +1,12 @@
 """The ngrok agent as a subprocess: spawn, read its JSON log, learn the public URL, stop.
 
-``ngrok http <port> --log=stdout --log-format=json`` prints one JSON object per
-line; the one that matters is ``{"msg": "started tunnel", "name": "command_line",
-"addr": "http://localhost:<port>", "url": "https://…"}``. Everything else is noise or
-an error (``{"lvl": "eror", "err": "…"}``), and an error about the authtoken is the
-one a first-time user hits, so it gets its own hint. The binary is the human's job
-(PLAN §7); when it is absent this module returns a sentence that says how to get it
-— it never raises into the TUI.
+``ngrok http <port> --log=stdout --log-format=json --log-level=info`` prints one JSON
+object per line; the one that matters is ``{"msg": "started tunnel", "name":
+"command_line", "addr": "http://localhost:<port>", "url": "https://…"}``. Everything
+else is noise or an error (``{"lvl": "eror", "err": "…"}``), and an error about the
+authtoken is the one a first-time user hits, so it gets its own hint. The binary is the
+human's job (PLAN §7); when it is absent this module returns a sentence that says how to
+get it — it never raises into the TUI.
 
 ``--inspect=false`` turns off ngrok's traffic inspector. Left on, the agent keeps
 every request and answer on its local web interface (``127.0.0.1:4040``), which
@@ -475,10 +475,20 @@ def ngrok_command(
     url: str | None = None,
     configs: Sequence[Path] | None = None,
 ) -> list[str]:
-    """``ngrok http <port>`` with its log as JSON lines and its traffic inspector off, on the
-    static domain ``url`` if one, with ``configs`` in place of ngrok's own config if given
-    (:func:`api_off_configs`)."""
-    command = [binary, "http", str(port), "--log=stdout", "--log-format=json", "--inspect=false"]
+    """``ngrok http <port>`` with its log as JSON lines at info level and its traffic inspector
+    off, on the static domain ``url`` if one, with ``configs`` in place of ngrok's own config
+    if given (:func:`api_off_configs`).
+
+    The level as well as the format, since the URL comes only from the info-level "started
+    tunnel" line: ngrok reads ``log_level`` from the human's ``ngrok.yml``, which ours is
+    merged over, and ``log_level: warn`` there hid it. The panel said ngrok did not announce
+    a tunnel in time, with no link and no QR, while ngrok was up and held the tunnel (sweep
+    3 of #243). A flag overrides the config, as ``--log`` and ``--log-format`` already do.
+    """
+    command = [
+        *(binary, "http", str(port), "--log=stdout", "--log-format=json", "--log-level=info"),
+        "--inspect=false",
+    ]
     if url:
         command.append(f"--url={url}")
     if configs:

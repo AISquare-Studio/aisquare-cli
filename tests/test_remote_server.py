@@ -14,6 +14,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -917,6 +918,34 @@ def test_start_status_revoke_stop_over_a_real_port(
         httpx.get(f"http://127.0.0.1:{port}/r/{info.token}/", timeout=1.0)
 
 
+def test_a_remote_turned_off_lets_no_phone_in_until_it_is_started_again(
+    isolated_home: Path, fake: Fake, dist: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The panel's order over a real port: every device revoked, the deadline cleared, the
+    server still up. An unlock then is a 404, not a device the revoke never saw; the next
+    start lets phones in again."""
+    from aisquare.services import remote_push
+
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    monkeypatch.setattr(remote_server, "live_sources", fake.sources)
+    monkeypatch.setattr(remote_push, "push_farewell", lambda ids, reason: None)
+    port = _free_port()
+    info = remote_server.start_remote_server(dist, port=port)
+    origin = {"origin": f"http://127.0.0.1:{port}"}
+    try:
+        with httpx.Client(base_url=info.url_local, headers=origin, trust_env=False) as phone:
+            remote_server.revoke_every_remote_device("remote off")
+            remote_server.set_auto_off(None)
+            assert phone.post("api/unlock", json={"password": info.password}).status_code == 404
+            assert remote_server.remote_server_status()["devices"] == []
+            remote_server.stop_remote_server()
+            info = remote_server.start_remote_server(dist, port=port)
+            assert phone.post("api/unlock", json={"password": info.password}).status_code == 200
+    finally:
+        remote_server.stop_remote_server()
+
+
 def test_start_reports_a_busy_port(
     isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1157,6 +1186,7 @@ def test_remote_on_again_while_the_last_one_still_finishes_a_write_is_refused_un
             with pytest.raises(remote_server.RemoteError, match="still finishing") as refused:
                 remote_server.start_remote_server(dist, port=_free_port())
             assert isinstance(refused.value, remote_server.RemoteWindingDown)
+            assert "still finishing agent/restart for coder-1 (a restart" in str(refused.value)
             stopper.join(10)
             with pytest.raises(remote_server.RemoteError, match="still finishing"):
                 remote_server.start_remote_server(dist, port=_free_port())
@@ -1179,6 +1209,30 @@ def test_remote_on_again_while_the_last_one_still_finishes_a_write_is_refused_un
         assert remote_server.remote_server_status()["running"] is True
     finally:
         remote_server.stop_remote_server()
+
+
+def test_a_start_refused_for_a_remote_still_stopping_names_no_write_when_none_runs(
+    isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stopped server outlives its stop for a phone's read waiting on a slow tmux as much as
+    for a write, and the refusal blamed "a phone's restart or switch" with none running,
+    which seemed to say someone was driving the fleet (sweep 3 of #243)."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    parked = SimpleNamespace(winding_down=True)  # still answering a read
+    monkeypatch.setattr(remote_server, "_winding_down", [parked])
+    with pytest.raises(remote_server.RemoteWindingDown) as refused:
+        remote_server.start_remote_server(dist, port=_free_port())
+    assert str(refused.value) == remote_server.REMOTE_WINDING_DOWN
+    assert "restart" not in str(refused.value) and "switch" not in str(refused.value)
+    with (
+        remote_server._remote_write_running("agent/switch for coder-2"),
+        pytest.raises(remote_server.RemoteWindingDown) as refused,
+    ):
+        remote_server.start_remote_server(dist, port=_free_port())
+    assert str(refused.value).startswith(
+        "the Remote turned off last is still finishing agent/switch for coder-2 (a restart"
+    )
 
 
 def test_a_remote_whose_process_ended_holds_the_home_no_more(

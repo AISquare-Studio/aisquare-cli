@@ -19,6 +19,7 @@ import base64
 import contextlib
 import http.client
 import json
+import logging
 import os
 import stat
 import struct
@@ -704,6 +705,50 @@ def test_no_answer_at_all_counts_as_a_failure_and_keeps_it(isolated_home: Path) 
     status = push_send_one("dev_a", record, {}, keys=keys, transport=unreachable, now=T0)
     assert status is None
     assert load_push_state().subscriptions["dev_a"].failures == 1
+
+
+@pytest.mark.parametrize(
+    ("statuses", "kept", "refusals"),
+    [
+        ((None, 503, 401), True, 1),
+        ((429, 429, 403), True, 1),
+        ((403, 403, None, 403), True, 1),
+        ((403, 503, 403, 403), True, 2),
+        ((403, 503, 403, 403, 403), False, None),
+        ((403, 413, 403, 403), True, 2),
+    ],
+)
+def test_only_refusals_in_a_row_drop_a_subscription(
+    isolated_home: Path, statuses: tuple[int | None, ...], kept: bool, refusals: int | None
+) -> None:
+    """A laptop that wakes with no network times out twice, and the service then refuses
+    once, around a clock correction: one refusal, not the third in a row. A timeout, a 429,
+    a 5xx or a 413 between refusals ends their row; each but the 413 still counts as a
+    failure."""
+    browser = Browser(f"{FCM}x")
+    push_subscribe_device("dev_a", browser.record(), {"dev_a"})
+    for status in statuses:
+        push_record_outcome("dev_a", browser.endpoint, status)
+    held = load_push_state().subscriptions.get("dev_a")
+    assert (held is not None) is kept
+    if held is not None:
+        assert held.refusals == refusals
+        assert held.failures == sum(status != 413 for status in statuses)
+
+
+def test_the_refusals_in_a_row_are_kept_in_the_file_and_a_success_ends_them(
+    isolated_home: Path,
+) -> None:
+    browser = Browser(f"{FCM}x")
+    push_subscribe_device("dev_a", browser.record(), {"dev_a"})
+    push_record_outcome("dev_a", browser.endpoint, 403)
+    push_record_outcome("dev_a", browser.endpoint, 403)
+    assert load_push_state().subscriptions["dev_a"].refusals == 2  # read back from the file
+    push_record_outcome("dev_a", browser.endpoint, 201)
+    push_record_outcome("dev_a", browser.endpoint, 403)
+    push_record_outcome("dev_a", browser.endpoint, 403)
+    held = load_push_state().subscriptions["dev_a"]
+    assert (held.failures, held.refusals) == (2, 2)
 
 
 def test_an_answer_about_a_replaced_endpoint_changes_nothing(isolated_home: Path) -> None:
@@ -1839,6 +1884,75 @@ def test_two_scans_through_the_listener_push_each_new_id_once(
     assert phone.read(transport.sent[0][2])["ids"] == [items[0].id, items[1].id]
 
 
+def test_the_sender_carries_on_after_a_failure_and_warns_once_a_streak(
+    runtime: Runtime,
+    roster: set[str],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A full disk, or a ``remote-push.json`` that cannot be read, raises out of a scan or a
+    due run. Raised past the loop, it ended the thread: no needs, auto-off or expiry push
+    for any phone until Remote restarted, and a queue filling that nobody read. No test
+    reached the handler that keeps it going (sweep 3 of #243). It carries on, retries, and
+    says so once a streak: a warning, then debug lines, and a warning again after a
+    success."""
+    monkeypatch.setattr(remote_push, "PUSH_COALESCE_SECONDS", 0.05)
+    monkeypatch.setattr(remote_push, "PUSH_SYSTEM_CHECK_SECONDS", 0.05)
+    transport = Transport()
+    monkeypatch.setattr(remote_push, "push_https_transport", transport)
+    roster.add("dev_aaaaaaaa")
+    phone = Browser(f"{FCM}phone")
+    push_subscribe_device("dev_aaaaaaaa", phone.record(), roster)
+    load_or_create_vapid_keys()
+    failing = threading.Event()
+    failing.set()
+    readable = remote_push.load_push_state
+
+    def disk_full() -> remote_push.PushState:
+        if failing.is_set() and threading.current_thread().name == "asq-remote-push":
+            raise OSError(28, "No space left on device")
+        return readable()
+
+    monkeypatch.setattr(remote_push, "load_push_state", disk_full)
+
+    def said(level: int) -> int:
+        return sum(
+            record.levelno == level and record.getMessage().startswith("remote: the push sender")
+            for record in caplog.records
+        )
+
+    def until(done: Callable[[], bool]) -> None:
+        deadline = time.monotonic() + 10
+        while not done():
+            assert time.monotonic() < deadline, "the sender stopped trying"
+            time.sleep(0.01)
+
+    kit = RemoteKit(runtime)
+    watcher = Watcher()
+    kit.lane_state["needs"] = watcher
+    due = datetime.now(UTC) - timedelta(minutes=1)
+    items = [needs_item(1, push_after=due)]
+    watcher.items = items
+    with caplog.at_level(logging.DEBUG, logger=remote_push.__name__):
+        stop = start_push_sender(kit)
+        assert stop is not None
+        try:
+            for listener in list(kit.needs_listeners):
+                listener(items, datetime.now(UTC))
+            until(lambda: said(logging.DEBUG) >= 2)  # failed three times in a row, at least
+            failing.clear()
+            for listener in list(kit.needs_listeners):
+                listener(items, datetime.now(UTC))
+                listener(items, datetime.now(UTC))
+            transport.wait_for(1)  # the thread lived on, and the push went
+            assert said(logging.WARNING) == 1, "one warning for the whole streak"
+            failing.set()
+            until(lambda: said(logging.WARNING) == 2)  # a new streak after the success
+        finally:
+            stop()
+    assert phone.read(transport.sent[0][2])["ids"] == [items[0].id]
+
+
 # --- with the real device model (lane b-security) ---------------------------------------------
 
 
@@ -2129,8 +2243,8 @@ def test_ngrok_is_told_the_static_domain_from_the_environment(
     tunnel.wait_for_url(5)
     tunnel.stop_tunnel()
     assert spawned == [
-        ["ngrok", "http", "8750", "--log=stdout", "--log-format=json", "--inspect=false",
-         "--url=remote-anmol.ngrok-free.app"]
+        ["ngrok", "http", "8750", "--log=stdout", "--log-format=json", "--log-level=info",
+         "--inspect=false", "--url=remote-anmol.ngrok-free.app"]
     ]  # fmt: skip
 
 

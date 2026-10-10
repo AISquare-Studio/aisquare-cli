@@ -532,6 +532,7 @@ def _hook_sites(agent: AgentInfo) -> str:
     ]
     clauses.extend(
         f"cannot be written in {site.config_dir}: {site.refused}"
+        + (f" — {'; or '.join(site.remedies)}" if site.remedies else "")
         for site in down
         if site.refused is not None
     )

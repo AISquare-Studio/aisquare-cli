@@ -877,6 +877,7 @@ def _unmade_ambient_dir(sites: list[agent_core.HookSiteHealth]) -> Path | None:
     return ambient
 
 
+@agents_service.one_reading()
 def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     """Claude Code: are our hooks in every config dir, and do they run THIS install?
 
@@ -909,7 +910,8 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     repository (project or local scope): it runs there alone, so the directory's
     hooks, which every other repository runs on, are not doubled but graded.
 
-    Read-only, like every check here: doctor never rewrites ``settings.json``.
+    Read-only, like every check here: doctor never rewrites ``settings.json``. Each
+    directory is read once per run (``agents_service.one_reading``).
     """
     info = agent_core.detect("claude-code")
     sites = agent_core.hook_sites("claude-code", cwd=cwd)
@@ -1207,51 +1209,11 @@ def _short_timeouts(
     return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(filter(None, fixes)))
 
 
-#: For the directory sessions from this shell read; asq and aisquare read the variable
-#: only when they start (review of #257).
-_REPOINT = (
-    "point CLAUDE_CONFIG_DIR at another directory this user can write, "
-    "then start asq or aisquare again from that shell"
-)
-
-
 def _refused_fix(
     directory: Path, refusal: agents_service.Refusal, *, also: str | None = None
 ) -> str:
-    """What changes ``refusal``, connect's for ``directory`` (``agents_service.access``): to
-    repair the path that blocks, unless it is a file where a directory must be, or what
-    generates a settings.json read-only by design (``also``); for the directory sessions
-    from this shell read, CLAUDE_CONFIG_DIR, with the disconnect that takes out one the
-    doctor grades whatever the variable says (recorded, or a ``~/.claude*`` holding
-    aisquare), where it would work and leave no plugin; for another recorded, forgetting
-    it. Each step made for one state of the path met a state it failed in (review of #257).
-    Empty where none applies: the row's fact is all there is.
-    """
-    spec = agent_core.spec("claude-code", directory)
-    fixes: list[str] = []
-    if refusal.repairable:
-        # A folder on the way repaired, connect makes only the directory sessions from this
-        # shell read, with `claude` on PATH: any other that is not there must be again.
-        there = ""
-        made = refusal.this_shell and agent_core.claude_on_path() is not None
-        if refusal.path in directory.parents and not (made or agent_core.present(directory)):
-            there = f" so that {directory} is there"
-        fixes.append(f"repair {refusal.path} ({refusal.fact}){there}, then connect again")
-        if also is not None and spec is not None and refusal.path == spec.settings_path:
-            fixes[0] += f", or {also} where that file is generated"
-    key = agent_core.dir_identity(directory)
-    recorded = key in {agent_core.dir_identity(p) for p in agent_core.connected_dirs("claude-code")}
-    leaves = agents_service.access("claude-code", directory).disconnect is None and not (
-        agent_core.plugin_route_supported() and agent_core.claude_plugin(directory)
-    )
-    disconnect = f"aisquare agents disconnect claude-code --config-dir {directory}"
-    if refusal.this_shell and not (recorded or agent_core.found_on_disk(directory)):
-        fixes.append(_REPOINT)
-    elif refusal.this_shell and leaves:
-        fixes.append(f"{_REPOINT}, and disconnect this one: {disconnect}")
-    elif recorded and leaves:
-        fixes.append(f"forget it: {disconnect}")
-    return "; or ".join(fixes)
+    """The remedies for ``refusal``, as every surface gives them (``agents_service.remedies``)."""
+    return "; or ".join(agents_service.remedies("claude-code", directory, refusal, also=also))
 
 
 def _disconnect_fix(directory: Path, lead: str) -> str:

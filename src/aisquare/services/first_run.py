@@ -126,12 +126,11 @@ class ClaudeState:
     refused: str | None = None
     """Why `agents connect` would refuse, in its own words, when it would: a settings.json
     that is not a JSON object or that this user may not write, or a CLAUDE.md it cannot
-    read (``agents.connect_refusal``). Connect could only fail, so step 2 says why
+    read (``agents.access``). Connect could only fail, so step 2 says why
     instead of offering it (review of #257)."""
-    refused_repair: str | None = None
-    """What step 2 says to repair: the first path that blocks and what is wrong with it
-    (``agents.Refusal``), as the doctor names it; ``None`` for a file standing where the
-    config dir must be, which step 2 never tells anyone to repair."""
+    refused_remedies: tuple[str, ...] = ()
+    """What changes the refusal, as the doctor gives it (``agents.remedies``): step 2 built
+    its own, and offered a remedy the doctor withholds (review of #257)."""
     signed_in: bool | None = None
     """``None`` when this probe did not look (the periodic one skips it)."""
     problem: str | None = None
@@ -251,14 +250,16 @@ def probe_claude(
         except Exception as exc:
             problems.append(f"could not read the hook settings: {_why(exc)}")
     refused: str | None = None
-    refused_repair: str | None = None
+    remedies: tuple[str, ...] = ()
     if not is_connected and switched_off is None:
         try:
             if refusal is not None:
                 refused = refusal()
             elif (found := agents_service.access("claude-code").connect) is not None:
+                ambient = agent_core.ambient_hook_dir("claude-code")
                 refused = found.why
-                refused_repair = f"{found.path} ({found.fact})" if found.repairable else None
+                if ambient is not None:
+                    remedies = tuple(agents_service.remedies("claude-code", ambient, found))
         except Exception as exc:
             problems.append(f"could not read the hook settings: {_why(exc)}")
     signed: bool | None = None
@@ -276,7 +277,7 @@ def probe_claude(
         manager_only=manager_only,
         hooks_off=switched_off,
         refused=refused,
-        refused_repair=refused_repair,
+        refused_remedies=remedies,
         signed_in=signed,
         problem="; ".join(problems) or None,
     )

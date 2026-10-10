@@ -59,6 +59,12 @@ def _connect(runner: CliRunner, config_dir: Path | None = None) -> None:
     assert result.exit_code == 0, result.output
 
 
+def _refused_why(config_dir: Path | None = None) -> str | None:
+    """Why `agents connect` would refuse ``config_dir``, in its own words, or ``None``."""
+    refusal = agents_service.access("claude-code", config_dir).connect
+    return None if refusal is None else refusal.why
+
+
 def _stat_error(path: Path) -> str:
     """The operating system's own words when asked for ``path``, which is not there."""
     try:
@@ -76,22 +82,11 @@ _REPOINT_FIX = (
 )
 
 
-def _step_two(path: Path, fact: str) -> str:
+def _step_two(fix: str | None) -> str:
     """Welcome step 2's remedies for a refusal of the directory this shell reads: the
-    first path that blocks, as the doctor names it, or the variable."""
-    return (
-        f"Connect cannot change that. Repair {path} ({fact}) and this page checks again "
-        "within a few seconds, or point CLAUDE_CONFIG_DIR at another directory this user can "
-        "write, then start asq again from that shell."
-    )
-
-
-#: Where a file stands where that directory must be, which no surface tells anyone to
-#: repair.
-_UNREPAIRABLE = (
-    "Connect cannot change that. Point CLAUDE_CONFIG_DIR at another directory this user can "
-    "write, then start asq again from that shell."
-)
+    doctor's, as it words them (``agents.remedies``)."""
+    said = str(fix or "")
+    return f"Connect cannot change that. {said[:1].upper()}{said[1:]}."
 
 
 _DISCONNECT = "aisquare agents disconnect claude-code"
@@ -702,7 +697,7 @@ def test_an_exported_config_dir_in_a_home_this_machine_lacks_is_never_offered_co
 
     found = dataclasses.replace(welcome, binary="/opt/homebrew/bin/claude")
     assert refusal is not None
-    assert _step_two(refusal.path, refusal.fact) in claude_text(found, platform="linux").plain
+    assert _step_two(row.fix) in claude_text(found, platform="linux").plain
     # The variable's remedy, done as worded in a shell started again, lets connect write,
     # and the row no longer names the home this machine lacks.
     writable = tmp_path / "writable"
@@ -850,7 +845,7 @@ def test_a_config_dir_connect_cannot_make_is_named_everywhere_and_never_offered_
     repair = None if a_file else f"repair {blocking} ({fact}), then connect again"
     assert row.fix == "; or ".join(filter(None, [repair, repoint])), row.fix
     assert welcome.refused == reason, welcome
-    assert (_UNREPAIRABLE if a_file else _step_two(blocking, fact)) in step_two, step_two
+    assert _step_two(row.fix) in step_two, "Welcome gives the doctor's remedies"
     assert not made, "nothing written before the refusal"
     # Each remedy, done as worded (the variable's in a shell started again), connects and
     # clears the row.
@@ -1075,7 +1070,7 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
     assert row.fix == "; or ".join(filter(None, [repair, _REPOINT_FIX])), row.fix
     assert fix_commands([row]) == [], "no Connect: the click could only fail"
     step_two = claude_text(welcome, platform="linux").plain
-    assert (_UNREPAIRABLE if a_file else _step_two(blocking, fact)) in step_two, step_two
+    assert _step_two(row.fix) in step_two, "Welcome gives the doctor's remedies"
     assert not made, "nothing written before the refusal"
     for result in (doctor, uninstall):
         lines = [line for line in result.stdout.splitlines() if line.strip()]
@@ -1312,6 +1307,76 @@ def test_a_recorded_profile_under_a_link_to_nothing_is_repaired_as_worded(
     rows.append(diagnostics._check_claude_code())
     assert (forgot.exit_code, connected.exit_code) == (0, 0), (forgot.output, connected.output)
     assert all(r.status is CheckStatus.ok for r in rows), rows
+
+
+def test_the_doctor_welcome_and_agents_list_give_one_remedy_list_for_0_7_0_hooks_read_only(
+    runner: CliRunner, claude_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recorded ~/.claude whose read-only settings.json holds 0.7.0's five hooks (no
+    StopFailure): the doctor withholds pointing CLAUDE_CONFIG_DIR elsewhere, since
+    disconnect cannot take those hooks out, while Welcome step 2 offered it, and followed,
+    step 2 went green while the row never cleared (review of #257). One list for every
+    surface (``agents.remedies``); done as worded, it clears both."""
+    from aisquare.cli.ui.views.welcome import claude_text
+
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    _connect(runner)
+    settings = claude_home / "settings.json"
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    del data["hooks"]["StopFailure"]
+    settings.write_text(json.dumps(data), encoding="utf-8")
+    settings.chmod(0o444)
+    try:
+        if os.access(settings, os.W_OK):
+            pytest.skip("this user can write a read-only file (root)")
+        row = diagnostics._check_claude_code()
+        welcome = first_run.probe_claude(sign_in=False, which=lambda _name: "/opt/claude")
+        listed = json.loads(
+            runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout
+        )
+    finally:
+        settings.chmod(0o644)
+    step_two = claude_text(welcome, platform="linux").plain
+    site = next(s for s in listed[0]["sites"] if s["config_dir"] == str(claude_home))
+
+    assert row.fix is not None and row.fix.startswith(f"repair {settings} ("), row.fix
+    assert "CLAUDE_CONFIG_DIR" not in row.fix, "disconnect could not take the five hooks out"
+    assert _step_two(row.fix) in step_two, step_two
+    assert "; or ".join(site["remedies"]) == row.fix, site
+    connected = runner.invoke(app, ["agents", "connect", "claude-code"])  # repaired: writable
+    after = first_run.probe_claude(sign_in=False, which=lambda _name: "/opt/claude")
+    assert connected.exit_code == 0, connected.output
+    assert diagnostics._check_claude_code().status is CheckStatus.ok and after.connected
+
+
+def test_a_welcome_tick_reads_settings_json_fewer_times(
+    claude_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Welcome step 2 asks every two seconds on the first-run screen, and each tick read
+    ~/.claude/settings.json nine times: `access()` worked out disconnect's half too, which
+    step 2 never asks, and a sibling scan read every ~/.claude* (review of #257)."""
+    import io
+
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    settings = claude_home / "settings.json"
+    settings.write_text('{"hooks": {},}', encoding="utf-8")  # one trailing comma: refused
+    for sibling in ("2", "-work", "-old"):
+        (claude_home.parent / f".claude{sibling}").mkdir()
+        (claude_home.parent / f".claude{sibling}" / "settings.json").write_text("{}")
+    reads: list[str] = []
+    real = io.open
+
+    def counted(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if not isinstance(file, int) and os.fsdecode(file).endswith("settings.json"):
+            reads.append(os.fsdecode(file))
+        return real(file, *args, **kwargs)
+
+    monkeypatch.setattr(io, "open", counted)
+    state = first_run.probe_claude(sign_in=False, which=lambda _name: "/opt/claude")
+
+    assert state.refused is not None, state
+    assert 0 < reads.count(str(settings)) <= 8, reads
+    assert len(reads) == reads.count(str(settings)), "no sibling's settings.json is read"
 
 
 def _hooks_run(settings: Path, program: str) -> None:
@@ -1780,14 +1845,14 @@ def test_a_claude_md_connect_refuses_is_named_and_never_offered_connect(
     claude_md = claude_home / "CLAUDE.md"
     _REFUSED_CLAUDE_MD[shape](claude_md)
     try:
-        refusal = agents_service.connect_refusal("claude-code")
+        refusal = _refused_why()
         row = diagnostics._check_claude_code()
         welcome = first_run.probe_claude(sign_in=False, which=lambda _name: None)
         clicked = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
     finally:
         _cleared(claude_md)
     claude_md.write_text("# Prefs\ncafé\n", encoding="utf-8")
-    readable = agents_service.connect_refusal("claude-code"), diagnostics._check_claude_code()
+    readable = _refused_why(), diagnostics._check_claude_code()
 
     reason = str(json.loads(clicked.stdout)["detail"])
     assert clicked.exit_code == 1 and reason.startswith(f"can't read {claude_md}: "), reason
@@ -1837,7 +1902,7 @@ def test_a_claude_md_that_cannot_be_stated_is_a_named_refusal_not_a_traceback(
         cell = _hook_sites(agents_service.status("claude-code")[0])
     finally:
         locked.chmod(0o755)
-    readable = agents_service.connect_refusal("claude-code", target)
+    readable = _refused_why(target)
 
     reason = f"can't read {claude_md}: Permission denied"
     assert doctor.exception is None or isinstance(doctor.exception, SystemExit), repr(
@@ -1930,22 +1995,25 @@ def test_agents_status_names_a_directory_connect_refuses_as_the_doctor_does(
     settings_path.write_text(hooked.removesuffix("}").rstrip() + ",\n}\n", encoding="utf-8")
     damaged = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
     cell = _hook_sites(agents_service.status("claude-code")[0])
-    refusal = agents_service.connect_refusal("claude-code")
+    refusal = _refused_why()
     row = diagnostics._check_claude_code()
     settings_path.write_text("{}\n", encoding="utf-8")  # readable, and the hooks are gone
     plain = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
     missing = _hook_sites(agents_service.status("claude-code")[0])
 
     assert refusal is not None and "it is not valid JSON" in refusal, refusal
+    remedies = damaged[0]["sites"][0]["remedies"]
     assert damaged[0]["sites"] == [
         {
             "config_dir": str(claude_home),
             "hooks_installed": False,
             "hooks_off": None,
             "refused": refusal,
+            "remedies": remedies,
         }
     ], damaged
-    assert cell == f"0/1 ok — cannot be written in {claude_home}: {refusal}", cell
+    assert remedies and "; or ".join(remedies) == row.fix, "the doctor's remedies, as it words them"
+    assert cell == f"0/1 ok — cannot be written in {claude_home}: {refusal} — {row.fix}", cell
     assert f"hooks cannot be written in {claude_home}: {refusal}" in row.detail, row
     assert plain[0]["sites"][0]["refused"] is None, "control: a file connect can write"
     assert missing == f"0/1 ok — missing in {claude_home}", missing
@@ -2109,6 +2177,7 @@ def test_agents_list_status_connect_and_init_name_hooks_switched_off(
         "hooks_installed": False,
         "hooks_off": str(settings_path),
         "refused": None,
+        "remedies": [],
     }
     assert (sites[str(work)]["hooks_installed"], sites[str(work)]["hooks_off"]) == (False, None)
     notes = " ".join(json.loads(init.stdout)["notes"])

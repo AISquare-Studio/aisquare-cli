@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import functools
 import os
 import stat
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,13 +40,17 @@ def status(name: str | None = None) -> list[AgentInfo]:
 
 def _refusals_named(agents: list[AgentInfo]) -> list[AgentInfo]:
     """``agents``, with each site whose hooks are not installed (and not switched off) given
-    the reason `agents connect` would refuse it (:func:`connect_refusal`), as the doctor and
-    Welcome name it. Read as "missing", a settings.json with our hooks and one trailing comma
-    sent the user to Connect, which can only fail there (review of #257)."""
-    for agent in agents:
-        for site in agent.sites:
-            if not site.hooks_installed and site.hooks_off is None:
-                site.refused = connect_refusal(agent.name, site.config_dir)
+    the reason `agents connect` would refuse it and its :func:`remedies`, as the doctor and
+    Welcome give them. Read as "missing", a settings.json with our hooks and one trailing
+    comma sent the user to Connect, which can only fail there (review of #257)."""
+    with one_reading():
+        for agent in agents:
+            for site in agent.sites:
+                if site.hooks_installed or site.hooks_off is not None:
+                    continue
+                if (refusal := access(agent.name, site.config_dir).connect) is not None:
+                    site.refused = refusal.why
+                    site.remedies = remedies(agent.name, site.config_dir, refusal)
     return agents
 
 
@@ -209,15 +217,11 @@ _NO_HOME = "no such home on this machine"
 
 
 def _check_settings(path: Path) -> None:
-    """Refuse, naming it, a settings file the hooks cannot be written into: before any write.
-
-    ``install_hooks`` edits the object it parses and writes it back, so it raises
-    for text that is not a JSON object rather than replace it, and a file this user
-    may not write (mode 444, or a link into a read-only ``/nix/store``) ended in a
-    traceback after the context was ingested (review of #257). Asked here first, so
-    a refusal comes before the context is ingested. A settings.json under a ``~user``
-    this machine does not have is refused before it is read, which would look it up in
-    the cwd: the refusal came from ``install_hooks``, after ``~/.aisquare`` was built.
+    """Refuse, naming it, a settings file the hooks cannot be written into, before any
+    write: one not a JSON object, which ``install_hooks`` never replaces, one this user may
+    not write (a link into a read-only ``/nix/store``), and one under a ``~user`` this
+    machine does not have, which read as written lands in the cwd. Each refused only after
+    the context was ingested and ``~/.aisquare`` built (review of #257).
     """
     if paths.names_no_home(path):
         raise AgentFileUnreadableError(f"can't write {path}: {_NO_HOME}", path)
@@ -233,13 +237,9 @@ def _check_settings(path: Path) -> None:
 
 def _read_before_writing(name: str, config_dir: Path | None) -> list[str]:
     """Every file `agents connect` reads before it writes anything, read: the settings file
-    the hooks go into (:func:`_check_settings`), then the context files it imports, whose
-    text it returns. Raises :class:`AgentFileUnreadableError` for the first it cannot use.
-
-    One function for :func:`connect` and :func:`access`, so what the doctor, Welcome
-    and the installer are told is what connect does: asking about settings.json alone,
-    they offered Connect for a CLAUDE.md connect refuses (review of #257).
-    """
+    (:func:`_check_settings`), then the context files, whose text it returns; raises
+    :class:`AgentFileUnreadableError` for the first it cannot use. One function for
+    :func:`connect` and :func:`access`, so no surface offers a Connect it refuses."""
     spec = agent_core.spec(name, config_dir)
     if spec is not None and spec.settings_path is not None:
         _check_settings(spec.settings_path)
@@ -258,56 +258,109 @@ class Refusal:
     why: str
     """The refusal, in the command's own words."""
     fact: str = ""
-    """What is wrong with ``path``, as the operating system or the parse says it. Its one
-    remedy in place is to repair that: each round of steps synthesized for one state of
-    the path missed another it could not work in (review of #257)."""
+    """What is wrong with ``path``, as the operating system or the parse says it."""
     this_shell: bool = False
-    """Whether the directory is the one sessions from this shell read, which pointing
-    ``CLAUDE_CONFIG_DIR`` at another directory moves them off."""
+    """Whether the directory is the one sessions from this shell read."""
     repairable: bool = True
     """False for a file standing where a directory must be (``CLAUDE_CONFIG_DIR`` naming
-    ``~/.claude.json``, Claude Code's own state file): repairing that path in place would
-    destroy it, so no surface offers to (review of #257)."""
+    ``~/.claude.json``, Claude Code's own state file), which a repair would destroy."""
 
 
 @dataclass(frozen=True)
 class DirAccess:
-    """What `agents connect` and `agents disconnect` can do with one config dir."""
+    """What `agents connect` and `agents disconnect` can do with one config dir, each half
+    read only when asked: Welcome step 2 asks about connect every two seconds."""
 
-    connect: Refusal | None
-    """Why connect would refuse to write the hooks there, or ``None`` when it would."""
-    disconnect: Refusal | None
-    """Why disconnect could not take aisquare's hooks out of it, or ``None`` when it can,
-    or when there are none to take out."""
+    name: str
+    config_dir: Path | None
+
+    @functools.cached_property
+    def connect(self) -> Refusal | None:
+        """Why connect would refuse to write the hooks there, or ``None`` when it would."""
+        return _connect_refusal(self.name, self.config_dir)
+
+    @functools.cached_property
+    def disconnect(self) -> Refusal | None:
+        """Why disconnect could not take aisquare's hooks out of it, or ``None``."""
+        return _disconnect_refusal(self.name, self.config_dir)
+
+
+_READING: contextvars.ContextVar[dict[tuple[str, Path | None], DirAccess] | None] = (
+    contextvars.ContextVar("_READING", default=None)
+)
+
+
+@contextlib.contextmanager
+def one_reading() -> Iterator[None]:
+    """Within it, :func:`access` reads each config dir once: the doctor read one dir's
+    settings.json some thirty times a run (review of #257). Never across readings."""
+    token = _READING.set({})
+    try:
+        yield
+    finally:
+        _READING.reset(token)
 
 
 def access(name: str, config_dir: Path | None = None) -> DirAccess:
     """THE answer to "what can connect and disconnect do with this config dir", asked
-    before either writes anything. Reads only, and never raises: a file it cannot even
-    stat is a refusal that names it.
-
-    Every surface that offers, names or implies either command asks it, so none names a
-    command that would refuse: the doctor's row (its text, fixes, buttons and coders
-    note), Welcome step 2, `agents list`/`status`/`scan` (:func:`connect_refusal`), and
-    `agents disconnect` itself; connect and init run the same checks as they go
-    (:func:`connect`). Several fixes in turn each answered for one surface, and every
-    round found a surface the last one missed (review of #257).
-
-    - ``connect``: connect's own checks, in its order. A named ``config_dir`` that does
-      not exist and that connect would not make (:func:`_check_found`), the directory
-      itself being the file. A settings.json in a home this machine does not have, that
-      is not a JSON object, or that this user may not write (:func:`_check_settings`).
-      A context file (``CLAUDE.md``) that is not UTF-8 text this user can read. Whether
-      Claude Code is installed at all is the callers' own question for the directory a
-      session from this shell reads: Welcome offers the install, and the doctor says it
-      is not detected.
-    - ``disconnect``: uninstall's own rule (``lifecycle.hooks_stuck``). A settings.json
-      it cannot read, one that holds aisquare's hooks but cannot be rewritten (not UTF-8
-      JSON, not an object with a ``hooks`` object), and one holding them that this user
-      may not write. A directory that is not there holds no hooks to take out
-      (``agent_core.nothing_there``), as the doctor reads it.
+    before either writes anything; reads only, and never raises. Every surface that
+    offers, names or implies either command asks it, so none names one that would refuse
+    (review of #257). ``connect`` is connect's own checks, in its order (whether Claude
+    Code is installed at all is the callers' question for this shell's directory);
+    ``disconnect`` is uninstall's rule (``lifecycle.hooks_stuck``), and a directory that
+    is not there holds no hooks to take out.
     """
-    return DirAccess(_connect_refusal(name, config_dir), _disconnect_refusal(name, config_dir))
+    memo = _READING.get()
+    if memo is None:
+        return DirAccess(name, config_dir)
+    key = (name, None if config_dir is None else agent_core.dir_identity(config_dir))
+    return memo.setdefault(key, DirAccess(name, config_dir))
+
+
+#: For the directory sessions from this shell read; asq and aisquare read the variable
+#: only when they start (review of #257).
+_REPOINT = (
+    "point CLAUDE_CONFIG_DIR at another directory this user can write, "
+    "then start asq or aisquare again from that shell"
+)
+
+
+def remedies(name: str, directory: Path, refusal: Refusal, *, also: str | None = None) -> list[str]:
+    """What changes ``refusal``, connect's for ``directory``: the one list the doctor, Welcome
+    step 2 and `agents list` print, each true done as worded; built per surface, Welcome
+    offered a remedy the doctor withholds on purpose (review of #257). To repair the path
+    that blocks (never a file where a directory must be), so that the directory is there
+    where connect will not make it, or what generates a read-only settings.json
+    (``also``); for this shell's directory, CLAUDE_CONFIG_DIR, with the disconnect that
+    takes out one the doctor grades anyway (recorded, or a ``~/.claude*`` holding
+    aisquare) where that would work; for another recorded, forgetting it.
+    """
+    spec = agent_core.spec(name, directory)
+    found: list[str] = []
+    if refusal.repairable:
+        # A folder on the way repaired, connect makes only the directory sessions from this
+        # shell read, with `claude` on PATH: any other that is not there must be again.
+        there = ""
+        made = refusal.this_shell and agent_core.claude_on_path() is not None
+        if refusal.path in directory.parents and not (made or agent_core.present(directory)):
+            there = f" so that {directory} is there"
+        found.append(f"repair {refusal.path} ({refusal.fact}){there}, then connect again")
+        if also is not None and spec is not None and refusal.path == spec.settings_path:
+            found[0] += f", or {also} where that file is generated"
+    key = agent_core.dir_identity(directory)
+    recorded = key in {agent_core.dir_identity(p) for p in agent_core.connected_dirs(name)}
+    disconnect = f"aisquare agents disconnect {name} --config-dir {directory}"
+    if refusal.this_shell and not (recorded or agent_core.found_on_disk(directory)):
+        found.append(_REPOINT)
+    elif (
+        (refusal.this_shell or recorded)
+        and access(name, directory).disconnect is None
+        # Disconnect takes the hooks and the record out, and leaves a plugin to grade.
+        and not (agent_core.plugin_route_supported() and agent_core.claude_plugin(directory))
+    ):
+        this = f"{_REPOINT}, and disconnect this one: {disconnect}"
+        found.append(this if refusal.this_shell else f"forget it: {disconnect}")
+    return found
 
 
 def _connect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
@@ -376,23 +429,12 @@ def _disconnect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
     )
 
 
-def connect_refusal(name: str, config_dir: Path | None = None) -> str | None:
-    """Why `agents connect` would refuse ``config_dir``, in its own words, or ``None`` when
-    it would write the hooks: :func:`access`'s answer for connect, as Welcome step 2 and
-    ``agents list``/``status`` read it."""
-    refusal = access(name, config_dir).connect
-    return None if refusal is None else refusal.why
-
-
 def settings_unwritable(path: Path) -> str | None:
-    """Why the hooks cannot be written into ``path``, or ``None`` when they can.
-
-    The one rule for `connect`, `refresh-hooks`, and the upgrade and uninstall plans
-    that promise them (review of #257). It asks about the file when it is there, else
-    the folder it will be made in (:func:`_no_room`), unless that is not there either,
-    which connect makes first. access(2) follows a link and reports a read-only file
-    system as well. A folder that is a file (``CLAUDE_CONFIG_DIR=~/.claude.json``) was
-    asked whether it could be written, and it could.
+    """Why the hooks cannot be written into ``path``, or ``None`` when they can: the one
+    rule for `connect`, `refresh-hooks`, and the upgrade and uninstall plans (review of
+    #257). It asks about the file when it is there, else the folder it will be made in
+    (:func:`_no_room`) unless that is not there either; access(2) follows a link and
+    reports a read-only file system as well.
     """
     if paths.names_no_home(path):
         return _NO_HOME  # read as written it would land in the cwd (paths.expand_user)
@@ -424,19 +466,12 @@ def _install_hooks(name: str, config_dir: Path | None, path: Path | None) -> boo
 
 def _first_run_dir(name: str, config_dir: Path | None) -> Path | None:
     """The config dir `agents connect` makes for an installed Claude Code that has never
-    started, else ``None``. Decides only; :func:`_make_first_run_dir` makes it.
-
-    npm and Homebrew create ``~/.claude`` only when ``claude`` first runs, and a
-    missing directory reads as "not installed" (detected means the directory
-    exists), so `agents connect`, `init --agent claude-code` and Welcome's Connect
-    refused a Claude Code that is on PATH. Welcome alone used to make it (review of
-    #257). With ``claude`` on PATH, the directory a session from this shell reads is
-    made, as that first start would make it, however it is named: the doctor names a
-    recorded ``~/.claude`` that was removed with ``--config-dir``, and that Connect
-    refused it as not installed while the bare one made it. Any other ``--config-dir``
-    is never made: a typo must not get hooks. Nor is a ``CLAUDE_CONFIG_DIR`` of
-    ``~olduser/…`` for a user this machine does not have: read as written
-    (``paths.expand_user``), it would be made in the cwd (sweep of #257).
+    started, else ``None``; :func:`_make_first_run_dir` makes it. npm and Homebrew make
+    ``~/.claude`` only when ``claude`` first runs, and connect called a Claude Code on
+    PATH not installed (review of #257). With ``claude`` on PATH, the directory sessions
+    from this shell read is made, however it is named; never any other ``--config-dir``
+    (a typo must not get hooks), nor a ``~olduser/…`` this machine lacks, which read as
+    written would be made in the cwd.
     """
     if agent_core.claude_on_path() is None:
         return None
@@ -457,12 +492,9 @@ def _this_shells_dir(name: str, config_dir: Path | None) -> Path | None:
 
 
 def _cannot_make(where: Path) -> tuple[Path, str] | None:
-    """The path that stops :func:`_make_first_run_dir` making ``where``, which is not there,
-    and what the operating system says of it (:func:`_no_room`); or ``None``. Asked by
-    connect before its mkdir and by :func:`access` for it, in the same words, so no
-    Connect is offered that this first step refuses. It is the nearest path on the way
-    that is there: "no directory it can be made in" named none (review of #257).
-    """
+    """The path that stops :func:`_make_first_run_dir` making ``where``, which is not there:
+    the nearest path on the way that is there, and what the operating system says of it
+    (:func:`_no_room`); or ``None``. Asked by connect and by :func:`access` alike."""
     blocking = _nearest(where)
     stopped = None if blocking is None else _no_room(blocking)
     return None if blocking is None or stopped is None else (blocking, stopped)
@@ -470,11 +502,9 @@ def _cannot_make(where: Path) -> tuple[Path, str] | None:
 
 def in_the_way(directory: Path) -> tuple[Path, str] | None:
     """The first path that stops this user entering ``directory``, and what the operating
-    system says of it, or ``None`` where it is a directory this user can enter, or is
-    simply not there yet under one: it, or the nearest path on the way that is there
-    (:func:`_cannot_make`'s walk), as a file, a link to nothing, or a folder this user may
-    not enter. Where a read failed under such a path, the settings.json it read was named,
-    and its repair meant destroying the file in the way (review of #257)."""
+    system says of it; ``None`` where it is a directory this user can enter, or is not
+    there yet under one. It, or the nearest path on the way that is there: a file, a link
+    to nothing, a folder this user may not enter (review of #257)."""
     if _enterable(directory):
         return None
     blocking = _nearest(directory)
@@ -496,10 +526,8 @@ def _enterable(path: Path) -> bool:
 
 def _no_room(folder: Path) -> str | None:
     """What stops this user creating anything in ``folder``, as the operating system says
-    it, or ``None``: its own error for the path, or that it is a link and where to, or
-    not a directory, or one this user may not write. Never a guess from an errno: a link
-    to a file was said to lead to nothing, and a loop on Windows was not one (review of
-    #257)."""
+    it (never a guess from an errno), or ``None``: its own error, that it is a link and
+    where to, not a directory, or one this user may not write (review of #257)."""
     named = f"{folder} is a link to {os.readlink(folder)}" if os.path.islink(folder) else None
     try:
         is_dir = stat.S_ISDIR(os.stat(folder).st_mode)
@@ -530,13 +558,9 @@ def _make_first_run_dir(name: str, config_dir: Path | None) -> None:
 
 
 def _check_found(name: str, config_dir: Path | None) -> None:
-    """Refuse a directory `agents connect` cannot find once :func:`_first_run_dir` is made.
-
-    A ``--config-dir`` that is not there is named, with what the operating system says of
-    it (:func:`_no_room`): a typo, or a profile removed after this home connected it, was
-    called "not installed on this machine" beside a `claude` on PATH, and one turned into
-    a link to itself "does not exist" (review of #257). Otherwise the agent is not
-    installed.
+    """Refuse a directory `agents connect` cannot find once :func:`_first_run_dir` is made:
+    a ``--config-dir`` that is not there, with what the operating system says of it (it
+    was "not installed on this machine", review of #257); else the agent is not installed.
     """
     info = agent_core.detect(name, config_dir)
     if info is not None and info.detected:

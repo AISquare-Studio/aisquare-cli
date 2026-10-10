@@ -85,6 +85,8 @@ class AgentHookSite(BaseModel):
     user may not write, a CLAUDE.md it cannot read, or a recorded directory that no
     longer exists and that connect would not make ("<dir> does not exist"). Connect can
     only fail there, as the doctor and Welcome say. ``None`` otherwise."""
+    remedies: list[str] = Field(default_factory=list)
+    """What changes ``refused``, as the doctor and Welcome give it (``agents.remedies``)."""
 
 
 class AgentInfo(BaseModel):

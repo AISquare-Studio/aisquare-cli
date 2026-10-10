@@ -1187,7 +1187,11 @@ def hook_commands(name: str, config_dir: Path | None = None) -> list[str]:
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
         return []
-    hooks = read_json(spec.settings_path).get("hooks")
+    return _aisquare_commands(read_json(spec.settings_path).get("hooks"))
+
+
+def _aisquare_commands(hooks: object) -> list[str]:
+    """The aisquare hook commands in a settings file's ``hooks`` value (:func:`hook_commands`)."""
     if not isinstance(hooks, dict):
         return []
     found: list[str] = []
@@ -1388,7 +1392,7 @@ def hook_site_health(
     )
 
 
-def _claude_dirs_on_disk(*, variable: bool = True) -> list[Path]:
+def _claude_dirs_on_disk() -> list[Path]:
     """Claude Code config directories on this machine that carry our hooks.
 
     ``$CLAUDE_CONFIG_DIR``, ``~/.claude`` and every ``~/.claude*`` directory —
@@ -1402,12 +1406,11 @@ def _claude_dirs_on_disk(*, variable: bool = True) -> list[Path]:
     A candidate whose ``settings.json`` this user cannot read — another
     account's ``~/.claude-archived``, a backup left at mode 000 — is skipped, not
     raised: it cannot be shown to carry our hooks, and one unreadable sibling
-    must not cost doctor every other row. ``variable=False`` leaves
-    ``$CLAUDE_CONFIG_DIR`` out (:func:`found_on_disk`).
+    must not cost doctor every other row.
     """
     candidates: list[Path] = []
     env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    if env and variable:
+    if env:
         candidates.append(paths.expand_user(Path(env)))
     home = _home()
     candidates.append(home / ".claude")
@@ -1422,22 +1425,31 @@ def _claude_dirs_on_disk(*, variable: bool = True) -> list[Path]:
         if key in seen or not os.path.isdir(candidate):
             continue
         seen.add(key)
-        try:
-            ours = bool(hook_commands("claude-code", candidate)) or (
-                plugin_route_supported() and claude_plugin(candidate) is not None
-            )
-        except (OSError, ValueError):
-            continue  # unreadable or undecodable settings.json — see the docstring
-        if ours:
+        if _holds_aisquare(candidate):
             found.append(candidate)
     return found
 
 
+def _holds_aisquare(config_dir: Path) -> bool:
+    """Whether ``config_dir``'s settings.json holds an aisquare hook or enables the aisquare
+    plugin, read once; one that cannot be read holds neither (:func:`read_json`)."""
+    settings = read_json(config_dir / "settings.json")
+    enabled = settings.get("enabledPlugins")
+    return bool(_aisquare_commands(settings.get("hooks"))) or (
+        plugin_route_supported()
+        and isinstance(enabled, dict)
+        and bool(enabled.get(CLAUDE_PLUGIN_ID))
+        and claude_plugin(config_dir) is not None
+    )
+
+
 def found_on_disk(config_dir: Path) -> bool:
     """Whether the doctor finds ``config_dir`` whatever ``CLAUDE_CONFIG_DIR`` says: a
-    ``~/.claude*`` directory holding aisquare's hooks or plugin (:func:`_claude_dirs_on_disk`)."""
-    key = _dir_key(config_dir)
-    return any(_dir_key(path) == key for path in _claude_dirs_on_disk(variable=False))
+    ``~/.claude*`` directory holding aisquare's hooks or plugin (:func:`_claude_dirs_on_disk`),
+    reading no sibling's settings but its own."""
+    home, key = _home(), _dir_key(config_dir)
+    named = home / ".claude", *(home.glob(".claude*") if os.path.isdir(home) else ())
+    return any(_dir_key(p) == key for p in named) and _holds_aisquare(config_dir)
 
 
 def _dir_key(path: Path) -> Path:

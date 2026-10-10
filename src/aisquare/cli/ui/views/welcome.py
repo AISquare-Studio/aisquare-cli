@@ -236,19 +236,10 @@ def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
     elif claude.refused is not None:
         text.append("\n✗ ", style="red")
         text.append(f"aisquare's hooks cannot be written: {claude.refused} — ")
-        # Repaired in place, the page sees it on its next look; CLAUDE_CONFIG_DIR, asq
-        # reads only when it starts. The refusal is of the directory this shell reads, and
-        # a file standing where it must be (~/.claude.json) is never to be repaired.
-        lead = "Point"
-        if claude.refused_repair is not None:
-            lead = (
-                f"Repair {claude.refused_repair} and this page checks again within a few "
-                "seconds, or point"
-            )
-        text.append(
-            f"Connect cannot change that. {lead} CLAUDE_CONFIG_DIR at another directory this "
-            "user can write, then start asq again from that shell."
-        )
+        text.append("Connect cannot change that.")
+        said = "; or ".join(claude.refused_remedies)  # the doctor's remedies, as it words them
+        if said:
+            text.append(f" {said[:1].upper()}{said[1:]}.")
     elif claude.manager_only:
         text.append("\n✗ ", style="red")
         # True either way: a repository that commits .claude/settings.json gives every

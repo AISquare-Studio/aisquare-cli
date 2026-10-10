@@ -3563,15 +3563,30 @@ def _built_page_target(dist: Path, path: Path) -> Path | None:
     ``dist``, with no hidden part; else ``None``, a path the system refuses included.
     The one rule for what is served (:func:`_built_page_file`) and what ``install-page``
     copies (:func:`_page_copy_skips`)."""
-    try:
-        resolved = path.resolve()
-    except (OSError, ValueError, RuntimeError):  # RuntimeError: a symlink loop, 3.11 and 3.12
-        return None
-    if not resolved.is_relative_to(dist):
+    resolved = _remote_resolved(path)
+    if resolved is None or not resolved.is_relative_to(dist):
         return None
     if any(part.startswith(".") for part in resolved.relative_to(dist).parts):
         return None
     return resolved
+
+
+def _remote_resolved(path: Path) -> Path | None:
+    """``path`` resolved, or ``None`` for one that does not resolve: the one rule for every
+    page path Remote resolves, a ``--dist``, the installed build, ``install-page``'s source
+    and each file in them (:func:`_built_page_target`).
+
+    A symbolic link loop raises ``RuntimeError`` ("Symlink loop from ...") on Python 3.11
+    and 3.12, which CI runs, where 3.13 returns the path; a path the system refuses raises
+    ``OSError``, or ``ValueError`` for a NUL byte. Only the files of a build caught all
+    three: a ``--dist`` or an ``install-page`` source that was a loop, or an installed
+    build that became one, ended ``serve``, ``install-page`` and the R panel's start in a
+    traceback, and no ``--json`` answer (review of #243, round 7).
+    """
+    try:
+        return path.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
 
 
 def _is_navigation(rel: str, accept: str) -> bool:
@@ -4480,7 +4495,8 @@ def build_remote_app(
         name: _remote_write_tracked(name, handler)
         for name, handler in (writes or live_writes()).handlers.items()
     }
-    dist = (dist_dir or remote_dist_dir()).resolve()
+    unresolved = dist_dir or remote_dist_dir()
+    dist = _remote_resolved(unresolved) or unresolved  # a loop: a build with no file at all
     limiter = _RateLimiter(clock)
     budget = UnlockBudget(runtime)
     cache = _Cache(ttl=tick * 0.9)
@@ -5929,19 +5945,30 @@ def _page_missing(dist_dir: Path | None) -> str | None:
     fresh machine's first ``R`` press just works. Only an install that lost its
     bundled page gets :data:`NO_PAGE_HINT` instead of a server that answers every
     request with nothing. A ``--dist`` that is a web project's own directory, not its
-    build, is refused as ``install-page`` refuses it (:func:`_page_project_not_build`).
+    build, is refused as ``install-page`` refuses it (:func:`_page_project_not_build`). One
+    that does not resolve, a symbolic link loop, is refused as such; an installed build that
+    does not is no installed page, as :func:`build_app` serves it (:func:`_remote_resolved`).
     """
     if dist_dir is not None:
-        dist = dist_dir.resolve()
+        dist = _remote_resolved(dist_dir)
+        if dist is None:
+            return PAGE_DOES_NOT_RESOLVE.format(path=dist_dir)
         if not (dist / "index.html").is_file():
             return f"no index.html in {dist}"
         return _page_project_not_build(dist)
-    if (remote_dist_dir().resolve() / "index.html").is_file():
+    installed = _remote_resolved(remote_dist_dir())
+    if installed is not None and (installed / "index.html").is_file():
         return None
     from aisquare.services import remote_page
 
     return None if remote_page.bundled_page_present() else NO_PAGE_HINT
 
+
+PAGE_DOES_NOT_RESOLVE = (
+    "{path} does not resolve to a directory: a symbolic link in it leads round in a loop"
+)
+"""Why a ``--dist`` or an ``install-page`` source that does not resolve is no page
+(:func:`_remote_resolved`)."""
 
 _PAGE_PROJECT_FILES = ("package.json", "node_modules")
 """What a web project's own directory holds beside its source ``index.html``, and its built
@@ -5994,7 +6021,10 @@ def install_page(source: Path) -> Path:
     each rename is atomic — rather than removing the destination first, so a server
     reading the old page mid-swap never sees a half-written one.
     """
-    source = source.resolve()
+    resolved = _remote_resolved(source)
+    if resolved is None:
+        raise NoRemotePage(PAGE_DOES_NOT_RESOLVE.format(path=source))
+    source = resolved
     if not (source / "index.html").is_file():
         raise NoRemotePage(f"no index.html in {source} — build aisquare-remote first")
     project = _page_project_not_build(source)

@@ -829,7 +829,8 @@ def needs_from_agent(
        interrupted turn ``working``);
     7. attention, and its notification is the usage-limit dialog → ``limited``;
     8. attention → ``permission``, the dialog form: an MCP elicitation, Claude Code's own;
-    9. ``waiting`` on its own words, which end on a question → ``asked``;
+    9. ``waiting`` on its own words, which end on a question → ``asked``, a local or ``!``
+       command run at its prompt since, which runs no turn, changing nothing (as for 6);
     10. ``waiting`` since its turn ended on an API error (the session's ``turn_failed``
         event, no hook since) → ``failed``.
 
@@ -950,20 +951,21 @@ def needs_from_agent(
                 push_after=seen,
             )
         ]
+    said, said_at, said_key = ("none", None, None) if tail is None else _needs_settled(tail)
     if (
         status.state == "waiting"
         and tail is not None
-        and tail.newest == "assistant_text"
+        and said == "assistant_text"
         and tail.last_text
-        and (tail.newest_at is None or tail.newest_at >= agent.created_at)
+        and (said_at is None or said_at >= agent.created_at)
         and looks_like_a_question(tail.last_text)
     ):
-        since = tail.newest_at or now
+        since = said_at or now
         prompt_now = _needs_is_manager(agent.role) or agent.spawned_by == "user" or not manager_live
         return [
             _needs_item(
                 "asked",
-                tail.marker_key or since.isoformat(),
+                said_key or since.isoformat(),
                 project=project,
                 agent=agent,
                 reason=f"{name} ended its turn with a question",

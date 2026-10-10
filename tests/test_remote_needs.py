@@ -740,6 +740,29 @@ def test_rule_9_a_turn_that_ends_on_a_question_is_asked() -> None:
     assert _classify(_status(row, "waiting", _session(row)), done) == []
 
 
+def test_a_question_a_local_command_follows_is_still_asked_under_its_own_id() -> None:
+    """The class of sweep 5 of #243's interruption: a ``/model`` or a ``!`` command typed at
+    the agent's prompt runs no turn, and its records became the newest. The agent's closing
+    question was no longer its newest record, and the card went, the question unanswered.
+    It is the same card, its id and time the question's."""
+    row = _row()
+    text = "Two ways to do it.\n\nWhich approach?"
+    asked_at = NOW - timedelta(minutes=2)
+    said = _tail(newest="assistant_text", text=text, key="txt-1", at=asked_at)
+    behind = replace(
+        _tail(newest="own", text=text, key="own-1", at=NOW - timedelta(seconds=30)),
+        under_own="assistant_text",
+        under_own_at=asked_at,
+        under_own_key="txt-1",
+    )
+    waiting = _status(row, "waiting", _session(row))
+    first, again = (_one(_classify(waiting, tail)) for tail in (said, behind))
+    assert (again.kind, again.id, again.since) == (first.kind, first.id, first.since)
+    assert first.kind == "asked" and first.since == asked_at
+    turned = replace(behind, under_own="user_prompt")
+    assert _classify(waiting, turned) == [], "a prompt since: the question was answered"
+
+
 def test_a_question_is_asked_only_while_the_agent_waits() -> None:
     row = _row()
     tail = _tail(newest="assistant_text", text="Shall I go on?")

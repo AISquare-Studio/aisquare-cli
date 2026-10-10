@@ -528,7 +528,7 @@ def test_rule_7_the_session_paused_dialog_reads_as_limited() -> None:
     row = _row()
     session = _session(row, state="attention")
     text = "Session paused — choose: continue on usage credits or switch models"
-    events = [_event(9, "attention", text, session=session)]
+    events = [_event(9, "attention", text, session=session, at=session.last_seen_at)]
     item = _one(_classify(_status(row, "attention", session), None, events))
     assert item.kind == "limited"
     assert item.id == needs_item_id(PROJECT.id, "limited", "attention:9")
@@ -585,6 +585,110 @@ def test_an_elicitation_asked_mid_call_is_a_dialog_not_the_calls_permission(said
     assert [answer.label for answer in _one(_classify(status, tail)).answers] == ["1", "2", "No"]
 
 
+def test_a_form_asked_after_its_calls_own_prompt_is_a_dialog_not_that_prompt_again() -> None:
+    """An MCP tool not allowed yet asks its permission first, and that notice is the turn's
+    first, the one the board keeps in words. The human grants it, the call runs, and its
+    server asks for a form. A grant writes nothing to the transcript and a later notice no
+    event, only ``last_seen_at``: the card was the call's permission again, under the
+    answered card's id, so nothing was pushed, and its "1" typed a digit into the form
+    (verifier of sweep 4's item 18 on #243). A notice since the turn's first with nothing
+    written between is a dialog the board has no words for: rule 8's form, its own id."""
+    row = _row()
+    asked = NOW - timedelta(seconds=40)
+    called = asked - timedelta(seconds=6)
+    first = _session(row, state="attention", seen=asked)
+    permission = "Claude needs your permission to use mcp__deploy__release"
+    events = [_event(4, "attention", permission, session=first, at=asked)]
+    call = _tool("toolu_mcp", "mcp__deploy__release", at=called, env="prod")
+    tail = _tail(call, at=called)
+    prompt = _one(_classify(_status(row, "attention", first), tail, events))
+    assert prompt.id == needs_item_id(PROJECT.id, "permission", "toolu_mcp")
+    assert [answer.label for answer in prompt.answers] == ["1", "2", "No"]
+    seen = NOW - timedelta(seconds=5)
+    later = _status(row, "attention", _session(row, state="attention", seen=seen))
+    form = _one(_classify(later, tail, events))
+    assert form.id == needs_item_id(PROJECT.id, "permission", f"attention:4:{seen.isoformat()}")
+    assert form.reason == "coder-1 shows a dialog that needs you"
+    assert (form.excerpt, form.detail, form.answers) == ("", {"text": ""}, ())
+    assert form.push_after == form.since == seen
+    beside = _tool("toolu_beside", "mcp__deploy__status", at=called)
+    both = _one(_classify(later, _tail(call, beside, at=called), events))
+    assert (both.id, both.answers) == (form.id, ()), "not the granted call's card again"
+
+
+def test_the_next_prompt_of_a_turn_keeps_its_answers_after_a_notice_since_the_first() -> None:
+    """``last_seen_at`` past the turn's first notice is any later notice, the next prompt's
+    too. A prompt's tool use is written before it, so the agent wrote after the event: the
+    call it asks about is the pending one, with its digits."""
+    row = _row()
+    asked = NOW - timedelta(minutes=2)
+    first = _session(row, state="attention", seen=asked)
+    bash = "Claude needs your permission to use Bash"
+    events = [_event(4, "attention", bash, session=first, at=asked)]
+    seen = NOW - timedelta(seconds=5)
+    later = _status(row, "attention", _session(row, state="attention", seen=seen))
+    called = seen - timedelta(seconds=6)
+    call = _tool("toolu_next", "mcp__deploy__release", at=called)
+    item = _one(_classify(later, _tail(call, at=called), events))
+    assert item.id == needs_item_id(PROJECT.id, "permission", "toolu_next")
+    assert [answer.label for answer in item.answers] == ["1", "2", "No"]
+
+
+def test_a_sub_agents_prompt_after_its_form_is_a_prompt_not_that_form_again() -> None:
+    """A sub-agent's records are not its agent's, so every one of its prompts comes with
+    nothing written here. Its form's notice, the turn's first, read as every prompt after
+    it: dialogs without digits. Only while it is the newest notice is it the form's."""
+    seen = NOW - timedelta(seconds=30)
+    status, tail = _in_a_sub_agent(seen)
+    assert status.session is not None
+    said = "Claude Code needs your input"
+    form = [_event(4, "attention", said, session=status.session, at=seen)]
+    assert _one(_classify(status, tail, form)).answers == ()
+    asked = _one(_classify(*_in_a_sub_agent(NOW - timedelta(seconds=5)), form))
+    assert asked.reason == "coder-1 waits for a permission answer (in a sub-agent)"
+    assert [answer.label for answer in asked.answers] == ["1", "2", "No"]
+
+
+def test_the_hooks_own_writes_tell_a_form_from_the_prompt_before_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Over the real store, by ``team.hook_notification``: the first notice of a turn leaves
+    ``last_seen_at`` before its event, which is what names the call's prompt; the form's
+    notice after it writes no event and moves ``last_seen_at`` past it."""
+    from aisquare.services import team as team_service
+
+    work = tmp_path / "repo"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("AISQUARE_TEAM", "1")
+    project = team_service.activate(work)
+    called = datetime.now(UTC)
+    row = _row(created=called - timedelta(minutes=1))
+    session_id = str(row.session_id)
+    team_service.hook_session_start(session_id, work, "startup")
+    tail = _tail(_tool("toolu_mcp", "mcp__deploy__release", at=called, env="prod"), at=called)
+
+    def card() -> NeedsItem:
+        with store_session() as store:
+            session = store.get_session(session_id)
+            events = store.recent_events(project.id, limit=20)
+        status = _status(row, "attention", session)
+        now = datetime.now(UTC)
+        return _one(needs_from_agent(status, tail, project=project, events=events, now=now))
+
+    said = "Claude needs your permission to use mcp__deploy__release"
+    team_service.hook_notification(session_id, work, said, notification_type="permission_prompt")
+    prompt = card()
+    assert prompt.id == needs_item_id(project.id, "permission", "toolu_mcp")
+    assert [answer.label for answer in prompt.answers] == ["1", "2", "No"]
+    team_service.hook_notification(
+        session_id, work, "Claude Code needs your input", notification_type="elicitation_dialog"
+    )
+    form = card()
+    assert (form.reason, form.answers) == ("coder-1 shows a dialog that needs you", ())
+    assert form.id != prompt.id
+
+
 def test_a_dialog_after_the_agent_moved_on_is_not_named_by_the_notice_before_it() -> None:
     """``mark_attention`` flips a session once per turn: a turn's later dialogs leave no event
     and move ``last_seen_at`` alone. A usage-limit dialog after a Bash prompt that was
@@ -604,8 +708,11 @@ def test_a_dialog_after_the_agent_moved_on_is_not_named_by_the_notice_before_it(
     assert later.reason == "coder-1 shows a dialog that needs you"
     assert _one(_classify(status, moved_on, limit)).kind == "permission", "not the limit's"
     still = _tail(newest="assistant_text", at=first - timedelta(seconds=8), text="Running it.")
-    assert _one(_classify(status, still, limit)).kind == "limited", "the dialog it named"
-    assert _one(_classify(status, still, bash)).excerpt == bash[0].text
+    named = _status(row, "attention", _session(row, state="attention", seen=first))
+    assert _one(_classify(named, still, limit)).kind == "limited", "the dialog it named"
+    assert _one(_classify(named, still, bash)).excerpt == bash[0].text
+    after = _one(_classify(status, still, limit))
+    assert (after.kind, after.detail) == ("permission", {"text": ""}), "a notice since: another"
 
 
 def test_stale_attention_still_counts_as_attention() -> None:
@@ -1850,8 +1957,12 @@ def test_the_guide_gives_quick_answers_only_to_the_cards_that_carry_them() -> No
     assert "`1`, `2` and No for a tool's permission" in prose
     assert "for a single question with one answer to pick from at most nine" in prose
     assert (
-        "(one of Claude Code's own dialogs, a form an MCP server asks you to fill in, even in"
-        " the middle of its tool's call, a question of several answers)"
+        "(one of Claude Code's own dialogs, a form an MCP server asks you to fill in, a"
+        " question of several answers)"
+    ) in prose
+    assert (
+        "When the agent already went on past an earlier prompt in the same turn, the form"
+        " reads as its tool's permission card"
     ) in prose
     row = _row()
     dialog = _one(_classify(_status(row, "attention", _session(row, state="attention")), None))
@@ -2779,7 +2890,9 @@ def test_without_the_board_a_dialogs_item_is_still_a_dialog(
     which an action matches before its Escape, on the project's scan."""
     fleet = _working(None, state="attention")
     session = fleet.agents[0].session
-    fleet.events = [_event(9, "attention", "Session paused: usage limit", session=session)]
+    assert session is not None
+    paused = "Session paused: usage limit"
+    fleet.events = [_event(9, "attention", paused, session=session, at=session.last_seen_at)]
     scanned = _now_of(fleet, FakeTmux(reference=NOW), monkeypatch)
     alone = _alone_of(fleet, FakeTmux(reference=NOW), monkeypatch)
     assert [item.kind for item in scanned.items] == ["limited"]

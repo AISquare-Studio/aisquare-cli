@@ -284,9 +284,14 @@ permission; one per option, and Cancel, for a single question with one answer to
 pick from at most nine; `1` to `3` and Keep planning for a plan. A quick answer
 is checked against the agent **as it is now**: if the prompt has already gone,
 the card says "No longer needs you" and nothing is typed. Anything else (one of
-Claude Code's own dialogs, a form an MCP server asks you to fill in, even in the
-middle of its tool's call, a question of several answers) is answered from the
-agent's key pad.
+Claude Code's own dialogs, a form an MCP server asks you to fill in, a question of
+several answers) is answered from the agent's key pad. The board keeps the words
+of only the first thing a turn asks for. A form an MCP server asks for while its
+tool runs is a card without quick answers when it is that first thing, or when
+it comes straight after the tool's own permission prompt. When the agent already
+went on past an earlier prompt in the same turn, the form reads as its tool's
+permission card, with `1`, `2` and No: read the live screen under a permission
+card before you answer it.
 
 The other buttons follow the kind: **Tell** for a question asked in text,
 **Reply** on the board, **Switch account** for a usage limit, **Tell** (to go on)

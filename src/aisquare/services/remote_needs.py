@@ -134,8 +134,9 @@ _INPUT_NOTICE = re.compile(r"needs your input", re.IGNORECASE)
 """An attention notification that asks for input in a form, not for a permission ("Claude
 needs your permission to use Bash"): an MCP server's elicitation ("Claude Code needs your
 input", "An MCP server needs your input") or an agent's ("<label> needs your input"), in
-Claude Code 2.1.296. A digit typed there goes into a field. A Claude Code string, not a
-contract."""
+Claude Code 2.1.296. A digit typed there goes into a field. Read only from the turn's first
+notice, the one the board keeps in words (:func:`_needs_notice`). A Claude Code string, not
+a contract."""
 
 NEEDS_ANSWER_KEYS = frozenset(
     {*"123456789", "Escape", "Enter", "Up", "Down", "Space", "Tab", "y", "n"}
@@ -815,7 +816,12 @@ def needs_from_agent(
        sub-agent's has that one pending tool, so the prompt is also its notice, the
        ``last_seen_at`` each notification moves (:func:`_needs_subagent_prompt`). Nor
        while the notice asks for input (:data:`_INPUT_NOTICE`): an MCP server's
-       elicitation comes while its tool call is pending, and that form is rule 8's;
+       elicitation comes while its tool call is pending, and that form is rule 8's. Nor
+       after a notice later than the turn's first with nothing written since it
+       (:func:`_needs_later_notice`): the call's own prompt was answered, and what is up
+       now is rule 8's too. Once the agent wrote after the turn's first notice, a later
+       one's words are not on the board, and nothing tells a form asked then from its
+       tool's own prompt: it reads as the prompt, whose digits would go into the form;
     6. no pending tool, and the newest record an interruption later than the session's last
        hook → ``interrupted``, whatever the row reads (Esc fires no Stop, so a dismissed
        prompt still reads ``attention`` and an interrupted turn ``working``);
@@ -825,7 +831,7 @@ def needs_from_agent(
     10. ``waiting`` since its turn ended on an API error (the session's ``turn_failed``
         event, no hook since) → ``failed``.
 
-    Rules 7 and 8 read the notification from the session's newest ``attention`` event
+    Rules 5, 7 and 8 read the notification from the session's newest ``attention`` event
     only while it still names the dialog on screen (:func:`_needs_notice`); after it a
     dialog is the plain form, its words not on the board. So the usage-limit dialog is a
     ``limited`` card only as the first notice of its turn; later in a turn it is the
@@ -890,8 +896,14 @@ def needs_from_agent(
     if pending:
         if not attention:
             return []  # a tool running, or the 6 s before Claude Code's notification
-        notice = _needs_notice(attention_event, tail)
-        if notice is None or not _INPUT_NOTICE.search(notice.text):
+        notice = _needs_notice(attention_event, tail, session)
+        if notice is not None:
+            form = _INPUT_NOTICE.search(notice.text) is not None
+        else:  # a sub-agent's prompts each send a notice, its records not this transcript's
+            form = pending[0].name not in _SUBAGENT_TOOLS and _needs_later_notice(
+                attention_event, tail, session
+            )
+        if not form:
             if pending[0].name in _SUBAGENT_TOOLS and session is not None:
                 return _needs_subagent_prompt(
                     pending[0], session, pane_output, project=project, agent=agent, now=now
@@ -902,7 +914,7 @@ def needs_from_agent(
     elif tail is not None and _needs_marker_later(status, tail):
         return [_needs_interrupted_item(tail, project=project, agent=agent, name=name, now=now)]
     if attention or _needs_unanswered(status, tail, unread=False):
-        notice = _needs_notice(attention_event, tail)
+        notice = _needs_notice(attention_event, tail, session)
         if notice is not None and LIMIT_DIALOG.search(notice.text):
             since = notice.created_at
             return [
@@ -975,22 +987,49 @@ def _needs_seq(event: TeamEvent) -> int:
     return event.seq
 
 
-def _needs_notice(event: TeamEvent | None, tail: TranscriptTail | None) -> TeamEvent | None:
+def _needs_notice(
+    event: TeamEvent | None, tail: TranscriptTail | None, session: TeamSession | None
+) -> TeamEvent | None:
     """The session's newest ``attention`` event, while it still names the dialog on screen.
 
     ``mark_attention`` flips a session once per turn, so a turn's first notice is
     the only one the board records: a later one moves ``last_seen_at`` and writes
     nothing. Once the agent wrote anything after the event (a granted tool's
-    result, its reply after the dialog was answered), the dialog the event named
-    was answered, and one on screen now is another, which its text would misname:
-    the usage-limit dialog read as the Bash prompt approved before it, and the
-    reverse. Without a tail nothing says it moved on.
+    result, its reply after the dialog was answered), or a notice came after it,
+    the dialog the event named was answered, and one on screen now is another,
+    which its text would misname: the usage-limit dialog read as the Bash prompt
+    approved before it, and the reverse, an MCP server's form as its tool's
+    permission prompt granted just before it. Without a tail nothing says the
+    agent moved on.
     """
-    if event is None:
+    if event is None or _needs_moved_on(event, tail):
         return None
-    if tail is not None and tail.newest_at is not None and tail.newest_at > event.created_at:
+    if session is not None and session.last_seen_at > event.created_at:
         return None
     return event
+
+
+def _needs_moved_on(event: TeamEvent, tail: TranscriptTail | None) -> bool:
+    """The agent wrote a record of its conversation after ``event``."""
+    return tail is not None and tail.newest_at is not None and tail.newest_at > event.created_at
+
+
+def _needs_later_notice(
+    event: TeamEvent | None, tail: TranscriptTail | None, session: TeamSession | None
+) -> bool:
+    """A notice came after the turn's first, ``event``, with nothing written between.
+
+    ``mark_attention`` writes the event after it moves ``last_seen_at``, so the
+    notice the event records leaves ``last_seen_at`` before it, and only a later
+    one moves it past. A pending tool's prompt is answered with no record written
+    (its result comes when it ends), so the dialog that notice is for is not the
+    one the event named: an MCP server's form, asked during the call its
+    permission prompt let run, or the prompt of a tool called beside it in the
+    same message. Neither is that tool's own prompt.
+    """
+    if event is None or session is None or _needs_moved_on(event, tail):
+        return False
+    return session.last_seen_at > event.created_at
 
 
 def _needs_attention(status: FleetAgentStatus) -> bool:

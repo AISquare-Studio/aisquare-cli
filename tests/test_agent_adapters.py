@@ -84,9 +84,9 @@ _REPOINT_FIX = (
 
 def _step_two(fix: str | None) -> str:
     """Welcome step 2's remedies for a refusal of the directory this shell reads: the
-    doctor's, as it words them (``agents.remedies``)."""
+    doctor's, as it words them (``agents.remedies``), with nothing after the last."""
     said = str(fix or "")
-    return f"Connect cannot change that. {said[:1].upper()}{said[1:]}."
+    return f"Connect cannot change that. {said[:1].upper()}{said[1:]}".rstrip()
 
 
 _DISCONNECT = "aisquare agents disconnect claude-code"
@@ -1342,19 +1342,30 @@ def test_a_recorded_profile_gone_behind_a_folder_this_user_cannot_enter_is_repai
     assert diagnostics._check_claude_code().status is CheckStatus.ok
 
 
+@pytest.mark.parametrize("program", ["this install", "a lost program"])
 def test_the_doctor_welcome_and_agents_list_give_one_remedy_list_for_0_7_0_hooks_read_only(
-    runner: CliRunner, claude_home: Path, monkeypatch: pytest.MonkeyPatch
+    runner: CliRunner,
+    claude_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    program: str,
 ) -> None:
     """A recorded ~/.claude whose read-only settings.json holds 0.7.0's five hooks (no
     StopFailure): the doctor withholds pointing CLAUDE_CONFIG_DIR elsewhere, since
     disconnect cannot take those hooks out, while Welcome step 2 offered it, and followed,
     step 2 went green while the row never cleared (review of #257). One list for every
-    surface (``agents.remedies``); done as worded, it clears both."""
+    surface (``agents.remedies``); done as worded, it clears both. Pinned at a program
+    that is gone, only the doctor's row says so (which program hooks run takes starting
+    it to know), and only it adds the remedy for that, where the file is generated."""
     from aisquare.cli.ui.views.welcome import claude_text
 
     monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
     _connect(runner)
     settings = claude_home / "settings.json"
+    if program == "a lost program":
+        _hooks_run(
+            settings, str(tmp_path / "nix" / "store" / "aisquare-0.7.0" / "bin" / "aisquare")
+        )
     data = json.loads(settings.read_text(encoding="utf-8"))
     del data["hooks"]["StopFailure"]
     settings.write_text(json.dumps(data), encoding="utf-8")
@@ -1372,14 +1383,40 @@ def test_the_doctor_welcome_and_agents_list_give_one_remedy_list_for_0_7_0_hooks
     step_two = claude_text(welcome, platform="linux").plain
     site = next(s for s in listed[0]["sites"] if s["config_dir"] == str(claude_home))
 
+    generated = ", or point its hooks at this install where that file is generated"
+    shared = str(row.fix).replace(generated, "")
     assert row.fix is not None and row.fix.startswith(f"repair {settings} ("), row.fix
     assert "CLAUDE_CONFIG_DIR" not in row.fix, "disconnect could not take the five hooks out"
-    assert _step_two(row.fix) in step_two, step_two
-    assert "; or ".join(site["remedies"]) == row.fix, site
+    assert (generated in row.fix) == (program == "a lost program"), "the doctor's diagnosis"
+    assert step_two.endswith(_step_two(shared)), step_two
+    assert "; or ".join(site["remedies"]) == shared, site
     connected = runner.invoke(app, ["agents", "connect", "claude-code"])  # repaired: writable
     after = first_run.probe_claude(sign_in=False, which=lambda _name: "/opt/claude")
     assert connected.exit_code == 0, connected.output
     assert diagnostics._check_claude_code().status is CheckStatus.ok and after.connected
+
+
+def test_welcome_step_two_ends_on_the_command_it_names_as_printed(
+    runner: CliRunner, claude_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Welcome step 2 put a period after the doctor's remedies, which can end in a command:
+    copied as printed, `--config-dir <dir>.` named another directory, disconnect said ✓,
+    and the record and the row stayed (review of #257). Nothing follows the command, and
+    run as printed it does what the remedy says."""
+    from aisquare.cli.ui.views.welcome import claude_text
+
+    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    _connect(runner)
+    (claude_home / "settings.json").write_text("{}", encoding="utf-8")  # hooks taken out
+    _utf16(claude_home / "CLAUDE.md")
+    welcome = first_run.probe_claude(sign_in=False, which=lambda _name: "/opt/claude")
+    step_two = claude_text(welcome, platform="linux").plain
+    printed = step_two.rsplit("disconnect this one: aisquare ", 1)[-1].split()
+    done = runner.invoke(app, printed)
+
+    assert step_two.endswith(f"--config-dir {claude_home}"), step_two
+    assert done.exit_code == 0, done.output
+    assert agent_core.connected_dirs("claude-code") == [], "the record is gone, as worded"
 
 
 def test_a_welcome_tick_reads_settings_json_fewer_times(

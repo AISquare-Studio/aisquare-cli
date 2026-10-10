@@ -237,9 +237,11 @@ def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
         text.append("\n✗ ", style="red")
         text.append(f"aisquare's hooks cannot be written: {claude.refused} — ")
         text.append("Connect cannot change that.")
-        said = "; or ".join(claude.refused_remedies)  # the doctor's remedies, as it words them
+        # The doctor's remedies, as it words them, with nothing after the last: it can end in
+        # a command, and a period there named another directory (review of #257).
+        said = "; or ".join(claude.refused_remedies)
         if said:
-            text.append(f" {said[:1].upper()}{said[1:]}.")
+            text.append(f" {said[:1].upper()}{said[1:]}")
     elif claude.manager_only:
         text.append("\n✗ ", style="red")
         # True either way: a repository that commits .claude/settings.json gives every

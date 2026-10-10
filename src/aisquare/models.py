@@ -86,7 +86,7 @@ class AgentHookSite(BaseModel):
     longer exists and that connect would not make ("<dir> does not exist"). Connect can
     only fail there, as the doctor and Welcome say. ``None`` otherwise."""
     remedies: list[str] = Field(default_factory=list)
-    """What changes ``refused``, as the doctor and Welcome give it (``agents.remedies``)."""
+    """What changes ``refused``, as Welcome and the doctor give it (``agents.remedies``)."""
 
 
 class AgentInfo(BaseModel):

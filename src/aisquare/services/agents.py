@@ -330,10 +330,14 @@ def remedies(name: str, directory: Path, refusal: Refusal, *, also: str | None =
     step 2 and `agents list` print, each true done as worded; built per surface, Welcome
     offered a remedy the doctor withholds on purpose (review of #257). To repair the path
     that blocks (never a file where a directory must be), so that the directory is there
-    where connect will not make it, or what generates a read-only settings.json
-    (``also``); for this shell's directory, CLAUDE_CONFIG_DIR, with the disconnect that
-    takes out one the doctor grades anyway (recorded, or a ``~/.claude*`` holding
-    aisquare) where that would work; for another recorded, forgetting it.
+    where connect will not make it; for this shell's directory, CLAUDE_CONFIG_DIR, with the
+    disconnect that takes out one the doctor grades anyway (recorded, or a ``~/.claude*``
+    holding aisquare) where that would work; for another recorded, forgetting it.
+
+    ``also`` is what to change instead where a read-only settings.json is generated, for a
+    problem only the doctor's row finds (hooks that run another program, which takes
+    starting it to know, or context hooks short of the timeout); it remedies that
+    diagnosis, so the surfaces that never make it never print it.
     """
     spec = agent_core.spec(name, directory)
     found: list[str] = []

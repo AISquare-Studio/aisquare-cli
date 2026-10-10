@@ -320,6 +320,8 @@ A reply is a board note to whoever asked, and a note to the manager wakes it.
 Any other agent the fleet runs reads a note only at its next prompt, and nothing
 prompts one that asked and waits, so a reply to one goes as Tell from its menu
 does: typed into its prompt while it waits there, otherwise left as that note.
+When the agent that asked has ended since, or its name is another agent's now,
+the reply is that note.
 
 ---
 

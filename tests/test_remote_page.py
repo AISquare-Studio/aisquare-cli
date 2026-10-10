@@ -2464,6 +2464,7 @@ def test_a_reply_to_a_coder_that_asked_reaches_it_as_its_tell_does(
         "noted": [],
         "toast": "Typed into coder-1",
         "dismissed": ["ny_00000000000000c1"],
+        "said": None,
     }
     assert replies["filed"] == {
         "title": "Tell coder-1",
@@ -2471,6 +2472,7 @@ def test_a_reply_to_a_coder_that_asked_reaches_it_as_its_tell_does(
         "noted": [],
         "toast": "coder-1: it is working — filed as board note #12 to coder-1",
         "dismissed": [],
+        "said": None,
     }
     assert replies["manager"] == {
         "title": "Reply on the board",
@@ -2478,6 +2480,49 @@ def test_a_reply_to_a_coder_that_asked_reaches_it_as_its_tell_does(
         "noted": [{"text": "Take T-4.", "kind": "note", "project": "prj_x", "to": "manager"}],
         "toast": "Posted on the board",
         "dismissed": ["ny_00000000000000c2"],
+        "said": None,
+    }
+
+
+def test_a_reply_to_a_coder_that_ended_or_was_replaced_since_it_asked_is_the_note_it_was(
+    boot_report: dict[str, Any],
+) -> None:
+    """The reply's Tell is pinned to the row that asked. Once that coder was stopped, or a
+    fresh row holds its label, the machine refuses the pin ``stale`` every time: the sheet
+    said the card no longer needed you while the question stayed open, Tell again was
+    refused the same way, and nothing reached anyone. The reply is then the note Reply
+    always posted, to the coder's label, which answers the card on the board, and the card
+    is dismissed. A card that went (its ``current`` is the agent's items, an array) is said
+    as a Tell's is, and Tell again goes; refused for the row then, it is the note too."""
+    replies = boot_report["crewReplies"]
+    told = {"agent": "coder-1", "project": "prj_x", "text": "Take T-4.", "mode": "auto"}
+    told.update(needs_id="ny_00000000000000c1", agent_id="agt_1")
+    noted = {"text": "Take T-4.", "kind": "note", "project": "prj_x", "to": "coder-1"}
+    for gone in ("ended", "replaced"):
+        assert replies[gone] == {
+            "title": "Tell coder-1",
+            "told": [told],
+            "noted": [noted],
+            "toast": "Posted on the board",
+            "dismissed": ["ny_00000000000000c1"],
+            "said": None,
+        }, gone
+    assert replies["went"] == {
+        "title": "Tell coder-1",
+        "told": [told],
+        "noted": [],
+        "toast": "",
+        "dismissed": [],
+        "said": "No longer needs you: nothing waits on coder-1 now. Tell again to send it anyway.",
+    }
+    again = {key: value for key, value in told.items() if key != "needs_id"}
+    assert replies["wentThenEnded"] == {
+        "title": "Tell coder-1",
+        "told": [told, again],
+        "noted": [noted],
+        "toast": "Posted on the board",
+        "dismissed": [],
+        "said": None,
     }
 
 
@@ -2534,6 +2579,80 @@ def test_the_tell_a_reply_sends_is_typed_into_the_coder_that_asked_on_the_board(
     assert tmux.typed == [("paste", "%9", "Take T-4."), ("keys", "%9", "Enter")]
     later = remote_needs.scan_needs_you(sources, now=datetime.now(UTC), dismissed=())
     assert [item.id for item in later] == [card.id]
+
+
+@pytest.mark.parametrize("since", ["ended", "replaced"])
+def test_a_reply_to_a_coder_gone_since_it_asked_is_refused_as_a_tell_and_answered_as_a_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, since: str
+) -> None:
+    """The machine's half of a reply to a coder that was stopped since it asked, or whose
+    label a fresh row holds now: the Tell the page sends, pinned to the card's row, is
+    refused ``stale`` and types nothing, and the card stays. The note the page posts in its
+    place, to the coder's label, answers the card on the board, as Reply always did."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.core.store import store_session
+    from aisquare.models import FleetAgent, TeamEvent, TeamSession
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services.remote_server import RequestError, live_writes
+    from tests.test_remote_needs import FakeTmux, _rooted
+
+    now = datetime.now(UTC)
+    root = tmp_path / "proj"
+    root.mkdir()
+
+    def coder(session: str, agent: str, pane: str, started: datetime) -> None:
+        with store_session() as store:
+            store.upsert_session(
+                TeamSession(
+                    id=session, project_id=project.id, role="coder", label="coder-1",
+                    started_at=started, last_seen_at=now, state="waiting",
+                )
+            )  # fmt: skip
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=agent, project_id=project.id, label="coder-1", role="coder",
+                    pane_id=pane, session_id=session, cwd=project.root, created_at=started,
+                )
+            )  # fmt: skip
+
+    with store_session() as store:
+        project = store.onboard_project(_rooted(root))
+    coder("ses_c", "agt_c", "%9", now - timedelta(hours=1))
+    with store_session() as store:
+        store.add_team_event(
+            TeamEvent(
+                id="evt_q", project_id=project.id, session_id="ses_c", kind="question",
+                text="Take T-4 or T-5?", to_role="manager", created_at=now - timedelta(minutes=1),
+            )
+        )  # fmt: skip
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    sources = remote_needs.live_needs_sources()
+    (card,) = remote_needs.scan_needs_you(sources, now=now, dismissed=())
+    assert (card.kind, card.agent, card.agent_id) == ("board_question", "coder-1", "agt_c")
+    with store_session() as store:
+        store.end_fleet_agent("agt_c", exit_status=0)
+    if since == "replaced":
+        coder("ses_d", "agt_d", "%10", now)
+    writes = live_writes().handlers
+    with pytest.raises(RequestError) as refused:
+        writes["agent/tell"](
+            {
+                "agent": "coder-1", "project": project.id, "text": "Take T-4.", "mode": "auto",
+                "needs_id": card.id, "agent_id": card.agent_id,
+            }
+        )  # fmt: skip
+    assert (refused.value.status, refused.value.error) == (409, "stale")
+    assert refused.value.extra["current"] == {"agent_id": "agt_d" if since == "replaced" else None}
+    assert tmux.typed == []
+    assert [item.id for item in remote_needs.scan_needs_you(sources, now=now, dismissed=())] == [
+        card.id
+    ]
+    note = {"text": "Take T-4.", "kind": "note", "project": project.id, "to": "coder-1"}
+    writes["note"](note)
+    assert tmux.typed == []
+    assert remote_needs.scan_needs_you(sources, now=datetime.now(UTC), dismissed=()) == []
 
 
 def test_a_card_refused_stale_says_so_in_its_place_and_the_feed_is_read_again(

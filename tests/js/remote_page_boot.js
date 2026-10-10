@@ -2776,8 +2776,11 @@ async function dismissals() {
 }
 
 /* A Reply on a board question to the agent that asked, as the machine builds one for a coder
- * the fleet runs (agent and agent_id are its row), the tell typed in and filed as a note; and
- * a Reply to the manager. The sheet's title, what was sent, the toast and the dismissals. */
+ * the fleet runs (agent and agent_id are its row), the tell typed in and filed as a note, and
+ * refused stale as the machine refuses it once that row ended or another holds coder-1, or
+ * once the card went (then, tapped again, once the row ended too); and a Reply to the
+ * manager. The sheet's title, what was sent, the toast, the dismissals and what the sheet
+ * said last, while it is open. */
 async function crewReplies() {
   const crew = Object.assign({}, ITEM, {
     id: "ny_00000000000000c1", kind: "board_question", detail: { text: "Take T-4 or T-5?", author: "coder-1" }, answers: [], actions: ["reply", "dismiss"],
@@ -2785,9 +2788,14 @@ async function crewReplies() {
   const manager = Object.assign({}, crew, { id: "ny_00000000000000c2", agent: "manager", agent_id: "agt_m", detail: { text: "Ship it?", author: "manager" } });
   const ok = () => ({ status: 200, json: { ok: true } });
   const strip = (body) => Object.fromEntries(Object.entries(body).filter(([key]) => key !== "request_id"));
+  // told answers each tap of the sheet's button in turn, the last one any tap after it.
   const reply = async (item, told, go) => {
+    const answers = [].concat(told);
     const page = bootPage("#/", signedIn({
-      "GET api/needs": () => ({ status: 200, json: { items: [item] } }), "POST api/agent/tell": told, "POST api/note": ok, "POST api/needs/dismiss": ok,
+      "GET api/needs": () => ({ status: 200, json: { items: [item] } }),
+      "POST api/agent/tell": () => (answers.length > 1 ? answers.shift() : answers[0])(),
+      "POST api/note": ok,
+      "POST api/needs/dismiss": ok,
     }));
     await settle();
     page.acceptSockets();
@@ -2795,17 +2803,29 @@ async function crewReplies() {
     click(buttonNamed(page.main(), "Reply…"));
     const title = sheetTitle(page);
     find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "Take T-4.";
-    click(buttonNamed(page.run("UI.sheet"), go));
-    await settle();
+    let said = null;
+    for (let tap = [].concat(told).length; tap > 0 && sheetTitle(page); tap--) {
+      click(buttonNamed(page.run("UI.sheet"), go));
+      await settle();
+      const status = sheetTitle(page) && find(page.run("UI.sheet"), (node) => node.className === "status");
+      said = status ? status.textContent : null;
+    }
     return {
       title, told: page.sent("api/agent/tell").map(strip), noted: page.sent("api/note").map(strip),
-      toast: page.toast(), dismissed: page.sent("api/needs/dismiss").map((body) => body.id),
+      toast: page.toast(), dismissed: page.sent("api/needs/dismiss").map((body) => body.id), said,
     };
   };
   const answered = (delivered, how) => () => ({ status: 200, json: { label: "coder-1", delivered, how, mode: "auto", project: PROJECT } });
+  const stale = (message, current) => () => ({ status: 409, json: { error: "stale", message, current } });
+  const ended = stale("there is no agent 'coder-1' in proj now — nothing was done", { agent_id: null });
+  const went = stale("coder-1 no longer shows what that card was about — nothing was done", []);
   return {
     typed: await reply(crew, answered(true, "typed into its pane (it was waiting)"), "Tell"),
     filed: await reply(crew, answered(false, "it is working — filed as board note #12 to coder-1"), "Tell"),
+    ended: await reply(crew, ended, "Tell"),
+    replaced: await reply(crew, stale("'coder-1' is another agent now (agt_d) — nothing was done", { agent_id: "agt_d" }), "Tell"),
+    went: await reply(crew, went, "Tell"),
+    wentThenEnded: await reply(crew, [went, ended], "Tell"),
     manager: await reply(manager, answered(true, "typed into its pane (it was waiting)"), "Post"),
   };
 }

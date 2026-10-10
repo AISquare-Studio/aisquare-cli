@@ -1968,7 +1968,7 @@ const TELL_MODES = {
   interrupt: ["Interrupt & tell", "One Esc stops what it is doing; this is typed once it is back at its prompt."],
 };
 
-function tellSheet(ctx, mode) {
+function tellSheet(ctx, mode, replyTo) {
   const label = plainText(ctx.label);
   openSheet(TELL_MODES[mode][0] + " " + label, (sheet) => {
     const lead = el("p", "lead", TELL_MODES[mode][1]);
@@ -1996,22 +1996,24 @@ function tellSheet(ctx, mode) {
         sheet.close();
         const told = res.data && typeof res.data === "object" ? res.data : {};
         const delivered = told.delivered === true;
-        // Not typed in, the machine says what happened instead: in "auto" a board note
-        // the agent reads at its next prompt; in the other two, text pasted at the
-        // prompt that tmux could not send with Enter, which holds the agent's next
-        // question back until Enter is pressed on the pad.
+        // Not typed in, the machine says why: in "auto" a note it reads at its next prompt;
+        // else text left at its prompt, which holds its next question until Enter is pressed.
         if (delivered) toast("Typed into " + label);
         else if (isText(told.how)) toast(label + ": " + plainText(told.how));
         else toast(current === "auto" ? "Left a note for " + label + " — it reads it at its next prompt" : "Not typed into " + label + " — look at its pane");
         if (delivered && ctx.needsId) dismissItem({ id: ctx.needsId });
         return;
       }
-      if (res.status === 409 && res.error === "stale" && ctx.item) {
+      // current lists the agent's items once the card went; else the pinned row is gone.
+      const stale = res.status === 409 && res.error === "stale";
+      const now = stale && res.data ? res.data.current : null;
+      if (stale && replyTo && !Array.isArray(now)) return postReply(ctx, sheet, replyTo, text.value);
+      if (stale && ctx.item) {
         // The card gives way, the words typed stay: Tell again is a Tell with no card.
         const item = ctx.item;
         ctx.item = ctx.needsId = null;
-        noLonger(item, res.data && res.data.current);
-        sheet.say(noLongerText(item, res.data && res.data.current) + " Tell again to send it anyway.");
+        noLonger(item, now);
+        sheet.say(noLongerText(item, now) + " Tell again to send it anyway.");
         return;
       }
       sheet.say(failText(res, TEXT_MAX.tell));
@@ -2033,34 +2035,36 @@ function tellSheet(ctx, mode) {
 function replySheet(ctx) {
   const detail = ctx.item.detail && typeof ctx.item.detail === "object" ? ctx.item.detail : {};
   const author = typeof detail.author === "string" ? detail.author : "";
-  if (author === ctx.label && ctx.agentId && author.trim().toLowerCase() !== "manager") return tellSheet(ctx, "auto");
+  if (author === ctx.label && ctx.agentId && author.trim().toLowerCase() !== "manager") return tellSheet(ctx, "auto", author);
   openSheet("Reply on the board", (sheet) => {
     sheet.body.appendChild(el("p", "lead", isText(author) ? "A note to " + author + " on the board." : "A note on the board."));
     const text = el("textarea", "compose");
     text.setAttribute("aria-label", "Reply");
     text.maxLength = TEXT_MAX.note;
     sheet.body.appendChild(text);
-    sheet.bar.appendChild(button("w primary", "Post", async () => {
-      if (!text.value.trim()) {
-        sheet.status.textContent = "Type something first.";
-        return;
-      }
-      const body = { text: text.value, kind: "note", project: ctx.pid };
-      if (isText(author)) body.to = author;
-      sheet.busy(true);
-      const res = await apiWrite(writePath("note"), body, "Reply", () => { sheet.status.textContent = LOST_WAIT; });
-      sheet.busy(false);
-      if (res.ok) {
-        sheet.close();
-        toast("Posted on the board");
-        dismissItem(ctx.item);
-        return;
-      }
-      sheet.say(failText(res, TEXT_MAX.note));
-      afterFailure(res, ctx, sheet);
+    sheet.bar.appendChild(button("w primary", "Post", () => {
+      if (text.value.trim()) return postReply(ctx, sheet, author, text.value);
+      sheet.status.textContent = "Type something first.";
     }));
     text.focus();
   });
+}
+
+/* A reply as a note to whoever asked, which answers its card on the board. */
+async function postReply(ctx, sheet, author, words) {
+  const body = { text: words, kind: "note", project: ctx.pid };
+  if (isText(author)) body.to = author;
+  sheet.busy(true);
+  const res = await apiWrite(writePath("note"), body, "Reply", () => { sheet.status.textContent = LOST_WAIT; });
+  sheet.busy(false);
+  if (res.ok) {
+    sheet.close();
+    toast("Posted on the board");
+    if (ctx.item) dismissItem(ctx.item);
+    return;
+  }
+  sheet.say(failText(res, TEXT_MAX.note));
+  afterFailure(res, ctx, sheet);
 }
 
 const AGENT_ACTIONS = {

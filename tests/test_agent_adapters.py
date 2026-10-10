@@ -970,6 +970,9 @@ _NOT_A_DIRECTORY_TO_READ = [
         id="unenterable, no claude",
         marks=_NEEDS_DENIED_READS,
     ),
+    pytest.param(f"a link to nothing, {_BESIDE_NO_CLAUDE}", id="dangling, no claude"),
+    pytest.param(f"a link loop, {_BESIDE_NO_CLAUDE}", id="loop, no claude"),
+    pytest.param(f"under a file, {_BESIDE_NO_CLAUDE}", id="under a file, no claude"),
 ]
 
 
@@ -982,14 +985,14 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
     shape: str,
 ) -> None:
     """`CLAUDE_CONFIG_DIR=~/.claude.json`, a slip for ~/.claude that names Claude Code's own
-    state file, or a directory in a folder this user cannot enter: the remedy named the
-    settings.json inside it, which for ~/.claude.json meant destroying that file; beside a
-    connected ~/.claude the row was green, and with no `claude` on the doctor's PATH it
-    still was; `doctor --json` printed nothing and `uninstall --dry-run` ended in a
-    traceback in the folder this user cannot enter (review of #257). Named on any PATH,
-    with the first path that blocks and what the operating system says of it; a file
-    there is never offered a repair. Each remedy, done as worded, lets connect write and
-    clears the row, and the file is left as it was."""
+    state file, a directory in a folder this user cannot enter, a link to nothing or in a
+    loop, or one under a file: the remedy named the settings.json inside it, which for
+    ~/.claude.json meant destroying that file; beside a connected ~/.claude the row was
+    green, and with no `claude` on the doctor's PATH it still was; `doctor --json` printed
+    nothing and `uninstall --dry-run` ended in a traceback in the folder this user cannot
+    enter (review of #257). Named on any PATH, with the first path that blocks and what
+    the operating system says of it; a file there is never offered a repair. Each remedy,
+    done as worded, lets connect write and clears the row, and the file is left as it was."""
     if os.name == "nt" and "link" in shape:
         pytest.skip("links need a privilege on Windows")
     on_path = None if "no claude" in shape else "/opt/homebrew/bin/claude"

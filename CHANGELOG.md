@@ -144,7 +144,9 @@ and an aisquare that upgrades and uninstalls itself.**
   refused by its briefing. A config file holding that old default (any
   `aisquare config set` saved it) loads with today's, once: the next save
   records that, so `--restricted` set again afterwards is kept. A reviewer
-  `extra_args` you wrote yourself stays as written.
+  started under those releases is restarted (`fleet restart`, `fleet switch`,
+  Restart) with today's arguments too. A reviewer `extra_args` you wrote
+  yourself stays as written.
 
 ## [0.7.0] - 2026-09-25
 

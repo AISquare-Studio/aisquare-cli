@@ -50,6 +50,7 @@ from aisquare.core.config import (
     FleetRoleSettings,
     FleetSettings,
     load_config,
+    replacing_the_former_reviewer_default,
 )
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
@@ -61,6 +62,7 @@ from aisquare.core.tmux import (
     TmuxUnavailable,
     WindowInfo,
 )
+from aisquare.core.version import __version__
 from aisquare.core.workspace import active_project
 from aisquare.models import (
     CLOSED_STATUSES,
@@ -1381,7 +1383,7 @@ def spawn(
             permission_mode = spec.permission_mode or ""
         worktree = worktree if worktree is not None else spec.worktree
         if replayed_args:
-            agent_args = list(spec.extra_args)
+            agent_args = _replayed_args(role, spec)
     # A transcript to resume is one only Claude Code writes.
     claude_code = claude_code or resume is not None
     srv = server(config)
@@ -1636,6 +1638,7 @@ def spawn(
             account_slot=choice.account.slot if choice.account is not None else None,
             worktree=use_worktree,
             command=list(command),
+            recorded_by=__version__,
         ),
         created_at=_now(),
     )
@@ -1777,6 +1780,22 @@ def _in_place_of_recorded(
         )
     notes.append(f"{gone} — starting {today.binary!r} (chosen by: {today.source}) instead")
     return today
+
+
+def _replayed_args(role: str, spec: LaunchSpec) -> list[str]:
+    """The arguments a replay of ``spec`` launches with: the recorded ones, as recorded.
+
+    Less one list nobody chose. 0.6.0 and 0.7.0 launched every reviewer with their
+    built-in ``--restricted``, which removes Bash, and its spec recorded it, so after the
+    upgrade ``fleet restart``, ``fleet switch`` and asq's Restart brought each one back
+    with no shell, every time: changing the config file's default reached fresh spawns
+    alone (review of #257). A spec recorded since then (``recorded_by``) is replayed as
+    it is, so a ``--restricted`` chosen in today's config survives a restart.
+    """
+    args = list(spec.extra_args)
+    if spec.recorded_by is None and role == "reviewer":
+        return replacing_the_former_reviewer_default(args)
+    return args
 
 
 def _without_session_choice(

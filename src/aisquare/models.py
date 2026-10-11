@@ -935,6 +935,10 @@ class LaunchSpec(BaseModel):
     account_slot: int | None = None
     worktree: bool = False
     command: list[str] = Field(default_factory=list)
+    recorded_by: str | None = None
+    """The aisquare version that recorded the spec; ``None`` on one recorded before 0.8.0,
+    whose reviewer may hold that release's built-in ``--restricted``, which nobody chose
+    and a replay replaces (``services.fleet``)."""
 
 
 class FleetAgent(BaseModel):

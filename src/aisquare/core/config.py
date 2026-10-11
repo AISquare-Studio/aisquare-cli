@@ -10,6 +10,7 @@ import codecs
 import errno
 import os
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -293,6 +294,16 @@ _FORMER_REVIEWER_ARGS = ["--restricted"]
 _REVIEWER_ARGS_MIGRATED = "migrated_reviewer_args"
 
 
+def replacing_the_former_reviewer_default(args: Sequence[str]) -> list[str]:
+    """``args``, or :data:`REVIEWER_ARGS` when they are exactly 0.6.0/0.7.0's reviewer default.
+
+    For what those releases wrote and nobody chose: a config file
+    (:func:`_replace_the_former_reviewer_default`) and a reviewer's launch spec, which a
+    restart replays (``services.fleet``).
+    """
+    return list(REVIEWER_ARGS) if list(args) == _FORMER_REVIEWER_ARGS else list(args)
+
+
 def _replace_the_former_reviewer_default(data: dict[str, Any]) -> None:
     """A reviewer a 0.6.0 or 0.7.0 save left with exactly ``["--restricted"]`` loads with today's.
 
@@ -311,8 +322,8 @@ def _replace_the_former_reviewer_default(data: dict[str, Any]) -> None:
         return
     roles = fleet.get("roles")
     reviewer = roles.get("reviewer") if isinstance(roles, dict) else None
-    if isinstance(reviewer, dict) and reviewer.get("extra_args") == _FORMER_REVIEWER_ARGS:
-        reviewer["extra_args"] = list(REVIEWER_ARGS)
+    if isinstance(reviewer, dict) and isinstance(reviewer.get("extra_args"), list):
+        reviewer["extra_args"] = replacing_the_former_reviewer_default(reviewer["extra_args"])
 
 
 class FleetSettings(BaseModel):

@@ -35,7 +35,7 @@ from aisquare.cli.app import app
 from aisquare.core import codenames, paths, selfcli
 from aisquare.core import store as core_store
 from aisquare.core import tmux as tmux_core
-from aisquare.core.config import FleetRoleSettings, FleetSettings
+from aisquare.core.config import REVIEWER_ARGS, FleetRoleSettings, FleetSettings
 from aisquare.core.ids import new_agent_id, new_task_id
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, SqliteStore, store_session
@@ -49,6 +49,7 @@ from aisquare.core.tmux import (
     TmuxUnavailable,
     WindowInfo,
 )
+from aisquare.core.version import __version__
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
 from aisquare.services import auto_mode
 from aisquare.services import fleet as fleet_service
@@ -9634,6 +9635,46 @@ def test_a_spec_that_holds_a_session_choice_does_not_replay_it(
     command = _command(tmux)
     assert _flag(command, "--resume") == str(transcript)
     assert "-c" not in command and "--continue" not in command
+
+
+def test_a_reviewer_restarted_from_a_spec_0_7_0_recorded_gets_its_shell_back(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #257, round 18: 0.6.0 and 0.7.0 recorded the reviewer's built-in
+    `--restricted` in its spec, and a restart replays the spec, not today's config, so
+    every reviewer started before the upgrade came back with no shell, every time."""
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=["--restricted"])})
+    agent = fleet_service.spawn(project, "reviewer", worktree=False).agent
+    assert agent.launch_spec is not None and agent.launch_spec.recorded_by == __version__
+    legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
+    with store_session() as store:
+        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+
+    restarted = fleet_service.restart(project, agent.label).started
+
+    command = _command(tmux)
+    assert "--restricted" not in command
+    assert REVIEWER_ARGS[0] in command, "today's reviewer arguments in its place"
+    assert restarted.launch_spec is not None
+    assert restarted.launch_spec.extra_args == list(REVIEWER_ARGS)
+    assert restarted.launch_spec.recorded_by == __version__
+
+    # Recorded since, the same list was chosen in today's config, and is replayed.
+    chosen = fleet_service.spawn(project, "reviewer", worktree=False).agent
+    _with_transcript(chosen, transcript)
+    tmux.die(chosen.pane_id, 1)
+
+    fleet_service.restart(project, chosen.label)
+
+    assert "--restricted" in _command(tmux)
 
 
 def test_a_replay_does_not_fall_back_onto_another_kind_of_program(

@@ -296,7 +296,15 @@ _keep() {
 # change the answer, so a session started under others neither reads nor replaces
 # this one's; a `plain` answer for five minutes alone, so one asked while offline is
 # asked again; and `plain` before the slow `uv run`, so a probe the hook's timeout
-# kills still spares the events after it (round 20).
+# kills still spares the events after it (round 20). The cost of that order: while
+# the `uv run` downloads a tested Python, tens of seconds the first time, an event
+# of another session under the same key reads that `plain` and runs on uv's default
+# Python, which may be outside the range (3.14 on Fedora 43), and a `ranged` kept
+# for the key is replaced until the `uv run` answers. A `probing` answer would cost
+# more: read as no answer, each of those events asks uv itself and waits out the
+# same download, or offline the same timeout, which keeping the answer exists to
+# spare a prompt (round 19); read as `ranged`, each waits for a download of its
+# own, and offline fails. So they run as where uv may fetch none (round 21).
 _has_tested_python() {
     _uv=${_runner%/*}/uv
     _starts "$_uv" || _uv=$(_find uv) || return 0

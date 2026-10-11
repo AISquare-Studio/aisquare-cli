@@ -30,6 +30,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Checkbox, Input, Label, Static
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.handoff import handing_over
 from aisquare.core import orchestrator, outbox, paths
 from aisquare.core.config import (
     AppConfig,
@@ -751,7 +752,13 @@ class ExplainabilityView(VerticalScroll):
     # --- reading ---------------------------------------------------------------------
 
     def refresh_status(self) -> None:
-        """Re-read both lanes off the UI thread (the probe may dial the proxy)."""
+        """Re-read both lanes off the UI thread (the probe may dial the proxy).
+
+        Not while asq hands its terminal over (``handoff``): the read resolves the
+        project's destination in the store, and its credits row writes their cache.
+        """
+        if handing_over(self):
+            return
         self.run_worker(
             partial(status_report, self.project), name=STATUS_WORKER, group=STATUS_WORKER,
             exclusive=True, thread=True, exit_on_error=False,

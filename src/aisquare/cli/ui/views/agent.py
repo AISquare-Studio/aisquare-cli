@@ -24,6 +24,7 @@ from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli import fleet as fleet_cli
+from aisquare.cli.ui.handoff import handing_over
 from aisquare.cli.ui.sidebar import ROLE_ICON, STATE_CHIP
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
 from aisquare.core.tmux import TmuxServer
@@ -158,10 +159,13 @@ class AgentView(Vertical):
         Accounts page runs its writes as thread workers for exactly that
         reason — so the header never opens it on the event loop: it paints the
         last good map (the built-in names before the first answer) and repaints
-        when the worker answers (review of #205, second round).
+        when the worker answers (review of #205, second round). Not while asq hands its
+        terminal over (``handoff``).
         """
         now = time.monotonic()
         if self._labels_asked_at is not None and now - self._labels_asked_at < LABELS_TTL:
+            return
+        if handing_over(self):
             return
         self._labels_asked_at = now
         self.run_worker(

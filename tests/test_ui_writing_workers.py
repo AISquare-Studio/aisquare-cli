@@ -26,6 +26,7 @@ from aisquare.cli.ui import app as ui_app
 from aisquare.cli.ui import board
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views import agent as agent_view
+from aisquare.cli.ui.views import explainability as explainability_view
 from aisquare.cli.ui.views import project as project_view
 from aisquare.cli.ui.views import settings as settings_view
 from aisquare.cli.ui.views import welcome as welcome_view
@@ -42,19 +43,16 @@ from tests.test_usage_aware_accounts import _payload, _slot, _Usage
 fake_home = _redirected_home
 
 READ_ONLY: dict[str, str] = {
-    "workspace-credits": "reads the workspace's credits",
     "aisquare-sign-in": "waits for the browser; a quit cancels it and nothing is stored "
     "past a cancel (see _writing_workers)",
-    "explainability-status": "reads Explainability's status",
     "welcome-look": "probes tmux, Claude Code and gh",
-    "welcome-candidates": "lists the folders step 1 offers",
 }
 """Workers that write nothing, so Update need not wait for them, with what they read.
 
 None of the accounts' readers is one: a read of the slots reconciles the registry and a
 usage reading records its samples (round 19 of #257). Nor is the doctor, whose checks read
 the slots too (round 20), nor Welcome's check of a typed folder, which opens the store
-(round 21). Step 1's list is: in the shell it reads the shell's frame, not the store."""
+(round 21), nor the credits, Explainability's status or step 1's list (round 22)."""
 
 
 def _module_name(path: Path) -> str:
@@ -239,6 +237,27 @@ def test_welcomes_folder_check_opens_the_store_so_update_waits_for_it(tmp_path: 
     assert verdict.root == folder and verdict.store_error is None
     assert paths.db_path().exists(), "the check created the store"
     assert welcome_view.worker_name("validate") in RECONCILING
+
+
+def test_the_credits_the_status_and_step_1s_list_open_the_store_so_update_waits_for_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 22 of #257: listed here as reads, the workspaces' credits and Explainability's
+    status resolve a project's destination in the store and write the credits' cache, and
+    step 1's list with no frame from the shell asks the store, which on a fresh machine
+    makes it."""
+    monkeypatch.chdir(tmp_path)
+    assert not paths.db_path().exists()
+
+    welcome_view._find_candidates(None)
+
+    assert paths.db_path().exists(), "step 1's list without a frame created the store"
+    found = {
+        accounts_view.CREDITS_WORKER,
+        explainability_view.STATUS_WORKER,
+        welcome_view.worker_name("candidates"),
+    }
+    assert found <= set(RECONCILING), found - set(RECONCILING)
 
 
 def _welcome_name(step: str) -> str:

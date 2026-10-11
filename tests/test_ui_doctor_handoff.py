@@ -17,10 +17,12 @@ import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.dom import DOMNode
 from textual.message import Message
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
@@ -29,14 +31,18 @@ from typer.testing import CliRunner
 from aisquare.cli import install as install_cli
 from aisquare.cli.app import app as cli_app
 from aisquare.cli.ui import app as ui_app
-from aisquare.cli.ui.sidebar import AddProject, ProjectSelected
+from aisquare.cli.ui.sidebar import AccountsSelected, AddProject, ProjectSelected
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views import doctor as doctor_view
 from aisquare.cli.ui.views import explainability as explainability_view
+from aisquare.cli.ui.views import project as project_view
+from aisquare.cli.ui.views import settings as settings_view
 from aisquare.cli.ui.views import welcome as welcome_view
 from aisquare.cli.ui.views.doctor import DoctorView
+from aisquare.cli.ui.views.project import ProjectView
 from aisquare.core import selfcli
 from aisquare.core.state import get_state, reset_state
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services.install_route import LatestRelease
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
 from tests.rendered import plain
@@ -46,6 +52,9 @@ from tests.ui_workers import settle_page, settle_until
 
 #: The real function, taken before ``no_real_installer`` closes it for every test here.
 _REAL_EXEC_SELF = selfcli.exec_self
+
+#: Textual's own, which a test that records every worker start wraps.
+_REAL_RUN_WORKER = DOMNode.run_worker
 
 # --------------------------------------------------------------------------- the view
 
@@ -222,7 +231,8 @@ def test_update_waits_out_a_read_that_writes_and_starts_no_other_meanwhile(
     of the time, and a retry had the same odds; and a tick could start another read
     between the last look and the quit. The hand-over now waits the read out, and asq's
     tick, its accounts read and its doctor start nothing once it has been asked for, nor
-    Welcome's folder check, which opens the store too (round 21)."""
+    Welcome's folder check, which opens the store too (round 21), nor the credits,
+    Explainability's status or step 1's list (round 22)."""
     monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
     release = threading.Event()
 
@@ -241,7 +251,11 @@ def test_update_waits_out_a_read_that_writes_and_starts_no_other_meanwhile(
         app.refresh_data()  # the tick
         app.refresh_accounts()
         app.run_doctor()
-        app.query_one(welcome_view.WelcomeView)._judge()  # a keystroke in the path box
+        welcome = app.query_one(welcome_view.WelcomeView)
+        welcome._judge()  # a keystroke in the path box
+        welcome._tick()  # Welcome's own tick: its look and step 1's list
+        welcome.look(full=True)
+        welcome.find_candidates()
         started = [str(w.name) for w in app.workers if w not in before]
         release.set()
         await settle_until(app, lambda: exits)
@@ -257,12 +271,7 @@ def test_update_waits_out_a_read_that_writes_and_starts_no_other_meanwhile(
 
 @pytest.mark.parametrize(
     "name",
-    [
-        accounts_view.SIGN_IN_WORKER,
-        accounts_view.CREDITS_WORKER,
-        explainability_view.STATUS_WORKER,
-        welcome_view.worker_name("look"),
-    ],
+    [accounts_view.SIGN_IN_WORKER, welcome_view.worker_name("look")],
 )
 def test_update_does_not_wait_for_a_worker_that_only_reads_or_waits(
     isolated_home: Path,
@@ -280,6 +289,89 @@ def test_update_does_not_wait_for_a_worker_that_only_reads_or_waits(
 
     assert name not in WRITING
     assert while_running == ("upgrade", "--reopen") and said == [], said
+
+
+def _starts_with_a_hand_over(pending: bool, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The workers asq's own starts begin: a project's page opened (its Explainability and
+    Settings tabs read on mount, and the shell's doctor runs for it), its Doctor tab, the
+    Accounts page's minute tick with a session and a signed-in slot, and Welcome's look and
+    list. With a hand-over ``pending``, held by a worker it waits for."""
+    monkeypatch.setattr(accounts_view, "_read_credits", lambda _session: [])
+    monkeypatch.setattr(accounts_service, "read_usage_with_trends", lambda _accounts: {})
+    monkeypatch.setattr(explainability_view, "status_report", lambda _project: None)
+    # Every start, read where it is made: a quick worker has left ``app.workers`` by the
+    # time the steps end. ``@work`` starts through ``run_worker`` too.
+    names: list[str] = []
+
+    def run_worker(node: DOMNode, *args: Any, **kwargs: Any) -> Any:
+        worker = _REAL_RUN_WORKER(node, *args, **kwargs)
+        names.append(str(worker.name))
+        return worker
+
+    monkeypatch.setattr(DOMNode, "run_worker", run_worker)
+    release = threading.Event()
+
+    async def fn(pilot: Pilot[None]) -> list[str]:
+        app = pilot.app
+        assert isinstance(app, ui_app.FleetApp)
+        app.exit = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        await app.on_accounts_selected(AccountsSelected())
+        await settle_page(app)
+        if pending:
+            app.run_worker(lambda: release.wait(10), name="held", thread=True, exit_on_error=False)
+            app.query_one("#doctor-update", Button).press()
+            await settle_page(app, group="held")
+            assert app.hand_off == ("upgrade", "--reopen")
+        mark = len(names)
+        await app.on_project_selected(ProjectSelected("prj_a"))
+        project = app.query_one(ProjectView)
+        project.run_project_doctor()
+        accounts = app.query_one(accounts_view.AccountsView)
+        accounts._on_screen = True
+        accounts.session = SimpleNamespace(source="file")  # type: ignore[assignment]
+        signed_in = SimpleNamespace(signed_in=True, account=SimpleNamespace(slot=2))
+        accounts.overview = SimpleNamespace(accounts=[signed_in])  # type: ignore[assignment]
+        accounts.refresh_readings()
+        welcome = app.query_one(welcome_view.WelcomeView)
+        welcome.look(full=True)
+        welcome.find_candidates()
+        await settle_page(app, group="held")  # the tabs' mounts, which start their reads
+        started = sorted(set(names[mark:]))
+        release.set()
+        return started
+
+    return drive(fn)
+
+
+def test_no_start_on_asqs_own_schedule_begins_once_a_hand_over_is_pending(
+    isolated_home: Path,
+    tmp_path: Path,
+    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 22 of #257: the hand-over waits for whatever is running, so a read that begins
+    after its last look is cut off by the quit. Every start on asq's own schedule asks
+    ``handoff.handing_over`` and stands down; the control is the same steps with none."""
+    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    started = _starts_with_a_hand_over(False, monkeypatch)
+    pending = _starts_with_a_hand_over(True, monkeypatch)
+
+    assert started == sorted(
+        {
+            explainability_view.STATUS_WORKER,
+            settings_view.ACCOUNTS_WORKER,
+            ui_app._DOCTOR_WORKER,  # the shell's, for the project now chosen
+            project_view.DOCTOR_WORKER,
+            accounts_view.USAGE_WORKER,
+            accounts_view.CREDITS_WORKER,
+            welcome_view.worker_name("look"),
+            welcome_view.worker_name("candidates"),
+        }
+    ), "control: each step starts its read"
+    assert pending == [], "none starts while the hand-over waits"
 
 
 class _FakeApp:

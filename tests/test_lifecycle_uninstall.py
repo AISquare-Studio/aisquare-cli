@@ -2440,3 +2440,49 @@ def test_the_docs_say_when_uninstall_removes_the_package_as_the_code_decides(
     shown = {name: install_route.not_removable(route) for name, route in others.items()}
     assert all(reason is not None for reason in shown.values()), shown
     assert _REMOVAL_RULE in text, f"{doc} must say when uninstall removes the package"
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("uvx", ["--from", "aisquare-cli", "aisquare", "serve"]),
+        ("/opt/homebrew/bin/uv", ["tool", "run", "--from", "aisquare-cli", "aisquare", "serve"]),
+        ("pipx", ["run", "--spec", "aisquare-cli", "aisquare", "serve"]),
+    ],
+    ids=["uvx", "uv-tool-run", "pipx-run"],
+)
+def test_a_purge_waits_for_an_mcp_server_that_fetches_aisquare(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    command: str,
+    args: list[str],
+) -> None:
+    """An MCP server run through uvx keeps running aisquare once the package is gone, and
+    `aisquare serve` opens the store: Claude Code's next session made the purged home
+    again, and the purge only noted the server (review of #257). Refused like an enabled
+    plugin, with its removal; one naming the installed program is the control."""
+    _initialised(runner, tmp_path)
+    claude_json = isolated_agent_home / ".claude.json"
+    claude_json.parent.mkdir(parents=True, exist_ok=True)
+    claude_json.write_text(
+        json.dumps({"mcpServers": {"memory": {"command": command, "args": args}}}),
+        encoding="utf-8",
+    )
+    before = _snapshot(tmp_path)
+
+    purge = runner.invoke(app, ["--json", "uninstall", "--yes", "--purge"])
+    untouched = _snapshot(tmp_path) == before and world.events == []
+    _mcp_server(claude_json, "memory")
+    control = runner.invoke(app, ["uninstall", "--purge", "--yes"])
+
+    refused = _one_object(purge.stdout)
+    assert (purge.exit_code, refused["error"]) == (1, "mcp_registered"), refused
+    assert "claude mcp remove --scope user memory" in refused["detail"], refused
+    assert untouched, "refused before anything is touched"
+    assert control.exit_code == 0, control.output
+    assert not paths.aisquare_home().exists(), "control: the installed program cannot restart"

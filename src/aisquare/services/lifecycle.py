@@ -1015,6 +1015,10 @@ class McpRegistration:
     config_dir: Path | None = None
     """The ``CLAUDE_CONFIG_DIR`` under which ``claude`` reads ``file``: ``None`` for
     ``~/.claude.json``, which it reads with that variable unset."""
+    fetches: bool = False
+    """Whether it runs aisquare through a runner that fetches the package (``uvx``,
+    ``uv tool run``, ``pipx run``), so it still starts once the package is gone and
+    makes the home again (:func:`_fetches_aisquare`)."""
 
 
 @dataclass(frozen=True)
@@ -1133,6 +1137,19 @@ class UninstallPlan:
                 error="purge_refused",
             )
         lasting = self.lasting_plugins
+        fetching = tuple(entry for entry in self.lasting_mcp if entry.fetches)
+        if self.purges and fetching:
+            # As a plugin below: Claude Code's next session starts the server, uvx fetches
+            # aisquare, and `aisquare serve` makes the home again (review of #257). One
+            # naming the installed program can only fail once the package is gone.
+            where = ", ".join(f"{entry.name} in {mcp_place(entry)}" for entry in fetching)
+            return UninstallRefused(
+                f"--purge would not last: the MCP server {where} runs aisquare through a "
+                f"runner that fetches it, so Claude Code's next session starts it and makes "
+                f"{self.home} again. Remove it first: "
+                f"{'; '.join(mcp_removal(entry) for entry in fetching)}",
+                error="mcp_registered",
+            )
         if self.purges and lasting:
             # A purge the next session undoes is not one: refused like the fleet, with
             # the command that clears the way. A plain uninstall only says so.
@@ -1318,6 +1335,22 @@ def _runs_aisquare(spec: object) -> bool:
     return False
 
 
+def _fetches_aisquare(spec: object) -> bool:
+    """Whether an ``mcpServers`` entry that runs aisquare (:func:`_runs_aisquare`) runs it
+    through ``uvx``, ``uv tool run`` or ``pipx run``, which fetch the package when it is
+    not installed, so the server outlives an uninstall."""
+    if not isinstance(spec, dict) or not isinstance(spec.get("command"), str):
+        return False
+    program = PureWindowsPath(spec["command"]).name.lower().removesuffix(".exe")
+    args = spec.get("args")
+    first = [str(arg) for arg in args[:2]] if isinstance(args, list) else []
+    return (
+        program == "uvx"
+        or (program == "uv" and first == ["tool", "run"])
+        or (program == "pipx" and first[:1] == ["run"])
+    )
+
+
 def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ...]:
     """aisquare's MCP servers in every ``.claude.json`` these directories use — read only.
 
@@ -1354,7 +1387,7 @@ def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ..
             servers = data.get("mcpServers")
             if isinstance(servers, dict):
                 found.extend(
-                    McpRegistration(str(name), path, None, reach)
+                    McpRegistration(str(name), path, None, reach, _fetches_aisquare(spec))
                     for name, spec in servers.items()
                     if _runs_aisquare(spec)
                 )
@@ -1365,7 +1398,9 @@ def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ..
                 servers = block.get("mcpServers") if isinstance(block, dict) else None
                 if isinstance(servers, dict):
                     found.extend(
-                        McpRegistration(str(name), path, str(project), reach)
+                        McpRegistration(
+                            str(name), path, str(project), reach, _fetches_aisquare(spec)
+                        )
                         for name, spec in servers.items()
                         if _runs_aisquare(spec)
                     )

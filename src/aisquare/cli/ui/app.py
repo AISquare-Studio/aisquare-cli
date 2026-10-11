@@ -1186,10 +1186,16 @@ def _writing_workers() -> dict[str, str]:
     a quit cancels that wait (``AccountsView.on_unmount``) and nothing is stored past a
     cancel, and counted it held Update for the device code's lifetime.
 
+    The accounts' readers are here too. A usage reading records a sample per account
+    (``read_usage_with_trends``), and every read of the slots reconciles the registry with
+    the directories (``claude_accounts._arranged`` adds and drops rows), so each writes the
+    store, however it reads in the view (round 19 of #257).
+
     A worker the UI starts that is neither here nor in the read-only list of
     tests/test_ui_writing_workers.py fails that guard, which reads every worker start from
     the source, so a new writer is not missed silently (round 17 of #257).
     """
+    from aisquare.cli.ui import board
     from aisquare.cli.ui.views import (
         accounts,
         agent,
@@ -1197,6 +1203,7 @@ def _writing_workers() -> dict[str, str]:
         explainability,
         onboard,
         project,
+        settings,
         welcome,
     )
 
@@ -1217,6 +1224,11 @@ def _writing_workers() -> dict[str, str]:
         accounts.COMPLETE_WORKER: "a Claude sign-in",
         accounts.REMOVE_WORKER: "an account's removal",
         accounts.ARRANGE_WORKER: "an account change",
+        accounts.USAGE_WORKER: "a usage reading",
+        ACCOUNTS_WORKER: "a read of the accounts",
+        settings.ACCOUNTS_WORKER: "a read of the accounts",
+        board.LABELS_WORKER: "a read of the accounts",
+        agent.LABELS_WORKER: "a read of the accounts",
     }
 
 

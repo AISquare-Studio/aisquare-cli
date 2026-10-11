@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import importlib
 from collections.abc import Callable, Iterator, Mapping
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,15 +22,23 @@ import pytest
 
 import aisquare.cli.ui as ui_package
 from aisquare.cli.ui import app as ui_app
+from aisquare.cli.ui import board
+from aisquare.cli.ui.views import accounts as accounts_view
+from aisquare.cli.ui.views import agent as agent_view
+from aisquare.cli.ui.views import settings as settings_view
+from aisquare.core.store import store_session
+from aisquare.services import claude_accounts as accounts_service
+from tests.test_claude_accounts import NOW
+from tests.test_claude_accounts import fake_home as _redirected_home
+from tests.test_usage_aware_accounts import _payload, _slot, _Usage
+
+#: The sibling file's redirected home, re-exported so pytest collects it here: the
+#: accounts test below writes Claude Code's files, and none may land in the developer's.
+fake_home = _redirected_home
 
 READ_ONLY: dict[str, str] = {
     "doctor": "the shell's Doctor page runs the checks, which only read",
     "project-doctor": "a project tab's Doctor runs the checks, which only read",
-    "shell-accounts": "reads the account slots for the shell's header",
-    "settings-accounts": "reads the account slots for Settings",
-    "board-account-labels": "reads the account labels for the board",
-    "agent-account-labels": "reads the account labels for an agent's page",
-    "accounts-usage": "reads each account's usage",
     "workspace-credits": "reads the workspace's credits",
     "aisquare-sign-in": "waits for the browser; a quit cancels it and nothing is stored "
     "past a cancel (see _writing_workers)",
@@ -38,7 +47,10 @@ READ_ONLY: dict[str, str] = {
     "welcome-candidates": "lists the folders step 1 offers",
     "welcome-validate": "judges a typed folder: runs git and reads the store",
 }
-"""Workers that write nothing, so Update need not wait for them, with what they read."""
+"""Workers that write nothing, so Update need not wait for them, with what they read.
+
+None of the accounts' readers is one: a read of the slots reconciles the registry and a
+usage reading records its samples (round 19 of #257)."""
 
 
 def _module_name(path: Path) -> str:
@@ -160,6 +172,34 @@ def test_the_lists_name_only_workers_the_ui_starts_and_never_both() -> None:
     assert set(WRITING) <= UI_WORKERS, set(WRITING) - UI_WORKERS
     assert set(READ_ONLY) <= UI_WORKERS, set(READ_ONLY) - UI_WORKERS
     assert not set(WRITING) & set(READ_ONLY)
+
+
+def test_the_accounts_readers_write_the_store_so_update_waits_for_them(fake_home: Path) -> None:
+    """Round 19 of #257: listed here as readers, a usage reading and the reads of the slots
+    let Update quit under them. A usage reading records a sample per account
+    (``read_usage_with_trends``), and a read of the slots, which the shell's header,
+    Settings, the board and an agent's page each run, adds a registry row for a slot that
+    has none (``_arranged``)."""
+    account = _slot("work@example.com", "tok-work")
+    with store_session() as store:
+        assert store.claude_accounts() == []
+
+    accounts_service.slot_labels()
+    accounts_service.read_usage_with_trends(
+        [account], now=NOW, fetch=_Usage({"tok-work": _payload(40)})
+    )
+
+    with store_session() as store:
+        assert account.slot in {row.slot for row in store.claude_accounts()}, "reconciled"
+        assert store.usage_samples(account.slot, since=NOW - timedelta(days=1))
+    readers = {
+        accounts_view.USAGE_WORKER,
+        ui_app.ACCOUNTS_WORKER,
+        settings_view.ACCOUNTS_WORKER,
+        board.LABELS_WORKER,
+        agent_view.LABELS_WORKER,
+    }
+    assert readers <= set(WRITING), readers - set(WRITING)
 
 
 def _welcome_name(step: str) -> str:

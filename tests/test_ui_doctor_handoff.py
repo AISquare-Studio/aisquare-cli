@@ -31,7 +31,6 @@ from aisquare.cli.app import app as cli_app
 from aisquare.cli.ui import app as ui_app
 from aisquare.cli.ui.sidebar import AddProject, ProjectSelected
 from aisquare.cli.ui.views import accounts as accounts_view
-from aisquare.cli.ui.views import agent as agent_view
 from aisquare.cli.ui.views import doctor as doctor_view
 from aisquare.cli.ui.views import explainability as explainability_view
 from aisquare.cli.ui.views import project as project_view
@@ -211,10 +210,8 @@ def test_update_waits_for_every_worker_that_writes(
     "name",
     [
         accounts_view.SIGN_IN_WORKER,
-        accounts_view.USAGE_WORKER,
         accounts_view.CREDITS_WORKER,
         project_view.DOCTOR_WORKER,
-        agent_view.LABELS_WORKER,
         explainability_view.STATUS_WORKER,
         welcome_view.worker_name("look"),
     ],

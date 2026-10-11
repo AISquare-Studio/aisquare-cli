@@ -1386,7 +1386,7 @@ def _names_aisquare(requirements: str) -> bool:
     """Whether a ``uv run --with`` value (comma-separated requirements) asks for aisquare."""
     for item in requirements.split(","):
         match = _REQUIREMENT_NAME.match(item)
-        if match is not None and re.sub(r"[-_.]+", "-", match.group(1)).lower() == DISTRIBUTION:
+        if match is not None and install_route.canonical_name(match.group(1)) == DISTRIBUTION:
             return True
     return False
 

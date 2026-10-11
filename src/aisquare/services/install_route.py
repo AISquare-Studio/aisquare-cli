@@ -561,7 +561,8 @@ class UvReceipt:
     """``<path>: <reason>`` when the receipt could not be read for what it records."""
 
 
-def _canonical(name: object) -> str:
+def canonical_name(name: object) -> str:
+    """A distribution name as PEP 503 normalises it, to compare with :data:`DISTRIBUTION`."""
     return re.sub(r"[-_.]+", "-", str(name)).lower()
 
 
@@ -691,7 +692,7 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
         if not isinstance(requirement, dict):
             refused.append("a requirement uv wrote in a shape this CLI does not know")
             continue
-        if ours is None and _canonical(requirement.get("name")) == DISTRIBUTION:
+        if ours is None and canonical_name(requirement.get("name")) == DISTRIBUTION:
             ours = requirement
             continue
         text = _requirement_string(requirement)

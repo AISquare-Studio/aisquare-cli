@@ -312,9 +312,10 @@ def upgrade(
     it reinstalls with `uv tool install --force`, keeping the extras, the
     `--with` packages and the Python the install already has, checks the new
     version in a new process, and re-connects the hooks in every Claude Code
-    directory this machine connected. Any other install is told the exact
-    command that upgrades it, and exits 1. Asks first at a terminal; off a
-    terminal it is a dry run unless --yes.
+    directory this machine connected. Any other install is told the command
+    that upgrades it, where one can, and exits 1; asking for the version that
+    already runs is nothing to do on every install. Asks first at a terminal;
+    off a terminal it is a dry run unless --yes.
     """
     json_output = get_state().json_output
     try:

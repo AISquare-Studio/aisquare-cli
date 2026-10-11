@@ -28,9 +28,11 @@ from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views import agent as agent_view
 from aisquare.cli.ui.views import project as project_view
 from aisquare.cli.ui.views import settings as settings_view
+from aisquare.cli.ui.views import welcome as welcome_view
+from aisquare.core import paths
 from aisquare.core.store import store_session
 from aisquare.services import claude_accounts as accounts_service
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, first_run
 from tests.test_claude_accounts import NOW
 from tests.test_claude_accounts import fake_home as _redirected_home
 from tests.test_usage_aware_accounts import _payload, _slot, _Usage
@@ -46,13 +48,13 @@ READ_ONLY: dict[str, str] = {
     "explainability-status": "reads Explainability's status",
     "welcome-look": "probes tmux, Claude Code and gh",
     "welcome-candidates": "lists the folders step 1 offers",
-    "welcome-validate": "judges a typed folder: runs git and reads the store",
 }
 """Workers that write nothing, so Update need not wait for them, with what they read.
 
 None of the accounts' readers is one: a read of the slots reconciles the registry and a
 usage reading records its samples (round 19 of #257). Nor is the doctor, whose checks read
-the slots too (round 20)."""
+the slots too (round 20), nor Welcome's check of a typed folder, which opens the store
+(round 21). Step 1's list is: in the shell it reads the shell's frame, not the store."""
 
 
 def _module_name(path: Path) -> str:
@@ -222,6 +224,21 @@ def test_the_doctor_reads_the_slots_and_writes_the_store_so_update_waits_for_it(
         assert account.slot in {row.slot for row in store.claude_accounts()}, "reconciled"
     doctors = {ui_app._DOCTOR_WORKER, project_view.DOCTOR_WORKER}
     assert doctors <= set(RECONCILING), doctors - set(RECONCILING)
+
+
+def test_welcomes_folder_check_opens_the_store_so_update_waits_for_it(tmp_path: Path) -> None:
+    """Round 21 of #257: Welcome's check of a typed folder was listed as one that reads
+    the store, but it looks the folder up there through ``store_session``, whose open
+    creates and migrates the store: on a machine that has none, typing a folder made it."""
+    folder = tmp_path / "work"
+    folder.mkdir()
+    assert not paths.db_path().exists()
+
+    verdict = first_run.validate_path(str(folder))
+
+    assert verdict.root == folder and verdict.store_error is None
+    assert paths.db_path().exists(), "the check created the store"
+    assert welcome_view.worker_name("validate") in RECONCILING
 
 
 def _welcome_name(step: str) -> str:

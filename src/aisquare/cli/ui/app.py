@@ -1137,8 +1137,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         instead. They run on asq's own schedule, the accounts read on every two-second
         tick, so refused for them Update and Uninstall were refused for much of the time,
         and a retry had the same odds (round 20). None starts once ``hand_off`` is set:
-        the tick, the accounts read and the doctor stand down, so none can start between
-        the last look and the quit either.
+        the tick, the accounts read, the doctor and Welcome's folder check stand down, so
+        none can start between the last look and the quit either.
         """
         if self.hand_off is not None:
             return  # already handing over, once the reads running end
@@ -1261,14 +1261,16 @@ def _reconciling_workers() -> dict[str, str]:
     (``claude_accounts._arranged`` adds and drops rows), so each writes the store,
     however it reads in the view (round 19 of #257). So do the doctor's checks: the
     accounts' (``diagnostics._claude_account_default_checks``) read the slots the same
-    way, and the store's open runs its migrations (round 20).
+    way, and the store's open runs its migrations (round 20). So does Welcome's check of
+    a typed folder, which looks the folder up in the store (``onboarding._lookup_in_store``)
+    and on a machine that has none creates it (round 21).
 
-    asq starts these on its own, on a tick, a page's show or a tab, not when someone
-    asks it to write, so a hand-over waits them out, starting no more, where it refuses
-    :func:`_writing_workers`' (``FleetApp.on_doctor_view_hand_off``).
+    asq starts these on its own, on a tick, a page's show, a tab or a keystroke, not when
+    someone asks it to write, so a hand-over waits them out, starting no more, where it
+    refuses :func:`_writing_workers`' (``FleetApp.on_doctor_view_hand_off``).
     """
     from aisquare.cli.ui import board
-    from aisquare.cli.ui.views import accounts, agent, project, settings
+    from aisquare.cli.ui.views import accounts, agent, project, settings, welcome
 
     return {
         accounts.USAGE_WORKER: "a usage reading",
@@ -1278,6 +1280,7 @@ def _reconciling_workers() -> dict[str, str]:
         agent.LABELS_WORKER: "a read of the accounts",
         _DOCTOR_WORKER: "the doctor's checks",
         project.DOCTOR_WORKER: "the project's checks",
+        welcome.worker_name("validate"): "a folder's check",
     }
 
 

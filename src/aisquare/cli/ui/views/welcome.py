@@ -719,8 +719,12 @@ class WelcomeView(VerticalScroll):
         stalled the shell between keys (review of #257). One judgement runs at a time,
         and text typed meanwhile is judged when it lands (:meth:`_judged`), so the
         verdict always ends on what the box holds — the latest text wins.
+
+        Not once asq is handing the terminal over: opening the store, this writes, so the
+        hand-over waits it out (``app._reconciling_workers``) and must not have another
+        to wait for.
         """
-        if self._in_flight("validate"):
+        if self._in_flight("validate") or getattr(self.app, "hand_off", None) is not None:
             return
         text, validate = self._typed, self.seams.validate
 

@@ -220,7 +220,8 @@ def test_update_waits_out_a_read_that_writes_and_starts_no_other_meanwhile(
     store's migrations). Refused under them, Update and Uninstall were refused for much
     of the time, and a retry had the same odds; and a tick could start another read
     between the last look and the quit. The hand-over now waits the read out, and asq's
-    tick, its accounts read and its doctor start nothing once it has been asked for."""
+    tick, its accounts read and its doctor start nothing once it has been asked for, nor
+    Welcome's folder check, which opens the store too (round 21)."""
     monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
     release = threading.Event()
 
@@ -239,6 +240,7 @@ def test_update_waits_out_a_read_that_writes_and_starts_no_other_meanwhile(
         app.refresh_data()  # the tick
         app.refresh_accounts()
         app.run_doctor()
+        app.query_one(welcome_view.WelcomeView)._judge()  # a keystroke in the path box
         started = [str(w.name) for w in app.workers if w not in before]
         release.set()
         await settle_until(app, lambda: exits)

@@ -642,7 +642,7 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
         if not binaries:
             continue
         programs = tuple(str(binary.program) for binary in binaries)
-        # Whether it STARTS, as the plugin's launcher asks (agent_core._starts): a script whose
+        # Whether it STARTS, as the plugin's launcher asks (agent_core.starts): a script whose
         # `#!` Python is gone exists, and was left as "another install", failing every
         # session (a later review of #257). Its os.path checks, not Path's: on 3.11 to 3.13
         # those raise PermissionError for a directory this user cannot enter, and upgrade
@@ -651,7 +651,7 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
             (
                 b
                 for b in binaries
-                if agent_core._starts(b.program) and not runs_this_install(b, found)
+                if agent_core.starts(b.program) and not runs_this_install(b, found)
             ),
             None,
         )
@@ -1776,7 +1776,7 @@ def plugin_answers() -> Path:
     is tested on, per uv and its settings. The one file aisquare writes outside the home,
     so ``--purge`` would have left it, holding a uv path (round 20 of #257).
     """
-    cache = os.environ.get("XDG_CACHE_HOME") or str(agent_core._home() / ".cache")
+    cache = os.environ.get("XDG_CACHE_HOME") or str(agent_core.home() / ".cache")
     return Path(cache) / "aisquare" / "plugin-tested-python"
 
 

@@ -93,6 +93,14 @@ def _home() -> Path:
     return Path.home()
 
 
+def home() -> Path:
+    """:func:`_home` for callers outside this module (``services.lifecycle``).
+
+    The home every path here is under, so a test that redirects it redirects theirs.
+    """
+    return _home()
+
+
 def _claude_home(config_dir: Path | None = None) -> Path:
     """Claude Code's config directory.
 
@@ -930,6 +938,15 @@ def _starts(program: Path) -> bool:
     return os.path.isfile(interpreter) and os.access(interpreter, os.X_OK)
 
 
+def starts(program: Path) -> bool:
+    """:func:`_starts` for callers outside this module (``services.lifecycle``).
+
+    One answer to "can this hook's program start", the plugin launcher's, for the
+    doctor's rows and upgrade's refresh plan alike, rather than a copy that could drift.
+    """
+    return _starts(program)
+
+
 def hooks_can_start(name: str, config_dir: Path) -> bool:
     """Whether every aisquare hook in ``config_dir`` names a program that can start
     (:func:`_starts`; for a module-form hook, its interpreter): the path-only half of
@@ -1414,6 +1431,15 @@ def _same_install(binary: HookBinary) -> bool:
         return program.resolve() == this.resolve()
     except (OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11 and 3.12
         return False
+
+
+def same_install(binary: HookBinary) -> bool:
+    """:func:`_same_install` for callers outside this module (``services.diagnostics``).
+
+    The doctor's install row asks it of the program on PATH, so "this install" means the
+    same thing there as in the hooks' rows.
+    """
+    return _same_install(binary)
 
 
 def hook_binary_version(argv: Sequence[str], *, timeout: float = 10.0) -> str | None:

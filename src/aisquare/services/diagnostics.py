@@ -266,10 +266,10 @@ def _check_install() -> DoctorCheck:
             f"Install as a global tool: {_GLOBAL_INSTALL}",
         )
     if {".venv", "venv"} & set(Path(binary).parts):
-        # Paths alone, the hooks' own rule (`_same_install`): the file itself, or the same
+        # Paths alone, the hooks' own rule (`same_install`): the file itself, or the same
         # file through a link (uv's ~/.local/bin/aisquare). One copy, so this row and the
         # claude-code row cannot disagree about one aisquare (review of #257).
-        this = agent_core._same_install(agent_core.HookBinary(Path(binary)))
+        this = agent_core.same_install(agent_core.HookBinary(Path(binary)))
         route = _route_of_this_process() if this else None
         if route is not None and route.kind != install_route.VENV:
             return _ok("install", f"aisquare at {binary} — {route.describe()}")
@@ -1002,7 +1002,7 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
         if site.plugin is not None and agent_core.hook_commands("claude-code", site.config_dir)
     ]
     # Doubled directories are graded too. The plugin's copies stand down only beside
-    # hooks whose program can start, as its launcher decides (``agent_core._starts``, the
+    # hooks whose program can start, as its launcher decides (``agent_core.starts``, the
     # MISSING verdict), so beside dead ones the plugin runs instead: that is not "two
     # ways", and those hooks fail on every event (review of #249).
     dead = [site for site in doubled if site.binary_state == agent_core.HOOK_BINARY_MISSING]

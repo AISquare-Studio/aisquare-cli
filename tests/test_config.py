@@ -24,6 +24,7 @@ from aisquare.core.config import (
 )
 from aisquare.core.paths import aisquare_home, cache_dir, config_path, ensure_home, log_dir
 from aisquare.models import RedactionLevel
+from aisquare.services import settings as settings_service
 
 
 def test_load_missing_file_returns_defaults() -> None:
@@ -293,6 +294,46 @@ def test_the_built_in_reviewer_keeps_its_shell_and_is_denied_the_tools_that_edit
     reviewer = FleetSettings().roles["reviewer"]
     assert reviewer.extra_args == ["--disallowedTools=Edit Write NotebookEdit"]
     assert "--restricted" not in reviewer.extra_args
+
+
+def test_the_former_reviewer_default_is_replaced_once_and_chosen_afterwards_is_kept(
+    tmp_path: Path,
+) -> None:
+    """Replaced on every load, `["--restricted"]` could not be chosen: `config set` said
+    it was saved, the fleet launched without it, and the next save erased it. The save
+    that follows the replacement records it, and from then on the file's list is kept."""
+    target = tmp_path / "config.toml"
+    target.write_text(_SAVED_BY_0_7_0_REVIEWER, encoding="utf-8")
+    loaded = load_config(target)
+    assert loaded.fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
+    save_config(loaded, target)
+    assert tomllib.loads(target.read_text(encoding="utf-8"))["fleet"]["migrated_reviewer_args"]
+
+    chosen = load_config(target)
+    chosen.fleet.roles["reviewer"].extra_args = ["--restricted"]
+    save_config(chosen, target)
+    assert load_config(target).fleet.roles["reviewer"].extra_args == ["--restricted"]
+    save_config(load_config(target), target)  # any later save, of any key
+    assert load_config(target).fleet.roles["reviewer"].extra_args == ["--restricted"]
+
+
+def test_config_set_of_the_former_reviewer_default_takes_effect() -> None:
+    """Through `config set` itself, on a 0.7.0 file: what it reports is what loads."""
+    target = config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(_SAVED_BY_0_7_0_REVIEWER, encoding="utf-8")
+    key = "fleet.roles.reviewer.extra_args"
+    assert settings_service.set_value(key, "--restricted") == "--restricted"
+    assert load_config().fleet.roles["reviewer"].extra_args == ["--restricted"]
+
+
+def test_the_reviewer_default_set_by_config_set_round_trips() -> None:
+    """`config set` splits a list on commas and `config get` joins one with them, so the
+    default's tool names are apart by spaces: what `get` prints, `set` takes back whole."""
+    key = "fleet.roles.reviewer.extra_args"
+    printed = settings_service.get_value(key)
+    assert settings_service.set_value(key, printed) == printed
+    assert load_config().fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
 
 
 def test_a_reviewer_given_more_than_the_former_default_keeps_it(tmp_path: Path) -> None:

@@ -142,8 +142,9 @@ and an aisquare that upgrades and uninstalls itself.**
   could either. It now launches with its shell and without the tools that edit
   files (`--disallowedTools=Edit Write NotebookEdit`); pushing and merging are
   refused by its briefing. A config file holding that old default (any
-  `aisquare config set` saved it) loads with today's; a reviewer `extra_args`
-  you wrote yourself stays as written.
+  `aisquare config set` saved it) loads with today's, once: the next save
+  records that, so `--restricted` set again afterwards is kept. A reviewer
+  `extra_args` you wrote yourself stays as written.
 
 ## [0.7.0] - 2026-09-25
 

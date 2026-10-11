@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import tomli_w
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from aisquare.core import paths
 from aisquare.core.atomic import write_replacing
@@ -286,6 +286,34 @@ REVIEWER_ARGS = ("--disallowedTools=Edit Write NotebookEdit",)
 #: reviewer whether or not anyone chose it.
 _FORMER_REVIEWER_ARGS = ["--restricted"]
 
+#: The key in ``[fleet]`` every save from this build writes: the reviewer arguments in a
+#: file that holds it were written after :data:`_FORMER_REVIEWER_ARGS` stopped being the
+#: default, so a ``["--restricted"]`` there was chosen. Not a setting, and not a field:
+#: nothing reads it but :func:`_replace_the_former_reviewer_default`.
+_REVIEWER_ARGS_MIGRATED = "migrated_reviewer_args"
+
+
+def _replace_the_former_reviewer_default(data: dict[str, Any]) -> None:
+    """A reviewer a 0.6.0 or 0.7.0 save left with exactly ``["--restricted"]`` loads with today's.
+
+    Changing the default alone fixes nothing for a config file that already holds it,
+    and every 0.6.0 or 0.7.0 save holds it. Once, not on every load: the next save
+    records that it ran (:data:`_REVIEWER_ARGS_MIGRATED`), so the old list chosen
+    afterwards, with ``config set``, is kept like any other. Replaced on every load
+    instead, it was impossible to choose: ``config set`` reported it saved, the fleet
+    launched without it and the next save erased it (review of #257). A reviewer given
+    any other list — ``--restricted`` with more beside it included — keeps that list.
+    Read from the file's own data, before the model: a model validator would rewrite
+    every ``AppConfig`` built in memory too, ``config set``'s among them.
+    """
+    fleet = data.get("fleet")
+    if not isinstance(fleet, dict) or fleet.get(_REVIEWER_ARGS_MIGRATED) is True:
+        return
+    roles = fleet.get("roles")
+    reviewer = roles.get("reviewer") if isinstance(roles, dict) else None
+    if isinstance(reviewer, dict) and reviewer.get("extra_args") == _FORMER_REVIEWER_ARGS:
+        reviewer["extra_args"] = list(REVIEWER_ARGS)
+
 
 class FleetSettings(BaseModel):
     """The fleet: one private tmux server, one session per project, agents as windows.
@@ -306,19 +334,6 @@ class FleetSettings(BaseModel):
     disable_native_agent_teams: bool = True
     max_continuations_per_hour: int = 30
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
-
-    @model_validator(mode="after")
-    def _replace_the_former_reviewer_default(self) -> FleetSettings:
-        """A reviewer saved with exactly the old built-in ``["--restricted"]`` loads with today's.
-
-        Changing the default alone fixes nothing for a config file that already holds
-        it, and every 0.6.0 or 0.7.0 save holds it. A reviewer given any other list —
-        ``--restricted`` with more beside it included — keeps that list as written.
-        """
-        reviewer = self.roles.get("reviewer")
-        if reviewer is not None and reviewer.extra_args == _FORMER_REVIEWER_ARGS:
-            reviewer.extra_args = list(REVIEWER_ARGS)
-        return self
 
 
 class SnapshotSettings(BaseModel):
@@ -494,6 +509,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         return AppConfig()
 
     data = _parse_toml(despite_windows_contention(target.read_bytes))
+    _replace_the_former_reviewer_default(data)
     return AppConfig.model_validate(data)
 
 
@@ -586,6 +602,9 @@ def save_config(
     written.parent.mkdir(parents=True, exist_ok=True)
 
     dumped = config.model_dump(mode="json", exclude_none=True)
+    # Whatever reviewer arguments this writes are this build's: the default it knows,
+    # or a list someone chose (see `_replace_the_former_reviewer_default`).
+    dumped["fleet"][_REVIEWER_ARGS_MIGRATED] = True
     if written.exists():
         # Keys this build has never heard of belong to whoever wrote them; see
         # _keep_unknown. A file this read cannot parse or decode is written over

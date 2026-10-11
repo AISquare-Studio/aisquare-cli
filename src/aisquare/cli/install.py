@@ -138,6 +138,11 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
         if plan.pin_refused:
             # Not "upgrade with" a command that installs another version (a later review).
             _say(plan.reason or "")
+        elif plan.latest is not None and plan.latest.pin_unlisted:
+            # A release PyPI does not list: the route's command can only fail, where a
+            # Requires-Python miss may not, on another Python (review of #257).
+            _say(f"`{plan.command}` cannot install it: {plan.pin_unmet}")
+            return
         else:
             _say(f"upgrade with: {plan.command}")
             _say(f"(`aisquare upgrade` does not run it: {plan.reason})")

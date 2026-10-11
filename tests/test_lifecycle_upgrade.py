@@ -3513,3 +3513,27 @@ def test_a_failing_sites_remedy_survives_a_space_in_its_path(
     assert result.exit_code == 1
     assert quoted in result.stdout
     assert f"--config-dir {site}" not in result.stdout, "an unquoted path would split there"
+
+
+@pytest.mark.parametrize("kind", ["pipx", "venv"])
+def test_a_pin_pypi_does_not_list_is_said_not_advised_on_a_route_aisquare_does_not_run(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """A pipx or venv install kept its own reason, so `--check --version 9.9.9` still said
+    "upgrade with: pipx install --force aisquare-cli==9.9.9", a command that can only fail,
+    and then that PyPI lists no 9.9.9 (review of #257)."""
+    kinds = {"pipx": install_route.PIPX, "venv": install_route.VENV}
+    route = install_route.InstallRoute(kinds[kind], tool.facts)
+    monkeypatch.setattr(install_route, "detect", lambda: route)
+    monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
+    body = _pypi_requiring({"0.8.0": ">=3.11"})
+    monkeypatch.setattr(install_route, "fetch_latest", _REAL_FETCH_LATEST)
+    monkeypatch.setattr(install_route, "open_url", lambda _request, timeout: _Response(body))
+
+    check = runner.invoke(app, ["upgrade", "--check", "--version", "9.9.9"])
+    command = install_route.command_line(install_route.upgrade_argv(route, "9.9.9"))
+
+    why = "PyPI lists no aisquare-cli 9.9.9"
+    assert "upgrade with" not in check.stdout, check.stdout
+    assert f"`{command}` cannot install it: {why}" in check.stdout, check.stdout
+    assert check.stdout.count(why) == 1, check.stdout

@@ -268,12 +268,16 @@ class Machine:
         where: Path | None = None,
         exit_code: int = 0,
         no_python: int | None = None,
+        prints: bool | None = None,
     ) -> Path:
         """An executable ``name`` that records its argv and stdin, prints a line, and exits.
 
         ``no_python`` is how a uvx that finds no interpreter for ``--python`` behaves:
-        it exits with that code BEFORE anything reads stdin.
+        it exits with that code BEFORE anything reads stdin. The line is printed when
+        ``prints`` says so, else when it exits 0.
         """
+        if prints is None:
+            prints = exit_code == 0
         directory = self.bin if where is None else where
         directory.mkdir(parents=True, exist_ok=True)
         record = self.log / name
@@ -290,12 +294,35 @@ class Machine:
             f"for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> '{record}.argv'; done\n"
             + refuse
             + f"'{shutil.which('cat')}' > '{record}.stdin'\n"
-            + ("printf 'context from the cli\\n'\n" if exit_code == 0 else "")
+            + ("printf 'context from the cli\\n'\n" if prints else "")
             + f"exit {exit_code}\n",
             encoding="utf-8",
         )
         script.chmod(0o755)
         return script
+
+    def fake_uv(
+        self, *, installed: bool = False, fetchable: bool = False, where: Path | None = None
+    ) -> None:
+        """A ``uv`` that says whether it has a tested Python (``uv python find``) or may
+        fetch one (``uv run``), recording each question. It reads stdin, as any program
+        handed the payload could, so a question asked without ``</dev/null`` eats it."""
+        directory = self.bin if where is None else where
+        directory.mkdir(parents=True, exist_ok=True)
+        record = self.log / "uv"
+        script = directory / "uv"
+        script.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$*\" >> '{record}.calls'\n"
+            f"'{shutil.which('cat')}' >> '{record}.stdin'\n"
+            "case $1 in\n"
+            f"    python) exit {0 if installed else 2} ;;\n"
+            f"    run) exit {0 if installed or fetchable else 2} ;;\n"
+            "esac\n"
+            "exit 2\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
 
     def ran(self, name: str) -> list[str] | None:
         """The argv ``name`` was last run with, or ``None`` if it never ran."""
@@ -892,20 +919,71 @@ def test_where_uv_has_no_tested_python_it_runs_on_what_uv_has(machine: Machine) 
 
     Measured on Fedora 44: Python 3.14 only, ``python-downloads = "manual"`` in
     /etc/uv/uv.toml, and ``uvx --python '>=3.11,<3.14'`` exits 2 -- every session
-    started with no memory. Retrying without the range runs it on 3.14.
+    started with no memory. uv is asked first, so uvx runs once, on 3.14.
     """
     machine.fake("uvx", no_python=2)
+    machine.fake_uv()
     pin = f"aisquare-cli=={_release()}"
 
     result = machine.run("session-start", stdin=b'{"cwd": "/tmp/x"}')
 
     assert result.returncode == 0
-    assert machine.calls("uvx") == [
-        f"--python >=3.11,<3.14 --from {pin} aisquare hook session-start",
-        f"--from {pin} aisquare hook session-start",
+    assert machine.calls("uv") == [
+        "python find --system >=3.11,<3.14",
+        "run --no-project --python >=3.11,<3.14 python -c ",
     ]
-    assert machine.stdin_of("uvx") == b'{"cwd": "/tmp/x"}', "the retry gets the payload"
-    assert result.stdout == b"context from the cli\n", "no failure message when the retry ran"
+    assert machine.calls("uvx") == [f"--from {pin} aisquare hook session-start"]
+    assert machine.stdin_of("uvx") == b'{"cwd": "/tmp/x"}', "uv's questions left the payload"
+    assert result.stdout == b"context from the cli\n", "no failure message"
+
+
+@posix_only
+@pytest.mark.parametrize(
+    ("installed", "fetchable", "beside_uvx", "ranged"),
+    [
+        (True, False, True, True),
+        (False, True, True, True),
+        (False, False, True, False),
+        (True, False, False, True),
+        (False, False, False, False),
+    ],
+    ids=["installed", "fetchable", "neither", "uv-elsewhere", "uv-elsewhere-neither"],
+)
+def test_uvx_is_given_the_tested_range_where_uv_has_or_may_fetch_a_python(
+    machine: Machine, installed: bool, fetchable: bool, beside_uvx: bool, ranged: bool
+) -> None:
+    """Asked of the uv beside uvx, else the first on PATH or in ~/.local/bin."""
+    machine.fake("uvx", where=None if beside_uvx else machine.home / ".cargo" / "bin")
+    machine.fake_uv(installed=installed, fetchable=fetchable)
+
+    result = machine.run("stop", stdin=b'{"cwd": "/tmp/x"}')
+
+    assert result.returncode == 0
+    argv = machine.ran("uvx") or []
+    assert (argv[:2] == ["--python", ">=3.11,<3.14"]) == ranged, argv
+    assert argv[-5:] == ["--from", f"aisquare-cli=={_release()}", "aisquare", "hook", "stop"]
+    assert machine.stdin_of("uvx") == b'{"cwd": "/tmp/x"}'
+    assert machine.calls("uv"), "uv was not asked"
+
+
+@posix_only
+@pytest.mark.parametrize("has_python", [True, False], ids=["tested-python", "what-uv-has"])
+def test_an_aisquare_that_prints_then_fails_under_uvx_runs_once(
+    machine: Machine, has_python: bool
+) -> None:
+    """A failed run may be aisquare's own: it has read the payload and printed. Run again,
+    it got no payload and Claude Code got two JSON objects on stdout (review of #257)."""
+    machine.fake("uvx", exit_code=1, prints=True)
+    machine.fake_uv(installed=has_python)
+
+    result = machine.run("session-start", stdin=b'{"cwd": "/tmp/x"}')
+
+    assert result.returncode == 0
+    assert len(machine.calls("uvx")) == 1, machine.calls("uvx")
+    assert machine.stdin_of("uvx") == b'{"cwd": "/tmp/x"}'
+    printed, message = result.stdout.decode().splitlines()
+    assert printed == "context from the cli", "its output, once"
+    assert "exit 1" in json.loads(message)["systemMessage"]
 
 
 @posix_only
@@ -916,7 +994,7 @@ def test_when_uvx_cannot_run_it_at_all_session_start_says_so(machine: Machine) -
     result = machine.run("session-start")
 
     assert result.returncode == 0
-    assert len(machine.calls("uvx")) == 2
+    assert len(machine.calls("uvx")) == 1
     assert "exit 1" in json.loads(result.stdout)["systemMessage"]
 
 

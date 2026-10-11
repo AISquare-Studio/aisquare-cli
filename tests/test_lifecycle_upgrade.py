@@ -453,7 +453,9 @@ def test_security_md_lists_what_upgrade_and_the_plugin_change_and_send() -> None
     assert "exported" in upgrades, "and that a setting the user exported is kept"
     assert '--from "$_from" aisquare hook' in launcher, "the launcher still runs uvx --from"
     assert f"uvx --from {DISTRIBUTION}==" in plugin
-    assert "--python '>=3.11,<3.14'" in launcher, "the launcher still asks uv for a Python"
+    assert "_tested='>=3.11,<3.14'" in launcher and '--python "$_tested"' in launcher, (
+        "the launcher still asks uv for a Python"
+    )
     assert "CPython" in plugin and "UV_PYTHON_DOWNLOADS" in plugin, plugin
     assert "`aisquare uninstall`" in changed and "`--purge`" in changed, "uninstall too"
     assert "Keychain" in changed, "a purge leaves the macOS slots' tokens, and says so"

@@ -232,21 +232,36 @@ _find() {
     return 1
 }
 
+# The Pythons CI tests aisquare on, as uv reads a request.
+_tested='>=3.11,<3.14'
+
+# Whether uv has a Python in $_tested, or may fetch one: `uv python find` answers
+# for the installed ones, and `uv run` fetches one wherever uv's python-downloads
+# allows it (Fedora's packaged uv sets "manual"). Asked of the uv beside uvx, else
+# the first that can start; with none to ask, uvx is given the range as it always
+# was. Neither question reads stdin or prints, so the payload stays the hook's.
+_has_tested_python() {
+    _uv=${_runner%/*}/uv
+    _starts "$_uv" || _uv=$(_find uv) || return 0
+    "$_uv" python find --system "$_tested" </dev/null >/dev/null 2>&1 ||
+        "$_uv" run --no-project --python "$_tested" python -c '' </dev/null >/dev/null 2>&1
+}
+
 if _runner=$(_find aisquare); then
     "$_runner" hook "$event"
     _status=$?
 elif _runner=$(_find uvx); then
     _from=${AISQUARE_PLUGIN_FROM:-aisquare-cli==$AISQUARE_PLUGIN_VERSION}
-    # An interpreter CI tests (3.11-3.13) first: an installed one, else uv fetches
-    # one. Where uv may not fetch (Fedora's packaged uv sets python-downloads =
-    # "manual") and only a newer Python is installed, that fails before aisquare
-    # starts, so the payload is still unread: let uv run it on what it has.
-    "$_runner" --python '>=3.11,<3.14' --from "$_from" aisquare hook "$event"
-    _status=$?
-    if [ "$_status" -ne 0 ]; then
+    # A Python CI tests where uv has one or may fetch one, else whatever uv has:
+    # asked for the range with neither, uvx fails. Decided BEFORE the one run, as a
+    # retry cannot be: a run that failed may be aisquare's own, which has read the
+    # payload and may have printed, so a second would get no payload and print twice.
+    if _has_tested_python; then
+        "$_runner" --python "$_tested" --from "$_from" aisquare hook "$event"
+    else
         "$_runner" --from "$_from" aisquare hook "$event"
-        _status=$?
     fi
+    _status=$?
 else
     if [ "$event" = session-start ]; then
         printf '%s\n' '{"systemMessage": "aisquare: neither the aisquare CLI nor uv was found, so this session has no aisquare memory. Install uv: https://docs.astral.sh/uv/"}'

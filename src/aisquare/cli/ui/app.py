@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import inspect
 import threading
+import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -44,6 +45,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState, WorkType
@@ -107,6 +109,8 @@ ACCOUNTS_WORKER = "shell-accounts"
 """The thread worker that reads the Accounts section's frame (``FleetApp.refresh_accounts``)."""
 _QUIT_POLL = 0.1
 """Seconds between the looks a hand-over takes at the reads it waits out (``_exit_when_read``)."""
+_HAND_OFF_PATIENCE = 10.0
+"""Seconds a hand-over waits for the reads running before it names them and can be called off."""
 _CHECK_SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "✗"}
 _CHECK_STYLE = {CheckStatus.ok: "green", CheckStatus.warn: "yellow", CheckStatus.fail: "bold red"}
 
@@ -315,7 +319,7 @@ class Panes(Horizontal):
 
 
 class _WorkerThreads(WorkerManager):
-    """The app's worker manager, which also knows whose threads still run, cancelled or not.
+    """The app's worker manager, which also knows the thread workers a quit would cut off.
 
     Textual's ``Worker.cancel`` cancels the task that awaits a thread worker's thread, not
     the thread: the callable runs on while the worker reads finished and leaves
@@ -324,12 +328,17 @@ class _WorkerThreads(WorkerManager):
     so a hand-over that went by the workers quit under a thread still opening the store
     (round 23 of #257). Every worker start passes through ``_new_worker``, ``@work``'s too,
     so each thread worker's callable is counted here from its first line to its last.
+
+    Textual's own thread workers are left out (:func:`_textuals_own`): the Onboard view's
+    ``DirectoryTree`` lists each folder in one, ``_load_directory``, which writes nothing,
+    and one listing a hung mount never ends (round 23).
     """
 
     def __init__(self, app: Any) -> None:
         super().__init__(app)
         self._lock = threading.Lock()
         self._threads: Counter[str] = Counter()
+        self._waited: set[Worker[Any]] = set()
 
     def _new_worker(
         self,
@@ -344,8 +353,9 @@ class _WorkerThreads(WorkerManager):
         exclusive: bool = False,
         thread: bool = False,
     ) -> Worker[Any]:
+        waited = thread and not _textuals_own(work)
         if (
-            thread
+            waited
             and callable(work)
             and not inspect.iscoroutinefunction(getattr(work, "func", work))
         ):
@@ -354,7 +364,7 @@ class _WorkerThreads(WorkerManager):
             name = name or getattr(work, "__name__", "") or ""
             description = description or repr(work)
             work = self._counted(work, name)
-        return super()._new_worker(
+        worker = super()._new_worker(
             work,
             node,
             name=name,
@@ -365,6 +375,13 @@ class _WorkerThreads(WorkerManager):
             exclusive=exclusive,
             thread=thread,
         )
+        if waited:
+            self._waited.add(worker)
+        return worker
+
+    def _remove_worker(self, worker: Worker[Any]) -> None:
+        self._waited.discard(worker)
+        super()._remove_worker(worker)
 
     def _counted(self, work: Callable[[], Any], name: str) -> Callable[[], Any]:
         def counted() -> Any:
@@ -378,10 +395,17 @@ class _WorkerThreads(WorkerManager):
 
         return counted
 
-    def threads_running(self) -> set[str]:
-        """The names of the thread workers whose callable is still running."""
+    def running(self) -> set[str]:
+        """The names of the thread workers a quit would cut off: still to start, running, or
+        cancelled with their callable still running."""
         with self._lock:
-            return set(+self._threads)
+            names = set(+self._threads)
+        return names | {worker.name for worker in self._waited if not worker.is_finished}
+
+
+def _textuals_own(work: object) -> bool:
+    """Whether ``work`` is one of Textual's own methods; ``@work`` hands over a ``partial``."""
+    return str(getattr(getattr(work, "func", work), "__module__", "")).startswith("textual.")
 
 
 class FleetApp(SelectionHost, inherit_bindings=False):
@@ -435,6 +459,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         super().__init__()
         self._workers = self._worker_threads = _WorkerThreads(self)
         """Textual's own manager, which ``self.workers`` reads, and the threads it ran."""
+        self._hand_off_since = 0.0
+        """When the pending hand-over was asked for (``time.monotonic``)."""
+        self._hand_off_overdue = False
+        """The pending hand-over has waited ``_HAND_OFF_PATIENCE``: a second press calls it off."""
+        self._hand_off_poll: Timer | None = None
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
         self._accounts = accounts
@@ -1217,14 +1246,22 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         nothing, that opened the store or wrote a cache. None starts once ``hand_off`` is
         set (``handoff.handing_over``), so none can start between the last look and the
         quit either.
+
+        A read that never ends (a store on a hung mount) would hold the quit for good, with
+        nothing on screen after the first toast: past ``_HAND_OFF_PATIENCE`` the wait names
+        what still runs, and a second press calls the hand-over off (round 23).
         """
         if self.hand_off is not None:
+            if self._hand_off_overdue:
+                self._call_off_hand_off()
             return  # already handing over, once the reads running end
         running = self._work_running(_writing_workers())
         if running is not None:
             self.notify(f"{running} is still running — try again when it ends", severity="warning")
             return
         self.hand_off = event.args
+        self._hand_off_since = time.monotonic()
+        self._hand_off_overdue = False
         if self._holding_the_quit():
             self.notify("asq quits once the reads running end", timeout=4)
         self._exit_when_read()
@@ -1235,31 +1272,43 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         The writers are waited for here too: one started from a page while the reads
         were waited out is cut off by a quit as much as any.
         """
-        if self._holding_the_quit():
-            self.set_timer(_QUIT_POLL, self._exit_when_read)
-        else:
+        running = self._holding_the_quit()
+        if not running:
             self.exit()
+            return
+        waited = time.monotonic() - self._hand_off_since
+        if not self._hand_off_overdue and waited >= _HAND_OFF_PATIENCE:
+            self._hand_off_overdue = True
+            self.notify(
+                f"Still waiting for {', '.join(running)} after {waited:.0f} s. Press Update "
+                "or Uninstall again to stay in asq; quit, and it runs once they end.",
+                severity="warning",
+                timeout=10,
+            )
+        self._hand_off_poll = self.set_timer(_QUIT_POLL, self._exit_when_read)
 
-    def _holding_the_quit(self) -> bool:
-        """Whether a worker a quit would cut off still runs: any thread worker but those
-        :func:`_cut_off_workers` names, whether it is still to start, running, or cancelled
-        with its thread still running (:class:`_WorkerThreads`).
+    def _call_off_hand_off(self) -> None:
+        """Stay in asq: stop waiting, and let its reads start again on their schedule."""
+        if self._hand_off_poll is not None:
+            self._hand_off_poll.stop()
+        self.hand_off = None
+        self._hand_off_overdue = False
+        self.notify("Called off: asq carries on", timeout=4)
+
+    def _holding_the_quit(self) -> list[str]:
+        """The workers a quit would cut off that still run, by name: any thread worker but
+        Textual's own and those :func:`_cut_off_workers` names, whether it is still to start,
+        running, or cancelled with its thread still running (:class:`_WorkerThreads`).
 
         A quit cannot stop a thread worker: Textual's cancel leaves its callable running,
         asyncio.run joins its thread with the terminal blank, and the hand-over can replace
         the install under it. A task worker is cancelled at its next await, and Textual's
         own include one that never ends (the Onboard view's ``DirectoryTree`` loader), so
-        those are left to the quit. Every worker the UI starts is a thread worker
-        (tests/test_ui_writing_workers.py). ``_thread_worker`` is Textual's own flag, with
-        no public reader; the hand-over tests run both kinds.
+        those are left to the quit, as is the thread that loader starts for each folder.
+        Every worker the UI starts is a thread worker (tests/test_ui_writing_workers.py);
+        the hand-over tests run both kinds.
         """
-        cut_off = _cut_off_workers()
-        running = {
-            worker.name
-            for worker in self.workers
-            if worker._thread_worker and not worker.is_finished
-        }
-        return bool((running | self._worker_threads.threads_running()) - cut_off)
+        return sorted(self._worker_threads.running() - _cut_off_workers())
 
     def _work_running(self, named: dict[str, str]) -> str | None:
         """What work of ``named`` still runs, in the toast's words, else ``None``."""

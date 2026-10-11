@@ -71,7 +71,8 @@ and an aisquare that upgrades and uninstalls itself.**
   still writing (a fix, a start, a sign-in) is named, and they refuse until it
   ends; every other read still running (the accounts, the doctor, a status)
   is waited out, and none starts meanwhile. Only a pending AISquare sign-in,
-  which a quit cancels with nothing stored, is not waited for.
+  which a quit cancels with nothing stored, is not waited for. A wait past
+  10 seconds names what still runs, and a second press stays in asq.
 - **A doctor row for each coding agent.** Claude Code keeps its one-click
   Connect, Codex and Cursor say what was found and that aisquare cannot
   connect them yet, and "is Claude Code connected?" is one shared check that

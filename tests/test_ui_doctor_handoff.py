@@ -15,6 +15,8 @@ import os
 import subprocess
 import sys
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,6 +38,7 @@ from aisquare.cli.ui.sidebar import AccountsSelected, AddProject, ProjectSelecte
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views import doctor as doctor_view
 from aisquare.cli.ui.views import explainability as explainability_view
+from aisquare.cli.ui.views import onboard as onboard_view
 from aisquare.cli.ui.views import project as project_view
 from aisquare.cli.ui.views import settings as settings_view
 from aisquare.cli.ui.views import welcome as welcome_view
@@ -374,6 +377,131 @@ def test_update_leaves_a_task_worker_to_the_quit(
     assert "_loader" in loaders, f"the tree's loader runs: {loaders}"
     assert with_the_loader == [("upgrade", "--reopen")], "quit at once beside the loader"
     assert under_a_thread == [], "control: a thread worker of that name holds the quit"
+
+
+async def _until(fact: Callable[[], object], timeout: float = 10.0) -> None:
+    """Poll for ``fact``, bounded, where a settle would wait on a node that is held."""
+    deadline = time.monotonic() + timeout
+    while not fact() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+
+
+def test_update_leaves_the_thread_textuals_tree_lists_a_folder_in_to_the_quit(
+    isolated_home: Path,
+    tmp_path: Path,
+    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 23 of #257: Textual's own include a thread worker too, ``_load_directory``, in
+    which the Onboard view's ``DirectoryTree`` lists each folder. On a folder that hangs (a
+    stale mount under the home) it never ends, and waited for, Update hung with it. It
+    writes nothing, so it is left to the quit. The control holds asq's own thread worker of
+    that name. The listing held is a reload's, after the view has mounted (its first one is
+    awaited by the mount), and the page is polled, not settled, while it is held."""
+    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
+    monkeypatch.setenv("HOME", str(tmp_path))  # what the Onboard view's tree scans
+    hold = threading.Event()
+    listing = threading.Event()
+    release = threading.Event()
+
+    def hung(_tree: Any, paths: Any) -> list[Path]:
+        if hold.is_set():
+            listing.set()
+            release.wait(30)
+        return list(paths)
+
+    monkeypatch.setattr(onboard_view.ProjectTree, "filter_paths", hung)
+
+    async def fn(pilot: Pilot[None]) -> tuple[list[str], list[Any], list[Any], list[Any]]:
+        app = pilot.app
+        assert isinstance(app, ui_app.FleetApp)
+        exits: list[Any] = []
+        app.exit = lambda *_args, **_kwargs: exits.append(app.hand_off)  # type: ignore[method-assign]
+        await app.on_add_project(AddProject())
+        await settle_page(app)
+        hold.set()
+        reloaded = app.query_one(onboard_view.ProjectTree).reload()
+        try:
+            assert await asyncio.to_thread(listing.wait, 10), "the tree lists the home"
+            listings = [str(w.name) for w in app.workers if w._thread_worker and not w.is_finished]
+            update = app.query_one("#doctor-update", Button)
+            update.press()
+            await _until(lambda: exits)
+            beside_it = list(exits)
+            app.hand_off = None  # the control: once more, under asq's thread worker of that name
+            exits.clear()
+            mine = threading.Event()
+            app.run_worker(
+                lambda: mine.wait(10), name="_load_directory", thread=True, exit_on_error=False
+            )
+            update.press()
+            await _until(lambda: app.hand_off is not None)
+            under_mine = list(exits)
+            mine.set()
+            await _until(lambda: exits)
+            return listings, beside_it, under_mine, list(exits)
+        finally:
+            release.set()
+            await reloaded
+
+    listings, beside_it, under_mine, after = drive(fn)
+
+    assert listings == ["_load_directory"], "the tree's listing runs, held"
+    assert beside_it == [("upgrade", "--reopen")], "quit at once beside it"
+    assert under_mine == [], "control: asq's thread worker of that name holds the quit"
+    assert after == [("upgrade", "--reopen")], "and quits once it has ended"
+
+
+def test_a_hand_over_kept_waiting_says_by_what_and_a_second_press_calls_it_off(
+    isolated_home: Path,
+    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 23 of #257: the wait had no end, so a read that never returns (the store on a
+    hung mount) left asq with nothing on screen after the first toast and nothing to press.
+    Past ``_HAND_OFF_PATIENCE`` it names what still runs, and a second press stays in asq:
+    no quit when the read ends, and asq's own reads start again. Before that, a second
+    press changes nothing."""
+    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
+    monkeypatch.setattr(ui_app, "_HAND_OFF_PATIENCE", 0.3)
+    release = threading.Event()
+
+    async def fn(pilot: Pilot[None]) -> tuple[list[str], Any, Any, list[Any], bool]:
+        app = pilot.app
+        assert isinstance(app, ui_app.FleetApp)
+        said: list[str] = []
+        exits: list[Any] = []
+        app.notify = lambda message, **_: said.append(str(message))  # type: ignore[method-assign]
+        app.exit = lambda *_args, **_kwargs: exits.append(app.hand_off)  # type: ignore[method-assign]
+        app.run_worker(release.wait, name="hung-read", thread=True, exit_on_error=False)
+        update = app.query_one("#doctor-update", Button)
+        update.press()
+        update.press()  # too soon to call it off
+        await settle_page(app, group="held")  # the read is held on purpose: settle no group
+        early = app.hand_off
+        await settle_until(app, lambda: len(said) == 2, group="held")
+        overdue = app.hand_off
+        update.press()
+        await settle_page(app, group="held")
+        release.set()
+        await settle_page(app)
+        before = set(app.workers)
+        app.run_doctor()
+        restarted = any(w not in before for w in app.workers)
+        await settle_page(app)  # its report painted before the app goes
+        return said, early, overdue, exits, restarted
+
+    said, early, overdue, exits, restarted = drive(fn)
+
+    assert early == overdue == ("upgrade", "--reopen"), "waiting, the early press ignored"
+    assert said[:2] == [
+        "asq quits once the reads running end",
+        "Still waiting for hung-read after 0 s. Press Update or Uninstall again to stay "
+        "in asq; quit, and it runs once they end.",
+    ], said
+    assert said[2:] == ["Called off: asq carries on"], said
+    assert exits == [], "no quit once the read ended"
+    assert restarted, "asq's reads start again"
 
 
 def _starts_with_a_hand_over(pending: bool, monkeypatch: pytest.MonkeyPatch) -> list[str]:

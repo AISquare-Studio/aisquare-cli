@@ -35,7 +35,12 @@ from aisquare.cli.app import app
 from aisquare.core import codenames, paths, selfcli
 from aisquare.core import store as core_store
 from aisquare.core import tmux as tmux_core
-from aisquare.core.config import REVIEWER_ARGS, FleetRoleSettings, FleetSettings
+from aisquare.core.config import (
+    REVIEWER_ARGS,
+    FleetRoleSettings,
+    FleetSettings,
+    replacing_the_former_reviewer_default,
+)
 from aisquare.core.ids import new_agent_id, new_task_id
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, SqliteStore, store_session
@@ -9657,6 +9662,8 @@ def test_a_reviewer_restarted_from_a_spec_0_7_0_recorded_gets_its_shell_back(
     transcript.write_text("{}\n", encoding="utf-8")
     _with_transcript(agent, transcript)
     tmux.die(agent.pane_id, 1)
+    # The upgrade: loading the config replaced the old default (`config.py`).
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=list(REVIEWER_ARGS))})
 
     restarted = fleet_service.restart(project, agent.label).started
 
@@ -9668,6 +9675,7 @@ def test_a_reviewer_restarted_from_a_spec_0_7_0_recorded_gets_its_shell_back(
     assert restarted.launch_spec.recorded_by == __version__
 
     # Recorded since, the same list was chosen in today's config, and is replayed.
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=["--restricted"])})
     chosen = fleet_service.spawn(project, "reviewer", worktree=False).agent
     _with_transcript(chosen, transcript)
     tmux.die(chosen.pane_id, 1)
@@ -9711,6 +9719,9 @@ def test_a_0_7_0_reviewer_spawned_with_arguments_of_its_own_gets_its_shell_back(
     transcript.write_text("{}\n", encoding="utf-8")
     _with_transcript(agent, transcript)
     tmux.die(agent.pane_id, 1)
+    # The upgrade: loading the config replaced the old default (`config.py`).
+    migrated = replacing_the_former_reviewer_default(role_args)
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=migrated)})
 
     restarted = fleet_service.restart(project, agent.label).started
 
@@ -9719,6 +9730,48 @@ def test_a_0_7_0_reviewer_spawned_with_arguments_of_its_own_gets_its_shell_back(
     command = _command(tmux)
     assert _flag(command, "--model") == "opus", "the caller's own arguments are kept"
     assert ("--restricted" in command) == ("--restricted" in replayed)
+
+
+@pytest.mark.parametrize(
+    "caller", [[], ["--add-dir", "/srv"]], ids=["config-alone", "config-then-callers"]
+)
+def test_a_0_7_0_reviewer_whose_config_chose_restricted_is_restarted_without_a_shell(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caller: list[str],
+) -> None:
+    """Round 20 of #257: a 0.7.0 config of `["--restricted", "--model", "opus"]` was written
+    by its operator, and loads as written, but the reviewer it spawned recorded the same
+    list the default and the caller's own `--model opus` did. The restart replaced the
+    leading `--restricted`, so that reviewer, kept from the shell by its config, got one
+    back, while a fresh spawn from the same config did not. Today's config still leading
+    with the flag says it was chosen."""
+    chosen = ["--restricted", "--model", "opus"]
+    assert replacing_the_former_reviewer_default(chosen) == chosen, "loading keeps it"
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=chosen)})
+    agent = fleet_service.spawn(project, "reviewer", worktree=False, agent_args=caller).agent
+    assert agent.launch_spec is not None
+    legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
+    with store_session() as store:
+        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+
+    restarted = fleet_service.restart(project, agent.label).started
+
+    assert restarted.launch_spec is not None
+    assert restarted.launch_spec.extra_args == [*chosen, *caller]
+    command = _command(tmux)
+    assert "--restricted" in command
+    assert REVIEWER_ARGS[0] not in command
+    fresh = fleet_service.spawn(project, "reviewer", worktree=False, agent_args=caller).agent
+    assert fresh.launch_spec is not None
+    assert fresh.launch_spec.extra_args == restarted.launch_spec.extra_args, "as a fresh spawn"
 
 
 def test_a_replay_does_not_fall_back_onto_another_kind_of_program(

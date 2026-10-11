@@ -304,17 +304,29 @@ def replacing_the_former_reviewer_default(args: Sequence[str]) -> list[str]:
     return list(REVIEWER_ARGS) if list(args) == _FORMER_REVIEWER_ARGS else list(args)
 
 
-def replacing_the_former_reviewer_default_first(args: Sequence[str]) -> list[str]:
+def replacing_the_former_reviewer_default_first(
+    args: Sequence[str], today: Sequence[str]
+) -> list[str]:
     """``args`` with 0.6.0/0.7.0's reviewer default replaced by :data:`REVIEWER_ARGS` where it
     leads them, the rest kept: for a reviewer's launch spec those releases recorded, which a
-    restart replays (``services.fleet``).
+    restart replays (``services.fleet``). ``today`` is the reviewer's ``extra_args`` in
+    today's config.
 
     A spec records the role's ``extra_args`` followed by the caller's, so a reviewer
     spawned with arguments of its own (``fleet spawn reviewer -- --model opus``) recorded
     ``["--restricted", "--model", "opus"]``. Matched exactly, as a config file is, that
     reviewer came back with no shell on every restart (round 19 of #257).
+
+    The spec alone cannot tell that default from a list the operator wrote in config,
+    ``["--restricted", "--model", "opus"]`` too, which loading keeps as written. Today's
+    config can: it has been through :func:`_replace_the_former_reviewer_default`, so a
+    ``--restricted`` still leading it was chosen, and the spec is replayed as recorded.
+    Replaced regardless, a reviewer its operator kept from the shell got one on restart
+    while a fresh spawn did not (round 20).
     """
     args = list(args)
+    if list(today[: len(_FORMER_REVIEWER_ARGS)]) == _FORMER_REVIEWER_ARGS:
+        return args
     if args[: len(_FORMER_REVIEWER_ARGS)] == _FORMER_REVIEWER_ARGS:
         return [*REVIEWER_ARGS, *args[len(_FORMER_REVIEWER_ARGS) :]]
     return args

@@ -1383,7 +1383,7 @@ def spawn(
             permission_mode = spec.permission_mode or ""
         worktree = worktree if worktree is not None else spec.worktree
         if replayed_args:
-            agent_args = _replayed_args(role, spec)
+            agent_args = _replayed_args(role, spec, config)
     # A transcript to resume is one only Claude Code writes.
     claude_code = claude_code or resume is not None
     srv = server(config)
@@ -1782,7 +1782,7 @@ def _in_place_of_recorded(
     return today
 
 
-def _replayed_args(role: str, spec: LaunchSpec) -> list[str]:
+def _replayed_args(role: str, spec: LaunchSpec, config: FleetSettings) -> list[str]:
     """The arguments a replay of ``spec`` launches with: the recorded ones, as recorded.
 
     Less one list nobody chose. 0.6.0 and 0.7.0 launched every reviewer with their
@@ -1790,12 +1790,15 @@ def _replayed_args(role: str, spec: LaunchSpec) -> list[str]:
     upgrade ``fleet restart``, ``fleet switch`` and asq's Restart brought each one back
     with no shell, every time: changing the config file's default reached fresh spawns
     alone (review of #257). Where it leads the list, as it does before the caller's own
-    arguments (round 19). A spec recorded since then (``recorded_by``) is replayed as it
+    arguments (round 19), and unless today's ``config`` leads with it too, which says it
+    was chosen (round 20). A spec recorded since then (``recorded_by``) is replayed as it
     is, so a ``--restricted`` chosen in today's config survives a restart.
     """
     args = list(spec.extra_args)
     if spec.recorded_by is None and role == "reviewer":
-        return replacing_the_former_reviewer_default_first(args)
+        return replacing_the_former_reviewer_default_first(
+            args, role_settings(role, config).extra_args
+        )
     return args
 
 

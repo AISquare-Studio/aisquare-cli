@@ -25,9 +25,11 @@ from aisquare.cli.ui import app as ui_app
 from aisquare.cli.ui import board
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views import agent as agent_view
+from aisquare.cli.ui.views import project as project_view
 from aisquare.cli.ui.views import settings as settings_view
 from aisquare.core.store import store_session
 from aisquare.services import claude_accounts as accounts_service
+from aisquare.services import diagnostics
 from tests.test_claude_accounts import NOW
 from tests.test_claude_accounts import fake_home as _redirected_home
 from tests.test_usage_aware_accounts import _payload, _slot, _Usage
@@ -37,8 +39,6 @@ from tests.test_usage_aware_accounts import _payload, _slot, _Usage
 fake_home = _redirected_home
 
 READ_ONLY: dict[str, str] = {
-    "doctor": "the shell's Doctor page runs the checks, which only read",
-    "project-doctor": "a project tab's Doctor runs the checks, which only read",
     "workspace-credits": "reads the workspace's credits",
     "aisquare-sign-in": "waits for the browser; a quit cancels it and nothing is stored "
     "past a cancel (see _writing_workers)",
@@ -50,7 +50,8 @@ READ_ONLY: dict[str, str] = {
 """Workers that write nothing, so Update need not wait for them, with what they read.
 
 None of the accounts' readers is one: a read of the slots reconciles the registry and a
-usage reading records its samples (round 19 of #257)."""
+usage reading records its samples (round 19 of #257). Nor is the doctor, whose checks read
+the slots too (round 20)."""
 
 
 def _module_name(path: Path) -> str:
@@ -200,6 +201,24 @@ def test_the_accounts_readers_write_the_store_so_update_waits_for_them(fake_home
         agent_view.LABELS_WORKER,
     }
     assert readers <= set(WRITING), readers - set(WRITING)
+
+
+def test_the_doctor_reads_the_slots_and_writes_the_store_so_update_waits_for_it(
+    fake_home: Path,
+) -> None:
+    """Round 20 of #257: the shell's and a project tab's Doctor were listed as runs that
+    only read, but once the store exists the accounts' checks list the slots, which adds a
+    registry row for a slot that has none, as the accounts' readers do."""
+    account = _slot("work@example.com", "tok-work")
+    with store_session() as store:
+        assert store.claude_accounts() == []
+
+    diagnostics._claude_account_default_checks()
+
+    with store_session() as store:
+        assert account.slot in {row.slot for row in store.claude_accounts()}, "reconciled"
+    doctors = {ui_app._DOCTOR_WORKER, project_view.DOCTOR_WORKER}
+    assert doctors <= set(WRITING), doctors - set(WRITING)
 
 
 def _welcome_name(step: str) -> str:

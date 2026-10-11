@@ -1189,7 +1189,9 @@ def _writing_workers() -> dict[str, str]:
     The accounts' readers are here too. A usage reading records a sample per account
     (``read_usage_with_trends``), and every read of the slots reconciles the registry with
     the directories (``claude_accounts._arranged`` adds and drops rows), so each writes the
-    store, however it reads in the view (round 19 of #257).
+    store, however it reads in the view (round 19 of #257). So do the doctor's checks: the
+    accounts' (``diagnostics._claude_account_default_checks``) read the slots the same
+    way, and the store's open runs its migrations (round 20).
 
     A worker the UI starts that is neither here nor in the read-only list of
     tests/test_ui_writing_workers.py fails that guard, which reads every worker start from
@@ -1229,6 +1231,8 @@ def _writing_workers() -> dict[str, str]:
         settings.ACCOUNTS_WORKER: "a read of the accounts",
         board.LABELS_WORKER: "a read of the accounts",
         agent.LABELS_WORKER: "a read of the accounts",
+        _DOCTOR_WORKER: "the doctor's checks",
+        project.DOCTOR_WORKER: "the project's checks",
     }
 
 

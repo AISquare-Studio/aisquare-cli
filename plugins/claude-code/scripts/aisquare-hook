@@ -145,7 +145,7 @@ _runnable() {
             ;;
         "$_a"*)
             # JSON's text: a double quote is \" there and a backslash \\.
-            _sq_word "$_cmd" "$_dq" '\\'
+            _sq_word "$_cmd" "$_dq" "\\\\"
             # Then each \" left is a double quote in the path, as JSON escapes it.
             _cmd=$_word
             _prog=

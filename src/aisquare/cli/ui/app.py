@@ -1133,13 +1133,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         install under it): any worker :func:`_writing_workers` names, in any view, shown
         or not (rounds 15 and 16 of #257), is refused with a toast.
 
-        The reads that write as they read (:func:`_reconciling_workers`) are waited out
-        instead. They run on asq's own schedule, the accounts read on every two-second
-        tick, so refused for them Update and Uninstall were refused for much of the time,
-        and a retry had the same odds (round 20). None starts once ``hand_off`` is set:
-        the tick, the accounts read and the doctor here, and every start on a page's own
-        schedule (``handoff.handing_over``) stand down, so none can start between the last
-        look and the quit either.
+        Every other worker still running is waited out instead (:meth:`_holding_the_quit`):
+        the reads asq starts on its own schedule, the accounts read on every two-second
+        tick. Refused for them, Update and Uninstall were refused for much of the time,
+        and a retry had the same odds (round 20). Waited for by default, not by a list of
+        the reads that write: rounds 19 to 22 each found a read, filed as one that writes
+        nothing, that opened the store or wrote a cache. None starts once ``hand_off`` is
+        set (``handoff.handing_over``), so none can start between the last look and the
+        quit either.
         """
         if self.hand_off is not None:
             return  # already handing over, once the reads running end
@@ -1148,21 +1149,38 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.notify(f"{running} is still running — try again when it ends", severity="warning")
             return
         self.hand_off = event.args
-        reading = self._work_running(_reconciling_workers())
-        if reading is not None:
-            self.notify(f"asq quits once {reading} ends", timeout=4)
+        if self._holding_the_quit():
+            self.notify("asq quits once the reads running end", timeout=4)
         self._exit_when_read()
 
     def _exit_when_read(self) -> None:
-        """Quit once no worker that writes runs; until then, look again shortly.
+        """Quit once no worker holds the quit; until then, look again shortly.
 
-        Every one is waited for here, the writers too: one started from a page while
-        the reads were waited out is cut off by a quit as much as any.
+        The writers are waited for here too: one started from a page while the reads
+        were waited out is cut off by a quit as much as any.
         """
-        if self._work_running({**_writing_workers(), **_reconciling_workers()}) is None:
-            self.exit()
-        else:
+        if self._holding_the_quit():
             self.set_timer(_QUIT_POLL, self._exit_when_read)
+        else:
+            self.exit()
+
+    def _holding_the_quit(self) -> bool:
+        """Whether a worker a quit would cut off still runs: any thread worker but those
+        :func:`_cut_off_workers` names.
+
+        A quit cannot stop a thread worker: Textual's cancel leaves its callable running,
+        asyncio.run joins its thread with the terminal blank, and the hand-over can replace
+        the install under it. A task worker is cancelled at its next await, and Textual's
+        own include one that never ends (the Onboard view's ``DirectoryTree`` loader), so
+        those are left to the quit. Every worker the UI starts is a thread worker
+        (tests/test_ui_writing_workers.py). ``_thread_worker`` is Textual's own flag, with
+        no public reader; the hand-over tests run both kinds.
+        """
+        cut_off = _cut_off_workers()
+        return any(
+            worker._thread_worker and not worker.is_finished and worker.name not in cut_off
+            for worker in self.workers
+        )
 
     def _work_running(self, named: dict[str, str]) -> str | None:
         """What work of ``named`` still runs, in the toast's words, else ``None``."""
@@ -1213,16 +1231,11 @@ def _writing_workers() -> dict[str, str]:
     property) and the next writer was missed: the Project tab's Start manager, an agent's
     Stop and Restart, and Explainability's writes all quit under an Update (round 16 of
     #257). The views' own name constants, imported here so the import block stays as it
-    is. The AISquare sign-in is left out: it waits for the browser until a token arrives,
-    a quit cancels that wait (``AccountsView.on_unmount``) and nothing is stored past a
-    cancel, and counted it held Update for the device code's lifetime.
+    is. The AISquare sign-in is left out (:func:`_cut_off_workers`).
 
-    The reads that write as they read are :func:`_reconciling_workers`, which a
-    hand-over waits out rather than refuses.
-
-    A worker the UI starts that is in neither list nor in the read-only one of
-    tests/test_ui_writing_workers.py fails that guard, which reads every worker start from
-    the source, so a new writer is not missed silently (round 17 of #257).
+    Every other thread worker is waited out rather than refused
+    (``FleetApp._holding_the_quit``), so a writer missing here is still never cut off;
+    listed, it is refused with its name, before asq stops starting its reads.
     """
     from aisquare.cli.ui.views import (
         accounts,
@@ -1254,41 +1267,17 @@ def _writing_workers() -> dict[str, str]:
     }
 
 
-def _reconciling_workers() -> dict[str, str]:
-    """The reads that write as they read, by name, with what each is in a toast's words.
+def _cut_off_workers() -> frozenset[str]:
+    """The workers a hand-over leaves to the quit, which loses nothing of theirs.
 
-    A usage reading records a sample per account (``read_usage_with_trends``), and every
-    read of the slots reconciles the registry with the directories
-    (``claude_accounts._arranged`` adds and drops rows), so each writes the store,
-    however it reads in the view (round 19 of #257). So do the doctor's checks: the
-    accounts' (``diagnostics._claude_account_default_checks``) read the slots the same
-    way, and the store's open runs its migrations (round 20). So does Welcome's check of
-    a typed folder, which looks the folder up in the store (``onboarding._lookup_in_store``)
-    and on a machine that has none creates it (round 21). So do the workspaces' credits and
-    Explainability's status, which resolve a project's destination in the store and write
-    the credits' cache, and step 1's list with no frame from the shell, which asks the
-    store (round 22).
-
-    asq starts these on its own, on a tick, a page's show, a tab or a keystroke, not when
-    someone asks it to write, so a hand-over waits them out, starting no more, where it
-    refuses :func:`_writing_workers`' (``FleetApp.on_doctor_view_hand_off``).
+    The AISquare sign-in alone: it waits for the browser until a token arrives, a quit
+    cancels that wait (``AccountsView.on_unmount``) and nothing is stored past a cancel.
+    Waited for, it held Update and Uninstall for the device code's lifetime, 10 to 15
+    minutes (round 16 of #257). Every other thread worker is waited for, a new one too.
     """
-    from aisquare.cli.ui import board
-    from aisquare.cli.ui.views import accounts, agent, explainability, project, settings, welcome
+    from aisquare.cli.ui.views import accounts
 
-    return {
-        accounts.USAGE_WORKER: "a usage reading",
-        ACCOUNTS_WORKER: "a read of the accounts",
-        settings.ACCOUNTS_WORKER: "a read of the accounts",
-        board.LABELS_WORKER: "a read of the accounts",
-        agent.LABELS_WORKER: "a read of the accounts",
-        _DOCTOR_WORKER: "the doctor's checks",
-        project.DOCTOR_WORKER: "the project's checks",
-        welcome.worker_name("validate"): "a folder's check",
-        accounts.CREDITS_WORKER: "a read of the credits",
-        explainability.STATUS_WORKER: "Explainability's status",
-        welcome.worker_name("candidates"): "step 1's list",
-    }
+    return frozenset({accounts.SIGN_IN_WORKER})
 
 
 def run_ui(**options: Any) -> None:

@@ -1,13 +1,15 @@
-"""Every worker the UI starts is either one Update waits for, or named here as one that reads.
+"""Every worker the UI starts is one Update and Uninstall wait for, unless it is safe to cut off.
 
-Update and Uninstall wait for the workers ``ui_app._writing_workers()`` and
-``ui_app._reconciling_workers()`` name. Those lists are kept by hand, and rounds 15 and 16
-of #257 each found writers they left out; the test that drives Update takes its cases from
-the same lists, so a new writer that is not in one passed everything (round 17). This guard
-reads every ``run_worker(name=…)`` and ``@work(name=…)`` in ``aisquare.cli.ui`` from the
-source, follows a name passed down through a helper's parameter (Welcome's ``_start_work``
-→ ``_run`` → ``worker_name``), and requires each name to be in one of the app's lists or in
-:data:`READ_ONLY` below, with why it writes nothing.
+Update and Uninstall refuse under the writers ``ui_app._writing_workers()`` names and wait
+out every other thread worker but ``ui_app._cut_off_workers()``'s. Until round 22 of #257
+they waited only for the reads a second list named, and rounds 15 to 22 each found a worker
+filed as one that writes nothing that opened the store or wrote a cache. Now a worker is
+waited for unless it is listed as safe to cut off, so this guard checks what that default
+rests on: every ``run_worker(…)`` and ``@work(…)`` in ``aisquare.cli.ui``, read from the
+source, is a thread worker (a task worker is left to the quit) and has a name. It follows a
+name passed down through a helper's parameter (Welcome's ``_start_work`` → ``_run`` →
+``worker_name``), so the app's lists and the hand-over's tests name only workers the UI
+starts, and those tests take every worker the walk finds.
 """
 
 from __future__ import annotations
@@ -41,18 +43,6 @@ from tests.test_usage_aware_accounts import _payload, _slot, _Usage
 #: The sibling file's redirected home, re-exported so pytest collects it here: the
 #: accounts test below writes Claude Code's files, and none may land in the developer's.
 fake_home = _redirected_home
-
-READ_ONLY: dict[str, str] = {
-    "aisquare-sign-in": "waits for the browser; a quit cancels it and nothing is stored "
-    "past a cancel (see _writing_workers)",
-    "welcome-look": "probes tmux, Claude Code and gh",
-}
-"""Workers that write nothing, so Update need not wait for them, with what they read.
-
-None of the accounts' readers is one: a read of the slots reconciles the registry and a
-usage reading records its samples (round 19 of #257). Nor is the doctor, whose checks read
-the slots too (round 20), nor Welcome's check of a typed folder, which opens the store
-(round 21), nor the credits, Explainability's status or step 1's list (round 22)."""
 
 
 def _module_name(path: Path) -> str:
@@ -125,7 +115,8 @@ def _names(
 
 def started_workers(source: str, namespace: Mapping[str, Any]) -> set[str]:
     """The name of every worker ``source`` starts: ``run_worker(…, name=…)`` and
-    ``@work(…, name=…)``. A start without a name cannot be told apart, so it fails."""
+    ``@work(…, name=…)``. A start without a name cannot be told apart, and one that is not
+    a thread worker would be cut off by the quit rather than waited for, so either fails."""
     tree = ast.parse(source)
     parents = _parents(tree)
     names: set[str] = set()
@@ -141,13 +132,11 @@ def started_workers(source: str, namespace: Mapping[str, Any]) -> set[str]:
         named = next((kw.value for kw in start.keywords if kw.arg == "name"), None)
         if named is None:
             raise AssertionError(f"a worker started with no name: {ast.unparse(start)}")
+        thread = next((kw.value for kw in start.keywords if kw.arg == "thread"), None)
+        if not (isinstance(thread, ast.Constant) and thread.value is True):
+            raise AssertionError(f"not a thread worker: {ast.unparse(start)}")
         names |= _names(named, _enclosing(start, parents), tree, parents, namespace)
     return names
-
-
-def unclassified(started: set[str], writing: Mapping[str, str]) -> set[str]:
-    """The started workers neither Update waits for nor :data:`READ_ONLY` explains."""
-    return started - set(writing) - set(READ_ONLY)
 
 
 def _ui_workers() -> set[str]:
@@ -159,23 +148,19 @@ def _ui_workers() -> set[str]:
 
 
 UI_WORKERS = _ui_workers()
-RECONCILING = ui_app._reconciling_workers()
-WRITING = {**ui_app._writing_workers(), **RECONCILING}
-
-
-def test_every_worker_the_ui_starts_is_waited_for_or_said_to_write_nothing() -> None:
-    """A new writer that is not in ``_writing_workers`` quits under an Update, as round
-    15's and 16's did; a renamed worker drops out of the list the same way."""
-    assert unclassified(UI_WORKERS, WRITING) == set()
+WRITING = ui_app._writing_workers()
+CUT_OFF = ui_app._cut_off_workers()
+WAITED = UI_WORKERS - set(WRITING) - CUT_OFF
+"""The workers a hand-over waits out rather than refuses: every other one the UI starts."""
 
 
 def test_the_lists_name_only_workers_the_ui_starts_and_never_both() -> None:
-    """What the guard must still see: every writer and every reader it explains is a
-    worker the walk found, so a walk gone blind fails here, not by passing above."""
+    """What the guard must still see: every writer and every worker safe to cut off is a
+    worker the walk found, so a renamed one, or a walk gone blind, fails here."""
     assert set(WRITING) <= UI_WORKERS, set(WRITING) - UI_WORKERS
-    assert set(READ_ONLY) <= UI_WORKERS, set(READ_ONLY) - UI_WORKERS
-    assert not set(WRITING) & set(READ_ONLY)
-    assert not set(ui_app._writing_workers()) & set(RECONCILING)
+    assert CUT_OFF <= UI_WORKERS, CUT_OFF - UI_WORKERS
+    assert not set(WRITING) & CUT_OFF
+    assert len(WAITED) >= 10, f"the walk found too few to wait for: {sorted(WAITED)}"
 
 
 def test_the_accounts_readers_write_the_store_so_update_waits_for_them(fake_home: Path) -> None:
@@ -203,7 +188,7 @@ def test_the_accounts_readers_write_the_store_so_update_waits_for_them(fake_home
         board.LABELS_WORKER,
         agent_view.LABELS_WORKER,
     }
-    assert readers <= set(RECONCILING), readers - set(RECONCILING)
+    assert readers <= WAITED, readers - WAITED
 
 
 def test_the_doctor_reads_the_slots_and_writes_the_store_so_update_waits_for_it(
@@ -221,7 +206,7 @@ def test_the_doctor_reads_the_slots_and_writes_the_store_so_update_waits_for_it(
     with store_session() as store:
         assert account.slot in {row.slot for row in store.claude_accounts()}, "reconciled"
     doctors = {ui_app._DOCTOR_WORKER, project_view.DOCTOR_WORKER}
-    assert doctors <= set(RECONCILING), doctors - set(RECONCILING)
+    assert doctors <= WAITED, doctors - WAITED
 
 
 def test_welcomes_folder_check_opens_the_store_so_update_waits_for_it(tmp_path: Path) -> None:
@@ -236,16 +221,17 @@ def test_welcomes_folder_check_opens_the_store_so_update_waits_for_it(tmp_path: 
 
     assert verdict.root == folder and verdict.store_error is None
     assert paths.db_path().exists(), "the check created the store"
-    assert welcome_view.worker_name("validate") in RECONCILING
+    assert welcome_view.worker_name("validate") in WAITED
 
 
-def test_the_credits_the_status_and_step_1s_list_open_the_store_so_update_waits_for_them(
+def test_the_reads_round_22_found_open_the_store_and_are_waited_for_by_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round 22 of #257: listed here as reads, the workspaces' credits and Explainability's
-    status resolve a project's destination in the store and write the credits' cache, and
-    step 1's list with no frame from the shell asks the store, which on a fresh machine
-    makes it."""
+    """Round 22 of #257: the workspace credits, Explainability's status and step 1's list
+    were filed as reads that write nothing. The credits and the status resolve a project's
+    destination in the store and write the credits' cache, and step 1's list with no frame
+    from the shell asks the store, which on a fresh machine makes it. None is listed now:
+    every worker the UI starts is waited for unless it is safe to cut off."""
     monkeypatch.chdir(tmp_path)
     assert not paths.db_path().exists()
 
@@ -257,7 +243,7 @@ def test_the_credits_the_status_and_step_1s_list_open_the_store_so_update_waits_
         explainability_view.STATUS_WORKER,
         welcome_view.worker_name("candidates"),
     }
-    assert found <= set(RECONCILING), found - set(RECONCILING)
+    assert found <= WAITED, found - WAITED
 
 
 def _welcome_name(step: str) -> str:
@@ -269,35 +255,39 @@ def _work(**_kwargs: object) -> Callable[[Any], Any]:
 
 
 SHAPES = {
-    "a literal": "def go(self):\n    self.run_worker(job, name='new-writer')\n",
-    "a module constant": "def go(self):\n    self.run_worker(job, name=NEW_WORKER)\n",
+    "a literal": "def go(self):\n    self.run_worker(job, name='new-read', thread=True)\n",
+    "a module constant": "def go(self):\n    self.run_worker(job, name=NEW_WORKER, thread=True)\n",
     "a decorator": "@work(thread=True, name=NEW_WORKER)\ndef go(self):\n    pass\n",
     "a helper's parameter": (
         "def _run(self, name, job):\n"
-        "    self.run_worker(job, name=worker_name(name), group='g')\n"
+        "    self.run_worker(job, name=worker_name(name), group='g', thread=True)\n"
         "def _start_work(self, name, job):\n"
         "    self._run(name, job)\n"
         "def go(self):\n"
-        "    self._start_work('writer', job)\n"
+        "    self._start_work('read', job)\n"
     ),
 }
 
 
 @pytest.mark.parametrize("shape", SHAPES)
-def test_the_rule_accuses_an_unlisted_writer_and_spares_a_listed_one(shape: str) -> None:
-    """Controls on the rule itself, one per shape a name reaches a worker start in."""
-    namespace = {"NEW_WORKER": "new-writer", "worker_name": _welcome_name, "work": _work}
+def test_the_rule_reads_every_shape_and_accuses_a_start_that_is_not_a_thread(shape: str) -> None:
+    """Controls on the rule itself, one per shape a name reaches a worker start in: read,
+    a new worker is one the hand-over's tests wait for; as a task, it would be cut off."""
+    namespace = {"NEW_WORKER": "new-read", "worker_name": _welcome_name, "work": _work}
     started = started_workers(SHAPES[shape], namespace)
     exec(compile(SHAPES[shape], shape, "exec"), dict(namespace))  # the shape is real Python
+    as_task = SHAPES[shape].replace("thread=True", "thread=False")
 
-    expected = {"welcome-writer"} if shape == "a helper's parameter" else {"new-writer"}
+    expected = {"welcome-read"} if shape == "a helper's parameter" else {"new-read"}
     assert started == expected
-    assert unclassified(started, WRITING) == expected, "unlisted: accused"
-    assert unclassified(started, {name: "it writes" for name in expected}) == set(), "listed"
+    with pytest.raises(AssertionError, match="not a thread worker"):
+        started_workers(as_task, namespace)
 
 
 def test_a_worker_name_the_guard_cannot_read_fails_rather_than_passing() -> None:
     with pytest.raises(AssertionError, match="cannot read"):
-        started_workers("def go(self):\n    self.run_worker(job, name=pick())\n", {})
+        started_workers("def go(self):\n    self.run_worker(job, name=pick(), thread=True)\n", {})
     with pytest.raises(AssertionError, match="no name"):
-        started_workers("def go(self):\n    self.run_worker(job)\n", {})
+        started_workers("def go(self):\n    self.run_worker(job, thread=True)\n", {})
+    with pytest.raises(AssertionError, match="not a thread worker"):
+        started_workers("def go(self):\n    self.run_worker(job, name='read')\n", {})

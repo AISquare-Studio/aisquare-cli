@@ -48,6 +48,7 @@ from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, a
 from tests.rendered import plain
 from tests.test_lifecycle_upgrade import Machine, Tool, machine, tool  # noqa: F401
 from tests.test_ui_shell import drive, script, seed  # noqa: F401 — `script` is a fixture
+from tests.test_ui_writing_workers import CUT_OFF, WAITED
 from tests.ui_workers import settle_page, settle_until
 
 #: The real function, taken before ``no_real_installer`` closes it for every test here.
@@ -170,9 +171,6 @@ def test_only_asqs_own_doctor_is_machine_wide_and_no_doctor_may_be_busy(
 WRITING = ui_app._writing_workers()
 """Every worker Update and Uninstall refuse under, by name, with the toast's words for it."""
 
-RECONCILING = ui_app._reconciling_workers()
-"""Every read that writes, which Update and Uninstall wait out, with the toast's words."""
-
 
 def _held_hand_off(name: str) -> tuple[Any, list[str], Any]:
     """Update pressed while a worker called ``name`` runs, held; then again once it ended."""
@@ -218,8 +216,8 @@ def test_update_waits_for_every_worker_that_writes(
     assert after == ("upgrade", "--reopen"), "control: once it has ended, Update quits"
 
 
-@pytest.mark.parametrize("name", sorted(RECONCILING))
-def test_update_waits_out_a_read_that_writes_and_starts_no_other_meanwhile(
+@pytest.mark.parametrize("name", sorted(WAITED))
+def test_update_waits_out_every_other_worker_and_starts_no_other_meanwhile(
     isolated_home: Path,
     script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
     monkeypatch: pytest.MonkeyPatch,
@@ -231,8 +229,9 @@ def test_update_waits_out_a_read_that_writes_and_starts_no_other_meanwhile(
     of the time, and a retry had the same odds; and a tick could start another read
     between the last look and the quit. The hand-over now waits the read out, and asq's
     tick, its accounts read and its doctor start nothing once it has been asked for, nor
-    Welcome's folder check, which opens the store too (round 21), nor the credits,
-    Explainability's status or step 1's list (round 22)."""
+    Welcome's folder check, which opens the store too (round 21). Every worker the UI
+    starts is waited out but the writers, refused above, and those safe to cut off: a
+    list of the reads that write missed three more (round 22)."""
     monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
     release = threading.Event()
 
@@ -263,32 +262,70 @@ def test_update_waits_out_a_read_that_writes_and_starts_no_other_meanwhile(
 
     said, while_held, started, exits = drive(fn)
 
-    assert said == [f"asq quits once {RECONCILING[name]} ends"], "not refused: waited out"
+    assert said == ["asq quits once the reads running end"], "not refused: waited out"
     assert while_held == [], "no quit under the read"
     assert started == [], "nothing new to wait for"
     assert exits == [("upgrade", "--reopen")], "the quit, once it has ended"
 
 
-@pytest.mark.parametrize(
-    "name",
-    [accounts_view.SIGN_IN_WORKER, welcome_view.worker_name("look")],
-)
-def test_update_does_not_wait_for_a_worker_that_only_reads_or_waits(
+@pytest.mark.parametrize("name", sorted(CUT_OFF))
+def test_update_does_not_wait_for_a_worker_that_is_safe_to_cut_off(
     isolated_home: Path,
     script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
     monkeypatch: pytest.MonkeyPatch,
     name: str,
 ) -> None:
-    """A worker that only reads holds nothing a quit could cut off. Nor does a pending
-    AISquare sign-in: it waits for the browser until a token arrives, a quit cancels the
-    wait (``on_unmount``) and nothing is stored past a cancel. Counted, it held Update and
-    Uninstall for as long as the device code lived, 10 to 15 minutes (round 16 of #257)."""
+    """A pending AISquare sign-in waits for the browser until a token arrives, a quit
+    cancels the wait (``on_unmount``) and nothing is stored past a cancel. Counted, it held
+    Update and Uninstall for as long as the device code lived, 10 to 15 minutes (round 16
+    of #257)."""
     monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
 
     while_running, said, _ = _held_hand_off(name)
 
-    assert name not in WRITING
+    assert name == accounts_view.SIGN_IN_WORKER and name not in WRITING
     assert while_running == ("upgrade", "--reopen") and said == [], said
+
+
+def test_update_leaves_a_task_worker_to_the_quit(
+    isolated_home: Path,
+    tmp_path: Path,
+    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Waited for by default are thread workers, which a quit cannot stop. A task worker is
+    cancelled at its next await, and one of Textual's own never ends: the Onboard view's
+    ``DirectoryTree`` loader, there once ``+`` has been pressed. Waited for, it would hold
+    Update for good. The control holds a thread worker under the same name."""
+    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
+    monkeypatch.setenv("HOME", str(tmp_path))  # what the Onboard view's tree scans
+    release = threading.Event()
+
+    async def fn(pilot: Pilot[None]) -> tuple[list[str], list[Any], list[Any]]:
+        app = pilot.app
+        assert isinstance(app, ui_app.FleetApp)
+        exits: list[Any] = []
+        app.exit = lambda *_args, **_kwargs: exits.append(app.hand_off)  # type: ignore[method-assign]
+        await app.on_add_project(AddProject())
+        await settle_page(app)
+        loaders = [str(w.name) for w in app.workers if not w.is_finished]
+        app.query_one("#doctor-update", Button).press()
+        await settle_page(app)
+        with_the_loader = list(exits)
+        app.hand_off = None  # the control: once more, under a thread worker of that name
+        exits.clear()
+        app.run_worker(lambda: release.wait(10), name="_loader", thread=True, exit_on_error=False)
+        app.query_one("#doctor-update", Button).press()
+        await settle_page(app, group="held")
+        under_a_thread = list(exits)
+        release.set()
+        return loaders, with_the_loader, under_a_thread
+
+    loaders, with_the_loader, under_a_thread = drive(fn)
+
+    assert "_loader" in loaders, f"the tree's loader runs: {loaders}"
+    assert with_the_loader == [("upgrade", "--reopen")], "quit at once beside the loader"
+    assert under_a_thread == [], "control: a thread worker of that name holds the quit"
 
 
 def _starts_with_a_hand_over(pending: bool, monkeypatch: pytest.MonkeyPatch) -> list[str]:

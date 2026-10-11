@@ -135,17 +135,24 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
             # of the version that runs is that version on every route (a later review).
             _say("nothing to upgrade")
             return
+        unlisted = plan.latest is not None and plan.latest.pin_unlisted
         if plan.pin_refused:
             # Not "upgrade with" a command that installs another version (a later review).
             _say(plan.reason or "")
-        elif plan.latest is not None and plan.latest.pin_unlisted:
-            # A release PyPI does not list: the route's command can only fail, where a
-            # Requires-Python miss may not, on another Python (review of #257).
+        elif unlisted and install_route.resolves_from_pypi(plan.route):
+            # A release PyPI does not list, on a route that asks PyPI alone: its command can
+            # only fail, where a Requires-Python miss may not, on another Python (review of
+            # #257).
             _say(f"`{plan.command}` cannot install it: {plan.pin_unmet}")
             return
         else:
             _say(f"upgrade with: {plan.command}")
             _say(f"(`aisquare upgrade` does not run it: {plan.reason})")
+            if unlisted:
+                # pip, pipx and uvx may be set up with an index that lists it: "cannot
+                # install it" withheld a command that would have worked (a later review).
+                _say(f"({plan.pin_unmet}: the command finds it only on an index set up for it)")
+                return
         if plan.pin_unmet is not None:
             _say(f"({plan.pin_unmet})")
 

@@ -3517,15 +3517,44 @@ def test_a_failing_sites_remedy_survives_a_space_in_its_path(
     assert f"--config-dir {site}" not in result.stdout, "an unquoted path would split there"
 
 
-@pytest.mark.parametrize("kind", ["pipx", "venv"])
-def test_a_pin_pypi_does_not_list_is_said_not_advised_on_a_route_aisquare_does_not_run(
+@pytest.mark.parametrize("kind", ["pipx", "venv", "system", "uvx"])
+def test_a_pin_pypi_does_not_list_keeps_the_command_of_a_route_with_an_index_of_its_own(
     runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
-    """A pipx or venv install kept its own reason, so `--check --version 9.9.9` still said
-    "upgrade with: pipx install --force aisquare-cli==9.9.9", a command that can only fail,
-    and then that PyPI lists no 9.9.9 (review of #257)."""
-    kinds = {"pipx": install_route.PIPX, "venv": install_route.VENV}
+    """pip, pipx and uvx read an index this CLI does not (PIP_INDEX_URL, pip.conf, pipx's
+    default index, uv.toml), so `--check --version 0.8.1+corp` said "`python -m pip install
+    aisquare-cli==0.8.1+corp` cannot install it" and offered no command, for a release a
+    company index carries and that command installs (review of #257)."""
+    kinds = {
+        "pipx": install_route.PIPX,
+        "venv": install_route.VENV,
+        "system": install_route.SYSTEM,
+        "uvx": install_route.UVX,
+    }
     route = install_route.InstallRoute(kinds[kind], tool.facts)
+    monkeypatch.setattr(install_route, "detect", lambda: route)
+    monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
+    body = _pypi_requiring({"0.8.0": ">=3.11"})
+    monkeypatch.setattr(install_route, "fetch_latest", _REAL_FETCH_LATEST)
+    monkeypatch.setattr(install_route, "open_url", lambda _request, timeout: _Response(body))
+
+    check = runner.invoke(app, ["upgrade", "--check", "--version", "0.8.1+corp"])
+    command = install_route.command_line(install_route.upgrade_argv(route, "0.8.1+corp"))
+
+    why = "PyPI lists no aisquare-cli 0.8.1+corp"
+    assert f"upgrade with: {command}" in check.stdout, check.stdout
+    assert f"({why}: the command finds it only on an index set up for it)" in check.stdout
+    assert "cannot install it" not in check.stdout, check.stdout
+    assert check.stdout.count(why) == 1, check.stdout
+
+
+def test_a_pin_pypi_does_not_list_is_one_a_uv_tool_aisquare_does_not_run_cannot_install(
+    runner: CliRunner, tmp_path: Path, machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Control: a uv tool's command restates every index its receipt records, and a recorded
+    one keeps PyPI from being asked, so PyPI's word holds where aisquare prints that command
+    rather than running it (Windows)."""
+    route = _uv_route(tmp_path / "w", _receipt(_OURS_PINNED, _TIKTOKEN), platform="win32")
     monkeypatch.setattr(install_route, "detect", lambda: route)
     monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
     body = _pypi_requiring({"0.8.0": ">=3.11"})
@@ -3536,6 +3565,7 @@ def test_a_pin_pypi_does_not_list_is_said_not_advised_on_a_route_aisquare_does_n
     command = install_route.command_line(install_route.upgrade_argv(route, "9.9.9"))
 
     why = "PyPI lists no aisquare-cli 9.9.9"
+    assert install_route.not_automated(route) is not None, "a route aisquare does not run"
     assert "upgrade with" not in check.stdout, check.stdout
     assert f"`{command}` cannot install it: {why}" in check.stdout, check.stdout
     assert check.stdout.count(why) == 1, check.stdout

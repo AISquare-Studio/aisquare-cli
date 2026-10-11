@@ -804,11 +804,16 @@ def claude_repo_plugins(config_dir: Path | None = None) -> list[ClaudePlugin]:
     return found
 
 
+_TRAMPOLINE = re.compile(rb"""'''exec' (["'])([^"']*)\1""")
+
+
 def _starts(program: Path) -> bool:
     """The launcher's ``_starts``: an executable file whose absolute ``#!`` interpreter,
     when it has one, is an executable file too. A console script whose environment lost
     its Python stays executable and fails every run; ``env`` lines and binaries are
-    trusted, as the launcher trusts them."""
+    trusted, as the launcher trusts them. A ``#!/bin/sh`` trampoline, which pip and uv
+    write for a Python whose path has a space or is long, is judged by the Python it
+    execs."""
     # os.path.isfile, here and below: a #! may name a path this user cannot reach, where
     # Path.is_file raises PermissionError on 3.11 to 3.13 (measured; 3.14 answers False);
     # the launcher's `[ -f ]` answers no.
@@ -817,12 +822,19 @@ def _starts(program: Path) -> bool:
     try:
         with program.open("rb") as handle:
             first = handle.readline(4096)
+            second = handle.readline(4096)
     except OSError:
         return True  # unreadable: trusted, as the launcher's failed `read` is
     if not first.startswith(b"#!"):
         return True
     line = first[2:].rstrip(b"\n").lstrip(b" \t")
     interpreter = Path(re.split(rb"[ \t]", line, maxsplit=1)[0].decode(errors="replace"))
+    # pip and uv write a /bin/sh trampoline in place of #!<python> when that path has a
+    # space or is over 127 bytes, and its second line execs the Python that must exist:
+    # '''exec' "<python>" "$0" "$@" (uv quotes it with ') (review of #257).
+    trampoline = _TRAMPOLINE.match(second)
+    if interpreter == Path("/bin/sh") and trampoline:
+        interpreter = Path(trampoline.group(2).decode(errors="replace"))
     if not interpreter.is_absolute():
         return True
     return os.path.isfile(interpreter) and os.access(interpreter, os.X_OK)

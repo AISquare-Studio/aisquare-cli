@@ -62,10 +62,17 @@ _ours="\"command\" *: *\"$_program($_ws+-[^\"]*)?$_ws+hook$_ws+$event$_ws*\""
 # its Python (uv python uninstall, a removed Homebrew python@3.x) stays executable
 # and fails every run with "bad interpreter", exit 126. Only an absolute
 # interpreter is checked; `#!/usr/bin/env python3` and binaries are trusted.
+# Where the Python's path has a space or is over 127 bytes, pip and uv write
+# #!/bin/sh and exec it from the second line, '''exec' "<python>" "$0" "$@"
+# (uv quotes it with '): that Python is the interpreter checked.
 _starts() {
     [ -f "$1" ] && [ -x "$1" ] || return 1
     _first=
-    IFS= read -r _first <"$1" 2>/dev/null
+    _second=
+    {
+        IFS= read -r _first
+        IFS= read -r _second
+    } <"$1" 2>/dev/null
     case $_first in
         '#!'*) ;;
         *) return 0 ;;
@@ -73,6 +80,18 @@ _starts() {
     _interp=${_first#??}
     _interp=${_interp#"${_interp%%[!	 ]*}"}
     _interp=${_interp%%[	 ]*}
+    if [ "$_interp" = /bin/sh ]; then
+        case $_second in
+            "$_a$_a${_a}exec$_a \""*)
+                _interp=${_second#*\"}
+                _interp=${_interp%%\"*}
+                ;;
+            "$_a$_a${_a}exec$_a $_a"*)
+                _interp=${_second#"$_a$_a${_a}exec$_a $_a"}
+                _interp=${_interp%%"$_a"*}
+                ;;
+        esac
+    fi
     case $_interp in
         /*) [ -f "$_interp" ] && [ -x "$_interp" ] ;;
         *) return 0 ;;

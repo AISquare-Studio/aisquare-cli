@@ -252,6 +252,43 @@ def test_a_script_whose_interpreter_is_gone_cannot_start_and_nothing_is_run(
     assert check.fix == f"aisquare agents connect claude-code --config-dir {config}"
 
 
+@pytest.mark.parametrize("quote", ['"', "'"], ids=["pip", "uv"])
+def test_a_trampoline_whose_python_is_gone_cannot_start_and_one_whose_python_is_there_can(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path, quote: str
+) -> None:
+    """Where the Python's path has a space or is long, pip and uv write ``#!/bin/sh`` and
+    exec it from the next line. ``/bin/sh`` is there, so a script whose Python was gone
+    "could start", and the hooks read as connected (review of #257): the Python it
+    execs is the interpreter judged."""
+    if os.name == "nt":
+        pytest.skip("a #! interpreter is a POSIX shape")
+    _this_install(monkeypatch, tmp_path)
+    _never_probe(monkeypatch)
+    venv = tmp_path / "my venv" / "bin"
+    venv.mkdir(parents=True)
+    python = venv / "python3"
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+    script = venv / "aisquare"
+    script.write_text(
+        f"#!/bin/sh\n'''exec' {quote}{python}{quote} \"$0\" \"$@\"\n' '''\nprint('x')\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    config = isolated_agent_home / ".claude"
+    _write_hooks(config, agents._quote(str(script)))
+    _connect(config)
+
+    assert agents._starts(script) and agents.hooks_can_start("claude-code", config)
+    python.unlink()
+    verdict = agents.classify_hook_binary(agents.HookBinary(script))
+
+    assert not agents._starts(script)
+    assert not agents.hooks_can_start("claude-code", config)
+    assert verdict == (agents.HOOK_BINARY_MISSING, None)
+    assert f"{script}, which cannot start" in diagnostics._check_claude_code().detail
+
+
 def test_a_binary_that_will_not_say_its_version_is_not_trusted(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path
 ) -> None:

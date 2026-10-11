@@ -679,24 +679,39 @@ def test_it_grades_the_program_in_our_hook_not_the_first_on_its_line(
     assert machine.ran("aisquare") == (["hook", "stop"] if runs else None)
 
 
-def _cannot_start(path: Path) -> Path:
-    """An executable script whose ``#!`` interpreter is gone: a console script after its
+# How a console script names its Python: on the #! line, or, where that path has a space
+# or is over 127 bytes, in the /bin/sh trampoline pip writes ("...") and uv writes ('...').
+SHAPES = {
+    "shebang": "#!{python}\nexit 0\n",
+    "pip-trampoline": "#!/bin/sh\n'''exec' \"{python}\" \"$0\" \"$@\"\n' '''\nexit 0\n",
+    "uv-trampoline": "#!/bin/sh\n'''exec' '{python}' \"$0\" \"$@\"\n' '''\nexit 0\n",
+}
+
+
+def _cannot_start(path: Path, shape: str = "shebang") -> Path:
+    """An executable script whose interpreter is gone: a console script after its
     environment lost its Python (``uv python uninstall``, a removed ``python@3.x``)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"#!{path.parent / 'gone' / 'python'}\nexit 0\n", encoding="utf-8")
+    python = path.parent / ("my venv" if shape != "shebang" else "venv") / "gone" / "python"
+    path.write_text(SHAPES[shape].format(python=python), encoding="utf-8")
     path.chmod(0o755)
     return path
 
 
 @posix_only
-def test_it_runs_in_place_of_a_hook_whose_script_cannot_start(machine: Machine) -> None:
+@pytest.mark.parametrize("shape", SHAPES)
+def test_it_runs_in_place_of_a_hook_whose_script_cannot_start(machine: Machine, shape: str) -> None:
     """Executable is not runnable: a script whose interpreter is gone fails every event
-    with exit 126, and the launcher stood down beside it (review of #257)."""
+    with exit 126, or 127 from a trampoline's exec, and the launcher stood down beside it
+    (review of #257)."""
     machine.fake("aisquare")
-    dead = _cannot_start(machine.home / "venv" / "bin" / "aisquare")
+    dead = _cannot_start(machine.home / "venv" / "bin" / "aisquare", shape)
     machine.settings(machine.home / ".claude", ("Stop", f"{dead} hook stop"))
-    with pytest.raises(OSError):  # the premise: exec refuses it (a bad interpreter)
-        subprocess.run([str(dead)], capture_output=True, check=False)
+    if shape == "shebang":
+        with pytest.raises(OSError):  # the premise: exec refuses it (a bad interpreter)
+            subprocess.run([str(dead)], capture_output=True, check=False)
+    else:  # the premise: /bin/sh starts and its exec finds no Python
+        assert subprocess.run([str(dead)], capture_output=True, check=False).returncode == 127
 
     result = machine.run("stop")
 
@@ -705,15 +720,16 @@ def test_it_runs_in_place_of_a_hook_whose_script_cannot_start(machine: Machine) 
 
 
 @posix_only
+@pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("good_in_local_bin", [False, True], ids=["to-uvx", "to-local-bin"])
 def test_an_aisquare_that_cannot_start_is_passed_over(
-    machine: Machine, monkeypatch: pytest.MonkeyPatch, good_in_local_bin: bool
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, good_in_local_bin: bool, shape: str
 ) -> None:
     """The first aisquare on PATH can be a script that cannot start; picked, it failed
     every event instead of reaching ~/.local/bin or the uvx fallback. The doctor's search
     (``agent_core.launcher_finds``) passes it over the same way, or the row names a
     program the plugin never runs (review of #257)."""
-    dead = _cannot_start(machine.bin / "aisquare")
+    dead = _cannot_start(machine.bin / "aisquare", shape)
     local = machine.home / ".local" / "bin"
     good = machine.fake("aisquare", where=local) if good_in_local_bin else None
     machine.fake("uvx")

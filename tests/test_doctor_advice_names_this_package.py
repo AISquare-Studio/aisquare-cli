@@ -41,10 +41,12 @@ from pathlib import Path
 
 import pytest
 
+from aisquare.core import agents as agent_core
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core.version import DISTRIBUTION
 from aisquare.models import CheckStatus, DoctorCheck
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, install_route
+from aisquare.services.install_route import Facts, InstallRoute
 
 #: An install-ish command and the first package-looking word after it. Written
 #: to match the forms this project's own advice uses — ``pip install``,
@@ -289,15 +291,109 @@ def test_install_hint_names_this_distribution_on_both_of_its_branches(
     assert absent.status is CheckStatus.warn
     assert f"pipx install {DISTRIBUTION}" in (absent.fix or "")
 
+    # A venv that is NOT this process's environment: its route cannot be read
+    # from here, so the advice stands (the checkout case is the tests below).
     monkeypatch.setattr(
         "aisquare.services.diagnostics.shutil.which",
         lambda _name: "/home/u/proj/.venv/bin/aisquare",
+    )
+    monkeypatch.setattr(
+        agent_core, "current_install", lambda: Path("/home/u/elsewhere/.venv/bin/aisquare")
     )
     in_venv = diagnostics._check_install()
     assert in_venv.status is CheckStatus.warn
     assert f"pipx install {DISTRIBUTION}" in (in_venv.fix or "")
     # The uv form is offered too, because that is what the installer will use.
     assert f"uv tool install {DISTRIBUTION}" in (in_venv.fix or "")
+
+
+_VENV = Path("/home/u/proj/.venv")
+
+
+def _route(kind: str, *, source: str | None = None) -> InstallRoute:
+    """A route for a process running from ``_VENV``, as ``install_route.detect`` answers."""
+    facts = Facts(
+        prefix=_VENV,
+        base_prefix=Path("/usr"),
+        executable=_VENV / "bin" / "python",
+        platform="linux",
+        python_version="3.13",
+        installer="uv",
+    )
+    return InstallRoute(kind, facts, source=source)
+
+
+def _venv_first_on_path(monkeypatch: pytest.MonkeyPatch, route: InstallRoute | None) -> None:
+    """``activate``'s PATH: ``_VENV``'s console script is what ``which`` finds, and it is
+    this process's own (``current_install``). ``route`` is what the process answers about
+    itself; ``None`` makes that question fail."""
+    program = _VENV / "bin" / "aisquare"
+    monkeypatch.setattr("aisquare.services.diagnostics.shutil.which", lambda _name: str(program))
+    monkeypatch.setattr(agent_core, "current_install", lambda: program)
+
+    def detect() -> InstallRoute:
+        if route is None:
+            raise RuntimeError("no metadata")
+        return route
+
+    monkeypatch.setattr(install_route, "detect", detect)
+
+
+@pytest.mark.parametrize(
+    ("kind", "source"),
+    [(install_route.EDITABLE, "/home/u/proj"), (install_route.LOCAL_SOURCE, "/home/u/proj")],
+)
+def test_install_row_is_green_for_a_checkout_installed_into_its_own_venv(
+    monkeypatch: pytest.MonkeyPatch, kind: str, source: str
+) -> None:
+    """A venv first on PATH that is THIS process, installed from a checkout, is deliberate.
+
+    Before: the ``.venv`` in the path alone made it "runs from a virtualenv" with
+    the PyPI command — on the 0.8.0 branch, before 0.8.0 was on PyPI, advice that
+    replaces the branch with 0.6.0.
+    """
+    _venv_first_on_path(monkeypatch, _route(kind, source=source))
+    row = diagnostics._check_install()
+    assert row.status is CheckStatus.ok, row
+    assert row.fix is None, row
+    assert str(_VENV / "bin" / "aisquare") in row.detail, row.detail
+    assert source in row.detail, row.detail
+    assert "pipx" not in row.detail and "uv tool" not in row.detail, row.detail
+
+
+def test_install_row_keeps_the_advice_for_a_plain_pip_install_into_a_venv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same venv, but the package came from an index: nothing deliberate about it."""
+    _venv_first_on_path(monkeypatch, _route(install_route.VENV))
+    row = diagnostics._check_install()
+    assert row.status is CheckStatus.warn, row
+    assert f"pipx install {DISTRIBUTION}" in (row.fix or "")
+
+
+def test_install_row_keeps_the_advice_for_a_venv_that_is_not_this_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another venv's script first on PATH: its route cannot be read from here, and this
+    process's own (editable) route must not be mistaken for it."""
+    _venv_first_on_path(monkeypatch, _route(install_route.EDITABLE, source="/home/u/proj"))
+    monkeypatch.setattr(
+        "aisquare.services.diagnostics.shutil.which",
+        lambda _name: "/home/u/other/.venv/bin/aisquare",
+    )
+    row = diagnostics._check_install()
+    assert row.status is CheckStatus.warn, row
+    assert "/home/u/other/.venv/bin/aisquare" in row.detail, row.detail
+    assert f"pipx install {DISTRIBUTION}" in (row.fix or "")
+
+
+def test_install_row_never_fails_on_a_route_it_cannot_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Metadata missing or unreadable: the row falls back to the warning, never a traceback."""
+    _venv_first_on_path(monkeypatch, None)
+    row = diagnostics._check_install()
+    assert row.status is CheckStatus.warn, row
 
 
 def test_tiktoken_hint_names_the_pipx_environment_that_actually_exists(

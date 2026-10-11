@@ -227,8 +227,55 @@ def _check_python() -> DoctorCheck:
 _GLOBAL_INSTALL = f"pipx install {DISTRIBUTION} (or: uv tool install {DISTRIBUTION})"
 
 
+def _is_this_install(binary: str) -> bool:
+    """Whether the ``aisquare`` found on PATH is the console script beside THIS interpreter.
+
+    Paths alone, no process: the file itself, or the same file through a link
+    (uv's ``~/.local/bin/aisquare``). The venv case this exists for is exact:
+    ``activate`` puts ``<venv>/bin`` first on PATH, and
+    :func:`agent_core.current_install` is ``<venv>/bin/aisquare``.
+    """
+    program = Path(binary)
+    this = agent_core.current_install()
+    if program == this:
+        return True
+    try:
+        return os.path.realpath(program) == os.path.realpath(this)
+    except OSError:
+        return False
+
+
+def _route_of_this_process() -> install_route.InstallRoute | None:
+    """How THIS process was installed, or ``None`` when that cannot be read.
+
+    ``install_route.detect`` reads the package metadata and files under
+    ``sys.prefix``; a doctor row never fails on a question it cannot answer.
+    """
+    try:
+        return install_route.detect()
+    except Exception:
+        return None
+
+
 def _check_install() -> DoctorCheck:
-    """Where aisquare runs from — the Claude Code hook needs a stable path."""
+    """Where the ``aisquare`` a shell finds runs from — a Claude Code hook needs a
+    path that stays.
+
+    A console script inside a virtualenv is the one place a hook's program can
+    vanish from (the venv deleted or rebuilt), so a venv on PATH was a warning
+    with the global-install command, always. That read a developer's own
+    checkout — installed editable into its ``.venv``, which ``activate`` puts
+    first on PATH — as a stray environment, and sent them to PyPI for a release
+    the checkout is ahead of: on the 0.8.0 branch, before 0.8.0 was published,
+    following the advice would have replaced the branch with 0.6.0.
+
+    ``install_route`` knows the difference, from how THIS process was installed
+    rather than from the path's spelling. So a venv that is this process's own
+    environment is judged by its route: an editable or local-source install is
+    deliberate, green, and named as such; a plain ``pip install`` into some venv
+    keeps the advice. A venv on PATH that is NOT this process cannot be
+    classified from here and keeps it too.
+    """
     binary = shutil.which("aisquare")
     if binary is None:
         return _warn(
@@ -237,6 +284,9 @@ def _check_install() -> DoctorCheck:
             f"Install as a global tool: {_GLOBAL_INSTALL}",
         )
     if {".venv", "venv"} & set(Path(binary).parts):
+        route = _route_of_this_process() if _is_this_install(binary) else None
+        if route is not None and route.kind != install_route.VENV:
+            return _ok("install", f"aisquare at {binary} — {route.describe()}")
         return _warn(
             "install",
             f"aisquare runs from a virtualenv ({binary})",

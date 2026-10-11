@@ -130,6 +130,12 @@ and an aisquare that upgrades and uninstalls itself.**
   it now reads usage on its first frame. CI: the frequent Windows-leg flakes
   are gone, CI also runs nightly and on demand, and ruff and mypy are pinned
   (#252).
+- `doctor`'s `install` row no longer sends a developer's checkout to PyPI. A
+  venv first on PATH that is this process's own environment is judged by its
+  install route, not by the `.venv` in its path: an editable or local-source
+  install is green and named, a plain `pip install` into a venv keeps the
+  `pipx install aisquare-cli` advice, and so does a venv that is not this
+  process.
 
 ## [0.7.0] - 2026-09-25
 

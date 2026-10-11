@@ -202,6 +202,26 @@ def test_on_the_uvx_route_the_log_command_names_the_uvx_and_the_python_the_hook_
     assert f"run `{install_route.command_line(argv)}` to see" in said, said
 
 
+def test_on_the_uvx_route_the_log_command_names_the_build_the_launcher_was_given(
+    runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 21 of #257: the launcher runs `--from "$AISQUARE_PLUGIN_FROM"` when it is set,
+    to check a wheel before the release is on PyPI, and session start still named
+    `aisquare-cli==<version>`: not on PyPI then, and another build than the hooks' after."""
+    cached = _uv_cache(tmp_path / ".cache" / "uv") / "archive-v0" / "NPat_ypOvcy3YMzz"
+    monkeypatch.setattr(sys, "prefix", str(cached))
+    _aisquare_on_path(str(cached / "bin" / "aisquare"), monkeypatch, uvx="/usr/bin/uvx")
+    monkeypatch.setenv(hooks_service.PLUGIN_UVX_ENV, "/usr/bin/uvx")
+    wheel = str(tmp_path / "dist" / f"aisquare_cli-{__version__}-py3-none-any.whl")
+    monkeypatch.setenv(hooks_service.PLUGIN_FROM_ENV, wheel)
+
+    said = _session_start_after_a_prompt(runner, work_dir)
+
+    argv = ["uvx", "--python", _PYTHON, "--from", wheel, "aisquare", "log"]
+    assert f"run `{install_route.command_line(argv)}` to see" in said, said
+    assert f"aisquare-cli=={__version__}" not in said
+
+
 def test_session_start_names_plain_aisquare_log_where_path_has_it(
     runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

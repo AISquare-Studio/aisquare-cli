@@ -491,6 +491,10 @@ def _directive(project_id: str, *, has_prompts: bool) -> str:
 #: (plugins/claude-code/scripts/aisquare-hook): ``~/.local/bin/uvx`` where PATH has none.
 PLUGIN_UVX_ENV = "AISQUARE_PLUGIN_UVX"
 
+#: What the plugin's launcher runs in place of the release it pins, when set: a wheel or a
+#: checkout, for testing a build not on PyPI yet. The hook inherits it from the launcher.
+PLUGIN_FROM_ENV = "AISQUARE_PLUGIN_FROM"
+
 
 def _log_command() -> str:
     """``aisquare log`` as the agent's own shell can run it.
@@ -507,12 +511,14 @@ def _log_command() -> str:
     PATH has none, the desktop app's case, where a bare ``uvx`` is command not found
     too; and uv resolves a command with no ``--python`` on its default Python, which
     may be outside the range the launcher asked for (3.14 on Fedora 43), so it built
-    another environment where the hook's is cached, or failed.
+    another environment where the hook's is cached, or failed. And the requirement it ran:
+    with ``AISQUARE_PLUGIN_FROM`` set, the agent was told the pinned release, which PyPI
+    does not have before it is published, or is another build than the hooks' (round 21).
     """
     if install_route.runs_from_uv_cache():
         python = f"{sys.version_info.major}.{sys.version_info.minor}"
-        argv = [_plugin_uvx(), "--python", python, "--from", f"{DISTRIBUTION}=={__version__}"]
-        argv += ["aisquare", "log"]
+        requirement = os.environ.get(PLUGIN_FROM_ENV) or f"{DISTRIBUTION}=={__version__}"
+        argv = [_plugin_uvx(), "--python", python, "--from", requirement, "aisquare", "log"]
     elif shutil.which("aisquare") is not None:
         return "aisquare log"
     else:

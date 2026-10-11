@@ -253,7 +253,8 @@ def test_the_hooks_guard_names_each_way_hooks_json_can_drift(
 
 @dataclass
 class Machine:
-    """A HOME, a PATH holding only fakes and ``grep``, and a log of what the fakes saw."""
+    """A HOME, a PATH holding only fakes, ``grep`` and ``mkdir``, and a log of what the
+    fakes saw."""
 
     home: Path
     bin: Path
@@ -374,9 +375,10 @@ def machine(tmp_path: Path) -> Machine:
     home = tmp_path / "home"
     tools = tmp_path / "tools"
     tools.mkdir()
-    grep = shutil.which("grep")
-    assert grep is not None, "the launcher needs grep, and so does every machine it runs on"
-    (tools / "grep").symlink_to(grep)
+    for needed in ("grep", "mkdir"):  # mkdir: once, for the folder the uv answer is kept in
+        found = shutil.which(needed)
+        assert found is not None, f"the launcher needs {needed}, as does every machine it runs on"
+        (tools / needed).symlink_to(found)
     log = tmp_path / "log"
     log.mkdir()
     root = home / ".claude" / "plugins" / "cache" / "aisquare-cli" / "aisquare" / _release()
@@ -964,6 +966,69 @@ def test_uvx_is_given_the_tested_range_where_uv_has_or_may_fetch_a_python(
     assert argv[-5:] == ["--from", f"aisquare-cli=={_release()}", "aisquare", "hook", "stop"]
     assert machine.stdin_of("uvx") == b'{"cwd": "/tmp/x"}'
     assert machine.calls("uv"), "uv was not asked"
+
+
+def _ranged(argv: list[str] | None) -> bool:
+    return (argv or [])[:2] == ["--python", ">=3.11,<3.14"]
+
+
+@posix_only
+@pytest.mark.parametrize("installed", [True, False], ids=["tested-python", "what-uv-has"])
+def test_uv_is_asked_at_session_start_and_the_events_after_read_its_answer(
+    machine: Machine, installed: bool
+) -> None:
+    """Every event asked uv, prompts and stops included, and the answer never changes
+    inside a session: one or two uv runs a prompt, and offline, an `uv run` that waits for
+    its download to time out (round 19 of #257). Asked once; the rest read a file."""
+    machine.fake("uvx")
+    machine.fake_uv(installed=installed)
+    asked = ["python find --system >=3.11,<3.14"]
+    if not installed:
+        asked.append("run --no-project --python >=3.11,<3.14 python -c ")
+
+    ranged = []
+    for event in ("session-start", "user-prompt-submit", "stop", "notification"):
+        result = machine.run(event, stdin=b'{"cwd": "/tmp/x"}')
+        assert result.returncode == 0 and result.stderr == b"", result.stderr
+        ranged.append(_ranged(machine.ran("uvx")))
+
+    assert machine.calls("uv") == asked, "asked at session start alone"
+    assert ranged == [installed] * 4, "every event runs as session start decided"
+    assert len(machine.calls("uvx")) == 4
+    assert machine.stdin_of("uvx") == b'{"cwd": "/tmp/x"}', "the payload, each time"
+
+
+@posix_only
+def test_each_session_start_asks_uv_again_and_another_uv_is_asked_on_any_event(
+    machine: Machine,
+) -> None:
+    """A Python installed between sessions is used from the next session start. An answer
+    kept for another uv, or none that can be read, is no answer: that event asks."""
+    machine.fake("uvx")
+    machine.fake_uv(installed=False)
+    machine.run("session-start")
+    machine.fake_uv(installed=True)  # a tested Python, installed meanwhile
+
+    machine.run("stop")
+    kept = _ranged(machine.ran("uvx"))
+    machine.run("session-start")
+    started = _ranged(machine.ran("uvx"))
+    asked_by_now = len(machine.calls("uv"))
+    machine.run("stop")
+    after = _ranged(machine.ran("uvx"))
+
+    assert (kept, started, after) == (False, True, True)
+    assert len(machine.calls("uv")) == asked_by_now, "that stop read the new answer"
+    answer = machine.home / ".cache" / "aisquare" / "plugin-tested-python"
+    for kept_text in ("ranged /elsewhere/bin/uv >=3.11,<3.14\n", "", "ranged\n"):
+        machine.fake_uv(installed=False)
+        answer.write_text(kept_text, encoding="utf-8")
+        before = len(machine.calls("uv"))
+
+        machine.run("user-prompt-submit")
+
+        assert len(machine.calls("uv")) > before, f"asked again over {kept_text!r}"
+        assert not _ranged(machine.ran("uvx")), kept_text
 
 
 @posix_only

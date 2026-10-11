@@ -235,16 +235,42 @@ _find() {
 # The Pythons CI tests aisquare on, as uv reads a request.
 _tested='>=3.11,<3.14'
 
+# Where the answer below is kept between one session's events: one line, `ranged` or
+# `plain`, then the uv and the range it was asked about.
+_answers=${XDG_CACHE_HOME:-$HOME/.cache}/aisquare
+_answer_file=$_answers/plugin-tested-python
+
 # Whether uv has a Python in $_tested, or may fetch one: `uv python find` answers
 # for the installed ones, and `uv run` fetches one wherever uv's python-downloads
 # allows it (Fedora's packaged uv sets "manual"). Asked of the uv beside uvx, else
 # the first that can start; with none to ask, uvx is given the range as it always
 # was. Neither question reads stdin or prints, so the payload stays the hook's.
+# Asked at session start, and on another event only when no answer is kept for this
+# uv: every prompt paid for one or two uv runs, and an offline `uv run` waits for
+# its download to time out (round 19 of #257). Read with builtins, for no process.
 _has_tested_python() {
     _uv=${_runner%/*}/uv
     _starts "$_uv" || _uv=$(_find uv) || return 0
-    "$_uv" python find --system "$_tested" </dev/null >/dev/null 2>&1 ||
-        "$_uv" run --no-project --python "$_tested" python -c '' </dev/null >/dev/null 2>&1
+    _key="$_uv $_tested"
+    if [ "$event" != session-start ]; then
+        _line=
+        IFS= read -r _line 2>/dev/null <"$_answer_file"
+        if [ "${_line#* }" = "$_key" ]; then
+            case $_line in
+                "ranged "*) return 0 ;;
+                "plain "*) return 1 ;;
+            esac
+        fi
+    fi
+    if "$_uv" python find --system "$_tested" </dev/null >/dev/null 2>&1 ||
+        "$_uv" run --no-project --python "$_tested" python -c '' </dev/null >/dev/null 2>&1; then
+        _answer=ranged
+    else
+        _answer=plain
+    fi
+    [ -d "$_answers" ] || mkdir -p "$_answers" 2>/dev/null
+    printf '%s %s\n' "$_answer" "$_key" 2>/dev/null >"$_answer_file"
+    [ "$_answer" = ranged ]
 }
 
 if _runner=$(_find aisquare); then

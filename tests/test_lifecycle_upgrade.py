@@ -2805,11 +2805,14 @@ def test_a_route_aisquare_does_not_run_keeps_its_command_beside_the_python_claus
     assert "cannot install it" not in check.stdout, "no command that never runs for pipx"
 
 
-def test_a_pin_pypi_does_not_list_is_said_not_advised(
+def test_a_pin_pypi_does_not_list_is_said_beside_the_command_a_uv_tool_runs(
     runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`--check --version 0.9.9`, a typo, said "upgrade with: aisquare upgrade --version
-    0.9.9", and uv found no such release (a later review of #257)."""
+    0.9.9" alone, and uv found no such release (a later review of #257). Then "cannot
+    install it", which is false where uv reads an index the receipt does not record:
+    uv.toml, UV_INDEX_URL, UV_DEFAULT_INDEX (round 20). Said beside the command, as for
+    pip, pipx and uvx."""
     monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
     body = _pypi_requiring({"0.8.0": ">=3.11"})
     monkeypatch.setattr(install_route, "fetch_latest", _REAL_FETCH_LATEST)
@@ -2821,9 +2824,11 @@ def test_a_pin_pypi_does_not_list_is_said_not_advised(
     )
 
     why = "PyPI lists no aisquare-cli 0.9.9"
-    assert "upgrade with" not in check.stdout, check.stdout
-    assert f"`aisquare upgrade --version 0.9.9` cannot install it: {why}" in check.stdout
-    assert planned["runnable"] is False and planned["reason"] == why, planned
+    assert "upgrade with: aisquare upgrade --version 0.9.9" in check.stdout, check.stdout
+    assert f"({why}: the command finds it only on an index set up for it)" in check.stdout
+    assert "cannot install it" not in check.stdout, check.stdout
+    assert planned["runnable"] is True and planned["reason"] is None, planned
+    assert planned["pin_unmet"] == why, planned
 
 
 @pytest.mark.parametrize("kind", ["homebrew", "editable", "local-source", "uv-editable", "uv-git"])
@@ -3548,12 +3553,13 @@ def test_a_pin_pypi_does_not_list_keeps_the_command_of_a_route_with_an_index_of_
     assert check.stdout.count(why) == 1, check.stdout
 
 
-def test_a_pin_pypi_does_not_list_is_one_a_uv_tool_aisquare_does_not_run_cannot_install(
+def test_a_pin_pypi_does_not_list_keeps_the_command_of_a_uv_tool_aisquare_does_not_run(
     runner: CliRunner, tmp_path: Path, machine: Machine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Control: a uv tool's command restates every index its receipt records, and a recorded
-    one keeps PyPI from being asked, so PyPI's word holds where aisquare prints that command
-    rather than running it (Windows)."""
+    """Round 20 of #257: a uv tool's receipt records no index set in uv's own settings
+    (uv.toml, UV_INDEX_URL), which `uv tool install --force` reads all the same, so "`uv
+    tool install …` cannot install it" withheld, where aisquare prints that command rather
+    than running it (Windows), one that installs a release only a company index carries."""
     route = _uv_route(tmp_path / "w", _receipt(_OURS_PINNED, _TIKTOKEN), platform="win32")
     monkeypatch.setattr(install_route, "detect", lambda: route)
     monkeypatch.setattr(lifecycle, "__version__", "0.8.0")
@@ -3566,6 +3572,7 @@ def test_a_pin_pypi_does_not_list_is_one_a_uv_tool_aisquare_does_not_run_cannot_
 
     why = "PyPI lists no aisquare-cli 9.9.9"
     assert install_route.not_automated(route) is not None, "a route aisquare does not run"
-    assert "upgrade with" not in check.stdout, check.stdout
-    assert f"`{command}` cannot install it: {why}" in check.stdout, check.stdout
+    assert f"upgrade with: {command}" in check.stdout, check.stdout
+    assert f"({why}: the command finds it only on an index set up for it)" in check.stdout
+    assert "cannot install it" not in check.stdout, check.stdout
     assert check.stdout.count(why) == 1, check.stdout

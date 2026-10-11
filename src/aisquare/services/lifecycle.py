@@ -326,9 +326,10 @@ class UpgradePlan:
     """Whether :attr:`reason` is that ``--version`` cannot pick a release for this route
     (``install_route.pin_refusal``): Homebrew's, a checkout's or a local source's."""
     pin_unmet: str | None = None
-    """Why ``--version``'s release cannot be installed here, when ``--check`` found so: the
-    reinstall's Python, or the uv cutoff, excludes it. It is :attr:`reason` too when the
-    route is otherwise one ``aisquare upgrade`` runs."""
+    """Why ``--version``'s release may not be installed here, when ``--check`` found so: the
+    reinstall's Python, or the uv cutoff, excludes it, or PyPI does not list it. The first
+    two are :attr:`reason` too when the route is otherwise one ``aisquare upgrade`` runs;
+    an index set up for it may list what PyPI does not."""
 
     @property
     def runnable(self) -> bool:
@@ -458,9 +459,13 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         latest = _latest_for(route, target)
         if target is not None:
             pin_unmet = _pin_unmet(route, target, latest)
-        # uv refuses that pin, and the run named it again (review of #257's fixes). A route
-        # aisquare does not run keeps its own reason and command (a later review).
-        reason = reason or pin_unmet
+        # uv refuses a pin its Python or its cutoff excludes, and the run named it again
+        # (review of #257's fixes). A route aisquare does not run keeps its own reason and
+        # command (a later review). Not a pin PyPI does not list: `uv tool install` also
+        # reads an index its receipt does not record (uv.toml, UV_INDEX_URL), as
+        # `_as_recorded` says, and that index may list it (round 20).
+        if not latest.pin_unlisted:
+            reason = reason or pin_unmet
     refresh: tuple[HookSite, ...] = ()
     left: tuple[HookSite, ...] = ()
     live: tuple[str, ...] = ()

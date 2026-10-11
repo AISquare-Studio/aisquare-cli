@@ -1276,19 +1276,6 @@ def pin_refusal(route: InstallRoute, target: str) -> str | None:
     return None
 
 
-def resolves_from_pypi(route: InstallRoute) -> bool:
-    """Whether this route's command is known to find releases on pypi.org alone, so a pin
-    PyPI does not list is one it cannot install.
-
-    A uv tool's is: it restates every index its receipt records, and a recorded one keeps
-    PyPI from being asked at all (``lifecycle._held_back``). pip, pipx and uvx read an index
-    of their own (``PIP_INDEX_URL``, ``pip.conf``, pipx's default index, ``uv.toml``) that
-    this CLI does not, and "cannot install it" said so of a command that would have
-    installed a release only a company index carries (review of #257).
-    """
-    return route.receipt is not None
-
-
 def _windows_blocker(route: InstallRoute, verb: str) -> str | None:
     """Why Windows rules out a self-``verb`` (``replace``, ``remove``), or ``None``."""
     if route.facts.platform != "win32":

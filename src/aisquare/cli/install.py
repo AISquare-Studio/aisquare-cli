@@ -107,6 +107,13 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
         return
     _say(f"aisquare {plan.current} — {plan.route.describe()}")
     _say(_latest_line(plan))
+    # A release PyPI does not list may be on an index the command reads and this CLI does
+    # not: PIP_INDEX_URL, pip.conf, pipx's default index, uv.toml, UV_INDEX_URL. Every
+    # route's, a uv tool's too, whose receipt does not record an index set in uv's own
+    # settings: "cannot install it" withheld a command that would have worked (reviews of
+    # #257, round 20 for the uv tool).
+    unlisted = plan.latest is not None and plan.latest.pin_unlisted
+    index_only = f"({plan.pin_unmet}: the command finds it only on an index set up for it)"
     if plan.pin_unmet is not None and plan.reason == plan.pin_unmet:
         # Not "upgrade with" a pin uv refuses here (review of #257's fixes).
         _say(f"`aisquare upgrade --version {plan.target}` cannot install it: {plan.pin_unmet}")
@@ -126,6 +133,8 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
             return
         pin = f" --version {plan.target}" if plan.target else ""
         _say(f"upgrade with: aisquare upgrade{pin}")
+        if unlisted:
+            _say(index_only)
     else:
         checkout = plan.route.kind in (install_route.EDITABLE, install_route.LOCAL_SOURCE)
         if plan.up_to_date and (plan.target is not None or not checkout):
@@ -135,23 +144,14 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
             # of the version that runs is that version on every route (a later review).
             _say("nothing to upgrade")
             return
-        unlisted = plan.latest is not None and plan.latest.pin_unlisted
         if plan.pin_refused:
             # Not "upgrade with" a command that installs another version (a later review).
             _say(plan.reason or "")
-        elif unlisted and install_route.resolves_from_pypi(plan.route):
-            # A release PyPI does not list, on a route that asks PyPI alone: its command can
-            # only fail, where a Requires-Python miss may not, on another Python (review of
-            # #257).
-            _say(f"`{plan.command}` cannot install it: {plan.pin_unmet}")
-            return
         else:
             _say(f"upgrade with: {plan.command}")
             _say(f"(`aisquare upgrade` does not run it: {plan.reason})")
             if unlisted:
-                # pip, pipx and uvx may be set up with an index that lists it: "cannot
-                # install it" withheld a command that would have worked (a later review).
-                _say(f"({plan.pin_unmet}: the command finds it only on an index set up for it)")
+                _say(index_only)
                 return
         if plan.pin_unmet is not None:
             _say(f"({plan.pin_unmet})")

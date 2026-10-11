@@ -834,7 +834,8 @@ def test_posix_quoting_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     exe = "/opt/my tools/bin/aisquare"
     monkeypatch.setattr("aisquare.core.agents.sys.argv", ["pytest"])
     monkeypatch.setattr("aisquare.core.agents.shutil.which", lambda _name: exe)
-    monkeypatch.setattr(agents, "_starts", lambda program: str(program) == exe)
+    # Paths compared, not strings: on Windows str(Path(exe)) has backslashes.
+    monkeypatch.setattr(agents, "_starts", lambda program: Path(program) == Path(exe))
 
     command = agents._aisquare_command()
 

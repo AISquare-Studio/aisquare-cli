@@ -2677,5 +2677,10 @@ def test_a_purge_waits_for_a_project_mcp_json_server_that_fetches_aisquare(
     ], plan.mcp
     refused = _one_object(purge.stdout)
     assert (purge.exit_code, refused["error"]) == (1, "mcp_registered"), refused
-    assert f"cd '{repo}' && claude mcp remove --scope project memory" in refused["detail"], refused
+    remedy = (
+        f"claude mcp remove --scope project memory (run it in {repo})"
+        if sys.platform == "win32"  # no `cd … &&` in PowerShell 5.1: the folder is said after
+        else f"cd '{repo}' && claude mcp remove --scope project memory"
+    )
+    assert remedy in refused["detail"], refused
     assert _snapshot(tmp_path) == before and world.events == [], "nothing touched"

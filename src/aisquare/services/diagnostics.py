@@ -227,24 +227,6 @@ def _check_python() -> DoctorCheck:
 _GLOBAL_INSTALL = f"pipx install {DISTRIBUTION} (or: uv tool install {DISTRIBUTION})"
 
 
-def _is_this_install(binary: str) -> bool:
-    """Whether the ``aisquare`` found on PATH is the console script beside THIS interpreter.
-
-    Paths alone, no process: the file itself, or the same file through a link
-    (uv's ``~/.local/bin/aisquare``). The venv case this exists for is exact:
-    ``activate`` puts ``<venv>/bin`` first on PATH, and
-    :func:`agent_core.current_install` is ``<venv>/bin/aisquare``.
-    """
-    program = Path(binary)
-    this = agent_core.current_install()
-    if program == this:
-        return True
-    try:
-        return os.path.realpath(program) == os.path.realpath(this)
-    except OSError:
-        return False
-
-
 def _route_of_this_process() -> install_route.InstallRoute | None:
     """How THIS process was installed, or ``None`` when that cannot be read.
 
@@ -284,7 +266,11 @@ def _check_install() -> DoctorCheck:
             f"Install as a global tool: {_GLOBAL_INSTALL}",
         )
     if {".venv", "venv"} & set(Path(binary).parts):
-        route = _route_of_this_process() if _is_this_install(binary) else None
+        # Paths alone, the hooks' own rule (`_same_install`): the file itself, or the same
+        # file through a link (uv's ~/.local/bin/aisquare). One copy, so this row and the
+        # claude-code row cannot disagree about one aisquare (review of #257).
+        this = agent_core._same_install(agent_core.HookBinary(Path(binary)))
+        route = _route_of_this_process() if this else None
         if route is not None and route.kind != install_route.VENV:
             return _ok("install", f"aisquare at {binary} — {route.describe()}")
         return _warn(

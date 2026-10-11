@@ -387,6 +387,26 @@ def test_install_row_keeps_the_advice_for_a_venv_that_is_not_this_process(
     assert f"pipx install {DISTRIBUTION}" in (row.fix or "")
 
 
+@pytest.mark.parametrize("same", [True, False], ids=["this-install", "another-install"])
+def test_install_row_asks_the_hooks_rule_whether_the_program_is_this_install(
+    monkeypatch: pytest.MonkeyPatch, same: bool
+) -> None:
+    """One rule for "is this program THIS install", ``agent_core._same_install``: the
+    install row kept a copy of it, so a fix to the hooks' rule never reached the row and
+    the two rows could disagree about one ``aisquare`` (review of #257)."""
+    _venv_first_on_path(monkeypatch, _route(install_route.EDITABLE, source="/home/u/proj"))
+    asked: list[Path] = []
+
+    def same_install(binary: agent_core.HookBinary) -> bool:
+        asked.append(binary.program)
+        return same
+
+    monkeypatch.setattr(agent_core, "_same_install", same_install)
+    row = diagnostics._check_install()
+    assert asked == [_VENV / "bin" / "aisquare"]
+    assert row.status is (CheckStatus.ok if same else CheckStatus.warn), row
+
+
 def test_install_row_never_fails_on_a_route_it_cannot_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

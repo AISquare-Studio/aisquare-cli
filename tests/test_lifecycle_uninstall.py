@@ -2448,8 +2448,11 @@ def test_the_docs_say_when_uninstall_removes_the_package_as_the_code_decides(
         ("uvx", ["--from", "aisquare-cli", "aisquare", "serve"]),
         ("/opt/homebrew/bin/uv", ["tool", "run", "--from", "aisquare-cli", "aisquare", "serve"]),
         ("pipx", ["run", "--spec", "aisquare-cli", "aisquare", "serve"]),
+        ("uv", ["run", "--with", "aisquare-cli", "aisquare", "serve", "--stdio"]),
+        ("uv", ["--offline", "tool", "run", "--from", "aisquare-cli", "aisquare", "serve"]),
+        ("pipx", ["--verbose", "run", "--spec", "aisquare-cli", "aisquare", "serve"]),
     ],
-    ids=["uvx", "uv-tool-run", "pipx-run"],
+    ids=["uvx", "uv-tool-run", "pipx-run", "uv-run-with", "uv-option-tool-run", "pipx-option-run"],
 )
 def test_a_purge_waits_for_an_mcp_server_that_fetches_aisquare(
     tool: Tool,
@@ -2486,3 +2489,95 @@ def test_a_purge_waits_for_an_mcp_server_that_fetches_aisquare(
     assert untouched, "refused before anything is touched"
     assert control.exit_code == 0, control.output
     assert not paths.aisquare_home().exists(), "control: the installed program cannot restart"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--with=aisquare-cli[serve]>=0.8", "run", "aisquare", "serve"],
+        ["run", "-w", "requests,aisquare_cli", "aisquare", "serve"],
+        ["run", "-waisquare-cli", "python", "-m", "aisquare", "serve"],
+    ],
+    ids=["with-equals", "w-list", "w-glued-module"],
+)
+def test_uv_run_fetches_aisquare_when_with_names_it_in_any_spelling(args: list[str]) -> None:
+    """clap takes `--with X`, `--with=X`, `-w X` and `-wX`, a comma-separated list in each,
+    and the distribution's name as PEP 503 normalises it."""
+    assert lifecycle._fetches_aisquare({"command": "uv", "args": args})
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("uv", ["run", "aisquare", "serve"]),
+        ("uv", ["run", "--with", "requests", "aisquare", "serve"]),
+        ("uv", ["run", "aisquare", "serve", "--with", "aisquare-cli"]),
+        ("/usr/local/bin/aisquare", ["serve", "--stdio"]),
+        ("python3", ["-m", "aisquare", "serve"]),
+    ],
+    ids=["uv-run", "uv-run-with-other", "with-after-the-program", "installed", "module"],
+)
+def test_a_runner_that_does_not_fetch_aisquare_is_not_read_as_one(
+    command: str, args: list[str]
+) -> None:
+    """`uv run` without a `--with` naming aisquare runs the project's or PATH's program, and
+    the arguments after the program are its own: each fails once the package is gone."""
+    assert not lifecycle._fetches_aisquare({"command": command, "args": args})
+
+
+def test_a_purge_waits_for_a_project_mcp_json_server_that_fetches_aisquare(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+) -> None:
+    """A repository's committed `.mcp.json` starts its servers in every session there, and no
+    project's was read: one running aisquare through uvx made the purged home again (review
+    of #257). Refused with the project-scope removal, run inside the repository; a server
+    the operator declined there never starts, and a repository reached twice is read once."""
+    _initialised(runner, tmp_path)
+    repo = tmp_path / "work" / "my repo"
+    declined = tmp_path / "work" / "declined"
+    for where in (repo, declined):
+        where.mkdir(parents=True)
+        (where / ".mcp.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "memory": {"command": "uvx", "args": ["--from", "aisquare-cli", "aisquare"]}
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+    linked = tmp_path / "work" / "linked"
+    linked.symlink_to(repo, target_is_directory=True)
+    claude_json = isolated_agent_home / ".claude.json"
+    claude_json.parent.mkdir(parents=True, exist_ok=True)
+    claude_json.write_text(
+        json.dumps(
+            {
+                "projects": {
+                    str(repo): {},
+                    str(linked): {},
+                    str(declined): {"disabledMcpjsonServers": ["memory"]},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = _snapshot(tmp_path)
+
+    plan = lifecycle.uninstall_plan(purge=True)
+    purge = runner.invoke(app, ["--json", "uninstall", "--yes", "--purge"])
+
+    assert [(entry.name, entry.project, entry.shared) for entry in plan.mcp] == [
+        ("memory", str(repo), True)
+    ], plan.mcp
+    refused = _one_object(purge.stdout)
+    assert (purge.exit_code, refused["error"]) == (1, "mcp_registered"), refused
+    assert f"cd '{repo}' && claude mcp remove --scope project memory" in refused["detail"], refused
+    assert _snapshot(tmp_path) == before and world.events == [], "nothing touched"

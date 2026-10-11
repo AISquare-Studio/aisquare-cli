@@ -1017,8 +1017,11 @@ class McpRegistration:
     ``~/.claude.json``, which it reads with that variable unset."""
     fetches: bool = False
     """Whether it runs aisquare through a runner that fetches the package (``uvx``,
-    ``uv tool run``, ``pipx run``), so it still starts once the package is gone and
-    makes the home again (:func:`_fetches_aisquare`)."""
+    ``uv tool run``, ``uv run --with``, ``pipx run``), so it still starts once the
+    package is gone and makes the home again (:func:`_fetches_aisquare`)."""
+    shared: bool = False
+    """A project-scope entry: ``file`` is the repository's own ``.mcp.json``, which
+    ``claude mcp remove --scope project`` edits from inside ``project``."""
 
 
 @dataclass(frozen=True)
@@ -1335,24 +1338,76 @@ def _runs_aisquare(spec: object) -> bool:
     return False
 
 
+#: A requirement's name at the start of a ``--with`` item (``aisquare-cli[x]>=0.8``,
+#: ``aisquare_cli @ https://…``), compared as PEP 503 normalises it.
+_REQUIREMENT_NAME = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def _names_aisquare(requirements: str) -> bool:
+    """Whether a ``uv run --with`` value (comma-separated requirements) asks for aisquare."""
+    for item in requirements.split(","):
+        match = _REQUIREMENT_NAME.match(item)
+        if match is not None and re.sub(r"[-_.]+", "-", match.group(1)).lower() == DISTRIBUTION:
+            return True
+    return False
+
+
+def _with_values(tokens: list[str]) -> list[str]:
+    """The values of ``uv run``'s ``--with``/``-w`` among ``tokens``, in each spelling clap
+    takes: ``--with X``, ``--with=X``, ``-w X``, ``-w=X``, ``-wX``."""
+    values: list[str] = []
+    for index, token in enumerate(tokens):
+        if token in ("--with", "-w"):
+            values.extend(tokens[index + 1 : index + 2])
+        elif token.startswith("--with="):
+            values.append(token.removeprefix("--with="))
+        elif token.startswith("-w") and not token.startswith("--"):
+            values.append(token[2:].removeprefix("="))
+    return values
+
+
 def _fetches_aisquare(spec: object) -> bool:
     """Whether an ``mcpServers`` entry that runs aisquare (:func:`_runs_aisquare`) runs it
-    through ``uvx``, ``uv tool run`` or ``pipx run``, which fetch the package when it is
-    not installed, so the server outlives an uninstall."""
+    through a runner that fetches the package when it is not installed, so the server
+    outlives an uninstall: ``uvx``, ``uv tool run``, ``uv run --with aisquare-cli`` and
+    ``pipx run``.
+
+    The subcommand is looked for among the arguments BEFORE the program (the bare
+    ``aisquare`` or ``-m aisquare`` :func:`_runs_aisquare` reads), not at a fixed
+    position: uv and pipx take their own options first, so ``uv --offline tool run``
+    and ``pipx --verbose run`` read as other commands, and the purge they undo went
+    ahead (review of #257). ``uv run`` fetches only what ``--with`` names; without it
+    the program comes from the project or PATH, as an installed one does.
+    """
     if not isinstance(spec, dict) or not isinstance(spec.get("command"), str):
         return False
     program = PureWindowsPath(spec["command"]).name.lower().removesuffix(".exe")
     args = spec.get("args")
-    first = [str(arg) for arg in args[:2]] if isinstance(args, list) else []
-    return (
-        program == "uvx"
-        or (program == "uv" and first == ["tool", "run"])
-        or (program == "pipx" and first[:1] == ["run"])
+    tokens = [str(arg) for arg in args] if isinstance(args, list) else []
+    end = next(
+        (
+            index
+            for index, token in enumerate(tokens)
+            if token.lower() in _PROGRAM_NAMES
+            or (token == "-m" and tokens[index + 1 : index + 2] == ["aisquare"])
+        ),
+        len(tokens),
     )
+    before = tokens[:end]
+    if program == "uvx":
+        return True
+    if program == "pipx":
+        return "run" in before
+    if program != "uv":
+        return False
+    if any(before[index : index + 2] == ["tool", "run"] for index in range(len(before))):
+        return True
+    return "run" in before and any(_names_aisquare(value) for value in _with_values(before))
 
 
 def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ...]:
-    """aisquare's MCP servers in every ``.claude.json`` these directories use — read only.
+    """aisquare's MCP servers in every ``.claude.json`` these directories use, and in the
+    ``.mcp.json`` of every project those list (:func:`_project_registrations`) — read only.
 
     Listed, never edited: ``.claude.json`` is Claude Code's own file, rewritten by
     every running session, and a second writer racing them is how a login gets
@@ -1360,6 +1415,7 @@ def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ..
     """
     found: list[McpRegistration] = []
     read: set[Path] = set()
+    listed: dict[str, list[dict[str, Any]]] = {}
     default = agent_core.dir_identity(accounts_core.home_config_dir().parent / ".claude.json")
     for directory in directories:
         for spelled in agent_core.claude_json_paths(directory):
@@ -1395,7 +1451,10 @@ def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ..
             if not isinstance(projects, dict):
                 continue
             for project, block in projects.items():
-                servers = block.get("mcpServers") if isinstance(block, dict) else None
+                if not isinstance(block, dict):
+                    continue
+                listed.setdefault(str(project), []).append(block)
+                servers = block.get("mcpServers")
                 if isinstance(servers, dict):
                     found.extend(
                         McpRegistration(
@@ -1404,11 +1463,59 @@ def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ..
                         for name, spec in servers.items()
                         if _runs_aisquare(spec)
                     )
+    found.extend(_project_registrations(listed))
     return tuple(found)
 
 
+def _project_registrations(
+    listed: dict[str, list[dict[str, Any]]],
+) -> list[McpRegistration]:
+    """aisquare's MCP servers in the ``.mcp.json`` of every project a ``.claude.json``
+    lists (``listed``: each project's blocks, from every file read) — project scope.
+
+    A repository's committed ``.mcp.json`` starts its servers in every session there,
+    and none of them was read: one running aisquare through ``uvx`` made the purged
+    home again at the next session in that repository (review of #257). A server the
+    operator declined there never starts and is left out, read as the doctor reads it
+    (``diagnostics._declined_project_servers``): named in a block's
+    ``disabledMcpjsonServers`` and in none's ``enabledMcpjsonServers``. A project
+    reached under two spellings is one file, read once.
+    """
+    found: list[McpRegistration] = []
+    read: set[Path] = set()
+    for project, blocks in listed.items():
+        if not Path(project).is_absolute():
+            continue  # another platform's path, or none: read here, it would name the cwd's
+        path = agent_core.dir_identity(Path(project) / ".mcp.json")
+        if path in read:
+            continue
+        read.add(path)
+        servers = agent_core.read_json(path).get("mcpServers")
+        if not isinstance(servers, dict):
+            continue
+        declined: set[str] = set()
+        approved: set[str] = set()
+        for block in blocks:
+            for field, sink in (
+                ("disabledMcpjsonServers", declined),
+                ("enabledMcpjsonServers", approved),
+            ):
+                names = block.get(field)
+                if isinstance(names, list):
+                    sink.update(str(name) for name in names)
+        found.extend(
+            McpRegistration(str(name), path, project, None, _fetches_aisquare(spec), shared=True)
+            for name, spec in servers.items()
+            if _runs_aisquare(spec) and str(name) not in declined - approved
+        )
+    return found
+
+
 def mcp_place(entry: McpRegistration) -> str:
-    """Where an MCP registration is: its ``.claude.json``, and the project it belongs to."""
+    """Where an MCP registration is: its ``.claude.json``, and the project it belongs to;
+    a project-scope one's ``.mcp.json``, which names the project itself."""
+    if entry.shared:
+        return str(entry.file)
     return str(entry.file) + (f", project {entry.project}" if entry.project else "")
 
 
@@ -1417,7 +1524,8 @@ def mcp_removal(entry: McpRegistration) -> str:
     ``.claude.json`` that holds it, and for a project's entry run from inside the project.
 
     ``claude mcp remove`` acts on the file ``CLAUDE_CONFIG_DIR`` names (``~/.claude.json``
-    when it is unset), and its local scope is the project it runs in. Bare, it answered
+    when it is unset), and its local scope is the project it runs in; its project scope
+    is that project's ``.mcp.json``, whatever the variable names. Bare, it answered
     "No MCP server named …" for a project's entry run from elsewhere and for one in
     another config dir, and left both (measured on Claude Code 2.1.296, review of #257).
     Built as :func:`agent_core.claude_plugin_command` builds the plugin's: nothing for
@@ -1426,11 +1534,18 @@ def mcp_removal(entry: McpRegistration) -> str:
     Native Windows has no ``env -u``, ``VAR=value command`` or (in PowerShell 5.1)
     ``&&``, so there the folder and the variable the command needs are said after it.
     """
-    scope = "user" if entry.project is None else "local"
+    scope = "project" if entry.shared else "user" if entry.project is None else "local"
     command = install_route.command_line(["claude", "mcp", "remove", "--scope", scope, entry.name])
     ambient = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     here = agent_core.dir_identity(Path(ambient)) if ambient else None
-    there = None if entry.config_dir is None else agent_core.dir_identity(entry.config_dir)
+    if entry.shared:
+        # Project scope is the `.mcp.json` of the directory it runs in, whatever config dir
+        # the shell names: only the project is needed.
+        there = here
+    elif entry.config_dir is None:
+        there = None
+    else:
+        there = agent_core.dir_identity(entry.config_dir)
     if sys.platform == "win32":
         needs = [] if entry.project is None else [f"in {entry.project}"]
         if there != here:

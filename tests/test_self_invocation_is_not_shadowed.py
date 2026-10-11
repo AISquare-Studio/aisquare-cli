@@ -146,6 +146,7 @@ def test_the_hook_fallback_carries_the_flag_and_still_round_trips(
     monkeypatch.setattr("aisquare.core.agents.sys.platform", "linux")
     monkeypatch.setattr("aisquare.core.agents.sys.argv", ["pytest"])
     monkeypatch.setattr("aisquare.core.agents.shutil.which", lambda _name: None)
+    monkeypatch.setattr(agents, "_starts", lambda _program: False)  # no console script beside
 
     command = agents._aisquare_command()
 

@@ -198,7 +198,12 @@ def _aisquare_command() -> str:
 
     The running executable wins: whoever installs hooks is the aisquare the
     hooks should call, even when it was invoked as ``.venv/bin/aisquare``
-    without being on PATH. Falls back to PATH lookup, then to ``python -P -m
+    without being on PATH. Run as ``python -m aisquare`` (every button that
+    runs the CLI, through :mod:`selfcli`), that is the console script beside
+    this interpreter (:func:`current_install`), then PATH lookup; either only
+    when it can start (:func:`_starts`), or a stale install first on PATH whose
+    Python is gone was written back and Connect never cleared "cannot start"
+    (review of #257). Then ``python -P -m
     aisquare`` via the current interpreter (:func:`selfcli.argv_for`, so the
     ``-P`` that keeps a project's own ``aisquare/`` off ``sys.path`` has one
     home — #81) — never to a bare name a hook shell might not resolve. A flag
@@ -208,8 +213,11 @@ def _aisquare_command() -> str:
     argv0 = Path(sys.argv[0])
     if _is_aisquare_program(argv0.name) and argv0.exists():
         return _quote(str(argv0.resolve()))
+    installed = current_install()
+    if _starts(installed):
+        return _quote(str(installed))
     found = shutil.which("aisquare")
-    if found:
+    if found and _starts(Path(found)):
         return _quote(found)
     return " ".join(_quote(part) for part in selfcli.argv_for([]))
 

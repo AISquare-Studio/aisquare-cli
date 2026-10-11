@@ -413,7 +413,7 @@ def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Hooks written by ``agents connect`` under the suite name whatever
     ``_aisquare_command`` resolves: the console script beside this interpreter
-    when PATH has it, otherwise the machine's ``aisquare`` — a pyenv shim on the
+    when there is one, otherwise the machine's ``aisquare`` — a pyenv shim on the
     author's box. Which one is ambient state, and running it would grade the
     developer's PATH rather than this tree. Same shape as ``no_repomix`` below.
     Tests of the probe itself capture the real function at import and call it

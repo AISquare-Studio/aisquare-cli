@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +12,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import agents
+from aisquare.core import agents, selfcli
 
 
 @pytest.fixture(autouse=True)
@@ -180,6 +182,7 @@ def test_hook_commands_are_never_a_bare_name(
     fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(fake_bin)])
     monkeypatch.setattr("aisquare.core.agents.shutil.which", lambda _: None)
+    monkeypatch.setattr(agents, "current_install", lambda: tmp_path / "no-venv" / "aisquare")
     result = runner.invoke(app, ["agents", "connect", "claude-code"])
     assert result.exit_code == 0, result.output
     settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
@@ -506,6 +509,7 @@ def test_windows_hook_commands_are_not_posix_quoted(monkeypatch: pytest.MonkeyPa
     exe = r"C:\Python312\Scripts\aisquare.EXE"
     monkeypatch.setattr("aisquare.core.agents.sys.argv", ["pytest"])
     monkeypatch.setattr("aisquare.core.agents.shutil.which", lambda _name: exe)
+    monkeypatch.setattr(agents, "_starts", lambda program: str(program) == exe)
 
     command = agents._aisquare_command()
 
@@ -523,6 +527,7 @@ def test_windows_hook_commands_round_trip_through_the_matcher(
     """
     _win32(monkeypatch)
     monkeypatch.setattr("aisquare.core.agents.sys.argv", ["pytest"])
+    monkeypatch.setattr(agents, "_starts", lambda program: "Python312" in str(program))
     for exe in (
         r"C:\Python312\Scripts\aisquare.EXE",
         r"C:\Program Files\Python312\Scripts\asq.exe",  # a path needing quotes
@@ -557,12 +562,52 @@ def test_windows_still_ignores_third_party_hooks(monkeypatch: pytest.MonkeyPatch
         assert not agents._is_aisquare_hook_command(command), command
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a #! interpreter is a POSIX shape")
+@pytest.mark.parametrize("installed", [True, False], ids=["this-install", "none-beside-it"])
+def test_connect_run_as_a_module_never_writes_back_a_program_that_cannot_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, installed: bool
+) -> None:
+    """Every button runs the CLI as `python -P -m aisquare`, so argv0 is not a console
+    script and PATH was asked: a stale install first on it, whose Python is gone, was
+    written back, and Connect never cleared "cannot start" (review of #257). The console
+    script beside this interpreter comes first, then PATH, each only when it can start."""
+    dead = tmp_path / "stale" / "bin" / "aisquare"
+    dead.parent.mkdir(parents=True)
+    dead.write_text(f"#!{tmp_path / 'gone' / 'python3.11'}\n", encoding="utf-8")
+    dead.chmod(0o755)
+    here = tmp_path / "venv" / "bin" / "aisquare"
+    if installed:
+        here.parent.mkdir(parents=True)
+        here.write_text("#!/bin/sh\n", encoding="utf-8")
+        here.chmod(0o755)
+    monkeypatch.setattr("aisquare.core.agents.sys.platform", "linux")
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", ["/x/aisquare/__main__.py"])
+    monkeypatch.setattr(agents, "current_install", lambda: here)
+    which: dict[str, str] = {"aisquare": str(dead)}
+    monkeypatch.setattr("aisquare.core.agents.shutil.which", which.get)
+
+    command = agents._aisquare_command()
+    alive = tmp_path / "live" / "aisquare"
+    alive.parent.mkdir()
+    alive.write_text("#!/bin/sh\n", encoding="utf-8")
+    alive.chmod(0o755)
+    monkeypatch.setattr(agents, "current_install", lambda: tmp_path / "no-venv" / "aisquare")
+    which["aisquare"] = str(alive)
+    control = agents._aisquare_command()
+
+    module_form = " ".join(shlex.quote(part) for part in selfcli.argv_for([]))
+    assert command == (str(here) if installed else module_form), command
+    assert str(dead) not in command
+    assert control == str(alive), "control: a PATH program that can start is still used"
+
+
 def test_posix_quoting_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     """The POSIX path must keep quoting exactly as before."""
     monkeypatch.setattr("aisquare.core.agents.sys.platform", "linux")
     exe = "/opt/my tools/bin/aisquare"
     monkeypatch.setattr("aisquare.core.agents.sys.argv", ["pytest"])
     monkeypatch.setattr("aisquare.core.agents.shutil.which", lambda _name: exe)
+    monkeypatch.setattr(agents, "_starts", lambda program: str(program) == exe)
 
     command = agents._aisquare_command()
 

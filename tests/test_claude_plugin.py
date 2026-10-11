@@ -390,8 +390,9 @@ def test_it_stands_down_where_agents_connect_installed_the_hooks(
         program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         program.chmod(0o755)
         monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(program)])
-    else:  # no aisquare runs connect or is on PATH: this interpreter's -P -m aisquare
+    else:  # no aisquare runs connect, sits beside it or is on PATH: -P -m aisquare
         monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(machine.home / "pytest")])
+        monkeypatch.setattr(agent_core, "current_install", lambda: machine.home / "no-venv")
         monkeypatch.setenv("PATH", str(machine.tools))
     assert agent_core.install_hooks("claude-code", claude)
     written = agent_core.hook_commands("claude-code", claude)

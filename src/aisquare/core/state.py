@@ -16,6 +16,22 @@ class RuntimeState:
     no_color: bool = False
 
 
+FLAGS: dict[str, str] = {
+    "no_color": "--no-color",
+    "verbose": "--verbose",
+    "quiet": "--quiet",
+    "json_output": "--json",
+    "profile": "--profile",
+}
+"""The flag that sets each :class:`RuntimeState` field, by field.
+
+The root callback (``cli.app.main_callback``) and every command
+(``cli.global_flags``) declare them, and ``selfcli.global_flags`` gives them back to
+the command it hands the terminal to. tests/test_global_flags.py ties all three to
+this table and this table to the fields, so a flag added to the first two and left
+out here fails there, not by being dropped on every hand-over."""
+
+
 _state = RuntimeState()
 
 

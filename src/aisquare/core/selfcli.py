@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
-from aisquare.core.state import get_state
+from aisquare.core.state import FLAGS, RuntimeState, get_state
 
 
 @dataclass(frozen=True)
@@ -126,17 +126,17 @@ def global_flags() -> list[str]:
     ``aisquare --no-color ui``, Update printed its plan and its y/N in colour, and the
     asq it reopened had lost ``--profile`` too, back on ``default`` (round 21 of #257).
     ``--json`` is not one: neither asq nor ``--reopen`` hands over under it.
+
+    Every other field of the state, read through ``state.FLAGS``, the one table of the
+    flags: kept here by hand, a third list of them would drop the next flag silently
+    (round 22). Each one given goes back as itself, a value as ``--flag=VALUE`` so a
+    profile named like a flag survives.
     """
-    state = get_state()
-    flags = [
-        flag
-        for flag, given in (
-            ("--no-color", state.no_color),
-            ("--verbose", state.verbose),
-            ("--quiet", state.quiet),
-        )
-        if given
-    ]
-    if state.profile != "default":
-        flags.append(f"--profile={state.profile}")
+    state, unset = get_state(), RuntimeState()
+    flags: list[str] = []
+    for field, flag in FLAGS.items():
+        value = getattr(state, field)
+        if field == "json_output" or value == getattr(unset, field):
+            continue
+        flags.append(flag if value is True else f"{flag}={value}")
     return flags

@@ -252,19 +252,20 @@ def test_a_script_whose_interpreter_is_gone_cannot_start_and_nothing_is_run(
     assert check.fix == f"aisquare agents connect claude-code --config-dir {config}"
 
 
-@pytest.mark.parametrize("quote", ['"', "'"], ids=["pip", "uv"])
+@pytest.mark.parametrize("quote", ['"', "", "'"], ids=["pip", "pip-long", "uv"])
 def test_a_trampoline_whose_python_is_gone_cannot_start_and_one_whose_python_is_there_can(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path, quote: str
 ) -> None:
     """Where the Python's path has a space or is long, pip and uv write ``#!/bin/sh`` and
     exec it from the next line. ``/bin/sh`` is there, so a script whose Python was gone
     "could start", and the hooks read as connected (review of #257): the Python it
-    execs is the interpreter judged."""
+    execs is the interpreter judged. pip quotes it only for a space, so a long path with
+    none is bare, and was read as no trampoline at all (round 18)."""
     if os.name == "nt":
         pytest.skip("a #! interpreter is a POSIX shape")
     _this_install(monkeypatch, tmp_path)
     _never_probe(monkeypatch)
-    venv = tmp_path / "my venv" / "bin"
+    venv = tmp_path / ("my venv" if quote else "v" * 130) / "bin"
     venv.mkdir(parents=True)
     python = venv / "python3"
     python.write_text("#!/bin/sh\n", encoding="utf-8")

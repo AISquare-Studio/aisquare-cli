@@ -812,7 +812,7 @@ def claude_repo_plugins(config_dir: Path | None = None) -> list[ClaudePlugin]:
     return found
 
 
-_TRAMPOLINE = re.compile(rb"""'''exec' (["'])([^"']*)\1""")
+_TRAMPOLINE = re.compile(rb"""'''exec' (?:(["'])([^"']*)\1|([^\s"']+)\s)""")
 
 
 def _starts(program: Path) -> bool:
@@ -839,10 +839,12 @@ def _starts(program: Path) -> bool:
     interpreter = Path(re.split(rb"[ \t]", line, maxsplit=1)[0].decode(errors="replace"))
     # pip and uv write a /bin/sh trampoline in place of #!<python> when that path has a
     # space or is over 127 bytes, and its second line execs the Python that must exist:
-    # '''exec' "<python>" "$0" "$@" (uv quotes it with ') (review of #257).
+    # '''exec' "<python>" "$0" "$@" (uv quotes it with '; pip quotes only a path with a
+    # space, so a long one is bare) (review of #257).
     trampoline = _TRAMPOLINE.match(second)
     if interpreter == Path("/bin/sh") and trampoline:
-        interpreter = Path(trampoline.group(2).decode(errors="replace"))
+        word = trampoline.group(2) if trampoline.group(1) else trampoline.group(3)
+        interpreter = Path(word.decode(errors="replace"))
     if not interpreter.is_absolute():
         return True
     return os.path.isfile(interpreter) and os.access(interpreter, os.X_OK)

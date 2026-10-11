@@ -64,7 +64,8 @@ _ours="\"command\" *: *\"$_program($_ws+-[^\"]*)?$_ws+hook$_ws+$event$_ws*\""
 # interpreter is checked; `#!/usr/bin/env python3` and binaries are trusted.
 # Where the Python's path has a space or is over 127 bytes, pip and uv write
 # #!/bin/sh and exec it from the second line, '''exec' "<python>" "$0" "$@"
-# (uv quotes it with '): that Python is the interpreter checked.
+# (uv quotes it with '; pip quotes only a path with a space, so a long one is
+# bare): that Python is the interpreter checked.
 _starts() {
     [ -f "$1" ] && [ -x "$1" ] || return 1
     _first=
@@ -89,6 +90,10 @@ _starts() {
             "$_a$_a${_a}exec$_a $_a"*)
                 _interp=${_second#"$_a$_a${_a}exec$_a $_a"}
                 _interp=${_interp%%"$_a"*}
+                ;;
+            "$_a$_a${_a}exec$_a "*)
+                _interp=${_second#"$_a$_a${_a}exec$_a "}
+                _interp=${_interp%%[	 ]*}
                 ;;
         esac
     fi

@@ -681,19 +681,23 @@ def test_it_grades_the_program_in_our_hook_not_the_first_on_its_line(
 
 
 # How a console script names its Python: on the #! line, or, where that path has a space
-# or is over 127 bytes, in the /bin/sh trampoline pip writes ("...") and uv writes ('...').
+# or is over 127 bytes, in the /bin/sh trampoline pip writes ("..." for a space, bare for
+# a long path) and uv writes ('...').
 SHAPES = {
     "shebang": "#!{python}\nexit 0\n",
     "pip-trampoline": "#!/bin/sh\n'''exec' \"{python}\" \"$0\" \"$@\"\n' '''\nexit 0\n",
+    "pip-long-trampoline": "#!/bin/sh\n'''exec' {python} \"$0\" \"$@\"\n' '''\nexit 0\n",
     "uv-trampoline": "#!/bin/sh\n'''exec' '{python}' \"$0\" \"$@\"\n' '''\nexit 0\n",
 }
+#: Where each shape's Python is: a trampoline's needs a space in its path, or length.
+_VENV = {"shebang": "venv", "pip-long-trampoline": "v" * 130}
 
 
 def _cannot_start(path: Path, shape: str = "shebang") -> Path:
     """An executable script whose interpreter is gone: a console script after its
     environment lost its Python (``uv python uninstall``, a removed ``python@3.x``)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    python = path.parent / ("my venv" if shape != "shebang" else "venv") / "gone" / "python"
+    python = path.parent / _VENV.get(shape, "my venv") / "gone" / "python"
     path.write_text(SHAPES[shape].format(python=python), encoding="utf-8")
     path.chmod(0o755)
     return path

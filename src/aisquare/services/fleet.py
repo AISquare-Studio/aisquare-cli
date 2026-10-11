@@ -50,7 +50,7 @@ from aisquare.core.config import (
     FleetRoleSettings,
     FleetSettings,
     load_config,
-    replacing_the_former_reviewer_default,
+    replacing_the_former_reviewer_default_first,
 )
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
@@ -1789,12 +1789,13 @@ def _replayed_args(role: str, spec: LaunchSpec) -> list[str]:
     built-in ``--restricted``, which removes Bash, and its spec recorded it, so after the
     upgrade ``fleet restart``, ``fleet switch`` and asq's Restart brought each one back
     with no shell, every time: changing the config file's default reached fresh spawns
-    alone (review of #257). A spec recorded since then (``recorded_by``) is replayed as
-    it is, so a ``--restricted`` chosen in today's config survives a restart.
+    alone (review of #257). Where it leads the list, as it does before the caller's own
+    arguments (round 19). A spec recorded since then (``recorded_by``) is replayed as it
+    is, so a ``--restricted`` chosen in today's config survives a restart.
     """
     args = list(spec.extra_args)
     if spec.recorded_by is None and role == "reviewer":
-        return replacing_the_former_reviewer_default(args)
+        return replacing_the_former_reviewer_default_first(args)
     return args
 
 

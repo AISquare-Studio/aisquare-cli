@@ -9677,6 +9677,50 @@ def test_a_reviewer_restarted_from_a_spec_0_7_0_recorded_gets_its_shell_back(
     assert "--restricted" in _command(tmux)
 
 
+@pytest.mark.parametrize(
+    ("role_args", "caller", "replayed"),
+    [
+        (["--restricted"], ["--model", "opus"], [*REVIEWER_ARGS, "--model", "opus"]),
+        ([], ["--model", "opus", "--restricted"], ["--model", "opus", "--restricted"]),
+    ],
+    ids=["role-default-then-callers", "callers-own-restricted"],
+)
+def test_a_0_7_0_reviewer_spawned_with_arguments_of_its_own_gets_its_shell_back(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    role_args: list[str],
+    caller: list[str],
+    replayed: list[str],
+) -> None:
+    """Round 19 of #257: a spec records the role's arguments, then the caller's, so 0.7.0's
+    `fleet spawn reviewer -- --model opus` recorded `--restricted --model opus`, and only a
+    spec of exactly `--restricted` was given today's arguments: that reviewer still came
+    back with no shell. The default leads the list; a `--restricted` the caller passed
+    after other arguments of its own is theirs, and is kept (the control)."""
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=role_args)})
+    agent = fleet_service.spawn(project, "reviewer", worktree=False, agent_args=caller).agent
+    assert agent.launch_spec is not None
+    assert agent.launch_spec.extra_args == [*role_args, *caller], "the role's, then the caller's"
+    legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
+    with store_session() as store:
+        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+
+    restarted = fleet_service.restart(project, agent.label).started
+
+    assert restarted.launch_spec is not None
+    assert restarted.launch_spec.extra_args == replayed
+    command = _command(tmux)
+    assert _flag(command, "--model") == "opus", "the caller's own arguments are kept"
+    assert ("--restricted" in command) == ("--restricted" in replayed)
+
+
 def test_a_replay_does_not_fall_back_onto_another_kind_of_program(
     tmux: FakeTmux,
     claude_on_path: Path,

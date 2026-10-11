@@ -297,11 +297,27 @@ _REVIEWER_ARGS_MIGRATED = "migrated_reviewer_args"
 def replacing_the_former_reviewer_default(args: Sequence[str]) -> list[str]:
     """``args``, or :data:`REVIEWER_ARGS` when they are exactly 0.6.0/0.7.0's reviewer default.
 
-    For what those releases wrote and nobody chose: a config file
-    (:func:`_replace_the_former_reviewer_default`) and a reviewer's launch spec, which a
-    restart replays (``services.fleet``).
+    For what those releases wrote in a config file and nobody chose
+    (:func:`_replace_the_former_reviewer_default`): there a longer list was chosen. A
+    launch spec is :func:`replacing_the_former_reviewer_default_first`'s.
     """
     return list(REVIEWER_ARGS) if list(args) == _FORMER_REVIEWER_ARGS else list(args)
+
+
+def replacing_the_former_reviewer_default_first(args: Sequence[str]) -> list[str]:
+    """``args`` with 0.6.0/0.7.0's reviewer default replaced by :data:`REVIEWER_ARGS` where it
+    leads them, the rest kept: for a reviewer's launch spec those releases recorded, which a
+    restart replays (``services.fleet``).
+
+    A spec records the role's ``extra_args`` followed by the caller's, so a reviewer
+    spawned with arguments of its own (``fleet spawn reviewer -- --model opus``) recorded
+    ``["--restricted", "--model", "opus"]``. Matched exactly, as a config file is, that
+    reviewer came back with no shell on every restart (round 19 of #257).
+    """
+    args = list(args)
+    if args[: len(_FORMER_REVIEWER_ARGS)] == _FORMER_REVIEWER_ARGS:
+        return [*REVIEWER_ARGS, *args[len(_FORMER_REVIEWER_ARGS) :]]
+    return args
 
 
 def _replace_the_former_reviewer_default(data: dict[str, Any]) -> None:

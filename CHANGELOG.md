@@ -145,8 +145,8 @@ and an aisquare that upgrades and uninstalls itself.**
   `aisquare config set` saved it) loads with today's, once: the next save
   records that, so `--restricted` set again afterwards is kept. A reviewer
   started under those releases is restarted (`fleet restart`, `fleet switch`,
-  Restart) with today's arguments too. A reviewer `extra_args` you wrote
-  yourself stays as written.
+  Restart) with today's arguments too, followed by any it was spawned with. A
+  reviewer `extra_args` you wrote yourself stays as written.
 
 ## [0.7.0] - 2026-09-25
 

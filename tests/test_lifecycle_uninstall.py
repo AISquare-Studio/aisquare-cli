@@ -254,6 +254,38 @@ def test_the_plan_names_the_logins_a_purge_would_delete(
     assert plan.home_exists and paths.db_path().name in plan.home_entries
 
 
+def test_the_plan_parses_each_slots_claude_json_once(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 23 of #257: the MCP scan parsed every slot's `.claude.json`, and the plan's list
+    of logins parsed it again for the email; such a file can reach tens of MB. The login is
+    taken from the scan's parse. The control: the login is still named."""
+    _initialised(runner, tmp_path)
+    slot = paths.claude_accounts_dir() / "2"
+    slot.mkdir(parents=True)
+    (slot / accounts_core.MARKER).write_text('{"slot": 2}', encoding="utf-8")
+    (slot / ".claude.json").write_text(
+        json.dumps({"oauthAccount": {"emailAddress": "dev@example.com"}}), encoding="utf-8"
+    )
+    real_loads = json.loads
+    parsed: list[str] = []
+
+    def loads(text: Any, *args: Any, **kwargs: Any) -> Any:
+        parsed.append(text)
+        return real_loads(text, *args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", loads)
+
+    plan = lifecycle.uninstall_plan()
+
+    assert plan.accounts == ("slot 2: dev@example.com",)
+    assert sum("dev@example.com" in text for text in parsed) == 1, "parsed once"
+
+
 def test_mcp_servers_that_run_aisquare_are_listed_and_never_edited(
     tool: Tool, world: World, runner: CliRunner, isolated_agent_home: Path
 ) -> None:

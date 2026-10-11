@@ -321,7 +321,12 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 def identity(account: ClaudeAccount) -> ClaudeIdentity | None:
     """The signed-in account, or ``None`` when the directory has no login recorded."""
-    data = _read_json(claude_json_path(account))
+    return identity_in(_read_json(claude_json_path(account)))
+
+
+def identity_in(data: Mapping[str, Any] | None) -> ClaudeIdentity | None:
+    """The signed-in account a parsed ``.claude.json`` records, or ``None``: for a reader
+    that has parsed the file for something else, which can be tens of MB."""
     if data is None:
         return None
     oauth = data.get("oauthAccount")

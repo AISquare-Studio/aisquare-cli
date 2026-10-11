@@ -20,7 +20,7 @@ import shutil
 import socket
 import sqlite3
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
@@ -41,7 +41,7 @@ from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxServer, TmuxUnavailable
 from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import current_project
-from aisquare.models import SetupReport
+from aisquare.models import ClaudeIdentity, SetupReport
 from aisquare.services import agents as agents_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import install_route, onboarding
@@ -1327,11 +1327,18 @@ def _account_dirs() -> list[Path]:
     return [child for child in children if os.path.isdir(child)]
 
 
-def _accounts_kept() -> tuple[str, ...]:
-    """The logins the home keeps in its account slots, as a person reads them."""
+def _accounts_kept(logins: Mapping[Path, ClaudeIdentity | None]) -> tuple[str, ...]:
+    """The logins the home keeps in its account slots, as a person reads them.
+
+    ``logins`` is the login in each ``.claude.json`` the MCP scan parsed
+    (:func:`_mcp_registrations`), which reads every slot's: such a file can reach tens of
+    MB, and read again here for an email, the plan parsed each twice (round 23 of #257).
+    A slot it did not read is read here.
+    """
     described: list[str] = []
     for account in accounts_core.managed_accounts():
-        identity = accounts_core.identity(account)
+        key = _file_identity(accounts_core.claude_json_path(account))
+        identity = logins[key] if key in logins else accounts_core.identity(account)
         who = identity.email if identity is not None else "not signed in"
         described.append(f"slot {account.slot}: {who}")
     retired = [d for d in _account_dirs() if ".removed-" in d.name]
@@ -1437,27 +1444,38 @@ def _fetches_aisquare(spec: object) -> bool:
     return "run" in before and any(_names_aisquare(value) for value in _with_values(before))
 
 
-def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ...]:
+def _file_identity(spelled: Path) -> Path:
+    """The file ``spelled`` reaches, links resolved, so one file reached two ways is one;
+    as spelled where pathlib cannot resolve it (a symlink loop raises RuntimeError on 3.11
+    and 3.12)."""
+    try:
+        return agent_core.dir_identity(spelled)
+    except (OSError, RuntimeError):
+        return spelled
+
+
+def _mcp_registrations(
+    directories: Iterable[Path],
+) -> tuple[tuple[McpRegistration, ...], dict[Path, ClaudeIdentity | None]]:
     """aisquare's MCP servers in every ``.claude.json`` these directories use, and in the
     ``.mcp.json`` of every project those list (:func:`_project_registrations`) — read only.
+    Beside them, the login each ``.claude.json`` read records, by :func:`_file_identity`,
+    for :func:`_accounts_kept`, so no file is parsed twice.
 
     Listed, never edited: ``.claude.json`` is Claude Code's own file, rewritten by
     every running session, and a second writer racing them is how a login gets
     lost. ``claude mcp remove`` is the tool that owns it.
     """
     found: list[McpRegistration] = []
+    logins: dict[Path, ClaudeIdentity | None] = {}
     read: set[Path] = set()
     listed: dict[str, list[dict[str, Any]]] = {}
     default = agent_core.dir_identity(accounts_core.home_config_dir().parent / ".claude.json")
     for directory in directories:
         for spelled in agent_core.claude_json_paths(directory):
             # The file itself: a slot linked to ~/.claude, or a ~/.claude* sibling that is a
-            # link, reaches it twice. Read as spelled where pathlib cannot resolve it (a
-            # symlink loop raises RuntimeError on 3.11 and 3.12); read_json fails open.
-            try:
-                path = agent_core.dir_identity(spelled)
-            except (OSError, RuntimeError):
-                path = spelled
+            # link, reaches it twice. read_json fails open.
+            path = _file_identity(spelled)
             if path in read:
                 continue
             read.add(path)
@@ -1472,6 +1490,7 @@ def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ..
             else:
                 reach = directory
             data = agent_core.read_json(path)
+            logins[path] = accounts_core.identity_in(data)
             servers = data.get("mcpServers")
             if isinstance(servers, dict):
                 found.extend(
@@ -1496,7 +1515,7 @@ def _mcp_registrations(directories: Iterable[Path]) -> tuple[McpRegistration, ..
                         if _runs_aisquare(spec)
                     )
     found.extend(_project_registrations(listed))
-    return tuple(found)
+    return tuple(found), logins
 
 
 def _project_registrations(
@@ -1815,18 +1834,19 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
     live, unlistened, fleet_error = running_fleet()
     custom = custom_home(home)
     claude_dirs = [*candidates, *_claude_dirs_for_mcp()]
+    mcp, logins = _mcp_registrations(claude_dirs)
     return UninstallPlan(
         route=route,
         hooks=tuple(hooks),
         unreadable=tuple(unreadable),
-        mcp=_mcp_registrations(claude_dirs),
+        mcp=mcp,
         package_argv=tuple(install_route.remove_argv(route)),
         package_env=install_route.installer_env(route),
         package_reason=install_route.not_removable(route),
         home=home,
         home_exists=_home_there(home)[0],
         home_entries=entries,
-        accounts=_accounts_kept(),
+        accounts=_accounts_kept(logins),
         keychain=accounts_core.keychain_platform(),
         purge=purge,
         purge_refusal=purge_refusal(home, custom=custom),

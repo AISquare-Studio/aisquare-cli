@@ -150,7 +150,10 @@ and an aisquare that upgrades and uninstalls itself.**
   `aisquare config set` saved it) loads with today's, once: the next save
   records that, so `--restricted` set again afterwards is kept. A reviewer
   started under those releases is restarted (`fleet restart`, `fleet switch`,
-  Restart) with today's arguments too, followed by any it was spawned with. A
+  Restart) with today's arguments too, followed by any it was spawned with;
+  where today's do not deny the editing tools (`extra_args = []`, say), that
+  restart adds the denial, because its record cannot tell the old default from
+  a `--restricted` it was spawned with, and a fresh spawn gets every tool. A
   reviewer `extra_args` you wrote yourself stays as written, and so do the
   arguments of a reviewer it started: one led by `--restricted` restarts
   without the shell, as a fresh spawn does.

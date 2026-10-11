@@ -310,9 +310,9 @@ def replacing_the_former_reviewer_default_first(
     """``args`` with 0.6.0/0.7.0's reviewer default replaced by ``today`` where it leads them,
     the rest kept: for a reviewer's launch spec those releases recorded, which a restart
     replays (``services.fleet``). ``today`` is the reviewer's ``extra_args`` in today's
-    config, so the restart and a fresh spawn launch with the same role arguments: replaced
-    by :data:`REVIEWER_ARGS` whatever the config said, a reviewer its operator gave every
-    tool (``extra_args = []``) or ``--model opus`` came back without them (round 21).
+    config, so the restart launches with the role arguments a fresh spawn does: replaced
+    by :data:`REVIEWER_ARGS` alone whatever the config said, a reviewer its operator gave
+    ``--model opus`` came back without it (round 21).
 
     A spec records the role's ``extra_args`` followed by the caller's, so a reviewer
     spawned with arguments of its own (``fleet spawn reviewer -- --model opus``) recorded
@@ -325,12 +325,21 @@ def replacing_the_former_reviewer_default_first(
     ``--restricted`` still leading it was chosen, and the spec is replayed as recorded.
     Replaced regardless, a reviewer its operator kept from the shell got one on restart
     while a fresh spawn did not (round 20).
+
+    Nor can it tell the default from a ``--restricted`` the caller gave first (``fleet
+    spawn reviewer -- --restricted`` under ``extra_args = []``). So where ``today`` does
+    not deny the editing tools, :data:`REVIEWER_ARGS` goes in beside it: replaced by an
+    empty ``today`` alone, a reviewer its operator kept locked down came back with Bash,
+    Edit and Write (round 22). That errs toward the reviewer without them, which a fresh
+    spawn then gives every tool ``today`` does.
     """
     args = list(args)
     if list(today[: len(_FORMER_REVIEWER_ARGS)]) == _FORMER_REVIEWER_ARGS:
         return args
     if args[: len(_FORMER_REVIEWER_ARGS)] == _FORMER_REVIEWER_ARGS:
-        return [*today, *args[len(_FORMER_REVIEWER_ARGS) :]]
+        denied = all(arg in today for arg in REVIEWER_ARGS)
+        replacement = list(today) if denied else [*today, *REVIEWER_ARGS]
+        return [*replacement, *args[len(_FORMER_REVIEWER_ARGS) :]]
     return args
 
 

@@ -40,6 +40,7 @@ from aisquare.core.config import (
     FleetRoleSettings,
     FleetSettings,
     replacing_the_former_reviewer_default,
+    replacing_the_former_reviewer_default_first,
 )
 from aisquare.core.ids import new_agent_id, new_task_id
 from aisquare.core.orchestrator import team_project
@@ -9700,8 +9701,10 @@ def test_a_0_7_0_reviewer_is_restarted_with_the_arguments_today_s_config_gives_t
 ) -> None:
     """Round 21 of #257: the `--restricted` a 0.7.0 spec leads with was replaced by the
     built-in `REVIEWER_ARGS` whatever today's config gave the role, so a reviewer its
-    operator since gave every tool (`extra_args = []`) or `--model opus` came back without
-    Edit and Write or the model, while a fresh spawn from the same config had them."""
+    operator since gave `--model opus` came back without the model. Today's arguments are
+    replayed in its place. Where they do not deny the editing tools the denial goes beside
+    them, since the spec cannot tell 0.7.0's default from a `--restricted` its caller gave
+    (round 22): that is all a restart adds to a fresh spawn's."""
     _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=["--restricted"])})
     agent = fleet_service.spawn(project, "reviewer", worktree=False, agent_args=caller).agent
     assert agent.launch_spec is not None
@@ -9717,13 +9720,48 @@ def test_a_0_7_0_reviewer_is_restarted_with_the_arguments_today_s_config_gives_t
     restarted = fleet_service.restart(project, agent.label).started
 
     assert restarted.launch_spec is not None
-    assert restarted.launch_spec.extra_args == [*today, *caller]
+    assert restarted.launch_spec.extra_args == [*today, *REVIEWER_ARGS, *caller]
     command = _command(tmux)
     assert "--restricted" not in command
-    assert REVIEWER_ARGS[0] not in command, "not the built-in default the config replaced"
+    assert REVIEWER_ARGS[0] in command, "without the editing tools, whoever chose --restricted"
     fresh = fleet_service.spawn(project, "reviewer", worktree=False, agent_args=caller).agent
     assert fresh.launch_spec is not None
-    assert fresh.launch_spec.extra_args == restarted.launch_spec.extra_args, "as a fresh spawn"
+    assert fresh.launch_spec.extra_args == [*today, *caller], "a fresh spawn: today's alone"
+
+
+def test_a_0_7_0_reviewer_its_caller_locked_down_is_never_restarted_with_every_tool(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Round 22 of #257: under 0.7.0, with `extra_args = []`, `fleet spawn reviewer --
+    --restricted` recorded `["--restricted"]`, as the default did. Replaced by an empty
+    `today` alone, that reviewer of someone else's PR came back with Bash, Edit and Write.
+    The control: today's config denying the tools already, it is replayed as today's."""
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=[])})
+    agent = fleet_service.spawn(
+        project, "reviewer", worktree=False, agent_args=["--restricted"]
+    ).agent
+    assert agent.launch_spec is not None and agent.launch_spec.extra_args == ["--restricted"]
+    legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
+    with store_session() as store:
+        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+
+    restarted = fleet_service.restart(project, agent.label).started
+
+    assert restarted.launch_spec is not None
+    assert restarted.launch_spec.extra_args == list(REVIEWER_ARGS)
+    assert REVIEWER_ARGS[0] in _command(tmux), "no Edit or Write"
+    denied = [*REVIEWER_ARGS, "--model", "opus"]
+    assert replacing_the_former_reviewer_default_first(["--restricted"], denied) == denied, (
+        "control: no second denial beside today's"
+    )
 
 
 @pytest.mark.parametrize(

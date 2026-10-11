@@ -101,6 +101,8 @@ _DoctorReport = tuple[Path | None, list[DoctorCheck]]
 _DOCTOR_WORKER = "doctor"
 ACCOUNTS_WORKER = "shell-accounts"
 """The thread worker that reads the Accounts section's frame (``FleetApp.refresh_accounts``)."""
+_QUIT_POLL = 0.1
+"""Seconds between the looks a hand-over takes at the reads it waits out (``_exit_when_read``)."""
 _CHECK_SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "✗"}
 _CHECK_STYLE = {CheckStatus.ok: "green", CheckStatus.warn: "yellow", CheckStatus.fail: "bold red"}
 
@@ -536,7 +538,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     # --- data ---------------------------------------------------------------------------
 
     def refresh_data(self) -> None:
-        """Re-read projects and agents; keep (and label) the last frame if the store is busy."""
+        """Re-read projects and agents; keep (and label) the last frame if the store is busy.
+
+        Not once asq is handing the terminal over: the tick is what starts the reads
+        a hand-over waits out (``_exit_when_read``).
+        """
+        if self.hand_off is not None:
+            return
         sidebar = self.sidebar
         try:
             with store_session() as store:
@@ -597,8 +605,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         numbers are the view's own, slower business
         (``AccountsView.refresh_usage``).
         """
-        if self._accounts is None:
-            return
+        if self._accounts is None or self.hand_off is not None:
+            return  # none to read, or asq is quitting once the reads running end
         reading = self._accounts_worker
         if reading is not None and not reading.is_finished:
             self._accounts_owed = True
@@ -714,8 +722,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         ``_set_doctor_scope``, and a worker that has already left RUNNING is
         past cancelling.
         """
-        if self._doctor is None:
-            return
+        if self._doctor is None or self.hand_off is not None:
+            return  # none to run, or asq is quitting once the reads running end
         injected: DoctorRunner = self._doctor
         project = self._scoped_project()
         scope: Path | None = project.root if project is not None else None
@@ -1123,20 +1131,42 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         Never under work that is still writing, which quitting would cut off (asyncio.run
         then joins its thread with the terminal blank, and the hand-over can replace the
         install under it): any worker :func:`_writing_workers` names, in any view, shown
-        or not (rounds 15 and 16 of #257).
+        or not (rounds 15 and 16 of #257), is refused with a toast.
+
+        The reads that write as they read (:func:`_reconciling_workers`) are waited out
+        instead. They run on asq's own schedule, the accounts read on every two-second
+        tick, so refused for them Update and Uninstall were refused for much of the time,
+        and a retry had the same odds (round 20). None starts once ``hand_off`` is set:
+        the tick, the accounts read and the doctor stand down, so none can start between
+        the last look and the quit either.
         """
-        running = self._work_running()
+        if self.hand_off is not None:
+            return  # already handing over, once the reads running end
+        running = self._work_running(_writing_workers())
         if running is not None:
             self.notify(f"{running} is still running — try again when it ends", severity="warning")
             return
         self.hand_off = event.args
-        self.exit()
+        reading = self._work_running(_reconciling_workers())
+        if reading is not None:
+            self.notify(f"asq quits once {reading} ends", timeout=4)
+        self._exit_when_read()
 
-    def _work_running(self) -> str | None:
-        """What writing work still runs, in the toast's words, else ``None``."""
-        writing = _writing_workers()
+    def _exit_when_read(self) -> None:
+        """Quit once no worker that writes runs; until then, look again shortly.
+
+        Every one is waited for here, the writers too: one started from a page while
+        the reads were waited out is cut off by a quit as much as any.
+        """
+        if self._work_running({**_writing_workers(), **_reconciling_workers()}) is None:
+            self.exit()
+        else:
+            self.set_timer(_QUIT_POLL, self._exit_when_read)
+
+    def _work_running(self, named: dict[str, str]) -> str | None:
+        """What work of ``named`` still runs, in the toast's words, else ``None``."""
         return next(
-            (writing[w.name] for w in self.workers if w.name in writing and not w.is_finished),
+            (named[w.name] for w in self.workers if w.name in named and not w.is_finished),
             None,
         )
 
@@ -1176,7 +1206,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
 
 def _writing_workers() -> dict[str, str]:
-    """Every worker that writes, by name, with what it is in a toast's words.
+    """Every worker that writes when someone asks it to, by name, in a toast's words.
 
     One rule on the app's worker manager, where views kept a flag each (a bool, a set, a
     property) and the next writer was missed: the Project tab's Start manager, an agent's
@@ -1186,18 +1216,13 @@ def _writing_workers() -> dict[str, str]:
     a quit cancels that wait (``AccountsView.on_unmount``) and nothing is stored past a
     cancel, and counted it held Update for the device code's lifetime.
 
-    The accounts' readers are here too. A usage reading records a sample per account
-    (``read_usage_with_trends``), and every read of the slots reconciles the registry with
-    the directories (``claude_accounts._arranged`` adds and drops rows), so each writes the
-    store, however it reads in the view (round 19 of #257). So do the doctor's checks: the
-    accounts' (``diagnostics._claude_account_default_checks``) read the slots the same
-    way, and the store's open runs its migrations (round 20).
+    The reads that write as they read are :func:`_reconciling_workers`, which a
+    hand-over waits out rather than refuses.
 
-    A worker the UI starts that is neither here nor in the read-only list of
+    A worker the UI starts that is in neither list nor in the read-only one of
     tests/test_ui_writing_workers.py fails that guard, which reads every worker start from
     the source, so a new writer is not missed silently (round 17 of #257).
     """
-    from aisquare.cli.ui import board
     from aisquare.cli.ui.views import (
         accounts,
         agent,
@@ -1205,7 +1230,6 @@ def _writing_workers() -> dict[str, str]:
         explainability,
         onboard,
         project,
-        settings,
         welcome,
     )
 
@@ -1226,6 +1250,27 @@ def _writing_workers() -> dict[str, str]:
         accounts.COMPLETE_WORKER: "a Claude sign-in",
         accounts.REMOVE_WORKER: "an account's removal",
         accounts.ARRANGE_WORKER: "an account change",
+    }
+
+
+def _reconciling_workers() -> dict[str, str]:
+    """The reads that write as they read, by name, with what each is in a toast's words.
+
+    A usage reading records a sample per account (``read_usage_with_trends``), and every
+    read of the slots reconciles the registry with the directories
+    (``claude_accounts._arranged`` adds and drops rows), so each writes the store,
+    however it reads in the view (round 19 of #257). So do the doctor's checks: the
+    accounts' (``diagnostics._claude_account_default_checks``) read the slots the same
+    way, and the store's open runs its migrations (round 20).
+
+    asq starts these on its own, on a tick, a page's show or a tab, not when someone
+    asks it to write, so a hand-over waits them out, starting no more, where it refuses
+    :func:`_writing_workers`' (``FleetApp.on_doctor_view_hand_off``).
+    """
+    from aisquare.cli.ui import board
+    from aisquare.cli.ui.views import accounts, agent, project, settings
+
+    return {
         accounts.USAGE_WORKER: "a usage reading",
         ACCOUNTS_WORKER: "a read of the accounts",
         settings.ACCOUNTS_WORKER: "a read of the accounts",

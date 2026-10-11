@@ -66,7 +66,10 @@ and an aisquare that upgrades and uninstalls itself.**
   for it (#253).
 - **Update and Uninstall in asq's Doctor** hand the terminal to
   `aisquare upgrade` and `aisquare uninstall`, which show their plan and ask;
-  after an update, asq reopens on the version just installed (#254).
+  after an update, asq reopens on the version just installed (#254). Work
+  still writing (a fix, a start, a sign-in) is named, and they refuse until it
+  ends; the reads asq runs on its own that write as they read (the accounts,
+  the doctor) are waited out, and none starts meanwhile.
 - **A doctor row for each coding agent.** Claude Code keeps its one-click
   Connect, Codex and Cursor say what was found and that aisquare cannot
   connect them yet, and "is Claude Code connected?" is one shared check that

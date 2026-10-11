@@ -41,7 +41,7 @@ from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, a
 from tests.rendered import plain
 from tests.test_lifecycle_upgrade import Machine, Tool, machine, tool  # noqa: F401
 from tests.test_ui_shell import drive, script, seed  # noqa: F401 — `script` is a fixture
-from tests.ui_workers import settle_page
+from tests.ui_workers import settle_page, settle_until
 
 #: The real function, taken before ``no_real_installer`` closes it for every test here.
 _REAL_EXEC_SELF = selfcli.exec_self
@@ -158,7 +158,10 @@ def test_only_asqs_own_doctor_is_machine_wide_and_no_doctor_may_be_busy(
 
 
 WRITING = ui_app._writing_workers()
-"""Every worker Update and Uninstall wait for, by name, with the toast's words for it."""
+"""Every worker Update and Uninstall refuse under, by name, with the toast's words for it."""
+
+RECONCILING = ui_app._reconciling_workers()
+"""Every read that writes, which Update and Uninstall wait out, with the toast's words."""
 
 
 def _held_hand_off(name: str) -> tuple[Any, list[str], Any]:
@@ -203,6 +206,50 @@ def test_update_waits_for_every_worker_that_writes(
     assert while_busy is None, f"{name} is still running"
     assert said == [f"{WRITING[name]} is still running — try again when it ends"]
     assert after == ("upgrade", "--reopen"), "control: once it has ended, Update quits"
+
+
+@pytest.mark.parametrize("name", sorted(RECONCILING))
+def test_update_waits_out_a_read_that_writes_and_starts_no_other_meanwhile(
+    isolated_home: Path,
+    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    """Round 20 of #257: the accounts read runs on every two-second tick, and the doctor
+    after every `r` and fix, and each writes as it reads (a reconcile, a usage sample, the
+    store's migrations). Refused under them, Update and Uninstall were refused for much
+    of the time, and a retry had the same odds; and a tick could start another read
+    between the last look and the quit. The hand-over now waits the read out, and asq's
+    tick, its accounts read and its doctor start nothing once it has been asked for."""
+    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
+    release = threading.Event()
+
+    async def fn(pilot: Pilot[None]) -> tuple[list[str], list[Any], list[str], list[Any]]:
+        app = pilot.app
+        assert isinstance(app, ui_app.FleetApp)
+        said: list[str] = []
+        exits: list[Any] = []
+        app.notify = lambda message, **_: said.append(str(message))  # type: ignore[method-assign]
+        app.exit = lambda *_args, **_kwargs: exits.append(app.hand_off)  # type: ignore[method-assign]
+        app.run_worker(lambda: release.wait(10), name=name, thread=True, exit_on_error=False)
+        app.query_one("#doctor-update", Button).press()
+        await settle_page(app, group="held")  # the read is held on purpose: settle no group
+        while_held = list(exits)
+        before = set(app.workers)
+        app.refresh_data()  # the tick
+        app.refresh_accounts()
+        app.run_doctor()
+        started = [str(w.name) for w in app.workers if w not in before]
+        release.set()
+        await settle_until(app, lambda: exits)
+        return said, while_held, started, exits
+
+    said, while_held, started, exits = drive(fn)
+
+    assert said == [f"asq quits once {RECONCILING[name]} ends"], "not refused: waited out"
+    assert while_held == [], "no quit under the read"
+    assert started == [], "nothing new to wait for"
+    assert exits == [("upgrade", "--reopen")], "the quit, once it has ended"
 
 
 @pytest.mark.parametrize(

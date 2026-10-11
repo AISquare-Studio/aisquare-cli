@@ -1,12 +1,13 @@
 """Every worker the UI starts is either one Update waits for, or named here as one that reads.
 
-Update and Uninstall wait for the workers ``ui_app._writing_workers()`` names. That list is
-kept by hand, and rounds 15 and 16 of #257 each found writers it left out; the test that
-drives Update takes its cases from the same list, so a new writer that is not in it passed
-everything (round 17). This guard reads every ``run_worker(name=…)`` and ``@work(name=…)``
-in ``aisquare.cli.ui`` from the source, follows a name passed down through a helper's
-parameter (Welcome's ``_start_work`` → ``_run`` → ``worker_name``), and requires each name to
-be in the app's list or in :data:`READ_ONLY` below, with why it writes nothing.
+Update and Uninstall wait for the workers ``ui_app._writing_workers()`` and
+``ui_app._reconciling_workers()`` name. Those lists are kept by hand, and rounds 15 and 16
+of #257 each found writers they left out; the test that drives Update takes its cases from
+the same lists, so a new writer that is not in one passed everything (round 17). This guard
+reads every ``run_worker(name=…)`` and ``@work(name=…)`` in ``aisquare.cli.ui`` from the
+source, follows a name passed down through a helper's parameter (Welcome's ``_start_work``
+→ ``_run`` → ``worker_name``), and requires each name to be in one of the app's lists or in
+:data:`READ_ONLY` below, with why it writes nothing.
 """
 
 from __future__ import annotations
@@ -158,7 +159,8 @@ def _ui_workers() -> set[str]:
 
 
 UI_WORKERS = _ui_workers()
-WRITING = ui_app._writing_workers()
+RECONCILING = ui_app._reconciling_workers()
+WRITING = {**ui_app._writing_workers(), **RECONCILING}
 
 
 def test_every_worker_the_ui_starts_is_waited_for_or_said_to_write_nothing() -> None:
@@ -173,6 +175,7 @@ def test_the_lists_name_only_workers_the_ui_starts_and_never_both() -> None:
     assert set(WRITING) <= UI_WORKERS, set(WRITING) - UI_WORKERS
     assert set(READ_ONLY) <= UI_WORKERS, set(READ_ONLY) - UI_WORKERS
     assert not set(WRITING) & set(READ_ONLY)
+    assert not set(ui_app._writing_workers()) & set(RECONCILING)
 
 
 def test_the_accounts_readers_write_the_store_so_update_waits_for_them(fake_home: Path) -> None:
@@ -200,7 +203,7 @@ def test_the_accounts_readers_write_the_store_so_update_waits_for_them(fake_home
         board.LABELS_WORKER,
         agent_view.LABELS_WORKER,
     }
-    assert readers <= set(WRITING), readers - set(WRITING)
+    assert readers <= set(RECONCILING), readers - set(RECONCILING)
 
 
 def test_the_doctor_reads_the_slots_and_writes_the_store_so_update_waits_for_it(
@@ -218,7 +221,7 @@ def test_the_doctor_reads_the_slots_and_writes_the_store_so_update_waits_for_it(
     with store_session() as store:
         assert account.slot in {row.slot for row in store.claude_accounts()}, "reconciled"
     doctors = {ui_app._DOCTOR_WORKER, project_view.DOCTOR_WORKER}
-    assert doctors <= set(WRITING), doctors - set(WRITING)
+    assert doctors <= set(RECONCILING), doctors - set(RECONCILING)
 
 
 def _welcome_name(step: str) -> str:

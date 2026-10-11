@@ -329,10 +329,11 @@ elif _runner=$(_find uvx); then
     # asked for the range with neither, uvx fails. Decided BEFORE the one run, as a
     # retry cannot be: a run that failed may be aisquare's own, which has read the
     # payload and may have printed, so a second would get no payload and print twice.
+    # The uvx found is named to aisquare, which tells the agent how to run it.
     if _has_tested_python; then
-        "$_runner" --python "$_tested" --from "$_from" aisquare hook "$event"
+        AISQUARE_PLUGIN_UVX=$_runner "$_runner" --python "$_tested" --from "$_from" aisquare hook "$event"
     else
-        "$_runner" --from "$_from" aisquare hook "$event"
+        AISQUARE_PLUGIN_UVX=$_runner "$_runner" --from "$_from" aisquare hook "$event"
     fi
     _status=$?
 else

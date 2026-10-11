@@ -169,6 +169,9 @@ AMBIENT_ENV_VARS = (
     # uv its cache (`install_route`). Left set, a test of `uninstall --purge` would
     # plan, and delete, the developer's own answers file.
     "XDG_CACHE_HOME",
+    # The uvx the plugin's launcher ran a hook with, which session start names to the
+    # agent (`services.hooks._log_command`). Set in a hook's own environment only.
+    "AISQUARE_PLUGIN_UVX",
     # The copies of the shell's own two a launch onto a managed slot keeps
     # (`core.claude_accounts.PLAIN_VARS`). `plain_environment` reads them
     # whenever CLAUDE_CONFIG_DIR names a managed slot, which the account tests

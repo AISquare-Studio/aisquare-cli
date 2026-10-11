@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import selfcli
 from aisquare.core.version import __version__
+from aisquare.services import hooks as hooks_service
 from aisquare.services import install_route
 
 _PACK = '<files>\n<file path="a.py">\nprint("hi")\n</file>\n</files>\n'
@@ -117,13 +118,21 @@ def test_session_start_directive_points_at_the_skeleton_when_the_full_pack_was_s
 _REAL_WHICH = shutil.which
 
 
-def _aisquare_on_path(found: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``shutil.which("aisquare")`` answers ``found``; every other name as it would."""
+def _aisquare_on_path(
+    found: str | None, monkeypatch: pytest.MonkeyPatch, *, uvx: str | None = None
+) -> None:
+    """``shutil.which("aisquare")`` answers ``found`` and ``shutil.which("uvx")`` ``uvx``;
+    every other name as it would."""
+    answers = {"aisquare": found, "uvx": uvx}
 
     def which(cmd: str, mode: int = os.F_OK | os.X_OK, path: str | None = None) -> str | None:
-        return found if cmd == "aisquare" else _REAL_WHICH(cmd, mode, path)
+        return answers[cmd] if cmd in answers else _REAL_WHICH(cmd, mode, path)
 
     monkeypatch.setattr(shutil, "which", which)
+
+
+_PYTHON = f"{sys.version_info.major}.{sys.version_info.minor}"
+"""The Python this process runs on, as ``uvx --python`` takes it."""
 
 
 def _uv_cache(root: Path) -> Path:
@@ -158,12 +167,39 @@ def test_session_start_names_a_log_command_the_uvx_route_can_run(
     """
     cached = _uv_cache(tmp_path / ".cache" / "uv") / "archive-v0" / "NPat_ypOvcy3YMzz"
     monkeypatch.setattr(sys, "prefix", str(cached))
-    _aisquare_on_path(str(cached / "bin" / "aisquare"), monkeypatch)
+    _aisquare_on_path(str(cached / "bin" / "aisquare"), monkeypatch, uvx="/usr/bin/uvx")
+    monkeypatch.setenv(hooks_service.PLUGIN_UVX_ENV, "/usr/bin/uvx")
 
     said = _session_start_after_a_prompt(runner, work_dir)
 
-    assert f"run `uvx --from aisquare-cli=={__version__} aisquare log` to see" in said, said
+    pin = f"aisquare-cli=={__version__}"
+    assert f"run `uvx --python {_PYTHON} --from {pin} aisquare log` to see" in said, said
     assert "run `aisquare log`" not in said
+
+
+@pytest.mark.parametrize("on_path", [None, "/usr/bin/uvx"], ids=["no-uvx", "another-uvx"])
+def test_on_the_uvx_route_the_log_command_names_the_uvx_and_the_python_the_hook_ran_on(
+    runner: CliRunner,
+    work_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    on_path: str | None,
+) -> None:
+    """Round 20 of #257: the launcher finds uvx in ~/.local/bin where PATH has none (a
+    session started from the desktop app), and runs it with the tested range. The agent
+    was told a bare `uvx`, command not found there, and no `--python`, so uv resolved on
+    its default Python, which may be outside the range: another environment built, on an
+    untested Python, or none. Named by the launcher's path, with this process's Python."""
+    cached = _uv_cache(tmp_path / ".cache" / "uv") / "archive-v0" / "NPat_ypOvcy3YMzz"
+    monkeypatch.setattr(sys, "prefix", str(cached))
+    _aisquare_on_path(str(cached / "bin" / "aisquare"), monkeypatch, uvx=on_path)
+    ran = str(tmp_path / "home" / ".local" / "bin" / "uvx")
+    monkeypatch.setenv(hooks_service.PLUGIN_UVX_ENV, ran)
+
+    said = _session_start_after_a_prompt(runner, work_dir)
+
+    argv = [ran, "--python", _PYTHON, "--from", f"aisquare-cli=={__version__}", "aisquare", "log"]
+    assert f"run `{install_route.command_line(argv)}` to see" in said, said
 
 
 def test_session_start_names_plain_aisquare_log_where_path_has_it(
@@ -197,14 +233,13 @@ def test_the_plugin_page_names_the_log_command_the_uvx_route_prints(
     """docs/claude-code-plugin.md said a uv-only machine "gets memory with nothing else
     installed", where session start's one line named a command that is not there
     (review of #257). It now says what that route gives, with the command it prints."""
-    from aisquare.services import hooks as hooks_service
-
     cache = _uv_cache(tmp_path / ".cache" / "uv")
     monkeypatch.setattr(sys, "prefix", str(cache / "archive-v0" / "x"))
     printed = hooks_service._log_command()
     page = Path(__file__).resolve().parents[1] / "docs" / "claude-code-plugin.md"
     text = " ".join(page.read_text(encoding="utf-8").split())
+    documented = printed.replace(__version__, "<version>").replace(_PYTHON, "<python>")
 
-    assert printed.startswith("uvx --from aisquare-cli=="), printed
-    assert f"`{printed.replace(__version__, '<version>')}`" in text
+    assert printed.startswith(f"uvx --python {_PYTHON} --from aisquare-cli=="), printed
+    assert f"`{documented}`" in text
     assert "gets memory with nothing else installed" not in text

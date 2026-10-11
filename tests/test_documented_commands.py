@@ -144,9 +144,22 @@ DOCUMENTED = (
 #: asks a user to run a command and sat outside a root-plus-docs sweep.
 #: `.claude` holds Claude Code's own worktrees (`.claude/worktrees/<name>` — full
 #: checkouts of this repo), so without it every document would be swept once per
-#: live worktree and reported as an unlisted copy of itself.
+#: live worktree and reported as an unlisted copy of itself. `.aisquare-worktrees`
+#: is the fleet's own worktree directory (`core.config` `worktree_dir`, which
+#: `fleet spawn` keeps out of git through `.git/info/exclude`, not `.gitignore`):
+#: the same shape, and a developer who runs the fleet on this repo had every page
+#: reported three times over, once per coder, tester and reviewer.
 _SWEEP_EXCLUDES = frozenset(
-    {".venv", ".git", ".claude", "node_modules", "site-packages", "build", "dist"}
+    {
+        ".venv",
+        ".git",
+        ".claude",
+        ".aisquare-worktrees",
+        "node_modules",
+        "site-packages",
+        "build",
+        "dist",
+    }
 )
 
 FENCE = re.compile(r"^\s*(?:>\s*)*```+\s*([A-Za-z0-9_-]*)\s*$")
@@ -1259,6 +1272,27 @@ def test_the_staleness_detector_sweeps_where_documents_actually_live(tmp_path: P
     assert ".github/ISSUE_TEMPLATE/bug.md" in _staleness_sweep(tmp_path), (
         "a page under .github showing a command is invisible to the detector"
     )
+
+
+def test_the_staleness_sweep_skips_the_fleet_s_own_worktrees(tmp_path: Path) -> None:
+    """A coder's worktree is a full checkout of this repo inside it, not a new page.
+
+    `fleet spawn coder` makes `.aisquare-worktrees/<label>` beside `.venv` and
+    keeps it out of git through `.git/info/exclude`; the sweep walks the
+    filesystem, so on a developer's machine with a fleet up every documented
+    page came back as an unlisted copy of itself, once per agent. Claude Code's
+    `.claude/worktrees` had the same treatment already.
+    """
+    page = tmp_path / "docs" / "new-page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("```sh\naisquare doctor\n```\n", encoding="utf-8")
+    copy = tmp_path / ".aisquare-worktrees" / "coder-auth" / "docs" / "new-page.md"
+    copy.parent.mkdir(parents=True)
+    copy.write_text(page.read_text(encoding="utf-8"), encoding="utf-8")
+
+    unlisted = _staleness_sweep(tmp_path)
+    assert "docs/new-page.md" in unlisted, unlisted
+    assert not [path for path in unlisted if ".aisquare-worktrees" in path], unlisted
 
 
 def test_the_staleness_detector_uses_the_same_rule_as_the_extractor(tmp_path: Path) -> None:

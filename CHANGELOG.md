@@ -139,10 +139,11 @@ and an aisquare that upgrades and uninstalls itself.**
 - The fleet's reviewer can review again. 0.6.0 and 0.7.0 launched it
   `--restricted`, which takes away Claude Code's Bash, so it could run none of
   `gh pr diff`, `gh pr review` or its `aisquare` cycle, and no agent it started
-  could either. It now launches without it and is read-only by its briefing,
-  as the ui-tester is. A config file holding that old default (any `aisquare
-  config set` saved it) loads without it; a reviewer `extra_args` you wrote
-  yourself stays as written.
+  could either. It now launches with its shell and without the tools that edit
+  files (`--disallowedTools=Edit Write NotebookEdit`); pushing and merging are
+  refused by its briefing. A config file holding that old default (any
+  `aisquare config set` saved it) loads with today's; a reviewer `extra_args`
+  you wrote yourself stays as written.
 
 ## [0.7.0] - 2026-09-25
 

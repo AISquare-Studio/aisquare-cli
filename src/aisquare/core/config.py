@@ -251,23 +251,33 @@ def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
     default (``harness.ROLE_PROFILES[...].default_args``) and is added by ``launch``
     inside the window, so it applies to a hand-started ui-tester too.
 
-    ``reviewer`` carries none either. It was launched ``--restricted`` as "read-only
-    by construction", and Claude Code's ``--restricted`` removes Bash (2.1.296:
-    unless ``--tools`` names it, and then only the named tools remain), so the
-    reviewer could run none of ``aisquare task next``, ``gh pr diff`` or ``gh pr
+    ``reviewer`` carries :data:`REVIEWER_ARGS`. It was launched ``--restricted`` as
+    "read-only by construction", and Claude Code's ``--restricted`` removes Bash
+    (2.1.296: unless ``--tools`` names it, and then only the named tools remain), so
+    the reviewer could run none of ``aisquare task next``, ``gh pr diff`` or ``gh pr
     review`` — every step of its cycle — and no subagent it spawned could either,
     because a subagent's tools come from its session's. It kept ``Edit`` and
-    ``Write``, so it was not read-only either. Its read-only is now the briefing's,
-    as the ui-tester's is.
+    ``Write``, so it was not read-only either. It now keeps the shell and is denied
+    the tools that edit files; what its shell could still do (``git push``, ``gh pr
+    merge``) its briefing forbids. Its whole input is a PR someone else wrote, so it
+    is the one role whose read-only is not left to the briefing alone.
     """
     return {
         "manager": FleetRoleSettings(),
         "coder": FleetRoleSettings(worktree=True),
         "tester": FleetRoleSettings(),
-        "reviewer": FleetRoleSettings(worktree=True),
+        "reviewer": FleetRoleSettings(worktree=True, extra_args=list(REVIEWER_ARGS)),
         "validator": FleetRoleSettings(),
         "ui-tester": FleetRoleSettings(),
     }
+
+
+#: The reviewer's built-in ``extra_args``: Claude Code without the tools that edit files.
+#: One token, because the flag takes a variadic list and separate words would go on
+#: swallowing whatever plain word came after them on the command line; the names apart
+#: by spaces, which Claude Code splits on as it does on commas, because ``config set``
+#: splits a list on commas and ``config get`` joins one with them.
+REVIEWER_ARGS = ("--disallowedTools=Edit Write NotebookEdit",)
 
 
 #: The reviewer's built-in ``extra_args`` in 0.6.0 and 0.7.0, which left it no shell
@@ -298,8 +308,8 @@ class FleetSettings(BaseModel):
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
 
     @model_validator(mode="after")
-    def _drop_the_former_reviewer_default(self) -> FleetSettings:
-        """A reviewer saved with exactly the old built-in ``["--restricted"]`` loads with none.
+    def _replace_the_former_reviewer_default(self) -> FleetSettings:
+        """A reviewer saved with exactly the old built-in ``["--restricted"]`` loads with today's.
 
         Changing the default alone fixes nothing for a config file that already holds
         it, and every 0.6.0 or 0.7.0 save holds it. A reviewer given any other list —
@@ -307,7 +317,7 @@ class FleetSettings(BaseModel):
         """
         reviewer = self.roles.get("reviewer")
         if reviewer is not None and reviewer.extra_args == _FORMER_REVIEWER_ARGS:
-            reviewer.extra_args = []
+            reviewer.extra_args = list(REVIEWER_ARGS)
         return self
 
 

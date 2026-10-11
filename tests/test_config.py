@@ -12,9 +12,11 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import snapshot
 from aisquare.core.config import (
+    REVIEWER_ARGS,
     AppConfig,
     CaptureSettings,
     ExperimentSettings,
+    FleetSettings,
     RedactionSettings,
     SnapshotSettings,
     load_config,
@@ -271,16 +273,26 @@ def test_a_reviewer_saved_with_the_former_restricted_default_loads_with_a_shell(
 ) -> None:
     """0.6.0 and 0.7.0 launched the reviewer `--restricted`, which removes Bash, and any
     `config set` wrote that default into the file. A new default alone would leave
-    every such file launching a reviewer that cannot run `gh` — this machine's did."""
+    every such file launching a reviewer that cannot run `gh` — this machine's did.
+    The old default is replaced by today's, so the reviewer still cannot edit files."""
     target = tmp_path / "config.toml"
     target.write_text(_SAVED_BY_0_7_0_REVIEWER, encoding="utf-8")
     loaded = load_config(target)
     reviewer = loaded.fleet.roles["reviewer"]
-    assert reviewer.extra_args == []
+    assert reviewer.extra_args == list(REVIEWER_ARGS)
     assert reviewer.worktree is True, "only the old default goes; the rest stays as saved"
     save_config(loaded, target)
     saved = tomllib.loads(target.read_text(encoding="utf-8"))
-    assert saved["fleet"]["roles"]["reviewer"]["extra_args"] == []
+    assert saved["fleet"]["roles"]["reviewer"]["extra_args"] == list(REVIEWER_ARGS)
+
+
+def test_the_built_in_reviewer_keeps_its_shell_and_is_denied_the_tools_that_edit() -> None:
+    """Bash is what `gh pr diff` and `gh pr review` run on; Edit, Write and NotebookEdit
+    are what a prompt injected through the PR it reads would edit the tree with. One
+    token: a separate list would swallow the next plain word on the command line."""
+    reviewer = FleetSettings().roles["reviewer"]
+    assert reviewer.extra_args == ["--disallowedTools=Edit Write NotebookEdit"]
+    assert "--restricted" not in reviewer.extra_args
 
 
 def test_a_reviewer_given_more_than_the_former_default_keeps_it(tmp_path: Path) -> None:

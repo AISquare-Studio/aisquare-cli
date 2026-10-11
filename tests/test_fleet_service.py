@@ -1039,7 +1039,9 @@ def test_the_built_in_reviewer_is_launched_with_a_shell(
     diff had no shell either (PR #257's review, run by a fleet reviewer, saw nothing).
     """
     fleet_service.spawn(project, "reviewer", worktree=False)
-    assert "--restricted" not in _command(tmux)
+    command = _command(tmux)
+    assert "--restricted" not in command
+    assert "--disallowedTools=Edit Write NotebookEdit" in command, "and no editing tools"
 
 
 def test_spawn_respects_a_caller_supplied_session_id(

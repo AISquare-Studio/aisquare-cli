@@ -9,6 +9,7 @@ known context file) exists. The set of connected agents is persisted in
 from __future__ import annotations
 
 import errno
+import functools
 import importlib.metadata
 import json
 import os
@@ -1371,6 +1372,7 @@ def hook_binary(command: str) -> HookBinary | None:
     return HookBinary(_resolve_program(tokens[0]))
 
 
+@functools.cache
 def current_install() -> Path:
     """The ``aisquare`` console script THIS distribution installed.
 
@@ -1384,6 +1386,12 @@ def current_install() -> Path:
     current by its path and never asked its version (review of #257). It may not
     exist (a checkout driven as ``python -m aisquare``); the directory is what the
     comparison uses.
+
+    Once per process: it locates the distribution and walks its RECORD, and Connect's
+    command, every hook binary's comparison, the doctor's install row and each "this
+    install is" line ask it again (round 21 of #257). The answer is this process's own
+    install, which an upgrade does not change under it: nothing in the process asks
+    after the installer has run (``services.lifecycle.upgrade``).
     """
     name = "aisquare.exe" if sys.platform == "win32" else "aisquare"
     try:

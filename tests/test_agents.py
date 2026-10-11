@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import importlib.metadata
 import json
 import os
 import shlex
@@ -802,6 +803,27 @@ def test_connect_run_as_a_module_never_writes_back_a_program_that_cannot_start(
     assert command == (str(here) if installed else module_form), command
     assert str(dead) not in command
     assert control == str(alive), "control: a PATH program that can start is still used"
+
+
+def test_this_install_is_located_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 21 of #257: Connect's command, every hook binary's comparison, the doctor's
+    install row and each "this install is" line located the distribution and walked its
+    RECORD again, for an answer that cannot change within the process."""
+    real = importlib.metadata.distribution
+    located: list[str] = []
+
+    def distribution(name: str) -> Any:
+        located.append(name)
+        return real(name)
+
+    monkeypatch.setattr("aisquare.core.agents.importlib.metadata.distribution", distribution)
+
+    first = agents.current_install()
+    agents._aisquare_command()
+    agents._same_install(agents.HookBinary(Path("/elsewhere/bin/aisquare")))
+
+    assert agents.current_install() == first
+    assert located == ["aisquare-cli"], "located once"
 
 
 def test_posix_quoting_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:

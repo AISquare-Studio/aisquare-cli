@@ -19,6 +19,7 @@ import pytest
 from typer.testing import CliRunner
 
 import aisquare
+from aisquare.core import agents as agent_core
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
 from aisquare.services import ci_client
@@ -375,6 +376,9 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # lru_cached, like core.insights._config), so a cached read from the previous
     # test's HOME would outlive the home it came from.
     ci_client.reset_cache()
+    # Cached once per process (core.agents.current_install), and tests change what it
+    # reads: the interpreter (sys.executable) and the distribution's RECORD on sys.path.
+    agent_core.current_install.cache_clear()
     return home
 
 

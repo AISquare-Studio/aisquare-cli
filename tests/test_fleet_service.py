@@ -9765,6 +9765,44 @@ def test_a_0_7_0_reviewer_its_caller_locked_down_is_never_restarted_with_every_t
 
 
 @pytest.mark.parametrize(
+    ("today", "denies"),
+    [
+        (["--disallowedTools", "Edit Write NotebookEdit"], True),
+        (["--disallowedTools", "Edit", "Write", "NotebookEdit", "--model", "opus"], True),
+        (["--disallowedTools=Edit,Write,NotebookEdit"], True),
+        (["--disallowed-tools", "NotebookEdit, Write ,Edit"], True),
+        (["--disallowedTools=Edit Write NotebookEdit WebFetch"], True),
+        (["--disallowedTools=Edit Write"], False),
+        (["--disallowedTools", "Edit", "--model", "Write", "NotebookEdit"], False),
+        (["--disallowedTools=Edit(src/**) Write NotebookEdit"], False),
+        (["--allowedTools=Edit Write NotebookEdit"], False),
+    ],
+    ids=[
+        "two-words",
+        "words-then-option",
+        "commas",
+        "kebab-flag",
+        "wider",
+        "narrower",
+        "words-end-at-an-option",
+        "edit-in-part",
+        "allowed-not-denied",
+    ],
+)
+def test_a_0_7_0_reviewer_gets_one_denial_however_todays_config_spells_it(
+    today: list[str], denies: bool
+) -> None:
+    """Round 23 of #257: today's config was taken to deny the editing tools only when it
+    held `REVIEWER_ARGS`'s one token, so a list spelled another way, or one tool wider, got
+    a second `--disallowedTools` beside it, and what the reviewer was denied rested on how
+    Claude Code combines the two. Read off the tools denied instead; a list that leaves one
+    of them out still gets the denial beside it."""
+    replayed = replacing_the_former_reviewer_default_first(["--restricted", "--x"], today)
+
+    assert replayed == ([*today, "--x"] if denies else [*today, *REVIEWER_ARGS, "--x"])
+
+
+@pytest.mark.parametrize(
     ("role_args", "caller", "replayed"),
     [
         (["--restricted"], ["--model", "opus"], [*REVIEWER_ARGS, "--model", "opus"]),

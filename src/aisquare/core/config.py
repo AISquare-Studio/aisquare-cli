@@ -9,6 +9,7 @@ from __future__ import annotations
 import codecs
 import errno
 import os
+import re
 import tomllib
 from collections.abc import Sequence
 from pathlib import Path
@@ -331,16 +332,42 @@ def replacing_the_former_reviewer_default_first(
     not deny the editing tools, :data:`REVIEWER_ARGS` goes in beside it: replaced by an
     empty ``today`` alone, a reviewer its operator kept locked down came back with Bash,
     Edit and Write (round 22). That errs toward the reviewer without them, which a fresh
-    spawn then gives every tool ``today`` does.
+    spawn then gives every tool ``today`` does. Whether ``today`` denies them is read off
+    the tools it denies (:func:`_denied_tools`), however it spells the list: matched as
+    :data:`REVIEWER_ARGS`'s one token, a list given as two words, with commas or with one
+    tool more got a second ``--disallowedTools`` beside it (round 23).
     """
     args = list(args)
     if list(today[: len(_FORMER_REVIEWER_ARGS)]) == _FORMER_REVIEWER_ARGS:
         return args
     if args[: len(_FORMER_REVIEWER_ARGS)] == _FORMER_REVIEWER_ARGS:
-        denied = all(arg in today for arg in REVIEWER_ARGS)
+        denied = _denied_tools(REVIEWER_ARGS) <= _denied_tools(today)
         replacement = list(today) if denied else [*today, *REVIEWER_ARGS]
         return [*replacement, *args[len(_FORMER_REVIEWER_ARGS) :]]
     return args
+
+
+_DISALLOWED_TOOLS = ("--disallowedTools", "--disallowed-tools")
+"""Claude Code's flag for the tools a session may not use, in both its spellings."""
+
+
+def _denied_tools(args: Sequence[str]) -> set[str]:
+    """The tools ``args`` deny Claude Code: each value of ``--disallowedTools``, given with
+    ``=`` or as the words after the flag up to the next option, split on spaces and commas
+    as Claude Code splits it."""
+    denied: set[str] = set()
+    taking = False
+    for arg in args:
+        flag, equals, value = arg.partition("=")
+        if flag in _DISALLOWED_TOOLS:
+            taking = not equals
+            denied.update(re.split(r"[\s,]+", value))
+        elif arg.startswith("-"):
+            taking = False
+        elif taking:
+            denied.update(re.split(r"[\s,]+", arg))
+    denied.discard("")
+    return denied
 
 
 def _replace_the_former_reviewer_default(data: dict[str, Any]) -> None:

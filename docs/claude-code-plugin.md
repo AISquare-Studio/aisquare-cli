@@ -24,6 +24,8 @@ The hooks are SessionStart, UserPromptSubmit, SessionEnd, Stop, Notification and
 
 A hook that fails never blocks a prompt or a session.
 
+On the `uvx` route the plugin asks uv, at session start, whether it has a Python aisquare is tested on (3.11 to 3.13) or may fetch one, and runs aisquare on it if so. It keeps the answer in `${XDG_CACHE_HOME:-~/.cache}/aisquare/plugin-tested-python`, one line for each uv and the settings it was asked under, so the session's other events start no uv process of their own. An answer that uv has none is asked again after five minutes. It is the one file aisquare writes outside `~/.aisquare`.
+
 ## Saving memory on purpose
 
 The hooks hand your saved context to every new session. To save something, use the CLI. Install it once, and the plugin runs that same install from then on:
@@ -56,6 +58,6 @@ A plugin installed at project or local scope is the exception: it runs only in i
 
 ## Removing it
 
-Run `/plugin uninstall aisquare@aisquare-cli`, and `/plugin marketplace remove aisquare-cli` if you no longer want the marketplace. Your memory stays in `~/.aisquare`. A project or local install is removed from inside its repository, with its scope: `claude plugin uninstall aisquare@aisquare-cli --scope project` (or `--scope local`).
+Run `/plugin uninstall aisquare@aisquare-cli`, and `/plugin marketplace remove aisquare-cli` if you no longer want the marketplace. Your memory stays in `~/.aisquare`, and the plugin's answers about uv stay in `~/.cache/aisquare` (delete that folder if you want them gone; `aisquare uninstall --purge` deletes them with the home). A project or local install is removed from inside its repository, with its scope: `claude plugin uninstall aisquare@aisquare-cli --scope project` (or `--scope local`).
 
 `aisquare uninstall` leaves the plugin to you, because the plugin is Claude Code's: it names the command that removes each install, at every scope, and `--purge` waits until they are gone, since the plugin would run aisquare again and make `~/.aisquare` anew.

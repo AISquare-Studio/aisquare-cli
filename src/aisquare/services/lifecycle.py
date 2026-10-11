@@ -12,6 +12,7 @@ subprocess.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -1067,6 +1068,9 @@ class UninstallPlan:
     in a repository (project and local scope). Uninstall leaves it, as Claude Code owns
     it, and it keeps running aisquare there: through uvx once the package is gone,
     which makes the home again (review of #257)."""
+    plugin_answers: Path | None = None
+    """The file the plugin's launcher keeps uv's answers in (:func:`plugin_answers`), when
+    it is there: outside the home, so named beside it, and deleted with it."""
 
     @property
     def package_command(self) -> str:
@@ -1201,6 +1205,9 @@ class UninstallReport:
     """Why agents.json could not be updated, when it could not."""
     purged: bool = False
     purge_error: str | None = None
+    plugin_answers_error: str | None = None
+    """Why the plugin's answers about uv were not deleted with the home. A cache: said,
+    and it fails nothing."""
     notes: tuple[str, ...] = ()
 
     @property
@@ -1756,6 +1763,24 @@ def running_fleet() -> tuple[tuple[str, ...], int, str | None]:
     return live, len(rows) - len(live), fleet_error
 
 
+def plugin_answers() -> Path:
+    """The file the Claude Code plugin's launcher keeps uv's answers in.
+
+    ``${XDG_CACHE_HOME:-~/.cache}/aisquare/plugin-tested-python``, as
+    plugins/claude-code/scripts/aisquare-hook names it: whether uv has a Python aisquare
+    is tested on, per uv and its settings. The one file aisquare writes outside the home,
+    so ``--purge`` would have left it, holding a uv path (round 20 of #257).
+    """
+    cache = os.environ.get("XDG_CACHE_HOME") or str(agent_core._home() / ".cache")
+    return Path(cache) / "aisquare" / "plugin-tested-python"
+
+
+def _plugin_answers_there() -> Path | None:
+    """:func:`plugin_answers` when there is a file (or a link) by that name, else ``None``."""
+    answers = plugin_answers()
+    return answers if os.path.lexists(answers) and not os.path.isdir(answers) else None
+
+
 def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
     """Decide what ``aisquare uninstall`` would do. Reads only; never creates the home."""
     route = install_route.detect()
@@ -1803,6 +1828,7 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         unlistened=unlistened,
         fleet_error=fleet_error,
         plugins=_plugins(claude_dirs),
+        plugin_answers=_plugin_answers_there(),
     )
 
 
@@ -1840,8 +1866,11 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
     removals.extend(HookRemoval(site.config_dir, False, site.reason) for site in blocking)
     purged, purge_error = False, None
     hooks_failed = any(not removal.ok for removal in removals)
+    answers_error: str | None = None
     if plan.purges and not hooks_failed:
         purged, purge_error = _purge(plan.home)
+        if purged and plan.plugin_answers is not None:
+            answers_error = _delete_plugin_answers(plan.plugin_answers)
     elif plan.purge and plan.home_exists and hooks_failed:
         purge_error = "not attempted: hooks were left in a directory above"
     if not purged:
@@ -1868,8 +1897,23 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
         record_error=record_error,
         purged=purged,
         purge_error=purge_error,
+        plugin_answers_error=answers_error,
         notes=tuple(_uninstall_notes(plan, removals, purged=purged)),
     )
+
+
+def _delete_plugin_answers(answers: Path) -> str | None:
+    """Delete the plugin's answers about uv, and the folder its launcher made for them
+    when nothing else is in it; why not, when it could not. A link is unlinked, never
+    followed."""
+    try:
+        answers.unlink(missing_ok=True)
+    except OSError as exc:
+        return str(exc) or type(exc).__name__
+    # Something else kept there, or the folder gone already: not ours to delete.
+    with contextlib.suppress(OSError):
+        answers.parent.rmdir()
+    return None
 
 
 def _unrecord_hookless() -> None:

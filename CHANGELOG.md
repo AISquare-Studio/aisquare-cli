@@ -63,7 +63,8 @@ and an aisquare that upgrades and uninstalls itself.**
   boards) unless you add `--purge`, shows its plan and asks first, and
   `--dry-run` removes nothing. An enabled aisquare plugin, which keeps running
   aisquare, is named with the command that removes it, and `--purge` waits
-  for it (#253).
+  for it (#253). `--purge` also deletes the one file aisquare keeps outside
+  the home: the plugin's answers about uv, in `~/.cache/aisquare`.
 - **Update and Uninstall in asq's Doctor** hand the terminal to
   `aisquare upgrade` and `aisquare uninstall`, which show their plan and ask;
   after an update, asq reopens on the version just installed (#254). Work

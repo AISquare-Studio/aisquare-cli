@@ -77,6 +77,8 @@ DIRTY_SHELL = {
     # A second Claude login's scratch directory, exported the way the README's
     # role bindings set it.
     "CLAUDE_CODE_TMPDIR": "/home/someone/.cache/claude-account1",
+    # Where the plugin's answers about uv live, which a purge deletes.
+    "XDG_CACHE_HOME": "/home/someone/.cache",
     # The shell's own two, as a launch onto one of that login's managed slots
     # keeps them (`claude_accounts.PLAIN_VARS`) — read as slot 1 whenever a test
     # points CLAUDE_CONFIG_DIR at a managed slot, as the account tests do.

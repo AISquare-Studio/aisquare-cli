@@ -93,7 +93,8 @@ Remove it with `aisquare uninstall`. It takes aisquare's hooks out of Claude
 Code, then removes the package of a uv tool install, whatever it was installed
 from; any other install, and any install on native Windows, is shown the
 command that removes it. It keeps `~/.aisquare` (your memory and boards) unless
-you add `--purge`, and it shows what it will do and asks first.
+you add `--purge`, which also deletes the Claude Code plugin's answers about uv
+in `~/.cache/aisquare`, and it shows what it will do and asks first.
 
 ## Start the GUI
 

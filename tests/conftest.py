@@ -165,6 +165,10 @@ AMBIENT_ENV_VARS = (
     # second login exported would see its directory in both. The account tests
     # cleared it locally; this makes it the suite's answer rather than theirs.
     "CLAUDE_CODE_TMPDIR",
+    # Where the plugin's launcher keeps uv's answers (`lifecycle.plugin_answers`) and
+    # uv its cache (`install_route`). Left set, a test of `uninstall --purge` would
+    # plan, and delete, the developer's own answers file.
+    "XDG_CACHE_HOME",
     # The copies of the shell's own two a launch onto a managed slot keeps
     # (`core.claude_accounts.PLAIN_VARS`). `plain_environment` reads them
     # whenever CLAUDE_CONFIG_DIR names a managed slot, which the account tests

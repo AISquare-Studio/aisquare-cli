@@ -3125,11 +3125,14 @@ def test_a_gesture_on_a_narrow_terminal_keeps_a_wider_remembered_width(
 
 
 def test_a_double_click_with_a_one_row_drift_is_still_a_double_click(
-    tmp_path: Path, script: Script, isolated_home: Path
+    tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`_moved` was set by any motion event: on a tall one-column handle a one-row hand drift
     between press and release is routine, moved nothing, and made the reset take three clicks."""
     seed(tmp_path, ("prj_a", "alpha", None))
+    # Settled click by click, a loaded runner can outlast the half-second window
+    # (test_another_button_breaks_the_double_click_chain); its length is not what this tests.
+    monkeypatch.setattr(FleetApp, "CLICK_CHAIN_TIME_THRESHOLD", 5.0)
 
     async def go(pilot: Pilot[None]) -> tuple[int, int, int]:
         app = fleet_app(pilot)
@@ -3176,12 +3179,16 @@ def test_a_refused_theme_save_is_said_once(
 
 
 def test_another_button_breaks_the_double_click_chain(
-    tmp_path: Path, script: Script, isolated_home: Path
+    tmp_path: Path, script: Script, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Textual's chain counter is button-agnostic: a middle click between two left clicks fifteen
     rows apart, or a right click between two at one cell, made the second left click
     `chain == 2` — and a time check on the previous left click let both through."""
     seed(tmp_path, ("prj_a", "alpha", None))
+    # Each click here is settled before the next, and on a loaded ubuntu runner the last two
+    # outlasted Textual's half-second window and read as single clicks (CI run 38181938628).
+    # The window's length is not what this tests: wide enough, the button alone decides.
+    monkeypatch.setattr(FleetApp, "CLICK_CHAIN_TIME_THRESHOLD", 5.0)
 
     async def go(pilot: Pilot[None]) -> dict[str, object]:
         app = fleet_app(pilot)

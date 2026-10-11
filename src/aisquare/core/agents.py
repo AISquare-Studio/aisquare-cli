@@ -273,9 +273,14 @@ def _write_settings(path: Path, settings: dict[str, Any]) -> None:
     ``connect`` or ``uninstall``) left a truncated file that is not JSON, which every
     surface then refuses and Claude Code runs without, and a session reading it between
     the truncate and the write saw it empty (round 19 of #257). Through a link, the file
-    it points at is replaced, as ``save_config`` does. In place only where its folder
-    takes no new file but the file itself may be written; a file this user may not
-    write is not replaced either.
+    it points at is replaced, as ``save_config`` does. A file this user may not write is
+    not replaced either.
+
+    In place, as before, wherever a new file renamed over it would not be the same file
+    to everyone else (round 20): where its folder takes no new file; where the rename is
+    refused because the file is a mount point of its own (``EBUSY``, ``EXDEV``: a
+    container's single-file bind mount); and where :func:`_as_it_was` finds the temp
+    differs, in its links, owner, group, device or Windows DACL.
     """
     text = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
     body = text.encode("utf-8", errors="backslashreplace").decode("utf-8")
@@ -283,16 +288,50 @@ def _write_settings(path: Path, settings: dict[str, Any]) -> None:
     there = os.path.exists(target)
     if there and not os.access(target, os.W_OK):
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(target))
-    made = False
+    made = in_place = False
     try:
         with atomic.replacement(target) as pending:
             made = True
-            pending.publish(body)
+            if there and not _as_it_was(target, pending.temporary):
+                in_place = True  # leaving without a publish removes the temp
+            else:
+                pending.publish(body)
     except PermissionError:
         if made or not there:
             raise
-        # No temp could be made beside it: the folder takes no new file, the file does.
+        in_place = True  # no temp could be made beside it: the folder takes no new file
+    except OSError as exc:
+        if not there or exc.errno not in {errno.EBUSY, errno.EXDEV}:
+            raise
+        in_place = True  # renamed over, the file is a mount point and stays one
+    if in_place:
         target.write_text(body, encoding="utf-8")
+
+
+def _as_it_was(target: Path, temporary: Path) -> bool:
+    """Whether ``temporary``, renamed over ``target``, is the same file to everyone else.
+
+    Not when ``target`` has a second name (a dotfiles tool that hard-links): the rename
+    splits the link, and the other name keeps the old hooks. Not when the temp's owner or
+    group is another than the file's: a file another user owns, which this user writes
+    through its group, would become this user's, and the group's write would go with it.
+    Nor across devices, nor on Windows when the temp's DACL, the one its folder hands
+    down, is not the file's own: a file whose DACL denies this user writing would be
+    replaced all the same, as ``os.access`` there reads the read-only flag alone
+    (round 20 of #257). Unreadable is not the same.
+    """
+    try:
+        was, new = target.stat(), temporary.stat()
+    except OSError:
+        return False
+    if was.st_nlink > 1:
+        return False
+    if (was.st_uid, was.st_gid, was.st_dev) != (new.st_uid, new.st_gid, new.st_dev):
+        return False
+    if sys.platform == "win32":
+        dacl = paths.dacl_sddl(target)
+        return dacl is not None and dacl == paths.dacl_sddl(temporary)
+    return True
 
 
 def _is_aisquare_hook_command(command: str) -> bool:

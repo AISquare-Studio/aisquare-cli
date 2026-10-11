@@ -472,6 +472,108 @@ def test_a_settings_json_this_user_may_not_write_is_not_replaced(fake_home: Path
     assert settings_path.read_bytes() == before
 
 
+@pytest.mark.skipif(not hasattr(os, "link"), reason="needs a hard link")
+def test_a_hard_linked_settings_json_is_written_in_place_so_both_names_get_the_hooks(
+    fake_home: Path,
+) -> None:
+    """Round 20 of #257: a dotfiles tool that hard-links rather than symlinks. Renamed
+    over, the settings.json name got a new file and the other name kept the old one,
+    without the hooks; written in place, both names are the one file."""
+    dotfiles = fake_home / "dotfiles"
+    dotfiles.mkdir()
+    real = dotfiles / "claude-settings.json"
+    real.write_text(json.dumps(MINE), encoding="utf-8")
+    settings_path = fake_home / ".claude" / "settings.json"
+    os.link(real, settings_path)
+
+    agents.install_hooks("claude-code", settings_path.parent)
+
+    assert os.path.samefile(real, settings_path), "still one file"
+    assert agents.hook_commands("claude-code", settings_path.parent)
+    assert real.read_text(encoding="utf-8") == settings_path.read_text(encoding="utf-8")
+    assert sorted(p.name for p in settings_path.parent.iterdir()) == [
+        "CLAUDE.md",
+        "settings.json",
+    ], "no temp"
+
+
+@pytest.mark.parametrize("refused", [errno.EBUSY, errno.EXDEV], ids=["EBUSY", "EXDEV"])
+def test_a_settings_json_mounted_on_its_own_is_written_in_place(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch, refused: int
+) -> None:
+    """Round 20 of #257: `docker run -v ~/.claude/settings.json:…` mounts the file alone,
+    and a rename onto a mount point is refused with EBUSY (EXDEV across devices), which is
+    no PermissionError: connect, uninstall and refresh-hooks failed where the in-place
+    write had worked. The rename is refused here as the kernel refuses it."""
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    real_replace = os.replace
+
+    def replace(source: Any, destination: Any) -> None:
+        if Path(destination) == settings_path.resolve():
+            raise OSError(refused, os.strerror(refused), str(destination))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", replace)
+
+    agents.install_hooks("claude-code", settings_path.parent)
+
+    monkeypatch.undo()
+    assert agents.hook_commands("claude-code", settings_path.parent)
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["env"] == MINE["env"]
+    assert sorted(p.name for p in settings_path.parent.iterdir()) == [
+        "CLAUDE.md",
+        "settings.json",
+    ], "no temp"
+
+
+def _another_group() -> int | None:
+    """A group this user is in besides the one its new files get, if it has one."""
+    if not hasattr(os, "getgroups") or not hasattr(os, "getegid"):
+        return None
+    return next((g for g in os.getgroups() if g != os.getegid()), None)
+
+
+@pytest.mark.skipif(_another_group() is None, reason="needs a second group to give the file")
+def test_a_settings_json_of_another_group_keeps_its_group(fake_home: Path) -> None:
+    """Round 20 of #257: replaced, the file's owner and group became this user's and its
+    primary group, its mode kept but read against another group, so a file shared
+    through its group stopped being writable by that group. Written in place, it keeps
+    both; so does a file another user owns, which no test can make without root."""
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    group = _another_group()
+    assert group is not None
+    os.chown(settings_path, -1, group)
+    inode = settings_path.stat().st_ino
+
+    agents.install_hooks("claude-code", settings_path.parent)
+
+    assert agents.hook_commands("claude-code", settings_path.parent)
+    assert settings_path.stat().st_gid == group
+    assert settings_path.stat().st_ino == inode, "in place"
+
+
+def test_a_settings_json_nobody_else_shares_is_still_replaced(fake_home: Path) -> None:
+    """The control: one name, this user's own, in a folder that takes a temp. Replaced,
+    as round 19 made it, so a write cut off partway keeps every setting."""
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    replaced: list[str] = []
+    real_replace = os.replace
+
+    def replace(source: Any, destination: Any) -> None:
+        replaced.append(str(destination))
+        real_replace(source, destination)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "replace", replace)
+        agents.install_hooks("claude-code", settings_path.parent)
+
+    assert replaced == [str(settings_path.resolve())]
+    assert agents.hook_commands("claude-code", settings_path.parent)
+
+
 def test_disconnect_warns_when_nothing_was_removed(runner: CliRunner, fake_home: Path) -> None:
     result = runner.invoke(app, ["agents", "disconnect", "claude-code"])
     assert result.exit_code == 0

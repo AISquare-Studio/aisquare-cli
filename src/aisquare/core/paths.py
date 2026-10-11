@@ -126,7 +126,7 @@ def restrict_to_owner(path: Path) -> bool:
         return False
     if result.returncode != 0:
         return False
-    sddl = _dacl_sddl(path)
+    sddl = dacl_sddl(path)
     return sddl is not None and _grants_only_owner(sddl, sid, _local_account_domain())
 
 
@@ -243,7 +243,7 @@ def _local_account_domain() -> str | None:
     What ``LA`` stands for, less its RID: ``ConvertStringSidToSidW`` resolves an
     SDDL abbreviation as the DACL's own text means it, so there is no second
     rule to keep in step with SDDL's. Read in process through ``advapi32``, as
-    :func:`_dacl_sddl` reads the DACL. Cached: the machine's domain does not
+    :func:`dacl_sddl` reads the DACL. Cached: the machine's domain does not
     change under a running process.
     """
     if sys.platform != "win32":
@@ -280,8 +280,8 @@ def _local_account_domain() -> str | None:
     return domain if rid == "500" and domain.startswith("S-1-5-21-") else None
 
 
-def _dacl_sddl(path: Path) -> str | None:
-    """``path``'s DACL as SDDL, read in process; ``None`` when it cannot be read.
+def dacl_sddl(path: Path) -> str | None:
+    """``path``'s DACL as SDDL, read in process; ``None`` off Windows or when it cannot be read.
 
     Through ``advapi32`` rather than ``icacls``: ``icacls <path>`` prints
     display names, which are localised and contain spaces, and a read that

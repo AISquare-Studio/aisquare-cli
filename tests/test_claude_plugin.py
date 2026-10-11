@@ -303,11 +303,17 @@ class Machine:
         return script
 
     def fake_uv(
-        self, *, installed: bool = False, fetchable: bool = False, where: Path | None = None
+        self,
+        *,
+        installed: bool = False,
+        fetchable: bool = False,
+        where: Path | None = None,
+        killed: bool = False,
     ) -> None:
         """A ``uv`` that says whether it has a tested Python (``uv python find``) or may
         fetch one (``uv run``), recording each question. It reads stdin, as any program
-        handed the payload could, so a question asked without ``</dev/null`` eats it."""
+        handed the payload could, so a question asked without ``</dev/null`` eats it.
+        ``killed``: its ``uv run`` outlives the hook's timeout, which kills the launcher."""
         directory = self.bin if where is None else where
         directory.mkdir(parents=True, exist_ok=True)
         record = self.log / "uv"
@@ -318,7 +324,8 @@ class Machine:
             f"'{shutil.which('cat')}' >> '{record}.stdin'\n"
             "case $1 in\n"
             f"    python) exit {0 if installed else 2} ;;\n"
-            f"    run) exit {0 if installed or fetchable else 2} ;;\n"
+            + ("    run) kill -KILL $PPID; exit 2 ;;\n" if killed else "")
+            + f"    run) exit {0 if installed or fetchable else 2} ;;\n"
             "esac\n"
             "exit 2\n",
             encoding="utf-8",
@@ -375,7 +382,8 @@ def machine(tmp_path: Path) -> Machine:
     home = tmp_path / "home"
     tools = tmp_path / "tools"
     tools.mkdir()
-    for needed in ("grep", "mkdir"):  # mkdir: once, for the folder the uv answer is kept in
+    # mkdir: once, for the folder the uv answers are kept in; date: when each was asked
+    for needed in ("grep", "mkdir", "date"):
         found = shutil.which(needed)
         assert found is not None, f"the launcher needs {needed}, as does every machine it runs on"
         (tools / needed).symlink_to(found)
@@ -1029,6 +1037,85 @@ def test_each_session_start_asks_uv_again_and_another_uv_is_asked_on_any_event(
 
         assert len(machine.calls("uv")) > before, f"asked again over {kept_text!r}"
         assert not _ranged(machine.ran("uvx")), kept_text
+
+
+def _answer_file(machine: Machine) -> Path:
+    return machine.home / ".cache" / "aisquare" / "plugin-tested-python"
+
+
+def _answers(machine: Machine) -> list[list[str]]:
+    """The kept answers, newest first: each its answer, when it was asked, and its key."""
+    text = _answer_file(machine).read_text(encoding="utf-8")
+    return [line.split(" ", 2) for line in text.splitlines()]
+
+
+@posix_only
+def test_a_plain_answer_is_asked_again_once_five_minutes_have_passed(machine: Machine) -> None:
+    """Round 20 of #257: a session started offline could fetch no tested Python, and the
+    `plain` that answered stood for every event until the next session start, long after
+    the network was back. It stands five minutes; a `ranged` one stands until then."""
+    machine.fake("uvx")
+    machine.fake_uv()
+    machine.run("session-start")
+    machine.fake_uv(fetchable=True)  # the network is back
+
+    machine.run("stop")
+    within = (_ranged(machine.ran("uvx")), len(machine.calls("uv")))
+    [[answer, asked, key]] = _answers(machine)
+    _answer_file(machine).write_text(f"{answer} {int(asked) - 301} {key}\n", encoding="utf-8")
+    machine.run("stop")
+    after = (_ranged(machine.ran("uvx")), len(machine.calls("uv")))
+    machine.run("stop")
+
+    assert answer == "plain"
+    assert within == (False, 2), "read: asked at session start alone"
+    assert after == (True, 4), "asked again, and uv may fetch one now"
+    assert len(machine.calls("uv")) == 4 and _ranged(machine.ran("uvx")), "ranged: kept"
+
+
+@posix_only
+def test_sessions_under_other_uv_settings_keep_answers_of_their_own(machine: Machine) -> None:
+    """Round 20 of #257: one answer for the machine, asked of one uv for one range. A
+    session started under another UV_PYTHON_DOWNLOADS (install dir, cache, PATH) replaced
+    it, and an older session's next prompt ran on that other session's answer."""
+    machine.fake("uvx")
+    machine.fake_uv()
+    machine.run("session-start", env={"UV_PYTHON_DOWNLOADS": "never"})
+    machine.fake_uv(installed=True)
+    machine.run("session-start", env={"UV_PYTHON_DOWNLOADS": "automatic"})
+    asked = len(machine.calls("uv"))
+
+    machine.run("stop", env={"UV_PYTHON_DOWNLOADS": "never"})
+    never = _ranged(machine.ran("uvx"))
+    machine.run("stop", env={"UV_PYTHON_DOWNLOADS": "automatic"})
+    automatic = _ranged(machine.ran("uvx"))
+    machine.run("stop")
+    unset = _ranged(machine.ran("uvx"))
+
+    assert (never, automatic) == (False, True), "each session read its own"
+    assert len(machine.calls("uv")) == asked + 1, "the third, under no setting, asked"
+    assert unset is True
+    assert [answer for answer, _, _ in _answers(machine)] == ["ranged", "ranged", "plain"]
+
+
+@posix_only
+def test_a_probe_the_hooks_timeout_kills_still_spares_the_events_after_it(
+    machine: Machine,
+) -> None:
+    """Round 20 of #257: offline, the slow `uv run` is the half a hook's timeout kills,
+    and killed, the probe wrote no answer, so every event after it paid the whole probe
+    again. `plain` is kept before that half is asked."""
+    machine.fake("uvx")
+    machine.fake_uv(killed=True)
+    started = machine.run("session-start")
+    asked = len(machine.calls("uv"))
+    machine.fake_uv(fetchable=True)
+
+    machine.run("user-prompt-submit")
+
+    assert started.returncode == -9, "premise: killed in its `uv run`"
+    assert asked == 2 and len(machine.calls("uv")) == asked, "not asked again"
+    assert machine.ran("uvx") is not None and not _ranged(machine.ran("uvx"))
 
 
 @posix_only

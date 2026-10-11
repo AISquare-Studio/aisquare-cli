@@ -235,42 +235,89 @@ _find() {
 # The Pythons CI tests aisquare on, as uv reads a request.
 _tested='>=3.11,<3.14'
 
-# Where the answer below is kept between one session's events: one line, `ranged` or
-# `plain`, then the uv and the range it was asked about.
+# Where the answers below are kept between events: one line each, `ranged` or `plain`,
+# when it was asked (seconds since 1970), then what it was asked under (_key).
 _answers=${XDG_CACHE_HOME:-$HOME/.cache}/aisquare
 _answer_file=$_answers/plugin-tested-python
+# Seconds a `plain` answer stands. It may be a moment's: no network, so no fetch.
+_plain_for=300
+
+# The answer kept for $_key into _kept_answer (`ranged` or `plain`), else return 1. A
+# `plain` one older than $_plain_for is no answer. The file is read with builtins, so
+# a `ranged` answer costs no process, and a `plain` one costs one `date`.
+_kept() {
+    [ -f "$_answer_file" ] || return 1
+    while IFS= read -r _line; do
+        _rest=${_line#* }
+        [ "${_rest#* }" = "$_key" ] || continue
+        _kept_answer=${_line%% *}
+        _asked=${_rest%% *}
+        case $_kept_answer in
+            ranged) return 0 ;;
+            plain)
+                _now=$(date +%s 2>/dev/null) || return 1
+                case $_asked$_now in
+                    '' | *[!0-9]*) return 1 ;;
+                esac
+                [ "$_now" -ge "$_asked" ] && [ $((_now - _asked)) -lt "$_plain_for" ]
+                return
+                ;;
+        esac
+        return 1
+    done <"$_answer_file"
+    return 1
+}
+
+# Keep $1 for $_key, first, and up to seven answers kept for other keys after it.
+_keep() {
+    _stamp=$(date +%s 2>/dev/null) || _stamp=0
+    _others=
+    _count=0
+    if [ -f "$_answer_file" ]; then
+        while IFS= read -r _line && [ "$_count" -lt 7 ]; do
+            _rest=${_line#* }
+            [ "${_rest#* }" = "$_key" ] && continue
+            _others=$_others$_line$_nl
+            _count=$((_count + 1))
+        done <"$_answer_file"
+    fi
+    [ -d "$_answers" ] || mkdir -p "$_answers" 2>/dev/null
+    printf '%s %s %s\n%s' "$1" "$_stamp" "$_key" "$_others" 2>/dev/null >"$_answer_file"
+}
 
 # Whether uv has a Python in $_tested, or may fetch one: `uv python find` answers
 # for the installed ones, and `uv run` fetches one wherever uv's python-downloads
 # allows it (Fedora's packaged uv sets "manual"). Asked of the uv beside uvx, else
 # the first that can start; with none to ask, uvx is given the range as it always
 # was. Neither question reads stdin or prints, so the payload stays the hook's.
-# Asked at session start, and on another event only when no answer is kept for this
-# uv: every prompt paid for one or two uv runs, and an offline `uv run` waits for
-# its download to time out (round 19 of #257). Read with builtins, for no process.
+# Asked at session start, and on another event only when no answer is kept: every
+# prompt paid for one or two uv runs, and an offline `uv run` waits for its download
+# to time out (round 19 of #257). Kept per uv, range, PATH and the uv settings that
+# change the answer, so a session started under others neither reads nor replaces
+# this one's; a `plain` answer for five minutes alone, so one asked while offline is
+# asked again; and `plain` before the slow `uv run`, so a probe the hook's timeout
+# kills still spares the events after it (round 20).
 _has_tested_python() {
     _uv=${_runner%/*}/uv
     _starts "$_uv" || _uv=$(_find uv) || return 0
-    _key="$_uv $_tested"
-    if [ "$event" != session-start ]; then
-        _line=
-        IFS= read -r _line 2>/dev/null <"$_answer_file"
-        if [ "${_line#* }" = "$_key" ]; then
-            case $_line in
-                "ranged "*) return 0 ;;
-                "plain "*) return 1 ;;
-            esac
-        fi
+    _key="$_uv $_tested ${UV_PYTHON_DOWNLOADS-}|${UV_PYTHON_PREFERENCE-}|${UV_MANAGED_PYTHON-}|${UV_NO_MANAGED_PYTHON-}|${UV_PYTHON_INSTALL_DIR-}|${UV_CACHE_DIR-}|${UV_OFFLINE-}|${UV_CONFIG_FILE-}|${UV_NO_CONFIG-}|$PATH"
+    case $_key in
+        *"$_nl"*) _key= ;; # not one line: kept, it could never be read back
+    esac
+    if [ -n "$_key" ] && [ "$event" != session-start ] && _kept; then
+        [ "$_kept_answer" = ranged ]
+        return
     fi
-    if "$_uv" python find --system "$_tested" </dev/null >/dev/null 2>&1 ||
-        "$_uv" run --no-project --python "$_tested" python -c '' </dev/null >/dev/null 2>&1; then
-        _answer=ranged
-    else
-        _answer=plain
+    if "$_uv" python find --system "$_tested" </dev/null >/dev/null 2>&1; then
+        [ -z "$_key" ] || _keep ranged
+        return 0
     fi
-    [ -d "$_answers" ] || mkdir -p "$_answers" 2>/dev/null
-    printf '%s %s\n' "$_answer" "$_key" 2>/dev/null >"$_answer_file"
-    [ "$_answer" = ranged ]
+    [ -z "$_key" ] || _keep plain
+    if "$_uv" run --no-project --python "$_tested" python -c '' </dev/null >/dev/null 2>&1; then
+        [ -z "$_key" ] || _keep ranged
+        return 0
+    fi
+    return 1
 }
 
 if _runner=$(_find aisquare); then

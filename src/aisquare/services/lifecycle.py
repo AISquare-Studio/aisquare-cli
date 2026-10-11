@@ -1223,11 +1223,33 @@ def _tmux_on_path() -> bool:
 
 
 def _is_link(path: Path) -> bool:
-    """A symlink, or on Windows a junction — anything a delete could be led through."""
-    if path.is_symlink():
+    """A symlink, or on Windows a junction — anything a delete could be led through.
+
+    ``os.path``'s, which never raise: ``Path.is_symlink`` raised PermissionError on 3.11
+    to 3.13 under a folder this user cannot enter (round 19 of #257).
+    """
+    if os.path.islink(path):
         return True
     is_junction = getattr(os.path, "isjunction", None)  # Python 3.12+
     return bool(is_junction(path)) if is_junction is not None else False
+
+
+def _home_there(home: Path) -> tuple[bool, str | None]:
+    """Whether ``home`` is there (a link counts), and why it could not be looked at.
+
+    ``os.lstat`` where ``Path.exists`` and ``is_symlink`` raised PermissionError on 3.11 to
+    3.13 under a folder this user cannot enter, and ESTALE or EIO on a network mount, so
+    ``uninstall`` ended in a traceback, ``--dry-run`` and ``--json`` too (round 19 of
+    #257). A home that cannot be looked at counts as there: nothing says it is gone, so
+    the plan keeps it and ``--purge`` refuses it rather than calling it deleted.
+    """
+    try:
+        os.lstat(home)
+    except (FileNotFoundError, NotADirectoryError):
+        return False, None
+    except OSError as exc:
+        return True, exc.strerror or str(exc)
+    return True, None
 
 
 def custom_home(home: Path) -> bool:
@@ -1251,11 +1273,14 @@ def purge_refusal(home: Path, *, custom: bool) -> str | None:
       ``screenshots/``), and no name tells the two apart (review of #253), so
       only ``~/.aisquare`` — aisquare's by name — is ever deleted.
     """
+    there, unreachable = _home_there(home)
+    if unreachable is not None:
+        return f"{home} cannot be looked at ({unreachable})"
     if _is_link(home):
         return f"{home} is a link — delete what it points at by hand if that is what you mean"
-    if not home.exists():
+    if not there:
         return None
-    if not home.is_dir():
+    if not os.path.isdir(home):
         return f"{home} is not a directory"
     resolved = agent_core.dir_identity(home)
     user_home = agent_core.dir_identity(_user_home())
@@ -1265,7 +1290,7 @@ def purge_refusal(home: Path, *, custom: bool) -> str | None:
         return f"{home} is the root of a filesystem"
     if resolved in user_home.parents:
         return f"{home} contains your home directory"
-    if not any((home / marker).is_file() for marker in HOME_MARKERS):
+    if not any(os.path.isfile(home / marker) for marker in HOME_MARKERS):
         return f"{home} holds none of {', '.join(HOME_MARKERS)}, so it is not an aisquare home"
     if custom:
         return (
@@ -1768,7 +1793,7 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         package_env=install_route.installer_env(route),
         package_reason=install_route.not_removable(route),
         home=home,
-        home_exists=home.exists() or home.is_symlink(),
+        home_exists=_home_there(home)[0],
         home_entries=entries,
         accounts=_accounts_kept(),
         keychain=accounts_core.keychain_platform(),
@@ -1827,11 +1852,12 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
             if site not in blocking
         )
     record_error: str | None = None
-    if not purged and paths.agents_registry_path().is_file():
+    if not purged and os.path.isfile(paths.agents_registry_path()):
         # The home survives — no purge, or one not attempted or not finished — so
         # it must not claim a connection that is gone: any recorded site with no
         # aisquare hook left, whether this run removed them or they were already
-        # gone. Only when agents.json exists: set_connected creates the home.
+        # gone. Only when agents.json exists: set_connected creates the home. Asked with
+        # os.path, which never raises: a home this user cannot enter has none to read.
         try:
             _unrecord_hookless()
         except Exception as exc:  # a record, not the hooks: reported, never a stop

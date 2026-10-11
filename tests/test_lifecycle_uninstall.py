@@ -1161,6 +1161,44 @@ def test_a_recorded_config_dir_this_user_cannot_enter_is_reported_not_raised(
     assert "its settings.json could not be read" in unreadable[0]["reason"], unreadable
 
 
+def test_a_home_under_a_folder_this_user_cannot_enter_is_kept_and_never_raises(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    user_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``home.exists()`` raised PermissionError on 3.11 to 3.13, so the plan, ``--dry-run``
+    and ``--json`` ended in a traceback, and so did the guard and the run's agents.json
+    check (round 19 of #257). Nothing says such a home is gone: the plan keeps it, and
+    --purge refuses it with the reason rather than reporting it deleted."""
+    if sys.platform == "win32" or not can_deny_reads():
+        pytest.skip("needs a directory this user cannot enter")
+    locked = tmp_path / "locked"
+    home = _home_with_markers(locked / "inner" / ".aisquare")
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(home))
+    locked.chmod(0)
+    try:
+        plan = runner.invoke(app, ["--json", "uninstall"])
+        purge = runner.invoke(app, ["--json", "uninstall", "--yes", "--purge"])
+        run = runner.invoke(app, ["uninstall", "--yes"])
+        refusal = lifecycle.purge_refusal(home, custom=False)
+    finally:
+        locked.chmod(0o700)
+
+    assert plan.exit_code == 0, plan.output
+    planned = _one_object(plan.stdout)
+    assert planned["home"]["exists"] is True and planned["home"]["action"] == "keep"
+    assert planned["purge_refusal"] == f"{home} cannot be looked at (Permission denied)"
+    assert refusal == planned["purge_refusal"]
+    assert purge.exit_code == 1 and _one_object(purge.stdout)["error"] == "purge_refused"
+    assert run.exit_code == 0, run.output
+    assert f"kept {home}" in run.stdout
+    assert [kind for kind, _ in world.events] == ["package"], "the refused purge ran nothing"
+    assert (home / "config.toml").is_file(), "the home is as it was"
+
+
 # --- review of #253, round 1 -------------------------------------------------------------
 
 

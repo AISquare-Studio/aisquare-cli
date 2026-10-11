@@ -1174,12 +1174,15 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False
         # The answer doctor and Welcome give, so `agents list`/`status` and `aisquare
         # status` agree with them (review of #257). A directory whose hooks or plugin
         # run aisquare is connected, whoever wrote them: told "not connected", a
-        # plugin user ran `agents connect` and got both routes.
+        # plugin user ran `agents connect` and got both routes. And a recorded one
+        # whose hooks are switched off or gone is not: the registry's word kept it
+        # "connected" beside the doctor's "switched off" and Welcome's Connect.
         directory = _hook_dir(spec)
-        if claude_code_connected(directory):
-            connected = True
-            if all(_dir_key(site.config_dir) != _dir_key(directory) for site in sites):
-                sites.append(AgentHookSite(config_dir=directory, hooks_installed=True))
+        if all(
+            _dir_key(site.config_dir) != _dir_key(directory) for site in sites
+        ) and claude_code_connected(directory):
+            sites.append(AgentHookSite(config_dir=directory, hooks_installed=True))
+        connected = any(site.hooks_installed for site in sites)
         # A Claude Code that has never started has no config dir yet; its binary on PATH
         # says it is installed, for the directory a session from this shell reads (never
         # a --config-dir, which a typo could name), as `agents connect` treats it.

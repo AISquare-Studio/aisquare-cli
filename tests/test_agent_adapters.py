@@ -405,10 +405,13 @@ def test_a_record_an_older_aisquare_wrote_is_no_connection(
     assert name not in summary["agents_connected"], summary
     assert f"{label} detected at {agent_dir}, but aisquare can't connect it yet" in row.detail
     claude = listed["claude-code"]
-    assert claude["connected"] is True and "claude-code" in summary["agents_connected"], (
-        "control: a record of an agent aisquare has hooks for still counts"
+    assert [site["config_dir"] for site in claude["sites"]] == [str(claude_home)], (
+        "control: a record of an agent aisquare has hooks for is still a site"
     )
     assert claude["sites"][0]["hooks_installed"] is False, "control: and reads as missing"
+    assert claude["connected"] is False and "claude-code" not in summary["agents_connected"], (
+        "with its hooks gone, as the doctor and Welcome read it"
+    )
     assert disconnected.exit_code == 0 and "no aisquare hooks" not in disconnected.output
     assert name not in after["connected"] and not after["connections"].get(name), after
     assert "claude-code" in after["connected"], "disconnecting it leaves claude-code's record"
@@ -2429,6 +2432,39 @@ def test_agents_list_status_connect_and_init_name_hooks_switched_off(
     assert f"1/2 ok — missing in {work}" in back_on and "switched off" not in back_on, (
         "control: with the key gone, the hooks connect already wrote run"
     )
+
+
+def test_a_recorded_claude_code_whose_hooks_are_off_or_gone_is_not_connected(
+    runner: CliRunner, claude_home: Path
+) -> None:
+    """`agents status` and `aisquare status` give the doctor's and Welcome's answer both ways:
+    the registry's record kept CONNECTED "yes" beside "switched off in" (review of #257)."""
+    _connect(runner)
+    settings_path = claude_home / "settings.json"
+    hooked = json.loads(settings_path.read_text(encoding="utf-8"))
+
+    def connected() -> tuple[bool, bool, bool]:
+        status = json.loads(
+            runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout
+        )
+        report = json.loads(runner.invoke(app, ["--json", "status"]).stdout)
+        return (
+            status[0]["connected"],
+            "claude-code" in report["agents_connected"],
+            agents_service.claude_code_connected(),
+        )
+
+    settings_path.write_text(json.dumps({**hooked, "disableAllHooks": True}), encoding="utf-8")
+    switched_off = connected()
+    settings_path.write_text("{}", encoding="utf-8")
+    deleted = connected()
+    settings_path.write_text(json.dumps(hooked), encoding="utf-8")
+    back_on = connected()
+
+    assert agent_core.connected_dirs("claude-code") == [claude_home], "still recorded"
+    assert switched_off == (False, False, False), switched_off
+    assert deleted == (False, False, False), deleted
+    assert back_on == (True, True, True), "control: the hooks back, all three say so"
 
 
 def test_the_agent_rows_read_paths_only(

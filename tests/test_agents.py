@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shlex
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agents, selfcli
+from tests.fsperms import can_deny_writes, can_symlink, unwritable
 
 
 @pytest.fixture(autouse=True)
@@ -369,6 +372,104 @@ def test_settings_json_is_written_in_utf8_as_claude_code_writes_it(
     assert "Développement" in written and "\\u00e9" not in written, written
     assert '"GREETING": "café"' in left and '"ODD": "\\udce9"' in left, left
     assert json.loads(left) == {"env": {"GREETING": "café", "ODD": "\udce9"}}
+
+
+MINE = {"permissions": {"allow": ["Bash(ls)"]}, "env": {"GREETING": "café"}}
+"""Settings of the user's own, which no write of the hooks may cost them."""
+
+
+def _full_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every file opened for writing is opened, so truncated, and then the disk is full."""
+    real_open = Path.open
+
+    def opened(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        handle = real_open(self, mode, *args, **kwargs)
+        if "w" in mode:
+            handle.close()
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), str(self))
+        return handle
+
+    monkeypatch.setattr(Path, "open", opened)
+
+
+@pytest.mark.parametrize("writer", ["install_hooks", "remove_hooks"])
+def test_a_settings_write_cut_off_partway_leaves_every_setting_as_it_was(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch, writer: str
+) -> None:
+    """Rewritten in place, a write that failed after the truncate (a full disk, a kill
+    during connect or uninstall) left a settings.json that is not JSON: every surface then
+    refused it and Claude Code ran without the user's settings (round 19 of #257). It is
+    replaced now, so the file holds all of the old text or all of the new."""
+    claude = fake_home / ".claude"
+    settings_path = claude / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    if writer == "remove_hooks":
+        agents.install_hooks("claude-code", claude)
+    before = settings_path.read_bytes()
+    _full_disk(monkeypatch)
+
+    with pytest.raises(OSError, match="No space left"):
+        getattr(agents, writer)("claude-code", claude)
+
+    monkeypatch.undo()
+    assert settings_path.read_bytes() == before, "the old text, whole"
+    assert sorted(p.name for p in claude.iterdir()) == ["CLAUDE.md", "settings.json"], "no temp"
+
+
+@pytest.mark.skipif(not can_symlink(), reason="needs a symlink")
+def test_a_linked_settings_json_has_the_file_it_points_at_replaced(fake_home: Path) -> None:
+    """A dotfiles link stays a link: the file it points at gets the hooks, as save_config
+    writes a linked config.toml, rather than a new file replacing the link."""
+    dotfiles = fake_home / "dotfiles"
+    dotfiles.mkdir()
+    real = dotfiles / "claude-settings.json"
+    real.write_text(json.dumps(MINE), encoding="utf-8")
+    link = fake_home / ".claude" / "settings.json"
+    link.symlink_to(real)
+
+    agents.install_hooks("claude-code", link.parent)
+
+    assert link.is_symlink() and link.resolve() == real.resolve()
+    assert agents.hook_commands("claude-code", link.parent), "the hooks are in the linked file"
+    assert json.loads(real.read_text(encoding="utf-8"))["env"] == MINE["env"]
+    assert sorted(p.name for p in dotfiles.iterdir()) == ["claude-settings.json"], "no temp"
+
+
+@pytest.mark.skipif(not can_deny_writes(), reason="needs a folder this user cannot write")
+def test_a_settings_json_in_a_folder_that_takes_no_new_file_is_written_in_place(
+    fake_home: Path,
+) -> None:
+    """No temp can be made beside it, but the file itself may be written: the one write
+    there is, as before (round 19 of #257)."""
+    claude = fake_home / ".claude"
+    settings_path = claude / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    inode = settings_path.stat().st_ino
+
+    with unwritable(claude):
+        agents.install_hooks("claude-code", claude)
+
+    assert agents.hook_commands("claude-code", claude)
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["env"] == MINE["env"]
+    if sys.platform != "win32":
+        assert settings_path.stat().st_ino == inode, "in place"
+
+
+@pytest.mark.skipif(not can_deny_writes(), reason="needs a file this user cannot write")
+def test_a_settings_json_this_user_may_not_write_is_not_replaced(fake_home: Path) -> None:
+    """Its folder would take the temp, and the rename would replace a file its owner made
+    read-only: refused as the in-place write refused it, and left as it was."""
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    before = settings_path.read_bytes()
+    settings_path.chmod(0o444)
+    try:
+        with pytest.raises(PermissionError):
+            agents.install_hooks("claude-code", settings_path.parent)
+    finally:
+        settings_path.chmod(0o644)
+
+    assert settings_path.read_bytes() == before
 
 
 def test_disconnect_warns_when_nothing_was_removed(runner: CliRunner, fake_home: Path) -> None:

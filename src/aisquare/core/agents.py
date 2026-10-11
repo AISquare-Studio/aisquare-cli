@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-from aisquare.core import paths, selfcli
+from aisquare.core import atomic, paths, selfcli
 from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.models import AgentHookSite, AgentInfo
 
@@ -268,9 +268,31 @@ def _write_settings(path: Path, settings: dict[str, Any]) -> None:
     beside a hook that fails on every event, and no aisquare ran at all (review of
     #257). A lone surrogate (a path that is not UTF-8) cannot be written as UTF-8 and
     keeps the escape ``json.dumps`` would give it.
+
+    Replaced, not rewritten in place: a write cut off partway (a full disk, a kill during
+    ``connect`` or ``uninstall``) left a truncated file that is not JSON, which every
+    surface then refuses and Claude Code runs without, and a session reading it between
+    the truncate and the write saw it empty (round 19 of #257). Through a link, the file
+    it points at is replaced, as ``save_config`` does. In place only where its folder
+    takes no new file but the file itself may be written; a file this user may not
+    write is not replaced either.
     """
     text = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
-    path.write_text(text, encoding="utf-8", errors="backslashreplace")
+    body = text.encode("utf-8", errors="backslashreplace").decode("utf-8")
+    target = Path(os.path.realpath(path))
+    there = os.path.exists(target)
+    if there and not os.access(target, os.W_OK):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(target))
+    made = False
+    try:
+        with atomic.replacement(target) as pending:
+            made = True
+            pending.publish(body)
+    except PermissionError:
+        if made or not there:
+            raise
+        # No temp could be made beside it: the folder takes no new file, the file does.
+        target.write_text(body, encoding="utf-8")
 
 
 def _is_aisquare_hook_command(command: str) -> bool:

@@ -36,6 +36,12 @@ _SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "�
 _STYLE = {CheckStatus.ok: "green", CheckStatus.warn: "yellow", CheckStatus.fail: "bold red"}
 FIX_WORKER = "doctor-fix"
 """The worker a one-click fix runs in (and the doctor after it): it writes."""
+ROUTE_WORKER = "doctor-update-route"
+"""The worker the machine Doctor reads how aisquare was installed in, for Update."""
+_UPDATE_TOOLTIP = (
+    "Quits asq and runs `aisquare upgrade` here: it shows what it will do and asks first. "
+    "asq opens again when it is done."
+)
 
 Refresh = Callable[[Path | None], list[DoctorCheck]]
 """``cwd -> checks``: how the view re-runs the doctor after a fix. Raising is
@@ -165,15 +171,10 @@ class DoctorView(VerticalScroll):
         yield Static("", id="doctor-status")
         yield Vertical(id="doctor-fixes")
         if self.machine:
-            refusal = (self._update_refusal or _update_refusal)()
             with Horizontal(id="doctor-machine"):
-                update = Button("Update aisquare", id="doctor-update")
-                update.tooltip = Text(
-                    refusal
-                    or "Quits asq and runs `aisquare upgrade` here: it shows what it will do "
-                    "and asks first. asq opens again when it is done."
-                )
-                update.disabled = refusal is not None
+                # Offered once the install route is known (_read_update_refusal).
+                update = Button("Update aisquare", id="doctor-update", disabled=True)
+                update.tooltip = "Checking how aisquare was installed…"
                 yield update
                 uninstall = Button("Uninstall aisquare…", id="doctor-uninstall", variant="error")
                 uninstall.tooltip = (
@@ -181,11 +182,30 @@ class DoctorView(VerticalScroll):
                     "what stays, and asks first. asq opens again if nothing is removed."
                 )
                 yield uninstall
-            if refusal is not None:  # said on screen, not only on hover
-                yield Static(Text(f"Update: {refusal}", style="dim"), id="doctor-update-note")
 
     def on_mount(self) -> None:
         self._redraw()
+        if self.machine:
+            self._read_update_refusal()
+
+    @work(thread=True, name=ROUTE_WORKER, group=ROUTE_WORKER, exit_on_error=False)
+    def _read_update_refusal(self) -> None:
+        """Whether Update would only refuse (:func:`_update_refusal`), read off the UI thread.
+
+        ``install_route.detect`` reads distribution metadata, uv's receipt and PATH. Read
+        as the machine Doctor composed, at every asq start, it ran before asq's first
+        paint, which showed on a network-mounted home (round 23 of #257).
+        """
+        refusal = (self._update_refusal or _update_refusal)()
+        self.app.call_from_thread(self._offer_update, refusal)
+
+    def _offer_update(self, refusal: str | None) -> None:
+        update = self.query_one("#doctor-update", Button)
+        update.tooltip = Text(refusal or _UPDATE_TOOLTIP)
+        update.disabled = refusal is not None
+        if refusal is not None:  # said on screen, not only on hover
+            note = Static(Text(f"Update: {refusal}", style="dim"), id="doctor-update-note")
+            self.mount(note, after=self.query_one("#doctor-machine"))
 
     # ---------------------------------------------------------------- the report
 

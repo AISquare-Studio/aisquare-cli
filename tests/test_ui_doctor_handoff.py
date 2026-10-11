@@ -130,6 +130,38 @@ def test_update_is_disabled_with_the_reason_where_upgrade_would_only_refuse() ->
     assert handed == [("uninstall", "--reopen")], "Uninstall still runs"
 
 
+def test_the_install_route_is_read_off_the_ui_thread_and_update_waits_for_it() -> None:
+    """Round 23 of #257: what Update rests on (distribution metadata, uv's receipt, a PATH
+    lookup) was read on the UI thread as the machine Doctor composed, at every asq start and
+    before its first paint, which showed on a network-mounted home. It is read in a thread
+    worker, and Update is offered once it is known."""
+    release = threading.Event()
+    threads: list[int] = []
+
+    def held_refusal() -> str | None:
+        threads.append(threading.get_ident())
+        release.wait(10)
+        return None
+
+    view = DoctorView(machine=True, update_refusal=held_refusal)
+
+    async def drive_view() -> tuple[tuple[bool, str], tuple[bool, str]]:
+        host = Host(view)
+        async with host.run_test(size=(120, 40)):
+            await settle_page(host, group="held")  # the read is held on purpose: settle no group
+            update = view.query_one("#doctor-update", Button)
+            while_read = (update.disabled, str(update.tooltip))
+            release.set()
+            await settle_page(host)
+            return while_read, (update.disabled, str(update.tooltip))
+
+    while_read, after = asyncio.run(drive_view())
+
+    assert len(threads) == 1 and threads[0] != threading.get_ident(), "off the UI thread"
+    assert while_read == (True, "Checking how aisquare was installed…")
+    assert after == (False, doctor_view._UPDATE_TOOLTIP), "offered once it is known"
+
+
 # --------------------------------------------------------------------------- the app
 
 

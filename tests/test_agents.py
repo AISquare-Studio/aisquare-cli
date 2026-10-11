@@ -530,7 +530,7 @@ def test_a_settings_json_mounted_on_its_own_is_written_in_place(
 
 def _another_group() -> int | None:
     """A group this user is in besides the one its new files get, if it has one."""
-    if not hasattr(os, "getgroups") or not hasattr(os, "getegid"):
+    if sys.platform == "win32":  # mypy narrows on this, not on hasattr: no getegid there
         return None
     return next((g for g in os.getgroups() if g != os.getegid()), None)
 
@@ -545,6 +545,8 @@ def test_a_settings_json_of_another_group_keeps_its_group(fake_home: Path) -> No
     settings_path.write_text(json.dumps(MINE), encoding="utf-8")
     group = _another_group()
     assert group is not None
+    if sys.platform == "win32":  # mypy narrows on this, not on the skipif that keeps it off
+        pytest.skip("no os.chown on Windows")
     os.chown(settings_path, -1, group)
     inode = settings_path.stat().st_ino
 

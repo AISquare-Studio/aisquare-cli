@@ -9,6 +9,7 @@ known context file) exists. The set of connected agents is persisted in
 from __future__ import annotations
 
 import errno
+import importlib.metadata
 import json
 import os
 import re
@@ -23,7 +24,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from aisquare.core import paths, selfcli
-from aisquare.core.version import __version__
+from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.models import AgentHookSite, AgentInfo
 
 CONTEXT_HOOK_TIMEOUT_SECONDS = 120
@@ -199,8 +200,8 @@ def _aisquare_command() -> str:
     The running executable wins: whoever installs hooks is the aisquare the
     hooks should call, even when it was invoked as ``.venv/bin/aisquare``
     without being on PATH. Run as ``python -m aisquare`` (every button that
-    runs the CLI, through :mod:`selfcli`), that is the console script beside
-    this interpreter (:func:`current_install`), then PATH lookup; either only
+    runs the CLI, through :mod:`selfcli`), that is the console script this
+    distribution installed (:func:`current_install`), then PATH lookup; either only
     when it can start (:func:`_starts`), or a stale install first on PATH whose
     Python is gone was written back and Connect never cleared "cannot start"
     (review of #257). Then ``python -P -m
@@ -1144,8 +1145,8 @@ def context_files(name: str, config_dir: Path | None = None) -> list[Path]:
 # these functions answer. Nothing here writes: doctor reports, ``connect`` fixes.
 
 HOOK_BINARY_CURRENT = "current"
-"""The hooks run this install: the console script beside this interpreter, or one
-that reports the same version."""
+"""The hooks run this install: the console script this distribution installed
+(:func:`current_install`), or one that reports the same version."""
 HOOK_BINARY_STALE = "stale"
 """The hooks run an aisquare that reports a different version from this one."""
 HOOK_BINARY_MISSING = "missing"
@@ -1293,13 +1294,27 @@ def hook_binary(command: str) -> HookBinary | None:
 
 
 def current_install() -> Path:
-    """The ``aisquare`` console script beside THIS interpreter.
+    """The ``aisquare`` console script THIS distribution installed.
 
     What ``agents connect`` run from here would write into the hooks, and so the
-    thing every hook binary is compared against. It may not exist (a checkout
-    driven as ``python -m aisquare``); the directory is what the comparison uses.
+    thing every hook binary is compared against. The one the distribution's RECORD
+    lists, else the one beside this interpreter. Beside the interpreter alone it could
+    be another install's: ``python3 -m aisquare`` on the system Python runs the package
+    from the user site, where ``pip install --user`` put its script in ``~/.local/bin``,
+    and ``/usr/bin/aisquare`` beside that Python is whatever an older ``sudo pip
+    install`` left. Connect wrote that one into the hooks, and the doctor graded it
+    current by its path and never asked its version (review of #257). It may not
+    exist (a checkout driven as ``python -m aisquare``); the directory is what the
+    comparison uses.
     """
     name = "aisquare.exe" if sys.platform == "win32" else "aisquare"
+    try:
+        distribution = importlib.metadata.distribution(DISTRIBUTION)
+        listed = [file for file in distribution.files or () if file.name == name]
+    except Exception:  # no metadata, or a RECORD that does not read: the sibling, as before
+        listed = []
+    if listed:
+        return Path(os.path.normpath(str(distribution.locate_file(listed[0]))))
     return Path(sys.executable).with_name(name)
 
 

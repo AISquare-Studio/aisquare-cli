@@ -625,10 +625,11 @@ def test_it_reads_the_hooks_connect_writes_for_a_path_with_an_apostrophe(
     program.chmod(0o755)
     if form == "console-script":
         monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(program)])
-    else:  # no aisquare runs connect or is on PATH, so the hooks run python -P -m aisquare
+    else:  # no aisquare runs connect, is installed or is on PATH: python -P -m aisquare
         monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(machine.home / "pytest")])
         monkeypatch.setenv("PATH", str(machine.tools))
         monkeypatch.setattr(sys, "executable", str(program))
+        monkeypatch.setattr(agent_core, "current_install", lambda: tools / "aisquare")
     assert agent_core.install_hooks("claude-code", claude)
     written = agent_core.hook_commands("claude-code", claude)
     beside_the_live_ones = [machine.run(subcommand) for subcommand in _SUBCOMMANDS]

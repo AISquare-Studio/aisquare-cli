@@ -630,6 +630,44 @@ def test_the_suite_stub_answers_as_this_install() -> None:
 # --- review of ac7d7ec: identity, not neighbourhood; one unreadable sibling ---------------
 
 
+def test_this_install_is_the_script_its_distribution_installed_not_one_beside_its_python(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path
+) -> None:
+    """``/usr/bin/python3 -m aisquare`` (asq's Connect) runs the package from the user
+    site, where ``pip install --user`` put its script in ``~/.local/bin``; the
+    ``/usr/bin/aisquare`` beside that Python is an older ``sudo pip install``'s. Connect
+    wrote that one into the hooks, and the doctor graded it current by its path without
+    asking its version (review of #257, round 18). The RECORD names the script."""
+    if os.name == "nt":
+        pytest.skip("the system-Python-and-user-site shape is a POSIX one")
+    usr_bin = tmp_path / "usr" / "bin"
+    python = _fake_aisquare(usr_bin / "python3")
+    old = _fake_aisquare(usr_bin / "aisquare", prints=f"aisquare {OLD}")
+    user = tmp_path / "home" / ".local"
+    ours = _fake_aisquare(user / "bin" / "aisquare", prints=f"aisquare {__version__}")
+    site = user / "lib" / "python3.12" / "site-packages"
+    record = site / f"aisquare_cli-{__version__}.dist-info"
+    record.mkdir(parents=True)
+    (record / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: aisquare-cli\nVersion: {__version__}\n", encoding="utf-8"
+    )
+    (record / "RECORD").write_text(
+        "../../../bin/aisquare,,\n../../../bin/asq,,\n", encoding="utf-8"
+    )
+    monkeypatch.syspath_prepend(str(site))
+    monkeypatch.setattr(sys, "executable", str(python))
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(tmp_path / "__main__.py")])
+    _real_probe(monkeypatch)
+
+    assert agents.current_install() == ours
+    assert agents._aisquare_command() == agents._quote(str(ours)), "what Connect writes"
+    assert agents.classify_hook_binary(agents.HookBinary(ours)) == (
+        agents.HOOK_BINARY_CURRENT,
+        __version__,
+    )
+    assert agents.classify_hook_binary(agents.HookBinary(old)) == (agents.HOOK_BINARY_STALE, OLD)
+
+
 def test_two_interpreters_in_one_directory_are_two_installs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path
 ) -> None:

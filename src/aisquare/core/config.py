@@ -11,7 +11,7 @@ import errno
 import os
 import re
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -288,11 +288,18 @@ REVIEWER_ARGS = ("--disallowedTools=Edit Write NotebookEdit",)
 #: reviewer whether or not anyone chose it.
 _FORMER_REVIEWER_ARGS = ["--restricted"]
 
-#: The key in ``[fleet]`` every save from this build writes: the reviewer arguments in a
-#: file that holds it were written after :data:`_FORMER_REVIEWER_ARGS` stopped being the
-#: default, so a ``["--restricted"]`` there was chosen. Not a setting, and not a field:
-#: nothing reads it but :func:`_replace_the_former_reviewer_default`.
-_REVIEWER_ARGS_MIGRATED = "migrated_reviewer_args"
+#: The version of the config file's format this build writes, at its top as
+#: ``config_version``. A file without one was saved by 0.7.0 or earlier: version 0. Each
+#: step of :data:`_MIGRATIONS` brings a file from one version to the next as it loads, and
+#: the next save records the version reached, so a step runs once per file: what the file
+#: holds after that was written by a build that knew the step, and is kept. Not a setting,
+#: and not a field.
+CONFIG_VERSION = 1
+_VERSION_KEY = "config_version"
+
+#: What builds before ``config_version`` wrote into ``[fleet]`` for the one step there was
+#: (round 23 of #257): a file holding it is at version 1. The next save drops it.
+_FORMER_MARKER = "migrated_reviewer_args"
 
 
 def replacing_the_former_reviewer_default(args: Sequence[str]) -> list[str]:
@@ -374,9 +381,9 @@ def _replace_the_former_reviewer_default(data: dict[str, Any]) -> None:
     """A reviewer a 0.6.0 or 0.7.0 save left with exactly ``["--restricted"]`` loads with today's.
 
     Changing the default alone fixes nothing for a config file that already holds it,
-    and every 0.6.0 or 0.7.0 save holds it. Once, not on every load: the next save
-    records that it ran (:data:`_REVIEWER_ARGS_MIGRATED`), so the old list chosen
-    afterwards, with ``config set``, is kept like any other. Replaced on every load
+    and every 0.6.0 or 0.7.0 save holds it. Once, not on every load: the step from
+    version 0 (:data:`_MIGRATIONS`), so the old list chosen afterwards, with ``config
+    set``, is kept like any other. Replaced on every load
     instead, it was impossible to choose: ``config set`` reported it saved, the fleet
     launched without it and the next save erased it (review of #257). A reviewer given
     any other list — ``--restricted`` with more beside it included — keeps that list.
@@ -384,12 +391,44 @@ def _replace_the_former_reviewer_default(data: dict[str, Any]) -> None:
     every ``AppConfig`` built in memory too, ``config set``'s among them.
     """
     fleet = data.get("fleet")
-    if not isinstance(fleet, dict) or fleet.get(_REVIEWER_ARGS_MIGRATED) is True:
+    if not isinstance(fleet, dict):
         return
     roles = fleet.get("roles")
     reviewer = roles.get("reviewer") if isinstance(roles, dict) else None
     if isinstance(reviewer, dict) and isinstance(reviewer.get("extra_args"), list):
         reviewer["extra_args"] = replacing_the_former_reviewer_default(reviewer["extra_args"])
+
+
+#: The steps that bring a config file to :data:`CONFIG_VERSION`, in order: the one at
+#: index ``n`` takes a parsed file from version ``n`` to ``n + 1``, in place.
+_MIGRATIONS: tuple[Callable[[dict[str, Any]], None], ...] = (_replace_the_former_reviewer_default,)
+
+
+def _migrate(data: dict[str, Any]) -> None:
+    """Bring a parsed config file to :data:`CONFIG_VERSION`, in place: every step of
+    :data:`_MIGRATIONS` from the file's own version on. The version and the former
+    marker are taken out, neither being a setting."""
+    version = data.pop(_VERSION_KEY, None)
+    fleet = data.get("fleet")
+    marked = isinstance(fleet, dict) and fleet.pop(_FORMER_MARKER, None) is True
+    if not isinstance(version, int) or isinstance(version, bool) or version < 0:
+        version = 1 if marked else 0
+    for step in _MIGRATIONS[version:]:
+        step(data)
+
+
+def _versioned(dumped: dict[str, Any]) -> dict[str, Any]:
+    """``dumped`` as a file this build writes: ``config_version`` at its top, and no marker.
+
+    A higher version, which a newer build wrote and ``_keep_unknown`` kept, stays: that
+    build's steps have run on the file, and must not run again on what this one saved.
+    """
+    fleet = dumped.get("fleet")
+    if isinstance(fleet, dict):
+        fleet.pop(_FORMER_MARKER, None)
+    kept = dumped.pop(_VERSION_KEY, None)
+    newer = isinstance(kept, int) and not isinstance(kept, bool) and kept > CONFIG_VERSION
+    return {_VERSION_KEY: kept if newer else CONFIG_VERSION, **dumped}
 
 
 class FleetSettings(BaseModel):
@@ -586,7 +625,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         return AppConfig()
 
     data = _parse_toml(despite_windows_contention(target.read_bytes))
-    _replace_the_former_reviewer_default(data)
+    _migrate(data)
     return AppConfig.model_validate(data)
 
 
@@ -679,9 +718,6 @@ def save_config(
     written.parent.mkdir(parents=True, exist_ok=True)
 
     dumped = config.model_dump(mode="json", exclude_none=True)
-    # Whatever reviewer arguments this writes are this build's: the default it knows,
-    # or a list someone chose (see `_replace_the_former_reviewer_default`).
-    dumped["fleet"][_REVIEWER_ARGS_MIGRATED] = True
     if written.exists():
         # Keys this build has never heard of belong to whoever wrote them; see
         # _keep_unknown. A file this read cannot parse or decode is written over
@@ -710,7 +746,8 @@ def save_config(
                 raise
         else:
             dumped = _keep_unknown(existing, dumped, config)
-    payload = tomli_w.dumps(dumped)
+    # What this writes is this build's, at the version every step has reached (_migrate).
+    payload = tomli_w.dumps(_versioned(dumped))
 
     # Written BESIDE the target and renamed over it, never into the target
     # itself — ``core.atomic.write_replacing``, the durable-replace recipe this

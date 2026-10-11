@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import snapshot
 from aisquare.core.config import (
+    CONFIG_VERSION,
     REVIEWER_ARGS,
     AppConfig,
     CaptureSettings,
@@ -301,13 +302,14 @@ def test_the_former_reviewer_default_is_replaced_once_and_chosen_afterwards_is_k
 ) -> None:
     """Replaced on every load, `["--restricted"]` could not be chosen: `config set` said
     it was saved, the fleet launched without it, and the next save erased it. The save
-    that follows the replacement records it, and from then on the file's list is kept."""
+    that follows the replacement records the version it reached, and from then on the
+    file's list is kept."""
     target = tmp_path / "config.toml"
     target.write_text(_SAVED_BY_0_7_0_REVIEWER, encoding="utf-8")
     loaded = load_config(target)
     assert loaded.fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
     save_config(loaded, target)
-    assert tomllib.loads(target.read_text(encoding="utf-8"))["fleet"]["migrated_reviewer_args"]
+    assert tomllib.loads(target.read_text(encoding="utf-8"))["config_version"] == CONFIG_VERSION
 
     chosen = load_config(target)
     chosen.fleet.roles["reviewer"].extra_args = ["--restricted"]
@@ -315,6 +317,49 @@ def test_the_former_reviewer_default_is_replaced_once_and_chosen_afterwards_is_k
     assert load_config(target).fleet.roles["reviewer"].extra_args == ["--restricted"]
     save_config(load_config(target), target)  # any later save, of any key
     assert load_config(target).fleet.roles["reviewer"].extra_args == ["--restricted"]
+
+
+def test_a_config_carries_one_version_and_no_marker_of_a_migration(tmp_path: Path) -> None:
+    """Round 23 of #257: every save wrote `migrated_reviewer_args = true` into `[fleet]`,
+    an undocumented key, and the next change to a default would have needed another. One
+    `config_version` at the top instead, with the steps in order. A file that builds
+    before it marked is at version 1: its `--restricted` was chosen and stays, and the
+    next save trades the marker for the version."""
+    fresh = tmp_path / "fresh.toml"
+    save_config(AppConfig(), fresh)
+    written = fresh.read_text(encoding="utf-8")
+    assert written.startswith(f"config_version = {CONFIG_VERSION}\n"), written
+    assert "migrated_reviewer_args" not in written
+
+    marked = tmp_path / "marked.toml"
+    marked.write_text(
+        f"[fleet]\nmigrated_reviewer_args = true\n\n{_SAVED_BY_0_7_0_REVIEWER}", encoding="utf-8"
+    )
+    assert "migrated_reviewer_args = true" in marked.read_text(encoding="utf-8")
+    loaded = load_config(marked)
+    assert loaded.fleet.roles["reviewer"].extra_args == ["--restricted"], "chosen: kept"
+    save_config(loaded, marked)
+    saved = tomllib.loads(marked.read_text(encoding="utf-8"))
+    assert (
+        saved["config_version"] == CONFIG_VERSION
+        and "migrated_reviewer_args" not in (saved["fleet"])
+    )
+    assert load_config(marked).fleet.roles["reviewer"].extra_args == ["--restricted"]
+
+
+def test_a_config_a_newer_build_wrote_keeps_its_version_and_runs_no_step(tmp_path: Path) -> None:
+    """A version above this build's was written by a newer build, whose steps have run on
+    the file: none runs again here, and a save from here keeps that version, so the newer
+    build does not run them again on what this one wrote."""
+    target = tmp_path / "config.toml"
+    newer = CONFIG_VERSION + 1
+    target.write_text(f"config_version = {newer}\n{_SAVED_BY_0_7_0_REVIEWER}", encoding="utf-8")
+
+    loaded = load_config(target)
+    save_config(loaded, target)
+
+    assert loaded.fleet.roles["reviewer"].extra_args == ["--restricted"]
+    assert tomllib.loads(target.read_text(encoding="utf-8"))["config_version"] == newer
 
 
 def test_config_set_of_the_former_reviewer_default_takes_effect() -> None:

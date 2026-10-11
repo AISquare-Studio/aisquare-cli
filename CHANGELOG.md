@@ -149,7 +149,8 @@ and an aisquare that upgrades and uninstalls itself.**
   files (`--disallowedTools=Edit Write NotebookEdit`); pushing and merging are
   refused by its briefing. A config file holding that old default (any
   `aisquare config set` saved it) loads with today's, once: the next save
-  records that, so `--restricted` set again afterwards is kept. A reviewer
+  records `config_version = 1` at the top of the file, so `--restricted` set
+  again afterwards is kept. A reviewer
   started under those releases is restarted (`fleet restart`, `fleet switch`,
   Restart) with today's arguments too, followed by any it was spawned with;
   where today's do not deny the editing tools (`extra_args = []`, say), that

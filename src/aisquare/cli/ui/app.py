@@ -28,6 +28,9 @@ all of them must reach it.
 
 from __future__ import annotations
 
+import inspect
+import threading
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -43,7 +46,8 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
-from textual.worker import Worker, WorkerState
+from textual.worker import Worker, WorkerState, WorkType
+from textual.worker_manager import WorkerManager
 
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.divider import Divider, floor_of
@@ -310,6 +314,76 @@ class Panes(Horizontal):
         self.divider.set_class(beside, "-neighbour-focused")
 
 
+class _WorkerThreads(WorkerManager):
+    """The app's worker manager, which also knows whose threads still run, cancelled or not.
+
+    Textual's ``Worker.cancel`` cancels the task that awaits a thread worker's thread, not
+    the thread: the callable runs on while the worker reads finished and leaves
+    ``app.workers``. A newer exclusive start cancels an older one (the doctor on a project
+    switch, a usage or credits read), and so does the removal of the view that started it,
+    so a hand-over that went by the workers quit under a thread still opening the store
+    (round 23 of #257). Every worker start passes through ``_new_worker``, ``@work``'s too,
+    so each thread worker's callable is counted here from its first line to its last.
+    """
+
+    def __init__(self, app: Any) -> None:
+        super().__init__(app)
+        self._lock = threading.Lock()
+        self._threads: Counter[str] = Counter()
+
+    def _new_worker(
+        self,
+        work: WorkType[Any],
+        node: Any,
+        *,
+        name: str | None = "",
+        group: str = "default",
+        description: str = "",
+        exit_on_error: bool = True,
+        start: bool = True,
+        exclusive: bool = False,
+        thread: bool = False,
+    ) -> Worker[Any]:
+        if (
+            thread
+            and callable(work)
+            and not inspect.iscoroutinefunction(getattr(work, "func", work))
+        ):
+            # The name and description Textual would give it, read off the callable before
+            # it is wrapped.
+            name = name or getattr(work, "__name__", "") or ""
+            description = description or repr(work)
+            work = self._counted(work, name)
+        return super()._new_worker(
+            work,
+            node,
+            name=name,
+            group=group,
+            description=description,
+            exit_on_error=exit_on_error,
+            start=start,
+            exclusive=exclusive,
+            thread=thread,
+        )
+
+    def _counted(self, work: Callable[[], Any], name: str) -> Callable[[], Any]:
+        def counted() -> Any:
+            with self._lock:
+                self._threads[name] += 1
+            try:
+                return work()
+            finally:
+                with self._lock:
+                    self._threads[name] -= 1
+
+        return counted
+
+    def threads_running(self) -> set[str]:
+        """The names of the thread workers whose callable is still running."""
+        with self._lock:
+            return set(+self._threads)
+
+
 class FleetApp(SelectionHost, inherit_bindings=False):
     """One `asq` view over every project, agent and session.
 
@@ -359,6 +433,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         accounts: AccountsReader | None = accounts_service.overview,
     ) -> None:
         super().__init__()
+        self._workers = self._worker_threads = _WorkerThreads(self)
+        """Textual's own manager, which ``self.workers`` reads, and the threads it ran."""
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
         self._accounts = accounts
@@ -1166,7 +1242,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     def _holding_the_quit(self) -> bool:
         """Whether a worker a quit would cut off still runs: any thread worker but those
-        :func:`_cut_off_workers` names.
+        :func:`_cut_off_workers` names, whether it is still to start, running, or cancelled
+        with its thread still running (:class:`_WorkerThreads`).
 
         A quit cannot stop a thread worker: Textual's cancel leaves its callable running,
         asyncio.run joins its thread with the terminal blank, and the hand-over can replace
@@ -1177,10 +1254,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         no public reader; the hand-over tests run both kinds.
         """
         cut_off = _cut_off_workers()
-        return any(
-            worker._thread_worker and not worker.is_finished and worker.name not in cut_off
+        running = {
+            worker.name
             for worker in self.workers
-        )
+            if worker._thread_worker and not worker.is_finished
+        }
+        return bool((running | self._worker_threads.threads_running()) - cut_off)
 
     def _work_running(self, named: dict[str, str]) -> str | None:
         """What work of ``named`` still runs, in the toast's words, else ``None``."""

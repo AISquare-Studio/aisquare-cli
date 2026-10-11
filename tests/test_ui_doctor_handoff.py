@@ -26,6 +26,7 @@ from textual.dom import DOMNode
 from textual.message import Message
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
+from textual.worker import WorkerState
 from typer.testing import CliRunner
 
 from aisquare.cli import install as install_cli
@@ -266,6 +267,53 @@ def test_update_waits_out_every_other_worker_and_starts_no_other_meanwhile(
     assert while_held == [], "no quit under the read"
     assert started == [], "nothing new to wait for"
     assert exits == [("upgrade", "--reopen")], "the quit, once it has ended"
+
+
+def test_update_waits_for_a_cancelled_doctor_run_whose_thread_still_runs(
+    isolated_home: Path,
+    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 23 of #257: Textual's cancel stops the task that awaits a thread worker, not its
+    thread, and the cancelled worker leaves ``app.workers`` while its callable runs on. A
+    newer exclusive start cancels the older one: the doctor on a project switch, here, and
+    the Accounts page's usage and credits reads. Update quit at once under a doctor run still
+    opening the store. The control: by the worker's own state, nothing runs."""
+    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
+    started = threading.Event()
+    release = threading.Event()
+
+    def held_doctor() -> list[Any]:
+        started.set()
+        release.wait(10)
+        return []
+
+    async def fn(pilot: Pilot[None]) -> tuple[Any, list[Any], list[Any]]:
+        app = pilot.app
+        assert isinstance(app, ui_app.FleetApp)
+        exits: list[Any] = []
+        app.exit = lambda *_args, **_kwargs: exits.append(app.hand_off)  # type: ignore[method-assign]
+        app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        app._doctor = held_doctor
+        app.run_doctor()
+        old = app._doctor_worker
+        assert old is not None and await asyncio.to_thread(started.wait, 10)
+        app._doctor = lambda: []
+        app.run_doctor()  # the project switch: an exclusive start cancels the held run
+        await settle_page(app)
+        cancelled = (old.state, old in list(app.workers))
+        app.query_one("#doctor-update", Button).press()
+        await settle_page(app)
+        while_running = list(exits)
+        release.set()
+        await settle_until(app, lambda: exits)
+        return cancelled, while_running, exits
+
+    cancelled, while_running, exits = drive(fn)
+
+    assert cancelled == (WorkerState.CANCELLED, False), "control: the worker reads finished"
+    assert while_running == [], "no quit under its thread"
+    assert exits == [("upgrade", "--reopen")], "the quit, once its thread has ended"
 
 
 @pytest.mark.parametrize("name", sorted(CUT_OFF))

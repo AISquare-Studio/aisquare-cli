@@ -42,6 +42,13 @@ setting it comes from.
 - Everything else gets your umask's default permissions. To restrict the whole
   tree to your user, run `chmod 700 "${AISQUARE_HOME:-$HOME/.aisquare}"`.
 
+The Claude Code plugin, where it runs aisquare through `uvx`, keeps whether uv
+has a Python aisquare is tested on in
+`${XDG_CACHE_HOME:-~/.cache}/aisquare/plugin-tested-python`, with your umask's
+default permissions. Each of its lines (eight at most) holds an answer, when it
+was asked, the path of the uv asked, the Python range, the nine `UV_*` settings
+that change the answer, and the session's whole `$PATH`.
+
 The Collective Intelligence test bed, while on, keeps each prompt's uncommitted
 tracked changes as git objects under `refs/aisquare/wip/` in your repository. It
 prunes them only while it is on. To delete them, run
@@ -63,8 +70,8 @@ every session and capture your prompts:
 `aisquare uninstall`, and asq's Uninstall, remove them from every Claude Code
 directory they find: the connected ones, `$CLAUDE_CONFIG_DIR`, each `~/.claude*`
 that holds them, and the account slots, removed ones included. With `--purge`,
-`~/.aisquare` and its account slots are deleted too; on macOS their sign-in
-tokens stay in the Keychain.
+`~/.aisquare`, its account slots and the plugin's `plugin-tested-python` are
+deleted too; on macOS the slots' sign-in tokens stay in the Keychain.
 
 Fleet agents (`asq`, `aisquare fleet spawn`) start with
 `--permission-mode auto` unless their role or the command says otherwise. In

@@ -1185,6 +1185,10 @@ def _writing_workers() -> dict[str, str]:
     is. The AISquare sign-in is left out: it waits for the browser until a token arrives,
     a quit cancels that wait (``AccountsView.on_unmount``) and nothing is stored past a
     cancel, and counted it held Update for the device code's lifetime.
+
+    A worker the UI starts that is neither here nor in the read-only list of
+    tests/test_ui_writing_workers.py fails that guard, which reads every worker start from
+    the source, so a new writer is not missed silently (round 17 of #257).
     """
     from aisquare.cli.ui.views import (
         accounts,

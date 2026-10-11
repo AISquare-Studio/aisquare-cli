@@ -1175,10 +1175,12 @@ def upgrade_argv(
     release, and for a uv tool never to one older than ``current`` (the running version
     unless given): a move back is only made by asking for it with ``--version``."""
     pinned = f"{DISTRIBUTION}=={target}" if target else DISTRIBUTION
+    if target and route.kind in (EDITABLE, LOCAL_SOURCE):
+        # Its reinstall installs what its source holds, not ``target`` (pin_refusal); a uv
+        # tool installed from a checkout, a directory or git too (review of #257).
+        return []
     if route.receipt is not None:
         return _uv_install_argv(route, target, __version__ if current is None else current)
-    if target and route.kind in (EDITABLE, LOCAL_SOURCE):
-        return []  # its reinstall installs what its source holds, not ``target`` (pin_refusal)
     if route.kind == EDITABLE:
         # The reinstall, not only `git pull`: hatchling writes the version and the
         # dependencies into the install's metadata, so a pulled checkout still

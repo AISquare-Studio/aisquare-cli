@@ -2824,7 +2824,7 @@ def test_a_pin_pypi_does_not_list_is_said_not_advised(
     assert planned["runnable"] is False and planned["reason"] == why, planned
 
 
-@pytest.mark.parametrize("kind", ["homebrew", "editable", "local-source"])
+@pytest.mark.parametrize("kind", ["homebrew", "editable", "local-source", "uv-editable", "uv-git"])
 def test_a_route_whose_command_cannot_pin_says_what_does_instead_of_advising_it(
     runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
@@ -2835,6 +2835,7 @@ def test_a_route_whose_command_cannot_pin_says_what_does_instead_of_advising_it(
     before a command that reinstalled the version already there (a later review): nothing
     but what is true by construction is said, and no command."""
     source = str(tool.prefix.parent / "src" / "aisquare-cli")
+    git = "https://github.com/x/y@dev"
     route = {
         "homebrew": install_route.InstallRoute(
             install_route.HOMEBREW, tool.facts, formula="aisquare-cli"
@@ -2842,6 +2843,20 @@ def test_a_route_whose_command_cannot_pin_says_what_does_instead_of_advising_it(
         "editable": install_route.InstallRoute(install_route.EDITABLE, tool.facts, source=source),
         "local-source": install_route.InstallRoute(
             install_route.LOCAL_SOURCE, tool.facts, source=source
+        ),
+        # A uv tool from a checkout or from git: its receipt's source is what it reinstalls,
+        # and the guard sat after the receipt's branch (review of #257).
+        "uv-editable": install_route.InstallRoute(
+            install_route.EDITABLE,
+            tool.facts,
+            source=source,
+            receipt=install_route.UvReceipt(source=("editable", source)),
+        ),
+        "uv-git": install_route.InstallRoute(
+            install_route.LOCAL_SOURCE,
+            tool.facts,
+            source=git,
+            receipt=install_route.UvReceipt(source=("git", git)),
         ),
     }[kind]
     monkeypatch.setattr(install_route, "detect", lambda: route)
@@ -2853,13 +2868,18 @@ def test_a_route_whose_command_cannot_pin_says_what_does_instead_of_advising_it(
     run = runner.invoke(app, ["upgrade", "--version", "0.7.0", "--yes"])
     latest = install_route.upgrade_argv(route)
 
-    why = {
+    whys = {
         "homebrew": "Homebrew installs the version its formula has, and brew cannot install 0.7.0",
         "editable": f"an editable install runs what its checkout holds ({source}), so "
         "--version cannot pick a release for it",
         "local-source": f"it runs what it was installed from ({source}), so --version cannot "
         "pick a release for it",
-    }[kind]
+        "uv-editable": f"an editable install runs what its checkout holds ({source}), so "
+        "--version cannot pick a release for it",
+        "uv-git": f"it runs what it was installed from ({git}), so --version cannot pick a "
+        "release for it",
+    }
+    why = whys[kind]
     assert "upgrade with" not in check.stdout and why in check.stdout, check.stdout
     assert planned["runnable"] is False and machine.installs == [], planned
     assert planned["reason"] == why and planned["argv"] == [], planned

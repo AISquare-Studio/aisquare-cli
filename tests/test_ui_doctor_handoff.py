@@ -36,6 +36,7 @@ from aisquare.cli.ui.views import explainability as explainability_view
 from aisquare.cli.ui.views import welcome as welcome_view
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.core import selfcli
+from aisquare.core.state import get_state, reset_state
 from aisquare.services.install_route import LatestRelease
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
 from tests.rendered import plain
@@ -318,6 +319,39 @@ def test_exec_self_replaces_this_process_with_this_installs_cli(
 
     argv = [sys.executable, "-P", "-m", "aisquare", "upgrade", "--reopen"]
     assert calls == [(sys.executable, argv)]
+
+
+@pytest.mark.parametrize(
+    ("given", "carried"),
+    [
+        (["--no-color", "--profile", "work", "config", "list"], ["--no-color", "--profile=work"]),
+        (["config", "list", "-v", "-q"], ["--verbose", "--quiet"]),
+        (["--profile", "-dash", "config", "list"], ["--profile=-dash"]),
+        (["config", "list"], []),
+    ],
+    ids=["colour-and-profile", "after-the-command", "profile-like-a-flag", "none"],
+)
+def test_exec_self_hands_over_with_the_global_flags_asq_was_started_with(
+    monkeypatch: pytest.MonkeyPatch, given: list[str], carried: list[str]
+) -> None:
+    """Round 21 of #257: the global flags set only the runtime state, so the command asq
+    handed its terminal to lost them. After `aisquare --no-color ui`, Update's plan and
+    y/N came out in colour, and the asq `--reopen` opened again was back on the `default`
+    profile. Read back by the CLI, they are the state asq was started with."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "execv", lambda _path, argv: calls.append(list(argv)))
+    started = CliRunner().invoke(cli_app, given)
+    assert started.exit_code == 0, started.output
+    asq = get_state()
+
+    _REAL_EXEC_SELF(["upgrade", "--reopen"])
+
+    assert calls == [[sys.executable, "-P", "-m", "aisquare", *carried, "upgrade", "--reopen"]]
+    reset_state()
+    reread = CliRunner().invoke(cli_app, [*calls[0][4:-2], "config", "list"])
+    assert reread.exit_code == 0, reread.output
+    assert get_state() == asq
 
 
 def test_exec_self_on_windows_waits_for_the_child_and_exits_with_its_status(

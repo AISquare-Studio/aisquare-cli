@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
+from aisquare.core.state import get_state
+
 
 @dataclass(frozen=True)
 class CliResult:
@@ -105,10 +107,36 @@ def exec_self(args: Sequence[str]) -> NoReturn:
     once, handing the prompt back to the shell while the program still asks its
     y/N. There the program runs as a child, waited for, and this process exits
     with its status.
+
+    With the global flags this process was started with (:func:`global_flags`).
     """
-    argv = argv_for(args)
+    argv = argv_for([*global_flags(), *args])
     sys.stdout.flush()
     sys.stderr.flush()
     if sys.platform == "win32":
         raise SystemExit(subprocess.call(argv))
     os.execv(argv[0], argv)
+
+
+def global_flags() -> list[str]:
+    """The global flags this process was started with, as ``aisquare`` takes them again.
+
+    They set only the runtime state (``cli.app.main_callback``), nothing in the
+    environment, so a command :func:`exec_self` hands the terminal to lost them: after
+    ``aisquare --no-color ui``, Update printed its plan and its y/N in colour, and the
+    asq it reopened had lost ``--profile`` too, back on ``default`` (round 21 of #257).
+    ``--json`` is not one: neither asq nor ``--reopen`` hands over under it.
+    """
+    state = get_state()
+    flags = [
+        flag
+        for flag, given in (
+            ("--no-color", state.no_color),
+            ("--verbose", state.verbose),
+            ("--quiet", state.quiet),
+        )
+        if given
+    ]
+    if state.profile != "default":
+        flags.append(f"--profile={state.profile}")
+    return flags

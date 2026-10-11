@@ -1062,10 +1062,10 @@ class UninstallPlan:
     """Why --purge may not delete the home: it refuses a run with ``purge`` set, and a
     plan without it does not offer --purge for this home."""
     live_agents: tuple[str, ...]
-    """Live fleet rows that may still be running: with tmux on PATH every live row,
-    without it those whose socket still has a server listening."""
+    """Live fleet rows that may still be running: those whose socket still has a server
+    listening."""
     unlistened: int
-    """Live rows that do not block: no tmux here and no server on their socket."""
+    """Live rows that do not block: no server on their socket."""
     fleet_error: str | None
     """Why the fleet's live agents could not be counted, when they could not."""
     plugins: tuple[agent_core.ClaudePlugin, ...] = ()
@@ -1227,11 +1227,6 @@ class UninstallReport:
 def _user_home() -> Path:
     """The user's home directory (an indirection so tests can name one)."""
     return Path.home()
-
-
-def _tmux_on_path() -> bool:
-    """Whether tmux exists here at all (an indirection so tests can decide)."""
-    return shutil.which("tmux") is not None
 
 
 def _is_link(path: Path) -> bool:
@@ -1729,12 +1724,13 @@ def _live_fleet_agents() -> tuple[tuple[tuple[str, str], ...], str | None]:
 def _server_listening(socket_name: str) -> bool:
     """Whether a tmux server answers on fleet socket ``socket_name``, asked WITHOUT tmux.
 
-    "tmux is not on PATH" is no evidence that no agent runs — the agents may have
-    been started from a shell whose PATH had it (``core.tmux``: "a missing
-    binary is not evidence either way"). The socket file is: a plain AF_UNIX
-    connect at tmux's own path (``TmuxServer.socket_path``). Only "no file" and
-    "nobody listening" count as no server; any other answer is treated as a live
-    one, because the cost of being wrong is removing hooks under running agents.
+    Whether tmux is on PATH is no evidence either way: without it the agents may have
+    been started from a shell whose PATH had it (``core.tmux``: "a missing binary is not
+    evidence either way"), and with it no server need be running, as after a reboot.
+    The socket file is: a plain AF_UNIX connect at tmux's own path
+    (``TmuxServer.socket_path``). Only "no file" and "nobody listening" count as no
+    server; any other answer is treated as a live one, because the cost of being wrong
+    is removing hooks under running agents.
     """
     try:
         path = TmuxServer(socket_name).socket_path()
@@ -1758,13 +1754,18 @@ def _server_listening(socket_name: str) -> bool:
 
 def running_fleet() -> tuple[tuple[str, ...], int, str | None]:
     """``(live, unlistened, error)``: the fleet agents that may be running, the live rows
-    that cannot be (no tmux here and no server on their socket), and why the fleet could
-    not be read. The one count upgrade and uninstall both act on."""
+    that cannot be (no server on their socket), and why the fleet could not be read. The
+    one count upgrade and uninstall both act on.
+
+    Each socket is asked whether tmux is on PATH or not. With tmux there, every live row
+    counted as running, so after a reboot, with no server and the sockets gone, uninstall
+    refused and upgrade warned of agents that were not there (round 23 of #257).
+    """
     rows, fleet_error = _live_fleet_agents()
-    tmux_found = _tmux_on_path()
-    live = tuple(
-        label for label, socket_name in rows if tmux_found or _server_listening(socket_name)
-    )
+    listening = {
+        socket_name: _server_listening(socket_name) for socket_name in {s for _, s in rows}
+    }
+    live = tuple(label for label, socket_name in rows if listening[socket_name])
     return live, len(rows) - len(live), fleet_error
 
 

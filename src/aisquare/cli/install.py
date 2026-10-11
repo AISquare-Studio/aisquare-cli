@@ -609,8 +609,8 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
         _say(f"⚠ the fleet's agents could not be counted ({plan.fleet_error}); make sure none run")
     elif plan.unlistened:
         _say(
-            f"· the board lists {plan.unlistened} live fleet agent(s), but tmux is not on PATH and "
-            "no server listens on their sockets, so none can be running"
+            f"· the board lists {plan.unlistened} live fleet agent(s), but no server listens on "
+            "their sockets, so none can be running"
         )
     refusal = plan.refusal
     if refusal is not None:

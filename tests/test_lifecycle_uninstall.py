@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -132,7 +133,8 @@ def world(monkeypatch: pytest.MonkeyPatch) -> World:
 
     monkeypatch.setattr(agent_core, "remove_hooks", remove_hooks)
     monkeypatch.setattr(install_route, "exec_replace", exec_replace)
-    monkeypatch.setattr(lifecycle, "_tmux_on_path", lambda: True)
+    # A live row is a running agent unless a test says its socket has no server.
+    monkeypatch.setattr(lifecycle, "_server_listening", lambda _socket: True)
     return recorded
 
 
@@ -625,8 +627,9 @@ def test_it_refuses_while_fleet_agents_are_live_and_names_the_shutdown(
     assert _snapshot(tmp_path) == before and world.events == []
 
 
+@pytest.mark.parametrize("tmux", [True, False], ids=["tmux-on-path", "no-tmux"])
 @pytest.mark.parametrize("listening", [True, False], ids=["server-listening", "no-server"])
-def test_without_tmux_a_live_row_blocks_only_while_its_server_listens(
+def test_a_live_row_blocks_only_while_its_server_listens(
     tool: Tool,
     world: World,
     runner: CliRunner,
@@ -634,11 +637,20 @@ def test_without_tmux_a_live_row_blocks_only_while_its_server_listens(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     listening: bool,
+    tmux: bool,
 ) -> None:
     """A tmux that left PATH is no evidence the agents stopped (review of #253): the
     row's socket is asked. Nobody listening — a stale row — must not trap someone who
-    cannot run `fleet shutdown` either."""
-    monkeypatch.setattr(lifecycle, "_tmux_on_path", lambda: False)
+    cannot run `fleet shutdown` either. Nor one with tmux on PATH: after a reboot no
+    server runs, and every row counted as running all the same (round 23 of #257)."""
+    real_which = shutil.which
+
+    def which(name: str, *args: Any, **kwargs: Any) -> str | None:
+        if name == "tmux":
+            return "/usr/bin/tmux" if tmux else None
+        return real_which(name, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "which", which)
     asked: list[str] = []
 
     def server_listening(name: str) -> bool:
@@ -650,15 +662,18 @@ def test_without_tmux_a_live_row_blocks_only_while_its_server_listens(
     _live_agent(tmp_path / "repo")
     _hooked(isolated_agent_home / ".claude", tool.script)
 
+    plan = runner.invoke(app, ["uninstall", "--dry-run"])
     result = runner.invoke(app, ["uninstall", "--yes"])
 
-    assert asked == ["asq"], "the row's own socket is the one asked"
+    assert asked == ["asq", "asq"], "the row's own socket is the one asked"
     if listening:
         assert result.exit_code == 1 and world.events == []
         assert "aisquare fleet shutdown --all --yes" in result.stderr
     else:
         assert result.exit_code == 0, result.output
         assert world.events[-1][0] == "package"
+        said = "but no server listens on their sockets, so none can be running"
+        assert said in plan.output, plan.output
 
 
 def test_the_probe_asks_the_socket_file_itself(

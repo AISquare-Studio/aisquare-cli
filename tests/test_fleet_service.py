@@ -1021,13 +1021,25 @@ def test_spawn_permission_mode_flag_beats_role_config_beats_default(
 
 
 def test_spawn_carries_role_extra_args_then_the_callers_args(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=["--verbose"])})
     fleet_service.spawn(project, "reviewer", worktree=False, agent_args=["--model", "opus"])
     command = _command(tmux)
-    assert "--restricted" in command, "the reviewer's built-in extra arg (§3.6)"
+    assert "--verbose" in command, "the role's configured extra arg"
     assert command[-2:] == ["--model", "opus"]
-    assert command.index("--restricted") < command.index("--model")
+    assert command.index("--verbose") < command.index("--model")
+
+
+def test_the_built_in_reviewer_is_launched_with_a_shell(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """`--restricted` removed Bash, so the reviewer could run none of `aisquare task
+    next`, `gh pr diff` or `gh pr review`, and every subagent it spawned to fetch the
+    diff had no shell either (PR #257's review, run by a fleet reviewer, saw nothing).
+    """
+    fleet_service.spawn(project, "reviewer", worktree=False)
+    assert "--restricted" not in _command(tmux)
 
 
 def test_spawn_respects_a_caller_supplied_session_id(

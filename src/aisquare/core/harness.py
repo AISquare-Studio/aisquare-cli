@@ -995,7 +995,8 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
         ]
     if role == "reviewer":
         # §3.3 — reads the PR as the stranger who will maintain it; findings on the
-        # PR through `gh pr review`; read-only (the fleet launches it --restricted).
+        # PR through `gh pr review`; read-only by this briefing alone, as the ui-tester
+        # is: `--restricted` would remove the Bash every step below needs.
         return [
             f"Your standing cycle (reviewer): `aisquare task next --status review --as {sid}`;",
             "if nothing,",

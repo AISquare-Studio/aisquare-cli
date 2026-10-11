@@ -249,3 +249,46 @@ def test_a_config_without_an_experiment_section_still_loads(tmp_path: Path) -> N
     target = tmp_path / "config.toml"
     target.write_text('profile = "default"\n', encoding="utf-8")
     assert load_config(target).experiment.enabled is False
+
+
+_SAVED_BY_0_7_0_REVIEWER = """\
+[fleet.roles.coder]
+permission_mode = "auto"
+worktree = true
+extra_args = []
+
+[fleet.roles.reviewer]
+permission_mode = "auto"
+worktree = true
+extra_args = [
+    "--restricted",
+]
+"""
+
+
+def test_a_reviewer_saved_with_the_former_restricted_default_loads_with_a_shell(
+    tmp_path: Path,
+) -> None:
+    """0.6.0 and 0.7.0 launched the reviewer `--restricted`, which removes Bash, and any
+    `config set` wrote that default into the file. A new default alone would leave
+    every such file launching a reviewer that cannot run `gh` — this machine's did."""
+    target = tmp_path / "config.toml"
+    target.write_text(_SAVED_BY_0_7_0_REVIEWER, encoding="utf-8")
+    loaded = load_config(target)
+    reviewer = loaded.fleet.roles["reviewer"]
+    assert reviewer.extra_args == []
+    assert reviewer.worktree is True, "only the old default goes; the rest stays as saved"
+    save_config(loaded, target)
+    saved = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert saved["fleet"]["roles"]["reviewer"]["extra_args"] == []
+
+
+def test_a_reviewer_given_more_than_the_former_default_keeps_it(tmp_path: Path) -> None:
+    """Only the exact old built-in list is the stale default; a list someone wrote is theirs."""
+    target = tmp_path / "config.toml"
+    target.write_text(
+        _SAVED_BY_0_7_0_REVIEWER.replace('"--restricted",', '"--restricted", "--tools", "Bash"'),
+        encoding="utf-8",
+    )
+    reviewer = load_config(target).fleet.roles["reviewer"]
+    assert reviewer.extra_args == ["--restricted", "--tools", "Bash"]

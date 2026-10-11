@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import tomli_w
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from aisquare.core import paths
 from aisquare.core.atomic import write_replacing
@@ -250,15 +250,31 @@ def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
     ``ui-tester`` carries no ``extra_args`` here: its ``--chrome`` is the role's own
     default (``harness.ROLE_PROFILES[...].default_args``) and is added by ``launch``
     inside the window, so it applies to a hand-started ui-tester too.
+
+    ``reviewer`` carries none either. It was launched ``--restricted`` as "read-only
+    by construction", and Claude Code's ``--restricted`` removes Bash (2.1.296:
+    unless ``--tools`` names it, and then only the named tools remain), so the
+    reviewer could run none of ``aisquare task next``, ``gh pr diff`` or ``gh pr
+    review`` — every step of its cycle — and no subagent it spawned could either,
+    because a subagent's tools come from its session's. It kept ``Edit`` and
+    ``Write``, so it was not read-only either. Its read-only is now the briefing's,
+    as the ui-tester's is.
     """
     return {
         "manager": FleetRoleSettings(),
         "coder": FleetRoleSettings(worktree=True),
         "tester": FleetRoleSettings(),
-        "reviewer": FleetRoleSettings(worktree=True, extra_args=["--restricted"]),
+        "reviewer": FleetRoleSettings(worktree=True),
         "validator": FleetRoleSettings(),
         "ui-tester": FleetRoleSettings(),
     }
+
+
+#: The reviewer's built-in ``extra_args`` in 0.6.0 and 0.7.0, which left it no shell
+#: (see ``_default_fleet_roles``). ``aisquare config set`` and the Settings page write
+#: every role out in full, so a config file either of them saved holds this list for the
+#: reviewer whether or not anyone chose it.
+_FORMER_REVIEWER_ARGS = ["--restricted"]
 
 
 class FleetSettings(BaseModel):
@@ -280,6 +296,19 @@ class FleetSettings(BaseModel):
     disable_native_agent_teams: bool = True
     max_continuations_per_hour: int = 30
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
+
+    @model_validator(mode="after")
+    def _drop_the_former_reviewer_default(self) -> FleetSettings:
+        """A reviewer saved with exactly the old built-in ``["--restricted"]`` loads with none.
+
+        Changing the default alone fixes nothing for a config file that already holds
+        it, and every 0.6.0 or 0.7.0 save holds it. A reviewer given any other list —
+        ``--restricted`` with more beside it included — keeps that list as written.
+        """
+        reviewer = self.roles.get("reviewer")
+        if reviewer is not None and reviewer.extra_args == _FORMER_REVIEWER_ARGS:
+            reviewer.extra_args = []
+        return self
 
 
 class SnapshotSettings(BaseModel):

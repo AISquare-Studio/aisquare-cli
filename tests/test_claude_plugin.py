@@ -682,25 +682,66 @@ def test_it_grades_the_program_in_our_hook_not_the_first_on_its_line(
 
 # How a console script names its Python: on the #! line, or, where that path has a space
 # or is over 127 bytes, in the /bin/sh trampoline pip writes ("..." for a space, bare for
-# a long path) and uv writes ('...').
+# a long path) and uv writes ('...', an apostrophe in it as '"'"').
+_PIP = "#!/bin/sh\n'''exec' \"{python}\" \"$0\" \"$@\"\n' '''\nexit 0\n"
+_UV = "#!/bin/sh\n'''exec' '{uv_quoted}' \"$0\" \"$@\"\n' '''\nexit 0\n"
 SHAPES = {
     "shebang": "#!{python}\nexit 0\n",
-    "pip-trampoline": "#!/bin/sh\n'''exec' \"{python}\" \"$0\" \"$@\"\n' '''\nexit 0\n",
+    "pip-trampoline": _PIP,
     "pip-long-trampoline": "#!/bin/sh\n'''exec' {python} \"$0\" \"$@\"\n' '''\nexit 0\n",
-    "uv-trampoline": "#!/bin/sh\n'''exec' '{python}' \"$0\" \"$@\"\n' '''\nexit 0\n",
+    "uv-trampoline": _UV,
+    "pip-apostrophe-trampoline": _PIP,
+    "uv-apostrophe-trampoline": _UV,
 }
 #: Where each shape's Python is: a trampoline's needs a space in its path, or length.
-_VENV = {"shebang": "venv", "pip-long-trampoline": "v" * 130}
+_VENV = {
+    "shebang": "venv",
+    "pip-long-trampoline": "v" * 130,
+    "pip-apostrophe-trampoline": "Jane's venv",
+    "uv-apostrophe-trampoline": "Jane's venv",
+}
+
+
+def _console_script(path: Path, shape: str, *, python: str) -> Path:
+    """A console script of ``shape`` whose Python is ``<its venv>/<python>/python``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    interpreter = str(path.parent / _VENV.get(shape, "my venv") / python / "python")
+    uv_quoted = interpreter.replace("'", "'\"'\"'")
+    text = SHAPES[shape].format(python=interpreter, uv_quoted=uv_quoted)
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
+    return path
 
 
 def _cannot_start(path: Path, shape: str = "shebang") -> Path:
     """An executable script whose interpreter is gone: a console script after its
     environment lost its Python (``uv python uninstall``, a removed ``python@3.x``)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    python = path.parent / _VENV.get(shape, "my venv") / "gone" / "python"
-    path.write_text(SHAPES[shape].format(python=python), encoding="utf-8")
-    path.chmod(0o755)
-    return path
+    return _console_script(path, shape, python="gone")
+
+
+@posix_only
+@pytest.mark.parametrize("shape", [shape for shape in SHAPES if shape != "shebang"])
+def test_it_stands_down_beside_a_hook_whose_trampoline_execs_a_python_that_is_there(
+    machine: Machine, shape: str
+) -> None:
+    """The exec word read as the shell reads it: uv writes an apostrophe in the path as
+    '"'"' inside its quotes, and the launcher cut the path there (`Jane`), judged a
+    working script dead and ran every event a second time beside it (review of #257)."""
+    machine.fake("aisquare")
+    script = _console_script(machine.home / "venv" / "bin" / "aisquare", shape, python="bin")
+    python = script.parent / _VENV.get(shape, "my venv") / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+    machine.settings(machine.home / ".claude", ("Stop", f"{script} hook stop"))
+    # The premise: the shell runs it, so the script starts.
+    assert subprocess.run([str(script)], capture_output=True, check=False).returncode == 0
+
+    result = machine.run("stop")
+
+    assert result.returncode == 0
+    assert machine.ran("aisquare") is None, "settings.json runs aisquare for this event"
+    assert agent_core._starts(script), "and the doctor's copy agrees"
 
 
 @posix_only

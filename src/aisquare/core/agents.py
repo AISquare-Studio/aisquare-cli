@@ -812,7 +812,26 @@ def claude_repo_plugins(config_dir: Path | None = None) -> list[ClaudePlugin]:
     return found
 
 
-_TRAMPOLINE = re.compile(rb"""'''exec' (?:(["'])([^"']*)\1|([^\s"']+)\s)""")
+#: How the second line of pip's and uv's ``#!/bin/sh`` trampoline opens.
+_TRAMPOLINE = b"'''exec' "
+
+
+def _trampoline_python(second: bytes) -> Path | None:
+    """The Python a trampoline's ``second`` line execs, or ``None`` when it is not one.
+
+    The word after ``'''exec'`` read as the shell reads it, quotes and all: an
+    apostrophe in the path is ``'"'"'`` inside uv's single quotes and bare inside pip's
+    double ones, and a class of quote-free characters cut the first at the apostrophe
+    (``Jane'``, so a working script "could not start") and skipped the second, where the
+    launcher read it (review of #257). Unbalanced quotes are no path to read.
+    """
+    if not second.startswith(_TRAMPOLINE):
+        return None
+    try:
+        words = shlex.split(second[len(_TRAMPOLINE) :].decode(errors="replace"))
+    except ValueError:
+        return None
+    return Path(words[0]) if words else None
 
 
 def _starts(program: Path) -> bool:
@@ -841,10 +860,9 @@ def _starts(program: Path) -> bool:
     # space or is over 127 bytes, and its second line execs the Python that must exist:
     # '''exec' "<python>" "$0" "$@" (uv quotes it with '; pip quotes only a path with a
     # space, so a long one is bare) (review of #257).
-    trampoline = _TRAMPOLINE.match(second)
-    if interpreter == Path("/bin/sh") and trampoline:
-        word = trampoline.group(2) if trampoline.group(1) else trampoline.group(3)
-        interpreter = Path(word.decode(errors="replace"))
+    execs = _trampoline_python(second) if interpreter == Path("/bin/sh") else None
+    if execs is not None:
+        interpreter = execs
     if not interpreter.is_absolute():
         return True
     return os.path.isfile(interpreter) and os.access(interpreter, os.X_OK)

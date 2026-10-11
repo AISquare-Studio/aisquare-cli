@@ -28,7 +28,7 @@ import json
 import os
 import stat
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -252,27 +252,41 @@ def test_a_script_whose_interpreter_is_gone_cannot_start_and_nothing_is_run(
     assert check.fix == f"aisquare agents connect claude-code --config-dir {config}"
 
 
-@pytest.mark.parametrize("quote", ['"', "", "'"], ids=["pip", "pip-long", "uv"])
+#: How each writer puts the Python in a trampoline: ``(the directory it is in, its word)``.
+#: pip double-quotes a path with a space and leaves a long one bare; uv single-quotes,
+#: an apostrophe inside as '"'"'.
+_EXEC_WORDS: dict[str, tuple[str, Callable[[str], str]]] = {
+    "pip": ("my venv", lambda path: f'"{path}"'),
+    "pip-long": ("v" * 130, str),
+    "uv": ("my venv", lambda path: f"'{path}'"),
+    "pip-apostrophe": ("Jane's venv", lambda path: f'"{path}"'),
+    "uv-apostrophe": ("Jane's venv", lambda path: "'" + path.replace("'", "'\"'\"'") + "'"),
+}
+
+
+@pytest.mark.parametrize("writer", _EXEC_WORDS)
 def test_a_trampoline_whose_python_is_gone_cannot_start_and_one_whose_python_is_there_can(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path, quote: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path, writer: str
 ) -> None:
     """Where the Python's path has a space or is long, pip and uv write ``#!/bin/sh`` and
     exec it from the next line. ``/bin/sh`` is there, so a script whose Python was gone
     "could start", and the hooks read as connected (review of #257): the Python it
     execs is the interpreter judged. pip quotes it only for a space, so a long path with
-    none is bare, and was read as no trampoline at all (round 18)."""
+    none is bare, and was read as no trampoline at all; an apostrophe in uv's quotes cut
+    the path short, and in pip's made the line no trampoline (round 18)."""
     if os.name == "nt":
         pytest.skip("a #! interpreter is a POSIX shape")
     _this_install(monkeypatch, tmp_path)
     _never_probe(monkeypatch)
-    venv = tmp_path / ("my venv" if quote else "v" * 130) / "bin"
+    directory, word = _EXEC_WORDS[writer]
+    venv = tmp_path / directory / "bin"
     venv.mkdir(parents=True)
     python = venv / "python3"
     python.write_text("#!/bin/sh\n", encoding="utf-8")
     python.chmod(0o755)
     script = venv / "aisquare"
     script.write_text(
-        f"#!/bin/sh\n'''exec' {quote}{python}{quote} \"$0\" \"$@\"\n' '''\nprint('x')\n",
+        f"#!/bin/sh\n'''exec' {word(str(python))} \"$0\" \"$@\"\n' '''\nprint('x')\n",
         encoding="utf-8",
     )
     script.chmod(0o755)

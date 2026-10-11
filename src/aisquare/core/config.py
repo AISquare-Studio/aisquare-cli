@@ -307,10 +307,12 @@ def replacing_the_former_reviewer_default(args: Sequence[str]) -> list[str]:
 def replacing_the_former_reviewer_default_first(
     args: Sequence[str], today: Sequence[str]
 ) -> list[str]:
-    """``args`` with 0.6.0/0.7.0's reviewer default replaced by :data:`REVIEWER_ARGS` where it
-    leads them, the rest kept: for a reviewer's launch spec those releases recorded, which a
-    restart replays (``services.fleet``). ``today`` is the reviewer's ``extra_args`` in
-    today's config.
+    """``args`` with 0.6.0/0.7.0's reviewer default replaced by ``today`` where it leads them,
+    the rest kept: for a reviewer's launch spec those releases recorded, which a restart
+    replays (``services.fleet``). ``today`` is the reviewer's ``extra_args`` in today's
+    config, so the restart and a fresh spawn launch with the same role arguments: replaced
+    by :data:`REVIEWER_ARGS` whatever the config said, a reviewer its operator gave every
+    tool (``extra_args = []``) or ``--model opus`` came back without them (round 21).
 
     A spec records the role's ``extra_args`` followed by the caller's, so a reviewer
     spawned with arguments of its own (``fleet spawn reviewer -- --model opus``) recorded
@@ -328,7 +330,7 @@ def replacing_the_former_reviewer_default_first(
     if list(today[: len(_FORMER_REVIEWER_ARGS)]) == _FORMER_REVIEWER_ARGS:
         return args
     if args[: len(_FORMER_REVIEWER_ARGS)] == _FORMER_REVIEWER_ARGS:
-        return [*REVIEWER_ARGS, *args[len(_FORMER_REVIEWER_ARGS) :]]
+        return [*today, *args[len(_FORMER_REVIEWER_ARGS) :]]
     return args
 
 

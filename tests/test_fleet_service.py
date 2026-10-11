@@ -9686,6 +9686,47 @@ def test_a_reviewer_restarted_from_a_spec_0_7_0_recorded_gets_its_shell_back(
 
 
 @pytest.mark.parametrize(
+    "today", [[], ["--model", "opus"]], ids=["every-tool", "model-chosen-since"]
+)
+@pytest.mark.parametrize("caller", [[], ["--add-dir", "/srv"]], ids=["alone", "then-callers"])
+def test_a_0_7_0_reviewer_is_restarted_with_the_arguments_today_s_config_gives_the_role(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    today: list[str],
+    caller: list[str],
+) -> None:
+    """Round 21 of #257: the `--restricted` a 0.7.0 spec leads with was replaced by the
+    built-in `REVIEWER_ARGS` whatever today's config gave the role, so a reviewer its
+    operator since gave every tool (`extra_args = []`) or `--model opus` came back without
+    Edit and Write or the model, while a fresh spawn from the same config had them."""
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=["--restricted"])})
+    agent = fleet_service.spawn(project, "reviewer", worktree=False, agent_args=caller).agent
+    assert agent.launch_spec is not None
+    legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
+    with store_session() as store:
+        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=today)})
+
+    restarted = fleet_service.restart(project, agent.label).started
+
+    assert restarted.launch_spec is not None
+    assert restarted.launch_spec.extra_args == [*today, *caller]
+    command = _command(tmux)
+    assert "--restricted" not in command
+    assert REVIEWER_ARGS[0] not in command, "not the built-in default the config replaced"
+    fresh = fleet_service.spawn(project, "reviewer", worktree=False, agent_args=caller).agent
+    assert fresh.launch_spec is not None
+    assert fresh.launch_spec.extra_args == restarted.launch_spec.extra_args, "as a fresh spawn"
+
+
+@pytest.mark.parametrize(
     ("role_args", "caller", "replayed"),
     [
         (["--restricted"], ["--model", "opus"], [*REVIEWER_ARGS, "--model", "opus"]),

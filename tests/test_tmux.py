@@ -836,20 +836,20 @@ def test_the_boot_is_asked_of_sysctl_where_macos_keeps_it(
     """A launchd or cron PATH leaves /usr/sbin out (round 25 of #257): ``sysctl`` is
     looked for where macOS keeps it too. Where the machine keeps no boot id, none."""
     monkeypatch.setattr(tmux_module, "_BOOT_ID", tmp_path / "no-proc")
-    monkeypatch.setattr(tmux_module.shutil, "which", lambda _name, *a, **k: None)
-    monkeypatch.setattr(tmux_module.os, "access", lambda place, _mode: place == "/usr/sbin/sysctl")
+    monkeypatch.setattr(shutil, "which", lambda _name, *a, **k: None)
+    monkeypatch.setattr(os, "access", lambda place, _mode: place == "/usr/sbin/sysctl")
     asked: list[list[str]] = []
 
     def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         asked.append(argv)
         return subprocess.CompletedProcess(argv, 0, "6B7A1D2E-0000-4000-8000-000000000001\n", "")
 
-    monkeypatch.setattr(tmux_module.subprocess, "run", run)
-    monkeypatch.setattr(tmux_module.sys, "platform", "darwin")
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(sys, "platform", "darwin")
     assert tmux_module.boot_id() == "6B7A1D2E-0000-4000-8000-000000000001"
     assert asked == [["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"]]
 
-    monkeypatch.setattr(tmux_module.sys, "platform", "freebsd13")  # only a boot time, which moves
+    monkeypatch.setattr(sys, "platform", "freebsd13")  # only a boot time, which moves
     assert tmux_module.boot_id() is None and len(asked) == 1
 
 

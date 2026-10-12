@@ -1730,6 +1730,7 @@ def _needs_scan_project(
     statuses: list[FleetAgentStatus] | None,
     *,
     board_id: str,
+    shared: bool,
     now: datetime,
     first_seen: MutableMapping[str, datetime],
     seen: set[str],
@@ -1756,7 +1757,7 @@ def _needs_scan_project(
     project's, though (``fleet._emit_exit``), and are read there (:func:`_needs_exits`;
     read from the hub's, a hand-over that could not start its replacement was no card,
     review of #243, round 18, 1/4). No other project's rows are read: whether a manager
-    hears of an item is :func:`_needs_nudged`'s to say.
+    hears of an item is :func:`_needs_nudged`'s to say (``shared``: :func:`_needs_shared`).
     """
     from aisquare.services.fleet import MANAGER_LABEL, RECENTLY_ENDED
 
@@ -1825,7 +1826,7 @@ def _needs_scan_project(
                 exits,
                 project=project,
                 now=now,
-                shared=board_id != project.id,
+                shared=shared,
             )
         )
         items.extend(
@@ -2210,8 +2211,8 @@ def _needs_manager_down(
     session once it is stopped, which followed every result and hid it. ``board`` is
     ``None`` when the day could not be read: a stop is then not reported at all.
 
-    Its crew is the project's own agents, ``statuses``. On a board it shares with other
-    projects (``shared``) its crew may be theirs, which no scan of its project reads: a
+    Its crew is the project's own agents, ``statuses``. On a board other fleet projects
+    write too (``shared``) its crew may be theirs, which no scan of its project reads: a
     stop is reported there whatever its own project's agents do (review of #243, round
     22, 2/7).
 
@@ -2338,18 +2339,19 @@ def scan_needs_you(
     accounts = _needs_accounts(sources)
     answers = _needs_hearing(sources)
     items: list[NeedsItem] = []
-    boards: dict[str, str] = {}
-    for project in sources.list_projects():
+    projects = sources.list_projects()
+    boards = {project.id: _needs_board_of(sources, project) for project in projects}
+    for project in projects:
         statuses = _needs_listing(sources, project)
         if statuses is None:
             _needs_still_remembered(memory, seen, project)
-        board = boards[project.id] = _needs_board_of(sources, project)
         try:
             scanned = _needs_scan_project(
                 sources,
                 project,
                 statuses,
-                board_id=board,
+                board_id=boards[project.id],
+                shared=_needs_shared(boards, project.id),
                 now=now,
                 first_seen=memory,
                 seen=seen,
@@ -2395,6 +2397,12 @@ def _needs_board_read_once(sources: NeedsSources) -> NeedsSources:
         board_events=once("window", sources.board_events),
         board_sessions=once("sessions", sources.board_sessions),
     )
+
+
+def _needs_shared(boards: Mapping[str, str], project_id: str) -> bool:
+    """Whether other fleet projects write ``project_id``'s board too (``boards``: each one's,
+    :func:`_needs_board_of`), the project the hub is included (review of #243, round 23, 1/7)."""
+    return list(boards.values()).count(boards[project_id]) > 1
 
 
 def _needs_board_once(items: Sequence[NeedsItem], boards: Mapping[str, str]) -> list[NeedsItem]:
@@ -2502,24 +2510,26 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
     """One agent of ``project`` re-derived now, synchronously: never call it on the event loop.
 
     It runs the scan's part for this one project — one listing, its ended rows,
-    its board, the cached tails, and no other project's rows — plus tmux questions
-    about the label's pane: is its foreground the agent, and has its window been
-    quiet. Only a pane the listing vouched for is asked about: one that reads
-    ``lost`` may be another agent's pane under the row's old id, and an Escape an
-    action sends on the strength of the answer would land in that agent's turn.
-    The listing is not caught here: a snapshot made without it would claim a pane
-    shows no dialog when nobody asked. Raises ``fleet.NoSuchAgent`` only when the
-    label has had no row at all within ``RECENTLY_ENDED``.
+    its board and who else writes it, the cached tails, and no other project's rows —
+    plus tmux questions about the label's pane: is its foreground the agent, and has
+    its window been quiet. Only a pane the listing vouched for is asked about: one
+    that reads ``lost`` may be another agent's pane under the row's old id, and an
+    Escape an action sends on the strength of the answer would land in that agent's
+    turn. The listing is not caught here: a snapshot made without it would claim a
+    pane shows no dialog when nobody asked. Raises ``fleet.NoSuchAgent`` only when
+    the label has had no row at all within ``RECENTLY_ENDED``.
     """
     from aisquare.services import fleet as fleet_service
 
     when = now or _needs_now()
     sources = live_needs_sources()
+    boards = {p.id: _needs_board_of(sources, p) for p in [*sources.list_projects(), project]}
     scanned = _needs_scan_project(
         sources,
         project,
         sources.list_agents(project),
-        board_id=_needs_board_of(sources, project),
+        board_id=boards[project.id],
+        shared=_needs_shared(boards, project.id),
         now=when,
         first_seen={},
         seen=set(),

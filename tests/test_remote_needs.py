@@ -3694,16 +3694,16 @@ def _seat_up(store: Any, seat: _Seat, project: ProjectInfo, board: ProjectInfo) 
 
 
 def _seated(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seats: tuple[_Seat, ...], *, hub: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seats: tuple[_Seat, ...], *, hub: bool | str
 ) -> dict[str, ProjectInfo]:
     """alpha, beta, gamma and delta onboarded, every one of ``seats`` up, on a hub's board or
-    each on its own project's."""
+    each on its own project's. A name for ``hub``: that project's root is the hub."""
     with store_session() as store:
         projects = {
             name: store.onboard_project(_rooted(tmp_path / name))
             for name in ("alpha", "beta", "gamma", "delta")
         }
-        board = _rooted(tmp_path / "hub")
+        board = projects[hub] if isinstance(hub, str) else _rooted(tmp_path / "hub")
         if hub:
             monkeypatch.setenv("AISQUARE_TEAM_HUB", str(board.root))
             store.ensure_project(board)
@@ -3829,6 +3829,12 @@ def _seated(
             id="hub, a manager stopped is down whatever its crew, one that exited is done",
         ),
         pytest.param(
+            "alpha",
+            (_manager_of("alpha", end="stop"), _Seat("beta", "coder-1")),
+            [("manager_down", "alpha", "manager", 60)],
+            id="hub in alpha, its manager stopped, its crew in another project",
+        ),
+        pytest.param(
             False,
             (
                 _manager_of("alpha", end="stop"),
@@ -3844,7 +3850,7 @@ def _seated(
 def test_a_live_manager_keeps_an_item_off_the_phone_only_on_its_projects_own_board(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    hub: bool,
+    hub: bool | str,
     seats: tuple[_Seat, ...],
     expected: list[tuple[str, str, str, int]],
 ) -> None:
@@ -3858,10 +3864,10 @@ def test_a_live_manager_keeps_an_item_off_the_phone_only_on_its_projects_own_boa
     crash like any agent's. Under ``AISQUARE_TEAM_HUB`` every question, result,
     crash, limit and failed hand-over is a card and a push, and a manager that is down is
     its own project's, from that project's rows: stopped whatever its crew, which may be
-    another project's (round 22, 2/7). A failed hand-over is down whatever its crew, with
-    a hub or not (round 23, 3/7). Each tuple is a card's kind, project, agent and the
-    seconds its push waits. An action's check of each agent finds what the scan found,
-    and no more."""
+    another project's (round 22, 2/7), the hub's own project's too (round 23, 1/7). A
+    failed hand-over is down whatever its crew, with a hub or not (round 23, 3/7). Each
+    tuple is a card's kind, project, agent and the seconds its push waits. An action's
+    check of each agent finds what the scan found, and no more."""
     projects = _seated(tmp_path, monkeypatch, seats, hub=hub)
     tmux = FakeTmux()
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
@@ -3920,7 +3926,8 @@ def test_under_a_hub_a_projects_needs_read_no_other_projects_rows(
     their managers under the agent's lock, and the scan judged each project by the rows
     of every other (review of #243, round 21, 6/8 and 8/8). Each project's needs are read
     from its own rows alone: the action lists the agent's project and nothing else, even
-    for a stopped manager; the scan reads each project's rows once, and the hub's day and
+    for a stopped manager, and reads the projects only for who else writes its board
+    (round 23, 1/7); the scan reads each project's rows once, and the hub's day and
     sessions once for all of them (7/8)."""
     seats = (
         _manager_of("alpha"),
@@ -3959,7 +3966,13 @@ def test_under_a_hub_a_projects_needs_read_no_other_projects_rows(
     monkeypatch.setattr(remote_needs, "live_needs_sources", counted)
     snap = needs_agent_now(projects["beta"], "coder-1")
     assert [item.kind for item in snap.items] == ["board_question"]
-    assert reads == [("list", "beta"), ("ended", "beta"), ("day", "hub"), ("sessions", "hub")]
+    assert reads == [
+        ("projects", "every project"),
+        ("list", "beta"),
+        ("ended", "beta"),
+        ("day", "hub"),
+        ("sessions", "hub"),
+    ]
     assert set(tmux.asked) == {"%beta-coder-1"}, "no other agent's pane"
     with store_session() as store:
         store.end_fleet_agent("agt_alpha_manager")

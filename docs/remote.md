@@ -311,8 +311,8 @@ hub's, for a worktree its principal checkout's), no manager is: every question
 and result on that board, and every crash, limit and failed hand-over of its
 agents, is a card and a push. That costs some extra cards, and never leaves one
 that nobody hears of. A stopped manager is `manager_down` while its own project's
-agents still work; on a board several projects share, whatever they do, since its
-crew may be another project's.
+agents still work; on a board several projects share, the hub's own project's
+included, whatever they do, since its crew may be another project's.
 
 A card holds what you must read before answering: the exact call a permission
 is for, every field of it (the command or the path first, a list or an object

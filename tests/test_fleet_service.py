@@ -864,6 +864,35 @@ def test_spawn_coder_gets_a_worktree_on_the_fleet_branch(
     assert exclude.read_text(encoding="utf-8").splitlines().count(".aisquare-worktrees/") == 1
 
 
+@pytest.mark.parametrize("layout", ["separate-git-dir", "bare-worktree"])
+def test_spawn_lands_in_a_checkout_whose_git_store_is_elsewhere(
+    layout: str, tmux: FakeTmux, claude_on_path: Path, repo: Path, tmp_path: Path
+) -> None:
+    """A ``--separate-git-dir`` checkout and a bare repository's worktree resolved to git's
+    store, so ``fleet spawn`` started its agents there, where there is no source (review of
+    #243, round 14, 1/3): they start in the checkout, and a coder's worktree is cut from it."""
+    checkout = tmp_path / "checkout"
+    if layout == "separate-git-dir":
+        git_dir = tmp_path / "store.git"
+        _git(
+            "init", "-q", "-b", "main", f"--separate-git-dir={git_dir}", str(checkout), cwd=tmp_path
+        )
+        _git("commit", "-q", "--allow-empty", "-m", "init", cwd=checkout)
+    else:
+        _git("clone", "-q", "--bare", str(repo), str(tmp_path / "repo.git"), cwd=tmp_path)
+        _git("worktree", "add", "-q", str(checkout), cwd=tmp_path / "repo.git")
+    checkout = checkout.resolve()
+    project = fleet_service.resolve_project(cwd=checkout)
+    assert project.root == checkout
+    with store_session() as store:
+        store.ensure_project(project)
+    manager = fleet_service.spawn(project, "manager").agent
+    assert manager.cwd == checkout and tmux.spawned[0]["cwd"] == checkout
+    coder = fleet_service.spawn(project, "coder").agent
+    assert coder.cwd == checkout / ".aisquare-worktrees" / "coder-1"
+    assert Path(_git("rev-parse", "--show-toplevel", cwd=coder.cwd)) == coder.cwd
+
+
 def test_spawn_with_a_task_names_the_label_and_the_branch_after_it(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

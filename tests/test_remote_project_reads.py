@@ -791,9 +791,10 @@ def test_a_worktrees_board_is_one_answer_everywhere_whether_git_answers_or_not(
     it, judged by the root's own ``.git``, a project below a worktree's root kept the
     worktree's board, and a worktree whose ``git`` always fails ran it twice for each
     lookup (review of #243, round 12, 2/10 to 4/10). A failed ``git`` gives the board a
-    working one does, a ``--separate-git-dir`` checkout's git directory included, which it
-    did not and was kept for the process (review of #243, round 13, 2/4): one ``git``
-    call, and the answer kept for a minute."""
+    working one does, a ``--separate-git-dir`` checkout's included, which it did not and
+    was kept for the process (review of #243, round 13, 2/4): one ``git`` call, and the
+    answer kept for a minute. That board is the checkout's own, not its git store's
+    (round 14, 1/3)."""
     from aisquare.core import workspace
     from aisquare.services import remote_needs
 
@@ -821,7 +822,7 @@ def test_a_worktrees_board_is_one_answer_everywhere_whether_git_answers_or_not(
         (worktree, principal),
         (worktree / "sub", principal),
         (marked, principal),
-        (separate, store),
+        (separate, separate),
     ):
         asked.clear()
         board = remote_server._remote_board_project(root)

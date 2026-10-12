@@ -72,20 +72,29 @@ def marks_project_root(directory: Path) -> bool:
 
 
 def git_common_root(start: Path) -> Path | None:
-    """The principal repository root for ``start``, resolving git worktrees.
+    """The project root git gives for ``start``, resolving git worktrees.
 
     A linked worktree's ``.git`` is a *file* pointing at the principal
     repository, so a plain marker walk stops inside the worktree and treats it
     as its own project. ``--git-common-dir`` names the shared directory
     instead, which is what makes every checkout of one repository resolve to a
-    single project.
+    single project: a linked worktree's principal checkout (:func:`_principal`),
+    else the checkout ``start`` is in (``--show-toplevel``).
 
     Returns ``None`` when git is unavailable or ``start`` is not in a work
     tree, leaving callers on the marker-based fallback.
     """
     try:
         result = subprocess.run(
-            ["git", "-C", str(start), "rev-parse", "--git-common-dir"],
+            [
+                "git",
+                "-C",
+                str(start),
+                "rev-parse",
+                "--git-dir",
+                "--git-common-dir",
+                "--show-toplevel",
+            ],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -95,46 +104,42 @@ def git_common_root(start: Path) -> Path | None:
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if result.returncode != 0:
+    lines = result.stdout.splitlines()
+    if result.returncode != 0 or len(lines) != 3:
         return None
-    common = result.stdout.strip()
-    if not common:
-        return None
-    return _common_dir_root((start / common).resolve())
+    git_dir, common_dir, toplevel = ((start / line).resolve() for line in lines)
+    return (_principal(common_dir) if git_dir != common_dir else None) or toplevel
 
 
-def _common_dir_root(common_dir: Path) -> Path | None:
-    """The project root of the repository whose common directory is ``common_dir``,
-    resolved, as :func:`git_common_root` reads git's and :func:`find_project_root` the
-    layout's; ``None`` for a submodule's."""
-    if common_dir.name != ".git" and ".git" in common_dir.parts:
-        # A submodule's common dir is <super>/.git/modules/<name> (deeper when
-        # nested) — git bookkeeping, not anyone's project root. Bail, and the
-        # caller lands on the submodule checkout itself.
-        return None
-    # <principal>/.git → <principal>; a bare repo's common dir is the repo itself.
-    return common_dir.parent if common_dir.name == ".git" else common_dir
+def _principal(common_dir: Path) -> Path | None:
+    """The checkout whose ``.git`` directory is a linked worktree's common directory
+    ``common_dir``; ``None`` for one no checkout holds: a bare repository's, a
+    ``--separate-git-dir`` store's, a submodule's ``<super>/.git/modules/<name>``. A
+    project root is a checkout a human edits, never git's store: the worktree is then
+    its own (review of #243, round 14, 1/3)."""
+    return common_dir.parent if common_dir.name == ".git" and common_dir.is_dir() else None
 
 
-def _layout_common_dir(checkout: Path) -> Path | None:
-    """The common directory of the checkout at ``checkout``, resolved, as git finds it
-    (``gitrepository-layout(5)``): its ``.git`` directory, or the one its ``.git`` file's
-    ``gitdir:`` names, or where that directory's ``commondir`` leads. ``None`` when one
-    of them is not there, a worktree whose principal moved or whose ``gitdir:`` is a
-    Windows path read from WSL: git cannot read that repository either."""
-    gitdir = checkout / ".git"
+def _layout_principal(checkout: Path) -> Path | None:
+    """The principal checkout of the linked worktree at ``checkout`` as git finds it
+    (``gitrepository-layout(5)``): the common directory its ``.git`` file's ``gitdir:``
+    names a ``commondir`` for, held by a checkout (:func:`_principal`). ``None`` for a
+    ``.git`` directory or a ``gitdir:`` with no ``commondir`` (a main checkout, its store
+    elsewhere), and for a ``gitdir:`` that names nothing there, a worktree whose principal
+    moved or whose ``gitdir:`` is a Windows path read from WSL: git cannot read that
+    repository either."""
+    dotgit = checkout / ".git"
     try:
-        if gitdir.is_file():
-            text = gitdir.read_text(encoding="utf-8", errors="replace")
-            if not text.startswith("gitdir:"):
-                return None
-            gitdir = checkout / text[len("gitdir:") :].strip()
-        commondir = gitdir / "commondir"
-        if commondir.is_file():
-            gitdir = gitdir / commondir.read_text(encoding="utf-8", errors="replace").strip()
+        if not dotgit.is_file():
+            return None
+        text = dotgit.read_text(encoding="utf-8", errors="replace")
+        if not text.startswith("gitdir:"):
+            return None
+        gitdir = checkout / text[len("gitdir:") :].strip()
+        commondir = (gitdir / "commondir").read_text(encoding="utf-8", errors="replace")
+        return _principal((gitdir / commondir.strip()).resolve())
     except OSError:
         return None
-    return gitdir.resolve() if gitdir.is_dir() else None
 
 
 def find_project_root(start: Path) -> Path:
@@ -144,14 +149,14 @@ def find_project_root(start: Path) -> Path:
     principal checkout — a feature branch in ``../wt-auth`` shares the parent
     repo's context pool instead of starting empty. Where git gives no answer (not
     installed, timed out), the nearest ``.git`` is read as git reads it
-    (:func:`_layout_common_dir`), for the root git would give. The marker walk
+    (:func:`_layout_principal`), for the root git would give. The marker walk
     stopped at the first marker, a worktree's own root or a subdirectory's ``.aisquare``,
     so a directory was one project while git answered and another while it did not
     (review of #243, round 12, 2/10 and 4/10); a linked worktree's ``gitdir:`` line read
-    alone gave a submodule's worktree ``<super>/.git/modules/<sub>``, a worktree whose
-    principal moved a directory that is not there, and a ``--separate-git-dir`` checkout
-    itself where git names its git directory (review of #243, round 13, 1/4 and 2/4). A
-    ``.git`` that names nothing there, or a submodule's, leaves the checkout itself.
+    alone gave a submodule's worktree ``<super>/.git/modules/<sub>`` and a worktree whose
+    principal moved a directory that is not there (review of #243, round 13, 1/4). A
+    checkout that is no linked worktree of a checkout, a ``--separate-git-dir`` one and a
+    bare repository's worktree included, is itself (round 14, 1/3).
     Outside any checkout, the nearest ancestor carrying a project marker, then ``start``
     itself, so every directory resolves to *some* project.
     """
@@ -163,8 +168,7 @@ def find_project_root(start: Path) -> Path:
     checkout = next((directory for directory in ancestors if (directory / ".git").exists()), None)
     if checkout is None:
         return next((directory for directory in ancestors if marks_project_root(directory)), start)
-    common_dir = _layout_common_dir(checkout)
-    return (_common_dir_root(common_dir) if common_dir is not None else None) or checkout
+    return _layout_principal(checkout) or checkout
 
 
 def worktree_principal(root: Path) -> Path | None:

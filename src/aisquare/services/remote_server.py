@@ -6434,17 +6434,19 @@ def _page_copy_removed(root: Path) -> None:
 def install_page(source: Path) -> Path:
     """Copy a built ``aisquare-remote`` dist into :func:`remote_dist_dir`, atomically.
 
-    ``source`` must contain ``index.html`` (re-checked here even though the CLI
-    command already does, so a direct caller gets the same guard), and be no web
-    project's own directory (:func:`_page_project_not_build`). What a server would not
-    serve from ``source`` stays behind (:func:`_built_page_file`): its hidden files, as
-    the bundled page's do, which is where a project keeps ``.env`` and ``.git``, and a
-    link that leads out of it or to a hidden file, whose content the copy would
-    otherwise hold under the link's own name. Nothing in the copy is writable by group or
-    others, whatever the build's modes were (:func:`_page_copy_narrowed`). The copy lands
-    in a staging directory beside the destination and is swapped in with two renames —
-    same filesystem, so each rename is atomic — rather than removing the destination
-    first, so a server reading the old page mid-swap never sees a half-written one.
+    ``source`` must resolve (:func:`_remote_resolved`), contain ``index.html``, and be no
+    web project's own directory (:func:`_page_project_not_build`), or :class:`NoRemotePage`
+    says why, which ``asq remote install-page`` answers as ``invalid_dist``: the one place a
+    source is checked, where the command checked the first two again in words of its own
+    (review of #243, round 8, 5/6). What a server would not serve from ``source`` stays
+    behind (:func:`_built_page_file`): its hidden files, as the bundled page's do, which is
+    where a project keeps ``.env`` and ``.git``, and a link that leads out of it or to a
+    hidden file, whose content the copy would otherwise hold under the link's own name.
+    Nothing in the copy is writable by group or others, whatever the build's modes were
+    (:func:`_page_copy_narrowed`). The copy lands in a staging directory beside the
+    destination and is swapped in with two renames — same filesystem, so each rename is
+    atomic — rather than removing the destination first, so a server reading the old page
+    mid-swap never sees a half-written one.
 
     The staging directory is made inside one only this account may enter (``mkdtemp``'s
     0700), and leaves it only once its modes are narrowed. Made beside the destination,
@@ -6458,7 +6460,9 @@ def install_page(source: Path) -> Path:
         raise NoRemotePage(PAGE_DOES_NOT_RESOLVE.format(path=source))
     source = resolved
     if not (source / "index.html").is_file():
-        raise NoRemotePage(f"no index.html in {source} — build aisquare-remote first")
+        raise NoRemotePage(
+            f"no index.html in {source} — build aisquare-remote first (npm run build)"
+        )
     project = _page_project_not_build(source)
     if project is not None:
         raise NoRemotePage(project)

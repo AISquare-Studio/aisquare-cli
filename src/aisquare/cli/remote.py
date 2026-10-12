@@ -306,20 +306,10 @@ def install_page(
     from aisquare.core.paths import remote_dist_dir
     from aisquare.services import remote_server
 
-    source = remote_server._remote_resolved(dist)
-    if source is None:  # a symlink loop: RuntimeError on 3.11 and 3.12, never a traceback
-        message = remote_server.PAGE_DOES_NOT_RESOLVE.format(path=dist)
-        fail(message, error="invalid_dist", ref=str(dist))
-    if not (source / "index.html").is_file():
-        fail(
-            f"no index.html in {source} — build aisquare-remote first (npm run build)",
-            error="invalid_dist",
-            ref=str(source),
-        )
     try:
-        destination = remote_server.install_page(source)
-    except remote_server.NoRemotePage as exc:  # a web project's own directory, not its build
-        fail(str(exc), error="invalid_dist", ref=str(source))
+        destination = remote_server.install_page(dist)
+    except remote_server.NoRemotePage as exc:  # no build: a loop, no index.html, the project
+        fail(str(exc), error="invalid_dist", ref=str(dist))
     except OSError as exc:  # as remote.json's writes: a clean failure, never a traceback
         target = remote_dist_dir()
         fail(

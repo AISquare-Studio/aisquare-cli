@@ -2027,6 +2027,21 @@ def test_a_sheet_opened_before_the_fleet_came_finds_its_agent_when_tapped(
     assert early["told"] == ["agt_1"]
 
 
+def test_a_fleet_that_cannot_be_read_leaves_an_agents_actions_pinned_to_it(
+    boot_report: dict[str, Any],
+) -> None:
+    """A fleet that could not be read comes with no agents, and the agent's screen took that
+    for the agent gone: Stop, Restart and Switch said it was not in the fleet any more and did
+    nothing, and a Tell went with no pin (review of #243, round 8, 2/6). The last fleet read
+    still says which agent the label is, through any number of frames not read; its state is
+    still not shown, and a screen that never read one waits for it."""
+    unread = boot_report["sheetOnFleetUnread"]
+    assert unread["told"] == ["agt_1"] and unread["stopped"] == ["agt_1"]
+    assert unread["state"] == ""
+    assert unread["unknown"].startswith("Waiting for the fleet to say which coder-1 this is")
+    assert unread["stops"] == 0
+
+
 def test_keys_reach_an_agent_one_at_a_time_in_the_order_they_were_tapped(
     boot_report: dict[str, Any],
 ) -> None:

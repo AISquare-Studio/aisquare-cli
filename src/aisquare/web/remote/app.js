@@ -1095,6 +1095,8 @@ function onFrame(text) {
   } else if (frame.type === "action") settleFromLedger(payload && payload.actions);
   else if (frame.type === "heartbeat") noteScan(frame.ts, payload);
   else if (frame.type === "fleet") {
+    // Unread, it keeps the last read: which agent a label is.
+    if (payload && payload.error && projectIdOf(payload) === projectIdOf(S.fleet)) payload.read = S.fleet.read || S.fleet;
     S.fleet = payload;
     noteName(payload);
     viewCall("fleet");
@@ -1145,7 +1147,7 @@ function paneWatch(pid, label, fn) {
   };
 }
 
-/* Fleet frames only on a project's or an agent's screen (null stops them): no other draws one. */
+/* Fleet frames only on a project's or an agent's screen (null stops them). */
 function wantProject(pid) {
   if (S.wantFleet !== pid) {
     S.wantFleet = pid;
@@ -1155,8 +1157,8 @@ function wantProject(pid) {
 }
 
 /* Board frames only while the Board tab shows (null stops them): a board is all of a project,
- * sent again on every heartbeat, and no other screen draws it. One from before is not shown
- * again. A frame names its pid, since under AISQUARE_TEAM_HUB the board is the hub's. */
+ * sent again on every heartbeat. One from before is not shown again. A frame names its pid,
+ * since under AISQUARE_TEAM_HUB the board is the hub's. */
 function wantBoard(pid) {
   if (S.wantBoard === pid) return;
   S.wantBoard = pid;
@@ -2132,7 +2134,7 @@ function actionSheet(kind, ctx) {
     const run = async () => {
       if (!ctx.agentId && ctx.idNow) ctx.agentId = ctx.idNow();
       if (!ctx.agentId) {
-        sheet.say(ctx.idNow && projectIdOf(S.fleet) === ctx.pid ? label + " is not in this project's fleet any more."
+        sheet.say(ctx.idNow && projectIdOf(S.fleet) === ctx.pid && !S.fleet.error ? label + " is not in this project's fleet any more."
           : "Waiting for the fleet to say which " + label + " this is — try again in a second.");
         return;
       }
@@ -2474,7 +2476,7 @@ function measureColumns(box) {
   return clampInt(width > 0 ? Math.floor(inner / width) : 40, 20, 200);
 }
 
-/* Enter is ⏎, as on the input bar: "Enter" ran out of its key into ↑ on a 390 px phone. */
+/* Enter is ⏎, as on the input bar: "Enter" overflows its key on a 390 px phone. */
 const PAD_ROW = [["Esc", "Escape"], ["1", "1"], ["2", "2"], ["3", "3"], ["⏎", "Enter"], ["↑", "Up"], ["↓", "Down"]];
 const PAD_MORE = [
   ["Tab", "Tab"], ["⇧Tab", "BTab"], ["⌫", "BSpace"], ["Space", "Space"], ["←", "Left"], ["→", "Right"],
@@ -2507,7 +2509,7 @@ VIEWS.agent = (route, main) => {
   const body = el("div", "agent-body data");
   main.appendChild(body);
   const cleanups = [];
-  const row = () => (projectIdOf(S.fleet) === pid ? findAgent(S.fleet, label) : null);
+  const row = (read) => (projectIdOf(S.fleet) === pid ? findAgent((read && S.fleet.read) || S.fleet, label) : null);
   const drawState = () => {
     clear(state);
     const current = row();
@@ -2516,7 +2518,7 @@ VIEWS.agent = (route, main) => {
     else if (needed) state.appendChild(el("span", "badge s-attention", "NEEDS YOU"));
   };
   const idNow = () => {
-    const current = row();
+    const current = row(1);
     return current && typeof current.agent.id === "string" ? current.agent.id : null;
   };
   // idNow: a sheet opened before the fleet came looks again at its tap.
@@ -2544,7 +2546,7 @@ VIEWS.agent = (route, main) => {
     let width = 80;
     const fitNow = () => {
       pane.classList.toggle("fit", fit.box.checked);
-      // The second style write from server data (see the top of this file): an integer, clamped below.
+      // The second style write from server data (see the top): an integer, clamped below.
       pane.style.setProperty("--cols", String(width));
     };
     fit.box.addEventListener("change", fitNow);
@@ -2964,7 +2966,7 @@ VIEWS.settings = (route, main) => {
   const controls = el("div", "row-inline");
   notes.append(said, controls);
   main.appendChild(notes);
-  // Turn on and Turn off take each other's place: focus goes to what is there now, not the page.
+  // Turn on and Turn off take each other's place: focus goes to the one there now.
   const draw = async () => {
     const had = controls.contains(document.activeElement);
     clear(controls);

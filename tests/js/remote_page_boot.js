@@ -1859,6 +1859,45 @@ async function sheetBeforeFleet() {
   };
 }
 
+/* An agent's screen whose fleet came, then two frames of a fleet the machine could not read
+ * (a store busy past its timeout for a tick): a Tell and Stop sent then, and Stop on a screen
+ * whose only fleet frame is one not read. */
+async function sheetOnFleetUnread() {
+  const unread = { project: { id: PROJECT }, agents: [], error: "database is locked" };
+  const stopped = { agent: { id: "agt_1", label: "coder-1" }, claims_released: [], release_failed: null, project: PROJECT };
+  const status = (page) => find(page.run("UI.sheet"), (node) => node.className === "status").textContent;
+  const page = await agentView({
+    "POST api/agent/stop": () => ({ status: 200, json: stopped }),
+    "POST api/agent/tell": () => ({ status: 200, json: { label: "coder-1", delivered: true, mode: "auto", project: PROJECT } }),
+  });
+  for (const fleet of [FLEET, unread, unread]) {
+    page.live().frame("fleet", fleet);
+    await settle();
+  }
+  click(buttonNamed(page.main(), "Actions…"));
+  click(buttonNamed(page.run("UI.sheet"), "Tell…"));
+  find(page.run("UI.sheet"), (node) => node.tagName === "TEXTAREA").value = "go on";
+  click(buttonNamed(page.run("UI.sheet"), "Tell"));
+  await settle();
+  click(buttonNamed(page.main(), "Actions…"));
+  click(buttonNamed(page.run("UI.sheet"), "Stop…"));
+  click(buttonNamed(page.run("UI.sheet"), "Stop"));
+  await settle();
+  const fresh = await agentView();
+  fresh.live().frame("fleet", unread);
+  await settle();
+  click(buttonNamed(fresh.main(), "Actions…"));
+  click(buttonNamed(fresh.run("UI.sheet"), "Stop…"));
+  click(buttonNamed(fresh.run("UI.sheet"), "Stop"));
+  await settle();
+  return {
+    told: page.sent("api/agent/tell").map((body) => body.agent_id || null),
+    stopped: page.sent("api/agent/stop").map((body) => body.agent_id),
+    state: page.main().querySelectorAll("span.state")[0].textContent,
+    unknown: status(fresh), stops: fresh.sent("api/agent/stop").length,
+  };
+}
+
 /* Pad keys tapped faster than the machine answers, in the order they reached it: ↓ ↓ ⏎
  * with every answer held until the scenario gives it, and the keys marked sending once
  * tapped and after each answer; a ⏎ tapped behind a ↓ the machine refused, then one tapped
@@ -3775,6 +3814,7 @@ async function main() {
     backLeaves: await backLeaves(),
     lateAnswers: await lateAnswers(),
     sheetBeforeFleet: await sheetBeforeFleet(),
+    sheetOnFleetUnread: await sheetOnFleetUnread(),
     keysInOrder: await keysInOrder(),
     padConfirms: await padConfirms(),
     staleAcrossAWake: await staleAcrossAWake(),

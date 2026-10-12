@@ -2613,6 +2613,7 @@ def test_a_task_ref_that_names_two_tasks_is_refused_ambiguous_id(
     assert client.post(f"{base(runtime)}/api/task/claim", json={"ref": first.id}).status_code == 200
 
 
+@pytest.mark.parametrize("author", [None, "ses_nope"], ids=["no as", "as names no session"])
 @pytest.mark.parametrize(
     ("route", "body"),
     [("task/claim", {"ref": "tsk_1"}), ("task/done", {"ref": "tsk_1"}), ("note", {"text": "hi"})],
@@ -2623,9 +2624,14 @@ def test_the_board_writes_are_refused_team_disabled_with_the_orchestrator_off(
     monkeypatch: pytest.MonkeyPatch,
     route: str,
     body: dict[str, str],
+    author: str | None,
 ) -> None:
     """``AISQUARE_TEAM=0``: ``asq`` refuses the board's writes as ``team_disabled``, and so
-    do the agent actions, 409; these fell to 400 ``write_failed`` (sweep 2 of #243)."""
+    do the agent actions, 409; these fell to 400 ``write_failed`` (sweep 2 of #243). An
+    ``as`` is read only once the board is on: one that named no session was 404
+    ``not_found`` (review of #243, round 8, 4/6)."""
+    if author is not None:
+        body = {**body, "as": author}
     monkeypatch.setenv("AISQUARE_TEAM", "0")
     client = make_client(build_app(runtime, sources=_sources(), dist_dir=tmp_path))
     unlock(client, runtime)

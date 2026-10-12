@@ -3003,11 +3003,18 @@ def _remote_author(ref: str | None) -> str | None:
     (sweep 5 of #243). Read by the board's own reading of ``as`` (``team._resolve_session``),
     which the services then read again: one of its own here could come to name another
     session than the one the note is posted as, or none.
+
+    Read only once the board is on, as the services read it: with the orchestrator off, an
+    ``as`` that named no session was 404 ``not_found``, or 400 ``ambiguous_id``, where
+    ``asq`` says 409 ``team_disabled``, and the store was opened for a board that is off
+    (review of #243, round 8, 4/6).
     """
+    from aisquare.services import team as team_service
+
+    team_service._require_enabled()
     if ref is None:
         return None
     from aisquare.core.store import store_session
-    from aisquare.services import team as team_service
 
     with store_session() as store:
         session = team_service._resolve_session(store, ref)

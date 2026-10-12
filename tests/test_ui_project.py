@@ -72,6 +72,7 @@ from aisquare.models import (
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services import fleet as fleet_service
+from aisquare.services import install_route
 from aisquare.services import team as team_service
 from tests.ui_workers import settle_page
 
@@ -480,6 +481,30 @@ def test_the_manager_pane_asks_its_server_at_the_path_its_row_recorded(
     assert AgentView(shown, escape_key="ctrl+]").server.path == elsewhere
     by_name = AgentView(FleetAgentStatus(agent=named), escape_key="ctrl+]")
     assert by_name.server.path is None, "asked by its name"
+
+
+def test_the_attach_line_quotes_the_path_and_the_socket_name_it_prints(
+    project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Round 29 of #257: the Manager tab pasted the recorded socket path into its attach line
+    as it was, so a ``TMUX_TMPDIR`` with a space or a ``$`` gave a line that failed or named
+    another path, and so did a free-form ``[fleet] tmux_socket``. Quoted for this shell, it
+    reads back as the command it names."""
+    odd = tmp_path / "my $HOME" / "tmux-1000" / "asq one"
+    recorded = fake_agent(project, pane_id="%7").model_copy(
+        update={"socket_path": odd, "tmux_socket": "asq one"}
+    )
+
+    def attach_argv(socket_at: Path | None) -> list[str]:
+        status = FleetAgentStatus(
+            agent=recorded, state="waiting", tmux_session="asq-amber-otter", socket_at=socket_at
+        )
+        header = project_view_module.manager_text(status).plain.splitlines()[0]
+        return install_route.split_line(header.split("  ·  ", 1)[1])
+
+    session = ["attach", "-t", "=asq-amber-otter"]
+    assert attach_argv(odd) == ["tmux", "-S", str(odd), *session]
+    assert attach_argv(None) == ["tmux", "-L", "asq one", *session]
 
 
 def test_no_button_and_no_spawn_when_a_manager_already_runs(

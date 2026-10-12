@@ -47,7 +47,7 @@ from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgentStatus, ProjectInfo
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, install_route
 from aisquare.services import fleet as fleet_service
 
 SPAWN_WORKER = "spawn-manager"
@@ -97,10 +97,15 @@ def manager_text(status: FleetAgentStatus) -> Text:
     text.append(f"  {agent.pane_id}", style="dim")
     if status.tmux_session:
         # Where the fleet asks its server: from a shell under another TMUX_TMPDIR, `-L`
-        # by the name reaches another server, and attaches to its session.
+        # by the name reaches another server, and attaches to its session. Quoted as every
+        # printed path is: a TMUX_TMPDIR or `[fleet] tmux_socket` with a space or a `$` in
+        # it pasted as another command, or another path (round 29 of #257).
         path = status.socket_at
-        where = f"-L {agent.tmux_socket}" if path is None else f"-S {path}"
-        text.append(f"  ·  tmux {where} attach -t ={status.tmux_session}", style="dim")
+        where = ["-L", agent.tmux_socket] if path is None else ["-S", str(path)]
+        line = install_route.command_line(
+            ["tmux", *where, "attach", "-t", f"={status.tmux_session}"]
+        )
+        text.append(f"  ·  {line}", style="dim")
     text.append(
         "\ntype to the manager as you would to any Claude session · F12 returns to the sidebar",
         style="dim",

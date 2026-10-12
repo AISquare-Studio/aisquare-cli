@@ -161,41 +161,7 @@ def test_team_and_context_agree_inside_a_submodule(
     assert team_project(sub).root == find_project_root(sub)
 
 
-def _checkout_of_a_store(layout: str, tmp_path: Path) -> Path:
-    """A checkout whose common directory no checkout holds: a ``--separate-git-dir`` one,
-    or a linked worktree of a bare repository."""
-    if layout == "separate-git-dir":
-        checkout = tmp_path / "proj"
-        (tmp_path / "store").mkdir()
-        _git(
-            "init",
-            "-q",
-            f"--separate-git-dir={tmp_path / 'store' / 'proj.git'}",
-            str(checkout),
-            cwd=tmp_path,
-        )
-        _git("commit", "-q", "--allow-empty", "-m", "init", cwd=checkout)
-        return checkout
-    origin = tmp_path / "origin"
-    origin.mkdir()
-    _git("init", "-q", cwd=origin)
-    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=origin)
-    _git("clone", "-q", "--bare", str(origin), str(tmp_path / "repo.git"), cwd=tmp_path)
-    checkout = tmp_path / "main"
-    _git("worktree", "add", "-q", str(checkout), cwd=tmp_path / "repo.git")
-    return checkout
-
-
-@pytest.mark.parametrize(
-    "layout",
-    [
-        "submodule-worktree",
-        "moved-principal",
-        "separate-git-dir",
-        "bare-worktree",
-        "windows-gitdir",
-    ],
-)
+@pytest.mark.parametrize("layout", ["submodule-worktree", "moved-principal", "windows-gitdir"])
 def test_a_failed_git_reads_the_layout_git_reads(
     layout: str,
     repo_with_worktree: tuple[Path, Path],
@@ -207,9 +173,8 @@ def test_a_failed_git_reads_the_layout_git_reads(
     ``<super>/.git/modules/<sub>`` for a submodule's worktree, whether git answered or not,
     and a directory that is not there for a worktree whose principal moved or whose
     ``gitdir:`` is a Windows path read from WSL: ``serve --stdio`` refused each as no
-    project root (review of #243, round 13, 1/4). A ``--separate-git-dir`` checkout and a
-    bare repository's worktree were git's store, which is no checkout (round 14, 1/3).
-    Read as git reads it, each is the root a working git gives: the checkout itself."""
+    project root (review of #243, round 13, 1/4). Read as git reads it, each is the root a
+    working git gives, and a checkout whose ``.git`` names nothing there is itself."""
     from aisquare.core import workspace
 
     repo, worktree = repo_with_worktree
@@ -220,8 +185,6 @@ def test_a_failed_git_reads_the_layout_git_reads(
     elif layout == "moved-principal":
         repo.rename(tmp_path / "moved")
         start = worktree
-    elif layout in ("separate-git-dir", "bare-worktree"):
-        start = _checkout_of_a_store(layout, tmp_path)
     else:
         start = tmp_path / "wsl"
         start.mkdir()
@@ -232,33 +195,66 @@ def test_a_failed_git_reads_the_layout_git_reads(
     assert team_project(start).root == start.resolve()
 
 
-@pytest.mark.parametrize("git", ["answers", "fails"])
-@pytest.mark.parametrize("layout", ["separate-git-dir", "bare-worktree"])
-def test_a_checkout_of_a_store_is_added_and_served_as_itself(
-    layout: str, git: str, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Given git's store for its root, ``project/add`` refused a ``--separate-git-dir``
-    checkout and a bare repository's worktree as "neither a git checkout nor a directory of
-    repositories", naming a directory nobody gave, and ``serve --stdio`` refused to
-    activate either as no project root (review of #243, round 14, 1/3)."""
-    from aisquare.core import workspace
-    from aisquare.services import mcp_server
-    from aisquare.services.remote_server import check_project_add_root
+@pytest.fixture(scope="module")
+def layouts(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Each layout a checkout can have, built once with real git."""
+    top = tmp_path_factory.mktemp("layouts").resolve()
+    origin = top / "origin"
+    origin.mkdir()
+    _git("init", "-q", cwd=origin)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=origin)
+    _git("clone", "-q", str(origin), "normal", cwd=top)
+    _git("worktree", "add", "-q", str(top / "normal-wt"), "-b", "wt", cwd=top / "normal")
+    (top / "normal" / "vendor" / ".git").mkdir(parents=True)
+    (top / "store").mkdir()
+    _git("init", "-q", f"--separate-git-dir={top / 'store' / 'proj.git'}", "proj", cwd=top)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=top / "proj")
+    coder = top / "proj" / ".aisquare-worktrees" / "coder-1"
+    _git("worktree", "add", "-q", str(coder), "-b", "coder", cwd=top / "proj")
+    _git("clone", "-q", "--bare", str(origin), "repo.git", cwd=top)
+    _git("worktree", "add", "-q", str(top / "main"), cwd=top / "repo.git")
+    (top / "x").mkdir()
+    _git("clone", "-q", "--bare", str(origin), str(top / "x" / ".git"), cwd=top)
+    _git("worktree", "add", "-q", str(top / "x" / "wt"), cwd=top / "x" / ".git")
+    return top
 
-    checkout = _checkout_of_a_store(layout, tmp_path).resolve()
-    (checkout / "src").mkdir()
-    if git == "fails":
-        monkeypatch.setattr(workspace, "git_common_root", lambda start: None)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    assert check_project_add_root(str(checkout / "src")) == checkout
-    served: list[Path] = []
-    monkeypatch.setattr(mcp_server, "run_stdio", lambda **_: served.append(Path.cwd()))
-    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
-    monkeypatch.chdir(checkout / "src")
-    result = runner.invoke(app, ["--json", "serve", "--stdio"])
-    assert result.exit_code == 0, result.output
-    assert served == [checkout / "src"] and team_project(None).root == checkout
+
+@pytest.mark.parametrize(
+    ("start", "root"),
+    [
+        ("normal", "normal"),
+        ("normal-wt", "normal"),
+        ("normal/vendor", "normal"),  # an empty .git, which git walks past
+        ("proj", "store/proj.git"),  # --separate-git-dir
+        ("proj/.aisquare-worktrees/coder-1", "store/proj.git"),  # fleet's worktree of it
+        ("main", "repo.git"),  # a bare repository's worktree
+        ("x/wt", "x"),  # a worktree of a bare repository cloned to x/.git
+    ],
+)
+def test_a_layout_has_main_s_root_whether_git_answers_or_not(
+    start: str, root: str, layouts: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The project root of each layout is the one origin/main's git path gives, whether git
+    answers or not. Round 14 made a ``--separate-git-dir`` checkout and a bare repository's
+    worktree roots of their own where git answered, which moved every project of those
+    layouts to a new id, split fleet's coder worktrees from their manager's board, and left
+    ``project prune`` offering to drop the new project (review of #243, round 15, 1/5 to
+    3/5); the failed-git fallback stopped at an empty ``.git`` that git walks past (5/5).
+    The fallback reads exactly what :func:`git_common_root` says, and ``project prune``
+    gives a worktree the principal its root is."""
+    from aisquare.core import workspace
+
+    expected = layouts / root
+    for directory in (layouts / start, layouts / start / "src"):
+        directory.mkdir(exist_ok=True)
+        answered = workspace.git_common_root(directory)
+        assert find_project_root(directory) == expected, f"{directory}, with git"
+        with monkeypatch.context() as failing:
+            failing.setattr(workspace, "git_common_root", lambda start: None)
+            assert workspace._discovered_common_root(directory) == answered, directory
+            assert find_project_root(directory) == expected, f"{directory}, with git failing"
+    if (layouts / start / ".git").is_file():
+        assert workspace.worktree_principal(layouts / start) == expected
 
 
 def test_a_plain_repo_is_still_its_own_root(tmp_path: Path) -> None:

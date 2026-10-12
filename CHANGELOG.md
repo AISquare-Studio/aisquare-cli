@@ -95,6 +95,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `~/.aisquare/remote.json` when its content changes, so `allow-write`,
   `regenerate-password` and `revoke` from another shell reach it within a second.
 
+### Changed
+- **A project's root no longer depends on whether `git` answers.** Where `git`
+  is not installed or times out, the root is read from the repository on disk
+  as `git` would give it: a linked worktree belongs to its principal checkout,
+  and a directory with its own `.aisquare` inside a checkout to the checkout,
+  as both already did wherever `git` answers. Without `git`, each was a
+  project of its own. Wherever `git` answers, no root changes.
+
 ### Security
 - **One choke point.** Every request and every socket handshake passes the
   token, auto-off, `Origin` (every write and socket must come from the page's

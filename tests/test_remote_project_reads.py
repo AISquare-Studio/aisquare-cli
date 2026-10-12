@@ -791,25 +791,26 @@ def test_a_worktrees_board_is_one_answer_everywhere_whether_git_answers_or_not(
     it, judged by the root's own ``.git``, a project below a worktree's root kept the
     worktree's board, and a worktree whose ``git`` always fails ran it twice for each
     lookup (review of #243, round 12, 2/10 to 4/10). A failed ``git`` gives the board a
-    working one does, a ``--separate-git-dir`` checkout's included, which it did not and
-    was kept for the process (review of #243, round 13, 2/4): one ``git`` call, and the
-    answer kept for a minute. That board is the checkout's own, not its git store's
-    (round 14, 1/3)."""
+    working one does, a ``--separate-git-dir`` checkout's git directory included, which it
+    did not and was kept for the process (review of #243, round 13, 2/4): one ``git``
+    call, and the answer kept for a minute."""
     from aisquare.core import workspace
     from aisquare.services import remote_needs
 
     principal = tmp_path / "principal"
     gitdir = principal / ".git" / "worktrees" / "wt"
-    gitdir.mkdir(parents=True)
+    separate, store = tmp_path / "proj", tmp_path / "store" / "proj.git"
+    for directory in (principal / ".git", gitdir, store):  # what git takes for a git dir
+        for name in ("objects", "refs"):
+            (directory / name).mkdir(parents=True)
+        (directory / "HEAD").write_text("ref: refs/heads/main\n")
     (gitdir / "commondir").write_text("../..\n")  # as git writes it
     worktree = tmp_path / "wt"
     (worktree / "sub").mkdir(parents=True)
     (worktree / ".git").write_text(f"gitdir: {gitdir}\n")
     marked = principal / "marked"
     (marked / ".aisquare").mkdir(parents=True)
-    separate, store = tmp_path / "proj", tmp_path / "store" / "proj.git"
-    for directory in (separate, store):
-        directory.mkdir(parents=True)
+    separate.mkdir()
     (separate / ".git").write_text(f"gitdir: {store}\n")
     asked: list[Path] = []
 
@@ -822,7 +823,7 @@ def test_a_worktrees_board_is_one_answer_everywhere_whether_git_answers_or_not(
         (worktree, principal),
         (worktree / "sub", principal),
         (marked, principal),
-        (separate, separate),
+        (separate, store),
     ):
         asked.clear()
         board = remote_server._remote_board_project(root)

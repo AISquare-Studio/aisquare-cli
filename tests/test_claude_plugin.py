@@ -388,8 +388,9 @@ def machine(tmp_path: Path) -> Machine:
     home = tmp_path / "home"
     tools = tmp_path / "tools"
     tools.mkdir()
-    # mkdir: once, for the folder the uv answers are kept in; date: when each was asked
-    for needed in ("grep", "mkdir", "date"):
+    # mkdir: once, for the folder the uv answers are kept in; date: when each was asked;
+    # mv and rm: the answers are written beside their file and moved over it
+    for needed in ("grep", "mkdir", "date", "mv", "rm"):
         found = shutil.which(needed)
         assert found is not None, f"the launcher needs {needed}, as does every machine it runs on"
         (tools / needed).symlink_to(found)
@@ -1089,6 +1090,29 @@ def test_a_plain_answer_is_asked_again_once_five_minutes_have_passed(machine: Ma
     assert within == (False, 2), "read: asked at session start alone"
     assert after == (True, 4), "asked again, and uv may fetch one now"
     assert len(machine.calls("uv")) == 4 and _ranged(machine.ran("uvx")), "ranged: kept"
+
+
+@posix_only
+def test_the_answers_are_replaced_whole_never_rewritten_in_place(machine: Machine) -> None:
+    """Round 25 of #257: the answers were rewritten in place, truncated and then written,
+    while another session's hook read them, so it read none, or half a file, and ran the
+    slow probe the file is there to spare. Each keep writes a file beside it and moves it
+    over: a reader holding the old one reads it whole, and nothing is left beside it."""
+    machine.fake("uvx")
+    machine.fake_uv(installed=True)
+    machine.run("session-start")
+    held = _answer_file(machine).parent / "held"
+    os.link(_answer_file(machine), held)  # a reader's open file, as the next keep finds it
+    kept = held.read_text(encoding="utf-8")
+
+    machine.run("session-start", env={"UV_PYTHON_DOWNLOADS": "never"})
+
+    assert held.read_text(encoding="utf-8") == kept, "the old file, whole, for its reader"
+    assert len(_answers(machine)) == 2, "the new one holds both answers"
+    assert sorted(path.name for path in _answer_file(machine).parent.iterdir()) == [
+        "held",
+        "plugin-tested-python",
+    ], "nothing left beside it"
 
 
 @posix_only

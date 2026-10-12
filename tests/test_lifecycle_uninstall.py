@@ -1118,13 +1118,16 @@ def test_the_plugins_answers_about_uv_are_named_beside_the_home_and_deleted_with
 ) -> None:
     """Round 20 of #257: the plugin's launcher keeps whether uv has a tested Python in
     `${XDG_CACHE_HOME:-~/.cache}/aisquare`, the one file aisquare writes outside the home.
-    No plan named it, and `--purge` left it, holding a uv path."""
+    No plan named it, and `--purge` left it, holding a uv path. A launcher stopped while it
+    wrote the file beside it left that copy too (round 25), which goes with it."""
     cache = tmp_path / "xdg-cache" if xdg else isolated_agent_home / ".cache"
     if xdg:
         monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
     answers = cache / "aisquare" / "plugin-tested-python"
     answers.parent.mkdir(parents=True)
     answers.write_text("ranged 1760000000 /home/u/.local/bin/uv >=3.11,<3.14\n", "utf-8")
+    # what a launcher stopped between writing beside the file and moving over it leaves
+    (answers.parent / "plugin-tested-python.4242").write_text("plain 1760000000 uv\n", "utf-8")
     _initialised(runner, tmp_path)
 
     kept = runner.invoke(app, ["uninstall", "--dry-run"]).stdout

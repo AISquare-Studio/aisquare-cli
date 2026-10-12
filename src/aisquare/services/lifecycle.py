@@ -2001,17 +2001,34 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
 
 
 def _delete_plugin_answers(answers: Path) -> str | None:
-    """Delete the plugin's answers about uv, and the folder its launcher made for them
-    when nothing else is in it; why not, when it could not. A link is unlinked, never
+    """Delete the plugin's answers about uv, with any a launcher stopped while writing them
+    left beside the file (:func:`_answers_cut_short`), and the folder its launcher made for
+    them when nothing else is in it; why not, when it could not. A link is unlinked, never
     followed."""
     try:
-        answers.unlink(missing_ok=True)
+        for found in (answers, *_answers_cut_short(answers)):
+            found.unlink(missing_ok=True)
     except OSError as exc:
         return str(exc) or type(exc).__name__
     # Something else kept there, or the folder gone already: not ours to delete.
     with contextlib.suppress(OSError):
         answers.parent.rmdir()
     return None
+
+
+def _answers_cut_short(answers: Path) -> list[Path]:
+    """What a launcher stopped between writing its answers beside their file and moving them
+    over it left there: ``<file>.<pid>`` (plugins/claude-code/scripts/aisquare-hook)."""
+    try:
+        names = os.listdir(answers.parent)
+    except OSError:
+        return []
+    prefix = f"{answers.name}."
+    return [
+        answers.parent / name
+        for name in names
+        if name.startswith(prefix) and name.removeprefix(prefix).isdigit()
+    ]
 
 
 def _unrecord_hookless() -> None:

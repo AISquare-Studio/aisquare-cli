@@ -269,6 +269,11 @@ _kept() {
 }
 
 # Keep $1 for $_key, first, and up to seven answers kept for other keys after it.
+# Written beside the file and moved over it, so a hook reading it meanwhile (another
+# session's, starting at the same moment) reads the old answers or the new ones, never
+# a file cut short; written in place, it read none and ran the slow probe the file is
+# there to spare (round 25 of #257). Two keeping at once each move a whole file: the
+# last stands, and the other's key is asked again at its next event.
 _keep() {
     _stamp=$(date +%s 2>/dev/null) || _stamp=0
     _others=
@@ -282,7 +287,11 @@ _keep() {
         done <"$_answer_file"
     fi
     [ -d "$_answers" ] || mkdir -p "$_answers" 2>/dev/null
-    printf '%s %s %s\n%s' "$1" "$_stamp" "$_key" "$_others" 2>/dev/null >"$_answer_file"
+    _fresh=$_answer_file.$$
+    if printf '%s %s %s\n%s' "$1" "$_stamp" "$_key" "$_others" 2>/dev/null >"$_fresh"; then
+        mv -f "$_fresh" "$_answer_file" 2>/dev/null && return
+    fi
+    rm -f "$_fresh" 2>/dev/null
 }
 
 # Whether uv has a Python in $_tested, or may fetch one: `uv python find` answers

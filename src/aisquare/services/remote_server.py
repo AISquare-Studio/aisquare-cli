@@ -2273,9 +2273,24 @@ def _remote_may_look_inside(directory: Path) -> bool:
 
 
 def _holds_repositories(root: Path) -> bool:
-    """Whether a direct child of ``root`` is a repository: the multi-repo project shape."""
+    """Whether a direct child of ``root`` is a repository: the multi-repo project shape.
+
+    Each child is judged on its own (:func:`_is_repository`): one this account may not
+    search, a database's or a container's volume beside the repositories, gave up on the
+    whole directory on Python 3.11 to 3.13, where asking it for its ``.git`` raises, and so
+    the same directory was a project or not as ``iterdir`` happened to list it (review of
+    #243, round 10, 6/7)."""
     try:
-        return any((child / ".git").exists() for child in root.iterdir() if child.is_dir())
+        return any(_is_repository(child) for child in root.iterdir())
+    except OSError:
+        return False
+
+
+def _is_repository(child: Path) -> bool:
+    """Whether ``child`` is a directory with a ``.git``; ``False`` for one that cannot be
+    asked, on every Python: 3.14's ``Path.exists`` says so where 3.11 to 3.13 raise."""
+    try:
+        return child.is_dir() and (child / ".git").exists()
     except OSError:
         return False
 

@@ -2253,6 +2253,37 @@ def test_a_git_checkout_or_a_folder_of_repos_inside_home_is_a_project(home: Path
     assert check_project_add_root(str(home / "work")) == home / "work", "multi-repo parent"
 
 
+@pytest.mark.parametrize("first", [True, False], ids=["listed-first", "listed-last"])
+def test_a_folder_of_repos_with_a_child_this_account_may_not_search_is_a_project(
+    home: Path, monkeypatch: pytest.MonkeyPatch, first: bool
+) -> None:
+    """A child this account may not search, a database's or a container's volume next to
+    the repositories, raises when asked for its ``.git`` on Python 3.11 to 3.13 (3.14 says
+    it has none), and that gave up on the whole directory: ``~/work`` was a project or
+    "neither a git checkout nor a directory of repositories" as ``iterdir`` happened to
+    list it (review of #243, round 10, 6/7). Raised here as 3.11 to 3.13 raise, the child
+    listed first and last."""
+    _repo(home / "work" / "api")
+    _repo(home / "work" / "web")
+    volume = home / "work" / "pgdata"
+    volume.mkdir()
+    listed = Path.iterdir
+    exists = Path.exists
+
+    def in_order(self: Path) -> Any:
+        children = sorted(listed(self), key=lambda child: (child != volume) == first)
+        return iter(children)
+
+    def as_3_13(self: Path, *args: Any, **kwargs: Any) -> bool:
+        if self.parent == volume:
+            raise PermissionError(13, "Permission denied", str(self))
+        return exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "iterdir", in_order)
+    monkeypatch.setattr(Path, "exists", as_3_13)
+    assert check_project_add_root(str(home / "work")) == home / "work"
+
+
 @pytest.mark.parametrize(
     ("raw", "says"),
     [

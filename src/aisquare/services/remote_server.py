@@ -6495,9 +6495,15 @@ def _page_entry_open(info: os.stat_result, own_group: int | None, *, above: bool
     user private group, the one Fedora and Debian give each user with a umask of 002,
     holds no one else: :func:`_remote_private_group`), or that an account other than this
     one or root owns. ``above``: a directory above a build, where the sticky bit keeps
-    others from renaming what this account or root owns in it, and so from the build."""
-    import stat
+    others from renaming what this account or root owns in it, and so from the build.
 
+    Never asked on Windows, which keeps no such modes and has no ``os.getuid``: said here,
+    where mypy's Windows run reads it, and not only by the callers."""
+    import stat
+    import sys
+
+    if sys.platform == "win32":
+        return False
     writable = info.st_mode & stat.S_IWOTH or (
         info.st_mode & stat.S_IWGRP and info.st_gid != own_group
     )

@@ -383,6 +383,10 @@ class FakeTmux(TmuxServer):
         self.reachable()
         return self.started if self._read() else None
 
+    def server_socket_path(self) -> Path | None:
+        """What ``#{socket_path}`` answers: where this server listens, while it runs."""
+        return Path("/run/fake/tmux-1000") / self.socket if self._read() else None
+
     def pane_pid(self, pane_id: str) -> int | None:
         self.binary()
         if pane_id not in self.facts:
@@ -721,6 +725,28 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
     assert agent.pane_id == "%1" and agent.binary == "claude" and agent.spawned_by == "user"
     with store_session() as store:
         assert store.fleet_agent_by_label(project.id, "manager") == agent
+
+
+def test_spawn_records_where_its_server_listens_and_in_which_boot(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What uninstall and upgrade ask whether the row may still run (round 25 of #257): the
+    socket tmux says its server listens on, which the asking shell's ``TMUX_TMPDIR`` cannot
+    rebuild, and the boot, which no process outlives. Kept by the store as written."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+
+    agent = fleet_service.spawn(project, "manager").agent
+
+    assert agent.socket_path == Path("/run/fake/tmux-1000/asq-test")
+    assert agent.boot_id == "b00t-1"
+    with store_session() as store:
+        assert store.fleet_agent_by_label(project.id, "manager") == agent
+
+    def refused() -> Path | None:
+        raise TmuxError("tmux did not answer within 30s")
+
+    monkeypatch.setattr(tmux, "server_socket_path", refused)  # the spawn goes on without it
+    assert fleet_service.spawn(project, "coder", worktree=False).agent.socket_path is None
 
 
 def test_spawn_with_an_account_carries_the_callers_environment_into_the_window(

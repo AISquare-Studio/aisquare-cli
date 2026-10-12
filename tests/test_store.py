@@ -295,8 +295,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v18 the launch spec and ui_state (#144), v19 the project explainability key (#141),
     # v20 project groups, pins and manual order (#140), v21 project destinations (#142),
     # v22 the revocations owed for keys the CLI minted (#142), v23 the one-time repair of
-    # old tombstones (#139, #140), v24 the destination a project's key was attached for (#142)
-    assert version == SCHEMA_VERSION == 24
+    # old tombstones (#139, #140), v24 the destination a project's key was attached for (#142),
+    # v25 where a fleet agent's server listened and in which boot (round 25 of #257)
+    assert version == SCHEMA_VERSION == 25
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:

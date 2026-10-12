@@ -76,6 +76,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -309,6 +310,49 @@ def _tmux(argv: Sequence[str], stdin: bytes | None) -> Completed:
         stdout=result.stdout.decode("utf-8", errors="replace"),
         stderr=result.stderr.decode("utf-8", errors="replace"),
     )
+
+
+#: Where Linux names this boot: a random UUID the kernel draws as it boots.
+_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
+#: Where macOS keeps ``sysctl``, for a PATH without ``/usr/sbin`` (launchd, cron).
+_SYSCTL = ("/usr/sbin/sysctl", "/sbin/sysctl")
+
+
+def boot_id() -> str | None:
+    """This boot's identity, or ``None`` where the machine keeps none.
+
+    No process outlives a reboot, so a fleet row recorded in another boot
+    (``FleetAgent.boot_id``) is no running agent. An identity, not a time:
+    Linux's ``btime`` is the wall clock less the time since boot, and moves
+    whenever the wall clock is stepped (a WSL2 VM resumed after the host slept,
+    NTP on a board with no clock), so rows from before the step read as from
+    before the boot (round 25 of #257). Linux draws ``boot_id`` at boot; macOS
+    keeps ``kern.bootsessionuuid``, asked of ``sysctl`` on PATH or where macOS
+    keeps it. The BSDs keep only a time, which moves the same way: ``None``.
+    """
+    with contextlib.suppress(OSError, UnicodeDecodeError):
+        said = _BOOT_ID.read_text(encoding="ascii").strip()
+        if said:
+            return said
+    if sys.platform != "darwin":
+        return None
+    sysctl = shutil.which("sysctl") or next(
+        (place for place in _SYSCTL if os.access(place, os.X_OK)), None
+    )
+    if sysctl is None:
+        return None
+    try:
+        completed = subprocess.run(
+            [sysctl, "-n", "kern.bootsessionuuid"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    said = completed.stdout.strip()
+    return said if completed.returncode == 0 and said else None
 
 
 def parse_version(text: str) -> tuple[int, int] | None:
@@ -1131,6 +1175,21 @@ class TmuxServer:
             raise TmuxUnavailable("no tmux socket on this platform — the fleet needs a POSIX host")
         base = os.environ.get("TMUX_TMPDIR") or "/tmp"
         return Path(base) / f"tmux-{getuid()}" / self.socket
+
+    def server_socket_path(self) -> Path | None:
+        """The socket the RUNNING server listens on, as it says (``#{socket_path}``).
+
+        :meth:`socket_path` rebuilds the path from the asking shell, and a server
+        started under another ``TMUX_TMPDIR``, or by a tmux built to keep its
+        sockets elsewhere (Termux), is not there. Asked once a window is made on
+        the server and kept on the fleet row (``FleetAgent.socket_path``), so a
+        later question about the row goes to that path whatever shell asks it.
+        ``None`` when the server does not answer with an absolute path; a question
+        that could not be put raises :class:`TmuxError`.
+        """
+        completed = self._runner(self.argv("display-message", "-p", "#{socket_path}"), None)
+        said = completed.stdout.strip()
+        return Path(said) if completed.returncode == 0 and os.path.isabs(said) else None
 
     def rename_session(self, old: str, new: str) -> None:
         _require_targetable(new)

@@ -816,6 +816,14 @@ WHERE forgotten_at IS NOT NULL;
 # is empty: the column is in :data:`_PRODUCTS`, its backfill
 # (:func:`_bind_keys_to_their_destinations`) in :data:`_BACKFILLS`.
 _SCHEMA_V24 = ""
+# v25 (round 25 of #257): where a fleet agent's server listened and in which boot,
+# recorded at spawn. Uninstall and upgrade ask whether a live row may still run, and
+# inferred it from the asking shell: tmux's default path under ITS ``TMUX_TMPDIR``,
+# and the wall-clock boot time, which moves when the clock is stepped. Both inferences
+# failed toward removing the hooks under running agents. The columns are the whole
+# step, so the script is empty: they are in :data:`_PRODUCTS`; a row from before them
+# keeps NULLs, which ``services.lifecycle`` reads as nothing recorded.
+_SCHEMA_V25 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -842,6 +850,7 @@ _MIGRATIONS = (
     _SCHEMA_V22,
     _SCHEMA_V23,
     _SCHEMA_V24,
+    _SCHEMA_V25,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -886,6 +895,9 @@ _PRODUCTS: dict[int, _Products] = {
     20: _Products(("project_destination",)),
     21: _Products(("pending_revocation",)),
     23: _Products(columns=(("project_explainability", "api_url", "TEXT"),)),
+    24: _Products(
+        columns=(("fleet_agent", "socket_path", "TEXT"), ("fleet_agent", "boot_id", "TEXT"))
+    ),
 }
 
 _PROJECT_COLUMNS = "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at"
@@ -962,7 +974,8 @@ _TASK_COLUMNS = (
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
 _FLEET_AGENT_COLUMNS = (
     "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
-    "task_id, spawned_by, created_at, ended_at, exit_status, account_slot, launch_spec"
+    "task_id, spawned_by, created_at, ended_at, exit_status, account_slot, launch_spec, "
+    "socket_path, boot_id"
 )
 _CLAUDE_ACCOUNT_COLUMNS = "slot, config_dir, alias, position, is_default, disabled, created_at"
 
@@ -1234,6 +1247,8 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         exit_status=row["exit_status"],
         account_slot=row["account_slot"],
         launch_spec=_launch_spec(row["launch_spec"]),
+        socket_path=Path(row["socket_path"]) if row["socket_path"] else None,
+        boot_id=row["boot_id"],
     )
 
 
@@ -2781,12 +2796,13 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
             "ended_at = excluded.ended_at, exit_status = excluded.exit_status, "
-            "account_slot = excluded.account_slot, launch_spec = excluded.launch_spec",
+            "account_slot = excluded.account_slot, launch_spec = excluded.launch_spec, "
+            "socket_path = excluded.socket_path, boot_id = excluded.boot_id",
             (
                 agent.id,
                 agent.project_id,
@@ -2805,6 +2821,8 @@ class SqliteStore:
                 agent.exit_status,
                 agent.account_slot,
                 agent.launch_spec.model_dump_json() if agent.launch_spec is not None else None,
+                str(agent.socket_path) if agent.socket_path is not None else None,
+                agent.boot_id,
             ),
         )
         self._conn.commit()

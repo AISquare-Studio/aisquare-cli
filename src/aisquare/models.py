@@ -970,6 +970,13 @@ class FleetAgent(BaseModel):
     ``None`` when nothing chose one and the window ran on whatever its shell had."""
     launch_spec: LaunchSpec | None = None
     """How it was launched (#144); ``None`` on rows spawned before the spec existed."""
+    socket_path: Path | None = None
+    """The socket its server listened on at spawn, as tmux said (``#{socket_path}``):
+    where uninstall and upgrade ask whether it may still run, whatever shell asks.
+    ``None`` on rows spawned before 0.8.0, or when tmux did not say."""
+    boot_id: str | None = None
+    """The boot it was spawned in (``core.tmux.boot_id``): a row from another boot is
+    no running agent. ``None`` on rows spawned before 0.8.0, or where none is kept."""
     created_at: datetime
     ended_at: datetime | None = None
     exit_status: int | None = None

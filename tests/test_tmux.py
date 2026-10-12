@@ -822,6 +822,37 @@ def test_socket_path_is_unavailable_where_there_is_no_uid(monkeypatch: pytest.Mo
         TmuxServer("asq").socket_path()
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith(("linux", "darwin")), reason="where a boot is named"
+)
+def test_the_boot_is_named_where_the_machine_names_it() -> None:
+    first = tmux_module.boot_id()
+    assert first and tmux_module.boot_id() == first, "one boot, one name"
+
+
+def test_the_boot_is_asked_of_sysctl_where_macos_keeps_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A launchd or cron PATH leaves /usr/sbin out (round 25 of #257): ``sysctl`` is
+    looked for where macOS keeps it too. Where the machine keeps no boot id, none."""
+    monkeypatch.setattr(tmux_module, "_BOOT_ID", tmp_path / "no-proc")
+    monkeypatch.setattr(tmux_module.shutil, "which", lambda _name, *a, **k: None)
+    monkeypatch.setattr(tmux_module.os, "access", lambda place, _mode: place == "/usr/sbin/sysctl")
+    asked: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        asked.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "6B7A1D2E-0000-4000-8000-000000000001\n", "")
+
+    monkeypatch.setattr(tmux_module.subprocess, "run", run)
+    monkeypatch.setattr(tmux_module.sys, "platform", "darwin")
+    assert tmux_module.boot_id() == "6B7A1D2E-0000-4000-8000-000000000001"
+    assert asked == [["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"]]
+
+    monkeypatch.setattr(tmux_module.sys, "platform", "freebsd13")  # only a boot time, which moves
+    assert tmux_module.boot_id() is None and len(asked) == 1
+
+
 def test_kill_and_rename_and_attach_build_exact_targets(fake_bin: Path, conf: Path) -> None:
     fake = FakeTmux()
     server = _server(fake, fake_bin, conf, socket="asq")
@@ -1602,8 +1633,10 @@ def test_live_a_new_server_reuses_pane_ids_and_says_when_it_started(live: TmuxSe
 
 @requires_tmux
 def test_live_socket_path_is_where_tmux_put_it_and_outlives_the_server(live: TmuxServer) -> None:
+    assert live.server_socket_path() is None, "no server, so nothing says where it listens"
     _spawn(live, "asq-test-fox", "w0", CAT)
     assert live.run("display-message", "-p", "#{socket_path}").strip() == str(live.socket_path())
+    assert live.server_socket_path() == live.socket_path(), "what a spawn records"
     assert live.socket_path().is_socket()
     live.kill_server()
     assert live.list_sessions() == []

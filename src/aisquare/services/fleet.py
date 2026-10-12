@@ -1613,6 +1613,13 @@ def spawn(
             "it runs at its session's size until a pane shows it, and at 144 columns or "
             "wider Claude Code opens its diff panel on its own"
         )
+    # Where this server listens and in which boot, as the window exists: what uninstall
+    # and upgrade ask whether the row may still run, rather than inferring it from the
+    # shell they run in (round 25 of #257). Not saying is not failing the spawn.
+    try:
+        socket_path = srv.server_socket_path()
+    except TmuxError:
+        socket_path = None
 
     agent = FleetAgent(
         id=agent_id,
@@ -1640,6 +1647,8 @@ def spawn(
             command=list(command),
             recorded_by=__version__,
         ),
+        socket_path=socket_path,
+        boot_id=tmux_core.boot_id(),
         created_at=_now(),
     )
     stored = _record(

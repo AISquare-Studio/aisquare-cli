@@ -6629,15 +6629,22 @@ def _page_open_refusal(path: str | Path, root: Path, remedy: str, *, inside: boo
     every entry, where macOS puts none of its own. Above it, each entry that allows a
     write, by its number in ``ls -le`` (``chmod -a#``): the directory is often a folder of
     the home, whose ``everyone deny delete`` ``chmod -N`` removed with the rest (review of
-    #243, round 12, 7/10). On Linux, ``chmod go-w`` lowers the ACL's mask, which every
-    named entry is held to (:func:`_page_entry_open`)."""
+    #243, round 12, 7/10). The highest number first, since each removal renumbers the
+    entries after it: from the top, the second command removed the wrong entry (review of
+    #243, round 13, 3/4). On Linux, ``chmod go-w`` lowers the ACL's mask, which every named
+    entry is held to (:func:`_page_entry_open`)."""
     target, recursive = (root, "-R ") if inside else (path, "")
     fix = f"chmod {recursive}go-w {target}"
-    if _page_darwin_acl_allows_write(path):
-        if inside:
-            fix += f" and chmod -R -N {root}"
-        else:
-            fix += f" and chmod -a# <n> {path} for each entry of ls -le {path} that allows a write"
+    writes = _page_darwin_acl_writes(path)
+    if inside and writes != []:
+        fix += f" and chmod -R -N {root}"
+    elif writes is None:
+        fix += (
+            f" and chmod -a# <n> {path} for each entry of ls -le {path} that allows a write,"
+            " the highest <n> first"
+        )
+    else:
+        fix += "".join(f" and chmod -a# {number} {path}" for number in reversed(writes))
     template = PAGE_OPEN_TO_OTHERS if inside else PAGE_PLACE_OPEN_TO_OTHERS
     return template.format(path=path, root=root, fix=fix, remedy=remedy)
 
@@ -6765,7 +6772,7 @@ def _page_entry_open(path: str | Path, info: os.stat_result, *, above: bool = Fa
       which every named entry is held to, and the entry then passes.
     * An ACL of macOS grants beside the mode: an entry whose ACL allows another account a
       right that changes it, or a directory's names, is open
-      (:func:`_page_darwin_acl_allows_write`). A deny grants nothing: macOS puts one on the
+      (:func:`_page_darwin_acl_writes`). A deny grants nothing: macOS puts one on the
       folders of each home.
 
     Never asked on Windows, which keeps no such modes and has no ``os.getuid``: said here,
@@ -6784,7 +6791,7 @@ def _page_entry_open(path: str | Path, info: os.stat_result, *, above: bool = Fa
             and (_page_posix_acl(path) or info.st_gid != _remote_private_group())
         )
     )
-    return bool(writable) or _page_darwin_acl_allows_write(path)
+    return bool(writable) or _page_darwin_acl_writes(path) != []
 
 
 def _page_posix_acl(path: str | Path) -> bool:
@@ -6821,45 +6828,49 @@ _DARWIN_ACL_WRITES = frozenset(
 and ``add_subdirectory``."""
 
 
-def _page_darwin_acl_allows_write(path: str | Path) -> bool:
-    """Whether a macOS ACL on the entry at ``path`` allows an account other than this one a
-    right that changes it (:data:`_DARWIN_ACL_WRITES`); an ACL that cannot be read is taken
-    to allow one."""
+def _page_darwin_acl_writes(path: str | Path) -> list[int] | None:
+    """The numbers ``ls -le`` gives the entries of a macOS ACL on the entry at ``path`` that
+    allow an account other than this one a right that changes it (:data:`_DARWIN_ACL_WRITES`);
+    ``None`` for an ACL that cannot be read, which is taken to allow one."""
     import sys
 
     if sys.platform != "darwin":
-        return False
+        return []
     try:
         text = _darwin_acl_text(os.fspath(path))
     except OSError:
-        return True
-    return text is not None and _page_acl_text_allows_write(text, os.getuid())
+        return None
+    return [] if text is None else _page_acl_text_writes(text, os.getuid())
 
 
-def _page_acl_text_allows_write(text: str, own_uid: int) -> bool:
-    """Whether ``text``, an ACL as macOS's ``acl_to_text`` writes it, has an entry that
-    allows an account other than ``own_uid`` a right that changes the entry. Each line after
-    the header is ``tag:uuid:name:id:allow[,flag...]:right[,right...]``: the inheritance
-    flags follow the verdict, as Libc's ``acl_translate.c`` writes and reads them, and
-    ``ls -le`` shows them among the rights. Read from the rights, every flagged entry was
-    taken for a deny, a file's ``allow,inherited`` grant included, which each file a build
-    writes in a shared folder carries (review of #243, round 12, 1/10).
+def _page_acl_text_writes(text: str, own_uid: int) -> list[int]:
+    """The numbers ``ls -le`` gives the entries of ``text``, an ACL as macOS's
+    ``acl_to_text`` writes it, that allow an account other than ``own_uid`` a right that
+    changes the entry, in order: one entry a line after the header, numbered from 0, as
+    ``ls -le`` and ``chmod -a#`` number them. Each is
+    ``tag:uuid:name:id:allow[,flag...]:right[,right...]``: the inheritance flags follow the
+    verdict, as Libc's ``acl_translate.c`` writes and reads them, and ``ls -le`` shows them
+    among the rights. Read from the rights, every flagged entry was taken for a deny, a
+    file's ``allow,inherited`` grant included, which each file a build writes in a shared
+    folder carries (review of #243, round 12, 1/10).
 
     An entry flagged ``only_inherit`` grants nothing on the entry that carries it, only on
     what is made inside it later, which carries a copy of its own and is asked about as
     itself: read as a right on the directory, a parent that seeds a shared folder's
     defaults that way refused every page below it (review of #243, round 11, 3/9)."""
-    for line in text.splitlines():
+    writes: list[int] = []
+    entries = (line for line in text.splitlines() if line and not line.startswith("!#"))
+    for number, line in enumerate(entries):
         fields = line.split(":")
-        if line.startswith("!#") or len(fields) < 6:
+        if len(fields) < 6:
             continue
         own = fields[0] == "user" and fields[-3] == str(own_uid)
         verdict, *flags = fields[-2].split(",")
         if verdict != "allow" or "only_inherit" in flags or own:
             continue
         if _DARWIN_ACL_WRITES.intersection(fields[-1].split(",")):
-            return True
-    return False
+            writes.append(number)
+    return writes
 
 
 _DARWIN_ACL_TYPE_EXTENDED = 0x00000100

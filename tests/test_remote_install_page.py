@@ -21,6 +21,7 @@ import errno
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import stat
@@ -799,7 +800,7 @@ def test_a_macos_acl_that_allows_another_account_to_change_an_entry_opens_it(
     file a build writes in a shared folder carries included (review of #243, round 12,
     1/10)."""
     assert (
-        remote_server._page_acl_text_allows_write(f"!#acl 1\n{entries.format(own=4242)}\n", 4242)
+        bool(remote_server._page_acl_text_writes(f"!#acl 1\n{entries.format(own=4242)}\n", 4242))
         is opened
     )
     if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
@@ -842,14 +843,18 @@ def test_a_build_a_macos_acl_opens_is_told_the_chmod_that_removes_the_acl(
     #243, round 11, 2/9). The refusal names ``chmod -R -N`` of the build as well. Above
     it, ``chmod -N`` removed macOS's own ``everyone deny delete`` from a folder of the home
     with the entry it found (review of #243, round 12, 7/10), so it names ``chmod -a#``
-    of each entry that allows a write, and never ``-N``."""
+    of each entry that allows a write, and never ``-N``: the highest number first, since
+    each removal renumbers the entries after it, and from the top the second command removed
+    the wrong entry (review of #243, round 13, 3/4)."""
     if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
         pytest.skip("Windows keeps no such modes")
     for path in (built, *built.rglob("*")):
         path.chmod(0o755 if path.is_dir() else 0o644)
     index = built / "index.html"
     opened = index if where == "in the build" else built.parent
-    acl = f"!#acl 1\n{HOME_FOLDERS}\n{BOB}:allow:read,write,add_file\n"
+    reads = f"{BOB}:allow:read"
+    entries = [HOME_FOLDERS, f"{BOB}:allow:read,write,add_file", reads, f"{ADMIN}:allow:add_file"]
+    acl = "!#acl 1\n" + "".join(f"{entry}\n" for entry in entries)
     monkeypatch.setattr(remote_server, "_remote_private_group", lambda: None)
     monkeypatch.setattr(
         remote_server, "_darwin_acl_text", lambda path: acl if path == str(opened) else None
@@ -866,11 +871,33 @@ def test_a_build_a_macos_acl_opens_is_told_the_chmod_that_removes_the_acl(
             path=index, fix=f"chmod -R go-w {built} and chmod -R -N {built}", remedy=remedy
         )
     else:
-        each = f"chmod -a# <n> {opened} for each entry of ls -le {opened} that allows a write"
+        each = f"chmod -a# 3 {opened} and chmod -a# 1 {opened}"
         assert problem == remote_server.PAGE_PLACE_OPEN_TO_OTHERS.format(
             path=opened, root=built, fix=f"chmod go-w {opened} and {each}", remedy=remedy
         )
         assert problem is not None and "-N" not in problem
+        for number in re.findall(r"chmod -a# (\d+) ", problem):
+            del entries[int(number)]  # as chmod -a# does: the entries after it move up
+        assert entries == [HOME_FOLDERS, reads], "each command removes the entry it names"
+
+
+def test_a_directory_above_a_build_whose_macos_acl_cannot_be_read_is_told_the_order(
+    built: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no numbers to name, the refusal says to remove the entries that allow a write
+    from the highest number down (review of #243, round 13, 3/4)."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("Windows keeps no such modes")
+
+    def unreadable(path: str) -> str | None:
+        raise OSError(5, "Input/output error", path)
+
+    monkeypatch.setattr(remote_server, "_darwin_acl_text", unreadable)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    problem = remote_server._page_open_refusal(built.parent, built, "", inside=False)
+    monkeypatch.undo()
+    each = f"for each entry of ls -le {built.parent} that allows a write, the highest <n> first"
+    assert f" and chmod -a# <n> {built.parent} {each} if it is yours" in problem
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="chmod +a is macOS's")

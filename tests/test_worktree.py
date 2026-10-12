@@ -82,6 +82,37 @@ def test_context_and_team_agree_on_project_identity(
     assert find_project_root(worktree) == team_project(worktree).root
 
 
+def test_a_failed_git_gives_the_project_a_working_git_does(
+    repo_with_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where git gave no answer, the marker walk stopped at the first marker: a linked
+    worktree's own root, or a subdirectory's ``.aisquare`` inside a checkout. One directory
+    was then one project while git answered and another while it timed out, and Remote kept
+    whichever its first lookup said (review of #243, round 12, 2/10 and 4/10). The nearest
+    ``.git`` gives git's answer, and ``team_project`` asks git once, not again for the
+    fallback."""
+    from aisquare.core import workspace
+
+    repo, worktree = repo_with_worktree
+    starts = [worktree, worktree / "sub", worktree / "marked", repo / "marked" / "deep"]
+    for start in starts:
+        start.mkdir(parents=True, exist_ok=True)
+    (worktree / "marked" / ".aisquare").mkdir()
+    (repo / "marked" / ".aisquare").mkdir()
+    answered = [team_project(start).root for start in starts]
+    assert answered == [repo.resolve()] * len(starts), "the premise: git's answer"
+    asked: list[Path] = []
+
+    def failed(start: Path) -> Path | None:
+        asked.append(start)
+        return None
+
+    monkeypatch.setattr(workspace, "git_common_root", failed)
+    assert [team_project(start).root for start in starts] == answered
+    assert [find_project_root(start) for start in starts] == answered
+    assert len(asked) == 2 * len(starts), "one git call for each lookup"
+
+
 @pytest.fixture
 def repo_with_submodule(tmp_path: Path) -> tuple[Path, Path]:
     """A superproject with a checked-out submodule."""

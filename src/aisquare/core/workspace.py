@@ -118,21 +118,28 @@ def find_project_root(start: Path) -> Path:
 
     Git is asked first so that every worktree of a repository resolves to the
     principal checkout — a feature branch in ``../wt-auth`` shares the parent
-    repo's context pool instead of starting empty. Falls back to the nearest
-    ancestor carrying a project marker, then to ``start`` itself, so every
-    directory resolves to *some* project.
+    repo's context pool instead of starting empty. Where git gives no answer (not
+    installed, timed out, a worktree whose principal has gone), its answer is read
+    from the nearest ``.git``: that directory, or the principal a linked worktree's
+    ``.git`` file names (:func:`worktree_principal`). The marker walk stopped at the
+    first marker, a worktree's own root or a subdirectory's ``.aisquare``, so a
+    directory was one project while git answered and another while it did not
+    (review of #243, round 12, 2/10 and 4/10). Outside any checkout, the nearest
+    ancestor carrying a project marker, then ``start`` itself, so every directory
+    resolves to *some* project.
     """
     start = start.resolve()
     common = git_common_root(start)
     if common is not None:
         return common
-    for directory in (start, *start.parents):
-        if marks_project_root(directory):
-            return directory
-    return start
+    ancestors = (start, *start.parents)
+    checkout = next((directory for directory in ancestors if (directory / ".git").exists()), None)
+    if checkout is not None:
+        return worktree_principal(checkout, ask_git=False) or checkout
+    return next((directory for directory in ancestors if marks_project_root(directory)), start)
 
 
-def worktree_principal(root: Path) -> Path | None:
+def worktree_principal(root: Path, *, ask_git: bool = True) -> Path | None:
     """The principal repository a LINKED worktree at ``root`` belongs to, else ``None``.
 
     Only a root whose ``.git`` is a FILE can be a linked worktree — a main
@@ -143,7 +150,8 @@ def worktree_principal(root: Path) -> Path | None:
     is the shape git writes, needs no subprocess, still resolves after the
     principal has been deleted, and covers a bare principal
     (``repo.git/worktrees/x``). Any other content is put to git itself, whose
-    ``--git-common-dir`` differs from ``--git-dir`` exactly for a worktree.
+    ``--git-common-dir`` differs from ``--git-dir`` exactly for a worktree, unless
+    ``ask_git`` is false, for a caller git has just failed (:func:`find_project_root`).
     """
     dotgit = root / ".git"
     try:
@@ -162,6 +170,8 @@ def worktree_principal(root: Path) -> Path | None:
             common = gitdir.parent.parent
             principal = common.parent if common.name == ".git" else common
             return principal.resolve()
+    if not ask_git:
+        return None
     principal_root = git_common_root(root)
     if principal_root is None or principal_root == root.resolve():
         return None

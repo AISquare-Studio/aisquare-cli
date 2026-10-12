@@ -30,7 +30,7 @@ import os
 import sys
 from pathlib import Path
 
-from aisquare.core.workspace import find_project_root, git_common_root, project_id_for
+from aisquare.core.workspace import find_project_root, project_id_for
 from aisquare.models import ProjectInfo
 
 _OFF_VALUES = {"0", "false", "no", "off"}
@@ -156,7 +156,9 @@ def team_project(cwd: Path | None = None) -> ProjectInfo:
     several repositories (planner in one, coders and runner in others) sets
     it to one hub directory so every session shares a single board. Otherwise
     worktrees resolve to their principal checkout, so the team shares one board
-    regardless of which worktree a session sits in.
+    regardless of which worktree a session sits in, whether git answers or not
+    (:func:`find_project_root`, one ``git`` call: git was asked again there
+    when it had just failed here).
     """
     hub = os.environ.get(TEAM_HUB_ENV_VAR, "").strip()
     if hub and not Path(hub).expanduser().is_absolute():
@@ -186,6 +188,5 @@ def team_project(cwd: Path | None = None) -> ProjectInfo:
     if hub:
         root = Path(hub).expanduser().resolve()
         return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
-    start = (cwd or Path.cwd()).resolve()
-    root = git_common_root(start) or find_project_root(start)
+    root = find_project_root(cwd or Path.cwd())
     return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])

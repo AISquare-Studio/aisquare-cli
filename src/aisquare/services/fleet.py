@@ -42,6 +42,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import codenames, harness, orchestrator, selfcli
 from aisquare.core import tmux as tmux_core
@@ -3018,13 +3019,19 @@ def _shutdown_tmux(config: FleetSettings, *, forget: bool) -> str | None:
 
 
 def _same_socket(left: Path, right: Path) -> bool:
-    """Whether two socket paths name one socket, symlinks resolved (macOS ``/tmp``)."""
+    """Whether two socket paths name one socket, symlinks resolved (macOS ``/tmp``).
+
+    Through :func:`~aisquare.core.agents.dir_identity`, which reads a path it cannot
+    resolve as written: pathlib raises ``RuntimeError``, not ``OSError``, for a symlink
+    loop on 3.11 and 3.12, and :func:`_address` asks this on every read of a row whose
+    recorded path is spelled otherwise than this shell's (every row on macOS, whose tmux
+    records ``/private/tmp``). A loop on the way to either path ended the listing, asq's
+    tick, spawn, stop, ``tell``, ``reap`` and the doctor in a traceback (round 29 of #257);
+    now the two paths read as different, and the row is asked at the one it recorded.
+    """
     if left == right:
         return True
-    try:
-        return left.resolve() == right.resolve()
-    except OSError:
-        return False
+    return agent_core.dir_identity(left) == agent_core.dir_identity(right)
 
 
 def _refuse_from_inside(sockets: Sequence[_Address], config: FleetSettings) -> None:

@@ -4092,6 +4092,37 @@ def test_every_read_asks_a_row_of_the_server_at_the_path_it_recorded(
     assert _events(project, "agent_exited") == []
 
 
+def test_a_symlink_loop_on_the_way_to_a_rows_socket_is_another_path_not_a_traceback(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Round 29 of #257: every read compares a row's recorded socket path with this shell's
+    (`_address`), and pathlib on 3.11 and 3.12 raises `RuntimeError`, not `OSError`, for a
+    symlink loop on the way. The listing, asq's tick and every command that reads a row
+    ended in a traceback. The two now read as different paths, so the row is asked at the
+    one it recorded."""
+    looped = tmp_path / "loop" / "tmux-1000" / "asq"
+    with suppress(OSError):
+        (tmp_path / "loop").symlink_to(tmp_path / "loop")  # a loop, where links can be made
+    coder = _recorded_at(_coder(project), looped)
+    resolve = Path.resolve
+
+    def resolve_as_3_12(self: Path, strict: bool = False) -> Path:
+        if "loop" in self.parts:
+            raise RuntimeError(f"Symlink loop from {str(self)!r}")
+        return resolve(self, strict)
+
+    monkeypatch.setattr(Path, "resolve", resolve_as_3_12)
+
+    [listed] = fleet_service.list_agents(project)
+
+    assert listed.agent.id == coder.id and listed.state == "waiting", listed
+    assert fleet_service.socket_at(coder) == looped, "asked at the path it recorded"
+
+
 def test_a_row_dead_on_its_own_server_is_ended_and_its_window_killed_there(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

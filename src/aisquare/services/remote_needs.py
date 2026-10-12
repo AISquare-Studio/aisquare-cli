@@ -1561,6 +1561,7 @@ def needs_from_board(
     project: ProjectInfo,
     now: datetime,
     manager_live: bool = False,
+    manager_read: int = 0,
 ) -> list[NeedsItem]:
     """The board's open questions and results for the human (:func:`is_needs_board_event`).
 
@@ -1570,7 +1571,11 @@ def needs_from_board(
     later question, result or decision: they have moved on. An unaddressed
     human note clears nothing; it is news, not an answer. ``agents`` names each
     author by its fleet label. ``manager_live``: the board's write wakes a manager that
-    can act on it (:func:`_needs_nudged`).
+    can act on it (:func:`_needs_nudged`). ``manager_read``: how far that manager's
+    session's ``cursor`` went, the board's own measure of what it was shown. A coder's
+    question or result to it up to there reached it, and stays its own once it ends or
+    parks on its limit: read as the human's, the day's every one was a card and a push
+    then (review of #243, round 22, 3/7).
     """
     by_session = {session.id: session for session in sessions}
     rows: dict[str, FleetAgent] = {}
@@ -1594,7 +1599,7 @@ def needs_from_board(
             names = {n.strip().lower() for n in (label, own, role) if n and n.strip()}
             open_still = event.session_id not in moved_on and not names & addressed
             if open_still and is_needs_board_event(
-                event, author_role=role, manager_live=manager_live
+                event, author_role=role, manager_live=manager_live or event.seq <= manager_read
             ):
                 items.append(
                     _needs_board_item(event, project=project, row=row, author=label or role)
@@ -1753,7 +1758,7 @@ def _needs_scan_project(
     review of #243, round 18, 1/4). No other project's rows are read: whether a manager
     hears of an item is :func:`_needs_nudged`'s to say.
     """
-    from aisquare.services.fleet import RECENTLY_ENDED
+    from aisquare.services.fleet import MANAGER_LABEL, RECENTLY_ENDED
 
     if statuses is not None:
         statuses = _needs_unheard(statuses, answers)
@@ -1764,15 +1769,22 @@ def _needs_scan_project(
     board_read = _needs_read_or_none(lambda: sources.board_since(board_id, day), "board", project)
     board = board_read or []
     window = _needs_window(sources, project, board_id)
-    authors = _needs_board_authors(board, now)
-    sessions = (
-        _needs_read(lambda: sources.board_sessions(board_id, authors), "sessions", project)
-        if authors
-        else []
-    )
     listed = statuses or []
     rows = list({row.id: row for row in [*ended, *(status.agent for status in listed)]}.values())
     nudged = _needs_nudged(project, board_id, listed)
+    readers = {  # the sessions of the manager the fleet nudges, on its project's own board
+        row.session_id
+        for row in rows
+        if board_id == project.id and row.label == MANAGER_LABEL and row.session_id
+    }
+    authors = _needs_board_authors(board, now)
+    sessions = (
+        _needs_read(
+            lambda: sources.board_sessions(board_id, authors | readers), "sessions", project
+        )
+        if authors
+        else []
+    )
     items: list[NeedsItem] = []
     tails: dict[str, TranscriptTail | None] = {}
     if statuses is not None:
@@ -1821,6 +1833,7 @@ def _needs_scan_project(
             # Unknown is not absent: without a listing, whether the manager the board's write
             # woke is live is not known, and no item is the human's for that alone.
             manager_live=nudged is not None or (statuses is None and board_id == project.id),
+            manager_read=max((s.cursor for s in sessions if s.id in readers), default=0),
         )
     )
     return _NeedsProject(items=items, statuses=listed, ended=ended, tails=tails)

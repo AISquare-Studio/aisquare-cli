@@ -302,8 +302,10 @@ that several projects share is one card, in the project of the agent that asked.
 A manager is there to handle an item only when the fleet wakes it for that item:
 on a project's own board, the project's `manager` while it runs (not stopped, not
 parked on its usage limit), which a coder's board write, an agent's exit and a
-usage limit all nudge. A manager started outside the fleet, or a numbered seat
-such as `manager-2`, is never nudged, so it keeps nothing off the phone. For a
+usage limit all nudge. A coder's question or result that manager was shown
+stays its own once it stops or parks on its limit; only what came after is
+yours. A manager started outside the fleet, or a numbered seat such as
+`manager-2`, is never nudged, so it keeps nothing off the phone. For a
 project whose agents write another project's board (under `AISQUARE_TEAM_HUB` the
 hub's, for a worktree its principal checkout's), no manager is: every question
 and result on that board, and every crash, limit and failed hand-over of its

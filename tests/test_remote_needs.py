@@ -3648,8 +3648,8 @@ class _Seat:
     role: str = "coder"
     rowed: bool = True
     end: str | None = None
-    """``crash`` (exit 1), ``hand-over`` (exit 0, its replacement never started) or ``stop``
-    (no status, as a kill leaves it)."""
+    """``crash`` (exit 1), ``exit`` (exit 0), ``hand-over`` (exit 0, its replacement never
+    started) or ``stop`` (no status, as a kill leaves it)."""
     limited: bool = False
     asks: bool = False
 
@@ -3681,7 +3681,7 @@ def _seat_up(store: Any, seat: _Seat, project: ProjectInfo, board: ProjectInfo) 
         )
     if not seat.rowed:
         return
-    status = {"crash": 1, "hand-over": 0}.get(seat.end or "")
+    status = {"crash": 1, "exit": 0, "hand-over": 0}.get(seat.end or "")
     row = store.upsert_fleet_agent(
         FleetAgent(
             id=f"agt_{seat.where}_{seat.label}", project_id=project.id, label=seat.label,
@@ -3837,6 +3837,38 @@ def test_a_live_manager_keeps_an_item_off_the_phone_only_on_its_projects_own_boa
             snap = needs_agent_now(project, seat.label, now=now)
             scanned = [i for i in items if i.project_id == project.id and i.agent == seat.label]
             assert sorted(i.id for i in snap.items) == sorted(i.id for i in scanned), seat
+
+
+@pytest.mark.parametrize(
+    "manager",
+    [_manager_of("alpha", end="exit"), _manager_of("alpha", limited=True)],
+    ids=["it exited cleanly", "it parks on its usage limit"],
+)
+def test_a_manager_gone_leaves_the_phone_only_what_it_was_never_shown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manager: _Seat
+) -> None:
+    """A manager that ended or parked on its limit made every coder's question or result to it
+    of the day a card and a push, those it was shown and acted on too (review of #243, round
+    22, 3/7). What its session's cursor passed reached it; what came after did not."""
+    from aisquare.services import team as team_service
+
+    seats = (manager, _Seat("alpha", "coder-1", asks=True), _Seat("alpha", "coder-2"))
+    alpha = _seated(tmp_path, monkeypatch, seats, hub=False)["alpha"]
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+
+    def board_cards() -> list[tuple[str, str | None]]:
+        sources = remote_needs.live_needs_sources()
+        items = scan_needs_you(sources, now=datetime.now(UTC), dismissed=())
+        return [(item.kind, item.agent) for item in items if item.kind.startswith("board_")]
+
+    assert board_cards() == [("board_question", "coder-1")], "it was never shown it"
+    with store_session() as store:
+        store.touch_session("ses_alpha_manager", cursor=store.latest_seq(alpha.id))
+        team_service._emit(
+            store, alpha.id, "result", "Green.", session_id="ses_alpha_coder-2", to_role="manager"
+        )
+    assert board_cards() == [("board_result", "coder-2")]
 
 
 def test_under_a_hub_a_projects_needs_read_no_other_projects_rows(

@@ -3651,6 +3651,8 @@ class _Seat:
     limited: bool = False
     waits: bool = False
     asks: bool = False
+    registered: bool = True
+    """``False``: its row has a session id that never reached the board (no aisquare hooks)."""
 
 
 def _manager_of(where: str, label: str = "manager", **kw: Any) -> _Seat:
@@ -3665,15 +3667,16 @@ def _seat_up(store: Any, seat: _Seat, project: ProjectInfo, board: ProjectInfo) 
     now = datetime.now(UTC)
     stopped = now - timedelta(minutes=10)
     session = f"ses_{seat.where}_{seat.label}"
-    store.upsert_session(
-        TeamSession(
-            id=session, project_id=board.id, role=seat.role, label=seat.label,
-            started_at=now - timedelta(hours=1),
-            state="limited" if seat.limited else "waiting" if seat.waits else "working",
-            limit_resets_at=now + timedelta(hours=4) if seat.limited else None,
-            last_seen_at=stopped if seat.end else now - timedelta(minutes=1),
-        )
-    )  # fmt: skip
+    if seat.registered:
+        store.upsert_session(
+            TeamSession(
+                id=session, project_id=board.id, role=seat.role, label=seat.label,
+                started_at=now - timedelta(hours=1),
+                state="limited" if seat.limited else "waiting" if seat.waits else "working",
+                limit_resets_at=now + timedelta(hours=4) if seat.limited else None,
+                last_seen_at=stopped if seat.end else now - timedelta(minutes=1),
+            )
+        )  # fmt: skip
     if seat.asks:
         team_service._emit(
             store, board.id, "question", "Which branch?", session_id=session, to_role="manager"
@@ -3899,37 +3902,42 @@ _GOING = {
     "it parks on its usage limit": (_manager_of("alpha", limited=True), True),
     "it is killed": (_manager_of("alpha", end="stop"), True),
     "it dies with no status": (_manager_of("alpha", end="lost"), True),
+    "it crashes": (_manager_of("alpha", end="crash"), True),
     "its hand-over fails": (_manager_of("alpha", end="hand-over"), True),
+    "its session never registered": (_manager_of("alpha", registered=False), True),
+    "its session never registered, and it exits": (
+        _manager_of("alpha", registered=False, end="exit"),
+        True,
+    ),
 }
 
 
 @pytest.mark.parametrize(("manager", "gone"), list(_GOING.values()), ids=list(_GOING))
-def test_once_the_manager_cannot_take_them_its_open_questions_and_later_results_are_cards(
+def test_once_the_manager_cannot_take_them_its_open_questions_are_cards_and_results_are_not(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manager: _Seat, gone: bool
 ) -> None:
-    """A coder's question or result to the manager is the manager's while it can take it.
-    Once it cannot, however it went, every question to it still open is a card, shown to it
-    or not, and a result to it is one when it came after the manager's last recorded
-    activity (its session's ``last_seen_at``). Read as what it was shown, its session's
-    cursor hid a question after a kill, a death or a failed hand-over, and one asked before
-    its session started (review of #243, round 23, 2/7 and 4/7). coder-1 asks, unanswered;
-    coder-2 asks and the human answers; coder-3 reports before the manager's last activity,
-    and coder-4 after it."""
+    """A coder's question or result to the manager is the manager's while it can take it: a
+    live row on a board session the fleet's nudge wakes. Once it cannot, however it went,
+    every question to it still open is a card: someone waits on the answer. A result to it
+    never is, whenever it came: it stays on the board, and the manager's stop is its own
+    card. Timed against the manager's ``last_seen_at``, which its stop writes too, a result
+    after it died was hidden once its row was reaped, and every result to a manager whose
+    session never registered was hidden for good (review of #243, round 24, 2/8 and 5/8).
+    coder-1 asks, unanswered; coder-2 asks and the human answers; coder-3 reported an hour
+    ago, and coder-4 a minute ago."""
     seats = (manager, *(_Seat("alpha", f"coder-{n}") for n in range(1, 5)))
     alpha = _seated(tmp_path, monkeypatch, seats, hub=False)["alpha"]
     tmux = FakeTmux()
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    now = datetime.now(UTC)
+    posts = [
+        ("coder-1", "question", now - timedelta(minutes=5)),
+        ("coder-2", "question", now - timedelta(minutes=5)),
+        (None, "note", now - timedelta(minutes=4)),
+        ("coder-3", "result", now - timedelta(hours=1)),
+        ("coder-4", "result", now - timedelta(minutes=1)),
+    ]
     with store_session() as store:
-        managing = store.get_session("ses_alpha_manager")
-        assert managing is not None
-        last = managing.last_seen_at
-        posts = [
-            ("coder-1", "question", last - timedelta(minutes=5)),
-            ("coder-2", "question", last - timedelta(minutes=5)),
-            (None, "note", last - timedelta(minutes=4)),
-            ("coder-3", "result", last - timedelta(minutes=3)),
-            ("coder-4", "result", last + timedelta(seconds=30)),
-        ]
         for n, (author, kind, at) in enumerate(posts):
             store.add_team_event(
                 TeamEvent(
@@ -3938,18 +3946,18 @@ def test_once_the_manager_cannot_take_them_its_open_questions_and_later_results_
                     to_role="manager" if author else "coder-2", created_at=at,
                 )
             )  # fmt: skip
-    expected = [("board_question", "coder-1"), ("board_result", "coder-4")] if gone else []
+    expected = [("board_question", "coder-1")] if gone else []
     assert _board_cards(remote_needs.live_needs_sources()) == expected
 
 
-def test_what_dates_the_managers_last_activity_unread_floods_the_phone_with_nothing(
+def test_what_says_whether_the_manager_can_take_them_unread_floods_the_phone_with_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With the board's sessions unread, r22's cursor read 0, and every coder's question and
-    result of the day to a manager that had stopped came back as a card, due at once
-    (review of #243, round 23, 5/7). Unknown is not absent: without the sessions no item
-    to the manager is the human's that scan, and without the manager's own no result to
-    it is, while a question, which no stamp decides, still is."""
+    """Unknown is not absent. With the board's sessions unread, no item to the manager is the
+    human's that scan (review of #243, round 23, 5/7). With the ended rows unread, a manager
+    that stopped read as none, and every coder's result to it of the day was a card, due at
+    once (round 24, 3/8): no result to it is the human's that scan, while its open question,
+    which the ended rows do not decide, still is."""
     from aisquare.services import team as team_service
 
     seats = (
@@ -3965,19 +3973,36 @@ def test_what_dates_the_managers_last_activity_unread_floods_the_phone_with_noth
             store, alpha.id, "result", "Green.", session_id="ses_alpha_coder-2", to_role="manager"
         )
     sources = remote_needs.live_needs_sources()
-    assert _board_cards(sources) == [("board_question", "coder-1"), ("board_result", "coder-2")]
+    assert _board_cards(sources) == [("board_question", "coder-1")]
 
-    def locked(*args: Any) -> list[TeamSession]:
+    def locked(*args: Any) -> list[Any]:
         raise RuntimeError("database is locked")
 
     assert _board_cards(replace(sources, board_sessions=locked)) == []
+    assert _board_cards(replace(sources, ended_agents=locked)) == [("board_question", "coder-1")]
 
-    def unstamped(project_id: str, ids: Any) -> list[TeamSession]:
-        return sources.board_sessions(project_id, set(ids) - {"ses_alpha_manager"})
 
-    assert _board_cards(replace(sources, board_sessions=unstamped)) == [
-        ("board_question", "coder-1")
-    ]
+def test_with_no_manager_in_its_day_a_coders_result_to_the_manager_is_a_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a manager that stopped leaves a result to it on the board: with none on the
+    project's board, or under a hub, it is a card, unread ended rows aside."""
+    from aisquare.services import team as team_service
+
+    alpha = _seated(tmp_path, monkeypatch, (_Seat("alpha", "coder-1"),), hub=False)["alpha"]
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    with store_session() as store:
+        team_service._emit(
+            store, alpha.id, "result", "Green.", session_id="ses_alpha_coder-1", to_role="manager"
+        )
+    sources = remote_needs.live_needs_sources()
+    assert _board_cards(sources) == [("board_result", "coder-1")]
+
+    def locked(*args: Any) -> list[Any]:
+        raise RuntimeError("database is locked")
+
+    assert _board_cards(replace(sources, ended_agents=locked)) == []
 
 
 def test_under_a_hub_a_projects_needs_read_no_other_projects_rows(

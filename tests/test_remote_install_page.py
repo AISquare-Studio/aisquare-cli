@@ -470,6 +470,40 @@ def test_after_install_page_the_server_serves_the_spa_with_no_dist_flag(
     assert asset.status_code == 200 and asset.text == "console.log('remote')"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a symlink needs a privilege on Windows")
+def test_a_linked_page_that_install_page_replaces_or_that_goes_is_no_longer_served(
+    isolated_home: Path, built: Path, tmp_path: Path
+) -> None:
+    """The installed build was looked up once, as the app was built, and a ``remote-dist``
+    that is a link was taken for the link's target: after ``install-page`` replaced the link
+    with a build, and after the link was removed to go back to the bundled page, a running
+    server still served the build it had led to (review of #243, round 10, 3/7)."""
+    own = tmp_path / "own-build"
+    shutil.copytree(built, own)
+    (own / "index.html").write_text("<!doctype html><title>MY OWN</title>")
+    other = tmp_path / "other-build"
+    shutil.copytree(built, other)
+    (other / "index.html").write_text("<!doctype html><title>NEW INSTALL</title>")
+    remote_dist_dir().parent.mkdir(parents=True, exist_ok=True)
+    remote_dist_dir().symlink_to(own)
+    runtime = Runtime(remote_state_path(), remote_audit_path())
+    client = make_client(build_app(runtime))  # dist_dir=None: the installed page
+
+    def page() -> str:
+        response = client.get(f"/r/{runtime.token}/", headers={"accept": "text/html"})
+        assert response.status_code == 200, response.text
+        return response.text
+
+    assert "MY OWN" in page()
+    remote_server.install_page(other)
+    assert "NEW INSTALL" in page()
+    shutil.rmtree(remote_dist_dir())
+    remote_dist_dir().symlink_to(own)
+    assert "MY OWN" in page()
+    remote_dist_dir().unlink()
+    assert page() == remote_page.bundled_page_files()["index.html"].decode("utf-8")
+
+
 # --- what a request may name in an installed build -------------------------------------------
 
 

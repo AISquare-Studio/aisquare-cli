@@ -3904,6 +3904,13 @@ def _remote_resolved(path: Path) -> Path | None:
         return None
 
 
+def _remote_page_root(path: Path) -> Path:
+    """The directory a page is served from for ``path``, a ``--dist`` or the installed build:
+    ``path`` resolved, or as it is for one that does not resolve, a link loop, which is a
+    build with no file at all (:func:`_remote_resolved`)."""
+    return _remote_resolved(path) or path
+
+
 def _is_navigation(rel: str, accept: str) -> bool:
     """Whether this is a page navigation, which is the ONLY thing the SPA fallback serves.
 
@@ -4815,8 +4822,7 @@ def build_remote_app(
         name: _remote_write_tracked(name, handler)
         for name, handler in (writes or live_writes()).handlers.items()
     }
-    unresolved = dist_dir or remote_dist_dir()
-    dist = _remote_resolved(unresolved) or unresolved  # a loop: a build with no file at all
+    given = None if dist_dir is None else _remote_page_root(dist_dir)
     page_remedy = PAGE_INSTALLED_REMEDY if dist_dir is None else PAGE_DIST_REMEDY
     page_group = _remote_private_group()
     limiter = _RateLimiter(clock)
@@ -5236,10 +5242,18 @@ def build_remote_app(
         account may change, or that is found through a directory another account may
         change, is 404 ``no_dist`` too (:data:`PAGE_NOT_SERVED`), asked about as it is
         served (:func:`_page_served_open_to_others`).
+
+        The installed build is looked up for each request, one ``realpath``: looked up once,
+        as the app was built, a ``remote-dist`` that is a link to a build of the human's own
+        was served from the link's target after ``install-page`` replaced the link with a
+        build, and after the link was removed to go back to the bundled page (review of
+        #243, round 10, 3/7). A ``--dist`` is the directory the caller named, as it
+        resolved then.
         """
         from aisquare.services import remote_page
 
         rel = request.path_params.get("path", "")
+        dist = given if given is not None else _remote_page_root(remote_dist_dir())
         index = dist / "index.html"
 
         def bundled_page() -> Response:

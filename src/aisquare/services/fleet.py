@@ -507,16 +507,20 @@ def resolve_project(ref: str | None = None, *, cwd: Path | None = None) -> Proje
     with store_session() as store:
         if ref is None:
             return active_project(store, cwd)
-        matches = store.find_projects(ref)
-        if not matches:
-            raise NoSuchProject(f"no project matches {ref!r} (id prefix, name or codename)")
-        if len(matches) > 1:
-            names = ", ".join(
-                f"{p.root.name or p.id}" + (f" · {p.codename}" if p.codename else "")
-                for p in matches
-            )
-            raise NoSuchProject(f"{ref!r} matches several projects: {names} — use the codename")
-        return matches[0]
+        return only_project(ref, store.find_projects(ref))
+
+
+def only_project(ref: str, matches: list[ProjectInfo]) -> ProjectInfo:
+    """The one project of ``matches``, those ``ref`` names; :class:`NoSuchProject` for none
+    or several, the message naming them."""
+    if not matches:
+        raise NoSuchProject(f"no project matches {ref!r} (id prefix, name or codename)")
+    if len(matches) > 1:
+        names = ", ".join(
+            f"{p.root.name or p.id}" + (f" · {p.codename}" if p.codename else "") for p in matches
+        )
+        raise NoSuchProject(f"{ref!r} matches several projects: {names} — use the codename")
+    return matches[0]
 
 
 def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> ProjectInfo:

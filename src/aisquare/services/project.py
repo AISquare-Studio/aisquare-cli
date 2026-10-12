@@ -73,24 +73,19 @@ def switch(name: str) -> ProjectInfo:
     return project
 
 
-def named(term: str) -> ProjectInfo:
-    """The single registered project ``term`` names — a name, codename or id prefix, never a
-    path: :func:`resolve` without the disk, for a caller with no working directory of its
-    own to read a path against (the remote's ``project/remove``).
-
-    ``KeyError`` when nothing matches, ``ValueError`` when several do, as :func:`resolve`.
-    """
-    with store_session() as store:
-        return _one_match(store, term)
-
-
 def _one_match(store: ContextStore, term: str) -> ProjectInfo:
     """The single registered project ``term`` names — a name, codename or id prefix.
 
     ``KeyError`` when nothing matches, ``ValueError`` (listing the candidates)
     when several do; the two commands that share this share its wording.
     """
-    matches = store.find_projects(term)
+    return only_match(term, store.find_projects(term))
+
+
+def only_match(term: str, matches: list[ProjectInfo]) -> ProjectInfo:
+    """The one project of ``matches``, those ``term`` names, as :func:`_one_match` says it:
+    ``KeyError`` for none, ``ValueError`` listing them for several. The remote's
+    ``project/remove`` passes the matches a phone is shown."""
     if not matches:
         raise KeyError(term)
     if len(matches) > 1:

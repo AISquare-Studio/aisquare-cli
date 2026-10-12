@@ -2392,6 +2392,30 @@ def test_removing_a_directory_this_account_may_not_look_inside_forgets_only_what
         assert project_service.list_projects() == []
 
 
+@pytest.mark.parametrize("ref", ["*", "secret", "id prefix", "path"])
+def test_a_phone_cannot_remove_a_directory_the_hooks_only_captured(
+    home: Path, runtime: Runtime, tmp_path: Path, ref: str
+) -> None:
+    """``project/remove`` named a project as ``project forget`` does, captured directories
+    included, and ``*`` matched every one: the refusal listed them all (review of #243,
+    round 9, 6/6). A phone names only what it is shown."""
+    (alpha,) = _projects(home, "code/alpha")
+    root = _repo(home / "code" / "secret")
+    secret = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+    with store_session() as store:
+        store.ensure_project(secret)
+    client = _project_writes(runtime, tmp_path)
+    sent = {"id prefix": secret.id[:12], "path": str(root)}.get(ref, ref)
+
+    answer = client.post(f"{base(runtime)}/api/project/remove", json={"ref": sent})
+
+    assert (answer.status_code, answer.json()["error"]) == (404, "not_found"), answer.text
+    assert answer.json()["message"] == f"no project matches {sent!r}"
+    assert [project.id for project in project_service.list_projects()] == [alpha.id]
+    with store_session() as store:
+        assert [project.id for project in store.captured_projects()] == [secret.id]
+
+
 def test_an_added_project_is_listed_where_the_phone_and_the_cli_look(
     home: Path, runtime: Runtime, tmp_path: Path
 ) -> None:

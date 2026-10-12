@@ -228,6 +228,71 @@ def test_an_unknown_project_raises_a_lookup_error(two_projects: tuple[str, str])
     assert "no-such-project" in str(raised.value)
 
 
+# --- a directory the hooks only captured is no phone's to name -------------------------
+
+
+@pytest.fixture
+def captured(two_projects: tuple[str, str], tmp_path: Path) -> ProjectInfo:
+    """A directory the hooks captured (#139): registered, never added, never listed."""
+    root = tmp_path / "secret-captured"
+    root.mkdir()
+    project = ProjectInfo(id=project_id_for(find_project_root(root)), root=root, linked_repos=[])
+    with store_session() as store:
+        store.ensure_project(project)
+    return project
+
+
+def test_a_ref_names_only_a_project_the_phone_is_shown(
+    two_projects: tuple[str, str], captured: ProjectInfo
+) -> None:
+    """``find_projects`` matches captured directories too, and ``*``, an id prefix with
+    nothing left of it, matched every one: its refusal listed them all, and an id prefix
+    then read one's board, memory and transcripts, though ``api/projects`` lists only the
+    projects added on purpose (review of #243, round 9, 6/6)."""
+    current, other = two_projects
+    for ref in (captured.id, captured.id[:12], captured.root.name, "*", "?", "[*?"):
+        with pytest.raises(NoSuchProject) as refused:
+            _resolve_project(ref)
+        assert str(refused.value).startswith(f"no project matches {ref!r}")
+    assert (_resolve_project(current).id, _resolve_project(other).id) == (current, other)
+    with pytest.raises(NoSuchProject) as several:
+        _resolve_project("prj_")
+    assert "matches several projects" in str(several.value)
+    assert captured.root.name not in str(several.value)
+
+
+def test_the_current_project_is_named_by_its_ref_though_it_was_only_captured(
+    two_projects: tuple[str, str], captured: ProjectInfo
+) -> None:
+    """A read without a project reads the current one, added or not, so its own ref names
+    it too: a phone that was handed its id can ask for it by that id."""
+    from aisquare.core.workspace import pin_project
+
+    pin_project(captured.id)
+    assert _resolve_project(None).id == captured.id
+    assert _resolve_project(captured.id).id == captured.id
+
+
+def test_a_phone_cannot_list_or_read_a_captured_directory(
+    runtime: Runtime,
+    tmp_path: Path,
+    two_projects: tuple[str, str],
+    captured: ProjectInfo,
+    fake_tmux: _FakeTmux,
+) -> None:
+    _current, other = two_projects
+    client = _client(runtime, live_sources(), tmp_path)
+
+    def fleet(ref: str) -> Any:
+        return client.get(f"/r/{runtime.token}/api/fleet", params={"project": ref})
+
+    everything, one = fleet("*"), fleet(captured.id[:12])
+    assert (everything.status_code, everything.json()["error"]) == (404, "not_found")
+    assert (one.status_code, one.json()["error"]) == (404, "not_found")
+    assert captured.root.name not in everything.text + one.text
+    assert fleet(other).status_code == 200
+
+
 # --- fleet ------------------------------------------------------------------------------
 
 

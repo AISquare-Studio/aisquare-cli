@@ -518,13 +518,54 @@ def _resolve_project(ref: str | None) -> ProjectInfo:
     ``fleet_service.resolve_project(None)`` — and so could only ever see the
     project the server started in — now threads an optional ``project`` through
     this one place.
+
+    A ref names only a project a phone is shown (:func:`_remote_projects_named`).
     """
     from aisquare.services import fleet as fleet_service
 
     try:
-        return fleet_service.resolve_project(ref)
+        if ref is None:
+            return fleet_service.resolve_project(None)
+        return fleet_service.only_project(ref, _remote_projects_named(ref))
     except fleet_service.NoSuchProject as exc:
         raise NoSuchProject(str(exc)) from exc
+
+
+_GLOB_CHARACTERS = str.maketrans("", "", "*?[")
+"""What the store takes out of an id prefix before it matches ids that start with it."""
+
+
+def _remote_projects_named(ref: str) -> list[ProjectInfo]:
+    """The projects a phone's ``ref``, an id prefix, a name or a codename, names among those
+    it is shown (:func:`_remote_shown`).
+
+    The store matches every directory it has a row for, and most are ones the hooks only
+    captured, anywhere Claude Code ran (#139): never added, never listed by
+    ``api/projects``, and some of them ones ``project/add`` refuses, a home or a hidden
+    directory, so that no phone reads their board, tasks and memory. A ref of ``*``, an id
+    prefix with nothing left once its glob characters are taken out, matched every one,
+    and its refusal named them all; an id prefix then read any one's board, memory, tasks,
+    panes and transcripts (review of #243, round 9, 6/6). Such a ref now names nothing.
+    """
+    from aisquare.core.store import store_session
+
+    if not ref.translate(_GLOB_CHARACTERS):
+        return []
+    with store_session() as store:
+        matches = store.find_projects(ref)
+    return _remote_shown(matches)
+
+
+def _remote_shown(projects: list[ProjectInfo]) -> list[ProjectInfo]:
+    """Those of ``projects`` a phone is shown: one added on purpose, which ``api/projects``
+    lists, and the current one, which a read with no project reads, whether it was added or
+    only captured."""
+    if all(project.onboarded_at is not None for project in projects):
+        return projects
+    from aisquare.services import fleet as fleet_service
+
+    current = fleet_service.resolve_project(None).id
+    return [p for p in projects if p.onboarded_at is not None or p.id == current]
 
 
 def _remote_now() -> datetime:
@@ -2098,6 +2139,10 @@ def remote_project_ref(ref: str) -> ProjectInfo:
     around it, which the remove then forgot (review of #243, round 9, 5/6). Such a
     directory is still 404 ``not_found`` unless it is a project's own root
     (:func:`_remote_may_look_inside`).
+
+    A ref names only a project a phone is shown, as ``?project=`` does
+    (:func:`_remote_projects_named`): one the hooks only captured is 404 ``not_found``,
+    and ``*`` no longer names, and lists, every one of them (review of #243, round 9, 6/6).
     """
     from aisquare.services import project as project_service
 
@@ -2114,7 +2159,7 @@ def remote_project_ref(ref: str) -> ProjectInfo:
             passed = found.root != path.resolve() and path.is_dir()
         except (OSError, RuntimeError):
             raise no_such from None
-        if passed and not _remote_may_look_inside(path):
+        if (passed and not _remote_may_look_inside(path)) or not _remote_shown([found]):
             raise no_such
         return found
     if ref in (".", "..") or any(separator in ref for separator in {"/", os.sep}):
@@ -2124,7 +2169,7 @@ def remote_project_ref(ref: str) -> ProjectInfo:
             f"{ref} is a relative path: name the project, or give its absolute path "
             "(start with / or ~)",
         )
-    return project_service.named(ref)
+    return project_service.only_match(ref, _remote_projects_named(ref))
 
 
 def _remote_may_look_inside(directory: Path) -> bool:

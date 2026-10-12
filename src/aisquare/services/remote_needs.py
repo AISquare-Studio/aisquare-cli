@@ -2199,24 +2199,21 @@ def _needs_manager_down(
 ) -> list[NeedsItem]:
     """The ``manager`` row has ended and none replaced it, while its crew still needs one.
 
-    A failing exit status is always reported. A forced stop (no status) is
-    reported only while an agent of its crew still works, waits on a prompt or
-    is limited, and the manager's last word on the board was not its ``result``:
-    a manager stopped after reporting, or exiting cleanly, finished its job.
-    Its last word is its newest question, result or decision of the board's
-    day (``board``), not the exit the fleet announces for it under its session
-    once it is stopped, which followed every result and hid it. Not a clean
-    exit a switch or a restart made, though, and then could not start the
-    replacement for: the hand-over's own ``/exit`` is status 0, and the exit it
-    announces says so (``fleet.HANDOVER_FAILED``, read from the day's ``exits``).
-    That one is reported as a stop is. ``board`` is ``None`` when the day could not
-    be read: a stop is then not reported at all, rather than for a last word nobody
-    read; a crash needs no board.
+    A failing exit status is always reported, and so is a switch or a restart that
+    could not start the replacement (``fleet.HANDOVER_FAILED``, in the day's ``exits``),
+    whatever its crew does, as for any agent (:func:`_needs_crashed`; review of #243,
+    round 23, 3/7). A forced stop (no status) is reported only while an agent of its
+    crew still works, waits on a prompt or is limited, and the manager's last word on
+    the board was not its ``result``: a manager stopped after reporting, or exiting
+    cleanly, finished its job. Its last word is its newest question, result or decision
+    of the board's day (``board``), not the exit the fleet announces for it under its
+    session once it is stopped, which followed every result and hid it. ``board`` is
+    ``None`` when the day could not be read: a stop is then not reported at all.
 
     Its crew is the project's own agents, ``statuses``. On a board it shares with other
     projects (``shared``) its crew may be theirs, which no scan of its project reads: a
-    stop or a failed hand-over is reported there whatever its own project's agents do, so
-    one is never silent (review of #243, round 22, 2/7; :func:`_needs_nudged`).
+    stop is reported there whatever its own project's agents do (review of #243, round
+    22, 2/7).
 
     The row judged is the one the fleet nudges: a numbered seat that runs is woken for
     nothing, so it hid the ``manager``'s crash, reported nowhere (review of #243, round
@@ -2225,13 +2222,13 @@ def _needs_manager_down(
     from aisquare.services.fleet import MANAGER_LABEL
 
     seats = [row for row in rows if row.label == MANAGER_LABEL]
-    if not seats or any(row.ended_at is None for row in seats):
-        return []
-    manager = max(seats, key=lambda row: row.created_at)
-    if manager.ended_at is None:
+    manager = max(seats, key=lambda row: row.created_at, default=None)
+    if manager is None or manager.ended_at is None or any(row.ended_at is None for row in seats):
         return []
     if manager.exit_status not in (0, None):
         reason = f"the manager exited unexpectedly (exit {manager.exit_status})"
+    elif _needs_handover_failed(_needs_exit_of(manager, exits)):
+        reason = "the manager stopped, and its replacement did not start"
     else:
         busy = [
             status
@@ -2240,9 +2237,7 @@ def _needs_manager_down(
             and status.agent.ended_at is None
             and status.state in ("working", "attention", "limited")
         ]
-        if not (busy or shared) or board is None:
-            return []
-        if manager.exit_status == 0 and not _needs_handover_failed(_needs_exit_of(manager, exits)):
+        if manager.exit_status == 0 or not (busy or shared) or board is None:
             return []
         said = _needs_last_word(manager, board)
         if said is not None and said.kind == "result":

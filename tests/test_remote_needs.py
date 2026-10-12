@@ -1140,7 +1140,9 @@ def test_a_manager_whose_hand_over_never_started_its_replacement_is_down() -> No
     """A switch or a restart stops the manager with its own ``/exit``, status 0, and then
     starts the replacement. When that start fails nothing replaces it, and "manager exited
     (0)" read as a manager whose job was done: no card while the crew worked on unmanaged.
-    The exit announced for a hand-over that failed says so."""
+    The exit announced for a hand-over that failed says so. Nobody chose that stop: it is
+    down with its crew all waiting too, in a coder's words (review of #243, round 23, 3/7
+    and 6/7)."""
     from aisquare.services.fleet import HANDOVER_FAILED
 
     manager = _row("manager", role="manager", ended=NOW - timedelta(minutes=5), exit_status=0)
@@ -1156,14 +1158,14 @@ def test_a_manager_whose_hand_over_never_started_its_replacement_is_down() -> No
     down = _one(_scan(fleet))
     assert (down.kind, down.reason) == (
         "manager_down",
-        "the manager stopped while 1 agent still works",
+        "the manager stopped, and its replacement did not start",
     )
     assert down.detail == {"exit_status": 0, "task_id": None}
     fleet.events = [_event(7, "agent_exited", "manager exited (0)", session=managing)]
     assert _scan(fleet) == [], "a stop that meant it: its job was done"
     fleet.events = [failed]
     fleet.agents = [_status(coder, "waiting", _session(coder, state="waiting"))]
-    assert _scan(fleet) == [], "and with nobody at work, nothing needs a manager"
+    assert _one(_scan(fleet)).reason == down.reason, "nobody chose it, whatever its crew does"
 
 
 def test_a_coder_whose_hand_over_never_started_its_replacement_is_reported() -> None:
@@ -3635,8 +3637,8 @@ def test_a_coder_whose_hand_over_never_started_its_replacement_is_reported_under
 class _Seat:
     """One agent of a board: its fleet project, label and role; whether a fleet row holds it
     (``False``: a manager session started outside the fleet, on its project's board); how it
-    ended, ``None`` while it works; whether it waits on its usage limit; and whether it asks
-    the manager on the board (``question --to manager``)."""
+    ended, ``None`` while it works; whether it waits on its usage limit, or at its prompt;
+    and whether it asks the manager on the board (``question --to manager``)."""
 
     where: str
     label: str
@@ -3646,6 +3648,7 @@ class _Seat:
     """``crash`` (exit 1), ``exit`` (exit 0), ``hand-over`` (exit 0, its replacement never
     started) or ``stop`` (no status, as a kill leaves it)."""
     limited: bool = False
+    waits: bool = False
     asks: bool = False
 
 
@@ -3665,7 +3668,7 @@ def _seat_up(store: Any, seat: _Seat, project: ProjectInfo, board: ProjectInfo) 
         TeamSession(
             id=session, project_id=board.id, role=seat.role, label=seat.label,
             started_at=now - timedelta(hours=1),
-            state="limited" if seat.limited else "working",
+            state="limited" if seat.limited else "waiting" if seat.waits else "working",
             limit_resets_at=now + timedelta(hours=4) if seat.limited else None,
             last_seen_at=stopped if seat.end else now - timedelta(minutes=1),
         )
@@ -3827,9 +3830,14 @@ def _seated(
         ),
         pytest.param(
             False,
-            (_manager_of("alpha", end="stop"), _manager_of("beta", end="hand-over")),
-            [],
-            id="no hub, a manager stopped with none of its crew at work",
+            (
+                _manager_of("alpha", end="stop"),
+                _Seat("alpha", "coder-1", waits=True),
+                _manager_of("beta", end="hand-over"),
+                _Seat("beta", "coder-2", waits=True),
+            ),
+            [("manager_down", "beta", "manager", 60)],
+            id="no hub, its crew all waiting: a manager stopped is done, a failed hand-over not",
         ),
     ],
 )
@@ -3849,10 +3857,11 @@ def test_a_live_manager_keeps_an_item_off_the_phone_only_on_its_projects_own_boa
     whatever numbered seat runs (round 22, 5/7), and a numbered seat's own crash is a
     crash like any agent's. Under ``AISQUARE_TEAM_HUB`` every question, result,
     crash, limit and failed hand-over is a card and a push, and a manager that is down is
-    its own project's, from that project's rows: stopped, or its hand-over failed, whatever
-    its crew, which may be another project's (round 22, 2/7). Each tuple is a card's kind, project,
-    agent and the seconds its push waits. An action's check of each agent finds what the
-    scan found, and no more."""
+    its own project's, from that project's rows: stopped whatever its crew, which may be
+    another project's (round 22, 2/7). A failed hand-over is down whatever its crew, with
+    a hub or not (round 23, 3/7). Each tuple is a card's kind, project, agent and the
+    seconds its push waits. An action's check of each agent finds what the scan found,
+    and no more."""
     projects = _seated(tmp_path, monkeypatch, seats, hub=hub)
     tmux = FakeTmux()
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)

@@ -285,7 +285,7 @@ aisquare --json remote needs
 | question | an agent asks you a question with options |
 | plan | an agent asks you to approve its plan |
 | board_question | the manager asks on the board, or a coder asks you (no `--to`, or `--to user`, `human`, `owner`, `all` or `everyone`), or asks the manager when no manager is there to answer it (below) |
-| manager_down | the manager crashed; or, while its agents still work (on a shared board, whatever they do) and before it reported a result, it was killed or lost (no exit status), or a switch or a restart could not start its replacement. A manager that exits cleanly (`fleet stop`, the phone's Stop, its own `/exit`) is taken to be done |
+| manager_down | the manager crashed, or a switch or a restart could not start its replacement; or, while its agents still work (on a shared board, whatever they do) and before it reported a result, it was killed or lost (no exit status). A manager that exits cleanly (`fleet stop`, the phone's Stop, its own `/exit`) is taken to be done |
 | crashed | an agent exited with an error in the last hour, or was stopped for a switch or a restart that could not start its replacement, its task unfinished, while no manager is there to handle it (below) |
 | limited | an agent hit its usage limit; when the limit named its reset, the card tells it by the phone's clock, and the Board tab leaves out the reset its line says by the machine's |
 | failed | an agent's turn ended on an API error (a login that expired, credit that ran out, the API overloaded past Claude Code's own retries), and it waits at its prompt |

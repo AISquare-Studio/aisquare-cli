@@ -901,16 +901,21 @@ def test_an_answer_that_lands_as_asq_closes_paints_nothing(name: str, state: Wor
     report: tuple[None, list[Any]] | None = (None, []) if name == ui_app._DOCTOR_WORKER else None
     worker = SimpleNamespace(name=name, result=report, error=LookupError("the checks crashed"))
 
+    read: list[str] = []
+
     class Closing:
         is_running = False
         _doctor_worker = worker  # the newest run: not dismissed as superseded
 
         def __getattr__(self, attribute: str) -> Any:
-            raise AssertionError(f"{attribute} read by an app that is closing")
+            read.append(attribute)  # what painting would ask of the app: its frame, its views
+            return lambda *_args, **_kwargs: None
 
     answered = SimpleNamespace(state=state, worker=worker)
 
     ui_app.FleetApp.on_worker_state_changed(Closing(), answered)  # type: ignore[arg-type]
+
+    assert read == [], "an app that has stopped running is asked nothing"
 
 
 def test_no_start_on_asqs_own_schedule_begins_once_a_hand_over_is_pending(

@@ -5331,29 +5331,33 @@ def build_remote_app(
             bundled = remote_page.bundled_page_response(rel, request)
             return _json_error(404, "no_dist", NO_PAGE_HINT) if bundled is None else bundled
 
-        def built_file(path: Path, cache_control: str) -> Response:
+        def built_file(path: Path, name: str) -> Response:
+            """``path``, the file of the build that ``name`` was asked for, typed and kept by
+            ``name``: typed by where it resolves, an ``index.html`` that is a link to a file
+            of the build with no suffix went out as ``application/octet-stream`` (review of
+            #243, round 12, 8/10)."""
             problem = _page_served_open_to_others(dist, path, page_remedy)
             if problem is not None:
                 log.warning("remote: %s", problem)
                 return _json_error(404, "no_dist", PAGE_NOT_SERVED)
             return FileResponse(
                 path,
-                media_type=remote_page.build_content_type(path.name),
-                headers={"cache-control": cache_control},
+                media_type=remote_page.build_content_type(name),
+                headers={"cache-control": _cache_control(name)},
             )
 
         index = _built_page_file(dist, "index.html")
         if dist_dir is None and index is None:
             response = bundled_page()
         elif rel and (candidate := _built_page_file(dist, rel)) is not None:
-            response = built_file(candidate, _cache_control(rel))
+            response = built_file(candidate, rel)
         elif rel and not _is_navigation(rel, request.headers.get("accept", "")):
             # A file was asked for and there is no such file. Saying so is the
             # whole point: the SPA document under a .js name is a boot failure
             # with no error, and the 200 hides which build is actually installed.
             response = _json_error(404, "not_found", f"no such file in the built page: {rel}")
         elif index is not None:
-            response = built_file(index, INDEX_CACHE_CONTROL)
+            response = built_file(index, "index.html")
         else:
             log.warning("remote: %s", _page_no_index(dist))
             response = _json_error(404, "no_dist", NO_DIST_INDEX)

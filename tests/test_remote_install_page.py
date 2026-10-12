@@ -1286,6 +1286,34 @@ def test_a_build_this_account_may_not_search_is_refused_with_no_traceback(
     assert (response.status_code, response.json()["error"]) == (404, "no_dist")
 
 
+def test_a_file_linked_to_one_of_the_build_is_typed_by_the_name_it_was_asked_for(
+    isolated_home: Path, built: Path
+) -> None:
+    """A file of the build was typed by where it resolves: an ``index.html`` that is a link
+    to ``pages/home``, a file with no suffix, went out as ``application/octet-stream`` with
+    ``nosniff``, and the phone downloaded it in place of opening the page (review of #243,
+    round 12, 8/10). Typed by the name asked for, ``index.html`` for a deep link too."""
+    (built / "pages").mkdir()
+    (built / "pages" / "home").write_text("<!doctype html><title>linked in</title>")
+    (built / "pages" / "app").write_text("console.log('linked in')")
+    (built / "index.html").unlink()
+    try:
+        (built / "index.html").symlink_to(built / "pages" / "home")
+        (built / "assets" / "linked.js").symlink_to(built / "pages" / "app")
+    except OSError:
+        pytest.skip("this platform cannot make the symlink")
+    runtime = Runtime(remote_state_path(), remote_audit_path())
+    client = make_client(build_app(runtime, dist_dir=_closed(built)))
+    for path, typed in [
+        ("", "text/html"),
+        ("fleet/coder-1", "text/html"),
+        ("assets/linked.js", remote_page.build_content_type("app.js")),
+    ]:
+        response = client.get(f"/r/{runtime.token}/{path}", headers={"accept": "text/html"})
+        assert response.status_code == 200, (path, response.text)
+        assert response.headers["content-type"].startswith(typed), path
+
+
 def test_install_page_copies_an_index_html_linked_to_a_file_of_the_build(
     isolated_home: Path, built: Path
 ) -> None:

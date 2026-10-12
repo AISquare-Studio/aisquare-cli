@@ -3932,6 +3932,33 @@ def test_shutdown_leaves_live_a_row_whose_socket_was_taken_from_under_its_server
     assert lifecycle.running_fleet()[0] == ()
 
 
+def test_shutdown_forget_never_ends_a_row_whose_socket_answers(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 28 of #257: `--forget` ended every row its probe found no server for, and its
+    plan hid them as recorded lost. A row whose recorded socket has a server listening (one
+    that came up after tmux was asked) is one `uninstall` counts as running, so ending it
+    let the next `uninstall` go on under it. The plan shows it left live, and so is it."""
+    dead = _unreachable_server()  # tmux says no server…
+    coder = _coder(project)
+    with _socket_file(coder.tmux_socket, listening=True) as listening:  # …and one listens
+        coder = _recorded_at(coder, listening)
+        monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+
+        plan = fleet_service.shutdown_plan(project, forget=True)
+        report = fleet_service.shutdown(project, forget=True)
+        counted = lifecycle.running_fleet()[0]
+
+    assert "a server came up on its socket" in plan.held[coder.id] and plan.lost == {}
+    assert report.recorded == [] and [row.agent.id for row in report.failed] == [coder.id]
+    assert "left live, which --forget does not end as a server answers there" in (
+        report.failed[0].reason
+    )
+    assert counted != (), "uninstall counts it: the two agree"
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+
+
 def test_shutdown_stops_a_row_on_the_server_at_the_path_it_recorded(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

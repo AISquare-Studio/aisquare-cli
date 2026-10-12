@@ -2416,6 +2416,36 @@ def test_stop_leaves_the_row_live_when_the_window_kill_was_refused_and_the_pane_
     assert lingering.state == "exited"
 
 
+def test_stop_and_restart_leave_live_a_row_whose_socket_was_taken_from_under_its_server(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Round 29 of #257: tmux's strict reads answer "no such pane" for a socket file that is
+    gone (`error connecting to <path> (No such file or directory)`), so `fleet stop` ended
+    the row of an agent whose server ran on, which `shutdown` and `uninstall` count as
+    running. `uninstall` then went on under it, and `restart` stopped it the same way and
+    started a second agent in its worktree. Both now ask the rule those two ask."""
+    coder = _coder(project)
+    spawned = len(tmux.spawned)
+    tmux.running = False  # no tmux client reaches the server…
+    tmux.socket_file = False  # …because its socket file is gone, not because it exited
+
+    with pytest.raises(FleetError, match=r"'coder-1' was not stopped: .* is gone") as stopped:
+        fleet_service.stop(project, "coder-1")
+    assert "SIGUSR1" in str(stopped.value) and "reap --server-down" in str(stopped.value)
+    with pytest.raises(FleetError, match="is gone"):
+        fleet_service.restart(project, "coder-1")
+
+    assert len(tmux.spawned) == spawned, "no second agent in its worktree"
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+    assert _events(project, "agent_exited") == []
+    # Negative control: a server that exited leaves its socket file behind, where nothing
+    # listens, and that row's pane is gone: stopped as before.
+    tmux.socket_file = True
+    ended = fleet_service.stop(project, "coder-1").agent
+    assert ended.ended_at is not None and tmux.killed == []
+
+
 def test_stop_leaves_the_row_live_when_a_denied_socket_cannot_confirm_the_pane_died(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

@@ -298,7 +298,11 @@ the same contract `fleet shutdown` and `fleet reap` keep for the same fact.
 left `PATH`, a socket that is there but refuses this user (`Permission denied`)
 — the row is **left live** and the command fails saying so, rather than
 reporting `✓ stopped` over an agent that is still running. Re-run it once
-tmux answers again, or `fleet reap` after the server comes back. If the server is
+tmux answers again, or `fleet reap` after the server comes back. So is a row
+whose server's socket file is gone, the row `fleet shutdown` leaves live (below):
+no tmux client reaches that server, but it may still run, so `fleet stop` and
+`fleet restart` refuse it rather than end it, and a restart never starts a
+second agent beside it. If the server is
 genuinely gone — a reboot, `kill-server` — `fleet reap --all --server-down` marks
 the rows on it lost; it acts only where tmux itself reports no server behind the
 socket, never on a server that is merely not answering.

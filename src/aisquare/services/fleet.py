@@ -2746,12 +2746,19 @@ def _stop_row(
         the row's own is gone with the server it ran on, which is what ``None``
         says. Asked of tmux only once a pane has answered, and strictly, as the
         reads before it.
+
+        Neither read names the pane when tmux found no server at the socket, and
+        a socket file taken from under its server is one of those: that is not a
+        pane that is gone (:func:`_refuse_unless_gone`).
         """
         for window in srv.windows_or_raise(session):
             if window.pane_id == agent.pane_id:
                 return None if _outlived(agent, srv.started_at()) else window
         facts = srv.pane_facts_or_raise(agent.pane_id)
-        if facts is None or _outlived(agent, srv.started_at()):
+        if facts is None:
+            _refuse_unless_gone(agent, srv)
+            return None
+        if _outlived(agent, srv.started_at()):
             return None
         return WindowInfo(
             session=session,
@@ -2872,6 +2879,44 @@ def _stop_row(
     if not handover and nudge:
         nudge_manager(ended.project_id, reason=f"{ended.label} exited")
     return StopReceipt(ended, released, release_failed, withheld=handover)
+
+
+def _refuse_unless_gone(agent: FleetAgent, srv: TmuxServer) -> None:
+    """Raise unless ``agent``'s pane, which tmux did not find on ``srv``, is really gone.
+
+    tmux's strict reads answer "no such pane" for a live server that does not hold it, and
+    the same for no server at the socket, ``error connecting to <path> (No such file or
+    directory)`` included. That last one is a socket file taken from under a server that
+    runs on (systemd-tmpfiles, logind), and its agent is not gone. Read as gone, ``fleet
+    stop`` and asq's Stop ended a running agent's row, so ``uninstall`` went on under it,
+    and ``restart`` started a second agent in its worktree (round 29 of #257). So this
+    asks the rule ``uninstall`` and ``shutdown`` ask
+    (:func:`~aisquare.core.tmux.server_may_run`): a row from another boot, a stale socket
+    file, or a server that answers on the socket, where tmux asked, shows the pane gone.
+    Anything else is refused, as :func:`_verify_gone` refuses a question it could not put.
+    """
+    answer = tmux_core.server_may_run(
+        srv, agent.socket_path, agent.boot_id, tmux_core.boot_id(), agent.created_at
+    )
+    if answer is None or answer == "answers":
+        return
+    try:
+        path = agent.socket_path or srv.socket_path()
+    except TmuxUnavailable:
+        return  # no POSIX uid: no tmux server can exist here
+    if answer == "gone":
+        raise FleetError(
+            f"{agent.label!r} was not stopped: its server's socket {path} is gone, so no tmux "
+            "client can reach the server, which may still be running, and its row is left "
+            "live. If it is, send that server SIGUSR1, which makes tmux create its socket "
+            "again, and run this again; if it is not, `aisquare fleet reap --server-down` "
+            "ends its row on your word"
+        )
+    raise FleetError(
+        f"{agent.label!r} was not stopped: its server's socket {path} could not be asked, so "
+        "it may still be running, and its row is left live; run this again where it can be "
+        "asked"
+    )
 
 
 def _manager_first(agents: list[FleetAgent]) -> list[FleetAgent]:

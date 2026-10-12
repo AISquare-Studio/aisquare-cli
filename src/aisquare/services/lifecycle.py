@@ -1559,39 +1559,49 @@ def _project_registrations(
     A repository's committed ``.mcp.json`` starts its servers in every session there,
     and none of them was read: one running aisquare through ``uvx`` made the purged
     home again at the next session in that repository (review of #257). A server the
-    operator declined there never starts and is left out, read as the doctor reads it
-    (``diagnostics._declined_project_servers``): named in a block's
-    ``disabledMcpjsonServers`` and in none's ``enabledMcpjsonServers``. A project
-    reached under two spellings is one file, read once.
+    operator declined there never starts and is left out, but only if every block that
+    lists the project declined it. Each block answers for the sessions Claude Code
+    starts under its config dir and its spelling of the project, and one that has not
+    answered asks at its next session there, where an approval starts the server: the
+    lists were merged across config dirs, and one dir's no left out a server another
+    never answered (round 26). A block declines a name in its ``disabledMcpjsonServers``
+    and not in its ``enabledMcpjsonServers``, as the doctor reads one
+    (``diagnostics._declined_project_servers``). A project reached under two spellings
+    is one ``.mcp.json``, read once, with every spelling's blocks.
     """
     found: list[McpRegistration] = []
-    read: set[Path] = set()
+    blocks_of: dict[Path, list[dict[str, Any]]] = {}
+    spelled: dict[Path, str] = {}
     for project, blocks in listed.items():
         if not Path(project).is_absolute():
             continue  # another platform's path, or none: read here, it would name the cwd's
         path = agent_core.dir_identity(Path(project) / ".mcp.json")
-        if path in read:
-            continue
-        read.add(path)
+        spelled.setdefault(path, project)
+        blocks_of.setdefault(path, []).extend(blocks)
+    for path, blocks in blocks_of.items():
         servers = agent_core.read_json(path).get("mcpServers")
         if not isinstance(servers, dict):
             continue
-        declined: set[str] = set()
-        approved: set[str] = set()
-        for block in blocks:
-            for field, sink in (
-                ("disabledMcpjsonServers", declined),
-                ("enabledMcpjsonServers", approved),
-            ):
-                names = block.get(field)
-                if isinstance(names, list):
-                    sink.update(str(name) for name in names)
         found.extend(
-            McpRegistration(str(name), path, project, None, _fetches_aisquare(spec), shared=True)
+            McpRegistration(
+                str(name), path, spelled[path], None, _fetches_aisquare(spec), shared=True
+            )
             for name, spec in servers.items()
-            if _runs_aisquare(spec) and str(name) not in declined - approved
+            if _runs_aisquare(spec) and not all(_declines(block, str(name)) for block in blocks)
         )
     return found
+
+
+def _declines(block: dict[str, Any], name: str) -> bool:
+    """Whether one ``.claude.json`` project block declined the ``.mcp.json`` server
+    ``name``: listed in its ``disabledMcpjsonServers`` and not in its
+    ``enabledMcpjsonServers`` (a name in both is approved, as the doctor reads it)."""
+
+    def named(field: str) -> bool:
+        names = block.get(field)
+        return isinstance(names, list) and name in (str(item) for item in names)
+
+    return named("disabledMcpjsonServers") and not named("enabledMcpjsonServers")
 
 
 def mcp_place(entry: McpRegistration) -> str:

@@ -2914,3 +2914,51 @@ def test_a_purge_waits_for_a_project_mcp_json_server_that_fetches_aisquare(
     )
     assert remedy in refused["detail"], refused
     assert _snapshot(tmp_path) == before and world.events == [], "nothing touched"
+
+
+@pytest.mark.parametrize("unanswered", ["config-dir", "spelling", None])
+def test_a_project_server_is_left_out_only_where_every_block_declined_it(
+    runner: CliRunner, isolated_agent_home: Path, tmp_path: Path, unanswered: str | None
+) -> None:
+    """Round 26 of #257: the declined and approved lists of every ``.claude.json`` were
+    merged, so a server ``~/.claude.json`` declined for the repository was left out though
+    ``~/.claude-c2`` listed it with no answer; the next session there under that config
+    dir asks, an approval starts it, and uvx makes the purged home again. And a project
+    listed under two spellings had only the first one's lists read. Each block answers
+    for its own sessions, so the server is left out only when every block declined it."""
+    if unanswered == "spelling" and not can_symlink():
+        pytest.skip("a second spelling of the repository is a symlink to it")
+    _initialised(runner, tmp_path)
+    repo = tmp_path / "work" / "repo"
+    repo.mkdir(parents=True)
+    (repo / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "memory": {"command": "uvx", "args": ["--from", "aisquare-cli", "aisquare"]}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    isolated_agent_home.mkdir(parents=True, exist_ok=True)
+    no = {"disabledMcpjsonServers": ["memory"]}
+    default: dict[str, Any] = {str(repo): no}
+    if can_symlink():
+        linked = tmp_path / "work" / "linked"
+        linked.symlink_to(repo, target_is_directory=True)
+        default[str(linked)] = {} if unanswered == "spelling" else no
+    (isolated_agent_home / ".claude.json").write_text(
+        json.dumps({"projects": default}), encoding="utf-8"
+    )
+    slot = isolated_agent_home / ".claude-c2"
+    slot.mkdir()
+    answer = {} if unanswered == "config-dir" else no
+    (slot / ".claude.json").write_text(
+        json.dumps({"projects": {str(repo): answer}}), encoding="utf-8"
+    )
+
+    plan = lifecycle.uninstall_plan(purge=True)
+
+    shared = [(entry.name, entry.shared) for entry in plan.mcp if entry.shared]
+    assert shared == ([] if unanswered is None else [("memory", True)]), plan.mcp

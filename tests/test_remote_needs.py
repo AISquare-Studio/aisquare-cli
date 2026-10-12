@@ -4005,6 +4005,37 @@ def test_with_no_manager_in_its_day_a_coders_result_to_the_manager_is_a_card(
     assert _board_cards(replace(sources, ended_agents=locked)) == []
 
 
+def test_an_actions_check_lists_the_projects_only_for_the_manager_and_never_fails_on_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``needs_agent_now`` listed every project and resolved each one's board before every
+    action, though only the manager's snapshot holds an item a shared board decides, and a
+    list that failed failed the action (review of #243, round 24, 7/8). Only the manager's
+    check lists them; one that cannot is unknown, read as shared, and the manager's card
+    the scan showed is still current."""
+    from aisquare.services import project as project_service
+
+    seats = (_manager_of("alpha", end="stop"), _Seat("beta", "coder-1"))
+    projects = _seated(tmp_path, monkeypatch, seats, hub="alpha")
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    now = datetime.now(UTC)
+    (down,) = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+    assert (down.kind, down.project_id) == ("manager_down", projects["alpha"].id)
+    listed: list[str] = []
+
+    def unlisted() -> list[ProjectInfo]:
+        listed.append("projects")
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(project_service, "list_projects", unlisted)
+    assert needs_agent_now(projects["beta"], "coder-1", now=now).items == ()
+    assert listed == [], "a coder's check needs no other project"
+    snap = needs_agent_now(projects["alpha"], "manager", now=now)
+    assert [item.id for item in snap.items] == [down.id]
+    assert listed == ["projects"]
+
+
 def test_under_a_hub_a_projects_needs_read_no_other_projects_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4012,9 +4043,9 @@ def test_under_a_hub_a_projects_needs_read_no_other_projects_rows(
     their managers under the agent's lock, and the scan judged each project by the rows
     of every other (review of #243, round 21, 6/8 and 8/8). Each project's needs are read
     from its own rows alone: the action lists the agent's project and nothing else, even
-    for a stopped manager, and reads the projects only for who else writes its board
-    (round 23, 1/7); the scan reads each project's rows once, and the hub's day and
-    sessions once for all of them (7/8)."""
+    for a stopped manager, and reads the projects only for the manager's, for who else
+    writes its board (round 23, 1/7; round 24, 7/8); the scan reads each project's rows
+    once, and the hub's day and sessions once for all of them (round 21, 7/8)."""
     seats = (
         _manager_of("alpha"),
         _Seat("alpha", "coder-a", asks=True),
@@ -4052,13 +4083,7 @@ def test_under_a_hub_a_projects_needs_read_no_other_projects_rows(
     monkeypatch.setattr(remote_needs, "live_needs_sources", counted)
     snap = needs_agent_now(projects["beta"], "coder-1")
     assert [item.kind for item in snap.items] == ["board_question"]
-    assert reads == [
-        ("projects", "every project"),
-        ("list", "beta"),
-        ("ended", "beta"),
-        ("day", "hub"),
-        ("sessions", "hub"),
-    ]
+    assert reads == [("list", "beta"), ("ended", "beta"), ("day", "hub"), ("sessions", "hub")]
     assert set(tmux.asked) == {"%beta-coder-1"}, "no other agent's pane"
     with store_session() as store:
         store.end_fleet_agent("agt_alpha_manager")
@@ -4066,7 +4091,11 @@ def test_under_a_hub_a_projects_needs_read_no_other_projects_rows(
     assert [item.kind for item in needs_agent_now(projects["alpha"], "manager").items] == [
         "manager_down"
     ], "for its own project's coder-a"
-    assert [name for what, name in reads if what in ("list", "ended")] == ["alpha", "alpha"]
+    assert [name for what, name in reads if what in ("projects", "list", "ended")] == [
+        "alpha",
+        "every project",
+        "alpha",
+    ]
     reads.clear()
     scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=())
     assert sorted(name for what, name in reads if what == "ended") == sorted(projects)

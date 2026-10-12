@@ -2398,6 +2398,19 @@ def _needs_shared(boards: Mapping[str, str], project_id: str) -> bool:
     return list(boards.values()).count(boards[project_id]) > 1
 
 
+def _needs_shared_now(sources: NeedsSources, project: ProjectInfo, board_id: str) -> bool:
+    """:func:`_needs_shared` outside a scan, ``board_id`` being ``project``'s. Projects that
+    cannot be listed are unknown, read as shared: the manager's card a scan showed stays
+    current, and the action on it goes on (review of #243, round 24, 7/8)."""
+    try:
+        projects = sources.list_projects()
+    except Exception:
+        log.debug("remote: needs could not list the projects", exc_info=True)
+        return True
+    boards = {p.id: _needs_board_of(sources, p) for p in projects if p.id != project.id}
+    return _needs_shared({**boards, project.id: board_id}, project.id)
+
+
 def _needs_board_once(items: Sequence[NeedsItem], boards: Mapping[str, str]) -> list[NeedsItem]:
     """``items`` with each question or result of a board that several projects write one card.
 
@@ -2502,8 +2515,8 @@ not be asked."""
 def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = None) -> AgentNow:
     """One agent of ``project`` re-derived now, synchronously: never call it on the event loop.
 
-    It runs the scan's part for this one project — one listing, its ended rows,
-    its board and who else writes it, the cached tails, and no other project's rows —
+    It runs the scan's part for this one project — one listing, its ended rows, its
+    board (for the manager, who else writes it), the cached tails, no other project's rows —
     plus tmux questions about the label's pane: is its foreground the agent, and has
     its window been quiet. Only a pane the listing vouched for is asked about: one
     that reads ``lost`` may be another agent's pane under the row's old id, and an
@@ -2516,13 +2529,15 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
 
     when = now or _needs_now()
     sources = live_needs_sources()
-    boards = {p.id: _needs_board_of(sources, p) for p in [*sources.list_projects(), project]}
+    board_id = _needs_board_of(sources, project)
     scanned = _needs_scan_project(
         sources,
         project,
         sources.list_agents(project),
-        board_id=boards[project.id],
-        shared=_needs_shared(boards, project.id),
+        board_id=board_id,
+        # Only the manager's snapshot holds the item it decides (``manager_down``).
+        shared=label == fleet_service.MANAGER_LABEL
+        and _needs_shared_now(sources, project, board_id),
         now=when,
         first_seen={},
         seen=set(),

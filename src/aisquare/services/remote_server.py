@@ -604,43 +604,90 @@ def _remote_reachable_projects() -> list[ProjectInfo]:
     return _remote_reachable(rows if held else [*rows, current], current)
 
 
-BoardProjects = dict[tuple[Path, str], ProjectInfo]
-"""The board project of each project root under each ``AISQUARE_TEAM_HUB``, resolved once."""
+_board_projects: dict[tuple[Path, str], ProjectInfo] = {}
+"""The board project of each project root under each ``AISQUARE_TEAM_HUB`` (blank for none),
+as :func:`_remote_board_project` resolved it."""
+_board_projects_lock = threading.Lock()
 
 
-def _remote_board_project(root: Path, boards: BoardProjects) -> ProjectInfo:
+def _remote_board_project(root: Path) -> ProjectInfo:
     """The board of the project at ``root``, as ``asq board`` run there resolves it,
-    ``AISQUARE_TEAM_HUB`` and worktrees included, kept in ``boards``: ``team_project`` runs
-    ``git``, and neither the hub nor where a checkout's repository lives changes under a
-    running server (:func:`remote_board_payload`)."""
+    ``AISQUARE_TEAM_HUB`` and worktrees included, kept for each root under each hub:
+    ``team_project`` runs ``git``, and neither the hub nor where a checkout's repository
+    lives changes under a running server (:func:`remote_board_payload`).
+
+    The one place it is kept, which the Board tab, the board writes and the needs watcher
+    all read. Each kept its own, and each kept whatever its first lookup said: a worktree
+    whose ``git`` failed in one was its own board there and its principal checkout's in
+    another, and the Board tab listed tasks no claim found (review of #243, round 11, 6/9).
+    So an answer that only a failed ``git`` gives is not kept
+    (:func:`_remote_board_settled`)."""
     from aisquare.core import orchestrator
     from aisquare.services import team as team_service
 
     key = (root, os.environ.get(orchestrator.TEAM_HUB_ENV_VAR, ""))
-    board = boards.get(key)
+    with _board_projects_lock:
+        board = _board_projects.get(key)
     if board is None:
-        board = boards[key] = team_service.resolve_project(root)
+        board = team_service.resolve_project(root)
+        if _remote_board_settled(root, board):
+            with _board_projects_lock:
+                board = _board_projects.setdefault(key, board)
     return board
 
 
-def _remote_boards(boards: BoardProjects | None = None) -> set[str]:
+def _remote_board_settled(root: Path, board: ProjectInfo) -> bool:
+    """Whether ``board``, the board resolved for the project at ``root``, may be kept: any
+    but a linked worktree's own root, which is its board only when ``git`` timed out or
+    failed (``workspace.git_common_root``): it answers with the principal checkout's."""
+    if board.root != (_remote_resolved(root) or root):
+        return True
+    try:
+        marker = (root / ".git").read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):  # a checkout's own .git directory, or none
+        return True
+    return "/worktrees/" not in marker.replace("\\", "/")
+
+
+def _remote_boards() -> set[str]:
     """The boards a phone may reach: each reachable project's (:func:`_remote_board_project`),
     which its Board and Tasks tabs read, and the project's own id. A task's or a session's
     ``project_id`` is the board it is on, which is a project's own unless a hub or a
-    worktree makes it another's. A root that cannot be looked at adds its own id alone."""
-    known: BoardProjects = {} if boards is None else boards
+    worktree makes it another's. A root that cannot be looked at adds its own id alone.
+
+    Worked out once for each board write, which reads it lazily (:class:`_RemoteReach`)."""
     reach: set[str] = set()
     for project in _remote_reachable_projects():
         reach.add(project.id)
         with contextlib.suppress(OSError):
-            reach.add(_remote_board_project(project.root, known).id)
+            reach.add(_remote_board_project(project.root).id)
     return reach
 
 
-def _remote_task(ref: str, boards: BoardProjects | None = None) -> TeamTask:
+class _RemoteReach:
+    """The boards one board write may name a task or session on (:func:`_remote_boards`),
+    worked out the first time it is asked for and kept for the rest of the write.
+
+    Its ``as``, its task and the refusal of a ref that names nothing each worked it out
+    again: each listed the projects, and with nothing pinned ran ``git`` for the current
+    one, twice for a claim with ``as`` and once for each reachable project to word a 404
+    (review of #243, round 11, 5/9 and 7/9). Not worked out before it is asked for: a note
+    with neither ``as`` nor ``task`` needs none, and with the board off an ``as`` is
+    refused before the store is opened (:func:`_remote_author`)."""
+
+    def __init__(self) -> None:
+        self._boards: set[str] | None = None
+
+    def __call__(self) -> set[str]:
+        if self._boards is None:
+            self._boards = _remote_boards()
+        return self._boards
+
+
+def _remote_task(ref: str, reach: Callable[[], set[str]]) -> TeamTask:
     """The task a phone's ``ref``, an id, an id prefix or an id tail, names among those on a
-    board it may reach (:func:`_remote_boards`): ``KeyError(ref)`` for none, as the board's
-    services raise it, and ``AmbiguousIdError`` for several there
+    board it may reach (``reach``, :class:`_RemoteReach`): ``KeyError(ref)`` for none, as the
+    board's services raise it, and ``AmbiguousIdError`` for several there
     (:func:`_remote_board_refusals`).
 
     The services read a ref across every board, captured directories' included: a claim or
@@ -650,9 +697,9 @@ def _remote_task(ref: str, boards: BoardProjects | None = None) -> TeamTask:
     task's id."""
     from aisquare.core.store import store_session
 
-    reach = _remote_boards(boards)
+    boards = reach()
     with store_session() as store:
-        task = store.get_task(ref, project_ids=reach)
+        task = store.get_task(ref, project_ids=boards)
     if task is None:
         raise KeyError(ref)
     return task
@@ -2711,9 +2758,7 @@ BOARD_EVENTS = 200
 Board tab draws. ``asq board --json`` prints five, a glance in a terminal."""
 
 
-def remote_board_payload(
-    project: str | None = None, *, boards: BoardProjects | None = None
-) -> dict[str, object]:
+def remote_board_payload(project: str | None = None, *, glance: bool = False) -> dict[str, object]:
     """``GET api/board`` and the ``board`` frame — the ONE call into ``board_data``.
 
     The project's root as ``cwd`` is exactly what ``asq board --json`` prints when
@@ -2733,16 +2778,16 @@ def remote_board_payload(
     page went by the board's own project id, dropped every frame and every read, and
     said "Loading…" for as long as the tab was open (review of #243, round 4).
 
-    The frame passes ``boards``, and is read for what :func:`remote_board_frame` keeps
+    The frame passes ``glance``, and is read for what :func:`remote_board_frame` keeps
     of it. It is read every second while a phone shows its Board tab, and each read
     resolved the board through ``team_project``, a ``git rev-parse`` process, wrote the
     store (``ensure_project``, a write transaction beside every hook's), and read every
     session and task the project ever had, for the frame to drop all but a few (review
-    of #243, round 4). Now the board project of each root is resolved once and kept in
-    ``boards``, as the TUI's Board tab resolves its own once: neither the hub nor where
-    a checkout's repository lives changes under a running server. ``board_data`` then
-    reads the events and the sessions they name (``glance``). ``GET api/board`` still
-    reads the whole board, as ``asq board --json`` prints it.
+    of #243, round 4). Now the board project of each root is resolved once and kept
+    (:func:`_remote_board_project`), as the TUI's Board tab resolves its own once: neither
+    the hub nor where a checkout's repository lives changes under a running server.
+    ``board_data`` then reads the events and the sessions they name (``glance``). ``GET
+    api/board`` still reads the whole board, as ``asq board --json`` prints it.
 
     #240 fold: pass ``exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS`` here (one line).
     """
@@ -2750,9 +2795,9 @@ def remote_board_payload(
     from aisquare.services import team as team_service
 
     cwd = _resolve_project(project).root
-    board = None if boards is None else _remote_board_project(cwd, boards)
+    board = _remote_board_project(cwd) if glance else None
     return board_json(
-        *team_service.board_data(cwd, events=BOARD_EVENTS, project=board, glance=boards is not None)
+        *team_service.board_data(cwd, events=BOARD_EVENTS, project=board, glance=glance)
     )
 
 
@@ -2810,10 +2855,8 @@ def live_sources() -> Sources:
                 entries = store.entries(project_id=target.id)
         return [entry.model_dump(mode="json") for entry in entries]
 
-    boards: BoardProjects = {}
-
     def board_frame_payload(project: str | None = None) -> object:
-        return remote_board_frame(remote_board_payload(project, boards=boards))
+        return remote_board_frame(remote_board_payload(project, glance=True))
 
     return Sources(
         projects=projects_payload,
@@ -3127,7 +3170,9 @@ class _ExitKeyGuard:
 
 
 @contextlib.contextmanager
-def _remote_board_refusals(*refs: tuple[str, str | None, str]) -> Iterator[None]:
+def _remote_board_refusals(
+    reach: Callable[[], set[str]], *refs: tuple[str, str | None, str]
+) -> Iterator[None]:
     """The board's refusals as ``asq`` gives them, as a write's: 409 ``team_disabled`` with
     the orchestrator off (``AISQUARE_TEAM=0``), as the agent actions answer it too, 409
     ``claim_lost`` for a task another session holds, and 400 ``ambiguous_id`` for a ref
@@ -3139,7 +3184,8 @@ def _remote_board_refusals(*refs: tuple[str, str | None, str]) -> Iterator[None]
     sent it, from ``refs``, each ``(field, value, "task" | "session")``. The board's
     services raise a bare ``KeyError(ref)``, and its message was the ref in quotes,
     ``"'ses_nope'"``: a note whose ``as`` and ``task`` were the same could not say which
-    one named nothing (sweep 3 of #243).
+    one named nothing (sweep 3 of #243). Looked up on the write's own ``reach``
+    (:class:`_RemoteReach`).
     """
     from aisquare.core.store import AmbiguousIdError
     from aisquare.services import team as team_service
@@ -3158,34 +3204,38 @@ def _remote_board_refusals(*refs: tuple[str, str | None, str]) -> Iterator[None]
         named = [(field, kind) for field, value, kind in refs if value == missing]
         if not isinstance(missing, str) or not named:
             raise
-        field, kind = _remote_ref_unknown(missing, named)
+        field, kind = _remote_ref_unknown(missing, named, reach)
         said = f"no {kind} matches {missing!r} (the {field!r} field)"
         raise RequestError(404, "not_found", said) from None
 
 
-def _remote_ref_unknown(ref: str, named: list[tuple[str, str]]) -> tuple[str, str]:
+def _remote_ref_unknown(
+    ref: str, named: list[tuple[str, str]], reach: Callable[[], set[str]]
+) -> tuple[str, str]:
     """Which of ``named``, the ``(field, kind)`` of every field that sent ``ref``, names
     nothing: the one field, or when two sent the same ref (``as`` and ``task``), the
-    first one the store has nothing for on a board a phone may reach
-    (:func:`_remote_boards`). The services raise ``KeyError(ref)`` for each."""
+    first one the store has nothing for on a board a phone may reach (``reach``, the
+    write's own: worked out again here, it ran ``git`` for each reachable project to word
+    one 404, review of #243, round 11, 7/9). The services raise ``KeyError(ref)`` for
+    each."""
     if len(named) > 1:
         from aisquare.core.store import store_session
 
         with contextlib.suppress(Exception):
-            reach = _remote_boards()
+            boards = reach()
             with store_session() as store:
                 for field, kind in named:
                     found = (
-                        store.get_session(ref, project_ids=reach)
+                        store.get_session(ref, project_ids=boards)
                         if kind == "session"
-                        else store.get_task(ref, project_ids=reach)
+                        else store.get_task(ref, project_ids=boards)
                     )
                     if found is None:
                         return field, kind
     return named[0]
 
 
-def _remote_author(ref: str | None, boards: BoardProjects | None = None) -> str | None:
+def _remote_author(ref: str | None, reach: Callable[[], set[str]]) -> str | None:
     """The id of the session a board write's ``as`` names, which the board's service is
     given in its place and the audit line records: what the server resolved, never what
     the body said. ``KeyError(ref)`` for one that names none, as the services raise it
@@ -3199,7 +3249,7 @@ def _remote_author(ref: str | None, boards: BoardProjects | None = None) -> str 
     their own could come to name another session than the one the note is posted as, or
     none.
 
-    A session on a board a phone may reach (:func:`_remote_boards`): the services read
+    A session on a board a phone may reach (``reach``, :class:`_RemoteReach`): the services read
     ``as`` across every board, and a note posted as a captured project's session went on
     that project's board, the session's own board winning over ``project`` (review of #243,
     round 10, 5/7).
@@ -3216,9 +3266,9 @@ def _remote_author(ref: str | None, boards: BoardProjects | None = None) -> str 
         return None
     from aisquare.core.store import store_session
 
-    reach = _remote_boards(boards)
+    boards = reach()
     with store_session() as store:
-        session = store.get_session(ref, project_ids=reach)
+        session = store.get_session(ref, project_ids=boards)
     if session is None:
         raise KeyError(ref)
     return session.id
@@ -3229,16 +3279,16 @@ def live_writes() -> Writes:
     from aisquare.services import remote_actions
 
     exit_keys = _ExitKeyGuard()
-    boards: BoardProjects = {}
 
     def task_claim(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.services import team as team_service
 
         ref = _required(body, "ref", limit=BOARD_REF_MAX)
         author = _optional_ref(body, "as", limit=BOARD_REF_MAX)
-        with _remote_board_refusals(("ref", ref, "task"), ("as", author, "session")):
-            session = _remote_author(author, boards)
-            task = team_service.claim_task(_remote_task(ref, boards).id, session_ref=session)
+        reach = _RemoteReach()
+        with _remote_board_refusals(reach, ("ref", ref, "task"), ("as", author, "session")):
+            session = _remote_author(author, reach)
+            task = team_service.claim_task(_remote_task(ref, reach).id, session_ref=session)
         return {"task": task.model_dump(mode="json")}, f"claimed {task.id} as={session or '-'}"
 
     def task_done(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -3250,9 +3300,10 @@ def live_writes() -> Writes:
         note = _optional_ref(body, "note")
         if note is not None:
             check_note_text(note, "note")
-        with _remote_board_refusals(("ref", ref, "task"), ("as", author, "session")):
-            session = _remote_author(author, boards)
-            found = _remote_task(ref, boards)
+        reach = _RemoteReach()
+        with _remote_board_refusals(reach, ("ref", ref, "task"), ("as", author, "session")):
+            session = _remote_author(author, reach)
+            found = _remote_task(ref, reach)
             task = team_service.finish_task(found.id, note=note, session_ref=session)
         return {"task": task.model_dump(mode="json")}, f"done {task.id} as={session or '-'}"
 
@@ -3295,13 +3346,14 @@ def live_writes() -> Writes:
             check_note_to(to)
         task = _optional_ref(body, "task", limit=BOARD_REF_MAX)
         try:
-            with _remote_board_refusals(("as", author, "session"), ("task", task, "task")):
-                session = _remote_author(author, boards)
+            reach = _RemoteReach()
+            with _remote_board_refusals(reach, ("as", author, "session"), ("task", task, "task")):
+                session = _remote_author(author, reach)
                 cwd = _resolve_project(project).root
                 event = team_service.add_note(
                     text,
                     session_ref=session,
-                    task_ref=None if task is None else _remote_task(task, boards).id,
+                    task_ref=None if task is None else _remote_task(task, reach).id,
                     to_role=to,
                     kind=kind,
                     cwd=cwd,

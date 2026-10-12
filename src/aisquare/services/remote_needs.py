@@ -70,8 +70,6 @@ from aisquare.services.transcript import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from starlette.requests import Request
     from starlette.responses import Response
     from starlette.routing import BaseRoute
@@ -2748,20 +2746,10 @@ def live_needs_sources() -> NeedsSources:
             return store.newest_session_event(project_id, session_id, kind, since=since)
 
     def needs_board_project(project: ProjectInfo) -> str:
-        """The project's board as ``asq board`` in its root resolves it, ``AISQUARE_TEAM_HUB``
-        and worktrees included, once per root and hub: ``team_project`` runs ``git``, and
-        neither changes under a running server (``remote_server.remote_board_payload``)."""
-        from aisquare.core import orchestrator
-        from aisquare.services import team as team_service
-
-        key = (project.root, os.environ.get(orchestrator.TEAM_HUB_ENV_VAR, ""))
-        with _boards_lock:
-            known = _boards.get(key)
-        if known is None:
-            known = team_service.resolve_project(project.root).id
-            with _boards_lock:
-                _boards[key] = known
-        return known
+        """The project's board as ``asq board`` in its root resolves it, the server's own
+        answer (``remote_server._remote_board_project``): kept here as well, the two could
+        disagree for the life of the server (review of #243, round 11, 6/9)."""
+        return remote_server._remote_board_project(project.root).id
 
     return NeedsSources(
         list_projects=project_service.list_projects,
@@ -2827,12 +2815,6 @@ def _needs_with_board_sessions(statuses: list[FleetAgentStatus]) -> list[FleetAg
         for agent in rows
     }
     return [derived.get(status.agent.id, status) for status in statuses]
-
-
-_boards: dict[tuple[Path, str], str] = {}
-"""The board project's id of each project root under each ``AISQUARE_TEAM_HUB`` (blank for
-none), as :func:`live_needs_sources` resolved it."""
-_boards_lock = threading.Lock()
 
 
 _tails: dict[str, tuple[tuple[int, int], TranscriptTail | None]] = {}

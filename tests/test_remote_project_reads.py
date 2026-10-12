@@ -713,6 +713,49 @@ def test_a_hubs_board_is_reached_through_every_project_on_it(
     assert summary == f"claimed {task.id} as=-"
 
 
+def test_a_board_write_works_out_what_a_phone_may_reach_once(
+    two_projects: tuple[ProjectInfo, ProjectInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write's ``as``, its task and the 404 of a ref that names nothing each worked out
+    the boards a phone may reach again: each listed the projects and, with nothing pinned,
+    ran ``git``, twice for a claim with ``as``, and once for every reachable project's root
+    to word the 404 (review of #243, round 11, 5/9 and 7/9). Once for each write, and not
+    at all for a note that names neither."""
+    _current, other = two_projects
+    task, _added = team_service.add_task("other's task", cwd=other.root)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id="ses_writer123", project_id=other.id, role="coder",
+                started_at=T0, last_seen_at=T0,
+            )
+        )  # fmt: skip
+    worked_out: list[None] = []
+    real = remote_server._remote_reachable_projects
+
+    def counted() -> list[ProjectInfo]:
+        worked_out.append(None)
+        return real()
+
+    monkeypatch.setattr(remote_server, "_remote_reachable_projects", counted)
+    handlers = live_writes().handlers
+
+    def times(route: str, body: dict[str, object]) -> int:
+        worked_out.clear()
+        try:
+            handlers[route](body)
+        except RequestError as refused:
+            assert (refused.status, refused.error) == (404, "not_found"), refused.message
+            assert refused.message == "no session matches 'ses_nope' (the 'as' field)"
+        return len(worked_out)
+
+    assert times("task/claim", {"ref": task.id, "as": "ses_writer"}) == 1
+    assert times("task/done", {"ref": task.id, "as": "ses_writer"}) == 1
+    assert times("note", {"text": "hi", "as": "ses_writer", "task": task.id}) == 1
+    assert times("note", {"text": "hi", "as": "ses_nope", "task": "ses_nope"}) == 1
+    assert times("note", {"text": "hi"}) == 0
+
+
 def test_a_project_ref_and_a_task_ref_are_kept_to_the_one_rule(
     captured: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -734,6 +777,41 @@ def test_a_project_ref_and_a_task_ref_are_kept_to_the_one_rule(
     assert remote_server._resolve_project(captured.id).id == captured.id
     _result, summary = live_writes().handlers["task/claim"]({"ref": task.id})
     assert summary == f"claimed {task.id} as=-"
+
+
+def test_a_worktrees_board_is_one_answer_everywhere_and_a_failed_git_is_not_kept(
+    two_projects: tuple[ProjectInfo, ProjectInfo],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Board tab, the board writes and the needs watcher each kept the board of each
+    root, whatever its first lookup said: a worktree whose ``git`` failed once was its own
+    board in one and its principal checkout's in another, and a task the Board tab listed
+    was one no claim found (review of #243, round 11, 6/9). One answer, kept once ``git``
+    gave it."""
+    from aisquare.core import orchestrator
+    from aisquare.services import remote_needs
+
+    principal = tmp_path / "principal"
+    (principal / ".git" / "worktrees" / "wt").mkdir(parents=True)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {principal / '.git' / 'worktrees' / 'wt'}\n")
+    asked: list[Path] = []
+
+    def git_common_root(start: Path) -> Path | None:
+        asked.append(start)
+        return None if len(asked) == 1 else principal  # the first one timed out
+
+    monkeypatch.setattr(orchestrator, "git_common_root", git_common_root)
+    project = ProjectInfo(id=project_id_for(worktree), root=worktree, linked_repos=[])
+
+    assert remote_server._remote_board_project(worktree).root == worktree, "git failed"
+    board = remote_server._remote_board_project(worktree)
+    assert board.root == principal
+    assert remote_needs.live_needs_sources().board_project(project) == board.id
+    assert remote_server._remote_board_project(worktree) == board
+    assert len(asked) == 2, "kept once git answered, and the needs watcher's is the same"
 
 
 # --- the socket: project panes, subscribe_board, caps ---------------------------------------

@@ -2040,8 +2040,8 @@ def team(monkeypatch: pytest.MonkeyPatch) -> FakeTeam:
     for name in ("add_note", "claim_task", "finish_task"):
         monkeypatch.setattr(team_service, name, getattr(fake, name))
     # Every ref a session, and every task ref a task: the fake holds no board to look in.
-    monkeypatch.setattr(remote_server, "_remote_author", lambda ref, boards=None: ref)
-    monkeypatch.setattr(remote_server, "_remote_task", lambda ref, boards=None: FakeTask(ref))
+    monkeypatch.setattr(remote_server, "_remote_author", lambda ref, reach: ref)
+    monkeypatch.setattr(remote_server, "_remote_task", lambda ref, reach: FakeTask(ref))
     return fake
 
 

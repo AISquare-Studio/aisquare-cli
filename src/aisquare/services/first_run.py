@@ -43,6 +43,7 @@ from typing import Literal, Protocol
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
+from aisquare.core import config as config_core
 from aisquare.core import harness, selfcli
 from aisquare.core import tmux as tmux_core
 from aisquare.core.store import store_session
@@ -211,8 +212,31 @@ def probe_claude(
     ``agents connect`` refuses (``refusal``). ``cwd`` is the folder the fleet starts
     in, which decides a project- or local-scope plugin; asq's own unless given. Given,
     the coders' folder (:func:`coder_folder`) is asked about too: connected for the
-    manager alone is ``manager_only``, and not connected.
+    manager alone is ``manager_only``, and not connected. The config is read once
+    (``config.one_load``), for the binding and the coders' folder both.
     """
+    with config_core.one_load():
+        return _probe_claude(
+            sign_in=sign_in,
+            which=which,
+            connected=connected,
+            signed_in=signed_in,
+            hooks_off=hooks_off,
+            refusal=refusal,
+            cwd=cwd,
+        )
+
+
+def _probe_claude(
+    *,
+    sign_in: bool,
+    which: Callable[[str], str | None],
+    connected: Callable[[], bool] | None,
+    signed_in: Callable[[], bool] | None,
+    hooks_off: Callable[[], Path | None] | None,
+    refusal: Callable[[], str | None] | None,
+    cwd: Path | None,
+) -> ClaudeState:
     problems: list[str] = []
     try:
         resolution = harness.resolve_binary(FLEET_ROLE)

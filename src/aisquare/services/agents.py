@@ -7,7 +7,7 @@ import contextvars
 import functools
 import os
 import stat
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -217,34 +217,84 @@ def _read_agent_file(path: Path) -> str | None:
 _NO_HOME = "no such home on this machine"
 
 
-def _check_settings(path: Path) -> None:
-    """Refuse, naming it, a settings file the hooks cannot be written into, before any
-    write: one not a JSON object, which ``install_hooks`` never replaces, one this user may
-    not write (a link into a read-only ``/nix/store``), and one under a ``~user`` this
-    machine does not have, which read as written lands in the cwd. Each refused only after
-    the context was ingested and ``~/.aisquare`` built (review of #257).
-    """
-    if paths.names_no_home(path):
-        raise AgentFileUnreadableError(f"can't write {path}: {_NO_HOME}", path)
+def _settings_readable(path: Path) -> None:
+    """Refuse a settings file that cannot be read, or is not a JSON object."""
     _read_agent_file(path)
     try:
         agent_core.read_settings(path)
     except agent_core.SettingsNotAnObjectError as exc:
         raise AgentFileUnreadableError(str(exc), path) from exc
+
+
+#: What each check said of each file, beside the file's stat when it said it
+#: (:func:`_unless_changed`).
+_SAID: dict[
+    tuple[Callable[[Path], object], Path], tuple[tuple[int, ...], tuple[str, Path | None] | None]
+] = {}
+
+
+def _unless_changed(check: Callable[[Path], object], path: Path) -> None:
+    """``check(path)``, or what it said of ``path`` last time while the file is unchanged
+    since: the same device, inode, size, and modification and change times (a chmod moves
+    the last). For :func:`access`, which Welcome step 2 asks every two seconds until Claude
+    Code is connected: every ``CLAUDE.md`` was read whole, and ``settings.json`` read twice
+    and parsed, on each tick (round 25 of #257). A file whose stat cannot be read is
+    checked each time, and so is any refusal not :class:`AgentFileUnreadableError`'s.
+    """
+    try:
+        found = os.stat(path)
+    except OSError:
+        check(path)
+        return
+    seen = (found.st_dev, found.st_ino, found.st_size, found.st_mtime_ns, found.st_ctime_ns)
+    kept = _SAID.get((check, path))
+    if kept is None or kept[0] != seen:
+        try:
+            check(path)
+        except AgentFileUnreadableError as exc:
+            kept = (seen, (str(exc), exc.path))
+        else:
+            kept = (seen, None)
+        _SAID[(check, path)] = kept
+    if kept[1] is not None:
+        raise AgentFileUnreadableError(*kept[1])
+
+
+def _check_settings(path: Path, *, kept: bool = False) -> None:
+    """Refuse, naming it, a settings file the hooks cannot be written into, before any
+    write: one not a JSON object, which ``install_hooks`` never replaces, one this user may
+    not write (a link into a read-only ``/nix/store``), and one under a ``~user`` this
+    machine does not have, which read as written lands in the cwd. Each refused only after
+    the context was ingested and ``~/.aisquare`` built (review of #257). ``kept``: read
+    again only once it changes (:func:`_unless_changed`).
+    """
+    if paths.names_no_home(path):
+        raise AgentFileUnreadableError(f"can't write {path}: {_NO_HOME}", path)
+    if kept:
+        _unless_changed(_settings_readable, path)
+    else:
+        _settings_readable(path)
     unwritable = settings_unwritable(path)
     if unwritable is not None:
         raise AgentFileUnreadableError(f"can't write {path}: {unwritable}", path)
 
 
-def _read_before_writing(name: str, config_dir: Path | None) -> list[str]:
+def _read_before_writing(name: str, config_dir: Path | None, *, kept: bool = False) -> list[str]:
     """Every file `agents connect` reads before it writes anything, read: the settings file
     (:func:`_check_settings`), then the context files, whose text it returns; raises
     :class:`AgentFileUnreadableError` for the first it cannot use. One function for
-    :func:`connect` and :func:`access`, so no surface offers a Connect it refuses."""
+    :func:`connect` and :func:`access`, so no surface offers a Connect it refuses.
+    ``kept`` is :func:`access`'s: each file read again only once it has changed
+    (:func:`_unless_changed`), and no text returned."""
     spec = agent_core.spec(name, config_dir)
     if spec is not None and spec.settings_path is not None:
-        _check_settings(spec.settings_path)
-    return [_read_agent_file(path) or "" for path in agent_core.context_files(name, config_dir)]
+        _check_settings(spec.settings_path, kept=kept)
+    context = agent_core.context_files(name, config_dir)
+    if kept:
+        for path in context:
+            _unless_changed(_read_agent_file, path)
+        return []
+    return [_read_agent_file(path) or "" for path in context]
 
 
 @dataclass(frozen=True)
@@ -400,7 +450,7 @@ def _connect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
             # its way, as with `claude` there; read as Claude Code not having made it yet,
             # it was offered a Connect that could only say not installed (review of #257).
             return _blocked(f"can't create {spec.home}: {blocked[1]}", *blocked, here)
-        _read_before_writing(name, config_dir)
+        _read_before_writing(name, config_dir, kept=True)
     except (AgentFileUnreadableError, AgentNotInstalledError) as exc:
         return _refused(spec, str(exc), getattr(exc, "path", None) or spec.home, here)
     except OSError as exc:

@@ -391,6 +391,18 @@ def fresh_state() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def fresh_file_checks() -> Iterator[None]:
+    """Forget what connect's checks said of each file (``services.agents._SAID``): a file a
+    test rewrites at the same size within one tick of the file system's clock reads as
+    unchanged, and no test may inherit another's answer."""
+    from aisquare.services import agents as agents_service
+
+    agents_service._SAID.clear()
+    yield
+    agents_service._SAID.clear()
+
+
+@pytest.fixture(autouse=True)
 def isolated_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point agent detection and the Claude accounts at a temp home so tests never read
     ``~/.claude*``.

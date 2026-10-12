@@ -22,6 +22,7 @@ import pytest
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
+from aisquare.core import config as config_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetSettings
 from aisquare.core.orchestrator import team_project
@@ -342,6 +343,56 @@ def test_a_settings_file_connect_refuses_is_named_and_connect_is_not_its_answer(
     assert str(settings) in refused.refused and "not valid JSON" in refused.refused
     assert (writable.connected, writable.refused) == (False, None), "control: merely missing"
     assert connected.connected and connected.refused is None
+
+
+def test_the_two_second_probe_reads_each_file_again_only_once_it_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 25 of #257: Welcome's probe, every two seconds until Claude Code is connected,
+    read every CLAUDE.md whole and settings.json twice to ask whether connect would refuse,
+    and loaded config.toml twice. A file is read again once it changes; the config once a
+    probe. Connect itself still reads every file (``_read_before_writing``)."""
+    where = agent_core.ambient_hook_dir("claude-code")
+    assert where is not None
+    where.mkdir(parents=True)
+    (where / "settings.json").write_text("{}", encoding="utf-8")
+    notes = where / "CLAUDE.md"
+    notes.write_text("# notes\n" * 1000, encoding="utf-8")
+    config_core.save_config(config_core.AppConfig())
+    read: list[str] = []
+    parsed: list[bytes] = []
+    real_read, real_parse = agents_service._read_agent_file, config_core._parse_toml
+
+    def reading(path: Path) -> str | None:
+        read.append(path.name)
+        return real_read(path)
+
+    def parsing(raw: bytes) -> dict[str, Any]:
+        parsed.append(raw)
+        return real_parse(raw)
+
+    monkeypatch.setattr(agents_service, "_read_agent_file", reading)
+    monkeypatch.setattr(config_core, "_parse_toml", parsing)
+    binary = str(tmp_path / "claude")
+
+    def tick(connected: Callable[[], bool] | None = lambda: False) -> first_run.ClaudeState:
+        return first_run.probe_claude(
+            sign_in=False, which=lambda name: binary, connected=connected, cwd=tmp_path
+        )
+
+    first, second = tick(), tick()
+    assert sorted(read) == ["CLAUDE.md", "settings.json"], "the second tick read neither"
+    notes.write_text("# notes, edited\n", encoding="utf-8")
+    tick()
+    assert sorted(read) == ["CLAUDE.md", "CLAUDE.md", "settings.json"], "the edit, read"
+    assert first.refused is None and second.refused is None
+
+    monkeypatch.setattr(first_run, "_connected_default", lambda cwd=None: True)
+    parsed.clear()
+    assert tick(connected=None).connected, "the coders' folder asked: the config read"
+    assert len(parsed) == 1, "once for the agent binding and the coders' folder"
+    connected = agents_service._read_before_writing("claude-code", None)
+    assert connected[0].startswith("# notes, edited"), "connect reads the texts as they are"
 
 
 def test_connect_is_the_doctors_own_fix() -> None:

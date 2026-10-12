@@ -7,11 +7,13 @@ stubbed. Unknown keys in the file are ignored so old configs keep loading.
 from __future__ import annotations
 
 import codecs
+import contextlib
+import contextvars
 import errno
 import os
 import re
 import tomllib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -615,18 +617,43 @@ def _parse_toml(raw: bytes) -> dict[str, Any]:
     return loaded
 
 
+_ONE_LOAD: contextvars.ContextVar[dict[Path, AppConfig] | None] = contextvars.ContextVar(
+    "_ONE_LOAD", default=None
+)
+
+
+@contextlib.contextmanager
+def one_load() -> Iterator[None]:
+    """Within it, :func:`load_config` reads and parses each file once, for readers that only
+    read: Welcome's probe, every two seconds, loaded config.toml once for the agent binding
+    and again for the coders' folder (round 25 of #257). A load that fails is not kept.
+    Never across uses."""
+    token = _ONE_LOAD.set({})
+    try:
+        yield
+    finally:
+        _ONE_LOAD.reset(token)
+
+
 def load_config(path: Path | None = None) -> AppConfig:
     """Load configuration from ``path`` (default: the standard location).
 
-    A missing file yields the built-in defaults.
+    A missing file yields the built-in defaults. Within :func:`one_load`, a file loaded
+    already is not read again.
     """
     target = path or paths.config_path()
+    loaded = _ONE_LOAD.get()
+    if loaded is not None and target in loaded:
+        return loaded[target]
     if not target.exists():
-        return AppConfig()
-
-    data = _parse_toml(despite_windows_contention(target.read_bytes))
-    _migrate(data)
-    return AppConfig.model_validate(data)
+        config = AppConfig()
+    else:
+        data = _parse_toml(despite_windows_contention(target.read_bytes))
+        _migrate(data)
+        config = AppConfig.model_validate(data)
+    if loaded is not None:
+        loaded[target] = config
+    return config
 
 
 def save_config(

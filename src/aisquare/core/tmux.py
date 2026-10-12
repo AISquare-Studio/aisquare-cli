@@ -318,6 +318,8 @@ def _tmux(argv: Sequence[str], stdin: bytes | None) -> Completed:
 _BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 #: Where macOS keeps ``sysctl``, for a PATH without ``/usr/sbin`` (launchd, cron).
 _SYSCTL = ("/usr/sbin/sysctl", "/sbin/sysctl")
+#: Where Linux says when it booted (``btime``, seconds since the epoch).
+_PROC_STAT = Path("/proc/stat")
 
 
 #: This boot's identity once :func:`boot_id` has found it; ``None`` until then.
@@ -356,6 +358,13 @@ def _ask_boot_id() -> str | None:
             return said
     if sys.platform != "darwin":
         return None
+    said = _sysctl("kern.bootsessionuuid")
+    return said or None
+
+
+def _sysctl(name: str) -> str | None:
+    """What ``sysctl -n <name>`` says, from ``sysctl`` on PATH or where macOS keeps it;
+    ``None`` when it cannot be asked or does not answer."""
     sysctl = shutil.which("sysctl") or next(
         (place for place in _SYSCTL if os.access(place, os.X_OK)), None
     )
@@ -363,16 +372,43 @@ def _ask_boot_id() -> str | None:
         return None
     try:
         completed = subprocess.run(
-            [sysctl, "-n", "kern.bootsessionuuid"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
+            [sysctl, "-n", name], capture_output=True, text=True, timeout=5, check=False
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    said = completed.stdout.strip()
-    return said if completed.returncode == 0 and said else None
+    return completed.stdout.strip() if completed.returncode == 0 else None
+
+
+#: When this boot started once :func:`boot_started` has found it; ``None`` until then.
+_booted_at: datetime | None = None
+
+
+def boot_started() -> datetime | None:
+    """When this machine booted, by the wall clock, where it says (Linux's ``btime``, the
+    ``kern.boottime`` of macOS and the BSDs); ``None`` elsewhere. Kept once found, as
+    :func:`boot_id` is.
+
+    Not an identity: it is the wall clock less the time since boot, so it moves whenever
+    the clock is stepped (a WSL2 VM resumed after the host slept, NTP on a board with no
+    clock), and a row from before the step reads as from before the boot (round 25 of
+    #257). :func:`server_may_run` asks it only for a row with no boot to compare.
+    """
+    global _booted_at
+    if _booted_at is None:
+        _booted_at = _ask_boot_started()
+    return _booted_at
+
+
+def _ask_boot_started() -> datetime | None:
+    """:func:`boot_started`, asked of the machine."""
+    with contextlib.suppress(OSError, UnicodeDecodeError, ValueError, IndexError):
+        for line in _PROC_STAT.read_text(encoding="ascii").splitlines():
+            if line.startswith("btime "):
+                return datetime.fromtimestamp(int(line.split()[1]), tz=UTC)
+    if sys.platform.startswith(("linux", "win")):
+        return None  # Linux said above, or could not; Windows keeps no tmux
+    found = re.search(r"\bsec = (\d+)", _sysctl("kern.boottime") or "")  # { sec = 17…, usec
+    return datetime.fromtimestamp(int(found.group(1)), tz=UTC) if found else None
 
 
 SocketAnswer = Literal["answers", "gone", "unasked"]
@@ -413,7 +449,11 @@ def socket_answer(path: Path | None) -> SocketAnswer | None:
 
 
 def server_may_run(
-    srv: TmuxServer, recorded: Path | None, booted: str | None, this_boot: str | None
+    srv: TmuxServer,
+    recorded: Path | None,
+    booted: str | None,
+    this_boot: str | None,
+    created: datetime | None = None,
 ) -> SocketAnswer | None:
     """Whether the agent of a live fleet row may still be running on ``srv``, and why; ``None``
     when it cannot be. The one rule ``upgrade``, ``uninstall`` and ``fleet shutdown`` ask, so
@@ -425,10 +465,23 @@ def server_may_run(
     at ``recorded``, where the server said it listened, whatever ``TMUX_TMPDIR`` this shell
     has and wherever this tmux build keeps sockets; a row from before v25 recorded neither
     and is asked where this shell's tmux looks.
+
+    With no boot to compare (a row from before v25, or a boot id that could not be had), a
+    socket that is gone is explained by a reboot when the row was ``created`` before this
+    boot started (:func:`boot_started`): a reboot clears ``/tmp``. Without it, every row a
+    0.7.0 fleet left behind at a reboot was held until ``--forget`` (round 28). That start
+    moves with the clock, so it explains only a missing file, never a socket that answers
+    or could not be asked: a row misjudged by a stepped clock is ended only when its socket
+    is gone as well.
     """
     if booted is not None and this_boot is not None and booted != this_boot:
         return None
-    return srv.listener(recorded)
+    answer = srv.listener(recorded)
+    if answer == "gone" and (booted is None or this_boot is None) and created is not None:
+        started = boot_started()
+        if started is not None and created < started:
+            return None
+    return answer
 
 
 def parse_version(text: str) -> tuple[int, int] | None:

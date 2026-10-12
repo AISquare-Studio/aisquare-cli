@@ -1790,16 +1790,16 @@ def _claude_dirs_for_mcp() -> list[Path]:
 
 
 _LIVE_ROWS = (
-    "SELECT f.label, f.tmux_socket, p.root, {recorded} FROM fleet_agent AS f "
+    "SELECT f.label, f.tmux_socket, p.root, f.created_at, {recorded} FROM fleet_agent AS f "
     "LEFT JOIN project AS p ON p.id = f.project_id WHERE f.ended_at IS NULL"
 )
 #: The facts a row has recorded since v25 (``FleetAgent.socket_path``, ``.boot_id``), and
 #: what a store from before them answers in their place: nothing recorded.
 _RECORDED = "f.socket_path, f.boot_id"
 _NOTHING_RECORDED = "NULL, NULL"
-#: One live fleet row: ``(label (project), socket, socket path, boot id)``, the last two
-#: what its spawn recorded of where its server listened and in which boot, else ``None``.
-_LiveRow = tuple[str, str, Path | None, str | None]
+#: One live fleet row: ``(label (project), socket, created, socket path, boot id)``, the last
+#: two what its spawn recorded of where its server listened and in which boot, else ``None``.
+_LiveRow = tuple[str, str, datetime | None, Path | None, str | None]
 
 
 def _siblings_hiding_hooks() -> list[Path]:
@@ -1867,23 +1867,34 @@ def _live_fleet_agents() -> tuple[tuple[_LiveRow, ...], str | None]:
             (
                 f"{label} ({Path(root).name if root else 'unknown project'})",
                 socket_name or "asq",
+                _created(created),
                 Path(path) if path else None,
                 booted or None,
             )
-            for label, socket_name, root, path, booted in rows
+            for label, socket_name, root, created, path, booted in rows
         ),
         None,
     )
+
+
+def _created(value: object) -> datetime | None:
+    """A row's ``created_at`` as the store wrote it (ISO 8601, UTC), or ``None`` unread."""
+    try:
+        when = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
 
 
 def _may_run(row: _LiveRow, this_boot: str | None) -> SocketAnswer | None:
     """Whether the agent of live ``row`` may still be running, and why; ``None`` when it
     cannot be. :func:`~aisquare.core.tmux.server_may_run`, the rule ``fleet shutdown`` asks
     too, so a row counted here is never one it ends as gone (round 27 of #257): one whose
-    socket is gone counts until ``fleet shutdown --forget`` ends it on the operator's word.
+    socket is gone counts until ``fleet shutdown --forget`` ends it on the operator's word,
+    unless it recorded no boot and predates this one (round 28).
     """
-    _label, socket_name, recorded, booted = row
-    return server_may_run(TmuxServer(socket_name), recorded, booted, this_boot)
+    _label, socket_name, created, recorded, booted = row
+    return server_may_run(TmuxServer(socket_name), recorded, booted, this_boot, created)
 
 
 def _fleet_answers() -> tuple[tuple[tuple[str, SocketAnswer], ...], int, str | None]:

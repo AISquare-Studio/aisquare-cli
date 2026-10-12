@@ -53,6 +53,7 @@ from aisquare.core.tmux import (
     WindowInfo,
     _tmux,
     parse_version,
+    server_may_run,
     socket_answer,
 )
 from tests import fakebin
@@ -911,6 +912,68 @@ def test_a_boot_id_that_could_not_be_had_is_asked_again(
     assert tmux_module.boot_id() is None, "failed"
     assert tmux_module.boot_id() == "6B7A1D2E-0000-4000-8000-000000000002"
     assert tmux_module.boot_id() == "6B7A1D2E-0000-4000-8000-000000000002" and answers == []
+
+
+def test_a_row_with_no_boot_to_compare_is_gone_when_its_socket_is_and_it_predates_the_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 28 of #257: a row from before v25 recorded no boot, and a reboot clears /tmp, so
+    its socket reads "gone", which counts as may still run: every 0.7.0 row left at a reboot
+    held uninstall and shutdown until --forget. Created before this boot started, a missing
+    socket is the reboot's doing. The start moves with the clock, so it explains away only
+    a missing file: never a socket that answers or could not be asked, and never what the
+    boot ids already decide."""
+    booted = datetime(2026, 10, 12, 6, 0, tzinfo=UTC)
+    monkeypatch.setattr(tmux_module, "boot_started", lambda: booted)
+    before, after = datetime(2026, 10, 11, tzinfo=UTC), datetime(2026, 10, 12, 7, tzinfo=UTC)
+
+    def may_run(
+        said: str | None, created: datetime | None, recorded_boot: str | None = None
+    ) -> str | None:
+        srv = TmuxServer("asq")
+        monkeypatch.setattr(srv, "listener", lambda recorded=None: said)
+        return server_may_run(srv, None, recorded_boot, "b00t", created)
+
+    assert may_run("gone", before) is None, "cleared by the reboot"
+    assert may_run("gone", after) == "gone", "since the boot: taken from under its server"
+    assert may_run("gone", None) == "gone", "no time to compare"
+    assert may_run("answers", before) == "answers", "a listener is no stepped clock's to deny"
+    assert may_run("unasked", before) == "unasked"
+    assert may_run("gone", before, recorded_boot="b00t") == "gone", "the boot ids decide"
+    assert may_run("answers", after, recorded_boot="other") is None, "another boot"
+
+
+def test_the_boot_start_is_read_where_the_machine_says_and_kept_once_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Linux's ``btime`` in /proc/stat; ``kern.boottime`` of macOS and the BSDs, asked of
+    ``sysctl`` where macOS keeps it too. Kept once found, asked again until then."""
+    monkeypatch.setattr(tmux_module, "_booted_at", None)  # put back after
+    stat = tmp_path / "stat"
+    stat.write_text("cpu  1 2 3\nbtime 1760000000\nprocesses 9\n", encoding="ascii")
+    monkeypatch.setattr(tmux_module, "_PROC_STAT", stat)
+    assert tmux_module.boot_started() == datetime.fromtimestamp(1760000000, tz=UTC)
+
+    monkeypatch.setattr(tmux_module, "_booted_at", None)  # another process, on macOS
+    monkeypatch.setattr(tmux_module, "_PROC_STAT", tmp_path / "no-proc")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(shutil, "which", lambda _name, *a, **k: None)
+    monkeypatch.setattr(os, "access", lambda place, _mode: place == "/usr/sbin/sysctl")
+    answers = [
+        subprocess.CompletedProcess(["sysctl"], 1, "", "sysctl: unknown oid"),
+        subprocess.CompletedProcess(["sysctl"], 0, "{ sec = 1760001234, usec = 5 } Fri\n", ""),
+    ]
+    asked: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        asked.append(argv)
+        return answers.pop(0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert tmux_module.boot_started() is None, "it failed"
+    assert tmux_module.boot_started() == datetime.fromtimestamp(1760001234, tz=UTC)
+    assert tmux_module.boot_started() == datetime.fromtimestamp(1760001234, tz=UTC)
+    assert asked == [["/usr/sbin/sysctl", "-n", "kern.boottime"]] * 2, "kept once found"
 
 
 def test_kill_and_rename_and_attach_build_exact_targets(fake_bin: Path, conf: Path) -> None:

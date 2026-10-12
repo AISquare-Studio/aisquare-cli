@@ -326,8 +326,10 @@ same socket name is not the agent's, and is never asked about it: its pane ids
 name other agents.
 
 A row whose server did not answer is ended as lost only where it cannot be
-running: it started before the last boot, or its socket file is there with
-nothing listening, which is what tmux leaves when its server exits. Otherwise
+running: it started in another boot, or its socket file is there with nothing
+listening, which is what tmux leaves when its server exits. A row from before
+0.8.0 recorded no boot; it is ended where its socket file is gone and it started
+before this boot did, as a reboot clears `/tmp`. Otherwise
 its row is **left live**, with what to do, because `aisquare uninstall` asks
 the same socket and would still count it. Most often the socket file is gone
 (systemd-tmpfiles or a logout removed it while the server ran on), so no tmux

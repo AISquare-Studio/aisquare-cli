@@ -3932,6 +3932,29 @@ def test_shutdown_leaves_live_a_row_whose_socket_was_taken_from_under_its_server
     assert lifecycle.running_fleet()[0] == ()
 
 
+def test_shutdown_ends_a_row_from_before_v25_whose_socket_a_reboot_cleared(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 28 of #257: a 0.7.0 row recorded no boot, and a reboot clears its socket, so it
+    read "gone", which may still run: `fleet shutdown --all --yes` left it live and exited
+    1 until `--forget`. Created before this boot started, it is ended as lost."""
+    coder = _coder(project)
+    with store_session() as store:  # as 0.7.0 wrote it: neither its socket nor its boot
+        coder = store.upsert_fleet_agent(
+            coder.model_copy(update={"socket_path": None, "boot_id": None})
+        )
+    booted = coder.created_at + timedelta(minutes=5)  # this boot began after the row
+    monkeypatch.setattr(tmux_core, "boot_started", lambda: booted)
+    tmux.running = False
+    tmux.socket_file = False  # what a reboot leaves: no file at all
+
+    plan = fleet_service.shutdown_plan(project)
+    report = fleet_service.shutdown(project)
+
+    assert plan.held == {} and coder.id in plan.lost
+    assert [row.agent.id for row in report.recorded] == [coder.id] and report.failed == []
+
+
 def test_shutdown_forget_never_ends_a_row_whose_socket_answers(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

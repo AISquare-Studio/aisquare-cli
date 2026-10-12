@@ -927,6 +927,22 @@ def test_a_row_from_another_boot_cannot_be_running(
     assert sorted(asked) == [tmp_path / "now.sock", tmp_path / "old.sock"]
 
 
+def test_a_row_that_recorded_no_boot_and_predates_it_does_not_block_once_its_socket_is_gone(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 28 of #257: a 0.7.0 row recorded no boot, and a reboot clears /tmp, so its
+    socket reads "gone", which counts as may still run: every upgrader with rows left at a
+    reboot was refused, told to SIGUSR1 a server that cannot exist. Created before this
+    boot started, its missing socket is the reboot's doing."""
+    monkeypatch.setattr(TmuxServer, "listener", lambda _self, recorded=None: "gone")
+    monkeypatch.setattr(tmux_core, "boot_started", lambda: datetime(2026, 10, 12, 6, tzinfo=UTC))
+    _initialised(runner, tmp_path)
+    _live_agent(tmp_path / "old", "coder-1", created_at=datetime(2026, 10, 11, tzinfo=UTC))
+    _live_agent(tmp_path / "now", "coder-2", created_at=datetime(2026, 10, 12, 7, tzinfo=UTC))
+
+    assert lifecycle.running_fleet() == (("coder-2 (now)",), 1, None)
+
+
 def test_a_store_from_before_the_recorded_socket_is_read_as_nothing_recorded(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

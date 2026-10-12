@@ -323,10 +323,11 @@ SEAMS: dict[str, Seam] = {
         "per-coder worktrees (docs/plans/fleet-tui.md §3.5). No model process; not "
         "stripped, like the other git seams",
     ),
-    "aisquare/core/tmux.py::_ask_boot_id": Seam(
+    "aisquare/core/tmux.py::_sysctl": Seam(
         EXCLUDED,
-        "`sysctl -n kern.bootsessionuuid` (macOS), at a fleet spawn and when uninstall and "
-        "upgrade count the fleet's running agents; an identifier, no model",
+        "`sysctl -n kern.bootsessionuuid` (macOS) or `kern.boottime` (macOS, the BSDs), at a "
+        "fleet spawn and when uninstall, upgrade and fleet shutdown ask whether an agent may "
+        "still run; an identifier and a time, no model",
     ),
 }
 

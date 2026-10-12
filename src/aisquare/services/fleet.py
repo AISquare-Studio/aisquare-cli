@@ -3023,7 +3023,9 @@ def _unreached(
     looks; one that answers now came up after tmux was asked.
     """
     srv = _server_of(agent, config)
-    answer = tmux_core.server_may_run(srv, agent.socket_path, agent.boot_id, this_boot)
+    answer = tmux_core.server_may_run(
+        srv, agent.socket_path, agent.boot_id, this_boot, agent.created_at
+    )
     if answer is None:
         return None
     try:

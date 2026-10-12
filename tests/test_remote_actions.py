@@ -1639,6 +1639,7 @@ def test_the_guard_waits_for_rest_as_long_as_the_interrupt_waits_for_its_prompt(
     monkeypatch.setattr(remote_actions, "time", fake_time)
     monkeypatch.setattr(remote_actions, "ACTION_POLL_SECONDS", 0.25)
     monkeypatch.setattr(remote_actions, "action_interrupt_wait", action_interrupt_wait)
+    monkeypatch.setattr(remote_actions, "action_quiet_window", action_quiet_window)
     monkeypatch.setattr(remote_needs, "DIALOG_SETTLE_SECONDS", 3.0)
     needs.pane_quiet, needs.escape_stops_agent = False, False
     response = phone.post("agent/stop", **PINNED)
@@ -2093,14 +2094,19 @@ def test_an_interrupt_that_does_not_stop_the_agent_types_nothing(
     ]
 
 
-def test_the_interrupt_waits_out_the_quiet_window_before_the_settle_time() -> None:
+def test_the_interrupt_waits_out_the_quiet_window_before_the_settle_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """needs_at_input_prompt wants a pane with no output for ``fleet.ACTIVITY_WINDOW``, and
     the interrupt's own redraw is output: waiting only the 3 s settle time could only
-    ever have answered still_busy."""
+    ever have answered still_busy. The window is the one a dismissed dialog's ``/exit``
+    waits out, so a change to it moves both (review of #243, round 8, 6/6)."""
     assert action_interrupt_wait() == (
         fleet_service.ACTIVITY_WINDOW.total_seconds() + remote_needs.DIALOG_SETTLE_SECONDS
     )
     assert action_interrupt_wait() == 8.0
+    monkeypatch.setattr(remote_actions, "action_quiet_window", lambda: 7.0)
+    assert action_interrupt_wait() == 7.0 + remote_needs.DIALOG_SETTLE_SECONDS
 
 
 class FakeTime:
@@ -2129,6 +2135,7 @@ def test_the_interrupt_reads_the_agent_every_quarter_second_until_the_wait_is_ov
     monkeypatch.setattr(remote_actions, "time", fake_time)
     monkeypatch.setattr(remote_actions, "ACTION_POLL_SECONDS", 0.25)
     monkeypatch.setattr(remote_actions, "action_interrupt_wait", action_interrupt_wait)
+    monkeypatch.setattr(remote_actions, "action_quiet_window", action_quiet_window)
     monkeypatch.setattr(remote_needs, "DIALOG_SETTLE_SECONDS", 3.0)
     needs.escape_stops_agent = False
     response = phone.post("agent/tell", agent=LABEL, text="hi", mode="interrupt")

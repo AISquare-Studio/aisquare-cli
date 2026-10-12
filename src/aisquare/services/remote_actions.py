@@ -1047,10 +1047,13 @@ def action_interrupt_wait() -> float:
     read as reached until that long after the Escape, and the settle time
     (``DIALOG_SETTLE_SECONDS``) counts from then. A wait of the settle time
     alone would always have ended in ``still_busy``.
-    """
-    from aisquare.services import fleet as fleet_service
 
-    return fleet_service.ACTIVITY_WINDOW.total_seconds() + remote_needs.DIALOG_SETTLE_SECONDS
+    The quiet window is :func:`action_quiet_window`'s, which a dismissed dialog's ``/exit``
+    waits out (:func:`action_after_escape`): an agent that cannot be read is reached only
+    by a deadline longer than it, and a second reading of ``ACTIVITY_WINDOW`` here did not
+    move with it (review of #243, round 8, 6/6).
+    """
+    return action_quiet_window() + remote_needs.DIALOG_SETTLE_SECONDS
 
 
 def action_busy_sentence(snap: AgentNow, label: str) -> str:

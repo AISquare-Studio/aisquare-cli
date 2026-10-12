@@ -285,14 +285,14 @@ aisquare --json remote needs
 | question | an agent asks you a question with options |
 | plan | an agent asks you to approve its plan |
 | board_question | the manager asks on the board, or a coder asks you (no `--to`, or `--to user`, `human`, `owner`, `all` or `everyone`), or asks the manager when no manager is there to answer it (below) |
-| manager_down | the manager crashed, or a switch or a restart could not start its replacement; or, while its agents still work (on a shared board, whatever they do) and before it reported a result, it was killed or lost (no exit status). A manager that exits cleanly (`fleet stop`, the phone's Stop, its own `/exit`) is taken to be done |
+| manager_down | the manager crashed, was killed or lost (no exit status), or a switch or a restart could not start its replacement, whatever its agents do, for a day or until a manager is back. A manager that exits cleanly (`fleet stop`, the phone's Stop, its own `/exit`) is taken to be done |
 | crashed | an agent exited with an error in the last hour, or was stopped for a switch or a restart that could not start its replacement, its task unfinished, while no manager is there to handle it (below) |
 | limited | an agent hit its usage limit; when the limit named its reset, the card tells it by the phone's clock, and the Board tab leaves out the reset its line says by the machine's |
 | failed | an agent's turn ended on an API error (a login that expired, credit that ran out, the API overloaded past Claude Code's own retries), and it waits at its prompt |
 | lost | an agent's pane is gone |
 | fleet_down | tmux is not answering for a project |
 | asked | an agent ended its turn with a question in plain text |
-| board_result | the manager reports a result, or a coder reports one to the manager when there is none (below). A coder's result to a manager that stopped stays on the board; the `manager_down` card is the signal |
+| board_result | the manager reports a result, or a coder reports one to the manager when no manager is there to read it (below). A coder's result to a manager that stopped stays on the board; the `manager_down` card is the signal |
 | interrupted | you pressed Esc on an agent, or turned its prompt down without saying what to do instead, and it waits for you |
 
 The board a project's cards come from is the one `aisquare board` shows in its
@@ -301,21 +301,25 @@ that several projects share is one card, in the project of the agent that asked.
 
 A manager is there to handle an item only when the fleet wakes it for that item:
 on a project's own board, the project's `manager` while it runs (not stopped, not
-parked on its usage limit) on a session aisquare's hooks registered, which a
+parked on its usage limit) on a live session aisquare's hooks registered, which a
 coder's board write, an agent's exit and a usage limit all nudge. Once it cannot
 take them, however it went (an exit, its limit, a kill, a death, a failed
-hand-over, a session that never registered), a coder's question to it that is
-still unanswered is yours: someone waits on the answer. A result to it stays on
-the board; the `manager_down` card is the signal. A manager started outside the
+hand-over, a session that never registered or was ended), a coder's question to
+it that is still unanswered is yours: someone waits on the answer. So is a result
+to a manager that still runs but cannot take it (its limit, its session): nothing
+wakes it, and no card says it is down. A result to a manager that stopped, posted
+before the stop or within a day after it, stays on the board: the `manager_down`
+card is the signal, or it exited cleanly. A manager started outside the
 fleet, or a numbered seat such as `manager-2`, is never nudged, so it keeps
 nothing off the phone. For a
 project whose agents write another project's board (under `AISQUARE_TEAM_HUB` the
 hub's, for a worktree its principal checkout's), no manager is: every question
 and result on that board, and every crash, limit and failed hand-over of its
 agents, is a card and a push. That costs some extra cards, and never leaves one
-that nobody hears of. A stopped manager is `manager_down` while its own project's
-agents still work; on a board several projects share, the hub's own project's
-included, whatever they do, since its crew may be another project's.
+that nobody hears of. A stopped manager is `manager_down` whatever its agents
+are doing, on its own board or a shared one. The coder that reports to it goes
+idle right after, so a card that waited on busy agents was gone before anyone
+saw it.
 
 A card holds what you must read before answering: the exact call a permission
 is for, every field of it (the command or the path first, a list or an object

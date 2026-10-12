@@ -470,7 +470,9 @@ class FakeTmux(TmuxServer):
         raise TmuxError(f"error connecting to /fake/tmux-0/{self.socket}{denied}")
 
     def attach_argv(self, session: str) -> list[str]:
-        return [self.binary(), "-L", self.socket, "attach-session", "-t", f"={session}"]
+        """As the real one: ``-S`` for a handle asked for at a path, else ``-L``."""
+        where = ["-L", self.socket] if self.path is None else ["-S", str(self.path)]
+        return [self.binary(), *where, "attach-session", "-t", f"={session}"]
 
     # -- input --
     def send_keys(self, pane_id: str, *keys: str) -> None:
@@ -6419,6 +6421,25 @@ def test_attach_argv_targets_the_project_session_exactly(
     fleet_service.spawn(project, "manager")
     argv = fleet_service.attach_argv(project)
     assert argv[-3:] == ["attach-session", "-t", f"=asq-{_codename(project)}"]
+
+
+def test_attach_argv_asks_the_server_at_the_path_the_projects_rows_recorded(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 29 of #257: `fleet attach` found its server by the socket's name (`tmux -L`)
+    while the Manager tab printed `tmux -S <path>`. From a shell under another `TMUX_TMPDIR`
+    that is another server: with no session of the project's it refused, saying `spawn
+    manager` starts one, which refuses for the live manager; with one of that name it
+    attached there. It asks the server at the path the project's live rows recorded."""
+    manager = fleet_service.spawn(project, "manager").agent
+    manager, stranger = _behind_a_stranger(tmux, project, manager, monkeypatch)
+    tmux.path = manager.socket_path  # the handle the stranger hands out for that path
+    session = f"asq-{_codename(project)}"
+    at_the_path = ["/fake/tmux", "-S", str(manager.socket_path), "attach-session", "-t"]
+
+    assert fleet_service.attach_argv(project) == [*at_the_path, f"={session}"]
+    stranger.sessions[session] = []  # a session of that name on the server `-L` reaches
+    assert fleet_service.attach_argv(project) == [*at_the_path, f"={session}"]
 
 
 def test_attach_argv_refuses_when_there_is_no_session_to_attach_to(

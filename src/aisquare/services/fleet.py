@@ -5156,14 +5156,27 @@ def attach_argv(project: ProjectInfo) -> list[str]:
     Refuses when the session does not exist. ``tmux attach`` would only answer
     with its own "can't find session" — and the CLI ``exec``s this argv, so
     nothing here may hand over an attach that has nothing to attach to.
+
+    Asked of the servers the project's live agents are on, the manager's first, where their
+    spawns said they listened (:func:`_address`), as the Manager tab's attach line names
+    them. By the socket's name alone (``tmux -L``), a shell under another ``TMUX_TMPDIR``
+    asks another server: one with no such session refused with "spawn manager starts
+    one", which then refused for the live manager, and one with a session of that name was
+    attached to (round 29 of #257). A project with no live agent is asked where this
+    shell's tmux looks.
     """
-    srv = server()
+    config = settings()
+    srv = server(config)
     _require_tmux(srv)
     project = ensure_codename(project)
     name = session_name(project.codename or codenames.codename_for(project.id))
-    if not srv.has_session(name):
-        raise FleetError(
-            f"no fleet session {name} for {_name(project)} — nothing to attach to; "
-            "`aisquare fleet spawn manager` starts one"
-        )
-    return srv.attach_argv(name)
+    with store_session() as store:
+        live = store.fleet_agents(project.id, live_only=True)
+    addresses = dict.fromkeys(_address(agent, config) for agent in _manager_first(live))
+    for candidate in [_server_at(address, config) for address in addresses] or [srv]:
+        if candidate.has_session(name):
+            return candidate.attach_argv(name)
+    raise FleetError(
+        f"no fleet session {name} for {_name(project)} — nothing to attach to; "
+        "`aisquare fleet spawn manager` starts one"
+    )

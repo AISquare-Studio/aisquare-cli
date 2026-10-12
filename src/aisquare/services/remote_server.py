@@ -2009,7 +2009,11 @@ def check_project_add_root(raw: object) -> Path:
     to 400 ``write_failed``, the system's own words for a write that never began
     (sweep 3 of #243), and so did a directory this account may see but not look
     inside, ``/root`` or a ``chmod 000`` one, whose ``.git`` the root lookup asks
-    about: ``[Errno 13] Permission denied: '/root/.git'`` (sweep 4).
+    about: ``[Errno 13] Permission denied: '/root/.git'`` (sweep 4). That is asked of
+    the directory itself first (:func:`_remote_may_look_inside`): from Python 3.14 the
+    lookup's ``Path.exists`` answers ``False`` where it raised, and a ``chmod 000``
+    checkout was "neither a git checkout nor a directory of repositories", or, below
+    one, the add registered the checkout around it (review of #243, round 9, 5/6).
     """
     from aisquare.core.workspace import find_project_root
     from aisquare.services import fleet as fleet_service
@@ -2040,6 +2044,8 @@ def check_project_add_root(raw: object) -> Path:
         if not resolved.is_relative_to(home)
         else f"{resolved} cannot be read: add a project this account may look inside",
     )
+    if not _remote_may_look_inside(resolved):
+        raise unreadable
     try:
         root = find_project_root(resolved)
     except OSError:  # a directory this account may not search: /root, another user's home
@@ -2108,6 +2114,14 @@ def remote_project_ref(ref: str) -> ProjectInfo:
             "(start with / or ~)",
         )
     return project_service.named(ref)
+
+
+def _remote_may_look_inside(directory: Path) -> bool:
+    """Whether this account may list ``directory`` and look up a name in it, as the project
+    root lookup does for its ``.git``: asked of the directory, since from Python 3.14
+    ``Path.exists`` answers ``False`` for a name in one it may not search, where 3.11 to
+    3.13 raise ``PermissionError``."""
+    return os.access(directory, os.R_OK | os.X_OK)
 
 
 def _holds_repositories(root: Path) -> bool:

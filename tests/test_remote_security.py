@@ -2301,15 +2301,26 @@ def _unsearchable(directory: Path) -> Iterator[Path]:
 @pytest.mark.skipif(not can_deny_reads(), reason="chmod(0) denies nothing here (root, or NTFS)")
 @pytest.mark.parametrize(
     ("where", "says"),
-    [("outside", "is outside your home directory"), ("inside", "cannot be read")],
+    [
+        ("outside", "is outside your home directory"),
+        ("inside", "cannot be read"),
+        ("inside a checkout", "cannot be read"),
+    ],
 )
 def test_a_directory_this_account_may_not_look_inside_is_invalid_not_a_failed_write(
     home: Path, tmp_path: Path, where: str, says: str
 ) -> None:
     """The root lookup asks for its ``.git``, and the ``PermissionError`` fell to 400
     ``write_failed`` with the system's own words, ``[Errno 13] Permission denied:
-    '/root/.git'``, for a write that never began (sweep 4 of #243)."""
-    parent = tmp_path / "elsewhere" if where == "outside" else home / "code"
+    '/root/.git'``, for a write that never began (sweep 4 of #243). From Python 3.14 the
+    lookup answers "no ``.git``" instead of raising: the directory was "neither a git
+    checkout nor a directory of repositories", and below a checkout the add took the
+    checkout (review of #243, round 9, 5/6)."""
+    parent = {
+        "outside": tmp_path / "elsewhere",
+        "inside": home / "code",
+        "inside a checkout": _repo(home / "code" / "app"),
+    }[where]
     with _unsearchable(parent / "locked") as locked, pytest.raises(RequestError) as refused:
         check_project_add_root(str(locked))
     assert (refused.value.status, refused.value.error) == (400, "invalid")

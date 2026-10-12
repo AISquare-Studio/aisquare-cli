@@ -998,7 +998,8 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
         # PR through `gh pr review`. `--restricted` would remove the Bash every step
         # below needs, so the fleet launches it denied Edit, Write and NotebookEdit
         # instead (`config.REVIEWER_ARGS`); never push and never merge are this
-        # briefing's alone.
+        # briefing's, and the credentials its shell runs with
+        # (`config._default_fleet_roles` says why no allowlist holds it).
         return [
             f"Your standing cycle (reviewer): `aisquare task next --status review --as {sid}`;",
             "if nothing,",

@@ -262,9 +262,13 @@ def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
     review`` — every step of its cycle — and no subagent it spawned could either,
     because a subagent's tools come from its session's. It kept ``Edit`` and
     ``Write``, so it was not read-only either. It now keeps the shell and is denied
-    the tools that edit files; what its shell could still do (``git push``, ``gh pr
-    merge``) its briefing forbids. Its whole input is a PR someone else wrote, so it
-    is the one role whose read-only is not left to the briefing alone.
+    the tools that edit files. The shell is NOT read-only: a PR that injects
+    ``sed -i``, ``git push`` or ``gh pr merge`` meets only its briefing and the
+    ``auto`` mode's per-action classifier (round 25 of #257). No allowlist of commands
+    holds it: its inline comments are ``gh api`` POSTs, a prefix a merge shares, and
+    verifying a finding runs the PR's own code. What holds against a PR that steers
+    it is the credentials it runs with: a ``gh`` token that cannot write contents
+    cannot push or merge, and branch protection.
     """
     return {
         "manager": FleetRoleSettings(),

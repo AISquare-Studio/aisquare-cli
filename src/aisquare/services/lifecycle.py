@@ -1074,9 +1074,11 @@ class UninstallPlan:
     in a repository (project and local scope). Uninstall leaves it, as Claude Code owns
     it, and it keeps running aisquare there: through uvx once the package is gone,
     which makes the home again (review of #257)."""
-    plugin_answers: Path | None = None
-    """The file the plugin's launcher keeps uv's answers in (:func:`plugin_answers`), when
-    it is there: outside the home, so named beside it, and deleted with it."""
+    plugin_answers: tuple[Path, ...] = ()
+    """The files the plugin's launcher keeps uv's answers in (:func:`plugin_answers`), each
+    where it or what a launcher cut short left beside it is there
+    (:func:`_plugin_answers_there`): outside the home, so named beside it, and deleted
+    with it."""
 
     @property
     def package_command(self) -> str:
@@ -1211,9 +1213,9 @@ class UninstallReport:
     """Why agents.json could not be updated, when it could not."""
     purged: bool = False
     purge_error: str | None = None
-    plugin_answers_error: str | None = None
-    """Why the plugin's answers about uv were not deleted with the home. A cache: said,
-    and it fails nothing."""
+    plugin_answers_errors: tuple[tuple[Path, str], ...] = ()
+    """Each answers file of the plan's that was not deleted with the home, and why. A
+    cache: said, and it fails nothing."""
     notes: tuple[str, ...] = ()
 
     @property
@@ -1854,22 +1856,38 @@ def running_fleet() -> tuple[tuple[str, ...], int, str | None]:
     return live, len(rows) - len(live), fleet_error
 
 
-def plugin_answers() -> Path:
+def plugin_answers(cache: str | None = None) -> Path:
     """The file the Claude Code plugin's launcher keeps uv's answers in.
 
     ``${XDG_CACHE_HOME:-~/.cache}/aisquare/plugin-tested-python``, as
-    plugins/claude-code/scripts/aisquare-hook names it: whether uv has a Python aisquare
-    is tested on, per uv and its settings. The one file aisquare writes outside the home,
+    plugins/claude-code/scripts/aisquare-hook names it, ``cache`` standing for
+    ``XDG_CACHE_HOME`` (this shell's when ``None``): whether uv has a Python aisquare is
+    tested on, per uv and its settings. The one file aisquare writes outside the home,
     so ``--purge`` would have left it, holding a uv path (round 20 of #257).
     """
-    cache = os.environ.get("XDG_CACHE_HOME") or str(agent_core.home() / ".cache")
-    return Path(cache) / "aisquare" / "plugin-tested-python"
+    if cache is None:
+        cache = os.environ.get("XDG_CACHE_HOME", "")
+    return Path(cache or str(agent_core.home() / ".cache")) / "aisquare" / "plugin-tested-python"
 
 
-def _plugin_answers_there() -> Path | None:
-    """:func:`plugin_answers` when there is a file (or a link) by that name, else ``None``."""
-    answers = plugin_answers()
-    return answers if os.path.lexists(answers) and not os.path.isdir(answers) else None
+def _plugin_answers_there() -> tuple[Path, ...]:
+    """Each place :func:`plugin_answers` may be holding something of the launcher's: the
+    file (or a link by its name), or what a launcher cut short left beside it
+    (:func:`_answers_cut_short`), with or without the file (round 26 of #257).
+
+    Asked under this shell's ``XDG_CACHE_HOME`` and under ``~/.cache``. The launcher
+    runs with the variables Claude Code started with, which this shell cannot read, and
+    a Claude Code started from a desktop launcher or an IDE often has none of the shell's.
+    """
+    places: dict[str, Path] = {}
+    for answers in (plugin_answers(), plugin_answers("")):
+        places.setdefault(os.path.realpath(answers.parent), answers)  # one folder, asked once
+    found: list[Path] = []
+    for answers in places.values():
+        there = os.path.lexists(answers) and not os.path.isdir(answers)
+        if there or _answers_cut_short(answers):
+            found.append(answers)
+    return tuple(found)
 
 
 def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
@@ -1958,11 +1976,14 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
     removals.extend(HookRemoval(site.config_dir, False, site.reason) for site in blocking)
     purged, purge_error = False, None
     hooks_failed = any(not removal.ok for removal in removals)
-    answers_error: str | None = None
+    answers_errors: list[tuple[Path, str]] = []
     if plan.purges and not hooks_failed:
         purged, purge_error = _purge(plan.home)
-        if purged and plan.plugin_answers is not None:
-            answers_error = _delete_plugin_answers(plan.plugin_answers)
+        if purged:
+            for answers in plan.plugin_answers:
+                error = _delete_plugin_answers(answers)
+                if error is not None:
+                    answers_errors.append((answers, error))
     elif plan.purge and plan.home_exists and hooks_failed:
         purge_error = "not attempted: hooks were left in a directory above"
     if not purged:
@@ -1989,7 +2010,7 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
         record_error=record_error,
         purged=purged,
         purge_error=purge_error,
-        plugin_answers_error=answers_error,
+        plugin_answers_errors=tuple(answers_errors),
         notes=tuple(_uninstall_notes(plan, removals, purged=purged)),
     )
 

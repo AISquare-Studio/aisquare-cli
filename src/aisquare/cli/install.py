@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from typing import Annotated, Any
 
 import typer
@@ -491,14 +492,10 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
             "keychain_tokens_kept": plan.keychain and bool(plan.accounts),
             "action": "delete" if plan.purges else "keep",
         },
-        "plugin_answers": (
-            None
-            if plan.plugin_answers is None
-            else {
-                "path": str(plan.plugin_answers),
-                "action": "delete" if plan.purges else "keep",
-            }
-        ),
+        "plugin_answers": [
+            {"path": str(answers), "action": "delete" if plan.purges else "keep"}
+            for answers in plan.plugin_answers
+        ],
         "purge_refusal": plan.purge_refusal,
         "live_agents": list(plan.live_agents),
         "unlistened": plan.unlistened,
@@ -546,8 +543,8 @@ def _home_line(plan: lifecycle_service.UninstallPlan) -> str:
     return f"{plan.home} — {what}"
 
 
-def _plugin_answers_line(plan: lifecycle_service.UninstallPlan) -> str:
-    return f"{plan.plugin_answers} — the Claude Code plugin's answers about uv's Pythons"
+def _plugin_answers_line(answers: Path) -> str:
+    return f"{answers} — the Claude Code plugin's answers about uv's Pythons"
 
 
 def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
@@ -574,8 +571,8 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
             # sign-in tokens in the Keychain, which nothing here touches (review of #253).
             _say("    their sign-in tokens stay in the macOS Keychain: sign out in each slot")
             _say("    (/logout in Claude Code) first to remove them")
-        if plan.plugin_answers is not None:
-            _say(f"  DELETE {_plugin_answers_line(plan)}")
+        for answers in plan.plugin_answers:
+            _say(f"  DELETE {_plugin_answers_line(answers)}")
     if plan.blocked:
         # What the run does: a site it cannot clean fails it, and it keeps both.
         _say(f"  then stop: {_blocked_keeps(plan)}, as {_blocked_reason(plan)}")
@@ -589,8 +586,8 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
         # Offered only where --purge could delete it, never for a home the guard refuses.
         offer = not plan.purge and plan.purge_refusal is None
         _say(f"  {_home_line(plan)}{' (delete it too with --purge)' if offer else ''}")
-        if plan.plugin_answers is not None:
-            _say(f"  {_plugin_answers_line(plan)}{' (and this with it)' if offer else ''}")
+        for answers in plan.plugin_answers:
+            _say(f"  {_plugin_answers_line(answers)}{' (and this with it)' if offer else ''}")
     lasting_mcp = plan.lasting_mcp
     if lasting_mcp:
         _say("  MCP servers that run aisquare (Claude Code owns .claude.json; remove each with")
@@ -619,6 +616,7 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
 
 def _emit_uninstall_report(report: lifecycle_service.UninstallReport) -> None:
     plan = report.plan
+    answers_errors = dict(report.plugin_answers_errors)
     if get_state().json_output:
         _echo_json(
             {
@@ -632,15 +630,14 @@ def _emit_uninstall_report(report: lifecycle_service.UninstallReport) -> None:
                     "deleted": report.purged,
                     "error": report.purge_error,
                 },
-                "plugin_answers": (
-                    None
-                    if plan.plugin_answers is None
-                    else {
-                        "path": str(plan.plugin_answers),
-                        "deleted": report.purged and report.plugin_answers_error is None,
-                        "error": report.plugin_answers_error,
+                "plugin_answers": [
+                    {
+                        "path": str(answers),
+                        "deleted": report.purged and answers not in answers_errors,
+                        "error": answers_errors.get(answers),
                     }
-                ),
+                    for answers in plan.plugin_answers
+                ],
                 "package": {
                     "command": plan.package_command,
                     "runs": report.package_runs,
@@ -664,10 +661,11 @@ def _emit_uninstall_report(report: lifecycle_service.UninstallReport) -> None:
             _say(f"✗ hooks in {hook.config_dir} were not removed: {hook.error}")
     if report.purged:
         _say(f"✓ deleted {plan.home}")
-        if plan.plugin_answers is not None and report.plugin_answers_error is None:
-            _say(f"✓ deleted {plan.plugin_answers}")
-        elif plan.plugin_answers is not None:
-            _say(f"⚠ {plan.plugin_answers} was not deleted: {report.plugin_answers_error}")
+        for answers in plan.plugin_answers:
+            if answers in answers_errors:
+                _say(f"⚠ {answers} was not deleted: {answers_errors[answers]}")
+            else:
+                _say(f"✓ deleted {answers}")
     elif report.purge_error is not None:
         _say(f"✗ {plan.home} was not deleted: {report.purge_error}")
     elif plan.home_exists:
@@ -705,8 +703,7 @@ def _uninstall_question(plan: lifecycle_service.UninstallPlan) -> str | None:
         steps.append(f"remove aisquare's hooks from {count} director{'ies' if count != 1 else 'y'}")
     if plan.purges:
         steps.append(f"DELETE {plan.home}")
-        if plan.plugin_answers is not None:
-            steps.append(f"DELETE {plan.plugin_answers}")
+        steps.extend(f"DELETE {answers}" for answers in plan.plugin_answers)
     if plan.package_reason is None and not plan.blocked:
         steps.append("remove the package")
     if not steps:

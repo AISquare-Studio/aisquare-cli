@@ -1171,7 +1171,7 @@ def test_the_plugins_answers_about_uv_are_named_beside_the_home_and_deleted_with
     result = runner.invoke(app, ["uninstall", "--yes", "--purge"])
 
     assert f"{answers} — the Claude Code plugin's answers about uv's Pythons (and this" in kept
-    assert planned["plugin_answers"] == {"path": str(answers), "action": "delete"}
+    assert planned["plugin_answers"] == [{"path": str(answers), "action": "delete"}]
     assert result.exit_code == 0, result.output
     assert f"✓ deleted {answers}" in result.stdout, result.stdout
     assert not answers.exists() and not answers.parent.exists(), "and the folder made for it"
@@ -1197,10 +1197,47 @@ def test_the_folder_the_plugins_answers_are_in_stays_while_it_holds_anything_els
     plain = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
     result = runner.invoke(app, ["uninstall", "--yes", "--purge"])
 
-    assert plain["plugin_answers"] == {"path": str(answers), "action": "keep"}
+    assert plain["plugin_answers"] == [{"path": str(answers), "action": "keep"}]
     assert result.exit_code == 0, result.output
     assert not answers.exists()
     assert (answers.parent / "notes.txt").read_text("utf-8") == "mine"
+
+
+@pytest.mark.parametrize("shell_xdg", [False, True], ids=["same-cache", "shell-names-another"])
+def test_a_purge_takes_what_a_launcher_cut_short_left_wherever_claude_code_kept_it(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shell_xdg: bool,
+) -> None:
+    """Round 26 of #257: the answers were planned only when their file was there, so a
+    launcher stopped before it ever moved its copy over the file left
+    ``plugin-tested-python.<pid>`` (a uv path and its settings) and the folder after
+    ``--purge``. And only this shell's ``XDG_CACHE_HOME`` was asked, while the launcher
+    runs with Claude Code's variables: one started from a desktop launcher or an IDE keeps
+    them in ``~/.cache`` whatever this shell names. Both places are asked, and the copy
+    alone is enough to plan them."""
+    if shell_xdg:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    folder = isolated_agent_home / ".cache" / "aisquare"
+    folder.mkdir(parents=True)
+    cut_short = folder / "plugin-tested-python.12345"
+    cut_short.write_text("ranged 1760000000 /home/u/.local/bin/uv >=3.11,<3.14\n", "utf-8")
+    answers = folder / "plugin-tested-python"
+    _initialised(runner, tmp_path)
+
+    planned = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
+    result = runner.invoke(app, ["uninstall", "--yes", "--purge"])
+
+    assert planned["plugin_answers"] == [{"path": str(answers), "action": "delete"}]
+    assert result.exit_code == 0, result.output
+    assert f"✓ deleted {answers}" in result.stdout, result.stdout
+    assert not cut_short.exists() and not folder.exists(), "the copy, and the folder made for it"
 
 
 def _repo_plugin_installed(

@@ -6298,7 +6298,8 @@ def _page_copy_skips(source: Path, directory: str, names: list[str]) -> set[str]
 
 
 def _page_copy_narrowed(root: Path) -> None:
-    """Take group and other write off every directory and file of an installed copy.
+    """Take group and other write off every directory and file of an installed copy, and
+    give each directory its owner's.
 
     ``copytree`` keeps the build's own modes (``copy2`` for each file, ``copystat`` for each
     directory) and the umask never applies: a build made on a FAT or exFAT drive, on a WSL
@@ -6307,14 +6308,39 @@ def _page_copy_narrowed(root: Path) -> None:
     Any of them could then replace ``index.html`` or its script, which are served before
     the passphrase, and take the passphrase and the device's cookie with them (sweep 5 of
     #243). The copy holds no link to look past: ``copytree`` copied what each one names.
+
+    A read-only build's 0555 directories came over as they were, and a directory moved to
+    another parent has its ``..`` rewritten, which takes write on the directory itself:
+    the copy could not leave the private directory it was made in, and the next install
+    could not empty it (review of #243, round 8, 1/6).
     """
     import stat
 
     for directory, _subdirectories, files in os.walk(root):
         for path in (directory, *(os.path.join(directory, name) for name in files)):
             mode = stat.S_IMODE(os.lstat(path).st_mode)
-            if mode & 0o022:
-                os.chmod(path, mode & ~0o022)
+            narrowed = (mode & ~0o022) | (stat.S_IWUSR if path == directory else 0)
+            if narrowed != mode:
+                os.chmod(path, narrowed)
+
+
+def _page_copy_removed(root: Path) -> None:
+    """Remove ``root``, a copy of a build or what is left of one, whatever modes it took.
+
+    ``copytree`` gives each directory its build's mode even when the copy fails part way
+    (``copystat`` runs after an error too), and ``rmtree`` cannot unlink what a 0555
+    directory holds: ``ignore_errors`` left each failed copy of a read-only build where it
+    was, as sweep 4 of #243 had them before, and an older install's copy the same way once
+    the next install moved it aside (review of #243, round 8, 1/6).
+    """
+    import stat
+
+    for directory, _subdirectories, _files in os.walk(root):
+        with contextlib.suppress(OSError):
+            mode = stat.S_IMODE(os.lstat(directory).st_mode)
+            if not mode & stat.S_IWUSR:
+                os.chmod(directory, mode | stat.S_IWUSR)
+    shutil.rmtree(root, ignore_errors=True)
 
 
 def install_page(source: Path) -> Path:
@@ -6358,7 +6384,7 @@ def install_page(source: Path) -> Path:
     try:
         shutil.copytree(source, staging, ignore=functools.partial(_page_copy_skips, source))
         _page_copy_narrowed(staging)
-        shutil.rmtree(previous, ignore_errors=True)
+        _page_copy_removed(previous)
         if destination.exists():
             destination.rename(previous)
         try:
@@ -6371,10 +6397,10 @@ def install_page(source: Path) -> Path:
         # Unique to this try, so no later install's own clean-up would ever find it: each
         # failed try (a full disk, a file it could not read) left another partial copy
         # holding the very space the refusal says to free (sweep 4 of #243).
-        shutil.rmtree(private, ignore_errors=True)
+        _page_copy_removed(private)
         raise
-    shutil.rmtree(private, ignore_errors=True)
-    shutil.rmtree(previous, ignore_errors=True)
+    _page_copy_removed(private)
+    _page_copy_removed(previous)
     return destination
 
 

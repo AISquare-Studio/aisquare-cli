@@ -203,6 +203,55 @@ def test_a_failed_install_leaves_no_partial_copy_and_the_page_before_it_served(
     ).read_text() == "<!doctype html><title>asq remote</title>"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows keeps no owner write bit on a directory")
+@pytest.mark.parametrize("fails", [None, "the copy"], ids=["installs", "fails"])
+def test_a_read_only_build_installs_and_leaves_no_copy_behind(
+    isolated_home: Path,
+    built: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fails: str | None,
+) -> None:
+    """A build whose directories are 0555 (a Nix store, a read-only mount, an archive that
+    kept its modes) was copied with them into the private directory, and a directory moved
+    to another parent needs write on itself for its ``..``: the swap raised
+    ``PermissionError``, and ``rmtree`` could not empty the 0555 copy, so each try left one
+    in ``~/.aisquare`` (review of #243, round 8, 1/6). An older install whose directories
+    are 0555, as a read-only build's were before the copy moved parent, is removed too."""
+    remote_server.install_page(built)
+    older = remote_dist_dir()
+    readonly = tmp_path / "readonly"
+    shutil.copytree(built, readonly)
+    (readonly / "index.html").write_text("<!doctype html><title>build 2</title>")
+    for path in (older / "assets", older, readonly / "assets", readonly):
+        path.chmod(0o555)
+    if fails == "the copy":
+        real_copytree = shutil.copytree
+
+        def copy_then_fill_the_disk(src: Path, dst: Path, *args: Any, **kwargs: Any) -> Any:
+            copied = real_copytree(src, dst, *args, **kwargs)
+            if ".staging-" in Path(dst).name:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return copied
+
+        monkeypatch.setattr(shutil, "copytree", copy_then_fill_the_disk)
+    try:
+        if fails:
+            with pytest.raises(OSError, match="No space left"):
+                remote_server.install_page(readonly)
+        else:
+            destination = remote_server.install_page(readonly)
+            assert (destination / "index.html").read_text().endswith("build 2</title>")
+            modes = [stat.S_IMODE(p.stat().st_mode) for p in (destination, destination / "assets")]
+            assert modes == [0o755, 0o755], "the next install can empty it"
+        home = remote_dist_dir().parent
+        assert [p.name for p in home.iterdir() if p.name.startswith(".remote-dist.")] == []
+    finally:
+        for path in (readonly, readonly / "assets", older, older / "assets"):
+            if path.exists():
+                path.chmod(0o755)
+
+
 def test_install_page_without_an_index_html_refuses_and_installs_nothing(
     isolated_home: Path, tmp_path: Path
 ) -> None:

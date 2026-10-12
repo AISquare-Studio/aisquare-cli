@@ -2019,32 +2019,6 @@ def test_the_rows_that_ended_since_are_chosen_by_the_query(store: ContextStore) 
     assert store.fleet_agents_ended_since("prj_other", since) == []
 
 
-def test_every_projects_live_rows_and_recent_endings_are_one_query(store: ContextStore) -> None:
-    """Needs-you finds the managers of every project on a shared board before each phone
-    action: one read across the projects, not one per project (review of #243, round 20)."""
-    from datetime import timedelta
-
-    from aisquare.models import FleetAgent
-
-    now = datetime.now(tz=UTC)
-    rows = (
-        ("agt_1", PROJECT.id, now - timedelta(days=2)),
-        ("agt_2", PROJECT.id, now - timedelta(hours=1)),
-        ("agt_3", "prj_other", None),
-        ("agt_4", "prj_other", now - timedelta(days=3)),
-    )
-    for n, (agent_id, project_id, ended) in enumerate(rows):
-        store.upsert_fleet_agent(
-            FleetAgent(
-                id=agent_id, project_id=project_id, label=f"coder-{n}", role="coder",
-                pane_id=f"%{n}", cwd=Path("/w"), created_at=now - timedelta(days=4, minutes=-n),
-                ended_at=ended, exit_status=None if ended is None else 0,
-            )
-        )  # fmt: skip
-    since = now - timedelta(days=1)
-    assert [row.id for row in store.fleet_agents_since(since)] == ["agt_2", "agt_3"]
-
-
 def test_the_sessions_seen_since_and_the_ones_named_are_chosen_by_the_query(
     store: ContextStore,
 ) -> None:

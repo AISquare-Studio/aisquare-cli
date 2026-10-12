@@ -716,32 +716,6 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
         assert store.fleet_agent_by_label(project.id, "manager") == agent
 
 
-def test_spawn_records_the_full_id_of_the_session_its_as_names(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
-) -> None:
-    """``--as`` takes an id prefix, and a manager is told to pass its short one: recorded as
-    given, a coder's ``spawned_by`` named no session's id, and needs-you could not tell
-    whose crew it was (review of #243, round 20). Anything the store cannot name, the user
-    and the hand-over among them, is recorded as given."""
-    now = datetime.now(tz=UTC)
-    manager = "a510229d-cca2-40fb-9d72-f8f52642691c"
-    with store_session() as store:
-        store.upsert_session(
-            TeamSession(
-                id=manager, project_id=project.id, role="manager", started_at=now,
-                last_seen_at=now,
-            )
-        )  # fmt: skip
-    spawned = [
-        fleet_service.spawn(project, "coder", label=f"coder-{n}", spawned_by=by).agent.spawned_by
-        for n, by in enumerate(("a510229d", "user", "usage-limit", "b0b0b0b0"))
-    ]
-    assert spawned == [manager, "user", "usage-limit", "b0b0b0b0"]
-    with store_session() as store:
-        row = store.fleet_agent_by_label(project.id, "coder-0")
-    assert row is not None and row.spawned_by == manager
-
-
 def test_spawn_with_an_account_carries_the_callers_environment_into_the_window(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

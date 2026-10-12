@@ -284,9 +284,9 @@ aisquare --json remote needs
 | permission | an agent waits for you to allow a tool (a Bash command, an edit), or shows one of Claude Code's own dialogs |
 | question | an agent asks you a question with options |
 | plan | an agent asks you to approve its plan |
-| board_question | the manager asks on the board, or a coder asks you (no `--to`, or `--to user`, `human`, `owner`, `all` or `everyone`), or asks its manager when that one is not there to answer (stopped, or parked on its usage limit) |
+| board_question | the manager asks on the board, or a coder asks you (no `--to`, or `--to user`, `human`, `owner`, `all` or `everyone`), or asks the manager when no manager is there to answer it (below) |
 | manager_down | the manager crashed; or, while its agents still work and before it reported a result, it was killed or lost (no exit status), or a switch or a restart could not start its replacement. A manager that exits cleanly (`fleet stop`, the phone's Stop, its own `/exit`) is taken to be done |
-| crashed | an agent exited with an error in the last hour, or was stopped for a switch or a restart that could not start its replacement, its task unfinished, while no manager of its project runs to handle it (one parked on its usage limit does not count) |
+| crashed | an agent exited with an error in the last hour, or was stopped for a switch or a restart that could not start its replacement, its task unfinished, while no manager is there to handle it (below) |
 | limited | an agent hit its usage limit; when the limit named its reset, the card tells it by the phone's clock, and the Board tab leaves out the reset its line says by the machine's |
 | failed | an agent's turn ended on an API error (a login that expired, credit that ran out, the API overloaded past Claude Code's own retries), and it waits at its prompt |
 | lost | an agent's pane is gone |
@@ -298,9 +298,18 @@ aisquare --json remote needs
 The board a project's cards come from is the one `aisquare board` shows in its
 directory: under `AISQUARE_TEAM_HUB` it is the hub's, and a question on a board
 that several projects share is one card, in the project of the agent that asked.
-An agent's manager is the one that spawned it (`fleet spawn --as`), in whichever
-project it runs; an agent you started yourself is its own project's manager's, or,
-with none running there, any manager's on its board.
+
+A manager is there to handle an item only when the fleet wakes it for that item:
+on a project's own board, the project's `manager` while it runs (not stopped, not
+parked on its usage limit), which a coder's board write, an agent's exit and a
+usage limit all nudge. A manager started outside the fleet, or a numbered seat
+such as `manager-2`, is never nudged, so it keeps nothing off the phone. For a
+project whose agents write another project's board (under `AISQUARE_TEAM_HUB` the
+hub's, for a worktree its principal checkout's), no manager is: every question
+and result on that board, and every crash, limit and failed hand-over of its
+agents, is a card and a push. That costs some extra cards, and never leaves one
+that nobody hears of. A stopped manager is `manager_down` for its own project's
+agents, with a hub as without.
 
 A card holds what you must read before answering: the exact call a permission
 is for, every field of it (the command or the path first, a list or an object

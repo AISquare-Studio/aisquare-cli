@@ -284,9 +284,9 @@ aisquare --json remote needs
 | permission | an agent waits for you to allow a tool (a Bash command, an edit), or shows one of Claude Code's own dialogs |
 | question | an agent asks you a question with options |
 | plan | an agent asks you to approve its plan |
-| board_question | the manager asks on the board, or a coder asks you (no `--to`, or `--to user`, `human`, `owner`, `all` or `everyone`), or asks a manager that is not there to answer (stopped, or parked on its usage limit) |
-| manager_down | the manager crashed; or, while agents still work and before it reported a result, it was killed or lost (no exit status), or a switch or a restart could not start its replacement. A manager that exits cleanly (`fleet stop`, the phone's Stop, its own `/exit`) is taken to be done |
-| crashed | an agent exited with an error in the last hour, or was stopped for a switch or a restart that could not start its replacement, its task unfinished, while no manager runs to handle it (one parked on its usage limit does not count) |
+| board_question | the manager asks on the board, or a coder asks you (no `--to`, or `--to user`, `human`, `owner`, `all` or `everyone`), or asks its manager when that one is not there to answer (stopped, or parked on its usage limit) |
+| manager_down | the manager crashed; or, while its agents still work and before it reported a result, it was killed or lost (no exit status), or a switch or a restart could not start its replacement. A manager that exits cleanly (`fleet stop`, the phone's Stop, its own `/exit`) is taken to be done |
+| crashed | an agent exited with an error in the last hour, or was stopped for a switch or a restart that could not start its replacement, its task unfinished, while no manager of its project runs to handle it (one parked on its usage limit does not count) |
 | limited | an agent hit its usage limit; when the limit named its reset, the card tells it by the phone's clock, and the Board tab leaves out the reset its line says by the machine's |
 | failed | an agent's turn ended on an API error (a login that expired, credit that ran out, the API overloaded past Claude Code's own retries), and it waits at its prompt |
 | lost | an agent's pane is gone |
@@ -298,6 +298,9 @@ aisquare --json remote needs
 The board a project's cards come from is the one `aisquare board` shows in its
 directory: under `AISQUARE_TEAM_HUB` it is the hub's, and a question on a board
 that several projects share is one card, in the project of the agent that asked.
+An agent's manager is the one that spawned it (`fleet spawn --as`), in whichever
+project it runs; an agent you started yourself is its own project's manager's, or,
+with none running there, any manager's on its board.
 
 A card holds what you must read before answering: the exact call a permission
 is for, every field of it (the command or the path first, a list or an object

@@ -1994,6 +1994,7 @@ def _write_row(
     with store_session() as store:
         if onboard:
             store.onboard_project(project)
+        agent = agent.model_copy(update={"spawned_by": _spawner(store, agent.spawned_by)})
         for _ in range(_LABEL_RETRIES):
             try:
                 stored = store.upsert_fleet_agent(agent)
@@ -2003,6 +2004,21 @@ def _write_row(
             _verify_cap(store, stored, cap)
             return stored
     raise FleetError(f"could not record {agent.label!r}: every label tried was taken")
+
+
+def _spawner(store: ContextStore, spawned_by: str | None) -> str | None:
+    """The full id of the session ``spawned_by`` names, which ``--as`` takes as an id prefix
+    (a manager is told to pass its short one); anything else as given: ``"user"``, the
+    hand-over's, a session the store does not know or cannot tell from another. Kept as
+    given, a manager's crew named a session no row's id is, and needs-you could not tell
+    whose crew it was (review of #243, round 20)."""
+    if not spawned_by:
+        return spawned_by
+    try:
+        session = store.get_session(spawned_by)
+    except AmbiguousIdError:
+        return spawned_by
+    return spawned_by if session is None else session.id
 
 
 def _relabel(

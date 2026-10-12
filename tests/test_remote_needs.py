@@ -3631,89 +3631,265 @@ def test_a_coder_whose_hand_over_never_started_its_replacement_is_reported_under
     ]
 
 
+@dataclass(frozen=True)
+class _Seat:
+    """One agent of a board: its fleet project (``""``: a manager session no row holds, on the
+    board), label and role; ``by``, the project whose manager spawned it (``""``: the one with
+    no row) or ``"user"``; how it ended, ``None`` while it works; and whether it asks the
+    manager on the board (``question --to manager``)."""
+
+    where: str
+    label: str
+    role: str = "coder"
+    by: str | None = None
+    end: str | None = None
+    """``crash`` (exit 1), ``hand-over`` (exit 0, its replacement never started) or ``stop``
+    (no status, as a kill leaves it)."""
+    asks: bool = False
+
+
+def _manager_of(where: str, **kw: Any) -> _Seat:
+    return _Seat(where, "manager", role="manager", **kw)
+
+
+def _seat_session(seat: _Seat) -> str:
+    return f"ses_{seat.where or 'board'}_{seat.label}"
+
+
+def _seat_up(store: Any, seat: _Seat, project: ProjectInfo | None, board: ProjectInfo) -> None:
+    """``seat``'s session on ``board`` and its row in ``project`` (none for ``None``), as of
+    an hour ago, and what it ended with and asked ten minutes ago."""
+    from aisquare.services import team as team_service
+
+    now = datetime.now(UTC)
+    stopped = now - timedelta(minutes=10)
+    session = _seat_session(seat)
+    store.upsert_session(
+        TeamSession(
+            id=session, project_id=board.id, role=seat.role, label=seat.label,
+            started_at=now - timedelta(hours=1), state="working",
+            last_seen_at=stopped if seat.end else now - timedelta(minutes=1),
+        )
+    )  # fmt: skip
+    if seat.asks:
+        team_service._emit(
+            store, board.id, "question", "Which branch?", session_id=session, to_role="manager"
+        )
+    if project is None:
+        return
+    status = {"crash": 1, "hand-over": 0}.get(seat.end or "")
+    spawner = seat.by if seat.by in (None, "user") else f"ses_{seat.by or 'board'}_manager"
+    row = store.upsert_fleet_agent(
+        FleetAgent(
+            id=f"agt_{seat.where}_{seat.label}", project_id=project.id, label=seat.label,
+            role=seat.role, pane_id=f"%{seat.where}-{seat.label}", session_id=session,
+            cwd=project.root, created_at=now - timedelta(hours=1),
+            spawned_by=spawner,
+            ended_at=stopped if seat.end else None, exit_status=status,
+        )
+    )  # fmt: skip
+    if seat.end:
+        why = fleet_service.HANDOVER_FAILED if seat.end == "hand-over" else None
+        fleet_service._emit_exit(store, row, why=why)
+
+
+def _seated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seats: tuple[_Seat, ...], *, hub: bool
+) -> dict[str, ProjectInfo]:
+    """alpha, beta, gamma and delta onboarded, every one of ``seats`` up, on a hub's board or
+    each on its own project's."""
+    with store_session() as store:
+        projects = {
+            name: store.onboard_project(_rooted(tmp_path / name))
+            for name in ("alpha", "beta", "gamma", "delta")
+        }
+        board = _rooted(tmp_path / "hub")
+        if hub:
+            monkeypatch.setenv("AISQUARE_TEAM_HUB", str(board.root))
+            store.ensure_project(board)
+        for seat in seats:
+            project = projects.get(seat.where)
+            _seat_up(store, seat, project, board if hub or project is None else project)
+    return projects
+
+
 @pytest.mark.parametrize(
-    ("hub", "manager_in", "crew_in", "case", "expected"),
+    ("hub", "seats", "expected"),
     [
-        pytest.param(False, "alpha", "alpha", "crash", [], id="no hub, crash"),
-        pytest.param(True, "alpha", "alpha", "crash", [], id="hub, one project, crash"),
         pytest.param(
-            True, "alpha", "beta", "crash", [("crashed", "beta", "coder-1")],
-            id="hub, two projects, crash",
+            False,
+            (
+                _manager_of("alpha"),
+                _Seat("alpha", "coder-1", by="alpha", asks=True),
+                _Seat("alpha", "coder-2", by="alpha", end="crash"),
+            ),
+            [],
+            id="no hub",
         ),
         pytest.param(
-            False, "alpha", "alpha", "hand-over", [("manager_down", "alpha", "manager")],
-            id="no hub, hand-over",
+            True,
+            (_manager_of("alpha"), _Seat("alpha", "coder-1", by="alpha", asks=True)),
+            [],
+            id="hub, the manager's own project asks, beside projects with no agents",
         ),
         pytest.param(
-            True, "alpha", "alpha", "hand-over", [("manager_down", "alpha", "manager")],
-            id="hub, one project, hand-over",
+            True,
+            (
+                _manager_of("alpha"),
+                _Seat("alpha", "coder-a", by="alpha"),
+                _Seat("beta", "coder-1", by="alpha", asks=True),
+            ),
+            [],
+            id="hub, one manager spawning coders in two projects",
         ),
         pytest.param(
-            True, "beta", "alpha", "hand-over", [("manager_down", "beta", "manager")],
-            id="hub, two projects, hand-over",
+            True,
+            (_manager_of(""), _Seat("beta", "coder-1", by="", asks=True)),
+            [],
+            id="hub, a manager with no row",
+        ),
+        pytest.param(
+            True,
+            (_manager_of("alpha"), _Seat("beta", "coder-1", by="alpha", end="crash")),
+            [("crashed", "beta", "coder-1")],
+            id="hub, a crash the fleet told no manager of",
+        ),
+        pytest.param(
+            True,
+            (
+                _manager_of("alpha"),
+                _Seat("alpha", "coder-1", by="alpha"),
+                _manager_of("beta", end="stop"),
+            ),
+            [],
+            id="hub, two managers, one stopped with no crew",
+        ),
+        pytest.param(
+            True,
+            (
+                _manager_of("alpha"),
+                _Seat("alpha", "coder-1", by="alpha"),
+                _manager_of("beta", end="stop"),
+                _Seat("beta", "coder-2", by="beta"),
+            ),
+            [("manager_down", "beta", "manager")],
+            id="hub, two managers, one stopped with its crew",
+        ),
+        pytest.param(
+            True,
+            (
+                _manager_of("alpha"),
+                _Seat("beta", "coder-1", by="user", asks=True),
+                _Seat("beta", "coder-2", by="user", end="crash"),
+            ),
+            [("crashed", "beta", "coder-2")],
+            id="hub, spawned by the user",
+        ),
+        pytest.param(
+            True,
+            (_Seat("alpha", "coder-1", by="user", end="hand-over"),),
+            [("crashed", "alpha", "coder-1")],
+            id="hub, a coder's hand-over that never started its replacement",
+        ),
+        pytest.param(
+            True,
+            (_manager_of("alpha", end="hand-over"), _Seat("beta", "coder-1", by="alpha")),
+            [("manager_down", "alpha", "manager")],
+            id="hub, the manager's hand-over that never started its replacement",
         ),
     ],
-)  # fmt: skip
-def test_a_row_its_exit_and_its_manager_are_its_fleet_projects_not_its_boards(
+)
+def test_a_rows_manager_is_the_session_that_spawned_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     hub: bool,
-    manager_in: str,
-    crew_in: str,
-    case: str,
+    seats: tuple[_Seat, ...],
     expected: list[tuple[str, str, str]],
 ) -> None:
-    """Under ``AISQUARE_TEAM_HUB`` several fleet projects write one board, and the scan took
-    the board for the project: a live manager in alpha hid beta's crashed coder, whom no
-    manager was nudged about (review of #243, round 19, 1/3), and a manager whose switch
-    never started its replacement was no card while its crew sat in another project (round
-    19, 2/3). A crash is its own project's manager's; a manager's crew is the board's. An
-    action's check of the card finds what the scan found."""
-    now = datetime.now(UTC)
-    hour_ago = now - timedelta(hours=1)
-    stopped = now - timedelta(minutes=10)
-    with store_session() as store:
-        projects = {
-            name: store.onboard_project(_rooted(tmp_path / name)) for name in ("alpha", "beta")
-        }
-        board = None
-        if hub:
-            board = _rooted(tmp_path / "hub")
-            monkeypatch.setenv("AISQUARE_TEAM_HUB", str(board.root))
-            store.ensure_project(board)
-        crashing = case == "crash"
-        rows = (
-            (projects[manager_in], "manager", "manager", "%1", not crashing),
-            (projects[crew_in], "coder-1", "coder", "%2", crashing),
-        )
-        for project, label, role, pane, ends in rows:
-            seen = stopped if ends else now - timedelta(minutes=1)
-            store.upsert_session(
-                TeamSession(
-                    id=f"ses_{label}", project_id=(board or project).id, role=role, label=label,
-                    started_at=hour_ago, last_seen_at=seen, state="working",
-                )
-            )  # fmt: skip
-            row = store.upsert_fleet_agent(
-                FleetAgent(
-                    id=f"agt_{label}", project_id=project.id, label=label, role=role,
-                    pane_id=pane, session_id=f"ses_{label}", cwd=project.root, created_at=hour_ago,
-                    ended_at=stopped if ends else None,
-                    exit_status=(1 if crashing else 0) if ends else None,
-                )
-            )  # fmt: skip
-            if ends:
-                why = None if crashing else fleet_service.HANDOVER_FAILED
-                fleet_service._emit_exit(store, row, why=why)
+    """Who manages a row was keyed by the board, then by the fleet project, and each was wrong
+    the other way: under ``AISQUARE_TEAM_HUB`` a coder's question to the one live manager
+    was a card and a push (review of #243, round 20, 1/3), and a manager stopped in beta
+    was a card for the crew alpha's live manager runs (round 20, 2/3). A row's manager is
+    the session that spawned it (``spawned_by``), wherever it is; a row the user spawned
+    falls back on its project's, then the board's. A crash is still a card when the fleet
+    told no live manager of it (round 19, 1/3), and a hand-over that never started its
+    replacement is one under a hub too (round 18, 1/4). An action's check of each agent
+    finds what the scan found, and no more."""
+    projects = _seated(tmp_path, monkeypatch, seats, hub=hub)
     tmux = FakeTmux()
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    now = datetime.now(UTC)
     items = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
     names = {project.id: name for name, project in projects.items()}
     assert [(item.kind, names[item.project_id], item.agent) for item in items] == expected
-    for item in items:
-        assert item.agent is not None
-        snap = needs_agent_now(projects[names[item.project_id]], item.agent, now=now)
-        assert needs_item_current(snap, item.id), "the card's Restart finds it current"
+    for seat in seats:
+        if seat.where:
+            project = projects[seat.where]
+            snap = needs_agent_now(project, seat.label, now=now)
+            scanned = [i for i in items if i.project_id == project.id and i.agent == seat.label]
+            assert sorted(i.id for i in snap.items) == sorted(i.id for i in scanned), seat
+
+
+def test_an_actions_check_reads_only_the_managers_of_the_other_projects_on_its_board(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Before each phone action, with the agent's lock held, ``needs_agent_now`` listed every
+    project on the board, under a hub every onboarded one: the store several times for
+    each, and tmux on every socket (review of #243, round 20, 3/3). It lists the agent's
+    own project, reads every project's rows in one go and derives the other projects'
+    managers alone; every agent on the board is listed only for a stopped manager, whose
+    card counts its crew wherever it is."""
+    seats = (
+        _manager_of("alpha"),
+        _Seat("alpha", "coder-a", by="alpha"),
+        _Seat("beta", "coder-1", by="alpha"),
+        _Seat("gamma", "coder-g", by="user"),
+        _Seat("delta", "coder-d", by="user"),
+    )
+    projects = _seated(tmp_path, monkeypatch, seats, hub=True)
+    names = {project.id: name for name, project in projects.items()}
+    reads: list[tuple[str, str]] = []
+    live = remote_needs.live_needs_sources
+
+    def counted() -> NeedsSources:
+        sources = live()
+
+        def count(what: str, read: Callable[..., Any], name: Callable[..., str]) -> Any:
+            def counting(*args: Any) -> Any:
+                reads.append((what, name(*args)))
+                return read(*args)
+
+            return counting
+
+        return replace(
+            sources,
+            list_agents=count("list", sources.list_agents, lambda p: names[p.id]),
+            has_live_agents=count("live", sources.has_live_agents, lambda pid: names[pid]),
+            ended_agents=count("ended", sources.ended_agents, lambda pid, since: names[pid]),
+            fleet_rows=count("rows", sources.fleet_rows, lambda since: "every project"),
+            agent_status=count(
+                "derive", sources.agent_status, lambda row: f"{names[row.project_id]}/{row.label}"
+            ),
+        )
+
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    monkeypatch.setattr(remote_needs, "live_needs_sources", counted)
+    snap = needs_agent_now(projects["beta"], "coder-1")
+    assert snap.status is not None and snap.status.state == "working"
+    assert reads == [
+        ("list", "beta"),
+        ("ended", "beta"),
+        ("rows", "every project"),
+        ("derive", "alpha/manager"),
+    ]
+    assert set(tmux.asked) == {"%beta-coder-1", "%alpha-manager"}, "no other agent's pane"
+    with store_session() as store:
+        store.end_fleet_agent("agt_alpha_manager")
+    reads.clear()
+    snap = needs_agent_now(projects["alpha"], "manager")
+    assert [item.kind for item in snap.items] == ["manager_down"]
+    assert sorted(name for what, name in reads if what == "list") == sorted(names.values())
 
 
 def test_a_project_on_another_board_reads_its_own_exits_only_with_a_listing() -> None:

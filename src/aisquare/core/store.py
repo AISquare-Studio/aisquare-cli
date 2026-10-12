@@ -1110,6 +1110,7 @@ class ContextStore(Protocol):
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
+    def fleet_agents_since(self, since: datetime) -> list[FleetAgent]: ...
     def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
@@ -3465,6 +3466,20 @@ class SqliteStore:
             f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
             "WHERE project_id = ? AND ended_at >= ? ORDER BY created_at, id",
             (project_id, since.astimezone(UTC).isoformat()),
+        ).fetchall()
+        return [_row_to_fleet_agent(row) for row in rows]
+
+    def fleet_agents_since(self, since: datetime) -> list[FleetAgent]:
+        """Every project's rows that are live or ended at or after ``since``, oldest first.
+
+        One read across the projects, for a reader that wants a few rows of each without
+        asking each in turn: ``remote``'s needs-you finds the managers on a shared board
+        (``AISQUARE_TEAM_HUB``) here before every phone action.
+        """
+        rows = self._conn.execute(
+            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            "WHERE ended_at IS NULL OR ended_at >= ? ORDER BY created_at, id",
+            (since.astimezone(UTC).isoformat(),),
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 

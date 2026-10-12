@@ -285,7 +285,7 @@ aisquare --json remote needs
 | question | an agent asks you a question with options |
 | plan | an agent asks you to approve its plan |
 | board_question | the manager asks on the board, or a coder asks you (no `--to`, or `--to user`, `human`, `owner`, `all` or `everyone`), or asks the manager when no manager is there to answer it (below) |
-| manager_down | the manager crashed; or, while its agents still work and before it reported a result, it was killed or lost (no exit status), or a switch or a restart could not start its replacement. A manager that exits cleanly (`fleet stop`, the phone's Stop, its own `/exit`) is taken to be done |
+| manager_down | the manager crashed; or, while its agents still work (on a shared board, whatever they do) and before it reported a result, it was killed or lost (no exit status), or a switch or a restart could not start its replacement. A manager that exits cleanly (`fleet stop`, the phone's Stop, its own `/exit`) is taken to be done |
 | crashed | an agent exited with an error in the last hour, or was stopped for a switch or a restart that could not start its replacement, its task unfinished, while no manager is there to handle it (below) |
 | limited | an agent hit its usage limit; when the limit named its reset, the card tells it by the phone's clock, and the Board tab leaves out the reset its line says by the machine's |
 | failed | an agent's turn ended on an API error (a login that expired, credit that ran out, the API overloaded past Claude Code's own retries), and it waits at its prompt |
@@ -310,8 +310,9 @@ project whose agents write another project's board (under `AISQUARE_TEAM_HUB` th
 hub's, for a worktree its principal checkout's), no manager is: every question
 and result on that board, and every crash, limit and failed hand-over of its
 agents, is a card and a push. That costs some extra cards, and never leaves one
-that nobody hears of. A stopped manager is `manager_down` for its own project's
-agents, with a hub as without.
+that nobody hears of. A stopped manager is `manager_down` while its own project's
+agents still work; on a board several projects share, whatever they do, since its
+crew may be another project's.
 
 A card holds what you must read before answering: the exact call a permission
 is for, every field of it (the command or the path first, a list or an object

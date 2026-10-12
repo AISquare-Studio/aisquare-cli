@@ -3813,15 +3813,28 @@ def _seated(
         ),
         pytest.param(
             True,
+            (_manager_of("alpha", end="hand-over"), _Seat("beta", "coder-1")),
+            [("manager_down", "alpha", "manager", 60)],
+            id="hub, the manager's failed hand-over, its crew in another project",
+        ),
+        pytest.param(
+            True,
             (
                 _manager_of("alpha"),
                 _Seat("alpha", "coder-1"),
                 _manager_of("beta", end="stop"),
                 _Seat("beta", "coder-2"),
                 _manager_of("gamma", end="stop"),
+                _manager_of("delta", end="exit"),
             ),
-            [("manager_down", "beta", "manager", 60)],
-            id="hub, a manager stopped is down for its own project's crew alone",
+            [("manager_down", "beta", "manager", 60), ("manager_down", "gamma", "manager", 60)],
+            id="hub, a manager stopped is down whatever its crew, one that exited is done",
+        ),
+        pytest.param(
+            False,
+            (_manager_of("alpha", end="stop"), _manager_of("beta", end="hand-over")),
+            [],
+            id="no hub, a manager stopped with none of its crew at work",
         ),
     ],
 )
@@ -3841,7 +3854,8 @@ def test_a_live_manager_keeps_an_item_off_the_phone_only_on_its_projects_own_boa
     whatever numbered seat runs (round 22, 5/7), and a numbered seat's own crash is a
     crash like any agent's. Under ``AISQUARE_TEAM_HUB`` every question, result,
     crash, limit and failed hand-over is a card and a push, and a manager that is down is
-    its own project's, from that project's rows. Each tuple is a card's kind, project,
+    its own project's, from that project's rows: stopped, or its hand-over failed, whatever
+    its crew, which may be another project's (round 22, 2/7). Each tuple is a card's kind, project,
     agent and the seconds its push waits. An action's check of each agent finds what the
     scan found, and no more."""
     projects = _seated(tmp_path, monkeypatch, seats, hub=hub)

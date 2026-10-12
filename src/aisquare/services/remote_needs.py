@@ -1818,7 +1818,15 @@ def _needs_scan_project(
             )
         )
         items.extend(
-            _needs_manager_down(statuses, rows, board_read, exits, project=project, now=now)
+            _needs_manager_down(
+                statuses,
+                rows,
+                board_read,
+                exits,
+                project=project,
+                now=now,
+                shared=board_id != project.id,
+            )
         )
         items.extend(
             _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
@@ -2187,6 +2195,7 @@ def _needs_manager_down(
     *,
     project: ProjectInfo,
     now: datetime,
+    shared: bool,
 ) -> list[NeedsItem]:
     """The ``manager`` row has ended and none replaced it, while its crew still needs one.
 
@@ -2204,10 +2213,14 @@ def _needs_manager_down(
     be read: a stop is then not reported at all, rather than for a last word nobody
     read; a crash needs no board.
 
-    Its crew is the project's own agents, ``statuses``, on a shared board as on its own
-    (:func:`_needs_nudged`). The row judged is the one the fleet nudges: a numbered seat
-    that runs is woken for nothing, so it hid the ``manager``'s crash, reported nowhere
-    (review of #243, round 22, 5/7); one that ends is :func:`_needs_crashed`'s.
+    Its crew is the project's own agents, ``statuses``. On a board it shares with other
+    projects (``shared``) its crew may be theirs, which no scan of its project reads: a
+    stop or a failed hand-over is reported there whatever its own project's agents do, so
+    one is never silent (review of #243, round 22, 2/7; :func:`_needs_nudged`).
+
+    The row judged is the one the fleet nudges: a numbered seat that runs is woken for
+    nothing, so it hid the ``manager``'s crash, reported nowhere (review of #243, round
+    22, 5/7); one that ends is :func:`_needs_crashed`'s.
     """
     from aisquare.services.fleet import MANAGER_LABEL
 
@@ -2227,7 +2240,7 @@ def _needs_manager_down(
             and status.agent.ended_at is None
             and status.state in ("working", "attention", "limited")
         ]
-        if not busy or board is None:
+        if not (busy or shared) or board is None:
             return []
         if manager.exit_status == 0 and not _needs_handover_failed(_needs_exit_of(manager, exits)):
             return []
@@ -2238,6 +2251,8 @@ def _needs_manager_down(
         reason = (
             f"the manager stopped while {count} agent{'s' if count != 1 else ''} "
             f"still work{'' if count != 1 else 's'}"
+            if busy
+            else "the manager stopped"
         )
     return [
         _needs_item(

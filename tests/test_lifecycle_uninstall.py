@@ -683,9 +683,9 @@ def test_a_live_row_blocks_only_while_its_server_listens(
     """A tmux that left PATH is no evidence the agents stopped (review of #253): the
     socket the row recorded is asked, and tmux is not. Nobody listening — a stale row —
     must not trap someone who cannot run `fleet shutdown` either (round 23 of #257)."""
-    asked: list[tuple[Path, bool]] = []
+    asked: list[tuple[Path | None, bool]] = []
 
-    def listens(path: Path, *, missing: bool) -> bool:
+    def listens(path: Path | None, *, missing: bool) -> bool:
         asked.append((path, missing))
         return listening
 
@@ -722,6 +722,7 @@ def test_the_probe_asks_the_socket_file_itself() -> None:
     and none at the path this shell rebuilds is no evidence (round 24 of #257)."""
     import socket as socket_module
 
+    assert lifecycle._listens(None, missing=True) is False, "no POSIX uid: no tmux server"
     if not hasattr(socket_module, "AF_UNIX"):
         pytest.skip("AF_UNIX sockets are what tmux needs")
     base = _short_base()
@@ -798,7 +799,8 @@ def test_a_row_from_another_boot_cannot_be_running(
     it started, and so is every row where this boot cannot be named."""
     asked: list[Path] = []
 
-    def listens(path: Path, *, missing: bool) -> bool:
+    def listens(path: Path | None, *, missing: bool) -> bool:
+        assert path is not None, "each row recorded its socket"
         asked.append(path)
         return True
 
@@ -831,9 +833,9 @@ def test_a_store_from_before_the_recorded_socket_is_read_as_nothing_recorded(
     ``socket_path`` or ``boot_id``: its live rows are asked as rows that recorded neither."""
     import sqlite3
 
-    asked: list[tuple[Path, bool]] = []
+    asked: list[tuple[Path | None, bool]] = []
 
-    def listens(path: Path, *, missing: bool) -> bool:
+    def listens(path: Path | None, *, missing: bool) -> bool:
         asked.append((path, missing))
         return True
 

@@ -1779,17 +1779,18 @@ def _live_fleet_agents() -> tuple[tuple[_LiveRow, ...], str | None]:
     )
 
 
-def _listens(path: Path, *, missing: bool) -> bool:
+def _listens(path: Path | None, *, missing: bool) -> bool:
     """Whether a server may be listening on the socket at ``path``, asked of the socket
     itself (no tmux needed); ``missing`` is the answer when there is no file there.
+    ``None`` is a host with no POSIX uid, where no tmux server can exist.
 
     ``False`` only on evidence that none is, because the cost of being wrong is removing
     hooks (or, with --purge, the home) under running agents: a file nobody listens on. A
     refusal to look (a denied directory) is no evidence.
     """
     family = getattr(socket, "AF_UNIX", None)
-    if family is None:
-        return False  # no AF_UNIX, so no tmux server can exist here at all
+    if path is None or family is None:
+        return False  # no POSIX uid or no AF_UNIX, so no tmux server can exist here
     probe = socket.socket(family, socket.SOCK_STREAM)
     probe.settimeout(2.0)
     try:
@@ -1824,9 +1825,9 @@ def _may_run(row: _LiveRow, this_boot: str | None) -> bool:
     if recorded is not None:
         return _listens(recorded, missing=False)
     try:
-        path = TmuxServer(socket_name).socket_path()
+        path: Path | None = TmuxServer(socket_name).socket_path()
     except TmuxUnavailable:
-        return False  # no POSIX uid, so no tmux server can exist here at all
+        path = None
     return _listens(path, missing=True)
 
 

@@ -36,7 +36,7 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetSettings
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import store_session
-from aisquare.core.tmux import PaneFacts, TmuxError, TmuxServer, TmuxUnavailable
+from aisquare.core.tmux import PaneFacts, SocketAnswer, TmuxError, TmuxServer, TmuxUnavailable
 from aisquare.core.workspace import project_id_for
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, ProjectInfo, Snapshot
 from aisquare.services import diagnostics
@@ -86,9 +86,13 @@ class FakeServer(TmuxServer):
         facts_raise: bool = False,
         absent: bool = False,
         started: datetime | None = None,
+        listened: SocketAnswer | None = None,
     ) -> None:
         super().__init__(socket, conf=Path("/nonexistent/fleet-tmux.conf"))
         self._present = present
+        self._listened = listened
+        """What the socket FILE says (:meth:`listener`): ``None`` is a file nobody listens on,
+        what tmux leaves when its server exits; ``"gone"`` no file, which a server outlives."""
         self._started = started
         """What ``#{start_time}`` answers; ``None`` — tmux did not say — judges nothing."""
         self._absent = absent
@@ -131,6 +135,10 @@ class FakeServer(TmuxServer):
     def server_absent(self) -> bool:
         self.asked.append("server_absent")
         return self._present and self._absent
+
+    def listener(self, recorded: Path | None = None) -> SocketAnswer | None:
+        self.asked.append("listener")
+        return self._listened
 
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
         self.asked.append(f"pane_facts:{pane_id}")
@@ -599,6 +607,41 @@ def test_fleet_check_warns_when_the_private_server_is_not_running(
     assert "manager" in check.detail
     assert check.fix and "aisquare fleet reap --all;" in check.fix
     assert "genuinely gone" in check.fix and "TMUX_TMPDIR" in check.fix
+    assert check.fix.endswith("aisquare fleet reap --all --server-down")
+
+
+def test_fleet_check_does_not_call_a_server_whose_socket_file_is_gone_not_running(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 29 of #257: tmux says "No such file or directory" for a socket file taken from
+    under a running server (systemd-tmpfiles, a logout), and `server_absent` reads that as
+    no server. The check said "is not running" and offered `reap --server-down`, which ends
+    the rows under their agents. Graded by the rule `uninstall` and `fleet shutdown` ask, a
+    row that may still run is said to, and the way back to its server comes first."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "this-boot")
+    project = _seed(tmp_path / "repo")
+    coder = _agent(project.id, "coder-1", "%2").model_copy(update={"boot_id": "this-boot"})
+    _seed(tmp_path / "repo", coder)
+    server = FakeServer(sessions=(), panes={}, absent=True, listened="gone")
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert check.status is CheckStatus.warn
+    assert "is not running" not in check.detail
+    assert "no tmux client reaches the private tmux server 'asq'" in check.detail
+    assert "may still be running: coder-1" in check.detail
+    assert check.fix and "SIGUSR1" in check.fix
+    assert check.fix.index("SIGUSR1") < check.fix.index("--server-down"), "the way back first"
+    assert "listener" in server.asked
+    # Negative control: a row from another boot cannot be running, socket file or not.
+    with store_session() as store:
+        store.upsert_fleet_agent(coder.model_copy(update={"boot_id": "an-earlier-boot"}))
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert "private tmux server 'asq' is not running: coder-1" in check.detail
+    assert "may still be running" not in check.detail
+    assert check.fix and "SIGUSR1" not in check.fix
     assert check.fix.endswith("aisquare fleet reap --all --server-down")
 
 

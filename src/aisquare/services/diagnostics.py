@@ -2980,9 +2980,11 @@ def _check_fleet(
                 exited.append(agent)
         problems: list[str] = []
         server_down = False
+        unreached: list[FleetAgent] = []
         by_socket: dict[fleet_service._Address, list[FleetAgent]] = {}
         for agent in gone:
             by_socket.setdefault(fleet_service._address(agent, config), []).append(agent)
+        this_boot = tmux_core.boot_id()
         for sock, agents in by_socket.items():
             listed = _fleet_labels(agents, names)
             if servers[sock].list_sessions():
@@ -2993,11 +2995,31 @@ def _check_fleet(
                 # A plain `reap` refuses a silent server (it may be alive under
                 # another TMUX_TMPDIR), so the fix prescribed here used to do
                 # nothing — measured: 10 rows reported, 0 reconciled.
-                server_down = True
-                problems.append(
-                    f"{len(agents)} recorded live but the private tmux server "
-                    f"'{sock}' is not running: {listed}"
-                )
+                # But tmux says it for a socket FILE that is gone too, which a
+                # server outlives (systemd-tmpfiles, a logout): graded by the rule
+                # `uninstall` and `fleet shutdown` ask, a row that may still run is
+                # not "not running", and `--server-down` would end it under its
+                # agent (round 29 of #257).
+                down: list[FleetAgent] = []
+                held: list[FleetAgent] = []
+                for agent in agents:
+                    answer = tmux_core.server_may_run(
+                        servers[sock], agent.socket_path, agent.boot_id, this_boot, agent.created_at
+                    )
+                    (down if answer is None else held).append(agent)
+                if down:
+                    server_down = True
+                    problems.append(
+                        f"{len(down)} recorded live but the private tmux server "
+                        f"'{sock}' is not running: {_fleet_labels(down, names)}"
+                    )
+                if held:
+                    unreached.extend(held)
+                    problems.append(
+                        f"{len(held)} recorded live but no tmux client reaches the private "
+                        f"tmux server '{sock}', as its socket file is gone or could not be "
+                        f"asked, and it may still be running: {_fleet_labels(held, names)}"
+                    )
             else:
                 # Silent but not absent: a protocol mismatch after a tmux upgrade,
                 # a wedged server, a socket under another TMUX_TMPDIR. The agents
@@ -3017,7 +3039,15 @@ def _check_fleet(
                 "Reconcile the rows with tmux (ended, lost, merged worktrees): "
                 "aisquare fleet reap --all"
             )
-            if server_down:
+            if unreached:
+                # Its server may run on, and the way back to it comes before the
+                # flag, which would end its rows as well (`reap --server-down` marks
+                # every row on a socket tmux finds no server behind).
+                fix += (
+                    "; if a server still runs behind a socket file that is gone, send it "
+                    "SIGUSR1, which makes tmux create its socket again, before anything else"
+                )
+            if server_down or unreached:
                 # tmux says no server is there — but doctor runs in this shell and
                 # cannot see a fleet alive under another TMUX_TMPDIR, so the flag
                 # is offered with its condition, not prescribed.

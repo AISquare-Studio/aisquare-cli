@@ -1206,6 +1206,12 @@ gone — you rebooted, or ran `kill-server` — say so:
 aisquare fleet reap --all --server-down
 ```
 
+`doctor` says instead that no tmux client reaches the server, which *may still be
+running*, when the row's socket file is gone (systemd-tmpfiles or a logout
+removed it while the server ran on): send that server `SIGUSR1`, which makes
+tmux create its socket again, before anything else, as `--server-down` would
+mark its rows lost under their agents.
+
 **The server was stopped outside the CLI.** Rows read `unknown (tmux
 unavailable)` and `reap` reaps nothing — correctly: it cannot ask. Once any
 project spawns again, a new server is up on the socket and hands the old pane

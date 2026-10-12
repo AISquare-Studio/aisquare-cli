@@ -100,17 +100,41 @@ def git_common_root(start: Path) -> Path | None:
     common = result.stdout.strip()
     if not common:
         return None
-    common_dir = Path(common)
-    if not common_dir.is_absolute():
-        common_dir = (start / common_dir).resolve()
+    return _common_dir_root((start / common).resolve())
+
+
+def _common_dir_root(common_dir: Path) -> Path | None:
+    """The project root of the repository whose common directory is ``common_dir``,
+    resolved, as :func:`git_common_root` reads git's and :func:`find_project_root` the
+    layout's; ``None`` for a submodule's."""
     if common_dir.name != ".git" and ".git" in common_dir.parts:
         # A submodule's common dir is <super>/.git/modules/<name> (deeper when
-        # nested) — git bookkeeping, not anyone's project root. Bail to the
-        # marker walk, which lands on the submodule checkout itself.
+        # nested) — git bookkeeping, not anyone's project root. Bail, and the
+        # caller lands on the submodule checkout itself.
         return None
     # <principal>/.git → <principal>; a bare repo's common dir is the repo itself.
-    root = common_dir.parent if common_dir.name == ".git" else common_dir
-    return root.resolve()
+    return common_dir.parent if common_dir.name == ".git" else common_dir
+
+
+def _layout_common_dir(checkout: Path) -> Path | None:
+    """The common directory of the checkout at ``checkout``, resolved, as git finds it
+    (``gitrepository-layout(5)``): its ``.git`` directory, or the one its ``.git`` file's
+    ``gitdir:`` names, or where that directory's ``commondir`` leads. ``None`` when one
+    of them is not there, a worktree whose principal moved or whose ``gitdir:`` is a
+    Windows path read from WSL: git cannot read that repository either."""
+    gitdir = checkout / ".git"
+    try:
+        if gitdir.is_file():
+            text = gitdir.read_text(encoding="utf-8", errors="replace")
+            if not text.startswith("gitdir:"):
+                return None
+            gitdir = checkout / text[len("gitdir:") :].strip()
+        commondir = gitdir / "commondir"
+        if commondir.is_file():
+            gitdir = gitdir / commondir.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    return gitdir.resolve() if gitdir.is_dir() else None
 
 
 def find_project_root(start: Path) -> Path:
@@ -119,14 +143,17 @@ def find_project_root(start: Path) -> Path:
     Git is asked first so that every worktree of a repository resolves to the
     principal checkout — a feature branch in ``../wt-auth`` shares the parent
     repo's context pool instead of starting empty. Where git gives no answer (not
-    installed, timed out, a worktree whose principal has gone), its answer is read
-    from the nearest ``.git``: that directory, or the principal a linked worktree's
-    ``.git`` file names (:func:`worktree_principal`). The marker walk stopped at the
-    first marker, a worktree's own root or a subdirectory's ``.aisquare``, so a
-    directory was one project while git answered and another while it did not
-    (review of #243, round 12, 2/10 and 4/10). Outside any checkout, the nearest
-    ancestor carrying a project marker, then ``start`` itself, so every directory
-    resolves to *some* project.
+    installed, timed out), the nearest ``.git`` is read as git reads it
+    (:func:`_layout_common_dir`), for the root git would give. The marker walk
+    stopped at the first marker, a worktree's own root or a subdirectory's ``.aisquare``,
+    so a directory was one project while git answered and another while it did not
+    (review of #243, round 12, 2/10 and 4/10); a linked worktree's ``gitdir:`` line read
+    alone gave a submodule's worktree ``<super>/.git/modules/<sub>``, a worktree whose
+    principal moved a directory that is not there, and a ``--separate-git-dir`` checkout
+    itself where git names its git directory (review of #243, round 13, 1/4 and 2/4). A
+    ``.git`` that names nothing there, or a submodule's, leaves the checkout itself.
+    Outside any checkout, the nearest ancestor carrying a project marker, then ``start``
+    itself, so every directory resolves to *some* project.
     """
     start = start.resolve()
     common = git_common_root(start)
@@ -134,12 +161,13 @@ def find_project_root(start: Path) -> Path:
         return common
     ancestors = (start, *start.parents)
     checkout = next((directory for directory in ancestors if (directory / ".git").exists()), None)
-    if checkout is not None:
-        return worktree_principal(checkout, ask_git=False) or checkout
-    return next((directory for directory in ancestors if marks_project_root(directory)), start)
+    if checkout is None:
+        return next((directory for directory in ancestors if marks_project_root(directory)), start)
+    common_dir = _layout_common_dir(checkout)
+    return (_common_dir_root(common_dir) if common_dir is not None else None) or checkout
 
 
-def worktree_principal(root: Path, *, ask_git: bool = True) -> Path | None:
+def worktree_principal(root: Path) -> Path | None:
     """The principal repository a LINKED worktree at ``root`` belongs to, else ``None``.
 
     Only a root whose ``.git`` is a FILE can be a linked worktree — a main
@@ -150,8 +178,7 @@ def worktree_principal(root: Path, *, ask_git: bool = True) -> Path | None:
     is the shape git writes, needs no subprocess, still resolves after the
     principal has been deleted, and covers a bare principal
     (``repo.git/worktrees/x``). Any other content is put to git itself, whose
-    ``--git-common-dir`` differs from ``--git-dir`` exactly for a worktree, unless
-    ``ask_git`` is false, for a caller git has just failed (:func:`find_project_root`).
+    ``--git-common-dir`` differs from ``--git-dir`` exactly for a worktree.
     """
     dotgit = root / ".git"
     try:
@@ -170,8 +197,6 @@ def worktree_principal(root: Path, *, ask_git: bool = True) -> Path | None:
             common = gitdir.parent.parent
             principal = common.parent if common.name == ".git" else common
             return principal.resolve()
-    if not ask_git:
-        return None
     principal_root = git_common_root(root)
     if principal_root is None or principal_root == root.resolve():
         return None

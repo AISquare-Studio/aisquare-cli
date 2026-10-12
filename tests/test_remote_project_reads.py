@@ -796,10 +796,12 @@ def test_a_worktrees_board_is_one_answer_everywhere_whether_git_answers_or_not(
     from aisquare.services import remote_needs
 
     principal = tmp_path / "principal"
-    (principal / ".git" / "worktrees" / "wt").mkdir(parents=True)
+    gitdir = principal / ".git" / "worktrees" / "wt"
+    gitdir.mkdir(parents=True)
+    (gitdir / "commondir").write_text("../..\n")  # as git writes it
     worktree = tmp_path / "wt"
     (worktree / "sub").mkdir(parents=True)
-    (worktree / ".git").write_text(f"gitdir: {principal / '.git' / 'worktrees' / 'wt'}\n")
+    (worktree / ".git").write_text(f"gitdir: {gitdir}\n")
     marked = principal / "marked"
     (marked / ".aisquare").mkdir(parents=True)
     asked: list[Path] = []

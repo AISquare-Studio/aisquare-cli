@@ -161,6 +161,47 @@ def test_team_and_context_agree_inside_a_submodule(
     assert team_project(sub).root == find_project_root(sub)
 
 
+@pytest.mark.parametrize(
+    "layout", ["submodule-worktree", "moved-principal", "separate-git-dir", "windows-gitdir"]
+)
+def test_a_failed_git_reads_the_layout_git_reads(
+    layout: str,
+    repo_with_worktree: tuple[Path, Path],
+    repo_with_submodule: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read from a linked worktree's ``gitdir:`` line alone, a failed git's answer was
+    ``<super>/.git/modules/<sub>`` for a submodule's worktree, whether git answered or not,
+    and a directory that is not there for a worktree whose principal moved or whose
+    ``gitdir:`` is a Windows path read from WSL: ``serve --stdio`` refused each as no
+    project root. A ``--separate-git-dir`` checkout was itself, where git names its git
+    directory (review of #243, round 13, 1/4 and 2/4). Read as git reads it, each is the
+    root a working git gives, and a checkout whose ``.git`` names nothing there is itself."""
+    from aisquare.core import workspace
+
+    repo, worktree = repo_with_worktree
+    _, sub = repo_with_submodule
+    if layout == "submodule-worktree":
+        start = expected = tmp_path / "dep-wt"
+        _git("worktree", "add", "-q", str(start), "-b", "wt", cwd=sub)
+    elif layout == "moved-principal":
+        repo.rename(tmp_path / "moved")
+        start = expected = worktree
+    elif layout == "separate-git-dir":
+        start, expected = tmp_path / "proj", tmp_path / "store" / "proj.git"
+        expected.parent.mkdir()
+        _git("init", "-q", f"--separate-git-dir={expected}", str(start), cwd=tmp_path)
+    else:
+        start = expected = tmp_path / "wsl"
+        start.mkdir()
+        (start / ".git").write_text("gitdir: C:/Users/me/repo/.git/worktrees/wsl\n")
+    assert find_project_root(start) == expected.resolve(), "with git"
+    monkeypatch.setattr(workspace, "git_common_root", lambda start: None)
+    assert find_project_root(start) == expected.resolve(), "with git failing"
+    assert team_project(start).root == expected.resolve()
+
+
 def test_a_plain_repo_is_still_its_own_root(tmp_path: Path) -> None:
     repo = tmp_path / "plain"
     (repo / "src").mkdir(parents=True)

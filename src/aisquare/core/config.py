@@ -303,10 +303,6 @@ _FORMER_REVIEWER_ARGS = ["--restricted"]
 CONFIG_VERSION = 1
 _VERSION_KEY = "config_version"
 
-#: What builds before ``config_version`` wrote into ``[fleet]`` for the one step there was
-#: (round 23 of #257): a file holding it is at version 1. The next save drops it.
-_FORMER_MARKER = "migrated_reviewer_args"
-
 
 def replacing_the_former_reviewer_default(args: Sequence[str]) -> list[str]:
     """``args``, or :data:`REVIEWER_ARGS` when they are exactly 0.6.0/0.7.0's reviewer default.
@@ -412,26 +408,21 @@ _MIGRATIONS: tuple[Callable[[dict[str, Any]], None], ...] = (_replace_the_former
 
 def _migrate(data: dict[str, Any]) -> None:
     """Bring a parsed config file to :data:`CONFIG_VERSION`, in place: every step of
-    :data:`_MIGRATIONS` from the file's own version on. The version and the former
-    marker are taken out, neither being a setting."""
+    :data:`_MIGRATIONS` from the file's own version on. The version is taken out, not
+    being a setting."""
     version = data.pop(_VERSION_KEY, None)
-    fleet = data.get("fleet")
-    marked = isinstance(fleet, dict) and fleet.pop(_FORMER_MARKER, None) is True
     if not isinstance(version, int) or isinstance(version, bool) or version < 0:
-        version = 1 if marked else 0
+        version = 0
     for step in _MIGRATIONS[version:]:
         step(data)
 
 
 def _versioned(dumped: dict[str, Any]) -> dict[str, Any]:
-    """``dumped`` as a file this build writes: ``config_version`` at its top, and no marker.
+    """``dumped`` as a file this build writes: ``config_version`` at its top.
 
     A higher version, which a newer build wrote and ``_keep_unknown`` kept, stays: that
     build's steps have run on the file, and must not run again on what this one saved.
     """
-    fleet = dumped.get("fleet")
-    if isinstance(fleet, dict):
-        fleet.pop(_FORMER_MARKER, None)
     kept = dumped.pop(_VERSION_KEY, None)
     newer = isinstance(kept, int) and not isinstance(kept, bool) and kept > CONFIG_VERSION
     return {_VERSION_KEY: kept if newer else CONFIG_VERSION, **dumped}

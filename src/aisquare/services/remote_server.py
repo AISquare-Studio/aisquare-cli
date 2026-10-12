@@ -6280,6 +6280,13 @@ PAGE_OPEN_TO_OTHERS = (
 """Why a ``--dist`` or an installed build that another account may change is no page
 (:func:`_page_open_to_others`)."""
 
+PAGE_NOT_READ = (
+    "{path} cannot be read to check that no other account may change the page that takes "
+    "the passphrase — chmod -R u+rX,go-w {root}, {remedy}"
+)
+"""Why a ``--dist`` or an installed build with a directory this account cannot list is no
+page (:func:`_page_open_to_others`)."""
+
 
 def _page_open_to_others(root: Path, remedy: str) -> str | None:
     """The refusal of the build at ``root`` when another account may change what a server
@@ -6292,13 +6299,14 @@ def _page_open_to_others(root: Path, remedy: str) -> str | None:
     replace ``index.html`` or its script, served before the passphrase, and take the
     passphrase and the device's cookie (review of #243, round 8, 3/6).
 
-    Another account may change a directory or a file that others may write, that a group
-    may write other than this account's own (a user private group, the one Fedora and
-    Debian give each user with a umask of 002, holds no one else:
-    :func:`_remote_private_group`), or that an account other than this one or root owns.
-    What a server never serves is not looked at: a hidden name, and a link, whose own mode
-    says nothing and whose target in the build is looked at where it is. Windows keeps no
-    such modes.
+    Each file and directory is looked at as its parent lists it (:func:`_page_entry_open`).
+    A directory this account cannot list is refused as one it cannot check: the walk passed
+    over it, its own mode and owner with it, and the server still serves a file inside it
+    by name, which needs only search. A directory another account made in the build while
+    the build was open stayed so, ``chmod -R go-w`` could not change it, and the check
+    passed (review of #243, round 9, 3/6). What a server never serves is not looked at: a
+    hidden name, and a link, whose own mode says nothing and whose target in the build is
+    looked at where it is. Windows keeps no such modes.
     """
     import sys
 
@@ -6307,24 +6315,46 @@ def _page_open_to_others(root: Path, remedy: str) -> str | None:
     import stat
 
     own_group = _remote_private_group()
-    owners = {os.getuid(), 0}
-    for directory, subdirectories, files in os.walk(root):
+
+    def refusal(path: str) -> str | None:
+        try:
+            info = os.lstat(path)
+        except OSError:
+            return None
+        if stat.S_ISLNK(info.st_mode) or not _page_entry_open(info, own_group):
+            return None
+        return PAGE_OPEN_TO_OTHERS.format(path=path, root=root, remedy=remedy)
+
+    if (problem := refusal(str(root))) is not None:
+        return problem
+    unread: list[OSError] = []
+    for directory, subdirectories, files in os.walk(root, onerror=unread.append):
+        if unread:
+            break
         subdirectories[:] = [name for name in subdirectories if not name.startswith(".")]
-        shown = (os.path.join(directory, name) for name in files if not name.startswith("."))
-        for path in (directory, *shown):
-            try:
-                info = os.lstat(path)
-            except OSError:
+        for name in (*subdirectories, *files):
+            if name.startswith("."):
                 continue
-            if stat.S_ISLNK(info.st_mode):
-                continue
-            if (
-                info.st_mode & stat.S_IWOTH
-                or (info.st_mode & stat.S_IWGRP and info.st_gid != own_group)
-                or info.st_uid not in owners
-            ):
-                return PAGE_OPEN_TO_OTHERS.format(path=path, root=root, remedy=remedy)
+            if (problem := refusal(os.path.join(directory, name))) is not None:
+                return problem
+    if unread:
+        return PAGE_NOT_READ.format(path=unread[0].filename or root, root=root, remedy=remedy)
     return None
+
+
+def _page_entry_open(info: os.stat_result, own_group: int | None) -> bool:
+    """Whether another account may change the file or directory ``info`` was read from:
+    one that others may write, that a group may write other than this account's own (a
+    user private group, the one Fedora and Debian give each user with a umask of 002,
+    holds no one else: :func:`_remote_private_group`), or that an account other than this
+    one or root owns."""
+    import stat
+
+    return bool(
+        info.st_mode & stat.S_IWOTH
+        or (info.st_mode & stat.S_IWGRP and info.st_gid != own_group)
+        or info.st_uid not in {os.getuid(), 0}
+    )
 
 
 def _remote_private_group() -> int | None:

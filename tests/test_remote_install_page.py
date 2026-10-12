@@ -36,6 +36,7 @@ from aisquare.cli.app import app as cli
 from aisquare.core.paths import remote_audit_path, remote_dist_dir, remote_state_path
 from aisquare.services import remote_page, remote_server
 from aisquare.services.remote_server import NO_PAGE_HINT, NoRemotePage, Runtime, build_app
+from tests.fsperms import can_deny_reads
 from tests.remote_kit_helpers import make_client
 
 
@@ -632,6 +633,41 @@ def test_a_build_another_account_may_change_is_no_page_to_serve(
             assert problem.startswith(str(changed).rstrip("/") + " ")
         with pytest.raises(NoRemotePage, match="can be written by another account"):
             remote_server.run_foreground(dist_dir=None if installed else built, port=free_port())
+
+
+@pytest.mark.skipif(not can_deny_reads(), reason="this account lists any directory (root, or NTFS)")
+@pytest.mark.parametrize("installed", [False, True], ids=["dist", "installed"])
+@pytest.mark.parametrize(
+    ("mode", "says"),
+    [(0o333, "can be written by another account"), (0o311, "cannot be read to check")],
+    ids=["others-may-write", "this-account-may-not-list"],
+)
+def test_a_directory_of_the_build_this_account_cannot_list_is_still_looked_at(
+    isolated_home: Path,
+    built: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    installed: bool,
+    mode: int,
+    says: str,
+) -> None:
+    """The walk passed over a directory this account could not list, its own mode and owner
+    with it, and the server still serves a file inside it by name, which needs only search:
+    a world-writable ``assets`` at 0333 left the build served (review of #243, round 9,
+    3/6). Its mode is read where its parent lists it, and one that cannot be listed is a
+    build that cannot be checked."""
+    root = remote_server.install_page(built) if installed else built
+    monkeypatch.setattr(remote_server, "_remote_private_group", lambda: None)
+    assets = root / "assets"
+    assets.chmod(mode)
+    try:
+        served = remote_server._built_page_file(root.resolve(), "assets/app.js")
+        problem = remote_server._page_missing(None if installed else built)
+    finally:
+        assets.chmod(0o755)
+
+    assert served is not None, "the premise: a file in it is served by name"
+    assert problem is not None and problem.startswith(f"{assets} "), problem
+    assert says in problem and f"go-w {root}," in problem
 
 
 def test_install_page_leaves_behind_what_a_server_would_not_serve(

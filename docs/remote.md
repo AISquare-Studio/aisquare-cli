@@ -131,9 +131,10 @@ The page is part of aisquare-cli, so a fresh machine needs no other step.
 `node_modules`), and neither copies nor serves a hidden file such as `.env` or
 `.git`: what is served is open to anyone with the link, before the passphrase. Nor
 is a build another account could change served: one with a file or directory that
-others, or a group other than your own, may write, or that another account owns.
-`chmod -R go-w` it, or install it with `install-page`, whose copy no other account
-may write. To go back to the bundled page:
+others, or a group other than your own, may write, or that another account owns, or
+a directory you cannot list, and so cannot check. `chmod -R go-w` it, or install it
+with `install-page`, whose copy no other account may write. To go back to the
+bundled page:
 
 ```sh
 rm -rf ~/.aisquare/remote-dist

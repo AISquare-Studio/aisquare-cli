@@ -19,7 +19,6 @@ import re
 import shutil
 import socket
 import sqlite3
-import subprocess
 import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
@@ -39,7 +38,7 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.core.store import store_session
-from aisquare.core.tmux import TmuxError, TmuxServer, TmuxUnavailable
+from aisquare.core.tmux import TmuxServer, TmuxUnavailable, boot_id
 from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import current_project
 from aisquare.models import ClaudeIdentity, SetupReport
@@ -1673,9 +1672,16 @@ def _claude_dirs_for_mcp() -> list[Path]:
 
 
 _LIVE_ROWS = (
-    "SELECT f.label, f.tmux_socket, p.root, f.created_at FROM fleet_agent AS f "
+    "SELECT f.label, f.tmux_socket, p.root, {recorded} FROM fleet_agent AS f "
     "LEFT JOIN project AS p ON p.id = f.project_id WHERE f.ended_at IS NULL"
 )
+#: The facts a row has recorded since v25 (``FleetAgent.socket_path``, ``.boot_id``), and
+#: what a store from before them answers in their place: nothing recorded.
+_RECORDED = "f.socket_path, f.boot_id"
+_NOTHING_RECORDED = "NULL, NULL"
+#: One live fleet row: ``(label (project), socket, socket path, boot id)``, the last two
+#: what its spawn recorded of where its server listened and in which boot, else ``None``.
+_LiveRow = tuple[str, str, Path | None, str | None]
 
 
 def _siblings_hiding_hooks() -> list[Path]:
@@ -1700,18 +1706,17 @@ def _siblings_hiding_hooks() -> list[Path]:
     return found
 
 
-def _live_fleet_agents() -> tuple[tuple[tuple[str, str, datetime | None], ...], str | None]:
-    """The fleet's live rows as ``(label (project), socket, started)``, or why they could not
-    be read; ``started`` is ``None`` where the row's time does not parse.
+def _live_fleet_agents() -> tuple[tuple[_LiveRow, ...], str | None]:
+    """The fleet's live rows (:class:`_LiveRow`), or why they could not be read.
 
     Read with a plain ``query_only`` connection, never through ``store_session``:
     that runs ``ensure_home`` (recreating ``cache/`` and ``log/``) and migrates
     the schema, and the plan writes nothing (review of #253). As the last
     connection, its close leaves no ``-wal``/``-shm`` behind; a ``mode=ro`` one
     would (measured). Opened only when ``context.db`` exists and is not empty. A
-    store from before the fleet has no rows to count; any other store that
-    cannot answer is reported, never raised — a damaged board is no reason to
-    keep a user from removing the tool.
+    store from before the fleet has no rows to count, and one from before v25 has
+    rows with nothing recorded; any other store that cannot answer is reported,
+    never raised — a damaged board is no reason to keep a user from removing the tool.
     """
     database = paths.db_path()
     try:
@@ -1725,7 +1730,12 @@ def _live_fleet_agents() -> tuple[tuple[tuple[str, str, datetime | None], ...], 
         return (), str(exc) or type(exc).__name__
     try:
         connection.execute("PRAGMA query_only = ON")
-        rows = connection.execute(_LIVE_ROWS).fetchall()
+        try:
+            rows = connection.execute(_LIVE_ROWS.format(recorded=_RECORDED)).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such column" not in str(exc):
+                raise
+            rows = connection.execute(_LIVE_ROWS.format(recorded=_NOTHING_RECORDED)).fetchall()
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):
             return (), None  # a store from before the fleet: nothing can be live
@@ -1739,85 +1749,32 @@ def _live_fleet_agents() -> tuple[tuple[tuple[str, str, datetime | None], ...], 
             (
                 f"{label} ({Path(root).name if root else 'unknown project'})",
                 socket_name or "asq",
-                _parsed_time(created),
+                Path(path) if path else None,
+                booted or None,
             )
-            for label, socket_name, root, created in rows
+            for label, socket_name, root, path, booted in rows
         ),
         None,
     )
 
 
-def _parsed_time(value: object) -> datetime | None:
-    """A row's ISO time, made aware (the store writes UTC), or ``None`` if it is not one."""
-    try:
-        parsed = datetime.fromisoformat(str(value))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
-
-
-#: tmux's two answers that no server is behind a socket (``TmuxServer.server_absent``): a
-#: file nobody listens on, and no file at the path it names.
-_NOBODY_LISTENS = re.compile(r"no server running on ")
-_NO_SOCKET_FILE = re.compile(r"error connecting to (.+) \(No such file or directory\)")
-
-
-def _socket_directory_there(socket_name: str) -> bool:
-    """Whether the directory tmux's default path for ``socket_name`` lies in is there."""
-    try:
-        return TmuxServer(socket_name).socket_path().parent.is_dir()
-    except (TmuxUnavailable, OSError):
-        return False
-
-
-def _server_listening(socket_name: str, there: bool) -> bool:
-    """Whether a tmux server may be answering on fleet socket ``socket_name``.
+def _listens(path: Path, *, missing: bool) -> bool:
+    """Whether a server may be listening on the socket at ``path``, asked of the socket
+    itself (no tmux needed); ``missing`` is the answer when there is no file there.
 
     ``False`` only on evidence that none is, because the cost of being wrong is removing
-    hooks (or, with --purge, the home) under running agents. Two answers are that
-    evidence: a socket file nobody listens on, and no socket file in a socket directory
-    that was ``there`` (:func:`_socket_directory_there`, looked at before tmux was asked
-    about any socket: tmux makes the directory as it looks, measured on 3.7c). One that
-    was not there is not evidence: the server may keep its socket where this shell does
-    not look, under a ``TMUX_TMPDIR`` set where the fleet was started and not here
-    (round 24 of #257). A reboot sweeps the directory too, and :func:`_booted_at` tells it.
-
-    With tmux on PATH tmux is asked, which looks where it keeps its own sockets, a tmux built
-    with another directory (Termux) included; no file there, when there is not this shell's
-    path, is no server. Without it the socket is probed at tmux's default path
-    (``TmuxServer.socket_path``): a missing binary is no evidence the agents stopped, since
-    they may have been started from a shell whose PATH had it (``core.tmux``).
+    hooks (or, with --purge, the home) under running agents: a file nobody listens on. A
+    refusal to look (a denied directory) is no evidence.
     """
-    server = TmuxServer(socket_name, conf=Path(os.devnull))  # asks only: writes no conf
-    try:
-        path = server.socket_path()
-    except TmuxUnavailable:
-        return False  # no POSIX uid, so no tmux server can exist here at all
-    if server.available():
-        try:
-            server.run("display-message", "-p", "#{version}")
-        except TmuxUnavailable:
-            pass  # gone between PATH and exec: probe the socket as without it
-        except TmuxError as exc:
-            said = str(exc)
-            if _NOBODY_LISTENS.search(said):
-                return False
-            missing = _NO_SOCKET_FILE.search(said)
-            if missing is None:
-                return True  # refused, wedged, timed out, unsafe: no evidence none runs
-            looked = os.path.realpath(missing.group(1)) == os.path.realpath(path)
-            return looked and not there
-        else:
-            return True
     family = getattr(socket, "AF_UNIX", None)
     if family is None:
-        return False
+        return False  # no AF_UNIX, so no tmux server can exist here at all
     probe = socket.socket(family, socket.SOCK_STREAM)
     probe.settimeout(2.0)
     try:
         probe.connect(str(path))
     except FileNotFoundError:
-        return not there
+        return missing
     except ConnectionRefusedError:
         return False
     except OSError:
@@ -1827,57 +1784,39 @@ def _server_listening(socket_name: str, there: bool) -> bool:
     return True
 
 
-def _booted_at() -> datetime | None:
-    """When this machine last booted, where it says (Linux, macOS and the BSDs), else ``None``.
+def _may_run(row: _LiveRow, this_boot: str | None) -> bool:
+    """Whether the agent of live ``row`` may still be running.
 
-    No process outlives a reboot, so a fleet row started before it is not running, whatever
-    its socket says: after a reboot the socket directory is gone, which :func:`_server_listening`
-    cannot tell from a socket kept elsewhere. Read as the fleet compares a row with its
-    server's start (``fleet._outlived``), by the wall clock.
+    Asked of what its spawn recorded, never inferred from the shell asking (round 25 of
+    #257). A row from another boot cannot be running: no process outlives a reboot. One
+    with its server's socket path is asked at that path, whatever ``TMUX_TMPDIR`` this
+    shell has and wherever this tmux build keeps sockets; no file there is no server.
+    A row from before v25 recorded neither and is asked at tmux's default path for this
+    shell (``TmuxServer.socket_path``), where no file is no evidence: its server may keep
+    the socket under another ``TMUX_TMPDIR``. Such a row counts until ``fleet shutdown``,
+    which the refusal names, ends it. Whether that path's directory is there settled
+    nothing: tmux makes it as it looks, so any probe made it there (round 24 and 25).
     """
+    _label, socket_name, recorded, booted = row
+    if booted is not None and this_boot is not None and booted != this_boot:
+        return False
+    if recorded is not None:
+        return _listens(recorded, missing=False)
     try:
-        with open("/proc/stat", encoding="ascii") as stat:
-            for line in stat:
-                if line.startswith("btime "):
-                    return datetime.fromtimestamp(int(line.split()[1]), tz=UTC)
-    except (OSError, ValueError, IndexError):
-        pass
-    sysctl = shutil.which("sysctl")
-    if sysctl is None:
-        return None
-    try:
-        completed = subprocess.run(
-            [sysctl, "-n", "kern.boottime"], capture_output=True, text=True, timeout=5, check=False
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    found = re.search(r"\bsec = (\d+)", completed.stdout)  # { sec = 1760000000, usec = … } …
-    return datetime.fromtimestamp(int(found.group(1)), tz=UTC) if found else None
+        path = TmuxServer(socket_name).socket_path()
+    except TmuxUnavailable:
+        return False  # no POSIX uid, so no tmux server can exist here at all
+    return _listens(path, missing=True)
 
 
 def running_fleet() -> tuple[tuple[str, ...], int, str | None]:
     """``(live, unlistened, error)``: the fleet agents that may be running, the live rows
-    that cannot be (no server on their socket), and why the fleet could not be read. The
-    one count upgrade and uninstall both act on.
-
-    A row started before this machine last booted cannot be running; any other is asked of
-    its socket (:func:`_server_listening`), whether tmux is on PATH or not. With tmux there,
-    every live row counted as running, so after a reboot uninstall refused and upgrade
-    warned of agents that were not there (round 23 of #257).
+    that cannot be (:func:`_may_run`), and why the fleet could not be read. The one count
+    upgrade and uninstall both act on.
     """
     rows, fleet_error = _live_fleet_agents()
-    booted = _booted_at() if rows else None
-    since = [  # no process outlives a reboot
-        (label, socket_name)
-        for label, socket_name, started in rows
-        if booted is None or started is None or started >= booted
-    ]
-    sockets = sorted({socket_name for _, socket_name in since})
-    there = {socket_name: _socket_directory_there(socket_name) for socket_name in sockets}
-    listening = {
-        socket_name: _server_listening(socket_name, there[socket_name]) for socket_name in sockets
-    }
-    live = tuple(label for label, socket_name in since if listening[socket_name])
+    this_boot = boot_id() if rows else None
+    live = tuple(row[0] for row in rows if _may_run(row, this_boot))
     return live, len(rows) - len(live), fleet_error
 
 

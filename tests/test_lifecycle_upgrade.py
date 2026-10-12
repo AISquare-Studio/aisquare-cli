@@ -1969,7 +1969,7 @@ def test_live_fleet_agents_are_named_before_the_install_is_replaced_under_them(
     """uninstall refuses while fleet agents run; upgrade never read the fleet, and a hook
     fired while uv recreates the environment fails, losing that turn's board update and
     the manager's wake-up (review of #257). Said in the plan, the question and under --yes."""
-    monkeypatch.setattr(lifecycle, "_server_listening", lambda _socket, _there: True)
+    monkeypatch.setattr(lifecycle, "_listens", lambda _path, *, missing: True)
     monkeypatch.setattr(install_cli, "_stdin_is_a_terminal", lambda: True)
     asked: list[str] = []
 

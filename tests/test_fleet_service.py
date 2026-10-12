@@ -3824,19 +3824,15 @@ def test_shutdown_records_rows_lost_with_a_reason_when_the_server_was_killed_by_
         assert store.fleet_agents(project.id, live_only=True) == []
 
 
-_needs_unix_sockets = pytest.mark.skipif(
-    not hasattr(os, "getuid") or not hasattr(socket, "AF_UNIX"),
-    reason="AF_UNIX sockets and a POSIX uid are what tmux needs",
-)
-
-
 @contextmanager
 def _socket_file(name: str, *, listening: bool) -> Iterator[Path]:
     """A real socket file at ``<short dir>/tmux-<uid>/<name>``, the shape tmux makes:
     listening, or stale, as tmux leaves it when its server exits. Under ``/tmp``, as an
-    AF_UNIX path is small (about 100 bytes)."""
+    AF_UNIX path is small (about 100 bytes). Skips where tmux cannot run."""
     import tempfile
 
+    if not hasattr(socket, "AF_UNIX") or not hasattr(os, "getuid"):
+        pytest.skip("AF_UNIX sockets and a POSIX uid are what tmux needs")
     base = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp"))
     path = base / f"tmux-{os.getuid()}" / name
     path.parent.mkdir()
@@ -3858,7 +3854,6 @@ def _recorded_at(agent: FleetAgent, path: Path) -> FleetAgent:
         return store.upsert_fleet_agent(agent.model_copy(update={"socket_path": path}))
 
 
-@_needs_unix_sockets
 def test_shutdown_records_rows_lost_over_the_real_tmux_wrapper(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3889,6 +3884,8 @@ def test_shutdown_leaves_live_a_row_whose_socket_was_taken_from_under_its_server
     shutdown`. That ended the row as lost because `tmux -L` found no server, stopping
     nothing, and the next `uninstall` went on under the running agent. Both now ask one
     rule: the row is left live with what to do, until `--forget` is the operator's word."""
+    if not hasattr(socket, "AF_UNIX") or not hasattr(os, "getuid"):
+        pytest.skip("AF_UNIX sockets and a POSIX uid are what tmux needs: uninstall asks one")
     coder = _coder(project)
     tmux.running = False  # no tmux client reaches the server…
     tmux.socket_file = False  # …because its socket file is gone, not because it exited
@@ -3916,7 +3913,6 @@ def test_shutdown_leaves_live_a_row_whose_socket_was_taken_from_under_its_server
     assert lifecycle.running_fleet()[0] == ()
 
 
-@_needs_unix_sockets
 def test_shutdown_leaves_live_a_row_whose_server_listens_where_this_shell_does_not_look(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

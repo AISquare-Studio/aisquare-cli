@@ -1261,6 +1261,31 @@ def test_an_installed_index_html_linked_out_of_the_build_by_hand_is_the_bundled_
     assert response.text == remote_page.bundled_page_files()["index.html"].decode("utf-8")
 
 
+@pytest.mark.skipif(not can_deny_reads(), reason="this account searches any directory (root, NTFS)")
+def test_a_build_this_account_may_not_search_is_refused_with_no_traceback(
+    isolated_home: Path, built: Path
+) -> None:
+    """Whether ``index.html`` was a link was asked through ``Path.is_symlink``, which raises
+    ``PermissionError`` on Python 3.11 to 3.13 for a build this account may not search:
+    ``serve --dist`` ended in a traceback, ``install-page`` blamed ``~/.aisquare``, and a
+    request was a bare 500 (review of #243, round 12, 5/10). Each says the build has no
+    index this account can serve, as for any other build without one."""
+    built.chmod(0o600)
+    try:
+        problem = remote_server._page_missing(built)
+        with pytest.raises(NoRemotePage) as refused:
+            remote_server.install_page(built)
+        runtime = Runtime(remote_state_path(), remote_audit_path())
+        response = make_client(build_app(runtime, dist_dir=built)).get(
+            f"/r/{runtime.token}/", headers={"accept": "text/html"}
+        )
+    finally:
+        built.chmod(0o755)
+    assert problem == f"no index.html in {built.resolve()}"
+    assert str(refused.value).startswith(f"no index.html in {built.resolve()} — build")
+    assert (response.status_code, response.json()["error"]) == (404, "no_dist")
+
+
 def test_install_page_copies_an_index_html_linked_to_a_file_of_the_build(
     isolated_home: Path, built: Path
 ) -> None:

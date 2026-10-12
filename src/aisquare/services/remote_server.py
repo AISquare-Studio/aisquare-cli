@@ -6557,9 +6557,12 @@ def _page_no_index(dist: Path, unbuilt: str = "") -> str:
     no other file: asked only whether it was a file, a ``--dist`` whose ``index.html`` led
     to ``../.env`` served that file before the passphrase, and ``install-page`` left the
     link behind and said it had installed a page with no index (review of #243, round 11,
-    1/9)."""
+    1/9). Asked through ``os.path.islink``, which never raises: ``Path.is_symlink`` raises
+    ``PermissionError`` on Python 3.11 to 3.13 for a build this account may not search, a
+    traceback for ``serve --dist`` and a bare 500 for a request (review of #243, round 12,
+    5/10)."""
     index = dist / "index.html"
-    if index.is_symlink():
+    if os.path.islink(index):
         return PAGE_INDEX_LINKED.format(index=index, root=dist)
     return f"no index.html in {dist}{unbuilt}"
 

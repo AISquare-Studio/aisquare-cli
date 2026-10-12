@@ -2757,12 +2757,31 @@ def test_a_purge_waits_for_an_mcp_server_that_fetches_aisquare(
         ["--with=aisquare-cli[serve]>=0.8", "run", "aisquare", "serve"],
         ["run", "-w", "requests,aisquare_cli", "aisquare", "serve"],
         ["run", "-waisquare-cli", "python", "-m", "aisquare", "serve"],
+        ["run", "--with", "git+https://github.com/AISquare-Studio/aisquare-cli", "aisquare"],
+        ["run", "--with", "requests, ./aisquare-cli", "aisquare", "serve"],
+        ["run", "-w", "dist/aisquare_cli-0.8.0-py3-none-any.whl", "aisquare", "serve"],
+        ["run", "--with", "aisquare_cli @ https://example.com/a.whl", "aisquare", "serve"],
+        ["run", "--with-editable", "../aisquare-cli", "aisquare", "serve"],
+        ["run", "--with-requirements=tools.txt", "aisquare", "serve"],
     ],
-    ids=["with-equals", "w-list", "w-glued-module"],
+    ids=[
+        "with-equals",
+        "w-list",
+        "w-glued-module",
+        "git-url",
+        "checkout-path",
+        "wheel",
+        "direct-reference",
+        "editable",
+        "requirements-file",
+    ],
 )
 def test_uv_run_fetches_aisquare_when_with_names_it_in_any_spelling(args: list[str]) -> None:
     """clap takes `--with X`, `--with=X`, `-w X` and `-wX`, a comma-separated list in each,
-    and the distribution's name as PEP 503 normalises it."""
+    and the distribution's name as PEP 503 normalises it. An item that names no package —
+    a URL, a checkout, a wheel — may be aisquare, and so may an editable path or a
+    requirements file: `--with git+https://…/aisquare-cli` read as a package called `git`,
+    and a purge it undoes went ahead (round 25 of #257)."""
     assert lifecycle._fetches_aisquare({"command": "uv", "args": args})
 
 
@@ -2771,11 +2790,21 @@ def test_uv_run_fetches_aisquare_when_with_names_it_in_any_spelling(args: list[s
     [
         ("uv", ["run", "aisquare", "serve"]),
         ("uv", ["run", "--with", "requests", "aisquare", "serve"]),
+        ("uv", ["run", "--with", "rich>=13,<15", "aisquare", "serve"]),
+        ("uv", ["run", "--with=httpx[http2,socks]", "aisquare", "serve"]),
         ("uv", ["run", "aisquare", "serve", "--with", "aisquare-cli"]),
         ("/usr/local/bin/aisquare", ["serve", "--stdio"]),
         ("python3", ["-m", "aisquare", "serve"]),
     ],
-    ids=["uv-run", "uv-run-with-other", "with-after-the-program", "installed", "module"],
+    ids=[
+        "uv-run",
+        "uv-run-with-other",
+        "with-a-version-range",
+        "with-extras",
+        "with-after-the-program",
+        "installed",
+        "module",
+    ],
 )
 def test_a_runner_that_does_not_fetch_aisquare_is_not_read_as_one(
     command: str, args: list[str]

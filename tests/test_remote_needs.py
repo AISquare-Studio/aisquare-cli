@@ -4026,6 +4026,55 @@ def test_an_actions_check_with_the_ended_rows_unread_is_a_503_not_that_the_agent
     assert needs_agent_now(alpha, "coder-1").status is not None
 
 
+@pytest.mark.parametrize(
+    ("before", "session"),
+    [
+        pytest.param(None, "ses_minted", id="a spawn"),
+        pytest.param(
+            _manager_of("alpha", end="exit", pruned=True), "ses_alpha_manager", id="a restart"
+        ),
+        pytest.param(_manager_of("alpha", end="exit", pruned=True), "ses_minted", id="a switch"),
+    ],
+)
+def test_a_manager_starting_takes_them_until_its_session_should_have_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, before: _Seat | None, session: str
+) -> None:
+    """The fleet records a manager's row once its window is up, and its start hook registers
+    the board session seconds later: on the session it resumes (a restart), or a new one (a
+    spawn, a fresh switch). Read meanwhile as a manager that cannot take them, every coder's
+    open question and result to it of the day was a card, due at once (review of #243, round
+    26, 1/2). It is starting for ``_NEEDS_STARTING``; after that, one that never registered
+    cannot take them."""
+    from aisquare.services import team as team_service
+
+    crew = (_Seat("alpha", "coder-1", asks=True), _Seat("alpha", "coder-2"))
+    seats = crew if before is None else (before, *crew)
+    alpha = _seated(tmp_path, monkeypatch, seats, hub=False)["alpha"]
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    now = datetime.now(UTC)
+    with store_session() as store:
+        team_service._emit(
+            store, alpha.id, "result", "Green.", session_id="ses_alpha_coder-2", to_role="manager"
+        )
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_starting", project_id=alpha.id, label="manager", role="manager",
+                pane_id="%starting", session_id=session, cwd=alpha.root, created_at=now,
+            )
+        )  # fmt: skip
+    sources = remote_needs.live_needs_sources()
+
+    def cards(at: datetime) -> list[tuple[str, str | None]]:
+        items = scan_needs_you(sources, now=at, dismissed=())
+        return [(item.kind, item.agent) for item in items if item.kind.startswith("board_")]
+
+    assert cards(now) == []
+    starting = remote_needs._NEEDS_STARTING
+    assert cards(now + starting - timedelta(seconds=1)) == []
+    assert cards(now + starting) == [("board_question", "coder-1"), ("board_result", "coder-2")]
+
+
 def test_under_a_hub_a_projects_needs_read_no_other_projects_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

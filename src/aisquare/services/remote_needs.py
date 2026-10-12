@@ -188,6 +188,11 @@ _NEEDS_PUSH_DELAY: dict[str, timedelta] = {
 }
 """How long after ``since`` a push may go out, for the kinds that wait at all."""
 
+_NEEDS_STARTING = _NEEDS_PUSH_DELAY["manager_down"]
+"""How long a live row's board session may take to register: its start hook comes seconds
+after the row (``fleet.spawn``), more with MCP servers to start or a busy machine. The minute
+a restart or a switch flashes ``manager_down`` for (review of #243, round 26, 1/2)."""
+
 _LIMITED_PUSH_DELAY = timedelta(seconds=90)
 
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,40}")
@@ -1646,12 +1651,19 @@ in one of them is no manager to leave a crash or a coder's question to."""
 
 
 def _needs_nudged(
-    project: ProjectInfo, board_id: str, manager: FleetAgent | None, listed: list[FleetAgentStatus]
+    project: ProjectInfo,
+    board_id: str,
+    manager: FleetAgent | None,
+    listed: list[FleetAgentStatus],
+    now: datetime,
 ) -> FleetAgent | None:
     """``manager``, the project's (:func:`_needs_manager`), while it hears of what its agents
     need and can take it: live in ``listed``, the listing, on a board session not ended, in
     none of :data:`_NEEDS_NOT_ACTING`. ``board_id`` is the project's board. ``None``:
-    nobody does, and what they need is the human's.
+    nobody does, and what they need is the human's. A row younger than
+    :data:`_NEEDS_STARTING` whose session has yet to register is starting, not one that
+    cannot take them: read as none, a restart, a switch or a spawn made every coder's open
+    question and result to it of the day a card, due at once (review of #243, round 26, 1/2).
 
     The one rule for which manager keeps an item off the phone: a coder's question or
     result to the manager, a crash, and for a while the push of a limit. A turn that
@@ -1675,9 +1687,11 @@ def _needs_nudged(
     """
     if board_id != project.id or manager is None or manager.ended_at is not None:
         return None
-    woken = {s.agent.id for s in listed if s.session and s.session.ended_at is None}
-    live = {s.agent.id for s in listed if s.state not in _NEEDS_NOT_ACTING} & woken
-    return manager if manager.id in live else None
+    status = next((s for s in listed if s.agent.id == manager.id), None)
+    if status is None or status.state in _NEEDS_NOT_ACTING:
+        return None
+    woken = status.session is not None and status.session.ended_at is None
+    return manager if woken or now - manager.created_at < _NEEDS_STARTING else None
 
 
 def _needs_manager(rows: Sequence[FleetAgent]) -> FleetAgent | None:
@@ -1785,7 +1799,7 @@ def _needs_scan_project(
         {row.id: row for row in [*(ended or []), *(status.agent for status in listed)]}.values()
     )
     manager = _needs_manager(rows)
-    taking = _needs_nudged(project, board_id, manager, listed)
+    taking = _needs_nudged(project, board_id, manager, listed, now)
     authors = _needs_board_authors(board, now)
     sessions = (
         _needs_read_or_none(lambda: sources.board_sessions(board_id, authors), "sessions", project)

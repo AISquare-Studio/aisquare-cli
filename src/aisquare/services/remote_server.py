@@ -6638,19 +6638,23 @@ def _page_open_refusal(path: str | Path, root: Path, remedy: str, *, inside: boo
     #243, round 12, 7/10). The highest number first, since each removal renumbers the
     entries after it: from the top, the second command removed the wrong entry (review of
     #243, round 13, 3/4). On Linux, ``chmod go-w`` lowers the ACL's mask, which every named
-    entry is held to (:func:`_page_entry_open`)."""
-    target, recursive = (root, "-R ") if inside else (path, "")
-    fix = f"chmod {recursive}go-w {target}"
+    entry is held to (:func:`_page_entry_open`). Each path in a command is quoted for the
+    shell: ``chmod -a# 0 /Users/me/My Projects`` acted on ``/Users/me/My`` and ``Projects``
+    (review of #243, round 14, 2/3)."""
+    import shlex
+
+    word, root_word = shlex.quote(str(path)), shlex.quote(str(root))
+    fix = f"chmod -R go-w {root_word}" if inside else f"chmod go-w {word}"
     writes = _page_darwin_acl_writes(path)
     if inside and writes != []:
-        fix += f" and chmod -R -N {root}"
+        fix += f" and chmod -R -N {root_word}"
     elif writes is None:
         fix += (
-            f" and chmod -a# <n> {path} for each entry of ls -le {path} that allows a write,"
+            f" and chmod -a# <n> {word} for each entry of ls -le {word} that allows a write,"
             " the highest <n> first"
         )
     else:
-        fix += "".join(f" and chmod -a# {number} {path}" for number in reversed(writes))
+        fix += "".join(f" and chmod -a# {number} {word}" for number in reversed(writes))
     template = PAGE_OPEN_TO_OTHERS if inside else PAGE_PLACE_OPEN_TO_OTHERS
     return template.format(path=path, root=root, fix=fix, remedy=remedy)
 
@@ -6687,6 +6691,7 @@ def _page_open_to_others(root: Path, remedy: str) -> str | None:
 
     if sys.platform == "win32":
         return None
+    import shlex
     import stat
 
     def refusal(path: str) -> str | None:
@@ -6711,7 +6716,9 @@ def _page_open_to_others(root: Path, remedy: str) -> str | None:
             if (problem := refusal(os.path.join(directory, name))) is not None:
                 return problem
     if unread:
-        return PAGE_NOT_READ.format(path=unread[0].filename or root, root=root, remedy=remedy)
+        return PAGE_NOT_READ.format(
+            path=unread[0].filename or root, root=shlex.quote(str(root)), remedy=remedy
+        )
     for parent in root.parents:
         try:
             info = os.lstat(parent)

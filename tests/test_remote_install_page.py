@@ -21,7 +21,7 @@ import errno
 import json
 import logging
 import os
-import re
+import shlex
 import shutil
 import socket
 import stat
@@ -847,9 +847,12 @@ def test_a_build_a_macos_acl_opens_is_told_the_chmod_that_removes_the_acl(
     with the entry it found (review of #243, round 12, 7/10), so it names ``chmod -a#``
     of each entry that allows a write, and never ``-N``: the highest number first, since
     each removal renumbers the entries after it, and from the top the second command removed
-    the wrong entry (review of #243, round 13, 3/4)."""
+    the wrong entry (review of #243, round 13, 3/4). Each path is quoted: unquoted, a space
+    split ``chmod -a# 0 /Users/me/My Projects`` into two other paths (round 14, 2/3)."""
     if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
         pytest.skip("Windows keeps no such modes")
+    (built.parent / "My Pro'jects").mkdir()
+    built = built.rename(built.parent / "My Pro'jects" / "dist")
     for path in (built, *built.rglob("*")):
         path.chmod(0o755 if path.is_dir() else 0o644)
     index = built / "index.html"
@@ -868,18 +871,26 @@ def test_a_build_a_macos_acl_opens_is_told_the_chmod_that_removes_the_acl(
     else:
         problem = remote_server._page_open_to_others(built, remedy)
     monkeypatch.undo()
+    assert problem is not None
+    fix = problem.split(" — ", 1)[1].removesuffix(f", {remedy}").removesuffix(" if it is yours")
+    commands = [shlex.split(command) for command in fix.split(" and ")]  # as the shell reads them
     if where == "in the build":
         assert problem == remote_server.PAGE_OPEN_TO_OTHERS.format(
-            path=index, fix=f"chmod -R go-w {built} and chmod -R -N {built}", remedy=remedy
+            path=index, fix=fix, remedy=remedy
         )
+        assert commands == [["chmod", "-R", "go-w", str(built)], ["chmod", "-R", "-N", str(built)]]
     else:
-        each = f"chmod -a# 3 {opened} and chmod -a# 1 {opened}"
         assert problem == remote_server.PAGE_PLACE_OPEN_TO_OTHERS.format(
-            path=opened, root=built, fix=f"chmod go-w {opened} and {each}", remedy=remedy
+            path=opened, root=built, fix=fix, remedy=remedy
         )
-        assert problem is not None and "-N" not in problem
-        for number in re.findall(r"chmod -a# (\d+) ", problem):
-            del entries[int(number)]  # as chmod -a# does: the entries after it move up
+        assert commands == [
+            ["chmod", "go-w", str(opened)],
+            ["chmod", "-a#", "3", str(opened)],
+            ["chmod", "-a#", "1", str(opened)],
+        ]
+        assert "-N" not in problem
+        for command in commands[1:]:
+            del entries[int(command[2])]  # as chmod -a# does: the entries after it move up
         assert entries == [HOME_FOLDERS, reads], "each command removes the entry it names"
 
 
@@ -1052,7 +1063,10 @@ def test_a_directory_of_the_build_this_account_cannot_list_is_still_looked_at(
     with it, and the server still serves a file inside it by name, which needs only search:
     a world-writable ``assets`` at 0333 left the build served (review of #243, round 9,
     3/6). Its mode is read where its parent lists it, and one that cannot be listed is a
-    build that cannot be checked."""
+    build that cannot be checked. The command names the build quoted for the shell (review
+    of #243, round 14, 2/3)."""
+    (built.parent / "My Pro'jects").mkdir()
+    built = built.rename(built.parent / "My Pro'jects" / "dist")
     root = remote_server.install_page(built) if installed else built
     monkeypatch.setattr(remote_server, "_remote_private_group", lambda: None)
     assets = root / "assets"
@@ -1065,7 +1079,7 @@ def test_a_directory_of_the_build_this_account_cannot_list_is_still_looked_at(
 
     assert served is not None, "the premise: a file in it is served by name"
     assert problem is not None and problem.startswith(f"{assets} "), problem
-    assert says in problem and f"go-w {root}," in problem
+    assert says in problem and f"go-w {shlex.quote(str(root))}," in problem
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows keeps no group or other bits")

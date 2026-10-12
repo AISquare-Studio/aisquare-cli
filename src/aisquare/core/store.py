@@ -2352,13 +2352,13 @@ class SqliteStore:
             raise AmbiguousIdError(ref)
         if matches:
             return _row_to_task(matches[0])
-        if not _glob_escape(ref):
+        if not _ref_stripped(ref):
             return None  # no tail either: ``*`` alone ends every id
         # Boards display the id *tail* (the unique random part), so tails
         # must resolve too: fall back to a suffix match.
         matches = self._conn.execute(
             f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ?{scope} LIMIT 2",
-            (f"*{_glob_escape(ref)}", *boards),
+            (f"*{_ref_stripped(ref)}", *boards),
         ).fetchall()
         if len(matches) > 1:
             raise AmbiguousIdError(ref)
@@ -3835,21 +3835,32 @@ def _on_boards(project_ids: Collection[str] | None) -> tuple[str, tuple[str, ...
 _GLOB_METACHARACTERS = str.maketrans("", "", "*?[")
 
 
-def _glob_escape(ref: str) -> str:
-    """``ref`` with the GLOB metacharacters taken out, to stand for itself in a pattern."""
+def _glob_escape(text: str) -> str:
+    """``text`` as a GLOB pattern that matches ``text`` itself: each ``*``, ``?`` and ``[`` in
+    a class of its own (``[*]``), as GLOB has no escape character.
+
+    It took them out, as a ref lookup does (:func:`_ref_stripped`), and so did not stand
+    for itself: ``x[1`` was the prefix ``x1``, and a purge of the keys under an id holding
+    one would have taken another id's (review of #243, round 11, 8/9)."""
+    return re.sub(r"([*?\[])", r"[\1]", text)
+
+
+def _ref_stripped(ref: str) -> str:
+    """``ref`` with the GLOB metacharacters taken out, as an id lookup reads a ref: no id
+    holds one, and ``ses_abc*`` is the prefix ``ses_abc``."""
     return ref.translate(_GLOB_METACHARACTERS)
 
 
 def _glob_prefix(ref: str) -> str:
-    """The GLOB pattern of an id that starts with ``ref``, its metacharacters taken out; one
-    that matches no id when nothing is left of it.
+    """The GLOB pattern of an id that starts with ``ref``, its metacharacters taken out
+    (:func:`_ref_stripped`); one that matches no id when nothing is left of it.
 
     ``*`` was then ``*``, which matched every id: a ref of ``*``, ``?`` or ``[`` named every
     project, task and session the store had, and a refusal of it as ambiguous listed them
     (review of #243, round 10, 7/7). An empty pattern matches only an empty id, which none is.
     """
-    escaped = _glob_escape(ref)
-    return f"{escaped}*" if escaped else ""
+    stripped = _ref_stripped(ref)
+    return f"{stripped}*" if stripped else ""
 
 
 _DEFAULT_BUSY_MS = 5000

@@ -231,6 +231,22 @@ def test_find_projects_by_name_and_id_prefix(store: ContextStore) -> None:
     assert store.find_projects("nope") == []
 
 
+def test_a_key_pattern_holds_its_glob_characters_as_themselves(store: ContextStore) -> None:
+    """``_glob_escape`` took ``*``, ``?`` and ``[`` out of what it was given, where its
+    callers read it as standing for itself: ``x[1`` listed the keys under ``x1``, and a
+    purge of an id holding one would have taken the keys of the id without it (review of
+    #243, round 11, 8/9). Each stands for itself."""
+    for key in ("x[1/a", "x1/b", "x*/c", "xy/d", "signal/prj_a*/1", "signal/prj_ab/1"):
+        store.set_meta(key, "v")
+    assert list(store.list_meta("x[1")) == ["x[1/a"]
+    assert list(store.list_meta("x*")) == ["x*/c"]
+    assert list(store.list_meta("x?")) == []
+    for project_id in ("prj_a*", "prj_ab"):
+        store.ensure_project(ProjectInfo(id=project_id, root=Path(f"/tmp/{project_id}")))
+    assert store.purge_project("prj_a*")["team_meta"] == 1
+    assert list(store.list_meta("signal/")) == ["signal/prj_ab/1"]
+
+
 @pytest.mark.parametrize("ref", ["*", "?", "[", "*?[", ""])
 def test_a_ref_with_nothing_left_once_its_glob_characters_go_names_nothing(
     store: ContextStore, ref: str

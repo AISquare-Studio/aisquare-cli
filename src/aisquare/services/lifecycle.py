@@ -997,6 +997,7 @@ def _refresh(site: HookSite, found: install_route.Facts) -> HookRefresh:
 HOME_MARKERS = ("config.toml", "context.db", "agents.json")
 
 FLEET_SHUTDOWN = "aisquare fleet shutdown --all --yes"
+FLEET_FORGET = f"{FLEET_SHUTDOWN} --forget"
 
 
 class UninstallRefused(RuntimeError):
@@ -1069,6 +1070,10 @@ class UninstallPlan:
     boot."""
     fleet_error: str | None
     """Why the fleet's live agents could not be counted, when they could not."""
+    no_tmux: bool = False
+    """Whether tmux is not installed here while :attr:`live_agents` may run: ``fleet
+    shutdown`` can then stop none of them, and only its ``--forget`` ends their rows
+    (round 27 of #257)."""
     plugins: tuple[agent_core.ClaudePlugin, ...] = ()
     """Where the aisquare Claude Code plugin is enabled: in a config dir (user scope) or
     in a repository (project and local scope). Uninstall leaves it, as Claude Code owns
@@ -1140,11 +1145,22 @@ class UninstallPlan:
         """The reason nothing may start, or ``None``."""
         if self.live_agents:
             count = len(self.live_agents)
-            return UninstallRefused(
+            running = (
                 f"{count} fleet agent{'s are' if count != 1 else ' is'} running "
                 f"({', '.join(self.live_agents)}) — their sessions would keep calling hooks "
-                f"that no longer exist. Stop them first: {FLEET_SHUTDOWN}",
-                error="fleet_running",
+                f"that no longer exist."
+            )
+            if self.no_tmux:
+                # Not "no tmux, so no server": a server outlives its program leaving PATH.
+                # The way out is the operator's word (round 27 of #257).
+                return UninstallRefused(
+                    f"{running} tmux is not installed here, so nothing can stop them or "
+                    f"tell whether they still run. Put tmux back and run {FLEET_SHUTDOWN}, "
+                    f"or, if they are not running, end their rows on your word: {FLEET_FORGET}",
+                    error="fleet_running",
+                )
+            return UninstallRefused(
+                f"{running} Stop them first: {FLEET_SHUTDOWN}", error="fleet_running"
             )
         if self.purge and self.purge_refusal is not None:
             return UninstallRefused(
@@ -1937,6 +1953,7 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         live_agents=live,
         unlistened=unlistened,
         fleet_error=fleet_error,
+        no_tmux=bool(live) and not TmuxServer().available(),
         plugins=_plugins(claude_dirs),
         plugin_answers=_plugin_answers_there(),
     )

@@ -71,6 +71,10 @@ and an aisquare that upgrades and uninstalls itself.**
   aisquare, is named with the command that removes it, and `--purge` waits
   for it (#253). `--purge` also deletes the one file aisquare keeps outside
   the home: the plugin's answers about uv, in `~/.cache/aisquare`.
+- `aisquare fleet shutdown --forget` ends the fleet's rows on your word,
+  unchecked, where tmux cannot be used: for agents you know are not running.
+  `aisquare uninstall` names it when tmux is not installed and a fleet agent
+  may still be running, which it otherwise refused with no way out.
 - **Update and Uninstall in asq's Doctor** hand the terminal to
   `aisquare upgrade` and `aisquare uninstall`, which show their plan and ask;
   after an update, asq reopens on the version just installed (#254). Work

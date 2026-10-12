@@ -522,6 +522,7 @@ def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
                     "agents": [a.model_dump(mode="json") for a in plan.agents],
                     "sessions": plan.sessions,
                     "absent_sockets": plan.absent_sockets,
+                    "tmux_unusable": plan.tmux_unusable,
                 }
             )
         )
@@ -530,14 +531,22 @@ def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
     if not plan.agents and not plan.sessions:
         console.print("nothing to shut down: no live agents and no fleet tmux sessions")
         return
-    console.print(
-        f"about to shut down {len(plan.agents)} agent(s) "
-        f"and kill {len(plan.sessions)} fleet session(s):"
-    )
+    if plan.tmux_unusable is not None:
+        console.print(
+            f"tmux is not usable here ({plan.tmux_unusable}), so nothing can be stopped or "
+            "checked — with --forget each row is ended on your word:"
+        )
+    else:
+        console.print(
+            f"about to shut down {len(plan.agents)} agent(s) "
+            f"and kill {len(plan.sessions)} fleet session(s):"
+        )
     names = {p.id: (p.codename or p.root.name or p.id) for p in plan.projects}
     for agent in plan.agents:
         where = names.get(agent.project_id, agent.project_id)
-        if agent.tmux_socket in plan.absent_sockets:
+        if plan.tmux_unusable is not None:
+            console.print(f"  ✗ {agent.label} · {where} — recorded lost, unchecked")
+        elif agent.tmux_socket in plan.absent_sockets:
             console.print(
                 f"  ✗ {agent.label} · {where} — recorded lost "
                 f"(no server answers on '{agent.tmux_socket}')"
@@ -669,6 +678,14 @@ def shutdown(
     force: Annotated[
         bool, typer.Option("--force", help="Kill every agent without a graceful /exit.")
     ] = False,
+    forget: Annotated[
+        bool,
+        typer.Option(
+            "--forget",
+            help="Where tmux is not usable here, end every row on your word, unchecked, "
+            "instead of refusing. Only for agents you know are not running.",
+        ),
+    ] = False,
 ) -> None:
     """Stop this project's agents, kill the fleet's sessions, record every row.
 
@@ -685,14 +702,16 @@ def shutdown(
     terminal it is a dry run unless --yes, and under --json without --yes it
     prints the plan and changes nothing. Board notes and tasks are kept, the
     ended rows' claims are released, and a `fleet-paused` signal is cleared.
-    Exits 1 when any row was left live or a claim release was refused, and 130
-    when interrupted — with the report of how far it got either way.
+    With no usable tmux it refuses; `--forget` then ends the rows unchecked,
+    for agents you know are not running. Exits 1 when any row was left live
+    or a claim release was refused, and 130 when interrupted — with the
+    report of how far it got either way.
     """
     refuse_conflicting_scope(every, project)
     target = None if every else _project(project)
     if not yes:
         try:
-            plan = fleet_service.shutdown_plan(target)
+            plan = fleet_service.shutdown_plan(target, forget=forget)
         except fleet_service.FleetError as exc:
             _fail_fleet(exc)
         _emit_shutdown_plan(plan)
@@ -717,7 +736,7 @@ def shutdown(
             stdout_console().print("nothing stopped")
             return
     try:
-        report = fleet_service.shutdown(target, force=force)
+        report = fleet_service.shutdown(target, force=force, forget=forget)
     except fleet_service.FleetInterrupted as exc:
         # The operator's Ctrl-C: rows before it are down and their claims
         # released, committed as they went, so they are told how far it got —

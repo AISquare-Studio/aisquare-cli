@@ -135,6 +135,8 @@ def world(monkeypatch: pytest.MonkeyPatch) -> World:
     monkeypatch.setattr(install_route, "exec_replace", exec_replace)
     # A live row is a running agent unless a test says its socket has no server.
     monkeypatch.setattr(lifecycle, "_listens", lambda _path: True)
+    # And `fleet shutdown` can reach it, whether or not this machine has tmux.
+    monkeypatch.setattr(TmuxServer, "available", lambda _self: True)
     return recorded
 
 
@@ -668,6 +670,33 @@ def test_it_refuses_while_fleet_agents_are_live_and_names_the_shutdown(
     assert "coder-1 (" in human.stderr, "the live agent is named"
     assert "aisquare fleet shutdown --all --yes" in human.stderr
     assert _snapshot(tmp_path) == before and world.events == []
+
+
+def test_with_no_tmux_the_refusal_says_why_and_names_the_operators_word(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 27 of #257: a row no probe can clear (its socket gone, no boot recorded) kept
+    uninstall refusing once tmux was removed, and the one remedy named, `fleet shutdown`,
+    refuses without tmux. A server outlives its program, so the refusal says the agents
+    cannot be checked and names `--forget`, the operator's word that they are not running."""
+    monkeypatch.setattr(TmuxServer, "available", lambda _self: False)
+    _initialised(runner, tmp_path)
+    _live_agent(tmp_path / "repo")
+    _hooked(isolated_agent_home / ".claude", tool.script)
+
+    result = runner.invoke(app, ["--json", "uninstall", "--yes"])
+    human = runner.invoke(app, ["uninstall", "--yes"])
+
+    assert result.exit_code == 1 and world.events == []
+    assert _one_object(result.stdout)["error"] == "fleet_running"
+    said = " ".join(human.stderr.split())
+    assert "tmux is not installed here, so nothing can stop them" in said
+    assert "aisquare fleet shutdown --all --yes --forget" in said
 
 
 @pytest.mark.parametrize("listening", [True, False], ids=["server-listening", "no-server"])

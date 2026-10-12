@@ -402,6 +402,9 @@ class ShutdownPlan:
     sessions: list[str] = field(default_factory=list)
     """``<socket>:<session>`` for every fleet session the kill phase would target."""
     absent_sockets: list[str] = field(default_factory=list)
+    tmux_unusable: str | None = None
+    """Why tmux is not usable here, for a ``forget`` plan: every row is then ended
+    unchecked, on the operator's word, and nothing is stopped or killed."""
 
 
 # --- settings ---------------------------------------------------------------------
@@ -2846,6 +2849,27 @@ def _require_usable_tmux(config: FleetSettings) -> None:
         ) from exc
 
 
+def _shutdown_tmux(config: FleetSettings, *, forget: bool) -> str | None:
+    """``None`` when tmux is usable (:func:`_require_usable_tmux`); else, with ``forget``,
+    why not, and every row is ended unchecked on the operator's word.
+
+    Without ``forget`` an unusable tmux still refuses, and the refusal names it. A fleet
+    whose tmux is gone had no way to end its rows otherwise, and ``uninstall`` refuses for
+    as long as one may be running (round 27 of #257). Not "no tmux, so no server": a
+    server outlives its program leaving ``PATH``, which only the operator can rule out.
+    """
+    try:
+        _require_usable_tmux(config)
+    except FleetUnavailable as exc:
+        if forget:
+            return str(exc)
+        raise FleetUnavailable(
+            f"{exc}; if the fleet's agents are not running, `--forget` ends their rows on "
+            "your word without tmux"
+        ) from exc
+    return None
+
+
 def _same_socket(left: Path, right: Path) -> bool:
     """Whether two socket paths name one socket, symlinks resolved (macOS ``/tmp``)."""
     if left == right:
@@ -3259,6 +3283,7 @@ def _shutdown_row(
     *,
     force: bool,
     grace: float,
+    unusable: str | None = None,
 ) -> None:
     """Stop one row where its server answers; record it lost where it does not.
 
@@ -3272,8 +3297,12 @@ def _shutdown_row(
     ``FleetUnavailable`` are carried the same way rather than vanishing into a
     bare ``pass``; ``NoSuchAgent`` — the agent exited on its own between the
     snapshot and its turn — goes through :func:`_row_that_went_away`, which reads
-    what actually became of the row instead of guessing.
+    what actually became of the row instead of guessing. ``unusable`` is why tmux could
+    not be used under ``--forget`` (:func:`_shutdown_tmux`): no row was asked.
     """
+    if unusable is not None:
+        _record_lost(agent, f"ended on your word (--forget), unchecked: {unusable}", report)
+        return
     if not answering.get(agent.tmux_socket):
         _record_lost(agent, f"no server answered on socket {agent.tmux_socket!r}", report)
         return
@@ -3589,19 +3618,25 @@ def _reconcile_pauses(
     return failures
 
 
-def shutdown_plan(project: ProjectInfo | None = None) -> ShutdownPlan:
+def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -> ShutdownPlan:
     """What :func:`shutdown` would end — read-only, and it refuses the same way.
 
     The guards run here too, so the plan an operator is asked to confirm is one
-    that can actually be carried out: no usable tmux, a probe that cannot be
-    asked, or a call from inside the fleet's own server all refuse before
-    anything is printed. A session query that fails AFTER a good probe refuses
+    that can actually be carried out: no usable tmux (unless ``forget``), a probe
+    that cannot be asked, or a call from inside the fleet's own server all refuse
+    before anything is printed. A session query that fails AFTER a good probe refuses
     the same way: the operator confirms this list, so a list missing a session
     the run would still kill is worse than no list at all.
     """
     config = settings()
-    _require_usable_tmux(config)
+    unusable = _shutdown_tmux(config, forget=forget)
     targets = _shutdown_targets(project)
+    if unusable is not None:
+        return ShutdownPlan(
+            projects=[current for current, agents in targets if agents],
+            agents=[agent for _, agents in targets for agent in agents],
+            tmux_unusable=unusable,
+        )
     sockets = _shutdown_sockets(targets, config)
     _refuse_from_inside(sockets, config)
     answering = _shutdown_probe(sockets, config)
@@ -3649,7 +3684,11 @@ def shutdown_plan(project: ProjectInfo | None = None) -> ShutdownPlan:
 
 
 def shutdown(
-    project: ProjectInfo | None = None, *, force: bool = False, grace: float = 5.0
+    project: ProjectInfo | None = None,
+    *,
+    force: bool = False,
+    grace: float = 5.0,
+    forget: bool = False,
 ) -> ShutdownReport:
     """Stop this project's live agents (every project's with ``project=None``).
 
@@ -3689,6 +3728,9 @@ def shutdown(
     not "untouched", it is stuck — and a ``fleet-paused`` signal is cleared for
     every project this run confirmed down, because the fleet it paused is gone;
     a project with a surviving or unverified agent keeps it.
+
+    ``forget`` is the operator's word where tmux cannot be used here: each row is
+    ended unchecked (:func:`_shutdown_tmux`), and nothing is stopped or killed.
     """
     config = settings()
     report = ShutdownReport()
@@ -3700,12 +3742,15 @@ def shutdown(
     # after every row was ended and every claim released (rounds 5 to 7).
     phase = "before anything was stopped"
     try:
-        _require_usable_tmux(config)
+        unusable = _shutdown_tmux(config, forget=forget)
         targets = _shutdown_targets(project)
         sockets = _shutdown_sockets(targets, config)
-        _refuse_from_inside(sockets, config)
-        answering = _shutdown_probe(sockets, config)
-        report.servers_absent.extend(socket for socket in sockets if not answering[socket])
+        if unusable is None:
+            _refuse_from_inside(sockets, config)
+            answering = _shutdown_probe(sockets, config)
+            report.servers_absent.extend(socket for socket in sockets if not answering[socket])
+        else:
+            answering = dict.fromkeys(sockets, False)  # none asked: nothing stopped or killed
         handled: set[str] = set()
 
         def finish() -> None:
@@ -3722,7 +3767,15 @@ def shutdown(
                 for agent in agents:
                     phase = f"while stopping {agent.label}"
                     handled.add(agent.id)
-                    _shutdown_row(current, agent, answering, report, force=force, grace=grace)
+                    _shutdown_row(
+                        current,
+                        agent,
+                        answering,
+                        report,
+                        force=force,
+                        grace=grace,
+                        unusable=unusable,
+                    )
         except Exception:
             # The kill phase runs even if a row could not be recorded: "shutdown
             # means down" must hold when the store refuses, and a caller that got

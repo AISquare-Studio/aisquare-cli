@@ -84,7 +84,8 @@ aisquare
 │                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
 │                   restart <label> [--fresh] [--permission-mode M]
 │                   switch <label> [--to A] [--fresh] [--reason R]
-│                   shutdown [--all] [--yes] [--force] · attach · reap [--all] [--server-down]
+│                   shutdown [--all] [--yes] [--force] [--forget] · attach
+│                   reap [--all] [--server-down]
 │                   rename <codename> · pause · resume
 │                   (all with [--project P]; spawn · tell · restart · switch · pause · resume
 │                   take [--as SESSION])

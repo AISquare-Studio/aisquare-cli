@@ -3904,12 +3904,37 @@ def test_shutdown_refuses_when_tmux_is_not_usable_and_touches_no_row(
     coder = _coder(project)
     tmux.installed = False
 
-    with pytest.raises(FleetUnavailable, match="tmux is not installed"):
+    with pytest.raises(FleetUnavailable, match="tmux is not installed") as refused:
         fleet_service.shutdown(project)
 
+    assert "`--forget` ends their rows on your word" in str(refused.value), "the way out"
     tmux.installed = True
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id]
     assert tmux.killed == [] and tmux.killed_sessions == []
+
+
+def test_shutdown_forget_ends_every_row_unchecked_where_tmux_is_not_usable(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Round 27 of #257: with tmux gone, a row that may still run blocked `uninstall`, and
+    the one remedy it named, `fleet shutdown`, refused without tmux. A server outlives its
+    program, so no tmux is no evidence; ``forget`` is the operator's word that the agents
+    are not running, and ends each row unchecked, stopping and killing nothing."""
+    coder = _coder(project)
+    tmux.installed = False
+
+    plan = fleet_service.shutdown_plan(project, forget=True)
+    report = fleet_service.shutdown(project, forget=True)
+
+    assert plan.tmux_unusable is not None and "tmux is not installed" in plan.tmux_unusable
+    assert [a.id for a in plan.agents] == [coder.id] and plan.sessions == []
+    assert [row.agent.id for row in report.recorded] == [coder.id]
+    assert report.recorded[0].reason.startswith("ended on your word (--forget), unchecked: ")
+    assert report.recorded[0].agent.exit_status is None
+    assert report.stopped == [] and report.failed == [] and report.servers_absent == []
+    assert tmux.killed == [] and tmux.killed_sessions == [] and tmux.typed == []
+    with store_session() as store:
+        assert store.fleet_agents(project.id, live_only=True) == []
 
 
 def test_shutdown_refuses_when_the_socket_cannot_be_asked(

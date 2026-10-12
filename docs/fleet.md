@@ -328,6 +328,13 @@ unless `--yes`. Under `--json` without `--yes` it prints the plan
 is recorded for it** — a status is only ever read from a pane that already reads
 dead — and no `SessionEnd` hook runs.
 
+`--forget` is your word that the fleet's agents are not running, for where
+tmux cannot be used here (removed, too old, or not answering for its version):
+each row is ended as lost, unchecked, and nothing is stopped or killed.
+Without it such a run refuses, because a tmux server outlives its program
+leaving `PATH`. `aisquare uninstall` names it when tmux is not installed and a
+row may still be running.
+
 What it kills is the fleet's own `asq-<codename>` sessions, never the server:
 `tmux kill-server` would take down every session on that socket, and the fleet's
 claim is only ever to its own (a hand-made session, or one a failed `rename`
@@ -358,8 +365,8 @@ session up, and the session the server, under a report saying the fleet is down.
 Whatever tmux will not confirm gone there is reported instead (`sessions_failed`
 or `sessions_left_up`), never assumed.
 
-It refuses rather than guess. With no usable tmux (`fleet_unavailable`), on a
-socket that cannot be ASKED whether a server is there (a wedged server's 30 s
+It refuses rather than guess. With no usable tmux (`fleet_unavailable`, unless
+`--forget`), on a socket that cannot be ASKED whether a server is there (a wedged server's 30 s
 timeout), or when run from INSIDE the fleet's own tmux server — a `fleet attach`
 pane included, where the kill would take down the process printing the report —
 nothing is touched and the message says why. The plan it asks you to confirm

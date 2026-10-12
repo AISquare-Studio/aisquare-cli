@@ -871,7 +871,7 @@ def test_shutdown_asks_at_a_terminal_and_stops_nothing_when_the_answer_is_no(
     agreed = runner.invoke(app, ["fleet", "shutdown"])
 
     assert agreed.exit_code == 0, agreed.output
-    assert shutdown.calls[-1] == ((PROJECT,), {"force": False})
+    assert shutdown.calls[-1] == ((PROJECT,), {"force": False, "forget": False})
 
 
 def test_shutdown_asks_about_the_sessions_when_no_agent_is_live(
@@ -943,7 +943,7 @@ def test_shutdown_reports_each_row_with_the_reason_the_service_gave(
     assert "fleet-paused signal on api was cleared" in out
     assert "were NOT ended" in out, "the operator is told which rows they still own"
     assert "was not running" not in out, "the CLI never asserts a cause the service did not give"
-    assert shutdown.calls[-1] == ((PROJECT,), {"force": True})
+    assert shutdown.calls[-1] == ((PROJECT,), {"force": True, "forget": False})
 
 
 def test_shutdown_all_never_resolves_a_project_and_a_clean_run_exits_zero(
@@ -1035,6 +1035,31 @@ def test_shutdown_says_so_when_there_is_nothing_to_shut_down(
     assert "nothing to shut down" in _plain(result.stdout)
     assert "dry run" not in result.stdout, "nothing to confirm is not a dry run"
     assert shutdown.calls == []
+
+
+def test_shutdown_forget_shows_every_row_ended_unchecked_and_passes_the_word_on(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 27 of #257: with no usable tmux, ``--forget`` ends the rows on the operator's
+    word, so the plan says nothing is stopped or checked, and the run is told so."""
+    plan = _install(
+        monkeypatch, "shutdown_plan", _plan(sessions=[], tmux_unusable="tmux is not installed")
+    )
+    shutdown = _install(monkeypatch, "shutdown", _report())
+
+    dry = runner.invoke(app, ["fleet", "shutdown", "--forget"])
+    as_json = runner.invoke(app, ["--json", "fleet", "shutdown", "--forget"])
+    ran = runner.invoke(app, ["fleet", "shutdown", "--forget", "--yes"])
+
+    assert dry.exit_code == 0, dry.output
+    out = _plain(dry.stdout)
+    assert "tmux is not usable here (tmux is not installed), so nothing can be stopped" in out
+    assert "✗ coder-auth · amber-otter — recorded lost, unchecked" in out
+    assert "stopped (%7)" not in out
+    assert plan.calls[0] == ((PROJECT,), {"forget": True})
+    assert json.loads(as_json.stdout)["tmux_unusable"] == "tmux is not installed"
+    assert ran.exit_code == 0, ran.output
+    assert shutdown.calls == [((PROJECT,), {"force": False, "forget": True})]
 
 
 def test_shutdown_maps_a_refusal_onto_the_fail_contract(

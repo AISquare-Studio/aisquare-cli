@@ -5318,7 +5318,10 @@ def build_remote_app(
         ``--dist`` whose ``index.html`` led to ``../.env`` gave that file out to anyone
         holding the link (review of #243, round 11, 1/9). One that leads out of the build
         or to a hidden file is no index. It is looked up once for each request, where it
-        was looked up as many as three times (review of #243, round 12, 10/10).
+        was looked up as many as three times (review of #243, round 12, 10/10), and only
+        for one that needs it: the installed build's, which may be the bundled page, and a
+        ``--dist``'s index and the deep links it answers, not each of its files (review of
+        #243, round 13, 4/4).
 
         The installed build is looked up for each request, one ``realpath``: looked up once,
         as the app was built, a ``remote-dist`` that is a link to a build of the human's own
@@ -5351,8 +5354,11 @@ def build_remote_app(
                 headers={"cache-control": _cache_control(name)},
             )
 
-        index = _built_page_file(dist, "index.html")
-        if dist_dir is None and index is None:
+        @functools.cache
+        def page_index() -> Path | None:
+            return _built_page_file(dist, "index.html")
+
+        if dist_dir is None and page_index() is None:
             response = bundled_page()
         elif rel and (candidate := _built_page_file(dist, rel)) is not None:
             response = built_file(candidate, rel)
@@ -5361,8 +5367,8 @@ def build_remote_app(
             # whole point: the SPA document under a .js name is a boot failure
             # with no error, and the 200 hides which build is actually installed.
             response = _json_error(404, "not_found", f"no such file in the built page: {rel}")
-        elif index is not None:
-            response = built_file(index, "index.html")
+        elif (found := page_index()) is not None:
+            response = built_file(found, "index.html")
         else:
             log.warning("remote: %s", _page_no_index(dist))
             response = _json_error(404, "no_dist", NO_DIST_INDEX)

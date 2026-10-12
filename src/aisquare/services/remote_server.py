@@ -620,8 +620,11 @@ def _remote_board_project(root: Path) -> ProjectInfo:
     all read. Each kept its own, and each kept whatever its first lookup said: a worktree
     whose ``git`` failed in one was its own board there and its principal checkout's in
     another, and the Board tab listed tasks no claim found (review of #243, round 11, 6/9).
-    So an answer that only a failed ``git`` gives is not kept
-    (:func:`_remote_board_settled`)."""
+    Every answer is kept, a failed ``git``'s too: ``team_project`` gives the board a working
+    ``git`` does either way (``workspace.find_project_root``). Telling a failed ``git``'s
+    answer apart by its shape missed a project below a worktree's root, and ran ``git``
+    twice a second for a worktree whose ``git`` always fails (review of #243, round 12,
+    2/10 to 4/10)."""
     from aisquare.core import orchestrator
     from aisquare.services import team as team_service
 
@@ -630,23 +633,9 @@ def _remote_board_project(root: Path) -> ProjectInfo:
         board = _board_projects.get(key)
     if board is None:
         board = team_service.resolve_project(root)
-        if _remote_board_settled(root, board):
-            with _board_projects_lock:
-                board = _board_projects.setdefault(key, board)
+        with _board_projects_lock:
+            board = _board_projects.setdefault(key, board)
     return board
-
-
-def _remote_board_settled(root: Path, board: ProjectInfo) -> bool:
-    """Whether ``board``, the board resolved for the project at ``root``, may be kept: any
-    but a linked worktree's own root, which is its board only when ``git`` timed out or
-    failed (``workspace.git_common_root``): it answers with the principal checkout's."""
-    if board.root != (_remote_resolved(root) or root):
-        return True
-    try:
-        marker = (root / ".git").read_text(encoding="utf-8", errors="replace")
-    except (OSError, ValueError):  # a checkout's own .git directory, or none
-        return True
-    return "/worktrees/" not in marker.replace("\\", "/")
 
 
 def _remote_boards() -> set[str]:

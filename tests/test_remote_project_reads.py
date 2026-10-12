@@ -445,7 +445,7 @@ def test_a_board_frame_runs_no_git_writes_nothing_and_reads_no_session_it_drops(
     (``ensure_project``) every second, and every session and task the project ever had was
     read for the frame to drop. Measured over the live stream: the board's project is
     resolved once for the server, and a frame reads its events and the sessions they name."""
-    from aisquare.core import orchestrator, workspace
+    from aisquare.core import workspace
     from aisquare.core.store import SqliteStore
 
     _current, other = two_projects
@@ -462,7 +462,7 @@ def test_a_board_frame_runs_no_git_writes_nothing_and_reads_no_session_it_drops(
     for name in ("ensure_project", "team_sessions", "team_tasks", "recent_events"):
         monkeypatch.setattr(SqliteStore, name, spy(name, getattr(SqliteStore, name)))
     git = spy("git", workspace.git_common_root, store=False)
-    monkeypatch.setattr(orchestrator, "git_common_root", git)
+    monkeypatch.setattr(workspace, "git_common_root", git)
 
     def of_other(name: str) -> list[object]:
         ids = (other.id, other.root, other.root.resolve())
@@ -779,7 +779,7 @@ def test_a_project_ref_and_a_task_ref_are_kept_to_the_one_rule(
     assert summary == f"claimed {task.id} as=-"
 
 
-def test_a_worktrees_board_is_one_answer_everywhere_and_a_failed_git_is_not_kept(
+def test_a_worktrees_board_is_one_answer_everywhere_whether_git_answers_or_not(
     two_projects: tuple[ProjectInfo, ProjectInfo],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -787,31 +787,36 @@ def test_a_worktrees_board_is_one_answer_everywhere_and_a_failed_git_is_not_kept
     """The Board tab, the board writes and the needs watcher each kept the board of each
     root, whatever its first lookup said: a worktree whose ``git`` failed once was its own
     board in one and its principal checkout's in another, and a task the Board tab listed
-    was one no claim found (review of #243, round 11, 6/9). One answer, kept once ``git``
-    gave it."""
-    from aisquare.core import orchestrator
+    was one no claim found (review of #243, round 11, 6/9). Kept only once ``git`` gave
+    it, judged by the root's own ``.git``, a project below a worktree's root kept the
+    worktree's board, and a worktree whose ``git`` always fails ran it twice for each
+    lookup (review of #243, round 12, 2/10 to 4/10). A failed ``git`` gives the
+    principal's board too, so the first answer is kept, after one ``git`` call."""
+    from aisquare.core import workspace
     from aisquare.services import remote_needs
 
     principal = tmp_path / "principal"
     (principal / ".git" / "worktrees" / "wt").mkdir(parents=True)
     worktree = tmp_path / "wt"
-    worktree.mkdir()
+    (worktree / "sub").mkdir(parents=True)
     (worktree / ".git").write_text(f"gitdir: {principal / '.git' / 'worktrees' / 'wt'}\n")
+    marked = principal / "marked"
+    (marked / ".aisquare").mkdir(parents=True)
     asked: list[Path] = []
 
     def git_common_root(start: Path) -> Path | None:
         asked.append(start)
-        return None if len(asked) == 1 else principal  # the first one timed out
+        return None  # timed out, or the principal has gone
 
-    monkeypatch.setattr(orchestrator, "git_common_root", git_common_root)
-    project = ProjectInfo(id=project_id_for(worktree), root=worktree, linked_repos=[])
-
-    assert remote_server._remote_board_project(worktree).root == worktree, "git failed"
-    board = remote_server._remote_board_project(worktree)
-    assert board.root == principal
-    assert remote_needs.live_needs_sources().board_project(project) == board.id
-    assert remote_server._remote_board_project(worktree) == board
-    assert len(asked) == 2, "kept once git answered, and the needs watcher's is the same"
+    monkeypatch.setattr(workspace, "git_common_root", git_common_root)
+    for root in (worktree, worktree / "sub", marked):
+        asked.clear()
+        board = remote_server._remote_board_project(root)
+        assert board.root == principal.resolve(), root
+        project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+        assert remote_needs.live_needs_sources().board_project(project) == board.id
+        assert remote_server._remote_board_project(root) == board
+        assert len(asked) == 1, "one git call, and the answer kept"
 
 
 # --- the socket: project panes, subscribe_board, caps ---------------------------------------

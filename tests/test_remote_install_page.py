@@ -670,6 +670,181 @@ def test_a_build_another_account_may_change_is_no_page_to_serve(
             remote_server.run_foreground(dist_dir=None if installed else built, port=free_port())
 
 
+def _setfacl(path: Path, entry: str) -> None:
+    """``setfacl -m entry path``, or a skip where there is no ``setfacl`` or no ACL."""
+    import subprocess
+
+    try:
+        done = subprocess.run(["setfacl", "-m", entry, str(path)], capture_output=True)
+    except OSError:
+        pytest.skip("no setfacl on this machine")
+    if done.returncode != 0:
+        pytest.skip(f"this filesystem keeps no ACL: {done.stderr!r}")
+
+
+@pytest.mark.parametrize("entry", ["file", "directory"])
+def test_a_build_entry_a_posix_acl_lets_another_account_write_is_no_page_to_serve(
+    isolated_home: Path, built: Path, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """Under a POSIX ACL the group bits are its mask, the most any named user or group gets,
+    and the check read them as the file's group alone: ``setfacl -m u:nobody:rw`` on a file
+    of this account's own group showed ``0664 anmol:anmol``, passed as start and as served,
+    and let ``nobody`` rewrite the page that takes the passphrase (review of #243, round 10,
+    4/7). A shared checkout's default ACL does as much for every file a build writes there.
+    ``chmod g-w``, which lowers the mask, closes it again."""
+    if sys.platform != "linux":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("POSIX ACLs are read on Linux")
+    changed = built / "index.html" if entry == "file" else built / "assets"
+    served = built / "index.html" if entry == "file" else built / "assets" / "app.js"
+    own_group = changed.stat().st_gid
+    monkeypatch.setattr(remote_server, "_remote_private_group", lambda: own_group)
+    remedy = remote_server.PAGE_DIST_REMEDY
+    changed.chmod(0o664 if entry == "file" else 0o775)
+    assert remote_server._page_open_to_others(built, remedy) is None, "this account's group"
+
+    _setfacl(changed, "u:nobody:rw" if entry == "file" else "u:nobody:rwx")
+
+    assert stat.S_IMODE(changed.stat().st_mode) == (0o664 if entry == "file" else 0o775)
+    problem = remote_server._page_open_to_others(built, remedy)
+    assert problem is not None and problem.startswith(f"{changed} can be written by another")
+    as_served = remote_server._page_served_open_to_others(built, served, remedy, own_group)
+    assert as_served is not None and as_served.startswith(f"{changed} can be written")
+    changed.chmod(0o644 if entry == "file" else 0o755)
+    assert remote_server._page_open_to_others(built, remedy) is None
+    assert remote_server._page_served_open_to_others(built, served, remedy, own_group) is None
+
+
+def test_a_posix_acl_is_read_from_the_entry_itself(
+    built: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ACL as Linux keeps it, ``system.posix_acl_access``, on a machine with or without
+    ``setfacl``: one there, of a file of this account's group, makes its group bit
+    another account's; none, or none on the filesystem, keeps it this account's own."""
+    import errno
+
+    if sys.platform != "linux":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("POSIX ACLs are read on Linux")
+    index = built / "index.html"
+    index.chmod(0o664)
+    info = index.stat()
+    answers: dict[str, object] = {}
+
+    def getxattr(path: object, name: str, *, follow_symlinks: bool = True) -> bytes:
+        assert name == "system.posix_acl_access" and follow_symlinks is False
+        answer = answers["now"]
+        if isinstance(answer, OSError):
+            raise answer
+        assert isinstance(answer, bytes)
+        return answer
+
+    monkeypatch.setattr(os, "getxattr", getxattr)
+    for answer, opened in [
+        (b"\x02\x00\x00\x00", True),
+        (OSError(errno.ENODATA, "No data available"), False),
+        (OSError(errno.EOPNOTSUPP, "Operation not supported"), False),
+        (OSError(errno.EIO, "Input/output error"), True),
+    ]:
+        answers["now"] = answer
+        assert remote_server._page_entry_open(index, info, info.st_gid) is opened, answer
+    assert remote_server._page_entry_open(index, info, info.st_gid + 1) is True, "not its own"
+
+
+HOME_FOLDERS = "group:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C:everyone:12:deny:delete"
+"""The ACL macOS puts on each folder of a home (``ls -le ~``), as ``acl_to_text`` writes it."""
+BOB = "user:FFFFEEEE-DDDD-CCCC-BBBB-AAAA000001F5:bob:501"
+ADMIN = "group:ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000050:admin:80"
+
+
+@pytest.mark.parametrize(
+    ("entries", "opened"),
+    [
+        (HOME_FOLDERS, False),
+        (f"{BOB}:allow:read,readattr", False),
+        (f"{BOB}:allow:read,write", True),
+        (f"{ADMIN}:allow:add_file,file_inherit", True),
+        (f"{HOME_FOLDERS}\n{ADMIN}:allow:list,delete_child", True),
+        ("user:FFFFEEEE-DDDD-CCCC-BBBB-AAAA00000ABC:me:{own}:allow:write,delete", False),
+    ],
+    ids=["home-folders", "allows-a-read", "allows-a-write", "allows-an-add", "both", "own"],
+)
+def test_a_macos_acl_that_allows_another_account_to_change_an_entry_opens_it(
+    built: Path, monkeypatch: pytest.MonkeyPatch, entries: str, opened: bool
+) -> None:
+    """macOS's ACLs grant beside the mode, which shows none of them: ``chmod +a "bob allow
+    write"`` on a 0644 file let ``bob`` rewrite it, and the check passed it (review of #243,
+    round 10, 4/7). An entry that allows another account a right that changes it is open;
+    a deny, as macOS puts on each home's folders, or a right that only reads, is not. Read
+    as ``acl_to_text`` writes it, on any machine."""
+    assert (
+        remote_server._page_acl_text_allows_write(f"!#acl 1\n{entries.format(own=4242)}\n", 4242)
+        is opened
+    )
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        return
+    index = built / "index.html"
+    index.chmod(0o644)
+    acl = f"!#acl 1\n{entries.format(own=os.getuid())}\n"
+    monkeypatch.setattr(remote_server, "_darwin_acl_text", lambda path: acl)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    seen = remote_server._page_entry_open(index, index.stat(), None)
+    monkeypatch.undo()
+    assert seen is opened
+
+
+def test_a_macos_acl_that_cannot_be_read_opens_the_entry(
+    built: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("Windows keeps no such modes")
+    index = built / "index.html"
+    index.chmod(0o644)
+
+    def unreadable(path: str) -> str | None:
+        raise OSError(5, "Input/output error", path)
+
+    monkeypatch.setattr(remote_server, "_darwin_acl_text", unreadable)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    seen = remote_server._page_entry_open(index, index.stat(), None)
+    monkeypatch.undo()
+    assert seen is True
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="chmod +a is macOS's")
+def test_a_build_file_a_macos_acl_lets_another_account_write_is_no_page_to_serve(
+    isolated_home: Path, built: Path
+) -> None:
+    """On macOS itself: ``chmod +a "nobody allow write"`` leaves the mode 0644."""
+    import subprocess
+
+    index = built / "index.html"
+    subprocess.run(["chmod", "+a", "nobody allow write", str(index)], check=True)
+    problem = remote_server._page_open_to_others(built, remote_server.PAGE_DIST_REMEDY)
+    assert problem is not None and problem.startswith(f"{index} can be written by another")
+
+
+def test_a_group_that_is_another_accounts_own_is_no_private_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An account whose primary group is this account's own is in it, and never in its
+    member list, which was all that was asked: the group was taken for a private one, and
+    a file it could write for this account's alone (review of #243, round 10, 4/7)."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("Windows has no groups to ask")
+    import grp
+    import pwd
+    from types import SimpleNamespace
+
+    me = SimpleNamespace(pw_name="anmol", pw_uid=1000, pw_gid=1000)
+    accounts = [me, SimpleNamespace(pw_name="root", pw_uid=0, pw_gid=0)]
+    monkeypatch.setattr(os, "getuid", lambda: 1000)
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: me)
+    monkeypatch.setattr(grp, "getgrgid", lambda gid: SimpleNamespace(gr_name="anmol", gr_mem=[]))
+    monkeypatch.setattr(pwd, "getpwall", lambda: accounts)
+    assert remote_server._remote_private_group() == 1000
+    accounts.append(SimpleNamespace(pw_name="build", pw_uid=1001, pw_gid=1000))
+    assert remote_server._remote_private_group() is None
+
+
 @pytest.mark.skipif(not can_deny_reads(), reason="this account lists any directory (root, or NTFS)")
 @pytest.mark.parametrize("installed", [False, True], ids=["dist", "installed"])
 @pytest.mark.parametrize(

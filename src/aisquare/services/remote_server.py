@@ -6567,7 +6567,7 @@ def _page_open_to_others(root: Path, remedy: str) -> str | None:
             info = os.lstat(path)
         except OSError:
             return None
-        if stat.S_ISLNK(info.st_mode) or not _page_entry_open(info, own_group):
+        if stat.S_ISLNK(info.st_mode) or not _page_entry_open(path, info, own_group):
             return None
         return PAGE_OPEN_TO_OTHERS.format(path=path, root=root, remedy=remedy)
 
@@ -6590,7 +6590,7 @@ def _page_open_to_others(root: Path, remedy: str) -> str | None:
             info = os.lstat(parent)
         except OSError:
             continue
-        if _page_entry_open(info, own_group, above=True):
+        if _page_entry_open(parent, info, own_group, above=True):
             return PAGE_PLACE_OPEN_TO_OTHERS.format(path=parent, root=root, remedy=remedy)
     return None
 
@@ -6623,20 +6623,42 @@ def _page_served_open_to_others(
             info = os.lstat(path)
         except OSError:
             continue
-        if _page_entry_open(info, own_group, above=path != dist and dist.is_relative_to(path)):
+        above = path != dist and dist.is_relative_to(path)
+        if _page_entry_open(path, info, own_group, above=above):
             inside = path.is_relative_to(dist)
             refusal = PAGE_OPEN_TO_OTHERS if inside else PAGE_PLACE_OPEN_TO_OTHERS
             return refusal.format(path=path, root=dist, remedy=remedy)
     return None
 
 
-def _page_entry_open(info: os.stat_result, own_group: int | None, *, above: bool = False) -> bool:
-    """Whether another account may change the file or directory ``info`` was read from:
-    one that others may write, that a group may write other than this account's own (a
-    user private group, the one Fedora and Debian give each user with a umask of 002,
-    holds no one else: :func:`_remote_private_group`), or that an account other than this
-    one or root owns. ``above``: a directory above a build, where the sticky bit keeps
-    others from renaming what this account or root owns in it, and so from the build.
+def _page_entry_open(
+    path: str | Path, info: os.stat_result, own_group: int | None, *, above: bool = False
+) -> bool:
+    """Whether another account may change the file or directory at ``path``, ``info`` its
+    ``lstat``: one that an account other than this one or root owns, that others may write,
+    that a group may write other than this account's own (a user private group, the one
+    Fedora and Debian give each user with a umask of 002, holds no one else:
+    :func:`_remote_private_group`), or whose ACL lets another account change it.
+    ``above``: a directory above a build, where the sticky bit keeps others from renaming
+    what this account or root owns in it, and so from the build.
+
+    The mode says who may write only as far as nothing grants beside it, and an ACL does.
+    The mode bits passed a file of this account's own group that ``setfacl -m u:bob:rw``
+    let another account write, as a shared checkout's default ACL lets a group write every
+    file a build writes there, and they show none of macOS's ACLs at all (review of #243,
+    round 10, 4/7). So the one rule, no account but this one or root may change it, is read
+    from both:
+
+    * A POSIX ACL, Linux's, grants nothing the mode does not show: its group bits are then
+      the ACL's mask, the most that any named user or named group gets, as well as the
+      file's group. A group write bit still bounds them all, but it no longer says the
+      writer is this account's own group, so an entry that carries such an ACL is not let
+      off as its private group's (:func:`_page_posix_acl`). ``chmod go-w`` lowers the mask,
+      which every named entry is held to, and the entry then passes.
+    * An ACL of macOS grants beside the mode: an entry whose ACL allows another account a
+      right that changes it, or a directory's names, is open
+      (:func:`_page_darwin_acl_allows_write`). A deny grants nothing: macOS puts one on the
+      folders of each home.
 
     Never asked on Windows, which keeps no such modes and has no ``os.getuid``: said here,
     where mypy's Windows run reads it, and not only by the callers."""
@@ -6645,18 +6667,136 @@ def _page_entry_open(info: os.stat_result, own_group: int | None, *, above: bool
 
     if sys.platform == "win32":
         return False
+    if info.st_uid not in {os.getuid(), 0}:
+        return True
     writable = info.st_mode & stat.S_IWOTH or (
-        info.st_mode & stat.S_IWGRP and info.st_gid != own_group
+        info.st_mode & stat.S_IWGRP and (info.st_gid != own_group or _page_posix_acl(path))
     )
     if above and info.st_mode & stat.S_ISVTX:
         writable = False
-    return bool(writable) or info.st_uid not in {os.getuid(), 0}
+    return bool(writable) or _page_darwin_acl_allows_write(path)
+
+
+def _page_posix_acl(path: str | Path) -> bool:
+    """Whether the entry at ``path`` carries a POSIX access ACL beyond its mode, Linux's
+    ``system.posix_acl_access``; an entry whose ACL cannot be read is taken to carry one."""
+    import errno
+    import sys
+
+    if sys.platform != "linux":
+        return False
+    try:
+        os.getxattr(path, "system.posix_acl_access", follow_symlinks=False)
+    except OSError as exc:  # none, none on this filesystem, or gone since it was looked at
+        return exc.errno not in {errno.ENODATA, errno.EOPNOTSUPP, errno.ENOENT}
+    return True
+
+
+_DARWIN_ACL_WRITES = frozenset(
+    {
+        "write",
+        "append",
+        "delete",
+        "add_file",
+        "add_subdirectory",
+        "delete_child",
+        "writeattr",
+        "writeextattr",
+        "writesecurity",
+        "chown",
+    }
+)
+"""The rights of a macOS ACL entry that change a file, or a directory's names, as
+``acl_to_text`` writes them: a file's ``write`` and ``append`` are a directory's ``add_file``
+and ``add_subdirectory``."""
+
+
+def _page_darwin_acl_allows_write(path: str | Path) -> bool:
+    """Whether a macOS ACL on the entry at ``path`` allows an account other than this one a
+    right that changes it (:data:`_DARWIN_ACL_WRITES`); an ACL that cannot be read is taken
+    to allow one."""
+    import sys
+
+    if sys.platform != "darwin":
+        return False
+    try:
+        text = _darwin_acl_text(os.fspath(path))
+    except OSError:
+        return True
+    return text is not None and _page_acl_text_allows_write(text, os.getuid())
+
+
+def _page_acl_text_allows_write(text: str, own_uid: int) -> bool:
+    """Whether ``text``, an ACL as macOS's ``acl_to_text`` writes it, has an entry that
+    allows an account other than ``own_uid`` a right that changes the entry. Each line after
+    the header is ``tag:uuid:name:id:allow|deny:rights``, the rights and the inheritance
+    flags in one comma-separated list."""
+    for line in text.splitlines():
+        fields = line.split(":")
+        if line.startswith("!#") or len(fields) < 6:
+            continue
+        tag, qualifier, verdict, rights = fields[0], fields[-3], fields[-2], fields[-1]
+        if verdict != "allow" or (tag == "user" and qualifier == str(own_uid)):
+            continue
+        if _DARWIN_ACL_WRITES & set(rights.split(",")):
+            return True
+    return False
+
+
+_DARWIN_ACL_TYPE_EXTENDED = 0x00000100
+"""macOS's ``acl_type_t`` of the ACL it keeps beside the mode (``<sys/acl.h>``)."""
+
+
+def _darwin_acl_text(path: str) -> str | None:
+    """The ACL of the entry at ``path``, not followed if it is a link, as macOS's
+    ``acl_to_text`` writes it; ``None`` for an entry with none. ``OSError`` when it cannot
+    be read."""
+    import ctypes
+    import errno
+
+    libc = _darwin_libc()
+    acl = libc.acl_get_link_np(os.fsencode(path), _DARWIN_ACL_TYPE_EXTENDED)
+    if not acl:
+        failed = ctypes.get_errno()
+        if failed in {errno.ENOENT, errno.EOPNOTSUPP}:  # no ACL, or none on this filesystem
+            return None
+        raise OSError(failed, os.strerror(failed), path)
+    try:
+        text = libc.acl_to_text(acl, None)
+        if not text:
+            failed = ctypes.get_errno()
+            raise OSError(failed, os.strerror(failed), path)
+        try:
+            return ctypes.string_at(text).decode("utf-8", "replace")
+        finally:
+            libc.acl_free(text)
+    finally:
+        libc.acl_free(acl)
+
+
+@functools.cache
+def _darwin_libc() -> Any:
+    """macOS's C library, its three ACL calls typed: ``acl_get_link_np``, ``acl_to_text`` and
+    ``acl_free``. Loaded once, the first time an ACL is read."""
+    import ctypes
+    import ctypes.util
+
+    libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.dylib", use_errno=True)
+    libc.acl_get_link_np.restype = ctypes.c_void_p
+    libc.acl_get_link_np.argtypes = (ctypes.c_char_p, ctypes.c_int)
+    libc.acl_to_text.restype = ctypes.c_void_p
+    libc.acl_to_text.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    libc.acl_free.restype = ctypes.c_int
+    libc.acl_free.argtypes = (ctypes.c_void_p,)
+    return libc
 
 
 def _remote_private_group() -> int | None:
     """This account's own group when no other account is in it, a user private group;
     ``None`` otherwise (macOS's ``staff``, SUSE's ``users``), or for an account with no
-    entry to look it up by."""
+    entry to look it up by. An account whose primary group it is is in it too, and is never
+    in its list of members (``gr_mem``), so each account's own group is asked as well
+    (review of #243, round 10, 4/7)."""
     import sys
 
     if sys.platform == "win32":
@@ -6670,6 +6810,9 @@ def _remote_private_group() -> int | None:
     except KeyError:
         return None
     if group.gr_name != user.pw_name or set(group.gr_mem) - {user.pw_name}:
+        return None
+    others = (other for other in pwd.getpwall() if other.pw_uid != user.pw_uid)
+    if any(other.pw_gid == user.pw_gid for other in others):
         return None
     return user.pw_gid
 

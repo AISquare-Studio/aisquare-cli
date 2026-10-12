@@ -132,8 +132,12 @@ The page is part of aisquare-cli, so a fresh machine needs no other step.
 `.git`: what is served is open to anyone with the link, before the passphrase. Nor
 is a build another account could change served: one with a file or directory that
 others, or a group other than your own, may write, or that another account owns, or
-a directory you cannot list, and so cannot check. `chmod -R go-w` it, or install it
-with `install-page`, whose copy no other account may write. A build in a directory
+whose ACL lets another account change it, or a directory you cannot list, and so
+cannot check. On Linux, a group write bit on an entry with an ACL (`setfacl`) counts
+as another account's, since it is the ACL's mask; on macOS, an ACL entry (`chmod +a`)
+that allows another account to write does. `chmod -R go-w` it (`chmod -R -N` drops
+macOS's ACLs), or install it with `install-page`, whose copy no other account may
+write. A build in a directory
 another account could change is not served either, wherever above it that directory
 is (a shared checkout's group-writable `/srv/app`, say), unless it has the sticky bit,
 as `/tmp` does. Remote refuses to start with such a build, and asks again about each

@@ -581,11 +581,14 @@ def action_pinned_call(
 
 
 def action_project(body: dict[str, Any]) -> ProjectInfo:
-    """The body's ``project`` (an id prefix, a name or a codename), or the current project."""
-    from aisquare.services import fleet as fleet_service
-
+    """The body's ``project`` (an id prefix, a name or a codename) among the projects a phone
+    may reach, or the current project, as every project ref a phone sends is read
+    (``remote_server._resolve_project``). The fleet's own lookup names any directory the
+    hooks captured, and ``*`` every one: a refusal listed them, and an id prefix told,
+    stopped, restarted or switched a captured project's agents (review of #243, round 10,
+    1/7)."""
     ref = action_ref(body, "project")
-    return action_fleet_call(lambda: fleet_service.resolve_project(ref))
+    return action_fleet_call(lambda: remote_server._resolve_project(ref))
 
 
 def action_newest_row(target: ProjectInfo, label: str) -> FleetAgent | None:

@@ -68,7 +68,16 @@ def switch(name: str) -> ProjectInfo:
     Raises ``KeyError`` if nothing matches and ``ValueError`` if it is ambiguous.
     """
     with store_session() as store:
-        project = store.onboard_project(_one_match(store, name))
+        found = _one_match(store, name)
+    return switch_to(found)
+
+
+def switch_to(project: ProjectInfo) -> ProjectInfo:
+    """:func:`switch` to a project already found: added, and pinned as active. The remote's
+    ``project/switch`` finds it among the projects a phone may reach, not by
+    :func:`switch`'s lookup, which names any directory the hooks captured."""
+    with store_session() as store:
+        project = store.onboard_project(project)
     pin_project(project.id)
     return project
 
@@ -79,13 +88,7 @@ def _one_match(store: ContextStore, term: str) -> ProjectInfo:
     ``KeyError`` when nothing matches, ``ValueError`` (listing the candidates)
     when several do; the two commands that share this share its wording.
     """
-    return only_match(term, store.find_projects(term))
-
-
-def only_match(term: str, matches: list[ProjectInfo]) -> ProjectInfo:
-    """The one project of ``matches``, those ``term`` names, as :func:`_one_match` says it:
-    ``KeyError`` for none, ``ValueError`` listing them for several. The remote's
-    ``project/remove`` passes the matches a phone is shown."""
+    matches = store.find_projects(term)
     if not matches:
         raise KeyError(term)
     if len(matches) > 1:

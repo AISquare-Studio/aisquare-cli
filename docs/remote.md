@@ -609,10 +609,12 @@ from `POST api/unlock`) except unlock itself; every non-GET request needs an
 | POST | `api/send-keys`, `api/note`, `api/agent/{tell,stop,restart,switch}`, `api/task/…`, `api/project/…` | the writes; keys, a note and an agent action take `"project"` in the body, as a read takes `?project=`, and without it go to the current project |
 | WS | `ws` | the live stream |
 
-A `?project=`, a write's `"project"` and `remove`'s ref name only a project the
-page is shown: one `api/projects` lists, which you added, or the current one. A
-directory Claude Code only ran in, which the hooks captured and nobody added, is
-named by none of them, and `*` names nothing.
+A `?project=`, a write's or an agent action's `"project"`, `switch`'s name and
+`remove`'s ref name only a project the page is shown: one `api/projects` lists,
+which you added, or the current one. A directory Claude Code only ran in, which
+the hooks captured and nobody added, is named by none of them, and `*` names
+nothing. A switch adds the project it names, so the current one, if you never
+added it, is switched to only where `add` would add it.
 
 The stream sends `{"type", "payload", "ts"}` frames, each kind when it changed:
 

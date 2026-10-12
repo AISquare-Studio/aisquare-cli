@@ -2416,6 +2416,61 @@ def test_a_phone_cannot_remove_a_directory_the_hooks_only_captured(
         assert [project.id for project in store.captured_projects()] == [secret.id]
 
 
+@pytest.mark.parametrize("ref", ["*", "secret", "id prefix"])
+def test_a_phone_cannot_switch_to_a_directory_the_hooks_only_captured(
+    home: Path, runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ref: str
+) -> None:
+    """``project/switch`` named a project as ``project switch`` does, captured directories
+    included: ``*`` listed every one, and an id prefix added the directory and pinned it, so
+    that every phone read its board, tasks and memory (review of #243, round 10, 2/7)."""
+    (alpha,) = _projects(home, "code/alpha")
+    root = _repo(home / "code" / "secret")
+    secret = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+    with store_session() as store:
+        store.ensure_project(secret)
+    monkeypatch.chdir(alpha.root)
+    client = _project_writes(runtime, tmp_path)
+    sent = {"id prefix": secret.id[:12]}.get(ref, ref)
+
+    answer = client.post(f"{base(runtime)}/api/project/switch", json={"name": sent})
+
+    assert (answer.status_code, answer.json()["error"]) == (404, "not_found"), answer.text
+    assert answer.json()["message"] == f"no project matches {sent!r}"
+    assert [project.id for project in project_service.list_projects()] == [alpha.id]
+    assert project_service.info().id == alpha.id
+    with store_session() as store:
+        assert [project.id for project in store.captured_projects()] == [secret.id]
+
+
+@pytest.mark.parametrize(("where", "status"), [("code/app", 200), (".work/app", 400), (".", 400)])
+def test_a_switch_adds_the_current_project_only_as_project_add_would(
+    home: Path,
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+    status: int,
+) -> None:
+    """The one project a phone reaches that may not be added yet is the current one, the
+    directory the server runs in, which a switch to it added: ``~`` or a hidden directory
+    then stayed listed for every phone, wherever the server ran next. A switch adds only
+    what ``project/add`` adds (review of #243, round 10, 2/7)."""
+    root = _repo(home / where) if where != "." else home
+    current = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+    with store_session() as store:
+        store.ensure_project(current)
+    monkeypatch.chdir(root)
+    client = _project_writes(runtime, tmp_path)
+
+    answer = client.post(f"{base(runtime)}/api/project/switch", json={"name": current.id})
+
+    assert answer.status_code == status, answer.text
+    added = [project.id for project in project_service.list_projects()]
+    assert added == ([current.id] if status == 200 else [])
+    if status != 200:
+        assert answer.json()["error"] == "invalid"
+
+
 def test_an_added_project_is_listed_where_the_phone_and_the_cli_look(
     home: Path, runtime: Runtime, tmp_path: Path
 ) -> None:

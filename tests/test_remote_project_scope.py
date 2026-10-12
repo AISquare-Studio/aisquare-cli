@@ -293,6 +293,107 @@ def test_a_phone_cannot_list_or_read_a_captured_directory(
     assert fleet(other).status_code == 200
 
 
+READS = (
+    "api/fleet",
+    "api/board",
+    "api/tasks",
+    "api/memory",
+    "api/panes/coder-1",
+    "api/transcript/coder-1",
+    "api/explainability/coder-1",
+)
+"""Every read that takes ``?project=``."""
+
+
+@pytest.mark.parametrize("read", READS)
+def test_no_read_names_or_reads_a_captured_directory(
+    runtime: Runtime,
+    tmp_path: Path,
+    two_projects: tuple[str, str],
+    captured: ProjectInfo,
+    fake_tmux: _FakeTmux,
+    read: str,
+) -> None:
+    """Each read resolves its ``?project=`` among the projects a phone may reach, so ``*``
+    lists no captured directory and an id prefix reads none (review of #243, round 9, 6/6;
+    round 10, 7/7)."""
+    _seed_agent(captured.id, "coder-1")
+    client = _client(runtime, live_sources(), tmp_path)
+    for ref in ("*", captured.id[:12], captured.id, captured.root.name):
+        answer = client.get(f"/r/{runtime.token}/{read}", params={"project": ref})
+        assert (answer.status_code, answer.json()["error"]) == (404, "not_found"), (ref, answer)
+        assert captured.root.name not in answer.json()["message"].replace(ref, "")
+
+
+def _write_bodies(ref: str, agent_id: str) -> dict[str, list[dict[str, object]]]:
+    """For each write a phone may send, the bodies that carry ``ref`` in each field that
+    names a project, a task or a session, with whatever else the write needs to reach it."""
+    pinned: dict[str, object] = {
+        "agent": "coder-1",
+        "confirm": "coder-1",
+        "agent_id": agent_id,
+        "project": ref,
+    }
+    return {
+        "task/claim": [{"ref": ref}, {"ref": "tsk_x", "as": ref}],
+        "task/done": [{"ref": ref}, {"ref": "tsk_x", "as": ref}],
+        "note": [{"text": "hi", "project": ref}, {"text": "hi", "as": ref}],
+        "project/switch": [{"name": ref}],
+        "project/add": [{"path": ref}],
+        "project/remove": [{"ref": ref}],
+        "send-keys": [{"agent": "coder-1", "text": "hi", "project": ref}],
+        "agent/tell": [{"agent": "coder-1", "text": "hi", "project": ref}],
+        "agent/stop": [pinned],
+        "agent/restart": [pinned],
+        "agent/switch": [pinned],
+    }
+
+
+def test_no_write_names_or_reaches_a_captured_directory(
+    runtime: Runtime,
+    tmp_path: Path,
+    two_projects: tuple[str, str],
+    captured: ProjectInfo,
+    fake_tmux: _FakeTmux,
+) -> None:
+    """Every write a phone may send, each field that names a project, a task or a session
+    given ``*`` and a captured directory's own refs: each is refused as naming nothing,
+    none names the directory, and none adds, pins or acts on it. The agent actions and
+    ``project/switch`` looked their ref up as the CLI does: ``*`` listed every captured
+    directory, and an id prefix told, stopped or switched its agents, or added and pinned it
+    (review of #243, round 10, 1/7, 2/7 and 7/7). The walk names every write, so a new one
+    is walked too."""
+    from aisquare.services.remote_server import write_endpoint_names
+
+    current, _other = two_projects
+    _seed_agent(captured.id, "coder-1")
+    agent_id = f"agt_{captured.id[-6:]}_coder-1"
+    client = _client(runtime, live_sources(), tmp_path)
+    runtime.set_allow_write(True)
+    for ref in ("*", captured.id[:12], captured.id, captured.root.name):
+        bodies = _write_bodies(ref, agent_id)
+        assert set(bodies) == set(write_endpoint_names())
+        for name, sent in bodies.items():
+            for body in sent:
+                answer = client.post(f"/r/{runtime.token}/api/{name}", json=body)
+                refused = (answer.status_code, answer.json()["error"])
+                assert refused in NAMES_NOTHING, (name, body, answer.text)
+                said = answer.json()["message"].replace(ref, "")  # its own words
+                assert captured.root.name not in said, (name, body, answer.text)
+    with store_session() as store:
+        assert [p.id for p in store.captured_projects()] == [captured.id], "never added"
+    assert fleet_service.resolve_project(None).id == current, "never pinned"
+    assert fake_tmux.sent == [], "nothing typed into its agent"
+    with store_session() as store:
+        row = store.fleet_agent_by_label(captured.id, "coder-1", live_only=True)
+    assert row is not None and row.id == agent_id, "its agent still runs"
+
+
+NAMES_NOTHING = {(404, "not_found"), (400, "invalid"), (409, "team_disabled")}
+"""How a write refuses a ref that names nothing it may reach: 404, or 400 for a path
+``project/add`` will not take, or 409 for a board ref with the board off."""
+
+
 # --- fleet ------------------------------------------------------------------------------
 
 

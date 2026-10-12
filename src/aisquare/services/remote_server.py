@@ -511,57 +511,79 @@ class NoSuchProject(LookupError):
     """
 
 
+class AmbiguousProject(NoSuchProject):
+    """A phone's project ref names several projects it may reach: a :class:`NoSuchProject`,
+    404 ``not_found`` wherever a project ref is read, and 400 ``ambiguous_project`` from
+    ``project/switch`` and ``project/remove``, as ``project switch`` and ``forget`` refuse it
+    (:func:`_remote_project_refusals`)."""
+
+
+# --- what a phone may reach ------------------------------------------------------------------
+
+
 def _resolve_project(ref: str | None) -> ProjectInfo:
-    """The named project (id prefix, name or codename), or the CURRENT one for ``None``.
+    """The project a phone's ``ref`` names (an id prefix, a name or a codename) among those it
+    may reach (:func:`_remote_reachable`), or the CURRENT one for ``None``;
+    :class:`NoSuchProject` for none, :class:`AmbiguousProject` for several.
 
     Every read and write endpoint that used to hard-code
     ``fleet_service.resolve_project(None)`` — and so could only ever see the
     project the server started in — now threads an optional ``project`` through
-    this one place.
-
-    A ref names only a project a phone is shown (:func:`_remote_projects_named`).
-    """
-    from aisquare.services import fleet as fleet_service
-
-    try:
-        if ref is None:
-            return fleet_service.resolve_project(None)
-        return fleet_service.only_project(ref, _remote_projects_named(ref))
-    except fleet_service.NoSuchProject as exc:
-        raise NoSuchProject(str(exc)) from exc
-
-
-def _remote_projects_named(ref: str) -> list[ProjectInfo]:
-    """The projects a phone's ``ref``, an id prefix, a name or a codename, names among those
-    it is shown (:func:`_remote_shown`).
+    this one place. So does every other project ref a phone sends: a socket's
+    subscription, an agent action's ``project``, ``project/switch``'s ``name`` and
+    ``project/remove``'s ``ref`` (:func:`remote_project_ref`).
 
     The store matches every directory it has a row for, and most are ones the hooks only
     captured, anywhere Claude Code ran (#139): never added, never listed by
     ``api/projects``, and some of them ones ``project/add`` refuses, a home or a hidden
-    directory, so that no phone reads their board, tasks and memory. A ref of ``*``, an id
-    prefix with nothing left once its glob characters are taken out, matched every one,
-    and its refusal named them all; an id prefix then read any one's board, memory, tasks,
-    panes and transcripts (review of #243, round 9, 6/6). Such a ref now names nothing, by
-    the store's own rule (``store._glob_prefix``), which a copy of its table here had to
-    keep in step with (round 10, 7/7).
+    directory, so that no phone reads their board, tasks and memory. A ref of ``*`` matched
+    every one, and its refusal named them all; an id prefix then read any one's board,
+    memory, tasks, panes and transcripts (review of #243, round 9, 6/6). The agent actions
+    and ``project/switch`` still looked their ref up as the CLI does, around this one: a
+    phone with writes on told, stopped or switched a captured project's agents, and a switch
+    added the directory it named, which every phone then read (round 10, 1/7 and 2/7).
     """
     from aisquare.core.store import store_session
+    from aisquare.services import fleet as fleet_service
 
+    if ref is None:
+        try:
+            return fleet_service.resolve_project(None)
+        except fleet_service.NoSuchProject as exc:
+            raise NoSuchProject(str(exc)) from exc
     with store_session() as store:
-        matches = store.find_projects(ref)
-    return _remote_shown(matches)
+        found = store.find_projects(ref)
+    matches = _remote_reachable(found)
+    try:
+        return fleet_service.only_project(ref, matches)
+    except fleet_service.NoSuchProject as exc:
+        refusal = AmbiguousProject if matches else NoSuchProject
+        raise refusal(str(exc)) from exc
 
 
-def _remote_shown(projects: list[ProjectInfo]) -> list[ProjectInfo]:
-    """Those of ``projects`` a phone is shown: one added on purpose, which ``api/projects``
+def _remote_reachable(projects: list[ProjectInfo]) -> list[ProjectInfo]:
+    """Those of ``projects`` a phone may reach: one added on purpose, which ``api/projects``
     lists, and the current one, which a read with no project reads, whether it was added or
-    only captured."""
+    only captured. The one rule for every project, task and session a phone names."""
     if all(project.onboarded_at is not None for project in projects):
         return projects
     from aisquare.services import fleet as fleet_service
 
     current = fleet_service.resolve_project(None).id
     return [p for p in projects if p.onboarded_at is not None or p.id == current]
+
+
+@contextlib.contextmanager
+def _remote_project_refusals(ref: str) -> Iterator[None]:
+    """``project/switch`` and ``project/remove``'s refusals of a project ``ref``, as
+    ``project switch`` and ``project forget`` give them: 404 ``not_found`` for none, 400
+    ``ambiguous_project`` for several (:func:`_resolve_project`)."""
+    try:
+        yield
+    except AmbiguousProject as exc:
+        raise RequestError(400, "ambiguous_project", str(exc)) from None
+    except NoSuchProject:
+        raise RequestError(404, "not_found", f"no project matches {ref!r}") from None
 
 
 def _remote_now() -> datetime:
@@ -2127,7 +2149,8 @@ def remote_project_ref(ref: str) -> ProjectInfo:
     a write that never began (sweeps 3 and 4 of #243). A loop is ``Path.resolve``'s
     ``RuntimeError`` ("Symlink loop from ...") on Python 3.11 and 3.12, which CI runs,
     and no error on 3.13. ``KeyError`` and ``ValueError`` are
-    ``project_service.resolve``'s, for nothing and several matching.
+    ``project_service.resolve``'s, for nothing and several matching, and a name is
+    :func:`_resolve_project`'s, :class:`NoSuchProject` and :class:`AmbiguousProject`.
 
     A directory with no project of its own is looked up to the project it is in, which
     asks for its ``.git``: from Python 3.14 that answers "none" for a directory this
@@ -2136,9 +2159,9 @@ def remote_project_ref(ref: str) -> ProjectInfo:
     directory is still 404 ``not_found`` unless it is a project's own root
     (:func:`_remote_may_look_inside`).
 
-    A ref names only a project a phone is shown, as ``?project=`` does
-    (:func:`_remote_projects_named`): one the hooks only captured is 404 ``not_found``,
-    and ``*`` no longer names, and lists, every one of them (review of #243, round 9, 6/6).
+    A ref names only a project a phone may reach, as ``?project=`` does
+    (:func:`_remote_reachable`): one the hooks only captured is 404 ``not_found``, and
+    ``*`` no longer names, and lists, every one of them (review of #243, round 9, 6/6).
     """
     from aisquare.services import project as project_service
 
@@ -2155,7 +2178,7 @@ def remote_project_ref(ref: str) -> ProjectInfo:
             passed = found.root != path.resolve() and path.is_dir()
         except (OSError, RuntimeError):
             raise no_such from None
-        if (passed and not _remote_may_look_inside(path)) or not _remote_shown([found]):
+        if (passed and not _remote_may_look_inside(path)) or not _remote_reachable([found]):
             raise no_such
         return found
     if ref in (".", "..") or any(separator in ref for separator in {"/", os.sep}):
@@ -2165,7 +2188,7 @@ def remote_project_ref(ref: str) -> ProjectInfo:
             f"{ref} is a relative path: name the project, or give its absolute path "
             "(start with / or ~)",
         )
-    return project_service.only_match(ref, _remote_projects_named(ref))
+    return _resolve_project(ref)
 
 
 def _remote_may_look_inside(directory: Path) -> bool:
@@ -3185,15 +3208,25 @@ def live_writes() -> Writes:
         return {"event": event.as_envelope().model_dump(mode="json")}, summary
 
     def project_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
+        """Pin the project ``name`` names among those a phone may reach
+        (:func:`_resolve_project`), and add it, as ``project switch`` does.
+
+        ``project switch``'s own lookup names any directory the hooks captured, and ``*``
+        named every one: the refusal listed them, and a captured directory's id prefix
+        added it and pinned it, so that every phone read its board, tasks and memory from
+        then on, a home or a hidden directory that ``project/add`` refuses included (review
+        of #243, round 10, 2/7). The one project a phone reaches that may not be added yet
+        is the current one, and it is added only within ``project/add``'s limits
+        (:func:`check_project_add_root`): a switch adds what it names.
+        """
         from aisquare.services import project as project_service
 
         name = _required(body, "name")
-        try:
-            project = project_service.switch(name)
-        except KeyError:
-            raise RequestError(404, "not_found", f"no project matches {name!r}") from None
-        except ValueError as exc:
-            raise RequestError(400, "ambiguous_project", str(exc)) from None
+        with _remote_project_refusals(name):
+            found = _resolve_project(name)
+        if found.onboarded_at is None:
+            check_project_add_root(str(found.root))
+        project = project_service.switch_to(found)
         return {"project": project.model_dump(mode="json")}, f"switched to {project.id}"
 
     def project_add(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -3230,7 +3263,9 @@ def live_writes() -> Writes:
 
         ref = _required(body, "ref")
         try:
-            report = project_service.forget_project(remote_project_ref(ref), purge=False)
+            with _remote_project_refusals(ref):
+                project = remote_project_ref(ref)
+            report = project_service.forget_project(project, purge=False)
         except KeyError:
             raise RequestError(404, "not_found", f"no project matches {ref!r}") from None
         except ValueError as exc:

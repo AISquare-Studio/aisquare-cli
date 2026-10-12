@@ -6601,7 +6601,7 @@ PAGE_INSTALLED_REMEDY = "or install the build again with asq remote install-page
 
 PAGE_OPEN_TO_OTHERS = (
     "{path} can be written by another account, which could change the page that takes the "
-    "passphrase — chmod -R go-w {root}, {remedy}"
+    "passphrase — {fix}, {remedy}"
 )
 """Why a ``--dist`` or an installed build that another account may change is no page
 (:func:`_page_open_to_others`)."""
@@ -6615,10 +6615,28 @@ page (:func:`_page_open_to_others`)."""
 
 PAGE_PLACE_OPEN_TO_OTHERS = (
     "{path} can be changed by another account, which could put a page of its own in place of "
-    "{root} and take the passphrase — chmod go-w {path} if it is yours, {remedy}"
+    "{root} and take the passphrase — {fix} if it is yours, {remedy}"
 )
 """Why a ``--dist`` or an installed build in a directory another account may change is no
 page (:func:`_page_open_to_others`)."""
+
+
+def _page_open_refusal(path: str | Path, root: Path, remedy: str, *, inside: bool) -> str:
+    """The refusal of the build at ``root`` because another account may change ``path``, an
+    entry ``inside`` it (:data:`PAGE_OPEN_TO_OTHERS`) or a directory above it
+    (:data:`PAGE_PLACE_OPEN_TO_OTHERS`), with the command that closes it: ``chmod go-w`` of
+    the whole build, or of that directory.
+
+    Where a macOS ACL lets another account change it, ``chmod -N`` as well, which removes
+    the ACL: a mode ``chmod`` leaves every ACL entry in place, and the next start refused
+    the build the same way (review of #243, round 11, 2/9). On Linux, ``chmod go-w`` lowers
+    the ACL's mask, which every named entry is held to (:func:`_page_entry_open`)."""
+    target, recursive = (root, "-R ") if inside else (path, "")
+    fix = f"chmod {recursive}go-w {target}"
+    if _page_darwin_acl_allows_write(path):
+        fix = f"{fix} and chmod {recursive}-N {target}"
+    template = PAGE_OPEN_TO_OTHERS if inside else PAGE_PLACE_OPEN_TO_OTHERS
+    return template.format(path=path, root=root, fix=fix, remedy=remedy)
 
 
 def _page_open_to_others(root: Path, remedy: str) -> str | None:
@@ -6664,7 +6682,7 @@ def _page_open_to_others(root: Path, remedy: str) -> str | None:
             return None
         if stat.S_ISLNK(info.st_mode) or not _page_entry_open(path, info, own_group):
             return None
-        return PAGE_OPEN_TO_OTHERS.format(path=path, root=root, remedy=remedy)
+        return _page_open_refusal(path, root, remedy, inside=True)
 
     if (problem := refusal(str(root))) is not None:
         return problem
@@ -6686,7 +6704,7 @@ def _page_open_to_others(root: Path, remedy: str) -> str | None:
         except OSError:
             continue
         if _page_entry_open(parent, info, own_group, above=True):
-            return PAGE_PLACE_OPEN_TO_OTHERS.format(path=parent, root=root, remedy=remedy)
+            return _page_open_refusal(parent, root, remedy, inside=False)
     return None
 
 
@@ -6720,9 +6738,7 @@ def _page_served_open_to_others(
             continue
         above = path != dist and dist.is_relative_to(path)
         if _page_entry_open(path, info, own_group, above=above):
-            inside = path.is_relative_to(dist)
-            refusal = PAGE_OPEN_TO_OTHERS if inside else PAGE_PLACE_OPEN_TO_OTHERS
-            return refusal.format(path=path, root=dist, remedy=remedy)
+            return _page_open_refusal(path, dist, remedy, inside=path.is_relative_to(dist))
     return None
 
 

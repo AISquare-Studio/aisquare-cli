@@ -822,6 +822,45 @@ def test_a_macos_acl_that_cannot_be_read_opens_the_entry(
     assert seen is True
 
 
+@pytest.mark.parametrize("served", [False, True], ids=["at-start", "as-served"])
+@pytest.mark.parametrize("where", ["in the build", "above it"])
+def test_a_build_a_macos_acl_opens_is_told_the_chmod_that_removes_the_acl(
+    built: Path, monkeypatch: pytest.MonkeyPatch, where: str, served: bool
+) -> None:
+    """A mode ``chmod`` leaves every ACL entry in place: a build refused for a macOS ACL
+    was told ``chmod -R go-w``, and the next start refused it the same way (review of
+    #243, round 11, 2/9). The refusal names ``chmod -N`` as well, for the entry it found."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("Windows keeps no such modes")
+    for path in (built, *built.rglob("*")):
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    index = built / "index.html"
+    opened = index if where == "in the build" else built.parent
+    acl = f"!#acl 1\n{BOB}:allow:read,write,add_file\n"
+    monkeypatch.setattr(remote_server, "_remote_private_group", lambda: None)
+    monkeypatch.setattr(
+        remote_server, "_darwin_acl_text", lambda path: acl if path == str(opened) else None
+    )
+    monkeypatch.setattr(sys, "platform", "darwin")
+    remedy = remote_server.PAGE_DIST_REMEDY
+    if served:
+        problem = remote_server._page_served_open_to_others(built, index, remedy, None)
+    else:
+        problem = remote_server._page_open_to_others(built, remedy)
+    monkeypatch.undo()
+    if where == "in the build":
+        assert problem == remote_server.PAGE_OPEN_TO_OTHERS.format(
+            path=index, fix=f"chmod -R go-w {built} and chmod -R -N {built}", remedy=remedy
+        )
+    else:
+        assert problem == remote_server.PAGE_PLACE_OPEN_TO_OTHERS.format(
+            path=opened,
+            root=built,
+            fix=f"chmod go-w {opened} and chmod -N {opened}",
+            remedy=remedy,
+        )
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="chmod +a is macOS's")
 def test_a_build_file_a_macos_acl_lets_another_account_write_is_no_page_to_serve(
     isolated_home: Path, built: Path

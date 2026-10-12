@@ -4012,6 +4012,75 @@ def test_shutdown_stops_a_row_on_the_server_at_the_path_it_recorded(
     assert not stranger.facts[coder.pane_id].dead, "the stranger runs on"
 
 
+def _behind_a_stranger(
+    tmux: FakeTmux, project: ProjectInfo, coder: FleetAgent, monkeypatch: pytest.MonkeyPatch
+) -> tuple[FleetAgent, FakeTmux]:
+    """``coder`` recorded at a path where ``tmux -L`` from this shell does not look, with its
+    own server (``tmux``) answering only there, and the stranger ``-L`` reaches instead:
+    another server on the same name, whose ``%1`` is another agent's (round 28 of #257)."""
+    elsewhere = Path("/run/user/1000/tmux-1000") / coder.tmux_socket
+    coder = _recorded_at(coder, elsewhere)
+    stranger = FakeTmux()
+    stranger.spawn_window("asq-someone", name="manager", cwd=project.root, command=["claude"])
+    assert stranger.facts.keys() == tmux.facts.keys() == {coder.pane_id}, "the same %1"
+    stranger.per_path[elsewhere] = tmux
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: stranger)
+    return coder, stranger
+
+
+def test_every_read_asks_a_row_of_the_server_at_the_path_it_recorded(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 29 of #257: after shutdown and stop, the listing (``fleet ls``, the UI's tick),
+    ``status_of``, ``tell``, a restart's probe and ``reap`` — ``--server-down`` too — still
+    asked a row's server by its socket's name (``tmux -L``). From a shell without the spawning
+    shell's ``TMUX_TMPDIR`` that is another server on the same name, and its dead ``%1`` ended
+    the row under its running agent. Each asks the server at the path the row recorded."""
+    coder, stranger = _behind_a_stranger(tmux, project, _coder(project), monkeypatch)
+    stranger.die(coder.pane_id, 1)  # the stranger's %1 has exited; the row's runs on
+    _board_session(coder, "waiting")
+    tmux.set_command(coder.pane_id, "claude")
+
+    [listed] = fleet_service.list_agents(project)
+    status = fleet_service.status_of(coder)
+    reaped = fleet_service.reap(project)
+    swept = fleet_service.reap(project, server_down=True)
+    alive = fleet_service._pane_alive(coder)
+    told = fleet_service.tell(project, coder.label, "please rebase")
+
+    assert listed.state == status.state == "waiting", (listed, status)
+    assert reaped.ended == reaped.lost == swept.ended == swept.lost == []
+    assert alive and told.delivered, told
+    assert tmux.typed == [
+        (coder.pane_id, "paste", "please rebase"),
+        (coder.pane_id, "key", "Enter"),
+    ]
+    assert stranger.typed == [] and stranger.killed == []
+    with store_session() as store:
+        row = store.get_fleet_agent(coder.id)
+    assert row is not None and row.ended_at is None, "never ended on the stranger's dead %1"
+    assert _events(project, "agent_exited") == []
+
+
+def test_a_row_dead_on_its_own_server_is_ended_and_its_window_killed_there(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of round 29 of #257: a row whose pane died on its OWN server, at the path
+    it recorded, is ended by the listing though ``tmux -L`` reaches a server where ``%1``
+    runs, and stopping its 💤 row removes its window from its own server
+    (``_kill_lingering_window``, ``_kill_dead``). The stranger's live ``%1`` is not touched."""
+    coder, stranger = _behind_a_stranger(tmux, project, _coder(project), monkeypatch)
+    tmux.die(coder.pane_id, 3)
+
+    [listed] = fleet_service.list_agents(project)
+    receipt = fleet_service.stop(project, coder.label)
+
+    assert listed.agent.id == coder.id and listed.state == "exited", listed
+    assert listed.agent.exit_status == 3, "its own pane's status, not the stranger's"
+    assert receipt.agent.id == coder.id and tmux.killed == [coder.pane_id]
+    assert stranger.killed == [] and not stranger.facts[coder.pane_id].dead
+
+
 def test_shutdown_defaults_to_one_project_and_all_reaches_every_project(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, plain_project: ProjectInfo
 ) -> None:

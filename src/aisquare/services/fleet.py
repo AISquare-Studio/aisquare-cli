@@ -450,7 +450,8 @@ def server_for(socket: str, config: FleetSettings | None = None) -> TmuxServer:
     rows whose processes are still running. ``services.diagnostics`` and the
     UI's agent pane already address panes by the stored socket; the lifecycle
     here does too. Routed through :func:`server` so a caller that fakes that
-    one factory sees every socket.
+    one factory sees every socket. This asks by the name alone (``tmux -L``); a
+    row's pane is asked of :func:`server_of`, at the path its spawn recorded.
     """
     config = config or settings()
     if socket and socket != config.tmux_socket:
@@ -472,7 +473,7 @@ class _Address:
         return self.name if self.path is None else str(self.path)
 
 
-def _address(agent: FleetAgent, config: FleetSettings) -> _Address:
+def _address(agent: FleetAgent, config: FleetSettings | None = None) -> _Address:
     """Where ``agent``'s server is asked (:class:`_Address`).
 
     At the path its spawn recorded, unless that is where ``-L`` finds the socket's name from
@@ -481,6 +482,10 @@ def _address(agent: FleetAgent, config: FleetSettings) -> _Address:
     the row's pane id: it was read as gone, its row ended under its running agent, or
     ``/exit`` typed into a stranger's pane (round 28 of #257). A row from before v25
     recorded no path, and is asked by name.
+
+    Every question about one row's pane is put here — the listings and the UI's tick, a
+    spawn's and a restart's reconcile, ``reap``, ``tell``, ``stop``, ``shutdown``, the
+    doctor — so none of them reads another server's ``%N`` as the row's.
     """
     if agent.socket_path is not None:
         try:
@@ -492,15 +497,25 @@ def _address(agent: FleetAgent, config: FleetSettings) -> _Address:
     return _Address(agent.tmux_socket)
 
 
-def _server_at(address: _Address, config: FleetSettings) -> TmuxServer:
+def _server_at(address: _Address, config: FleetSettings | None = None) -> TmuxServer:
     """The server at ``address``, through :func:`server_for` so a faked factory sees it."""
     return server_for(address.name, config).at(address.path)
 
 
-def _server_of(agent: FleetAgent, config: FleetSettings | None = None) -> TmuxServer:
-    """The server ``agent``'s row lives on, asked where it said it listened (:func:`_address`)."""
+def server_of(agent: FleetAgent, config: FleetSettings | None = None) -> TmuxServer:
+    """The server ``agent``'s row lives on, asked where it said it listened (:func:`_address`).
+
+    What every question about one row's pane is put to, never :func:`server_for` by the
+    socket's name alone, which from another ``TMUX_TMPDIR`` is another server."""
     config = config or settings()
     return _server_at(_address(agent, config), config)
+
+
+def socket_at(agent: FleetAgent) -> Path | None:
+    """The path ``agent``'s server is asked at (``tmux -S``), or ``None`` when it is asked by
+    its socket's name (:func:`_address`): for a caller that builds the server itself, as the
+    UI's panes do (``TmuxServer(agent.tmux_socket).at(socket_at(agent))``)."""
+    return _address(agent).path
 
 
 def _team() -> ModuleType:
@@ -1103,21 +1118,36 @@ def _observe(
 
 def _observe_sockets(
     agents: Sequence[FleetAgent], tmux_session: str | None, config: FleetSettings | None = None
-) -> dict[str, dict[str, _PaneView] | None]:
-    """Socket → what THAT server says about the live agents recorded on it.
+) -> dict[_Address, dict[str, _PaneView] | None]:
+    """Server → what THAT server says about the live agents recorded on it.
 
     Rows can span sockets — ``[fleet] tmux_socket`` may have changed since they
-    were started — and each must be asked of the server it lives on
-    (:func:`server_for`). A ``None`` value is one socket that could not be
-    asked at all, which is per socket and not per fleet: an unreachable server
-    must not make the agents on a reachable one read as gone, nor the reverse.
+    were started — and each must be asked of the server it lives on, where its
+    spawn said it listened (:func:`_address`): ``tmux -L`` by the name alone,
+    from a shell under another ``TMUX_TMPDIR``, asks another server, whose dead
+    ``%N`` ended a live row (round 28 of #257). A ``None`` value is one server
+    that could not be asked at all, which is per server and not per fleet: an
+    unreachable server must not make the agents on a reachable one read as
+    gone, nor the reverse. Looked up with :func:`_view`.
     """
     config = config or settings()
-    views: dict[str, dict[str, _PaneView] | None] = {}
-    for socket in {agent.tmux_socket for agent in agents}:
-        group = [agent for agent in agents if agent.tmux_socket == socket]
-        views[socket] = _observe(server_for(socket, config), tmux_session, group)
-    return views
+    groups: dict[_Address, list[FleetAgent]] = {}
+    for agent in agents:
+        groups.setdefault(_address(agent, config), []).append(agent)
+    return {
+        address: _observe(_server_at(address, config), tmux_session, group)
+        for address, group in groups.items()
+    }
+
+
+def _view(
+    agent: FleetAgent,
+    views: Mapping[_Address, dict[str, _PaneView] | None],
+    config: FleetSettings | None = None,
+) -> dict[str, _PaneView] | None:
+    """What ``agent``'s own server said (:func:`_observe_sockets`); ``None`` when it could
+    not be asked, or was not."""
+    return views.get(_address(agent, config))
 
 
 def _exit_detail(status: int | None) -> str | None:
@@ -1470,7 +1500,7 @@ def spawn(
     # evidence and is left to `reap` (see `list_agents`). Every row is observed,
     # not only the live ones, because the ended rows' windows are read below.
     views = _observe_sockets(rows, session_name(observed) if observed else None, config)
-    for ended in _end_dead_rows(live, views):
+    for ended in _end_dead_rows(live, views, config=config):
         live = [agent for agent in live if agent.id != ended.id]
         rows = [ended if agent.id == ended.id else agent for agent in rows]
     with store_session() as store:
@@ -1908,7 +1938,7 @@ def _without_session_choice(
 
 def _supersede(
     rows: Sequence[FleetAgent],
-    views: Mapping[str, dict[str, _PaneView] | None],
+    views: Mapping[_Address, dict[str, _PaneView] | None],
     started: FleetAgent,
     config: FleetSettings,
 ) -> None:
@@ -1926,10 +1956,10 @@ def _supersede(
     the pane is asked again at the kill (:func:`_kill_dead`). A window already
     gone, or a server that will not answer, costs nothing here.
     """
-    own = (started.tmux_socket, started.pane_id)
-    for (socket, pane_id), row in _lingering_windows(rows, views).items():
-        if row.label == started.label and (socket, pane_id) != own:
-            _kill_dead(server_for(socket, config), pane_id)
+    own = (_address(started, config), started.pane_id)
+    for (address, pane_id), row in _lingering_windows(rows, views, config).items():
+        if row.label == started.label and (address, pane_id) != own:
+            _kill_dead(_server_at(address, config), pane_id)
 
 
 def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[str]) -> FleetAgent:
@@ -2293,17 +2323,18 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
         cutoff = now - RECENTLY_ENDED
         agents = [a for a in agents if a.ended_at is None or a.ended_at >= cutoff]
     tmux_session = session_name(current.codename) if current.codename else None
-    views = _observe_sockets(agents, tmux_session)
-    ended = {row.id: row for row in _end_dead_rows(agents, views, best_effort=True)}
+    config = settings()
+    views = _observe_sockets(agents, tmux_session, config)
+    ended = {row.id: row for row in _end_dead_rows(agents, views, best_effort=True, config=config)}
     if ended:
         agents = [ended.get(agent.id, agent) for agent in agents]
     if live_only:
-        agents = _with_lingering_windows(agents, views)
+        agents = _with_lingering_windows(agents, views, config)
     return [
         _status(
             agent,
             sessions.get(agent.session_id) if agent.session_id else None,
-            views.get(agent.tmux_socket),
+            _view(agent, views, config),
             tmux_session,
             now,
         )
@@ -2313,10 +2344,11 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
 
 def _end_dead_rows(
     agents: Sequence[FleetAgent],
-    views: Mapping[str, dict[str, _PaneView] | None],
+    views: Mapping[_Address, dict[str, _PaneView] | None],
     *,
     best_effort: bool = False,
     nudge: bool = True,
+    config: FleetSettings | None = None,
 ) -> list[FleetAgent]:
     """Record every LIVE row whose observed pane is dead as ended — reap's rule, on every read.
 
@@ -2354,12 +2386,17 @@ def _end_dead_rows(
     manager is not woken for an agent already on its way back — woken, it read
     "exited" before ``restarted`` was on the board and could restart the label
     itself, onto the replacement (review of #163, round 2).
+
+    Each row's pane is read from ITS server's view (:func:`_view`), the one at the socket
+    its spawn recorded: from a shell under another ``TMUX_TMPDIR`` the server ``tmux -L``
+    reaches on the same name is another, and a dead ``%N`` there ended a live row under its
+    running agent (round 28 of #257).
     """
     dead = [
         (agent, pane)
         for agent in agents
         if agent.ended_at is None
-        and (observed := views.get(agent.tmux_socket)) is not None
+        and (observed := _view(agent, views, config)) is not None
         and (pane := observed.get(agent.id)) is not None
         and pane.dead
     ]
@@ -2395,9 +2432,11 @@ def _end_dead_rows(
 
 
 def _lingering_windows(
-    agents: Sequence[FleetAgent], views: Mapping[str, dict[str, _PaneView] | None]
-) -> dict[tuple[str, str], FleetAgent]:
-    """``(socket, pane id)`` → the ENDED row whose window each dead pane still is.
+    agents: Sequence[FleetAgent],
+    views: Mapping[_Address, dict[str, _PaneView] | None],
+    config: FleetSettings | None = None,
+) -> dict[tuple[_Address, str], FleetAgent]:
+    """``(server, pane id)`` → the ENDED row whose window each dead pane still is.
 
     "Its window" means a DEAD pane under the row's id on the row's server. The
     id alone is not the window: pane ids are unique only per server lifetime —
@@ -2415,13 +2454,14 @@ def _lingering_windows(
     row's (review of #138: a reused id let ``stop`` kill another agent's
     window and report success).
     """
-    owners: dict[tuple[str, str], FleetAgent] = {}
+    owners: dict[tuple[_Address, str], FleetAgent] = {}
     for agent in agents:
-        observed = views.get(agent.tmux_socket)
+        address = _address(agent, config)
+        observed = views.get(address)
         pane = observed.get(agent.id) if observed else None
         if pane is None or not pane.dead:
             continue
-        key = (agent.tmux_socket, agent.pane_id)
+        key = (address, agent.pane_id)
         held = owners.get(key)
         if held is None or (
             held.ended_at is not None and (agent.ended_at is None or agent.ended_at > held.ended_at)
@@ -2431,11 +2471,13 @@ def _lingering_windows(
 
 
 def _with_lingering_windows(
-    agents: Sequence[FleetAgent], views: Mapping[str, dict[str, _PaneView] | None]
+    agents: Sequence[FleetAgent],
+    views: Mapping[_Address, dict[str, _PaneView] | None],
+    config: FleetSettings | None = None,
 ) -> list[FleetAgent]:
     """Every live row, plus each ended row whose window still stands (see
     :func:`_lingering_windows`)."""
-    shown = {agent.id for agent in _lingering_windows(agents, views).values()}
+    shown = {agent.id for agent in _lingering_windows(agents, views, config).values()}
     return [agent for agent in agents if agent.ended_at is None or agent.id in shown]
 
 
@@ -2451,11 +2493,13 @@ def _kill_lingering_window(store: ContextStore, project: ProjectInfo, agent: Fle
     current = store.get_project(project.id) or project
     rows = store.fleet_agents(project.id, live_only=False)
     tmux_session = session_name(current.codename) if current.codename else None
-    views = _observe_sockets(rows, tmux_session)
-    owner = _lingering_windows(rows, views).get((agent.tmux_socket, agent.pane_id))
+    config = settings()
+    views = _observe_sockets(rows, tmux_session, config)
+    address = _address(agent, config)
+    owner = _lingering_windows(rows, views, config).get((address, agent.pane_id))
     if owner is None or owner.id != agent.id:
         return False
-    return _kill_dead(server_for(agent.tmux_socket), agent.pane_id)
+    return _kill_dead(_server_at(address, config), agent.pane_id)
 
 
 def _kill_dead(srv: TmuxServer, pane_id: str) -> bool:
@@ -2481,7 +2525,7 @@ def status_of(agent: FleetAgent) -> FleetAgentStatus:
         project = store.get_project(agent.project_id)
         session = store.get_session(agent.session_id) if agent.session_id else None
     tmux_session = session_name(project.codename) if project and project.codename else None
-    observed = _observe(server_for(agent.tmux_socket), tmux_session, [agent])
+    observed = _observe(server_of(agent), tmux_session, [agent])
     return _status(agent, session, observed, tmux_session, _now())
 
 
@@ -2514,7 +2558,7 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
         agent = _live_agent(store, project, label)
     status = status_of(agent)
     if status.state == "waiting":
-        srv = server_for(agent.tmux_socket)
+        srv = server_of(agent)
         if not _pane_is_the_agent(srv, agent.pane_id):
             how = _file_note(project, label, text, sender)
             return TellResult(
@@ -2663,7 +2707,7 @@ def _stop_row(
     window kill goes through the same verdict, so this returns only for a pane
     tmux confirmed dead or gone, and raises otherwise.
     """
-    srv = _server_of(agent)
+    srv = server_of(agent)
     session = session_name(ensure_codename(project).codename or "")
     exit_status: int | None = None
 
@@ -3022,7 +3066,7 @@ def _unreached(
     row recorded, where tmux was asked too (:func:`_address`), else where this shell's tmux
     looks; one that answers now came up after tmux was asked.
     """
-    srv = _server_of(agent, config)
+    srv = server_of(agent, config)
     answer = tmux_core.server_may_run(
         srv, agent.socket_path, agent.boot_id, this_boot, agent.created_at
     )
@@ -4598,7 +4642,7 @@ def _pane_alive(agent: FleetAgent) -> bool:
     and its exit announced, then replaced with no hand-over (review of the
     #203 final-round fixes, F5).
     """
-    srv = server_for(agent.tmux_socket)
+    srv = server_of(agent)
     try:
         facts = srv.pane_facts(agent.pane_id)
     except TmuxError:
@@ -4784,16 +4828,19 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
 
     When tmux cannot be asked nothing is marked: absence of evidence is not a
     dead pane, and an unreachable tmux must not end rows whose processes may
-    still be running. That is decided per SOCKET — each row is asked of the
-    server it was started on — so an operator who changed ``[fleet]
-    tmux_socket`` does not thereby lose every agent still running on the old one.
+    still be running. That is decided per SERVER — each row is asked of the
+    server it was started on, at the socket its spawn recorded (:func:`_address`)
+    — so an operator who changed ``[fleet] tmux_socket`` does not thereby lose
+    every agent still running on the old one, and a shell under another
+    ``TMUX_TMPDIR`` does not read another server's panes as the rows'.
 
     ``server_down`` is the operator's word that a server which does not answer
     is genuinely gone (a reboot swept ``/tmp``; ``kill-server``). Even then the
     rows are marked only on a socket tmux ITSELF reports as having no server
     (:meth:`~aisquare.core.tmux.TmuxServer.server_absent`): a client that exits
-    non-zero for a protocol mismatch, a wedged server or a socket under another
-    ``TMUX_TMPDIR`` is not a dead server, and the agents behind it are alive.
+    non-zero for a protocol mismatch, a wedged server or, for a row from before
+    v25 that recorded no socket, a socket under another ``TMUX_TMPDIR`` is not a
+    dead server, and the agents behind it are alive.
     Such a socket is then a server with no panes — the view is empty and the
     ordinary "pane is gone → lost" branch does the rest. A missing tmux binary
     marks nothing: that is a question that could not be put.
@@ -4803,7 +4850,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
     """
     config = settings()
     report = ReapReport()
-    absent: dict[str, bool] = {}
+    absent: dict[_Address, bool] = {}
     now = _now()
     with store_session() as store:
         if project is not None:
@@ -4816,13 +4863,13 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                 tmux_session = session_name(current.codename) if current.codename else None
                 views = _observe_sockets(live, tmux_session, config)
                 if server_down:
-                    for socket, view in views.items():
+                    for address, view in views.items():
                         if view is None:
-                            # Asked once per socket for the whole sweep, so a
+                            # Asked once per server for the whole sweep, so a
                             # server coming up mid-sweep cannot split the answer.
-                            if socket not in absent:
+                            if address not in absent:
                                 try:
-                                    absent[socket] = server_for(socket, config).server_absent()
+                                    absent[address] = _server_at(address, config).server_absent()
                                 except TmuxError:
                                     # Unreachable TODAY: `server_absent` promises
                                     # False for every question it could not put
@@ -4832,13 +4879,13 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                                     # no evidence of absence, and this sweep must
                                     # never end on one. Do not copy the pattern
                                     # to a call site that has the promise.
-                                    absent[socket] = False
-                            if absent[socket]:
-                                views[socket] = {}  # no server: no panes
+                                    absent[address] = False
+                            if absent[address]:
+                                views[address] = {}  # no server: no panes
                 for agent in live:
-                    observed = views.get(agent.tmux_socket)
+                    observed = _view(agent, views, config)
                     if observed is None:
-                        continue  # that socket could not be asked: nothing is marked
+                        continue  # that server could not be asked: nothing is marked
                     pane = observed.get(agent.id)
                     if (pane is None or pane.dead) and _handed_over(
                         agent,
@@ -5017,7 +5064,7 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
             last = store.get_meta(key)
             if last is not None and now - datetime.fromisoformat(last) < NUDGE_DEBOUNCE:
                 return False
-            srv = server_for(manager.tmux_socket)
+            srv = server_of(manager)
             facts = srv.pane_facts(manager.pane_id)
             if facts is None or facts.dead or not _agent_running(facts.current_command):
                 return False

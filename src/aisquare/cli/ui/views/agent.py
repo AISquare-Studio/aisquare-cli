@@ -145,8 +145,11 @@ class AgentView(Vertical):
         super().__init__(id=id)
         self.status = status
         # Both are defaults the caller may override (§3.10): the agent's own
-        # socket names its server; the escape key comes from ``[fleet]``.
-        self.server = server or TmuxServer(status.agent.tmux_socket)
+        # socket names its server, asked where its spawn said it listened
+        # (`fleet_service.socket_at`); the escape key comes from ``[fleet]``.
+        self.server = server or TmuxServer(status.agent.tmux_socket).at(
+            fleet_service.socket_at(status.agent)
+        )
         self.escape_key = escape_key or fleet_service.settings().escape_key
         self._labels: Mapping[int, str] = {}
         self._labels_asked_at: float | None = None

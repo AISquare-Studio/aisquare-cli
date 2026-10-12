@@ -2468,8 +2468,10 @@ def _pane_holds(agent: FleetAgent) -> bool | None:
     not adopted on a guess, because the guess that was wrong here handed a
     parent's task to its child. The fleet's own server factory is used so the
     row's socket is asked (``[fleet] tmux_socket`` may have changed since the
-    spawn) and so a test's fake tmux is seen; imported here because
-    ``services.fleet`` imports this module the same lazy way.
+    spawn), at the path its spawn recorded (another ``TMUX_TMPDIR`` reaches
+    another server on the name, whose ``%N`` is another agent), and so a test's
+    fake tmux is seen; imported here because ``services.fleet`` imports this
+    module the same lazy way.
     """
     pid = orchestrator.env_claude_pid()
     if pid is None:
@@ -2477,7 +2479,7 @@ def _pane_holds(agent: FleetAgent) -> bool | None:
     from aisquare.services import fleet as fleet_service
 
     try:
-        pane_pid = fleet_service.server_for(agent.tmux_socket).pane_pid(agent.pane_id)
+        pane_pid = fleet_service.server_of(agent).pane_pid(agent.pane_id)
     except TmuxError:
         return None
     if pane_pid is None:

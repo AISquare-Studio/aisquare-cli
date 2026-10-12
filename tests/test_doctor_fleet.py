@@ -100,6 +100,9 @@ class FakeServer(TmuxServer):
         self._version_raises = version_raises
         self._facts_raise = facts_raise
         self.asked: list[str] = []
+        self.per_path: dict[Path, TmuxServer] = {}
+        """Servers asked for at a path (``tmux -S``, :meth:`at`) that is not where ``-L``
+        reaches this one: a server started under another ``TMUX_TMPDIR``."""
         self.scripted: dict[tuple[str, ...], str] = {}
         """Scripted ``run`` output by argv — the fleet-terminal row's server questions (#147)."""
 
@@ -138,6 +141,10 @@ class FakeServer(TmuxServer):
     def started_at(self) -> datetime | None:
         self.asked.append("started_at")
         return self._started
+
+    def at(self, path: Path | None) -> TmuxServer:
+        """The server listening at ``path`` (:attr:`per_path`), else this one."""
+        return self.per_path.get(path, self) if path is not None else self
 
     def run(self, *args: str, stdin: bytes | None = None) -> str:
         self.asked.append(" ".join(args))
@@ -660,6 +667,27 @@ def test_fleet_check_looks_on_the_socket_each_row_was_spawned_on(
     assert check.status is CheckStatus.ok
     assert "pane_facts:%5" in servers["asq-old"].asked
     assert "pane_facts:%5" not in servers["asq"].asked
+
+
+def test_fleet_check_asks_a_row_of_the_server_at_the_path_it_recorded(
+    home: Path, tmp_path: Path
+) -> None:
+    """Round 29 of #257: a row is asked of the server at the path its spawn recorded, as the
+    fleet asks it, not what ``tmux -L`` reaches from this shell: without the spawning shell's
+    ``TMUX_TMPDIR`` that is another server on the same name, whose dead ``%1`` read as the
+    row's agent exited and prescribed a ``reap``."""
+    project = _seed(tmp_path / "repo")
+    elsewhere = tmp_path / "elsewhere" / "tmux-1000" / "asq"  # never where `-L` looks here
+    coder = _agent(project.id, "coder-1", "%1").model_copy(update={"socket_path": elsewhere})
+    _seed(tmp_path / "repo", coder)
+    own = FakeServer(sessions=("asq-amber-otter",), panes={"%1": _facts("%1")})
+    stranger = FakeServer(sessions=("asq-someone",), panes={"%1": _facts("%1", dead=True)})
+    stranger.per_path[elsewhere] = own
+
+    check = diagnostics._check_fleet(lambda socket: stranger)
+
+    assert check.status is CheckStatus.ok, check.detail
+    assert "pane_facts:%1" in own.asked and "pane_facts:%1" not in stranger.asked
 
 
 def test_fleet_check_caps_the_labels_it_lists(home: Path, tmp_path: Path) -> None:

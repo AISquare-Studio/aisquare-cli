@@ -80,10 +80,12 @@ and an aisquare that upgrades and uninstalls itself.**
   whose socket a server still answers on. Without it, `shutdown` leaves such a
   row live and says what to do, as `aisquare uninstall` still counts it.
   Uninstall names `--forget` for those rows, which it otherwise refused with no
-  way out. `fleet shutdown` and `fleet stop` ask each agent's tmux server at
+  way out. Every fleet command (`fleet ls` and asq's tick, `tell`, `stop`,
+  `restart`, `reap`, `shutdown`) and the doctor ask each agent's tmux server at
   the socket its row recorded, so one started under another `TMUX_TMPDIR` is
-  stopped from any shell, and another server on the same socket name is never
-  taken for it.
+  found and stopped from any shell, and another server on the same socket name
+  is never taken for it: a dead pane there no longer ends a running agent's
+  row.
 - **Update and Uninstall in asq's Doctor** hand the terminal to
   `aisquare upgrade` and `aisquare uninstall`, which show their plan and ask;
   after an update, asq reopens on the version just installed (#254). Work

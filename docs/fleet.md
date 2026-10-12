@@ -320,10 +320,11 @@ exit status where tmux exposed one, and rows whose socket had no server as
 *lost*, each with the reason the service gave.
 
 Each agent's server is asked at the socket its row recorded at spawn (`tmux
--S`), so a server started under another `TMUX_TMPDIR` is reached and stopped
-from any shell. Another server that `tmux -L` reaches from this shell under the
-same socket name is not the agent's, and is never asked about it: its pane ids
-name other agents.
+-S`), as every fleet command asks it (see *The private server*), so a server
+started under another `TMUX_TMPDIR` is reached and stopped from any shell.
+Another server that `tmux -L` reaches from this shell under the same socket
+name is not the agent's, and is never asked about it: its pane ids name other
+agents.
 
 A row whose server did not answer is ended as lost only where it cannot be
 running: it started in another boot, or its socket file is there with nothing
@@ -437,10 +438,13 @@ agents whose panes have vanished as lost, and removes the worktrees of ended
 agents **whose branch is merged**. It never deletes unmerged work. `--all`
 walks every project's fleet, not just this one.
 
-A tmux server that does not answer marks **nothing** by default: silence is not
-evidence that its panes are dead — the server may be alive under another
-`TMUX_TMPDIR`, wedged, or running an older binary than the client after an
-upgrade. `--server-down` is the operator's word that the server is genuinely
+Each row is asked of its own server, at the socket its spawn recorded, so a
+shell under another `TMUX_TMPDIR` reaps exactly what the spawning shell would,
+and never by another server's panes. A tmux server that does not answer marks
+**nothing** by default: silence is not evidence that its panes are dead — the
+server may be wedged, running an older binary than the client after an
+upgrade, or, for a row from before 0.8.0, which recorded no socket, alive
+under another `TMUX_TMPDIR`. `--server-down` is the operator's word that the server is genuinely
 gone (a reboot swept `/tmp`; `kill-server`). Even with it, rows are marked lost
 only on a socket where tmux itself reports no server (`no server running on …`
 or `error connecting to … (No such file or directory)`); a protocol mismatch or
@@ -915,6 +919,17 @@ config is bundled and regenerated (do not edit it): status line off,
 extended keys on so shift+enter and friends reach Claude Code, mouse off (the
 UI owns the mouse), monitor-activity on. One server for every project; one
 session per project; one window per agent.
+
+**Each agent is asked of its own server.** A spawn records the socket its
+server says it listens on, and every fleet command — `fleet ls` and the UI,
+`tell`, `stop`, `restart`, `switch`, `reap`, `shutdown`, and the doctor — asks
+the agent's server there (`tmux -S <path>`) when that is not where `tmux -L
+asq` looks from the asking shell. Under another `TMUX_TMPDIR`, `-L` reaches
+another server on the same name, or none, and every server numbers its panes
+from `%0`, so its panes would answer for the agents' ids: a dead one there read
+as a running agent's exit and ended its row. A row from before 0.8.0 recorded
+no socket and is asked by name. The Manager tab's attach line names the
+server the same way.
 
 **What the UI remembers.** The view that was open — a project, an agent, the
 Accounts page, the Doctor — comes back at the next launch if its row is still

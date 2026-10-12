@@ -50,6 +50,7 @@ from aisquare.cli.app import app
 from aisquare.cli.ui.board import BoardPanel
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import project as project_view_module
+from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.project import ManagerTab, ProjectView
@@ -232,6 +233,15 @@ class ScriptedServer(TmuxServer):
 
     def resize(self, pane_id: str, width: int, height: int) -> None:
         self.resizes.append((pane_id, width, height))
+
+    def at(self, path: Path | None) -> TmuxServer:
+        """This server asked for at ``path`` (``tmux -S``): scripted there too, and saying
+        where it was asked (:attr:`path`), so no real tmux is run for a recorded row."""
+        if path is None or path == self.path:
+            return self
+        there = ScriptedServer(self.socket)
+        there.path = path
+        return there
 
 
 # --- fixtures ---------------------------------------------------------------------------
@@ -421,6 +431,37 @@ def test_the_manager_pane_is_scripted_and_never_addresses_the_real_fleet(
     # The recorder is checked in this fixture's teardown; assert it here too, so
     # the failure names this test rather than an error on the way out.
     assert no_real_tmux.ran == []
+
+
+def test_the_manager_pane_asks_its_server_at_the_path_its_row_recorded(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round 29 of #257: the Manager tab's pane and its attach line, and an agent view's pane,
+    named the row's server by its socket's name (``tmux -L``). From a shell under another
+    ``TMUX_TMPDIR`` that is another server, and its ``%7`` — another agent — was shown and
+    typed into. A row recorded elsewhere is asked at its path (``tmux -S``); one from before
+    v25, by its name."""
+    elsewhere = tmp_path / "elsewhere" / "tmux-1000" / PRIVATE_SOCKET  # not where `-L` looks
+    recorded = fake_agent(project, pane_id="%7").model_copy(update={"socket_path": elsewhere})
+    monkeypatch.setattr(fleet_service, "manager_of", lambda target: recorded)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> TmuxServer | None:
+        await pilot.pause(0.25)  # past the 100 ms resize debounce
+        return host.query_one("#manager-pane", TerminalPane).server
+
+    server = drive(project, scenario)
+    named = fake_agent(project, pane_id="%7")
+
+    def attach_line(agent: FleetAgent) -> str:
+        status = FleetAgentStatus(agent=agent, state="waiting", tmux_session="asq-amber-otter")
+        return project_view_module.manager_text(status).plain
+
+    assert isinstance(server, ScriptedServer) and server.path == elsewhere, server
+    assert server.captures, "the frame came from the server at the recorded path"
+    assert f"tmux -S {elsewhere} attach -t =asq-amber-otter" in attach_line(recorded)
+    assert f"tmux -L {PRIVATE_SOCKET} attach -t =asq-amber-otter" in attach_line(named)
+    assert AgentView(FleetAgentStatus(agent=recorded)).server.path == elsewhere
+    assert AgentView(FleetAgentStatus(agent=named)).server.path is None, "asked by its name"
 
 
 def test_no_button_and_no_spawn_when_a_manager_already_runs(

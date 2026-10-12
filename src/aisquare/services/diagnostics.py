@@ -2918,8 +2918,11 @@ def _check_fleet(
     Machine-wide on purpose: a stale row in ANY project is this machine's, and
     ``fleet reap`` with no project reaps them all. Each row is checked on the
     socket IT was spawned on — the socket is a default the user may change
-    (§3.10), and a row must not read as lost because the config moved after it.
-    ``server_for`` builds the server for a socket; tests hand in fakes.
+    (§3.10), and a row must not read as lost because the config moved after it —
+    at the path its spawn recorded, where the fleet asks it (``fleet._address``):
+    ``tmux -L`` by the name, from a shell under another ``TMUX_TMPDIR``, reaches
+    another server, whose ``%N`` is another agent (round 28 of #257). ``server_for``
+    builds the server for a socket; tests hand in fakes.
 
     A pane that answers is the row's only on a server that was already running
     when the row was written (``fleet._outlived``): after a reboot the next
@@ -2927,7 +2930,7 @@ def _check_fleet(
     counted as a healthy pane — another agent's — while ``fleet ls`` read it
     ``✗ lost`` and this check never prescribed the ``reap`` that records it
     (review of the #203 final-round fixes, F4). The server is asked when it
-    started once per socket, and only once a pane there has answered.
+    started once per server, and only once a pane there has answered.
     """
     absent = _uncreated_home("fleet")
     if absent is not None:
@@ -2935,9 +2938,12 @@ def _check_fleet(
     name = "fleet"
     server_for = server_for or _fleet_server
     try:
-        socket = fleet_service.settings().tmux_socket
-        servers: dict[str, tmux_core.TmuxServer] = {socket: server_for(socket)}
-        if not servers[socket].available():
+        config = fleet_service.settings()
+        today = fleet_service._Address(config.tmux_socket)
+        servers: dict[fleet_service._Address, tmux_core.TmuxServer] = {
+            today: server_for(today.name)
+        }
+        if not servers[today].available():
             # Failing open costs this line: nothing here can be stale in a way
             # that matters when nothing can run, and the tmux check has the verdict.
             return _ok(name, "not evaluated — tmux is not installed (see the tmux check)")
@@ -2947,33 +2953,36 @@ def _check_fleet(
             live = [a for p in projects for a in store.fleet_agents(p.id, live_only=True)]
         gone: list[FleetAgent] = []
         exited: list[FleetAgent] = []
-        started: dict[str, datetime | None] = {}
+        started: dict[fleet_service._Address, datetime | None] = {}
         for agent in live:
-            server = servers.setdefault(agent.tmux_socket, server_for(agent.tmux_socket))
+            address = fleet_service._address(agent, config)
+            if address not in servers:
+                servers[address] = server_for(address.name).at(address.path)
+            server = servers[address]
             try:
                 facts = server.pane_facts(agent.pane_id)
             except tmux_core.TmuxError:
                 facts = None
-            if facts is not None and agent.tmux_socket not in started:
+            if facts is not None and address not in started:
                 try:
-                    started[agent.tmux_socket] = server.started_at()
+                    started[address] = server.started_at()
                 except tmux_core.TmuxError:
-                    started[agent.tmux_socket] = None  # judges nothing, as in the fleet
+                    started[address] = None  # judges nothing, as in the fleet
             # tmux 3.7c answers a vanished target with exit 0 and every field
             # empty, so "gone" is "no facts OR facts about no pane", not only None.
             if (
                 facts is None
                 or facts.pane_id != agent.pane_id
-                or fleet_service._outlived(agent, started[agent.tmux_socket])
+                or fleet_service._outlived(agent, started[address])
             ):
                 gone.append(agent)
             elif facts.dead:
                 exited.append(agent)
         problems: list[str] = []
         server_down = False
-        by_socket: dict[str, list[FleetAgent]] = {}
+        by_socket: dict[fleet_service._Address, list[FleetAgent]] = {}
         for agent in gone:
-            by_socket.setdefault(agent.tmux_socket, []).append(agent)
+            by_socket.setdefault(fleet_service._address(agent, config), []).append(agent)
         for sock, agents in by_socket.items():
             listed = _fleet_labels(agents, names)
             if servers[sock].list_sessions():
@@ -3018,20 +3027,20 @@ def _check_fleet(
                     "aisquare fleet reap --all --server-down"
                 )
             return _warn(name, "; ".join(problems), fix)
-        sessions = servers[socket].list_sessions()
+        sessions = servers[today].list_sessions()
         if live:
             return _ok(
                 name,
                 f"{len(live)} live agent(s) across {len(sessions)} session(s) on the private "
-                f"tmux server '{socket}'",
+                f"tmux server '{today}'",
             )
         if sessions:
             return _ok(
                 name,
-                f"private tmux server '{socket}' running with {len(sessions)} session(s); "
+                f"private tmux server '{today}' running with {len(sessions)} session(s); "
                 "no agents recorded live",
             )
-        return _ok(name, f"no fleet agents; the private tmux server '{socket}' is not running")
+        return _ok(name, f"no fleet agents; the private tmux server '{today}' is not running")
     except Exception as exc:  # diagnostics must never crash
         # A store that will not open is the database check's verdict. Failing
         # open here costs the stale-row report — a label can stay taken and a

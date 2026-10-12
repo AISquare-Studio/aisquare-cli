@@ -1734,7 +1734,9 @@ def _needs_scan_project(
     """Every item of one fleet project. ``statuses`` is its ``list_agents``; ``None``, it failed.
 
     Without a listing only the board speaks: an agent's state, a crash, a
-    manager gone and tmux down all depend on rows the listing could not read.
+    manager gone and tmux down all depend on rows the listing could not read. So does
+    a coder's question or result to the manager on the project's own board: read as
+    no manager, every one of the day was a card and a push (review of #243, round 22, 1/7).
     ``first_seen`` dates the items whose facts carry no date (a pane gone, tmux
     not answering) from the first scan that saw them; ``seen`` collects what
     this scan saw, so the caller can forget the rest. ``answers`` says whether a
@@ -1811,7 +1813,14 @@ def _needs_scan_project(
         )
     items.extend(
         needs_from_board(
-            board, sessions, rows, project=project, now=now, manager_live=nudged is not None
+            board,
+            sessions,
+            rows,
+            project=project,
+            now=now,
+            # Unknown is not absent: without a listing, whether the manager the board's write
+            # woke is live is not known, and no item is the human's for that alone.
+            manager_live=nudged is not None or (statuses is None and board_id == project.id),
         )
     )
     return _NeedsProject(items=items, statuses=listed, ended=ended, tails=tails)

@@ -1636,6 +1636,21 @@ def test_a_project_whose_listing_fails_still_shows_its_board() -> None:
     assert fleet.listed == 1, "it has a live row, so it was listed, and the listing failed"
 
 
+def test_a_listing_that_fails_is_no_proof_the_manager_is_gone() -> None:
+    """With the listing failed the live manager read absent, and every coder's question or
+    result to it of the day became a card and a push, though the board's write woke it for
+    each (review of #243, round 22, 1/7). On its project's own board unknown is not absent;
+    on a board it shares with other projects every item is a card all the same."""
+    manager = _row("manager", role="manager")
+    fleet = _crew_and_manager(_status(manager, "working", _session(manager)))
+    assert _scan(fleet) == []
+    fleet.listing_fails = True
+    assert _scan(fleet) == [], "nor the crash, which needs the listing"
+    shared = replace(_sources(fleet), board_project=lambda project: "prj_hub")
+    items = scan_needs_you(shared, now=NOW, dismissed=())
+    assert [item.kind for item in items] == ["board_question"]
+
+
 def test_a_project_with_no_live_row_is_not_listed() -> None:
     """``fleet.list_agents`` reads every row and session the project ever had, and the scan
     runs every few seconds over every project. With no live row there is no pane to ask

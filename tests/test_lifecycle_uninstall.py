@@ -28,7 +28,13 @@ from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
-from aisquare.core.tmux import SocketAnswer, TmuxServer, TmuxUnavailable, socket_answer
+from aisquare.core.tmux import (
+    SocketAnswer,
+    TmuxError,
+    TmuxServer,
+    TmuxUnavailable,
+    socket_answer,
+)
 from aisquare.models import FleetAgent
 from aisquare.services import install_route, lifecycle
 from aisquare.services.install_route import Facts
@@ -136,8 +142,8 @@ def world(monkeypatch: pytest.MonkeyPatch) -> World:
     monkeypatch.setattr(install_route, "exec_replace", exec_replace)
     # A live row is a running agent unless a test says its socket has no server.
     monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "answers")
-    # And `fleet shutdown` can reach it, whether or not this machine has tmux.
-    monkeypatch.setattr(TmuxServer, "available", lambda _self: True)
+    # And `fleet shutdown` can reach it, whether or not this machine has a usable tmux.
+    monkeypatch.setattr(TmuxServer, "require", lambda _self: None)
     return recorded
 
 
@@ -673,20 +679,36 @@ def test_it_refuses_while_fleet_agents_are_live_and_names_the_shutdown(
     assert _snapshot(tmp_path) == before and world.events == []
 
 
-def test_with_no_tmux_the_refusal_says_why_and_names_the_operators_word(
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        TmuxUnavailable("tmux is not installed (or not on PATH) — the fleet needs it"),
+        TmuxUnavailable("tmux 2.9 is too old — the fleet needs 3.2 or newer"),
+        TmuxError("tmux did not answer within 30s: /usr/bin/tmux -V …"),
+    ],
+    ids=["not-installed", "too-old", "version-timed-out"],
+)
+def test_with_no_usable_tmux_the_refusal_says_why_and_names_the_operators_word(
     tool: Tool,
     world: World,
     runner: CliRunner,
     isolated_agent_home: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    refusal: TmuxError,
 ) -> None:
     """Round 27 of #257: a row no probe can clear (its socket gone, no boot recorded) kept
     uninstall refusing once tmux was removed, and the one remedy named, `fleet shutdown`,
     refuses without tmux. A server outlives its program, so the refusal says the agents
     cannot be checked and names `--forget`, the operator's word that they are not running.
-    A row whose socket answers is named apart: `--forget` leaves it live (round 28)."""
-    monkeypatch.setattr(TmuxServer, "available", lambda _self: False)
+    A row whose socket answers is named apart: `--forget` leaves it live (round 28). And
+    "no tmux" is the test `fleet shutdown` applies, not only PATH: a tmux too old, or whose
+    `-V` timed out, is refused there too, so naming the plain shutdown misled (round 28)."""
+
+    def unusable(_self: TmuxServer) -> None:
+        raise refusal
+
+    monkeypatch.setattr(TmuxServer, "require", unusable)
     answers: dict[Path | None, SocketAnswer] = {}
     monkeypatch.setattr(
         TmuxServer, "listener", lambda _self, recorded=None: answers.get(recorded, "gone")
@@ -701,8 +723,8 @@ def test_with_no_tmux_the_refusal_says_why_and_names_the_operators_word(
     assert result.exit_code == 1 and world.events == []
     assert _one_object(result.stdout)["error"] == "fleet_running"
     said = " ".join(human.stderr.split())
-    assert "tmux is not installed here, so nothing can stop them" in said
-    assert "Put tmux back and run aisquare fleet shutdown --all --yes, or, if coder-1 (" in said
+    assert f"tmux is not usable here ({refusal}), so nothing can stop them" in said
+    assert "Once tmux is usable, run aisquare fleet shutdown --all --yes, or, if coder-1 (" in said
     assert "end its row on your word: aisquare fleet shutdown --all --yes --forget" in said
     assert "A server answers" not in said
 
@@ -711,7 +733,7 @@ def test_with_no_tmux_the_refusal_says_why_and_names_the_operators_word(
     said = " ".join(runner.invoke(app, ["uninstall", "--yes"]).stderr.split())
 
     assert "A server answers on the socket of coder-2 (other), so it is likely running" in said
-    assert "--forget leaves its row live. Put tmux back" in said
+    assert "--forget leaves its row live. Once tmux is usable" in said
     assert "or, if coder-1 (repo) is not running, end its row on your word" in said
 
 

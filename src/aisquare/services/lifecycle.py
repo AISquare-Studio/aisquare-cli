@@ -37,7 +37,7 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.core.store import store_session
-from aisquare.core.tmux import SocketAnswer, TmuxServer, boot_id, server_may_run
+from aisquare.core.tmux import SocketAnswer, TmuxError, TmuxServer, boot_id, server_may_run
 from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import current_project
 from aisquare.models import ClaudeIdentity, SetupReport
@@ -1073,9 +1073,9 @@ class UninstallPlan:
     boot."""
     fleet_error: str | None
     """Why the fleet's live agents could not be counted, when they could not."""
-    no_tmux: bool = False
-    """Whether tmux is not installed here while :attr:`live_agents` may run: ``fleet
-    shutdown`` can then stop none of them, and only its ``--forget`` ends their rows
+    tmux_unusable: str | None = None
+    """Why tmux cannot be used here while :attr:`live_agents` may run (:func:`_tmux_unusable`):
+    ``fleet shutdown`` can then stop none of them, and only its ``--forget`` ends their rows
     (round 27 of #257)."""
     unreached: tuple[str, ...] = ()
     """Those of :attr:`live_agents` whose server's socket is gone or could not be asked: no
@@ -1174,7 +1174,7 @@ class UninstallPlan:
                 f"({', '.join(self.live_agents)}) — their sessions would keep calling hooks "
                 f"that no longer exist."
             )
-            if self.no_tmux:
+            if self.tmux_unusable is not None:
                 # Not "no tmux, so no server": a server outlives its program leaving PATH.
                 # The way out is the operator's word (round 27 of #257), but for a row whose
                 # socket answers, which `--forget` leaves live (round 28).
@@ -1196,8 +1196,8 @@ class UninstallPlan:
                         f"{FLEET_FORGET}"
                     )
                 return UninstallRefused(
-                    f"{running} tmux is not installed here, so nothing can stop them.{held} "
-                    f"Put tmux back and run {FLEET_SHUTDOWN}{forget}",
+                    f"{running} tmux is not usable here ({self.tmux_unusable}), so nothing can "
+                    f"stop them.{held} Once tmux is usable, run {FLEET_SHUTDOWN}{forget}",
                     error="fleet_running",
                 )
             unreached = ""
@@ -1889,6 +1889,18 @@ def _created(value: object) -> datetime | None:
     return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
 
 
+def _tmux_unusable() -> str | None:
+    """Why ``fleet shutdown`` would refuse the tmux here, or ``None``: its own test
+    (``fleet._require_usable_tmux``), a tmux missing or too old, or one whose ``tmux -V``
+    did not answer. Asking only whether it is on PATH named the shutdown for a tmux it then
+    refused (round 28 of #257)."""
+    try:
+        TmuxServer().require()
+    except TmuxError as exc:  # TmuxUnavailable included
+        return str(exc)
+    return None
+
+
 def _may_run(row: _LiveRow, this_boot: str | None) -> SocketAnswer | None:
     """Whether the agent of live ``row`` may still be running, and why; ``None`` when it
     cannot be. :func:`~aisquare.core.tmux.server_may_run`, the rule ``fleet shutdown`` asks
@@ -2024,7 +2036,7 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         live_agents=live,
         unlistened=unlistened,
         fleet_error=fleet_error,
-        no_tmux=bool(live) and not TmuxServer().available(),
+        tmux_unusable=_tmux_unusable() if live else None,
         unreached=tuple(label for label, answer in answers if answer != "answers"),
         plugins=_plugins(claude_dirs),
         plugin_answers=_plugin_answers_there(),

@@ -426,32 +426,33 @@ def test_an_explicit_dist_is_still_the_callers_business(
     assert response.status_code == 404 and response.json()["error"] == "no_dist"
 
 
-def test_an_installed_index_that_goes_as_a_request_is_answered_is_the_bundled_page(
-    isolated_home: Path, built: Path, monkeypatch: pytest.MonkeyPatch
+def test_the_index_is_looked_up_once_for_each_request(
+    isolated_home: Path, built: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The index is looked at twice, and one an ``install-page`` swap took away in between
-    was answered as a ``--dist`` without its index is: 404 ``no_dist`` naming the
-    directory, ``~/.aisquare/remote-dist`` resolved, to anyone holding the link (sweep 4 of
-    #243). It is answered as the next request will be, with the bundled page."""
+    """A request looked the index up as many as three times, a ``realpath`` and a ``stat``
+    each, and an installed index that an ``install-page`` swap took away between two looks
+    needed an answer of its own (sweep 4 of #243; review of #243, round 12, 10/10). Once:
+    the installed build, a ``--dist`` and a ``--dist`` with no index each look once, for
+    the index itself and for a deep link it answers."""
     remote_server.install_page(built)
-    index = remote_dist_dir().resolve() / "index.html"
-    looks: list[Path] = []
-    real_is_file = Path.is_file
+    unbuilt = tmp_path / "unbuilt"
+    unbuilt.mkdir()
+    looked: list[str] = []
+    real = remote_server._built_page_file
 
-    def gone_after_the_first_look(self: Path) -> bool:
-        if self == index:
-            looks.append(self)
-            return len(looks) == 1
-        return real_is_file(self)
+    def counted(dist: Path, rel: str) -> Path | None:
+        looked.append(rel)
+        return real(dist, rel)
 
+    monkeypatch.setattr(remote_server, "_built_page_file", counted)
     runtime = Runtime(remote_state_path(), remote_audit_path())
-    client = make_client(build_app(runtime))
-    monkeypatch.setattr(Path, "is_file", gone_after_the_first_look)
-    response = client.get(f"/r/{runtime.token}/", headers={"accept": "text/html"})
-    assert len(looks) == 2, "the race this answers: present, then gone"
-    assert response.status_code == 200, response.text
-    assert response.text == remote_page.bundled_page_files()["index.html"].decode("utf-8")
-    assert str(isolated_home) not in response.text
+    for dist_dir, status in ((None, 200), (built, 200), (unbuilt, 404)):
+        client = make_client(build_app(runtime, dist_dir=dist_dir))
+        for path in ("", "fleet/coder-1"):
+            looked.clear()
+            response = client.get(f"/r/{runtime.token}/{path}", headers={"accept": "text/html"})
+            assert response.status_code == status, (dist_dir, path, response.text)
+            assert looked.count("index.html") == 1, (dist_dir, path, looked)
 
 
 def test_after_install_page_the_server_serves_the_spa_with_no_dist_flag(

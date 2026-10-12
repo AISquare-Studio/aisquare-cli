@@ -5303,18 +5303,17 @@ def build_remote_app(
         No answer names a directory: anyone holding the link reads these before any
         passphrase. A ``--dist`` without its index said ``no index.html in`` and the
         directory's absolute path, the machine's home and user name with it (sweep 4 of
-        #243); the log names it now (:data:`NO_DIST_INDEX`). An installed index that went
-        between the two looks at it, as ``install-page`` swaps a build in, is answered as
-        the next request will be, with the bundled page. A file of the build that another
-        account may change, or that is found through a directory another account may
-        change, is 404 ``no_dist`` too (:data:`PAGE_NOT_SERVED`), asked about as it is
+        #243); the log names it now (:data:`NO_DIST_INDEX`). A file of the build that
+        another account may change, or that is found through a directory another account
+        may change, is 404 ``no_dist`` too (:data:`PAGE_NOT_SERVED`), asked about as it is
         served (:func:`_page_served_open_to_others`).
 
         ``index.html`` is held to the rule every other file is (:func:`_built_page_file`).
         Only asked whether it was a file, a link, it was served from wherever it led: a
         ``--dist`` whose ``index.html`` led to ``../.env`` gave that file out to anyone
         holding the link (review of #243, round 11, 1/9). One that leads out of the build
-        or to a hidden file is no index.
+        or to a hidden file is no index. It is looked up once for each request, where it
+        was looked up as many as three times (review of #243, round 12, 10/10).
 
         The installed build is looked up for each request, one ``realpath``: looked up once,
         as the app was built, a ``remote-dist`` that is a link to a build of the human's own
@@ -5343,7 +5342,8 @@ def build_remote_app(
                 headers={"cache-control": cache_control},
             )
 
-        if dist_dir is None and _built_page_file(dist, "index.html") is None:
+        index = _built_page_file(dist, "index.html")
+        if dist_dir is None and index is None:
             response = bundled_page()
         elif rel and (candidate := _built_page_file(dist, rel)) is not None:
             response = built_file(candidate, _cache_control(rel))
@@ -5352,12 +5352,10 @@ def build_remote_app(
             # whole point: the SPA document under a .js name is a boot failure
             # with no error, and the 200 hides which build is actually installed.
             response = _json_error(404, "not_found", f"no such file in the built page: {rel}")
-        elif (index := _built_page_file(dist, "index.html")) is not None:
+        elif index is not None:
             response = built_file(index, INDEX_CACHE_CONTROL)
-        elif dist_dir is None:
-            response = bundled_page()
         else:
-            log.warning("remote: %s", _page_no_index(dist) or f"no index.html in {dist}")
+            log.warning("remote: %s", _page_no_index(dist))
             response = _json_error(404, "no_dist", NO_DIST_INDEX)
         response.headers.update(remote_page.remote_page_headers())
         return response
@@ -6538,9 +6536,8 @@ def _page_missing(dist_dir: Path | None) -> str | None:
         dist = _remote_resolved(dist_dir)
         if dist is None:
             return PAGE_DOES_NOT_RESOLVE.format(path=dist_dir)
-        no_index = _page_no_index(dist)
-        if no_index is not None:
-            return no_index
+        if _built_page_file(dist, "index.html") is None:
+            return _page_no_index(dist)
         return _page_project_not_build(dist) or _page_open_to_others(dist, PAGE_DIST_REMEDY)
     installed = _remote_resolved(remote_dist_dir())
     if installed is not None and _built_page_file(installed, "index.html") is not None:
@@ -6550,18 +6547,17 @@ def _page_missing(dist_dir: Path | None) -> str | None:
     return None if remote_page.bundled_page_present() else NO_PAGE_HINT
 
 
-def _page_no_index(dist: Path, unbuilt: str = "") -> str | None:
+def _page_no_index(dist: Path, unbuilt: str = "") -> str:
     """Why the build at ``dist``, resolved, has no ``index.html`` a server would serve
-    (:func:`_built_page_file`); ``None`` when it has one. ``unbuilt`` follows the sentence
-    for a build with no ``index.html`` at all.
+    (:func:`_built_page_file`), which its caller has just found. ``unbuilt`` follows the
+    sentence for a build with no ``index.html`` at all. Each caller looked for the index
+    and this looked again, three times for a request (review of #243, round 12, 10/10).
 
     A link that leads out of the build, or to a hidden file in it, is no index, as it is
     no other file: asked only whether it was a file, a ``--dist`` whose ``index.html`` led
     to ``../.env`` served that file before the passphrase, and ``install-page`` left the
     link behind and said it had installed a page with no index (review of #243, round 11,
     1/9)."""
-    if _built_page_file(dist, "index.html") is not None:
-        return None
     index = dist / "index.html"
     if index.is_symlink():
         return PAGE_INDEX_LINKED.format(index=index, root=dist)
@@ -7065,9 +7061,8 @@ def install_page(source: Path) -> Path:
     if resolved is None:
         raise NoRemotePage(PAGE_DOES_NOT_RESOLVE.format(path=source))
     source = resolved
-    no_index = _page_no_index(source, " — build aisquare-remote first (npm run build)")
-    if no_index is not None:
-        raise NoRemotePage(no_index)
+    if _built_page_file(source, "index.html") is None:
+        raise NoRemotePage(_page_no_index(source, " — build aisquare-remote first (npm run build)"))
     project = _page_project_not_build(source)
     if project is not None:
         raise NoRemotePage(project)

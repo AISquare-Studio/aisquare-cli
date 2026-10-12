@@ -4078,15 +4078,30 @@ def test_shutdown_forget_ends_every_row_unchecked_where_tmux_is_not_usable(
     """Round 27 of #257: with tmux gone, a row that may still run blocked `uninstall`, and
     the one remedy it named, `fleet shutdown`, refused without tmux. A server outlives its
     program, so no tmux is no evidence; ``forget`` is the operator's word that the agents
-    are not running, and ends each row unchecked, stopping and killing nothing."""
+    are not running, and ends each row unchecked, stopping and killing nothing. But not a
+    row whose socket answers, which needs no tmux to ask: a server listens there, and
+    `uninstall` counts it (round 28)."""
     coder = _coder(project)
-    tmux.installed = False
+    tmux.installed = False  # its server runs on, and its socket answers
 
+    plan = fleet_service.shutdown_plan(project, forget=True)
+    report = fleet_service.shutdown(project, forget=True)
+
+    assert "and no usable tmux here can stop it" in plan.held[coder.id]
+    assert report.recorded == [] and [row.agent.id for row in report.failed] == [coder.id]
+    assert report.failed[0].reason.endswith(
+        "left live, which --forget does not end as a server answers there: put a usable tmux "
+        "back and run this again"
+    )
+    assert tmux.killed == [] and tmux.killed_sessions == [] and tmux.typed == []
+
+    tmux.running = False  # its server exited, leaving the socket file: nobody listens
     plan = fleet_service.shutdown_plan(project, forget=True)
     report = fleet_service.shutdown(project, forget=True)
 
     assert plan.tmux_unusable is not None and "tmux is not installed" in plan.tmux_unusable
     assert [a.id for a in plan.agents] == [coder.id] and plan.sessions == []
+    assert plan.held == {}
     assert [row.agent.id for row in report.recorded] == [coder.id]
     assert report.recorded[0].reason.startswith("ended on your word (--forget), unchecked: ")
     assert report.recorded[0].agent.exit_status is None

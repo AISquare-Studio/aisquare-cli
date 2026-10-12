@@ -1041,9 +1041,16 @@ def test_shutdown_forget_shows_every_row_ended_unchecked_and_passes_the_word_on(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Round 27 of #257: with no usable tmux, ``--forget`` ends the rows on the operator's
-    word, so the plan says nothing is stopped or checked, and the run is told so."""
+    word, so the plan says nothing is stopped, and the run is told so. A row whose socket
+    answers is shown left live (round 28)."""
     plan = _install(
-        monkeypatch, "shutdown_plan", _plan(sessions=[], tmux_unusable="tmux is not installed")
+        monkeypatch,
+        "shutdown_plan",
+        _plan(
+            sessions=[],
+            tmux_unusable="tmux is not installed",
+            held={"agt_manager": "a server listens on its socket /tmp/tmux-1000/asq"},
+        ),
     )
     shutdown = _install(monkeypatch, "shutdown", _report())
 
@@ -1055,6 +1062,7 @@ def test_shutdown_forget_shows_every_row_ended_unchecked_and_passes_the_word_on(
     out = _plain(dry.stdout)
     assert "tmux is not usable here (tmux is not installed), so nothing can be stopped" in out
     assert "✗ coder-auth · amber-otter — recorded lost, unchecked" in out
+    assert "⚠ manager · amber-otter — left live: a server listens on its socket" in out
     assert "stopped (%7)" not in out
     assert plan.calls[0] == ((PROJECT,), {"forget": True})
     assert json.loads(as_json.stdout)["tmux_unusable"] == "tmux is not installed"

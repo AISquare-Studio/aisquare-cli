@@ -535,8 +535,8 @@ def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
         return
     if plan.tmux_unusable is not None:
         console.print(
-            f"tmux is not usable here ({plan.tmux_unusable}), so nothing can be stopped or "
-            "checked — with --forget each row is ended on your word:"
+            f"tmux is not usable here ({plan.tmux_unusable}), so nothing can be stopped — "
+            "with --forget each row whose socket does not answer is ended on your word:"
         )
     else:
         console.print(
@@ -546,10 +546,10 @@ def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
     names = {p.id: (p.codename or p.root.name or p.id) for p in plan.projects}
     for agent in plan.agents:
         where = names.get(agent.project_id, agent.project_id)
-        if plan.tmux_unusable is not None:
-            console.print(f"  ✗ {agent.label} · {where} — recorded lost, unchecked")
-        elif agent.id in plan.held:
+        if agent.id in plan.held:
             console.print(f"  ⚠ {agent.label} · {where} — left live: {plan.held[agent.id]}")
+        elif plan.tmux_unusable is not None:
+            console.print(f"  ✗ {agent.label} · {where} — recorded lost, unchecked")
         elif agent.id in plan.lost:
             console.print(
                 f"  ✗ {agent.label} · {where} — recorded lost "

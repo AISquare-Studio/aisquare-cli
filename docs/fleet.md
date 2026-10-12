@@ -347,10 +347,11 @@ dead — and no `SessionEnd` hook runs.
 rows it would leave live as above are ended as lost instead, but for a row
 whose socket answers — a server listens there, so no word ends it, and the plan
 shows it left live. Where tmux cannot be used here (removed, too old, or not
-answering for its version), every row is ended as lost, unchecked, and nothing
-is stopped or killed; without `--forget` such a run refuses, because a tmux
-server outlives its program leaving `PATH`. `aisquare uninstall` names it for a
-row it counts as running that no tmux here can reach.
+answering for its version), every other row is ended as lost, unchecked, and
+nothing is stopped or killed: a socket is asked without tmux. Without
+`--forget` such a run refuses, because a tmux server outlives its program
+leaving `PATH`. `aisquare uninstall` names it for a row it counts as running
+that no tmux here can reach.
 
 What it kills is the fleet's own `asq-<codename>` sessions, never the server:
 `tmux kill-server` would take down every session on that socket, and the fleet's

@@ -1176,11 +1176,28 @@ class UninstallPlan:
             )
             if self.no_tmux:
                 # Not "no tmux, so no server": a server outlives its program leaving PATH.
-                # The way out is the operator's word (round 27 of #257).
+                # The way out is the operator's word (round 27 of #257), but for a row whose
+                # socket answers, which `--forget` leaves live (round 28).
+                listening = tuple(a for a in self.live_agents if a not in self.unreached)
+                held = ""
+                if listening:
+                    one = len(listening) == 1
+                    held = (
+                        f" A server answers on the socket of {', '.join(listening)}, so "
+                        f"{'it is' if one else 'they are'} likely running, and --forget "
+                        f"leaves {'its row' if one else 'their rows'} live."
+                    )
+                forget = ""
+                if self.unreached:
+                    one = len(self.unreached) == 1
+                    forget = (
+                        f", or, if {', '.join(self.unreached)} {'is' if one else 'are'} not "
+                        f"running, end {'its row' if one else 'their rows'} on your word: "
+                        f"{FLEET_FORGET}"
+                    )
                 return UninstallRefused(
-                    f"{running} tmux is not installed here, so nothing can stop them or "
-                    f"tell whether they still run. Put tmux back and run {FLEET_SHUTDOWN}, "
-                    f"or, if they are not running, end their rows on your word: {FLEET_FORGET}",
+                    f"{running} tmux is not installed here, so nothing can stop them.{held} "
+                    f"Put tmux back and run {FLEET_SHUTDOWN}{forget}",
                     error="fleet_running",
                 )
             unreached = ""

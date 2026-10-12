@@ -684,8 +684,13 @@ def test_with_no_tmux_the_refusal_says_why_and_names_the_operators_word(
     """Round 27 of #257: a row no probe can clear (its socket gone, no boot recorded) kept
     uninstall refusing once tmux was removed, and the one remedy named, `fleet shutdown`,
     refuses without tmux. A server outlives its program, so the refusal says the agents
-    cannot be checked and names `--forget`, the operator's word that they are not running."""
+    cannot be checked and names `--forget`, the operator's word that they are not running.
+    A row whose socket answers is named apart: `--forget` leaves it live (round 28)."""
     monkeypatch.setattr(TmuxServer, "available", lambda _self: False)
+    answers: dict[Path | None, SocketAnswer] = {}
+    monkeypatch.setattr(
+        TmuxServer, "listener", lambda _self, recorded=None: answers.get(recorded, "gone")
+    )
     _initialised(runner, tmp_path)
     _live_agent(tmp_path / "repo")
     _hooked(isolated_agent_home / ".claude", tool.script)
@@ -697,7 +702,17 @@ def test_with_no_tmux_the_refusal_says_why_and_names_the_operators_word(
     assert _one_object(result.stdout)["error"] == "fleet_running"
     said = " ".join(human.stderr.split())
     assert "tmux is not installed here, so nothing can stop them" in said
-    assert "aisquare fleet shutdown --all --yes --forget" in said
+    assert "Put tmux back and run aisquare fleet shutdown --all --yes, or, if coder-1 (" in said
+    assert "end its row on your word: aisquare fleet shutdown --all --yes --forget" in said
+    assert "A server answers" not in said
+
+    answers[tmp_path / "x.sock"] = "answers"
+    _live_agent(tmp_path / "other", "coder-2", socket_path=tmp_path / "x.sock")
+    said = " ".join(runner.invoke(app, ["uninstall", "--yes"]).stderr.split())
+
+    assert "A server answers on the socket of coder-2 (other), so it is likely running" in said
+    assert "--forget leaves its row live. Put tmux back" in said
+    assert "or, if coder-1 (repo) is not running, end its row on your word" in said
 
 
 def test_a_row_shutdown_cannot_reach_is_named_with_the_way_out(

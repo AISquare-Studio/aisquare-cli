@@ -1719,6 +1719,8 @@ class _NeedsProject:
     """Agent id → the tail its items were read from."""
     failed: Exception | None
     """The read that failed (:class:`_NeedsReads`): then none of the above is to be used."""
+    failed_read: str
+    """What that read was of."""
 
 
 _T = TypeVar("_T")
@@ -1726,11 +1728,12 @@ _T = TypeVar("_T")
 
 class _NeedsReads:
     """Every read of one project's scan, each through :meth:`needs_read`. ``failed`` is the
-    first that failed; ``None`` while all worked."""
+    first that failed, ``failed_read`` what it was of; ``None`` while all worked."""
 
     def __init__(self, project: ProjectInfo) -> None:
         self.project = project
         self.failed: Exception | None = None
+        self.failed_read = ""
 
     def needs_read(self, read: Callable[[], _T], what: str) -> _T | None:
         """``read()``; ``None`` once a read failed, this one or one before: nothing is read
@@ -1741,7 +1744,7 @@ class _NeedsReads:
             return read()
         except Exception as exc:
             log.debug("remote: needs could not read %s of %s", what, self.project.id, exc_info=True)
-            self.failed = exc
+            self.failed, self.failed_read = exc, what
             return None
 
 
@@ -1857,7 +1860,12 @@ def _needs_scan_project(
         )
     )
     return _NeedsProject(
-        items=items, statuses=statuses, rows=rows, tails=tails, failed=reads.failed
+        items=items,
+        statuses=statuses,
+        rows=rows,
+        tails=tails,
+        failed=reads.failed,
+        failed_read=reads.failed_read,
     )
 
 
@@ -2259,8 +2267,9 @@ def scan_needs_you(
     memory of when it first saw the items whose facts carry no date; without
     it, each scan is the first. What it holds for a project that could not be
     looked at this time is kept for the next look. ``failing`` is the watcher's
-    memory of the projects whose scans fail: one warning a streak, not one every
-    3 s (:func:`_needs_failed`).
+    memory of the projects whose scans fail, outright or by a read: one warning a streak,
+    naming the read, not one every 3 s (:func:`_needs_failed`), and "works again" only
+    once a scan reads all it needs.
     """
     memory: MutableMapping[str, datetime] = {} if first_seen is None else first_seen
     seen: set[str] = set()
@@ -2269,15 +2278,21 @@ def scan_needs_you(
     projects = sources.list_projects()
     boards = {project.id: _needs_board_of(sources, project) for project in projects}
     for project in projects:
+        scanned: _NeedsProject | None = None
         try:
             scanned = _needs_scan_project(
                 sources, project, board_id=boards[project.id], now=now, first_seen=memory, seen=seen
             )
         except Exception as exc:
             _needs_failed(f"the needs scan of {project.id}", exc, failing, project.id)
-            scanned = None
         else:
-            if failing is not None and project.id in failing:
+            if scanned.failed is not None:
+                # A scan that decides nothing has not recovered: a read that keeps failing
+                # froze the project's cards and 503'd its actions with debug lines alone
+                # (review of #243, round 28, 1/10).
+                what = f"the needs scan of {project.id} reading {scanned.failed_read}"
+                _needs_failed(what, scanned.failed, failing, project.id)
+            elif failing is not None and project.id in failing:
                 failing.discard(project.id)
                 log.info("remote: the needs scan of %s works again", project.id)
         if scanned is not None and scanned.failed is None:
@@ -2380,14 +2395,14 @@ def _needs_failed(what: str, exc: Exception, failing: MutableSet[_K] | None, key
     from aisquare.core.store import StoreUnopenable, damaged_store_message
 
     if failing is not None and key in failing:
-        log.debug("remote: %s failed again", what, exc_info=True)
+        log.debug("remote: %s failed again", what, exc_info=exc)
         return
     if failing is not None:
         failing.add(key)
     if isinstance(exc, StoreUnopenable):
         log.warning("remote: %s failed: %s", what, damaged_store_message(exc))
     else:
-        log.warning("remote: %s failed", what, exc_info=True)
+        log.warning("remote: %s failed", what, exc_info=exc)
 
 
 def _needs_ranked(items: Sequence[NeedsItem]) -> list[NeedsItem]:

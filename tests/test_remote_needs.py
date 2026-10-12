@@ -4949,6 +4949,42 @@ def test_a_project_whose_scan_keeps_failing_is_told_once_a_streak(
     assert failing == set()
 
 
+def test_a_project_whose_read_keeps_failing_is_told_once_and_works_again_only_when_read_whole(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A scan that could not read all it needs decides nothing, so it has not recovered. It
+    ended the streak and said "works again", and the read that failed was a debug line: a
+    project frozen at its last items, every action on it a 503, was never told of (review
+    of #243, round 28, 1/10). One warning naming the read, its traceback, for the streak,
+    an outright failure in it too; "works again" once a scan reads it whole."""
+    caplog.set_level(logging.INFO, logger=remote_needs.__name__)
+    failing: set[str] = set()
+    fleet = _crash(exit_status=1)
+    last = scan_needs_you(_sources(fleet), now=NOW, dismissed=(), failing=failing)
+    assert [item.kind for item in last] == ["crashed"]
+    locked = _failing(_sources(fleet), "ended_agents", [])
+    real = remote_needs._needs_scan_project
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("a query the store could not answer")
+
+    for scan in (real, real, broken, real):
+        monkeypatch.setattr(remote_needs, "_needs_scan_project", scan)
+        kept = scan_needs_you(locked, now=NOW, dismissed=(), failing=failing, kept=last)
+        assert kept == last, "its last items stand"
+        assert failing == {"prj_alpha"}, "a scan that decides nothing is still failing"
+    told = [(r.levelname, r.getMessage()) for r in caplog.records]
+    assert told == [("WARNING", "remote: the needs scan of prj_alpha reading rows failed")]
+    assert caplog.records[0].exc_info is not None, "the read's own traceback"
+    assert scan_needs_you(_sources(fleet), now=NOW, dismissed=(), failing=failing) == last
+    scan_needs_you(locked, now=NOW, dismissed=(), failing=failing, kept=last)
+    told = [(r.levelname, r.getMessage()) for r in caplog.records]
+    assert told[1:] == [
+        ("INFO", "remote: the needs scan of prj_alpha works again"),
+        ("WARNING", "remote: the needs scan of prj_alpha reading rows failed"),
+    ], "a new streak is told anew"
+
+
 def test_a_card_dismissed_while_a_scan_runs_stays_dismissed(
     runtime: Runtime, tmp_path: Path
 ) -> None:

@@ -1028,6 +1028,10 @@ class McpRegistration:
     shared: bool = False
     """A project-scope entry: ``file`` is the repository's own ``.mcp.json``, which
     ``claude mcp remove --scope project`` edits from inside ``project``."""
+    asked_in: tuple[Path, ...] = ()
+    """For a project-scope entry, each ``.claude.json`` (the file itself) whose block for
+    the project has not declined it: sessions under that config dir start it, or ask to
+    (:func:`_project_registrations`)."""
 
 
 @dataclass(frozen=True)
@@ -1137,11 +1141,19 @@ class UninstallPlan:
     def lasting_mcp(self) -> tuple[McpRegistration, ...]:
         """The MCP registrations still there after this run: when it purges, not those in a
         ``.claude.json`` inside the home (an account slot's), which the purge deletes, as it
-        does a plugin there (sweep 2 of #257). ``file`` is the file itself, so the answer is
-        the same after the purge as before it."""
+        does a plugin there (sweep 2 of #257). Nor a repository's ``.mcp.json`` server that
+        only blocks inside the home have not declined (:attr:`McpRegistration.asked_in`):
+        the purge deletes them, and every config dir left declined it, so no session starts
+        it, and its removal would edit the repository's committed file (round 27). ``file``
+        is the file itself, so the answer is the same after the purge as before it."""
         if not self.purges:
             return self.mcp
-        return tuple(entry for entry in self.mcp if not self.in_home(entry.file))
+        return tuple(
+            entry
+            for entry in self.mcp
+            if not self.in_home(entry.file)
+            and not (entry.shared and all(self.in_home(path) for path in entry.asked_in))
+        )
 
     @property
     def refusal(self) -> UninstallRefused | None:
@@ -1535,7 +1547,7 @@ def _mcp_registrations(
     found: list[McpRegistration] = []
     logins: dict[Path, ClaudeIdentity | None] = {}
     read: set[Path] = set()
-    listed: dict[str, list[dict[str, Any]]] = {}
+    listed: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
     default = agent_core.dir_identity(accounts_core.home_config_dir().parent / ".claude.json")
     for directory in directories:
         for spelled in agent_core.claude_json_paths(directory):
@@ -1570,7 +1582,7 @@ def _mcp_registrations(
             for project, block in projects.items():
                 if not isinstance(block, dict):
                     continue
-                listed.setdefault(str(project), []).append(block)
+                listed.setdefault(str(project), []).append((path, block))
                 servers = block.get("mcpServers")
                 if isinstance(servers, dict):
                     found.extend(
@@ -1585,10 +1597,11 @@ def _mcp_registrations(
 
 
 def _project_registrations(
-    listed: dict[str, list[dict[str, Any]]],
+    listed: dict[str, list[tuple[Path, dict[str, Any]]]],
 ) -> list[McpRegistration]:
     """aisquare's MCP servers in the ``.mcp.json`` of every project a ``.claude.json``
-    lists (``listed``: each project's blocks, from every file read) — project scope.
+    lists (``listed``: each project's blocks, each beside the file it was read from) —
+    project scope.
 
     A repository's committed ``.mcp.json`` starts its servers in every session there,
     and none of them was read: one running aisquare through ``uvx`` made the purged
@@ -1601,10 +1614,12 @@ def _project_registrations(
     never answered (round 26). A block declines a name in its ``disabledMcpjsonServers``
     and not in its ``enabledMcpjsonServers``, as the doctor reads one
     (``diagnostics._declined_project_servers``). A project reached under two spellings
-    is one ``.mcp.json``, read once, with every spelling's blocks.
+    is one ``.mcp.json``, read once, with every spelling's blocks. Each entry keeps the
+    files whose blocks have not declined it (``asked_in``), so a purge can drop the
+    blocks it deletes (:attr:`UninstallPlan.lasting_mcp`).
     """
     found: list[McpRegistration] = []
-    blocks_of: dict[Path, list[dict[str, Any]]] = {}
+    blocks_of: dict[Path, list[tuple[Path, dict[str, Any]]]] = {}
     spelled: dict[Path, str] = {}
     for project, blocks in listed.items():
         if not Path(project).is_absolute():
@@ -1616,13 +1631,22 @@ def _project_registrations(
         servers = agent_core.read_json(path).get("mcpServers")
         if not isinstance(servers, dict):
             continue
-        found.extend(
-            McpRegistration(
-                str(name), path, spelled[path], None, _fetches_aisquare(spec), shared=True
+        for name, spec in servers.items():
+            asked_in = tuple(
+                dict.fromkeys(file for file, block in blocks if not _declines(block, str(name)))
             )
-            for name, spec in servers.items()
-            if _runs_aisquare(spec) and not all(_declines(block, str(name)) for block in blocks)
-        )
+            if _runs_aisquare(spec) and asked_in:
+                found.append(
+                    McpRegistration(
+                        str(name),
+                        path,
+                        spelled[path],
+                        None,
+                        _fetches_aisquare(spec),
+                        shared=True,
+                        asked_in=asked_in,
+                    )
+                )
     return found
 
 

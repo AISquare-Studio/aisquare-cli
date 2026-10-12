@@ -3010,6 +3010,61 @@ def test_a_purge_waits_for_a_project_mcp_json_server_that_fetches_aisquare(
     assert _snapshot(tmp_path) == before and world.events == [], "nothing touched"
 
 
+@pytest.mark.parametrize("outside", ["declined", "unanswered"])
+def test_a_purge_does_not_wait_for_a_project_server_only_its_own_slots_left_unanswered(
+    default_home: None,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    outside: str,
+) -> None:
+    """Round 27 of #257: the per-block rule counted the block of a fleet account slot, inside
+    the home this purge deletes. A server ``~/.claude.json`` declined still held the purge
+    up, because the slot's block was Claude Code's default (no answer), and the advice was
+    to edit the repository's committed ``.mcp.json``. A purge leaves no session under that
+    slot to start it, so it does not wait; a plain uninstall, which keeps the slot, still
+    names it, and so does a purge where a config dir it leaves has not answered."""
+    _initialised(runner, tmp_path)
+    repo = tmp_path / "work" / "repo"
+    repo.mkdir(parents=True)
+    (repo / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "memory": {"command": "uvx", "args": ["--from", "aisquare-cli", "aisquare"]}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    isolated_agent_home.mkdir(parents=True, exist_ok=True)
+    answer = {"disabledMcpjsonServers": ["memory"]} if outside == "declined" else {}
+    (isolated_agent_home / ".claude.json").write_text(
+        json.dumps({"projects": {str(repo): answer}}), encoding="utf-8"
+    )
+    slot = paths.claude_accounts_dir() / "2"
+    slot.mkdir(parents=True)
+    (slot / ".claude.json").write_text(
+        json.dumps(
+            {"projects": {str(repo): {"enabledMcpjsonServers": [], "disabledMcpjsonServers": []}}}
+        ),
+        encoding="utf-8",
+    )
+
+    purge = lifecycle.uninstall_plan(purge=True)
+    plain = lifecycle.uninstall_plan()
+
+    assert purge.purges and [(e.name, e.shared) for e in purge.mcp] == [("memory", True)]
+    lasting = [(entry.name, entry.shared) for entry in purge.lasting_mcp]
+    refusal = purge.refusal
+    if outside == "declined":
+        assert lasting == [] and refusal is None, (purge.mcp, refusal)
+    else:
+        assert lasting == [("memory", True)]
+        assert refusal is not None and refusal.error == "mcp_registered"
+    assert [(entry.name, entry.shared) for entry in plain.lasting_mcp] == [("memory", True)]
+
+
 @pytest.mark.parametrize("unanswered", ["config-dir", "spelling", None])
 def test_a_project_server_is_left_out_only_where_every_block_declined_it(
     runner: CliRunner, isolated_agent_home: Path, tmp_path: Path, unanswered: str | None

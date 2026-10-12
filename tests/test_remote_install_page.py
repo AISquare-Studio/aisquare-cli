@@ -764,8 +764,19 @@ ADMIN = "group:ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000050:admin:80"
         (f"{ADMIN}:allow:add_file,file_inherit", True),
         (f"{HOME_FOLDERS}\n{ADMIN}:allow:list,delete_child", True),
         ("user:FFFFEEEE-DDDD-CCCC-BBBB-AAAA00000ABC:me:{own}:allow:write,delete", False),
+        (f"{ADMIN}:allow:only_inherit,file_inherit,directory_inherit,add_file,write", False),
+        (f"{ADMIN}:allow:inherited,file_inherit,add_file,write", True),
     ],
-    ids=["home-folders", "allows-a-read", "allows-a-write", "allows-an-add", "both", "own"],
+    ids=[
+        "home-folders",
+        "allows-a-read",
+        "allows-a-write",
+        "allows-an-add",
+        "both",
+        "own",
+        "only-inherits",
+        "inherited",
+    ],
 )
 def test_a_macos_acl_that_allows_another_account_to_change_an_entry_opens_it(
     built: Path, monkeypatch: pytest.MonkeyPatch, entries: str, opened: bool
@@ -773,8 +784,10 @@ def test_a_macos_acl_that_allows_another_account_to_change_an_entry_opens_it(
     """macOS's ACLs grant beside the mode, which shows none of them: ``chmod +a "bob allow
     write"`` on a 0644 file let ``bob`` rewrite it, and the check passed it (review of #243,
     round 10, 4/7). An entry that allows another account a right that changes it is open;
-    a deny, as macOS puts on each home's folders, or a right that only reads, is not. Read
-    as ``acl_to_text`` writes it, on any machine."""
+    a deny, as macOS puts on each home's folders, or a right that only reads, is not; nor is
+    one flagged ``only_inherit``, a right only on what is made inside the directory later
+    (review of #243, round 11, 3/9). One a file inherited is its own. Read as
+    ``acl_to_text`` writes it, on any machine."""
     assert (
         remote_server._page_acl_text_allows_write(f"!#acl 1\n{entries.format(own=4242)}\n", 4242)
         is opened

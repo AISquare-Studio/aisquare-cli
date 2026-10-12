@@ -6825,7 +6825,12 @@ def _page_acl_text_allows_write(text: str, own_uid: int) -> bool:
     """Whether ``text``, an ACL as macOS's ``acl_to_text`` writes it, has an entry that
     allows an account other than ``own_uid`` a right that changes the entry. Each line after
     the header is ``tag:uuid:name:id:allow|deny:rights``, the rights and the inheritance
-    flags in one comma-separated list."""
+    flags in one comma-separated list.
+
+    An entry flagged ``only_inherit`` grants nothing on the entry that carries it, only on
+    what is made inside it later, which carries a copy of its own and is asked about as
+    itself: read as a right on the directory, a parent that seeds a shared folder's
+    defaults that way refused every page below it (review of #243, round 11, 3/9)."""
     for line in text.splitlines():
         fields = line.split(":")
         if line.startswith("!#") or len(fields) < 6:
@@ -6833,7 +6838,8 @@ def _page_acl_text_allows_write(text: str, own_uid: int) -> bool:
         tag, qualifier, verdict, rights = fields[0], fields[-3], fields[-2], fields[-1]
         if verdict != "allow" or (tag == "user" and qualifier == str(own_uid)):
             continue
-        if _DARWIN_ACL_WRITES & set(rights.split(",")):
+        granted = set(rights.split(","))
+        if "only_inherit" not in granted and _DARWIN_ACL_WRITES & granted:
             return True
     return False
 

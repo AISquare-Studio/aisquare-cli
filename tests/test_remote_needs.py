@@ -1537,15 +1537,6 @@ def test_an_event_older_than_its_row_names_nothing_in_the_window_or_out_of_it() 
     assert after.id == before.id
 
 
-def test_a_managers_stop_is_its_rows_own_and_needs_no_board() -> None:
-    """A board that could not be read hides no stop: only a hand-over's is told there."""
-    killed = _row("manager", role="manager", ended=NOW - timedelta(minutes=5))
-    crashed = _row("manager", role="manager", ended=NOW - timedelta(minutes=5), exit_status=3)
-    for manager in (killed, crashed):
-        fleet = Fleet(ended=[manager], board_fails=True)
-        assert [item.kind for item in _scan(fleet)] == ["manager_down"]
-
-
 def test_a_lost_pane_is_dated_from_the_first_scan_that_saw_it() -> None:
     """It flashes between a restart's kill and the row's end: the push waits from then."""
     row = _row()
@@ -1555,36 +1546,6 @@ def test_a_lost_pane_is_dated_from_the_first_scan_that_saw_it() -> None:
     later = _one(_scan(fleet, now=NOW + timedelta(seconds=30), first_seen=memory))
     assert later.id == first.id
     assert (later.since, later.push_after) == (NOW, NOW + timedelta(seconds=60))
-
-
-def test_a_project_whose_listing_fails_still_shows_its_board() -> None:
-    manager = _row("manager", role="manager")
-    managing = _session(manager)
-    coder = _row("coder-2")
-    fleet = Fleet(
-        agents=[_status(coder, "working", _session(coder))],
-        listing_fails=True,
-        sessions=[managing],
-        events=[_event(5, "question", "Ship on Friday?", session=managing)],
-        ended=[_row("coder-1", ended=NOW - timedelta(minutes=1), exit_status=1)],
-    )
-    assert [item.kind for item in _scan(fleet)] == ["board_question"]
-    assert fleet.listed == 1, "it has a live row, so it was listed, and the listing failed"
-
-
-def test_a_listing_that_fails_is_no_proof_the_manager_is_gone() -> None:
-    """With the listing failed the live manager read absent, and every coder's question or
-    result to it of the day became a card and a push, though the board's write woke it for
-    each (review of #243, round 22, 1/7). On its project's own board unknown is not absent;
-    on a board it shares with other projects every item is a card all the same."""
-    manager = _row("manager", role="manager")
-    fleet = _crew_and_manager(_status(manager, "working", _session(manager)))
-    assert _scan(fleet) == []
-    fleet.listing_fails = True
-    assert _scan(fleet) == [], "nor the crash, which needs the listing"
-    shared = replace(_sources(fleet), board_project=lambda project: "prj_hub")
-    items = scan_needs_you(shared, now=NOW, dismissed=())
-    assert [item.kind for item in items] == ["board_question"]
 
 
 def test_a_project_with_no_live_row_is_not_listed() -> None:
@@ -2899,14 +2860,6 @@ def test_a_label_with_no_row_is_no_such_agent(monkeypatch: pytest.MonkeyPatch) -
         _now_of(_working(None), FakeTmux(reference=NOW), monkeypatch, label="ghost")
 
 
-def test_a_listing_that_fails_is_not_an_answer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A snapshot without the listing would claim the pane shows no dialog."""
-    fleet = _working(None)
-    fleet.listing_fails = True
-    with pytest.raises(fleet_service.FleetUnavailable):
-        _now_of(fleet, FakeTmux(reference=NOW), monkeypatch)
-
-
 # --- the agent alone: what an action reads while its Escape lands -------------------------
 
 
@@ -3938,43 +3891,11 @@ def test_a_result_to_a_manager_that_stopped_is_judged_by_the_stop_in_its_own_day
         assert cards == ([("board_result", "coder-1")] if card else []), at
 
 
-def test_what_says_whether_the_manager_can_take_them_unread_floods_the_phone_with_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Unknown is not absent. With the board's sessions unread, no item to the manager is the
-    human's that scan (review of #243, round 23, 5/7). With the ended rows unread, a manager
-    that stopped read as none, and every coder's result to it of the day was a card, due at
-    once (round 24, 3/8): no result to it is the human's that scan, while its open question,
-    which the ended rows do not decide, still is."""
-    from aisquare.services import team as team_service
-
-    seats = (
-        _manager_of("alpha", end="exit"),
-        _Seat("alpha", "coder-1", asks=True),
-        _Seat("alpha", "coder-2"),
-    )
-    alpha = _seated(tmp_path, monkeypatch, seats, hub=False)["alpha"]
-    tmux = FakeTmux()
-    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
-    with store_session() as store:
-        team_service._emit(
-            store, alpha.id, "result", "Green.", session_id="ses_alpha_coder-2", to_role="manager"
-        )
-    sources = remote_needs.live_needs_sources()
-    assert _board_cards(sources) == [("board_question", "coder-1")]
-
-    def locked(*args: Any) -> list[Any]:
-        raise RuntimeError("database is locked")
-
-    assert _board_cards(replace(sources, board_sessions=locked)) == []
-    assert _board_cards(replace(sources, ended_agents=locked)) == [("board_question", "coder-1")]
-
-
 def test_with_no_manager_in_its_day_a_coders_result_to_the_manager_is_a_card(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Only a manager that stopped leaves a result to it on the board: with none on the
-    project's board, or under a hub, it is a card, unread ended rows aside."""
+    project's board, or under a hub, it is a card."""
     from aisquare.services import team as team_service
 
     alpha = _seated(tmp_path, monkeypatch, (_Seat("alpha", "coder-1"),), hub=False)["alpha"]
@@ -3984,46 +3905,7 @@ def test_with_no_manager_in_its_day_a_coders_result_to_the_manager_is_a_card(
         team_service._emit(
             store, alpha.id, "result", "Green.", session_id="ses_alpha_coder-1", to_role="manager"
         )
-    sources = remote_needs.live_needs_sources()
-    assert _board_cards(sources) == [("board_result", "coder-1")]
-
-    def locked(*args: Any) -> list[Any]:
-        raise RuntimeError("database is locked")
-
-    assert _board_cards(replace(sources, ended_agents=locked)) == []
-
-
-def test_an_actions_check_with_the_ended_rows_unread_is_a_503_not_that_the_agent_is_gone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An action's check read ended rows it could not load as none, and a Restart on a
-    ``crashed`` or ``manager_down`` card, whose agent has only an ended row, was told 404
-    "That agent is gone." for a store that was busy a moment (review of #243, round 25,
-    4/4). Unknown is not absent: it is a 503, to try again. A live row needs no ended
-    ones."""
-    from aisquare.services import remote_actions
-    from aisquare.services.remote_server import RequestError
-
-    seats = (_manager_of("alpha", end="crash"), _Seat("alpha", "coder-1"))
-    alpha = _seated(tmp_path, monkeypatch, seats, hub=False)["alpha"]
-    tmux = FakeTmux()
-    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
-    live = remote_needs.live_needs_sources
-    (down,) = scan_needs_you(live(), now=datetime.now(UTC), dismissed=())
-    assert (down.kind, down.agent) == ("manager_down", "manager")
-    snap = remote_actions.action_check_needs(alpha, "manager", "agt_alpha_manager", down.id)
-    assert snap is not None and [item.id for item in snap.items] == [down.id]
-
-    def locked(*args: Any) -> list[Any]:
-        raise RuntimeError("database is locked")
-
-    monkeypatch.setattr(
-        remote_needs, "live_needs_sources", lambda: replace(live(), ended_agents=locked)
-    )
-    with pytest.raises(RequestError) as refused:
-        remote_actions.action_check_needs(alpha, "manager", "agt_alpha_manager", down.id)
-    assert (refused.value.status, refused.value.error) == (503, "unavailable")
-    assert needs_agent_now(alpha, "coder-1").status is not None
+    assert _board_cards(remote_needs.live_needs_sources()) == [("board_result", "coder-1")]
 
 
 @pytest.mark.parametrize(
@@ -4075,71 +3957,154 @@ def test_a_manager_starting_takes_them_until_its_session_should_have_registered(
     assert cards(now + starting) == [("board_question", "coder-1"), ("board_result", "coder-2")]
 
 
-def _day_unread(sources: NeedsSources, *, hub: bool) -> NeedsSources:
-    """``sources`` with the read of the exits failing: the board's day, or under a hub the
-    project's own exits."""
+_READS = (
+    "list_agents",
+    "has_live_agents",
+    "tmux_answers",
+    "ended_agents",
+    "board_since",
+    "board_sessions",
+    "accounts",
+    "board_events",
+    "session_event",
+    "transcript_tail",
+    "pane_output",
+    "exits_since",
+    "task_status",
+)
+"""Every read of a project's scan (:class:`NeedsSources`) but ``list_projects``, which a
+scan cannot go without, and ``board_project``, whose failure is an answer: the team off."""
 
-    def locked(*args: Any) -> list[Any]:
+
+def _every_read() -> tuple[Fleet, NeedsSources]:
+    """A hub's project whose scan makes each of :data:`_READS`: coder-1 parked on its limit,
+    coder-2 at an MCP form and coder-3 at the usage-limit dialog, each named by an event the
+    window no longer holds; coder-4 at a sub-agent's prompt; coder-5 crashed with its task
+    open, its exit in the project's own events; coder-6 asking the human on the board."""
+    fleet = _parked_and_asking()
+    _board_traffic(fleet)
+    prompted, tail = _in_a_sub_agent(NOW - timedelta(minutes=1), "coder-4")
+    asker = _row("coder-6")
+    asking = _session(asker)
+    crashed = _row("coder-5", ended=NOW - timedelta(minutes=10), exit_status=1, task_id="tsk_1")
+    fleet.agents += [prompted, _status(asker, "working", asking)]
+    fleet.tails["/transcripts/coder-4.jsonl"] = tail
+    fleet.ended.append(crashed)
+    fleet.tasks["tsk_1"] = "doing"
+    fleet.sessions.append(asking)
+    fleet.events.append(_event(400, "question", "Ship on Friday?", session=asking))
+    return fleet, replace(_sources(fleet), board_project=lambda project: "prj_hub")
+
+
+def _failing(sources: NeedsSources, read: str, asked: list[str]) -> NeedsSources:
+    """``sources`` with ``read`` failing, as a store held past its busy timeout does, and
+    each time it was asked put in ``asked``."""
+
+    def locked(*args: Any) -> Any:
+        asked.append(read)
         raise RuntimeError("database is locked")
 
-    return replace(sources, exits_since=locked) if hub else replace(sources, board_since=locked)
+    return replace(sources, **{read: locked})
 
 
-@pytest.mark.parametrize("hub", [False, True], ids=["its own board", "a hub"])
-def test_with_the_exits_unread_a_failed_hand_over_stays_and_an_actions_check_is_a_503(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: bool
+@pytest.mark.parametrize("read", _READS)
+def test_a_scan_that_cannot_read_one_of_its_facts_leaves_the_last_items_as_they_were(
+    runtime: Runtime, tmp_path: Path, read: str
 ) -> None:
-    """A board's day, or under a hub the exits, that could not be read read as no exits: the
-    ``manager_down`` card of a hand-over that failed, and the ``crashed`` one of a coder's,
-    went for that scan, their push streak with them, and a Restart on either was a 409
-    ``stale`` (review of #243, round 26, 2/2). Unknown is not absent: they stand as the last
-    scan had them, and an action's check is a 503, to try again."""
-    from aisquare.services import remote_actions
-    from aisquare.services.remote_server import RequestError
+    """Unknown is not absent. Each read that failed was taken for none, one kind of read at a
+    time: a listing or ended rows not read dropped a crash or a manager's stop and restarted
+    its push streak, events not read named a dialog anew, its dismissal lost and pushed
+    again (review of #243, rounds 22 to 27). A scan decides only from a complete read: with
+    one read failing, the last scan's items stand, ids, dismissal and push streak and all,
+    and nothing a complete scan would change, a new question or a crash whose task closed,
+    shows until the read works again."""
+    from aisquare.services.remote_push import RemotePushSender
 
-    seats = (_manager_of("alpha", end="hand-over"), _Seat("alpha", "coder-1", end="hand-over"))
-    alpha = _seated(tmp_path, monkeypatch, seats, hub=hub)["alpha"]
-    tmux = FakeTmux()
-    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
-    live = remote_needs.live_needs_sources
-    now = datetime.now(UTC)
-    last = scan_needs_you(live(), now=now, dismissed=())
-    assert [(item.kind, item.agent) for item in last] == [
-        ("manager_down", "manager"),
-        ("crashed", "coder-1"),
-    ]
-    unread = _day_unread(live(), hub=hub)
-    assert scan_needs_you(unread, now=now, dismissed=()) == [], "no last scan: nothing new"
-    assert scan_needs_you(unread, now=now, dismissed=(), kept=last) == last
-    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: _day_unread(live(), hub=hub))
-    for item in last:
-        assert item.agent is not None and item.agent_id is not None
-        with pytest.raises(RequestError) as refused:
-            remote_actions.action_check_needs(alpha, item.agent, item.agent_id, item.id)
-        assert (refused.value.status, refused.value.error) == (503, "unavailable")
-
-
-def test_with_the_day_unread_the_watcher_keeps_a_failed_turn_and_its_check_is_a_503(
-    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The board's day decides a turn that failed too (rule 10): with it unread, the watcher
-    keeps the card its last scan published, and an action's check of the agent is a 503."""
-    from aisquare.services.remote_server import RequestError
-
-    status, tail, events = _turn_failed()
-    fleet = Fleet(agents=[status], events=events, tails={"/transcripts/coder-1.jsonl": tail})
+    fleet, sources = _every_read()
+    reading = [sources]
     app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
-    watcher = RemoteNeedsWatcher(app.kit, sources=lambda: _sources(fleet), clock=lambda: NOW)
-    (failed,) = watcher.scan_needs_now()
-    assert failed.kind == "failed"
-    fleet.board_fails = True
-    assert watcher.scan_needs_now() == [failed]
-    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: _sources(fleet))
+    watcher = RemoteNeedsWatcher(app.kit, sources=lambda: reading[0], clock=lambda: NOW)
+    sender = RemotePushSender(app.kit, clock=lambda: NOW)
+    app.kit.needs_listeners.append(sender.push_scan_seen)
+    last = watcher.scan_needs_now()
+    assert [(item.kind, item.agent) for item in last] == [
+        ("permission", "coder-2"),
+        ("permission", "coder-4"),
+        ("board_question", "coder-6"),
+        ("crashed", "coder-5"),
+        ("limited", "coder-1"),
+        ("limited", "coder-3"),
+    ]
+    form = last[0]
+    record_needs_dismissal(form.id)
+    fleet.tasks["tsk_1"] = "done"
+    fleet.events.append(_event(401, "question", "Or Monday?", session=fleet.sessions[-1]))
+    asked: list[str] = []
+    reading[0] = _failing(sources, read, asked)
+    kept = last[1:]
+    assert watcher.scan_needs_now() == kept
+    assert asked == [read], "the read was made, and failed"
+    assert sender._streak == {item.id: 2 for item in kept}
+    reading[0] = sources
+    healed = [(item.kind, item.agent, item.excerpt) for item in watcher.scan_needs_now()]
+    assert ("crashed", "coder-5", "") not in healed
+    assert ("board_question", "coder-6", "Or Monday?") in healed
+
+
+@pytest.mark.parametrize("read", _READS)
+def test_an_actions_check_is_a_503_while_any_read_of_its_scan_fails(
+    monkeypatch: pytest.MonkeyPatch, read: str
+) -> None:
+    """An action's check took a read that failed for none, so a card's own item was missing
+    or named anew: a Restart on a ``crashed`` or ``manager_down`` card was told "That agent
+    is gone.", and on a failed hand-over's, or a Switch on a usage-limit dialog's, a 409
+    ``stale``, whatever other card the agent had (review of #243, round 25, 4/4; round 26,
+    2/2; round 27, 2/6 and 7/7). Any read of its scan that fails is a 503, to try again."""
+    from aisquare.services.remote_server import RequestError
+
+    _fleet, sources = _every_read()
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: sources)
+    monkeypatch.setattr(
+        fleet_service, "server_for", lambda socket, config=None: FakeTmux(reference=NOW)
+    )
+    assert [item.kind for item in needs_agent_now(PROJECT, "coder-2", now=NOW).items] == [
+        "permission"
+    ]
+    asked: list[str] = []
+    failing = _failing(sources, read, asked)
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: failing)
     with pytest.raises(RequestError) as refused:
-        needs_agent_now(PROJECT, "coder-1", now=NOW)
+        needs_agent_now(PROJECT, "coder-2", now=NOW)
     assert (refused.value.status, refused.value.error) == (503, "unavailable")
-    fleet.board_fails = False
-    assert [item.id for item in needs_agent_now(PROJECT, "coder-1", now=NOW).items] == [failed.id]
+    assert asked == [read]
+
+
+def test_a_tmux_question_that_fails_is_no_first_sighting_of_tmux_down() -> None:
+    """A scan whose question to tmux failed is not used, and dates nothing either: read as
+    no answer, it was the first sighting of an outage nobody saw, and the card of the next
+    scan that did see one, and its push, were dated from before it."""
+    fleet = _on_a_dead_tmux()
+    fleet.silent.add("asq")
+    memory: dict[str, datetime] = {}
+    asked: list[str] = []
+    failing = _failing(_sources(fleet), "tmux_answers", asked)
+    assert scan_needs_you(failing, now=NOW, dismissed=(), first_seen=memory) == []
+    assert asked == ["tmux_answers"] and memory == {}
+    later = NOW + timedelta(seconds=3)
+    down = _one(_scan(fleet, now=later, first_seen=memory))
+    assert (down.kind, down.since) == ("fleet_down", later)
+
+
+def test_a_board_that_cannot_be_resolved_is_the_projects_own_and_the_scan_goes_on() -> None:
+    """With the team off ``team.resolve_project`` refuses every time: a failure to name the
+    board is an answer, not a read that failed, or nothing would ever be scanned."""
+    fleet = _crash(exit_status=1)
+
+    def refused(project: ProjectInfo) -> str:
+        raise RuntimeError("the team is disabled")
+
+    sources = replace(_sources(fleet), board_project=refused)
+    assert [item.kind for item in scan_needs_you(sources, now=NOW, dismissed=())] == ["crashed"]
 
 
 def test_under_a_hub_a_projects_needs_read_no_other_projects_rows(
@@ -4946,9 +4911,11 @@ def test_a_project_whose_scan_keeps_failing_is_told_once_a_streak(
 
     caplog.set_level(logging.INFO, logger=remote_needs.__name__)
     failing: set[str] = set()
+    last = _scan(_crash(exit_status=1))
     monkeypatch.setattr(remote_needs, "_needs_scan_project", broken)
     for _ in range(3):
-        scan_needs_you(_sources(Fleet()), now=NOW, dismissed=(), failing=failing)
+        kept = scan_needs_you(_sources(Fleet()), now=NOW, dismissed=(), failing=failing, kept=last)
+        assert kept == last, "its last items stand, as for a read that failed"
     monkeypatch.setattr(remote_needs, "_needs_scan_project", real)
     scan_needs_you(_sources(Fleet()), now=NOW, dismissed=(), failing=failing)
     told = [(r.levelname, r.getMessage()) for r in caplog.records]
@@ -5657,7 +5624,8 @@ def test_an_answer_needs_the_listing_it_rechecks_against(live: Live) -> None:
     live.fleet.listing_fails = True
     response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
     assert response.status_code == 503
-    assert response.json() == {"error": "fleet_unavailable", "message": "tmux is not installed"}
+    said = "alpha could not be read: tmux is not installed"
+    assert response.json() == {"error": "unavailable", "message": said}
     assert live.tmux.typed == []
     assert not remote_agent_lock(PROJECT.id, "coder-1").locked(), "the lock is let go"
 
@@ -5682,7 +5650,8 @@ def test_an_answer_whose_store_fails_as_it_rechecks_is_a_503_not_a_bare_500(
     )
     response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
     assert response.status_code == 503, response.text
-    assert response.json() == {"error": "unavailable", "message": "file is not a database"}
+    said = "alpha could not be read: file is not a database"
+    assert response.json() == {"error": "unavailable", "message": said}
     assert live.tmux.typed == []
     assert not remote_agent_lock(PROJECT.id, "coder-1").locked(), "the lock is let go"
 

@@ -52,6 +52,7 @@ import unicodedata
 from collections.abc import Callable, Collection, Mapping, MutableMapping, MutableSet, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from aisquare.models import (
@@ -159,12 +160,6 @@ _NEEDS_DAY_KINDS = (*_NEEDS_ASKED, "agent_exited", "turn_failed")
 """The kinds of its agents' events the scan reads of a project's day (``board_since``): what
 opens a board item or moves on from one, the exits the fleet announces, and the turns that
 died on an API error."""
-
-_NEEDS_BY_DAY = _NEEDS_BOARD_KINDS | {"failed"}
-"""The items the board's day decides: its questions and results, and a turn that failed (rule 10
-of :func:`needs_from_agent`). ``_NEEDS_BY_EXITS``: the ones the exits the fleet announced
-decide, whether a clean stop was a hand-over that failed."""
-_NEEDS_BY_EXITS = frozenset({"crashed", "manager_down"})
 
 _NEEDS_ACTIONS: dict[str, tuple[str, ...]] = {
     "permission": ("answer", "open", "dismiss"),
@@ -1716,73 +1711,62 @@ class _NeedsProject:
 
     items: list[NeedsItem]
     statuses: list[FleetAgentStatus]
-    ended: list[FleetAgent] | None
-    """``None``: the ended rows could not be read."""
+    rows: list[FleetAgent]
+    """Its live rows, and those that ended in the scan's two days."""
     tails: dict[str, TranscriptTail | None]
     """Agent id → the tail its items were read from."""
-    unread: frozenset[str]
-    """The kinds of item it could not judge, the read that decides them failed
-    (:data:`_NEEDS_BY_DAY`, :data:`_NEEDS_BY_EXITS`)."""
+    failed: Exception | None
+    """The read that failed (:class:`_NeedsReads`): then none of the above is to be used."""
 
 
 _T = TypeVar("_T")
 
 
-def _needs_read(read: Callable[[], list[_T]], what: str, project: ProjectInfo) -> list[_T]:
-    """One source read for one project; a failure costs what it would have shown."""
-    return _needs_read_or_none(read, what, project) or []
+class _NeedsReads:
+    """Every read of one project's scan, each through :meth:`needs_read`. ``failed`` is the
+    first that failed; ``None`` while all worked."""
 
+    def __init__(self, project: ProjectInfo) -> None:
+        self.project = project
+        self.failed: Exception | None = None
 
-def _needs_read_or_none(
-    read: Callable[[], list[_T]], what: str, project: ProjectInfo
-) -> list[_T] | None:
-    """:func:`_needs_read`, ``None`` when the read failed: for facts whose absence says
-    something, as the ended rows' does: no manager that stopped."""
-    try:
-        return read()
-    except Exception:
-        log.debug("remote: needs could not read %s of %s", what, project.id, exc_info=True)
-        return None
-
-
-def _needs_listing(sources: NeedsSources, project: ProjectInfo) -> list[FleetAgentStatus] | None:
-    """``project``'s ``list_agents``, empty when it has no live row to list
-    (:func:`_needs_has_live`); ``None``: it failed."""
-    try:
-        return sources.list_agents(project) if _needs_has_live(sources, project) else []
-    except Exception:
-        log.debug("remote: needs could not list the agents of %s", project.id, exc_info=True)
-        return None
+    def needs_read(self, read: Callable[[], _T], what: str) -> _T | None:
+        """``read()``; ``None`` once a read failed, this one or one before: nothing is read
+        after one fails, since nothing the scan finds then is used."""
+        if self.failed is not None:
+            return None
+        try:
+            return read()
+        except Exception as exc:
+            log.debug("remote: needs could not read %s of %s", what, self.project.id, exc_info=True)
+            self.failed = exc
+            return None
 
 
 def _needs_scan_project(
     sources: NeedsSources,
     project: ProjectInfo,
-    statuses: list[FleetAgentStatus] | None,
     *,
     board_id: str,
     now: datetime,
     first_seen: MutableMapping[str, datetime],
     seen: set[str],
-    accounts: AccountsSettings | None,
-    answers: Callable[[str], bool],
 ) -> _NeedsProject:
-    """Every item of one fleet project. ``statuses`` is its ``list_agents``; ``None``, it failed.
+    """Every item of one fleet project, and whether every read they came from worked.
 
-    Without a listing only the board speaks: an agent's state, a crash, a
-    manager gone and tmux down all depend on rows the listing could not read. So does
-    a coder's question or result to the manager on its own board, and a result to it on the
-    ended rows too: read as none, every one of the day was a card and a push (review of
-    #243, rounds 22 to 24). The ended rows go back a day before the board's day: a result
-    to the manager is judged by the stop in its own day (:func:`needs_from_board`), and read
-    a day from now, a result an hour after a stop became a card once the stop was a day
-    old (round 25, 3/4). A board's day, or its exits, not read decide no item: ``unread``
-    names the kinds they decide, which stand as the last scan had them (:func:`scan_needs_you`).
-    Read as none, a failed hand-over was no card and a Restart on it a 409 (round 26, 2/2).
+    Unknown is not absent: what a read that failed would have said is not known, so a
+    scan decides only from a complete read (:class:`_NeedsReads`). Each read taken for
+    none changed cards: a listing or ended rows not read lost a manager that stopped, and
+    every coder's result to it was a card; a day or exits not read made a failed hand-over
+    no card; events not read named a dialog anew, its dismissal lost (review of #243,
+    rounds 22 to 27). So when one fails the scan's items are not used: its last items
+    stand (:func:`scan_needs_you`), and an action's check is a 503 (:func:`needs_agent_now`).
+    The ended rows go back a day before the board's day: a result to the manager is judged
+    by the stop in its own day (:func:`needs_from_board`), and read a day from now, a result
+    an hour after a stop became a card once the stop was a day old (round 25, 3/4).
     ``first_seen`` dates the items whose facts carry no date (a pane gone, tmux
     not answering) from the first scan that saw them; ``seen`` collects what
-    this scan saw, so the caller can forget the rest. ``answers`` says whether a
-    tmux server answers (:func:`_needs_unheard`), once per socket for a whole scan.
+    this scan saw, so the caller can forget the rest.
 
     The board's sessions and events are read from ``board_id``, the project's board
     (:func:`_needs_board_of`), its rows by its own id. Under ``AISQUARE_TEAM_HUB``
@@ -1797,72 +1781,68 @@ def _needs_scan_project(
     """
     from aisquare.services.fleet import RECENTLY_ENDED
 
-    if statuses is not None:
-        statuses = _needs_unheard(statuses, answers)
-    day = now - max(QUESTION_HORIZON, RECENTLY_ENDED)
-    ended = _needs_read_or_none(
-        lambda: sources.ended_agents(project.id, day - RECENTLY_ENDED), "rows", project
+    reads = _NeedsReads(project)
+    listed = reads.needs_read(
+        lambda: sources.list_agents(project) if sources.has_live_agents(project.id) else [],
+        "the agents",
     )
-    board_read = _needs_read_or_none(lambda: sources.board_since(board_id, day), "board", project)
-    board = board_read or []
-    unread: frozenset[str] = frozenset() if board_read is not None else _NEEDS_BY_DAY
-    window = _needs_window(sources, project, board_id)
-    listed = statuses or []
+    # A question that failed is no answer: no row reads ``unknown``, no outage is first seen.
+    statuses = _needs_unheard(
+        listed or [],
+        lambda socket: reads.needs_read(partial(sources.tmux_answers, socket), "tmux") is not False,
+    )
+    day = now - max(QUESTION_HORIZON, RECENTLY_ENDED)
+    ended = reads.needs_read(lambda: sources.ended_agents(project.id, day - RECENTLY_ENDED), "rows")
+    board = reads.needs_read(lambda: sources.board_since(board_id, day), "the board") or []
     rows = list(
-        {row.id: row for row in [*(ended or []), *(status.agent for status in listed)]}.values()
+        {row.id: row for row in [*(ended or []), *(status.agent for status in statuses)]}.values()
     )
     manager = _needs_manager(rows)
-    taking = _needs_nudged(project, board_id, manager, listed, now)
+    taking = _needs_nudged(project, board_id, manager, statuses, now)
     authors = _needs_board_authors(board, now)
     sessions = (
-        _needs_read_or_none(lambda: sources.board_sessions(board_id, authors), "sessions", project)
+        reads.needs_read(lambda: sources.board_sessions(board_id, authors), "sessions")
         if authors
         else []
     )
+    accounts = reads.needs_read(sources.accounts, "the accounts")
+    window = _needs_window(sources, board_id, reads)
     items: list[NeedsItem] = []
     tails: dict[str, TranscriptTail | None] = {}
-    if statuses is not None:
-        for status in statuses:
-            tail = tails[status.agent.id] = _needs_tail_of(sources, status)
-            for item in needs_from_agent(
-                status,
-                tail,
-                project=project,
-                events=[
-                    *_needs_own_events(sources, board_id, status, window),
-                    *_needs_failures(board, status),
-                ],
-                now=now,
-                # The manager's own items wait on no one: its own limit's nudge goes to itself.
-                manager_live=taking is not None and taking.id != status.agent.id,
-                accounts=accounts,
-                pane_output=_needs_output_of(sources, status.agent),
-            ):
-                items.append(_needs_dated(item, first_seen, seen) if item.kind == "lost" else item)
-        exits = board_read if board_id == project.id else _needs_exits(sources, project, day)
-        if exits is None:
-            unread |= _NEEDS_BY_EXITS
-        items.extend(
-            _needs_crashed(
-                ended or [],
-                rows,
-                exits or [],
-                project=project,
-                now=now,
-                manager_live=taking is not None,
-                sources=sources,
-            )
-        )
-        items.extend(_needs_manager_down(manager, exits or [], project=project, now=now))
-        items.extend(
-            _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
-        )
-    # Unknown is not absent: no item to the manager is the human's for a listing or sessions
-    # that were not read, nor a result to it for ended rows not read: it may have stopped,
-    # as late as now.
+    for status in statuses:
+        tail = tails[status.agent.id] = _needs_tail_of(sources, status, reads)
+        for item in needs_from_agent(
+            status,
+            tail,
+            project=project,
+            events=[
+                *_needs_own_events(sources, board_id, status, window, reads),
+                *_needs_failures(board, status),
+            ],
+            now=now,
+            # The manager's own items wait on no one: its own limit's nudge goes to itself.
+            manager_live=taking is not None and taking.id != status.agent.id,
+            accounts=accounts,
+            pane_output=_needs_output_of(sources, status.agent, reads),
+        ):
+            items.append(_needs_dated(item, first_seen, seen) if item.kind == "lost" else item)
     own = board_id == project.id
-    unknown = statuses is None or sessions is None
-    stopped = manager.ended_at if manager is not None else None if ended is not None else now
+    exits = board if own else _needs_exits(sources, project, day, reads) or []
+    items.extend(
+        _needs_crashed(
+            ended or [],
+            rows,
+            exits,
+            project=project,
+            now=now,
+            manager_live=taking is not None,
+            task_status=lambda ref: reads.needs_read(partial(sources.task_status, ref), "a task"),
+        )
+    )
+    items.extend(_needs_manager_down(manager, exits, project=project, now=now))
+    items.extend(
+        _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
+    )
     items.extend(
         needs_from_board(
             board,
@@ -1870,24 +1850,24 @@ def _needs_scan_project(
             rows,
             project=project,
             now=now,
-            manager_live=taking is not None or (unknown and own),
-            stopped=stopped if own else None,
+            manager_live=taking is not None,
+            stopped=manager.ended_at if own and manager is not None else None,
         )
     )
-    return _NeedsProject(items=items, statuses=listed, ended=ended, tails=tails, unread=unread)
+    return _NeedsProject(
+        items=items, statuses=statuses, rows=rows, tails=tails, failed=reads.failed
+    )
 
 
-def _needs_tail_of(sources: NeedsSources, status: FleetAgentStatus) -> TranscriptTail | None:
+def _needs_tail_of(
+    sources: NeedsSources, status: FleetAgentStatus, reads: _NeedsReads
+) -> TranscriptTail | None:
     """The agent's transcript tail, read only where a rule can use it."""
     session = status.session
     path = None if session is None else session.transcript_path
     if not path or status.state in ("exited", "unknown", "lost"):
         return None
-    try:
-        return sources.transcript_tail(path)
-    except Exception:
-        log.debug("remote: needs could not read the tail of %s", path, exc_info=True)
-        return None
+    return reads.needs_read(partial(sources.transcript_tail, path), "a transcript")
 
 
 def _needs_own_events(
@@ -1895,6 +1875,7 @@ def _needs_own_events(
     board_id: str,
     status: FleetAgentStatus,
     window: Callable[[], Sequence[TeamEvent]],
+    reads: _NeedsReads,
 ) -> list[TeamEvent]:
     """The board events :func:`needs_from_agent` reads of an agent: its session's newest
     ``attention`` and ``limited`` events, wherever they are.
@@ -1923,7 +1904,8 @@ def _needs_own_events(
     for kind in wanted:
         if any(event.kind == kind for event in own):
             break
-        found = _needs_session_event(sources, board_id, session.id, kind, born)
+        asked = partial(sources.session_event, board_id, session.id, kind, born)
+        found = reads.needs_read(asked, "events")
         if found is not None:
             own.append(found)
             break
@@ -1939,21 +1921,15 @@ def _needs_failures(board: Sequence[TeamEvent], status: FleetAgentStatus) -> lis
     return [e for e in board if e.kind == "turn_failed" and e.session_id == session.id]
 
 
-def _needs_output_of(sources: NeedsSources, agent: FleetAgent) -> Callable[[], datetime | None]:
+def _needs_output_of(
+    sources: NeedsSources, agent: FleetAgent, reads: _NeedsReads
+) -> Callable[[], datetime | None]:
     """When ``agent``'s pane last printed, asked of tmux only when called."""
-
-    def needs_output() -> datetime | None:
-        try:
-            return sources.pane_output(agent)
-        except Exception:
-            log.debug("remote: needs could not ask tmux about %s", agent.pane_id, exc_info=True)
-            return None
-
-    return needs_output
+    return lambda: reads.needs_read(partial(sources.pane_output, agent), "tmux")
 
 
 def _needs_window(
-    sources: NeedsSources, project: ProjectInfo, board_id: str
+    sources: NeedsSources, board_id: str, reads: _NeedsReads
 ) -> Callable[[], list[TeamEvent]]:
     """The project's board's newest :data:`NEEDS_BOARD_EVENTS` events, read the first time
     they are asked for in a scan, and not at all by one that asks nothing of them: most
@@ -1962,64 +1938,32 @@ def _needs_window(
 
     def needs_window() -> list[TeamEvent]:
         if not read:
-            read.append(
-                _needs_read(
-                    lambda: sources.board_events(board_id, NEEDS_BOARD_EVENTS), "board", project
-                )
-            )
+            asked = partial(sources.board_events, board_id, NEEDS_BOARD_EVENTS)
+            read.append(reads.needs_read(asked, "the window") or [])
         return read[0]
 
     return needs_window
 
 
-def _needs_session_event(
-    sources: NeedsSources, board_id: str, session_id: str, kind: str, since: datetime
-) -> TeamEvent | None:
-    try:
-        return sources.session_event(board_id, session_id, kind, since)
-    except Exception:
-        log.debug("remote: needs could not read %s's events", session_id, exc_info=True)
-        return None
-
-
 def _needs_exits(
-    sources: NeedsSources, project: ProjectInfo, day: datetime
+    sources: NeedsSources, project: ProjectInfo, day: datetime, reads: _NeedsReads
 ) -> list[TeamEvent] | None:
     """The exits the fleet announced on ``project``'s own board since ``day`` (``agent_exited``,
-    by the row's ``project_id``), for a project whose agents write another board; ``None``:
-    they could not be read. Only those: the day's other kinds are its board's (review of
-    #243, round 19, 3/3)."""
-    return _needs_read_or_none(lambda: sources.exits_since(project.id, day), "exits", project)
+    by the row's ``project_id``), for a project whose agents write another board. Only
+    those: the day's other kinds are its board's (review of #243, round 19, 3/3)."""
+    return reads.needs_read(lambda: sources.exits_since(project.id, day), "exits")
 
 
 def _needs_board_of(sources: NeedsSources, project: ProjectInfo) -> str:
     """The id of ``project``'s board (:attr:`NeedsSources.board_project`); its own when the
     source cannot say (the team off, a root that is gone): a board read there finds what
-    it finds."""
+    it finds. Unlike a read of the scan's, a failure here is an answer: with the team off
+    ``team.resolve_project`` refuses every time."""
     try:
         return sources.board_project(project)
     except Exception:
         log.debug("remote: needs could not resolve the board of %s", project.id, exc_info=True)
         return project.id
-
-
-def _needs_hearing(sources: NeedsSources) -> Callable[[str], bool]:
-    """``sources.tmux_answers``, asked once per socket: one per scan, across its projects.
-
-    A question that fails to be put is no sign the server is gone: it answers yes.
-    """
-    heard: dict[str, bool] = {}
-
-    def needs_heard(socket: str) -> bool:
-        if socket not in heard:
-            try:
-                heard[socket] = sources.tmux_answers(socket)
-            except Exception:
-                log.debug("remote: needs could not ask tmux on %s", socket, exc_info=True)
-                heard[socket] = True
-        return heard[socket]
-
-    return needs_heard
 
 
 def _needs_unheard(
@@ -2093,7 +2037,7 @@ def _needs_still_remembered(
 ) -> None:
     """Keep every date ``first_seen`` holds for ``project`` through a scan that could not look.
 
-    A listing that failed, or a project whose scan did, says nothing of whether a
+    A scan that could not read all it needs, or failed outright, says nothing of whether a
     pane is still gone or tmux still silent. Forgotten, the next scan that saw it
     again dated it anew: ``fleet_down``, whose id is its first sighting, became a
     new item, pushed again past the dismissal of the one before.
@@ -2110,7 +2054,7 @@ def _needs_crashed(
     project: ProjectInfo,
     now: datetime,
     manager_live: bool,
-    sources: NeedsSources,
+    task_status: Callable[[str], str | None],
 ) -> list[NeedsItem]:
     """Agents that died with a failing exit status in the last hour, with nobody on it.
 
@@ -2119,9 +2063,9 @@ def _needs_crashed(
     replacement (its ``/exit``, or the kill when that did not land in time):
     nothing took the agent's place, and the exit it announced says so
     (``fleet.HANDOVER_FAILED``, read from the day's ``exits``). An agent whose task
-    is closed did its work; one the fleet woke a live manager for (``manager_live``,
-    :func:`_needs_nudged`) is the manager's; one that was restarted since — a newer
-    row holds its label — was handled. The ``manager`` row's own crash is
+    is closed (``task_status``) did its work; one the fleet woke a live manager for
+    (``manager_live``, :func:`_needs_nudged`) is the manager's; one that was restarted
+    since — a newer row holds its label — was handled. The ``manager`` row's own crash is
     ``manager_down``; a numbered seat's is a crash like any agent's, which the fleet
     wakes the ``manager`` for.
     """
@@ -2144,7 +2088,7 @@ def _needs_crashed(
             continue
         if newest.get(row.label, row.created_at) > row.created_at:
             continue
-        if row.task_id is not None and _needs_task_closed(sources, row.task_id):
+        if row.task_id is not None and task_status(row.task_id) in CLOSED_STATUSES:
             continue
         name = needs_push_safe(row.label)
         items.append(
@@ -2165,14 +2109,6 @@ def _needs_crashed(
             )
         )
     return items
-
-
-def _needs_task_closed(sources: NeedsSources, task_id: str) -> bool:
-    try:
-        status = sources.task_status(task_id)
-    except Exception:
-        return False  # an unreadable task is not proof the work is done
-    return status in CLOSED_STATUSES
 
 
 def _needs_handover_failed(event: TeamEvent | None) -> bool:
@@ -2314,10 +2250,10 @@ def scan_needs_you(
 ) -> list[NeedsItem]:
     """Every item across every project, dismissals dropped, ranked by kind then ``since``.
 
-    A project whose listing fails still yields its board items, and one that
-    fails outright costs only its own items. ``kept`` is the last scan's items: those
-    of a kind a project's scan could not judge (:attr:`_NeedsProject.unread`) stand as
-    they were. ``first_seen`` is the watcher's
+    A project whose scan could not read all it needs (:func:`_needs_scan_project`), or
+    failed outright, decides nothing: its items of ``kept``, the last scan's, stand as they
+    were, ids and all, so a dismissal still hides them and a push's streak goes on, and no
+    item is new (review of #243, round 27). ``first_seen`` is the watcher's
     memory of when it first saw the items whose facts carry no date; without
     it, each scan is the first. What it holds for a project that could not be
     looked at this time is kept for the next look. ``failing`` is the watcher's
@@ -2326,46 +2262,36 @@ def scan_needs_you(
     """
     memory: MutableMapping[str, datetime] = {} if first_seen is None else first_seen
     seen: set[str] = set()
-    sources = _needs_board_read_once(sources)
-    accounts = _needs_accounts(sources)
-    answers = _needs_hearing(sources)
+    sources = _needs_read_once(sources)
     items: list[NeedsItem] = []
     projects = sources.list_projects()
     boards = {project.id: _needs_board_of(sources, project) for project in projects}
     for project in projects:
-        statuses = _needs_listing(sources, project)
-        if statuses is None:
-            _needs_still_remembered(memory, seen, project)
         try:
             scanned = _needs_scan_project(
-                sources,
-                project,
-                statuses,
-                board_id=boards[project.id],
-                now=now,
-                first_seen=memory,
-                seen=seen,
-                accounts=accounts,
-                answers=answers,
+                sources, project, board_id=boards[project.id], now=now, first_seen=memory, seen=seen
             )
         except Exception as exc:
             _needs_failed(f"the needs scan of {project.id}", exc, failing, project.id)
+            scanned = None
+        else:
+            if failing is not None and project.id in failing:
+                failing.discard(project.id)
+                log.info("remote: the needs scan of %s works again", project.id)
+        if scanned is not None and scanned.failed is None:
+            items.extend(scanned.items)
+        else:
             _needs_still_remembered(memory, seen, project)
-            continue
-        if failing is not None and project.id in failing:
-            failing.discard(project.id)
-            log.info("remote: the needs scan of %s works again", project.id)
-        items.extend(scanned.items)
-        # After the fresh ones: of an id twice, ranked, the first stands.
-        items.extend(i for i in kept if i.project_id == project.id and i.kind in scanned.unread)
+            items.extend(item for item in kept if item.project_id == project.id)
     for key in [key for key in memory if key not in seen]:
         del memory[key]
     items = _needs_board_once(items, boards)
     return _needs_ranked([item for item in items if item.id not in dismissed])
 
 
-def _needs_board_read_once(sources: NeedsSources) -> NeedsSources:
-    """``sources`` with each board's day, window and sessions read once for a whole scan.
+def _needs_read_once(sources: NeedsSources) -> NeedsSources:
+    """``sources`` with each board's day, window and sessions, each tmux server's answer and
+    the accounts read once for a whole scan.
 
     Under ``AISQUARE_TEAM_HUB`` every project's board is the hub's, and each project's
     scan read the same day, window and sessions of it again: N copies every 3 s
@@ -2388,6 +2314,8 @@ def _needs_board_read_once(sources: NeedsSources) -> NeedsSources:
         board_since=once("day", sources.board_since),
         board_events=once("window", sources.board_events),
         board_sessions=once("sessions", sources.board_sessions),
+        tmux_answers=once("tmux", sources.tmux_answers),
+        accounts=once("accounts", sources.accounts),
     )
 
 
@@ -2460,22 +2388,6 @@ def _needs_failed(what: str, exc: Exception, failing: MutableSet[_K] | None, key
         log.warning("remote: %s failed", what, exc_info=True)
 
 
-def _needs_has_live(sources: NeedsSources, project: ProjectInfo) -> bool:
-    """Whether to list ``project``: it has a live row, or the store would not say."""
-    try:
-        return sources.has_live_agents(project.id)
-    except Exception:
-        log.debug("remote: needs could not count the live rows of %s", project.id, exc_info=True)
-        return True
-
-
-def _needs_accounts(sources: NeedsSources) -> AccountsSettings | None:
-    try:
-        return sources.accounts()
-    except Exception:
-        return None
-
-
 def _needs_ranked(items: Sequence[NeedsItem]) -> list[NeedsItem]:
     """One item per id, in rank order (:data:`NEEDS_KINDS`), then oldest first."""
     unique = list({item.id: item for item in reversed(items)}.values())
@@ -2500,64 +2412,41 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
     label's pane: is its foreground the agent, and has its window been quiet. Only a
     pane the listing vouched for is asked about: one that reads ``lost`` may be another
     agent's pane under the row's old id, and an Escape an action sends on the strength
-    of the answer would land in that agent's turn. The listing is not caught here: a
-    snapshot made without it would claim a pane shows no dialog when nobody asked.
-    Raises ``fleet.NoSuchAgent`` only when
-    the label has had no row at all among the scan's (two days of ended ones), and a
-    503 ``RequestError`` when it has no live row and the ended rows could not be read:
-    unknown is not absent, and a Restart on a ``crashed`` or ``manager_down`` card was
-    told "That agent is gone." (review of #243, round 25, 4/4). So is a label with no
-    item whose item the day or the exits not read would decide (:func:`_needs_unjudged`):
-    a Restart on a failed hand-over's card was a 409 ``stale`` (round 26, 2/2).
+    of the answer would land in that agent's turn.
+
+    Raises a 503 ``RequestError`` when a read that scan needs failed, whatever the label's
+    items: unknown is not absent (:func:`_needs_scan_project`). A snapshot without the
+    listing claimed a pane shows no dialog when nobody asked; without the ended rows a
+    Restart on a ``crashed`` or ``manager_down`` card was told "That agent is gone." (review
+    of #243, round 25, 4/4); without the day, the exits or a session's events the card's
+    item was missing or named anew, and its action a 409 ``stale`` (rounds 26 and 27). So
+    an action that names no card is told to try again too. Raises ``fleet.NoSuchAgent``
+    only when the label has had no row at all among the scan's (two days of ended ones).
     """
     from aisquare.services import fleet as fleet_service
     from aisquare.services.remote_server import RequestError
 
     when = now or _needs_now()
     sources = live_needs_sources()
+    board_id = _needs_board_of(sources, project)
     scanned = _needs_scan_project(
-        sources,
-        project,
-        sources.list_agents(project),
-        board_id=_needs_board_of(sources, project),
-        now=when,
-        first_seen={},
-        seen=set(),
-        accounts=_needs_accounts(sources),
-        answers=_needs_hearing(sources),
+        sources, project, board_id=board_id, now=when, first_seen={}, seen=set()
     )
-    rows = [
-        row
-        for row in [*(scanned.ended or []), *(s.agent for s in scanned.statuses)]
-        if row.label == label
-    ]
     where = project.root.name or project.id
-    if not rows and scanned.ended is None:
-        raise RequestError(503, "unavailable", f"the agents of {where} could not be read")
+    if scanned.failed is not None:
+        raise RequestError(503, "unavailable", f"{where} could not be read: {scanned.failed}")
+    rows = [row for row in scanned.rows if row.label == label]
     if not rows:
         raise fleet_service.NoSuchAgent(f"no agent {label!r} in {where} within the last two days")
     newest = max(rows, key=lambda row: row.created_at)
     status = next((s for s in scanned.statuses if s.agent.id == newest.id), None)
-    items = tuple(item for item in scanned.items if item.agent == label)
-    if not items and _needs_unjudged(newest, status, scanned.unread):
-        raise RequestError(503, "unavailable", f"the board of {where} could not be read")
     return _needs_snapshot(
         project,
         status,
         None if status is None else scanned.tails.get(status.agent.id),
-        items,
+        tuple(item for item in scanned.items if item.agent == label),
         when,
     )
-
-
-def _needs_unjudged(
-    row: FleetAgent, status: FleetAgentStatus | None, unread: frozenset[str]
-) -> bool:
-    """Whether ``row``'s item may be of a kind its scan could not judge (``unread``): a clean
-    stop's, which its exit says was a hand-over that failed, or a waiting agent's failed turn."""
-    if row.ended_at is not None:
-        return row.exit_status in (0, None) and not unread.isdisjoint(_NEEDS_BY_EXITS)
-    return status is not None and status.state == "waiting" and "failed" in unread
 
 
 def needs_single_agent_now(
@@ -2596,7 +2485,7 @@ def needs_single_agent_now(
     if row is None:
         raise fleet_service.NoSuchAgent(f"no agent {label!r} in {project.root.name or project.id}")
     status = fleet_service.status_of(row)
-    tail = _needs_tail_of(live_needs_sources(), status)
+    tail = _needs_tail_of(live_needs_sources(), status, _NeedsReads(project))
     items = needs_from_agent(status, tail, project=project, events=(), now=when)
     return _needs_snapshot(project, status, tail, tuple(items), when)
 
@@ -2889,7 +2778,8 @@ def _needs_with_board_sessions(statuses: list[FleetAgentStatus]) -> list[FleetAg
     #243). Only such rows are derived again, in one read of the store and one look at
     each tmux server they are on, as the listing looks: ``fleet.status_of`` of each was a
     store session and a server's three questions per row, every row of a hub's every 3 s
-    scan. If the servers cannot be asked, the rows are left as the listing had them.
+    scan. A server that cannot be asked reads its rows as the listing would; a look that
+    fails is the listing's failure (:func:`_needs_scan_project`).
     """
     from aisquare.core.store import store_session
     from aisquare.services import fleet as fleet_service
@@ -2912,11 +2802,7 @@ def _needs_with_board_sessions(statuses: list[FleetAgentStatus]) -> list[FleetAg
         return statuses
     rows = [status.agent for status in elsewhere if status.agent.id in held]
     tmux_session = elsewhere[0].tmux_session  # the listing's one, its project's
-    try:
-        views = fleet_service._observe_sockets(rows, tmux_session)
-    except Exception:
-        log.debug("remote: needs could not derive the hub's rows again", exc_info=True)
-        return statuses
+    views = fleet_service._observe_sockets(rows, tmux_session)
     now = fleet_service._now()
     derived = {
         agent.id: fleet_service._status(

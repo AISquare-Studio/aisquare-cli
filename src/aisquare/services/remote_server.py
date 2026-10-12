@@ -622,14 +622,19 @@ def _remote_board_project(root: Path) -> ProjectInfo:
     all read. Each kept its own, and each kept whatever its first lookup said: a worktree
     whose ``git`` failed in one was its own board there and its principal checkout's in
     another, and the Board tab listed tasks no claim found (review of #243, round 11, 6/9).
-    A failed ``git``'s answer is kept too, and is a working ``git``'s: the checkout's
-    ``.git`` is read as ``git`` reads it (``workspace.find_project_root``). Telling it apart
-    by its shape missed a project below a worktree's root, and ran ``git`` twice a second
-    for a worktree whose ``git`` always fails (review of #243, round 12, 2/10 to 4/10).
-    Kept for the process on the premise that the two agree, a ``--separate-git-dir``
-    checkout's, which they did not, held the Board tab to another board until a restart
-    (review of #243, round 13, 2/4): no answer is kept past a minute."""
+    A failed ``git``'s answer, the marker walk's, is kept like any other, and no longer:
+    told apart by its shape, a project below a worktree's root kept it for the process,
+    and a worktree whose ``git`` always fails ran ``git`` twice a second (review of #243,
+    round 12, 2/10 to 4/10); kept for the process, it held the Board tab to another board
+    than ``asq board``'s until a restart (round 13, 2/4). After a minute ``git`` is asked
+    again.
+
+    One ``git`` call for each lookup: ``team_project`` asks ``git_common_root`` and then
+    ``find_project_root``, which asks it again where it failed, and ``find_project_root``
+    alone gives the same answer. Under a hub, where ``team_project`` runs no ``git``, and
+    with the board off, which ``resolve_project`` refuses, the answer is theirs."""
     from aisquare.core import orchestrator
+    from aisquare.core.workspace import find_project_root, project_id_for
     from aisquare.services import team as team_service
 
     key = (root, os.environ.get(orchestrator.TEAM_HUB_ENV_VAR, ""))
@@ -638,7 +643,11 @@ def _remote_board_project(root: Path) -> ProjectInfo:
         kept = _board_projects.get(key)
     if kept is not None and now - kept[0] < BOARD_PROJECT_TTL:
         return kept[1]
-    board = team_service.resolve_project(root)
+    if orchestrator.team_hub() is None and orchestrator.team_enabled():
+        found = find_project_root(root)
+        board = ProjectInfo(id=project_id_for(found), root=found, linked_repos=[])
+    else:
+        board = team_service.resolve_project(root)
     with _board_projects_lock:
         _board_projects[key] = (now, board)
     return board

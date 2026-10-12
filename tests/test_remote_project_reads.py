@@ -779,7 +779,7 @@ def test_a_project_ref_and_a_task_ref_are_kept_to_the_one_rule(
     assert summary == f"claimed {task.id} as=-"
 
 
-def test_a_worktrees_board_is_one_answer_everywhere_whether_git_answers_or_not(
+def test_a_roots_board_is_team_projects_after_one_git_call_and_kept_a_minute(
     two_projects: tuple[ProjectInfo, ProjectInfo],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -790,53 +790,55 @@ def test_a_worktrees_board_is_one_answer_everywhere_whether_git_answers_or_not(
     was one no claim found (review of #243, round 11, 6/9). Kept only once ``git`` gave
     it, judged by the root's own ``.git``, a project below a worktree's root kept the
     worktree's board, and a worktree whose ``git`` always fails ran it twice for each
-    lookup (review of #243, round 12, 2/10 to 4/10). A failed ``git`` gives the board a
-    working one does, a ``--separate-git-dir`` checkout's git directory included, which it
-    did not and was kept for the process (review of #243, round 13, 2/4): one ``git``
-    call, and the answer kept for a minute."""
-    from aisquare.core import workspace
+    lookup (review of #243, round 12, 2/10 to 4/10); kept for the process, a failed
+    ``git``'s answer held the Board tab to another board until a restart (round 13, 2/4).
+    The board is ``team_project``'s, kept in one place after one ``git`` call, a failed
+    ``git``'s answer as any other, and for a minute at most."""
+    from aisquare.core import orchestrator, workspace
     from aisquare.services import remote_needs
 
-    principal = tmp_path / "principal"
-    gitdir = principal / ".git" / "worktrees" / "wt"
-    separate, store = tmp_path / "proj", tmp_path / "store" / "proj.git"
-    for directory in (principal / ".git", gitdir, store):  # what git takes for a git dir
-        for name in ("objects", "refs"):
-            (directory / name).mkdir(parents=True)
-        (directory / "HEAD").write_text("ref: refs/heads/main\n")
-    (gitdir / "commondir").write_text("../..\n")  # as git writes it
-    worktree = tmp_path / "wt"
+    principal, worktree = tmp_path / "principal", tmp_path / "wt"
+    (principal / ".git").mkdir(parents=True)
     (worktree / "sub").mkdir(parents=True)
-    (worktree / ".git").write_text(f"gitdir: {gitdir}\n")
+    (worktree / ".git").write_text(f"gitdir: {principal / '.git' / 'worktrees' / 'wt'}\n")
     marked = principal / "marked"
     (marked / ".aisquare").mkdir(parents=True)
-    separate.mkdir()
-    (separate / ".git").write_text(f"gitdir: {store}\n")
+    answers: dict[Path, Path] = {}
     asked: list[Path] = []
 
     def git_common_root(start: Path) -> Path | None:
         asked.append(start)
-        return None  # timed out
+        return answers.get(start)  # None: git failed
 
     monkeypatch.setattr(workspace, "git_common_root", git_common_root)
-    for root, answer in (
-        (worktree, principal),
-        (worktree / "sub", principal),
-        (marked, principal),
-        (separate, store),
-    ):
+    monkeypatch.setattr(orchestrator, "git_common_root", git_common_root)
+    for root, walked in ((worktree, worktree), (worktree / "sub", worktree), (marked, marked)):
+        answers.clear()
         asked.clear()
         board = remote_server._remote_board_project(root)
-        assert board.root == answer.resolve(), root
+        assert len(asked) == 1, "one git call"
+        assert board.root == walked.resolve(), "a failed git's answer: the marker walk's"
+        assert board == orchestrator.team_project(root)
         project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+        asked.clear()
         assert remote_needs.live_needs_sources().board_project(project) == board.id
         assert remote_server._remote_board_project(root) == board
-        assert len(asked) == 1, "one git call, and the answer kept"
+        assert asked == [], "kept, as a working git's answer is"
+        answers[root.resolve()] = principal.resolve()
         key = (root, "")
         when, _board = remote_server._board_projects[key]
         remote_server._board_projects[key] = (when - remote_server.BOARD_PROJECT_TTL, board)
-        assert remote_server._remote_board_project(root) == board
-        assert len(asked) == 2, "asked again after a minute"
+        answered = remote_server._remote_board_project(root)
+        assert len(asked) == 1, "asked again after a minute, once"
+        assert answered.root == principal.resolve()
+        assert answered == orchestrator.team_project(root)
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv(orchestrator.TEAM_HUB_ENV_VAR, str(hub))
+    asked.clear()
+    assert remote_server._remote_board_project(worktree) == orchestrator.team_project(worktree)
+    assert remote_server._remote_board_project(worktree).root == hub.resolve()
+    assert asked == [], "a hub's board runs no git"
 
 
 # --- the socket: project panes, subscribe_board, caps ---------------------------------------

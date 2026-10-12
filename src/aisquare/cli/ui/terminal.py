@@ -117,6 +117,7 @@ import weakref
 from bisect import bisect_left
 from collections.abc import Callable
 from functools import partial
+from pathlib import Path
 from typing import Any, ClassVar, Literal, NamedTuple, assert_never
 
 from rich.cells import cell_len, set_cell_size, split_graphemes
@@ -326,8 +327,20 @@ def _extract(selection: Selection, rows: list[DisplayedRow], width: int) -> str:
     return "".join(pieces).rstrip("\n")
 
 
-_SERVER_VERSIONS: dict[str, tuple[int, int]] = {}
-"""The servers' own versions, by socket — see :meth:`TerminalPane._server_version`."""
+_ServerKey = tuple[str, Path | None]
+"""What names one server here: its socket's name, and the path it is asked at
+(``tmux -S``, :meth:`~aisquare.core.tmux.TmuxServer.at`) when it is asked at one."""
+
+
+def _server_key(server: TmuxServer) -> _ServerKey:
+    """:data:`_ServerKey` for ``server``. The name alone no longer names one server: a pane is
+    built as ``TmuxServer(name).at(path)``, and this shell's ``-L asq`` and the ``-S`` server
+    at a path under another ``TMUX_TMPDIR`` both carry the name ``asq`` (round 29 of #257)."""
+    return server.socket, server.path
+
+
+_SERVER_VERSIONS: dict[_ServerKey, tuple[int, int]] = {}
+"""The servers' own versions, by server — see :meth:`TerminalPane._server_version`."""
 
 
 def forget_server_versions() -> None:
@@ -932,8 +945,8 @@ class TerminalPane(Widget, can_focus=True):
         self._resize_timer: Timer | None = None
         self._resize_retry: float = self.RESIZE_RETRY
         self._synced: tuple[str, int, int] | None = None
-        self._warned: set[tuple[str | None, str]] = set()
-        """``(server socket or None, key)`` per notice said — see :meth:`_warn_once`."""
+        self._warned: set[tuple[_ServerKey | None, str]] = set()
+        """``(server or None, key)`` per notice said — see :meth:`_warn_once`."""
         self._reported_gone = False
         self._mouse_queue: list[tuple[str, int, int, int]] = []
         """Mouse events (kind, button code, pane column, pane row) awaiting one
@@ -1002,17 +1015,21 @@ class TerminalPane(Widget, can_focus=True):
         read ``(pane gone)``, and was sent ``S-Enter``, which it typed into the
         agent (final review of #203, F2).
 
-        Cached by SOCKET across attaches: ``_wrap_flags`` needs the answer for
+        Cached by SERVER across attaches: ``_wrap_flags`` needs the answer for
         the FIRST frame, and asking per attach put a blocking subprocess on the
         UI thread at every project switch, tab activation and re-mounted view
         (round 8 of #203). The server behind a socket is what the answer is
         about, and it does not change on an attach. Only an answer is cached — a
-        server that will not say is asked again next time.
+        server that will not say is asked again next time. A server is its
+        socket's name AND the path it is asked at (:func:`_server_key`): keyed by
+        the name, whichever of two servers on one name was asked first decided
+        the chords for both, and shift+enter went to a 3.4 server as ``S-Enter``,
+        which it types into the agent (round 29 of #257).
         """
         if not self._version_read:
             self._version = None
             if self.server is not None:
-                key = self.server.socket
+                key = _server_key(self.server)
                 if key in _SERVER_VERSIONS:
                     self._version = _SERVER_VERSIONS[key]
                 else:
@@ -2020,7 +2037,7 @@ class TerminalPane(Widget, can_focus=True):
                 self._warn_once(
                     key,
                     f"{have} cannot carry {_printable_name(key)} — {need} or newer can",
-                    server=self.server.socket if self.server is not None else None,
+                    server=_server_key(self.server) if self.server is not None else None,
                 )
             case "no_name":
                 self._warn_once(
@@ -2039,7 +2056,7 @@ class TerminalPane(Widget, can_focus=True):
         message: str,
         *,
         severity: SeverityLevel = "warning",
-        server: str | None = None,
+        server: _ServerKey | None = None,
     ) -> None:
         """Say ``message`` once per ``key`` — and per ``server``, when it names one.
 
@@ -2052,9 +2069,10 @@ class TerminalPane(Widget, can_focus=True):
         Once per PANE, not per session: ``_warned`` is this widget's, and the
         app composes a ``TerminalPane`` per view — so that is the scope
         ``docs/fleet.md`` promises, and no wider (review). A line about a
-        SERVER passes that server's socket as ``server`` — ``views/project.py``
-        builds a fresh ``TmuxServer`` for the same socket at every attach, so
-        the socket is what names a server here — and is said once per key name
+        SERVER passes that server's :func:`_server_key` as ``server`` —
+        ``views/project.py`` builds a fresh ``TmuxServer`` for the same socket at
+        every attach, so its socket, at the path it is asked at, is what names a
+        server here — and is said once per key name
         on EACH: the too-old line names the version, so a pane moved to another
         server hears it for that one (review of #161, round 6). A server
         restarted on the same socket under another tmux counts as the same

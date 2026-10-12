@@ -1779,14 +1779,18 @@ def _live_fleet_agents() -> tuple[tuple[_LiveRow, ...], str | None]:
     )
 
 
-def _listens(path: Path | None, *, missing: bool) -> bool:
+def _listens(path: Path | None) -> bool:
     """Whether a server may be listening on the socket at ``path``, asked of the socket
-    itself (no tmux needed); ``missing`` is the answer when there is no file there.
-    ``None`` is a host with no POSIX uid, where no tmux server can exist.
+    itself (no tmux needed). ``None`` is a host with no POSIX uid, where no tmux server
+    can exist.
 
     ``False`` only on evidence that none is, because the cost of being wrong is removing
-    hooks (or, with --purge, the home) under running agents: a file nobody listens on. A
-    refusal to look (a denied directory) is no evidence.
+    hooks (or, with --purge, the home) under running agents: a file nobody listens on.
+    tmux leaves its socket file when its server exits (tmux 3.7, measured), so a stale
+    file is that evidence. No file is not: something else took it while the server may
+    run on, systemd-tmpfiles ageing out ``/tmp/tmux-<uid>``, logind removing
+    ``/run/user/<uid>`` at logout, or a private ``/tmp`` (round 26 of #257). A refusal
+    to look (a denied directory) is no evidence either.
     """
     family = getattr(socket, "AF_UNIX", None)
     if path is None or family is None:
@@ -1795,8 +1799,6 @@ def _listens(path: Path | None, *, missing: bool) -> bool:
     probe.settimeout(2.0)
     try:
         probe.connect(str(path))
-    except FileNotFoundError:
-        return missing
     except ConnectionRefusedError:
         return False
     except OSError:
@@ -1812,10 +1814,10 @@ def _may_run(row: _LiveRow, this_boot: str | None) -> bool:
     Asked of what its spawn recorded, never inferred from the shell asking (round 25 of
     #257). A row from another boot cannot be running: no process outlives a reboot. One
     with its server's socket path is asked at that path, whatever ``TMUX_TMPDIR`` this
-    shell has and wherever this tmux build keeps sockets; no file there is no server.
-    A row from before v25 recorded neither and is asked at tmux's default path for this
-    shell (``TmuxServer.socket_path``), where no file is no evidence: its server may keep
-    the socket under another ``TMUX_TMPDIR``. Such a row counts until ``fleet shutdown``,
+    shell has and wherever this tmux build keeps sockets. A row from before v25 recorded
+    neither and is asked at tmux's default path for this shell
+    (``TmuxServer.socket_path``). Either way only a stale socket file shows no server
+    (:func:`_listens`), so a row whose socket is gone counts until ``fleet shutdown``,
     which the refusal names, ends it. Whether that path's directory is there settled
     nothing: tmux makes it as it looks, so any probe made it there (round 24 and 25).
     """
@@ -1823,12 +1825,12 @@ def _may_run(row: _LiveRow, this_boot: str | None) -> bool:
     if booted is not None and this_boot is not None and booted != this_boot:
         return False
     if recorded is not None:
-        return _listens(recorded, missing=False)
+        return _listens(recorded)
     try:
         path: Path | None = TmuxServer(socket_name).socket_path()
     except TmuxUnavailable:
         path = None
-    return _listens(path, missing=True)
+    return _listens(path)
 
 
 def running_fleet() -> tuple[tuple[str, ...], int, str | None]:

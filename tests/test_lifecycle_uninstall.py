@@ -27,7 +27,7 @@ from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import paths
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
-from aisquare.core.tmux import TmuxServer
+from aisquare.core.tmux import TmuxServer, TmuxUnavailable
 from aisquare.models import FleetAgent
 from aisquare.services import install_route, lifecycle
 from aisquare.services.install_route import Facts
@@ -134,7 +134,7 @@ def world(monkeypatch: pytest.MonkeyPatch) -> World:
     monkeypatch.setattr(agent_core, "remove_hooks", remove_hooks)
     monkeypatch.setattr(install_route, "exec_replace", exec_replace)
     # A live row is a running agent unless a test says its socket has no server.
-    monkeypatch.setattr(lifecycle, "_listens", lambda _path, *, missing: True)
+    monkeypatch.setattr(lifecycle, "_listens", lambda _path: True)
     return recorded
 
 
@@ -683,10 +683,10 @@ def test_a_live_row_blocks_only_while_its_server_listens(
     """A tmux that left PATH is no evidence the agents stopped (review of #253): the
     socket the row recorded is asked, and tmux is not. Nobody listening — a stale row —
     must not trap someone who cannot run `fleet shutdown` either (round 23 of #257)."""
-    asked: list[tuple[Path | None, bool]] = []
+    asked: list[Path | None] = []
 
-    def listens(path: Path | None, *, missing: bool) -> bool:
-        asked.append((path, missing))
+    def listens(path: Path | None) -> bool:
+        asked.append(path)
         return listening
 
     monkeypatch.setattr(lifecycle, "_listens", listens)
@@ -698,7 +698,7 @@ def test_a_live_row_blocks_only_while_its_server_listens(
     plan = runner.invoke(app, ["uninstall", "--dry-run"])
     result = runner.invoke(app, ["uninstall", "--yes"])
 
-    assert asked == [(recorded, False)] * 2, "the row's own socket is the one asked"
+    assert asked == [recorded] * 2, "the row's own socket is the one asked"
     if listening:
         assert result.exit_code == 1 and world.events == []
         assert "aisquare fleet shutdown --all --yes" in result.stderr
@@ -718,24 +718,24 @@ def _short_base() -> Path:
 
 def test_the_probe_asks_the_socket_file_itself() -> None:
     """The probe needs no tmux: a listener is a server, and a stale file nobody listens on
-    is none. No file is the caller's to answer: none at a path tmux recorded is no server,
-    and none at the path this shell rebuilds is no evidence (round 24 of #257)."""
+    is none, which is what tmux leaves when its server exits. No file at all is no
+    evidence: systemd-tmpfiles or logind takes the socket while the server runs on (round
+    26 of #257)."""
     import socket as socket_module
 
-    assert lifecycle._listens(None, missing=True) is False, "no POSIX uid: no tmux server"
+    assert lifecycle._listens(None) is False, "no POSIX uid: no tmux server"
     if not hasattr(socket_module, "AF_UNIX"):
         pytest.skip("AF_UNIX sockets are what tmux needs")
     base = _short_base()
     path = base / "probe"
     server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
     try:
-        assert lifecycle._listens(path, missing=False) is False
-        assert lifecycle._listens(path, missing=True) is True
+        assert lifecycle._listens(path) is True, "no file: no evidence"
         server.bind(str(path))
         server.listen(1)
-        assert lifecycle._listens(path, missing=False) is True
+        assert lifecycle._listens(path) is True
         server.close()
-        assert lifecycle._listens(path, missing=True) is False, "a stale file: no server"
+        assert lifecycle._listens(path) is False, "a stale file: no server"
     finally:
         server.close()
         path.unlink(missing_ok=True)
@@ -776,9 +776,8 @@ def test_a_recorded_socket_is_asked_whatever_this_shell_rebuilds(
                 0,
                 None,
             )
-        server.close()
-        recorded.unlink()
-        assert lifecycle.running_fleet() == (("coder-2 (old)",), 1, None), "no file: no server"
+        server.close()  # the file stays, as tmux leaves it when its server exits
+        assert lifecycle.running_fleet() == (("coder-2 (old)",), 1, None), "a stale file"
     finally:
         server.close()
         recorded.unlink(missing_ok=True)
@@ -786,6 +785,37 @@ def test_a_recorded_socket_is_asked_whatever_this_shell_rebuilds(
             made.rmdir()
         fleet_base.rmdir()
         shell_base.rmdir()
+
+
+def test_a_recorded_socket_taken_from_under_its_server_still_counts(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Round 26 of #257: no file at the path a row recorded was read as no server, but the
+    file can go while the server runs on: systemd-tmpfiles ages out ``/tmp/tmux-<uid>``,
+    and logind removes ``/run/user/<uid>`` (a ``TMUX_TMPDIR`` over SSH) at logout. After
+    reconnecting, ``uninstall --purge`` found no agent running and deleted the home under
+    them. Only a stale file, which tmux leaves when its server exits, shows none."""
+    import socket as socket_module
+
+    if not hasattr(socket_module, "AF_UNIX") or not hasattr(os, "getuid"):
+        pytest.skip("AF_UNIX sockets and a POSIX uid are what tmux needs")
+    base = _short_base()
+    recorded = base / "asq"
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    try:
+        server.bind(str(recorded))
+        server.listen(1)
+        _initialised(runner, tmp_path)
+        _live_agent(tmp_path / "repo", "coder-1", socket_path=recorded)
+        recorded.unlink()  # tmpfiles or logind: the server still listens, on no file
+
+        assert lifecycle.running_fleet() == (("coder-1 (repo)",), 0, None)
+        server.close()
+        assert lifecycle.running_fleet() == (("coder-1 (repo)",), 0, None), "no file: no answer"
+    finally:
+        server.close()
+        recorded.unlink(missing_ok=True)
+        base.rmdir()
 
 
 def test_a_row_from_another_boot_cannot_be_running(
@@ -799,7 +829,7 @@ def test_a_row_from_another_boot_cannot_be_running(
     it started, and so is every row where this boot cannot be named."""
     asked: list[Path] = []
 
-    def listens(path: Path | None, *, missing: bool) -> bool:
+    def listens(path: Path | None) -> bool:
         assert path is not None, "each row recorded its socket"
         asked.append(path)
         return True
@@ -833,10 +863,10 @@ def test_a_store_from_before_the_recorded_socket_is_read_as_nothing_recorded(
     ``socket_path`` or ``boot_id``: its live rows are asked as rows that recorded neither."""
     import sqlite3
 
-    asked: list[tuple[Path | None, bool]] = []
+    asked: list[Path | None] = []
 
-    def listens(path: Path | None, *, missing: bool) -> bool:
-        asked.append((path, missing))
+    def listens(path: Path | None) -> bool:
+        asked.append(path)
         return True
 
     monkeypatch.setattr(lifecycle, "_listens", listens)
@@ -851,7 +881,11 @@ def test_a_store_from_before_the_recorded_socket_is_read_as_nothing_recorded(
         connection.close()
 
     assert lifecycle.running_fleet() == (("coder-1 (repo)",), 0, None)
-    assert [missing for _path, missing in asked] == [True], "asked where this shell looks"
+    try:
+        here: Path | None = TmuxServer("asq").socket_path()
+    except TmuxUnavailable:
+        here = None  # no POSIX uid: asked as a host where no tmux server can exist
+    assert asked == [here], "asked where this shell looks"
 
 
 def test_ended_rows_do_not_count_as_live(

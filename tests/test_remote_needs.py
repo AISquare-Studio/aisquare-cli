@@ -2144,28 +2144,25 @@ def test_a_limits_reset_reaches_the_phone_as_an_instant_never_the_machines_clock
 
 
 @pytest.mark.parametrize(
-    ("role", "spawned_by", "manager_live", "minutes"),
-    [
-        ("coder", "ses_manager", True, 5),
-        ("coder", "ses_manager", False, 0),
-        ("coder", "user", True, 0),
-        ("manager", None, True, 0),
-    ],
+    ("role", "manager_live"), [("coder", True), ("coder", False), ("manager", True)]
 )
-def test_a_closing_question_waits_for_the_manager_to_answer_it_first(
-    role: str, spawned_by: str | None, manager_live: bool, minutes: int
+def test_a_closing_question_is_pushed_at_once_since_no_manager_hears_of_it(
+    role: str, manager_live: bool
 ) -> None:
-    row = _row(role=role, spawned_by=spawned_by)
+    """A crew agent's closing question waited five minutes for a live manager to answer it
+    first, but nothing wakes the manager for it: a crew agent's Stop marks its session
+    waiting and nudges nobody (``team.hook_stop``), and nothing is on the board. The agent
+    sat idle with no push and nobody on it (review of #243, round 22, 6/7)."""
+    row = _row(role=role, spawned_by="ses_manager" if role == "coder" else None)
     tail = _tail(newest="assistant_text", text="Want me to commit this?")
     item = _one(_classify(_status(row, "waiting", _session(row)), tail, manager_live=manager_live))
-    assert item.push_after == item.since + timedelta(minutes=minutes)
+    assert item.push_after == item.since
 
 
 def test_the_guide_says_when_each_kind_is_pushed_as_the_scan_decides_it() -> None:
     """docs/remote.md gave the delays of a crash and a lost pane only, and said every other
-    item went out after two scans: a usage limit near its reset never does, a question of an
-    agent the manager runs waits five minutes for it, an interruption ten. Each delay the guide
-    gives is the scan's own."""
+    item went out after two scans: a usage limit near its reset never does, an interruption
+    waits ten minutes. Each delay the guide gives is the scan's own."""
     guide = Path(__file__).resolve().parents[1] / "docs" / "remote.md"
     prose = " ".join(guide.read_text(encoding="utf-8").split())
     delays = remote_needs._NEEDS_PUSH_DELAY
@@ -2177,8 +2174,6 @@ def test_the_guide_says_when_each_kind_is_pushed_as_the_scan_decides_it() -> Non
          " (15 by default)", AccountsSettings().wait_if_reset_within_minutes, 15),
         ('after 90 seconds when `on_limit = "switch"` or a live manager is on it',
          remote_needs._LIMITED_PUSH_DELAY, timedelta(seconds=90)),
-        ("a turn that ended with a question: after 5 minutes while a manager is live",
-         remote_needs._ASKED_PUSH_DELAY, timedelta(minutes=5)),
         ("an interruption: after 10 minutes", delays["interrupted"], timedelta(minutes=10)),
     ]  # fmt: skip
     assert [sentence for sentence, _code, _guide in said if sentence not in prose] == []

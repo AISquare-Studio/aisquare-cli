@@ -189,7 +189,6 @@ _NEEDS_PUSH_DELAY: dict[str, timedelta] = {
 """How long after ``since`` a push may go out, for the kinds that wait at all."""
 
 _LIMITED_PUSH_DELAY = timedelta(seconds=90)
-_ASKED_PUSH_DELAY = timedelta(minutes=5)
 
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,40}")
 """A tool name a reason may carry; anything else is left out of the sentence."""
@@ -962,7 +961,6 @@ def needs_from_agent(
         and looks_like_a_question(tail.last_text)
     ):
         since = said_at or now
-        prompt_now = _needs_is_manager(agent.role) or agent.spawned_by == "user" or not manager_live
         return [
             _needs_item(
                 "asked",
@@ -973,8 +971,10 @@ def needs_from_agent(
                 excerpt=_needs_asked_tail(tail.last_text),
                 detail=_needs_fit({"text": tail.last_text}, _DETAIL_TEXT_MAX),
                 since=since,
-                # A crew agent's closing question is its manager's to answer first.
-                push_after=since if prompt_now else since + _ASKED_PUSH_DELAY,
+                # At once, a live manager or not: a turn's end wakes no manager
+                # (``team.hook_stop``), so none would answer it first (review of #243,
+                # round 22, 6/7).
+                push_after=since,
             )
         ]
     if (
@@ -1646,8 +1646,8 @@ def _needs_nudged(
     and ``statuses`` its listing; ``None``: nobody does, and what they need is the human's.
 
     The one rule for when a live manager keeps an item off the phone: a coder's
-    question or result to the manager, a crash, and for a while the push of a limit
-    or of a turn that ended on a question.
+    question or result to the manager, a crash, and for a while the push of a limit.
+    A turn that ended on a question wakes no manager, so it waits on none.
 
     On its own board it is the project's live ``manager`` row while that can act
     (none of :data:`_NEEDS_NOT_ACTING`): the one manager the fleet wakes

@@ -450,8 +450,9 @@ Settings → **Turn on** asks the browser for permission, subscribes, and tells
 the machine. **Send test** checks the whole path. A notification goes out when an
 item has been there for two scans in a row, once for each item, however long it
 stays and through a restart of Remote: at once for a permission, a
-question, a plan, a board question or result and a failed turn, and later for
-the kinds that often clear by themselves, or that someone else is already on:
+question, a plan, a board question or result, a turn that ended with a question
+and a failed turn, and later for the kinds that often clear by themselves, or
+that someone else is already on:
 
 - a crash: after 30 seconds;
 - a lost pane, a stopped manager, or tmux not answering: after a minute, since
@@ -462,9 +463,6 @@ the kinds that often clear by themselves, or that someone else is already on:
   or a live manager is on it; at once otherwise. Claude Code's "Session paused"
   dialog, which a limit can show instead, goes at once: no hand-over starts on
   it, and no manager hears of it;
-- a turn that ended with a question: after 5 minutes while a manager is live,
-  for an agent that is neither the manager nor one you started yourself, since
-  the manager is to answer it first; at once otherwise;
 - an interruption: after 10 minutes, since it follows your own Esc.
 
 Several at once come as one notification, at most one every 20 seconds per

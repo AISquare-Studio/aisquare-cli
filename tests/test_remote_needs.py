@@ -5677,16 +5677,23 @@ def test_a_pane_that_is_not_the_agent_is_not_typed_into(live: Live) -> None:
     assert live.tmux.typed == []
 
 
-def test_an_answer_needs_the_listing_it_rechecks_against(live: Live) -> None:
+def test_an_answer_needs_the_listing_it_rechecks_against(
+    live: Live, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``needs_agent_now``'s own 503 reaches the phone as it is. The answer's catch-all took
+    it for a bug, said a warning on every tap, and made it anew (review of #243, round 28,
+    6/10)."""
     live.runtime.set_allow_write(True)
     card = live.card("permission")
     live.fleet.listing_fails = True
+    caplog.set_level(logging.DEBUG, logger=remote_needs.__name__)
     response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
     assert response.status_code == 503
     said = "alpha could not be read: tmux is not installed"
     assert response.json() == {"error": "unavailable", "message": said}
     assert live.tmux.typed == []
     assert not remote_agent_lock(PROJECT.id, "coder-1").locked(), "the lock is let go"
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 
 def test_an_answer_whose_store_fails_as_it_rechecks_is_a_503_not_a_bare_500(

@@ -3430,11 +3430,9 @@ def _needs_answer_now(
             snap = needs_agent_now(project, label)
         except fleet_service.NoSuchAgent:
             raise RequestError(409, "stale", f"{label} is gone", current=[]) from None
-        except fleet_service.FleetUnavailable as exc:
-            raise RequestError(503, "fleet_unavailable", str(exc)) from None
-        except fleet_service.FleetError as exc:
-            raise RequestError(409, "fleet_error", str(exc)) from None
-        except Exception as exc:  # the store, mid-read: as a failed scan is, not a bare 500
+        except RequestError:  # a read its scan needs failed: its own 503, as it is
+            raise
+        except Exception as exc:  # a bug: as a failed scan is, not a bare 500
             log.warning("remote: a needs answer could not read %s: %s", label, exc)
             raise RequestError(503, "unavailable", str(exc)) from None
         if not needs_item_current(snap, item.id):

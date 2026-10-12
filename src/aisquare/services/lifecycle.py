@@ -1685,21 +1685,11 @@ def _claude_dirs_for_mcp() -> list[Path]:
     ``claude mcp add`` on a plain install writes ``~/.claude.json``, beside
     ``~/.claude``, whether or not that directory carries hooks; reading a few
     small files is cheap next to telling nobody about a server that will fail to
-    start once the package is gone.
-
-    Each sibling is asked with ``os.path.isdir``, which never raises, as
-    agent_core's ``_claude_dirs_on_disk`` asks it. ``Path.is_dir`` raised
-    PermissionError on 3.11 to 3.13 for a link into a folder this user cannot
-    enter, and inside one ``suppress`` that dropped every sibling: their hooks and
-    MCP servers went unnamed, and --purge deleted the home under them (review of
-    #257). Such a sibling is skipped; only the listing itself is guarded.
+    start once the package is gone. The siblings are the doctor's
+    (``agent_core.claude_dir_siblings``), so the two scans agree on which there are.
     """
     default = accounts_core.home_config_dir()
-    try:
-        siblings = sorted(default.parent.glob(".claude*"))
-    except OSError:
-        siblings = []
-    return [default, *(p for p in siblings if p != default and os.path.isdir(p))]
+    return [default, *(p for p in agent_core.claude_dir_siblings() if p != default)]
 
 
 _LIVE_ROWS = (

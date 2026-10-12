@@ -1574,12 +1574,8 @@ def _claude_dirs_on_disk() -> list[Path]:
     env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     if env:
         candidates.append(paths.expand_user(Path(env)))
-    home = _home()
-    candidates.append(home / ".claude")
-    # os.path.isdir, which never raises: ``Path.is_dir`` raised PermissionError on 3.11
-    # to 3.13 for one in a folder this user cannot enter, and cost the doctor its output.
-    if os.path.isdir(home):
-        candidates.extend(sorted(path for path in home.glob(".claude*") if os.path.isdir(path)))
+    candidates.append(_home() / ".claude")
+    candidates.extend(claude_dir_siblings())
     seen: set[Path] = set()
     found: list[Path] = []
     for candidate in candidates:
@@ -1607,12 +1603,30 @@ def _holds_aisquare(config_dir: Path) -> bool:
     )
 
 
+def claude_dir_siblings() -> list[Path]:
+    """Every ``~/.claude*`` directory, sorted, hooked or not: ``~/.claude``, the ``[0-9]``
+    siblings of a parallel install, ``~/.claude-account1``. The one listing the doctor's
+    scan (:func:`_claude_dirs_on_disk`, :func:`found_on_disk`) and uninstall's MCP and
+    plugin scan share, so they agree on which directories there are (round 25 of #257).
+
+    Each is asked with ``os.path.isdir``, which never raises: ``Path.is_dir`` raised
+    PermissionError on 3.11 to 3.13 for a link into a folder this user cannot enter, and
+    cost the doctor its output, and uninstall every sibling (review of #257). Such a
+    sibling is skipped; only the listing itself is guarded.
+    """
+    try:
+        found = sorted(_home().glob(".claude*"))
+    except OSError:
+        return []
+    return [path for path in found if os.path.isdir(path)]
+
+
 def found_on_disk(config_dir: Path) -> bool:
     """Whether the doctor finds ``config_dir`` whatever ``CLAUDE_CONFIG_DIR`` says: a
     ``~/.claude*`` directory holding aisquare's hooks or plugin (:func:`_claude_dirs_on_disk`),
     reading no sibling's settings but its own."""
-    home, key = _home(), _dir_key(config_dir)
-    named = home / ".claude", *(home.glob(".claude*") if os.path.isdir(home) else ())
+    key = _dir_key(config_dir)
+    named = _home() / ".claude", *claude_dir_siblings()
     return any(_dir_key(p) == key for p in named) and _holds_aisquare(config_dir)
 
 

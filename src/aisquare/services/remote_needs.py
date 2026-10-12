@@ -391,7 +391,7 @@ class NeedsSources:
     fleet announces a row's exit on its row's project (``fleet._emit_exit``), so a project
     whose agents write another board finds none in that board's day."""
     board_sessions: Callable[[str, Collection[str]], list[TeamSession]]
-    """The project's sessions with the given ids: the authors of the board's open questions."""
+    """The project's sessions with the given ids: its open questions' authors, and its manager."""
     task_status: Callable[[str], str | None]
     """A task's status; ``None`` when it is gone."""
     transcript_tail: Callable[[str], TranscriptTail | None]
@@ -1561,7 +1561,7 @@ def needs_from_board(
     project: ProjectInfo,
     now: datetime,
     manager_live: bool = False,
-    manager_read: int = 0,
+    manager_seen: datetime | None = None,
 ) -> list[NeedsItem]:
     """The board's open questions and results for the human (:func:`is_needs_board_event`).
 
@@ -1571,11 +1571,10 @@ def needs_from_board(
     later question, result or decision: they have moved on. An unaddressed
     human note clears nothing; it is news, not an answer. ``agents`` names each
     author by its fleet label. ``manager_live``: the board's write wakes a manager that
-    can act on it (:func:`_needs_nudged`). ``manager_read``: how far that manager's
-    session's ``cursor`` went, the board's own measure of what it was shown. A coder's
-    question or result to it up to there reached it, and stays its own once it ends or
-    parks on its limit: read as the human's, the day's every one was a card and a push
-    then (review of #243, round 22, 3/7).
+    can take it (:func:`_needs_nudged`). Once none can, however it went, a coder's question
+    to it still open is the human's, and a result to it posted after ``manager_seen``, the
+    manager's last recorded activity: one before it was the manager's to act on (review
+    of #243, rounds 22 and 23).
     """
     by_session = {session.id: session for session in sessions}
     rows: dict[str, FleetAgent] = {}
@@ -1598,9 +1597,9 @@ def needs_from_board(
             label = row.label if row is not None else own
             names = {n.strip().lower() for n in (label, own, role) if n and n.strip()}
             open_still = event.session_id not in moved_on and not names & addressed
-            if open_still and is_needs_board_event(
-                event, author_role=role, manager_live=manager_live or event.seq <= manager_read
-            ):
+            seen = manager_seen is not None and event.created_at <= manager_seen
+            taken = manager_live or (event.kind == "result" and seen)
+            if open_still and is_needs_board_event(event, author_role=role, manager_live=taken):
                 items.append(
                     _needs_board_item(event, project=project, row=row, author=label or role)
                 )
@@ -1640,21 +1639,22 @@ in one of them is no manager to leave a crash or a coder's question to."""
 
 
 def _needs_nudged(
-    project: ProjectInfo, board_id: str, statuses: Sequence[FleetAgentStatus]
-) -> FleetAgent | None:
-    """The manager that hears of what ``project``'s agents need, ``board_id`` being its board
-    and ``statuses`` its listing; ``None``: nobody does, and what they need is the human's.
+    project: ProjectInfo, board_id: str, rows: list[FleetAgent], listed: list[FleetAgentStatus]
+) -> tuple[FleetAgent | None, FleetAgent | None]:
+    """The manager that hears of what ``project``'s agents need, live or ended, and it again
+    while it can take an item: live in ``listed``, the listing, in none of
+    :data:`_NEEDS_NOT_ACTING`. ``board_id`` is the project's board, ``rows`` its rows;
+    ``None`` for both: nobody does, and what they need is the human's.
 
-    The one rule for when a live manager keeps an item off the phone: a coder's
-    question or result to the manager, a crash, and for a while the push of a limit.
-    A turn that ended on a question wakes no manager, so it waits on none.
+    The one rule for which manager keeps an item off the phone: a coder's question or
+    result to the manager, a crash, and for a while the push of a limit. A turn that
+    ended on a question wakes no manager, so it waits on none.
 
-    On its own board it is the project's live ``manager`` row while that can act
-    (none of :data:`_NEEDS_NOT_ACTING`): the one manager the fleet wakes
-    (``fleet.nudge_manager``), which a board write (``team.note``), an agent's exit
-    and a usage limit all nudge by the project's id. A manager session no row holds,
-    or a numbered seat (``manager-2``), is sent nothing, and keeps nothing off the
-    phone.
+    On its own board it is the project's newest ``manager`` row with a session: the one
+    manager the fleet wakes (``fleet.nudge_manager``), which a board write
+    (``team.note``), an agent's exit and a usage limit all nudge by the project's id. A
+    manager session no row holds, or a numbered seat (``manager-2``), is sent nothing,
+    and keeps nothing off the phone.
 
     When its agents write another project's board (under ``AISQUARE_TEAM_HUB`` the
     hub's, for a worktree its principal checkout's) it is nobody. A board write there
@@ -1669,18 +1669,12 @@ def _needs_nudged(
     from aisquare.services.fleet import MANAGER_LABEL
 
     if board_id != project.id:
-        return None
-    return next(
-        (
-            status.agent
-            for status in statuses
-            if status.agent.label == MANAGER_LABEL
-            and status.agent.ended_at is None
-            and status.agent.session_id is not None
-            and status.state not in _NEEDS_NOT_ACTING
-        ),
-        None,
-    )
+        return None, None
+    seats = [row for row in rows if row.label == MANAGER_LABEL and row.session_id is not None]
+    manager = max(seats, key=lambda row: row.created_at, default=None)
+    live = {s.agent.id for s in listed if s.state not in _NEEDS_NOT_ACTING}
+    taking = manager is not None and manager.ended_at is None and manager.id in live
+    return manager, manager if taking else None
 
 
 @dataclass(frozen=True)
@@ -1741,8 +1735,8 @@ def _needs_scan_project(
 
     Without a listing only the board speaks: an agent's state, a crash, a
     manager gone and tmux down all depend on rows the listing could not read. So does
-    a coder's question or result to the manager on the project's own board: read as
-    no manager, every one of the day was a card and a push (review of #243, round 22, 1/7).
+    a coder's question or result to the manager on its own board, as does its last activity:
+    read as none, every one of the day was a card and a push (review of #243, rounds 22, 23).
     ``first_seen`` dates the items whose facts carry no date (a pane gone, tmux
     not answering) from the first scan that saw them; ``seen`` collects what
     this scan saw, so the caller can forget the rest. ``answers`` says whether a
@@ -1759,7 +1753,7 @@ def _needs_scan_project(
     review of #243, round 18, 1/4). No other project's rows are read: whether a manager
     hears of an item is :func:`_needs_nudged`'s to say (``shared``: :func:`_needs_shared`).
     """
-    from aisquare.services.fleet import MANAGER_LABEL, RECENTLY_ENDED
+    from aisquare.services.fleet import RECENTLY_ENDED
 
     if statuses is not None:
         statuses = _needs_unheard(statuses, answers)
@@ -1772,20 +1766,17 @@ def _needs_scan_project(
     window = _needs_window(sources, project, board_id)
     listed = statuses or []
     rows = list({row.id: row for row in [*ended, *(status.agent for status in listed)]}.values())
-    nudged = _needs_nudged(project, board_id, listed)
-    readers = {  # the sessions of the manager the fleet nudges, on its project's own board
-        row.session_id
-        for row in rows
-        if board_id == project.id and row.label == MANAGER_LABEL and row.session_id
-    }
+    manager, taking = _needs_nudged(project, board_id, rows, listed)
     authors = _needs_board_authors(board, now)
+    heard = {manager.session_id} if manager and manager.session_id else set()  # its last activity
     sessions = (
-        _needs_read(
-            lambda: sources.board_sessions(board_id, authors | readers), "sessions", project
+        _needs_read_or_none(
+            lambda: sources.board_sessions(board_id, authors | heard), "sessions", project
         )
         if authors
         else []
     )
+    stamp = next((s.last_seen_at for s in sessions or () if s.id in heard), None)
     items: list[NeedsItem] = []
     tails: dict[str, TranscriptTail | None] = {}
     if statuses is not None:
@@ -1801,7 +1792,7 @@ def _needs_scan_project(
                 ],
                 now=now,
                 # The manager's own items wait on no one: its own limit's nudge goes to itself.
-                manager_live=nudged is not None and nudged.id != status.agent.id,
+                manager_live=taking is not None and taking.id != status.agent.id,
                 accounts=accounts,
                 pane_output=_needs_output_of(sources, status.agent),
             ):
@@ -1814,7 +1805,7 @@ def _needs_scan_project(
                 exits,
                 project=project,
                 now=now,
-                manager_live=nudged is not None,
+                manager_live=taking is not None,
                 sources=sources,
             )
         )
@@ -1832,17 +1823,18 @@ def _needs_scan_project(
         items.extend(
             _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
         )
+    # Unknown is not absent: no item to the manager is the human's for a listing or sessions
+    # that were not read, nor a result to it for a last activity not read (taken as now).
+    unknown = statuses is None or sessions is None
     items.extend(
         needs_from_board(
             board,
-            sessions,
+            sessions or [],
             rows,
             project=project,
             now=now,
-            # Unknown is not absent: without a listing, whether the manager the board's write
-            # woke is live is not known, and no item is the human's for that alone.
-            manager_live=nudged is not None or (statuses is None and board_id == project.id),
-            manager_read=max((s.cursor for s in sessions if s.id in readers), default=0),
+            manager_live=taking is not None or (unknown and board_id == project.id),
+            manager_seen=now if manager and stamp is None else stamp,
         )
     )
     return _NeedsProject(items=items, statuses=listed, ended=ended, tails=tails)

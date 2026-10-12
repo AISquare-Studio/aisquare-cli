@@ -98,7 +98,7 @@ def manager_text(status: FleetAgentStatus) -> Text:
     if status.tmux_session:
         # Where the fleet asks its server: from a shell under another TMUX_TMPDIR, `-L`
         # by the name reaches another server, and attaches to its session.
-        path = fleet_service.socket_at(agent)
+        path = status.socket_at
         where = f"-L {agent.tmux_socket}" if path is None else f"-S {path}"
         text.append(f"  ·  tmux {where} attach -t ={status.tmux_session}", style="dim")
     text.append(
@@ -198,7 +198,7 @@ class ManagerTab(Vertical):
         try:
             status = fleet_service.status_of(manager)
         except fleet_service.FleetError:
-            status = FleetAgentStatus(agent=manager)
+            status = FleetAgentStatus(agent=manager, socket_at=fleet_service.socket_at(manager))
         self.show(status)
 
     def show(
@@ -234,9 +234,7 @@ class ManagerTab(Vertical):
             if wanted is not None:
                 # The row's own server, where its spawn said it listened: `-L` by the name
                 # alone, from another TMUX_TMPDIR, shows and types into another's %N.
-                pane.server = TmuxServer(status.agent.tmux_socket).at(
-                    fleet_service.socket_at(status.agent)
-                )
+                pane.server = TmuxServer(status.agent.tmux_socket).at(status.socket_at)
             pane.attach(wanted)
 
     @on(Button.Pressed, "#start-manager")

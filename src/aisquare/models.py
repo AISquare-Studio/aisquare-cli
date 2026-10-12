@@ -992,3 +992,7 @@ class FleetAgentStatus(BaseModel):
     hooks" for a binary without lifecycle hooks, "pane gone"."""
     session: TeamSession | None = None
     tmux_session: str | None = None
+    socket_at: Path | None = None
+    """Where the agent's server is asked (``tmux -S``), worked out once with the listing's
+    config (``services.fleet.socket_at``); ``None`` when it is asked by its socket's name
+    (``tmux -L``). Carried so the UI's panes and attach line read it off the frame."""

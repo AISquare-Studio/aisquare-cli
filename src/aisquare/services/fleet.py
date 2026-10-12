@@ -515,7 +515,10 @@ def server_of(agent: FleetAgent, config: FleetSettings | None = None) -> TmuxSer
 def socket_at(agent: FleetAgent) -> Path | None:
     """The path ``agent``'s server is asked at (``tmux -S``), or ``None`` when it is asked by
     its socket's name (:func:`_address`): for a caller that builds the server itself, as the
-    UI's panes do (``TmuxServer(agent.tmux_socket).at(socket_at(agent))``)."""
+    UI's panes do (``TmuxServer(agent.tmux_socket).at(socket_at(agent))``). It reads the
+    config, so a caller holding a listed :class:`FleetAgentStatus` reads its ``socket_at``,
+    worked out with the listing's: asked on the UI thread, each frame reloaded config.toml
+    for every open project (round 29 of #257)."""
     return _address(agent).path
 
 
@@ -1256,11 +1259,17 @@ def _status(
     observed: dict[str, _PaneView] | None,
     tmux_session: str | None,
     now: datetime,
+    config: FleetSettings,
 ) -> FleetAgentStatus:
     pane = observed.get(agent.id) if observed is not None else None
     state, detail = _derive(agent, session, pane, observed=observed is not None, now=now)
     return FleetAgentStatus(
-        agent=agent, state=state, detail=detail, session=session, tmux_session=tmux_session
+        agent=agent,
+        state=state,
+        detail=detail,
+        session=session,
+        tmux_session=tmux_session,
+        socket_at=_address(agent, config).path,
     )
 
 
@@ -2338,6 +2347,7 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
             _view(agent, views, config),
             tmux_session,
             now,
+            config,
         )
         for agent in agents
     ]
@@ -2526,8 +2536,9 @@ def status_of(agent: FleetAgent) -> FleetAgentStatus:
         project = store.get_project(agent.project_id)
         session = store.get_session(agent.session_id) if agent.session_id else None
     tmux_session = session_name(project.codename) if project and project.codename else None
-    observed = _observe(server_of(agent), tmux_session, [agent])
-    return _status(agent, session, observed, tmux_session, _now())
+    config = settings()
+    observed = _observe(server_of(agent, config), tmux_session, [agent])
+    return _status(agent, session, observed, tmux_session, _now(), config)
 
 
 def manager_of(project: ProjectInfo) -> FleetAgent | None:

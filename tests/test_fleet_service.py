@@ -4092,6 +4092,23 @@ def test_every_read_asks_a_row_of_the_server_at_the_path_it_recorded(
     assert _events(project, "agent_exited") == []
 
 
+def test_a_listed_status_carries_where_its_server_is_asked(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 29 of #257: asq's panes and the Manager tab's attach line asked `socket_at(agent)`
+    on the UI thread for every open project each frame, and that reloads config.toml. The
+    listing and `status_of` work it out once, with their config, and carry it."""
+    coder, _ = _behind_a_stranger(tmux, project, _coder(project), monkeypatch)
+
+    [listed] = fleet_service.list_agents(project)
+
+    assert listed.socket_at == fleet_service.status_of(coder).socket_at == coder.socket_path
+    with store_session() as store:  # a row from before v25 is asked by its socket's name
+        named = store.upsert_fleet_agent(coder.model_copy(update={"socket_path": None}))
+    [listed] = fleet_service.list_agents(project)
+    assert listed.socket_at is None and fleet_service.status_of(named).socket_at is None
+
+
 def test_a_symlink_loop_on_the_way_to_a_rows_socket_is_another_path_not_a_traceback(
     tmux: FakeTmux,
     claude_on_path: Path,

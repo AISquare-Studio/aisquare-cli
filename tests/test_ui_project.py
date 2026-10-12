@@ -440,10 +440,19 @@ def test_the_manager_pane_asks_its_server_at_the_path_its_row_recorded(
     named the row's server by its socket's name (``tmux -L``). From a shell under another
     ``TMUX_TMPDIR`` that is another server, and its ``%7`` — another agent — was shown and
     typed into. A row recorded elsewhere is asked at its path (``tmux -S``); one from before
-    v25, by its name."""
+    v25, by its name.
+
+    Where, the listed status says (``socket_at``, worked out with the listing's config): each
+    frame asked ``fleet_service.socket_at``, which reloaded config.toml on the UI thread for
+    every open project (round 29 of #257)."""
     elsewhere = tmp_path / "elsewhere" / "tmux-1000" / PRIVATE_SOCKET  # not where `-L` looks
     recorded = fake_agent(project, pane_id="%7").model_copy(update={"socket_path": elsewhere})
     monkeypatch.setattr(fleet_service, "manager_of", lambda target: recorded)
+    monkeypatch.setattr(
+        fleet_service,
+        "status_of",
+        lambda agent: FleetAgentStatus(agent=agent, state="waiting", socket_at=elsewhere),
+    )
 
     async def scenario(pilot: Pilot[None], host: Host) -> TmuxServer | None:
         await pilot.pause(0.25)  # past the 100 ms resize debounce
@@ -452,16 +461,25 @@ def test_the_manager_pane_asks_its_server_at_the_path_its_row_recorded(
     server = drive(project, scenario)
     named = fake_agent(project, pane_id="%7")
 
-    def attach_line(agent: FleetAgent) -> str:
-        status = FleetAgentStatus(agent=agent, state="waiting", tmux_session="asq-amber-otter")
+    def no_config(config: object = None) -> object:
+        raise AssertionError("a frame read config.toml on the UI thread")
+
+    monkeypatch.setattr(fleet_service, "settings", no_config)
+
+    def attach_line(agent: FleetAgent, socket_at: Path | None) -> str:
+        status = FleetAgentStatus(
+            agent=agent, state="waiting", tmux_session="asq-amber-otter", socket_at=socket_at
+        )
         return project_view_module.manager_text(status).plain
 
     assert isinstance(server, ScriptedServer) and server.path == elsewhere, server
     assert server.captures, "the frame came from the server at the recorded path"
-    assert f"tmux -S {elsewhere} attach -t =asq-amber-otter" in attach_line(recorded)
-    assert f"tmux -L {PRIVATE_SOCKET} attach -t =asq-amber-otter" in attach_line(named)
-    assert AgentView(FleetAgentStatus(agent=recorded)).server.path == elsewhere
-    assert AgentView(FleetAgentStatus(agent=named)).server.path is None, "asked by its name"
+    assert f"tmux -S {elsewhere} attach -t =asq-amber-otter" in attach_line(recorded, elsewhere)
+    assert f"tmux -L {PRIVATE_SOCKET} attach -t =asq-amber-otter" in attach_line(named, None)
+    shown = FleetAgentStatus(agent=recorded, socket_at=elsewhere)
+    assert AgentView(shown, escape_key="ctrl+]").server.path == elsewhere
+    by_name = AgentView(FleetAgentStatus(agent=named), escape_key="ctrl+]")
+    assert by_name.server.path is None, "asked by its name"
 
 
 def test_no_button_and_no_spawn_when_a_manager_already_runs(

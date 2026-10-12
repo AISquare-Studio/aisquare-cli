@@ -1904,7 +1904,9 @@ def test_recent_output_is_working_and_old_output_is_waiting_without_hooks(
 ) -> None:
     agent = _coder(project, binary=sys.executable)  # no --session-id: tmux is the only source
     assert fleet_service.status_of(agent).state == "waiting", "no output yet"
-    tmux.printed(agent.pane_id, ago=ACTIVITY_WINDOW - timedelta(seconds=1))
+    # Well inside the window: tmux, and so the fake, says when in whole seconds, and a second
+    # short of the edge left a loaded runner a fraction of one (ambient leg, run 38185297691).
+    tmux.printed(agent.pane_id, ago=ACTIVITY_WINDOW / 2)
     assert fleet_service.status_of(agent).state == "working"
     tmux.printed(agent.pane_id, ago=ACTIVITY_WINDOW + timedelta(seconds=2))
     status = fleet_service.status_of(agent)

@@ -3586,6 +3586,46 @@ def test_under_a_team_hub_the_scan_reads_the_hubs_board_once_for_its_projects(
     assert [item.kind for item in needs_agent_now(beta, "coder-1").items] == ["failed"]
 
 
+@pytest.mark.parametrize("under_a_hub", [False, True])
+def test_a_coder_whose_hand_over_never_started_its_replacement_is_reported_under_a_hub_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, under_a_hub: bool
+) -> None:
+    """The fleet announces a row's exit on the board of the row's own project
+    (``fleet._emit_exit``), and under ``AISQUARE_TEAM_HUB`` the scan looked for it on the
+    hub's, where the team writes: a coder's switch whose replacement never started was no
+    card and no push, the case ``HANDOVER_FAILED`` is for (review of #243, round 18, 1/4).
+    The exit is read where the fleet writes it, with a hub and without."""
+    hour_ago = datetime.now(UTC) - timedelta(hours=1)
+    stopped = datetime.now(UTC) - timedelta(minutes=10)
+    with store_session() as store:
+        alpha = store.onboard_project(_rooted(tmp_path / "alpha"))
+        board = alpha
+        if under_a_hub:
+            board = _rooted(tmp_path / "hub")
+            monkeypatch.setenv("AISQUARE_TEAM_HUB", str(board.root))
+            store.ensure_project(board)
+        store.upsert_session(
+            TeamSession(
+                id="ses_c", project_id=board.id, role="coder", label="coder-1",
+                started_at=hour_ago, last_seen_at=stopped, state="working",
+            )
+        )  # fmt: skip
+        row = store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_c", project_id=alpha.id, label="coder-1", role="coder", pane_id="%1",
+                session_id="ses_c", cwd=alpha.root, created_at=hour_ago, ended_at=stopped,
+                exit_status=0,
+            )
+        )  # fmt: skip
+        fleet_service._emit_exit(store, row, why=fleet_service.HANDOVER_FAILED)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=datetime.now(UTC), dismissed=())
+    assert [(item.kind, item.project_id, item.agent, item.reason) for item in items] == [
+        ("crashed", alpha.id, "coder-1", "coder-1 stopped, and its replacement did not start")
+    ]
+
+
 def test_under_a_team_hub_a_projects_rows_are_derived_again_in_one_look_at_tmux(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

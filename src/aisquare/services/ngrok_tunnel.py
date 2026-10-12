@@ -123,7 +123,6 @@ falls back to ``127.0.0.1`` only when it is refused: any account on the machine 
 on ``[::1]:<port>``, before Remote starts or after, and was handed every request, the
 token in its path, the passphrase of an unlock and every device's cookie (sweep 4 of #243).
 So may a dev server that listens on ``localhost`` over IPv6 alone."""
-_LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1"})
 NGROK_CONFIG_NAME = "ngrok.yml"
 API_OFF_CONFIGS = {
     "2": 'version: "2"\nweb_addr: false\n',
@@ -272,14 +271,17 @@ def _one_line(text: str) -> str:
 
 
 def forwards_to(addr: str, port: int) -> bool:
-    """Whether a tunnel's ``addr`` (``http://localhost:8750``, ``localhost:8750``, ``8750``)
-    is ``port`` on this machine's loopback."""
+    """Whether a tunnel's ``addr`` (``http://127.0.0.1:8750``, ``127.0.0.1:8750``) is
+    ``port`` at :data:`UPSTREAM_HOST`, the one address Remote listens on.
+
+    Not ``localhost``, ``[::1]`` or the port alone, which ngrok reads as ``localhost``:
+    any account here may listen on ``[::1]:<port>``, and a tunnel to it, started through
+    ngrok's agent API under ngrok's own name, read as Remote's, its link and QR the
+    panel's (review of #243, round 18, 2/4)."""
     text = addr.strip()
-    if text.isdigit():
-        return int(text) == port
     try:
         split = urlsplit(text if "://" in text else f"//{text}")
-        return split.port == port and (split.hostname or "localhost") in _LOOPBACK
+        return split.port == port and split.hostname == UPSTREAM_HOST
     except ValueError:  # no address at all: not this port
         return False
 
@@ -868,11 +870,12 @@ class NgrokTunnel:
 
     def _announces_this_tunnel(self, event: LogEvent) -> bool:
         """Whether a started tunnel is the one ``ngrok http`` asked for: named
-        :data:`COMMAND_LINE_TUNNEL`, forwarding to this port. Its log is read whatever
-        ngrok's agent API did, and a tunnel started there, under any other name or to any
-        other address, became the link, the QR and every notification's origin: a tap
-        carried the token to a host of the API's caller, and the passphrase after it. A
-        line naming neither is taken as ever; every ngrok names both."""
+        :data:`COMMAND_LINE_TUNNEL`, forwarding to this port at :data:`UPSTREAM_HOST`
+        (:func:`forwards_to`). Its log is read whatever ngrok's agent API did, and a tunnel
+        started there, under any other name or to any other address, became the link, the
+        QR and every notification's origin: a tap carried the token to a host of the API's
+        caller, and the passphrase after it. A line naming neither is taken as ever; every
+        ngrok names both."""
         if event.name is not None and event.name != COMMAND_LINE_TUNNEL:
             return False
         return event.addr is None or forwards_to(event.addr, self.port)

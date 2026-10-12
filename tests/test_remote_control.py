@@ -156,21 +156,38 @@ def test_ngroks_log_reaches_the_status_line_with_nothing_that_drives_a_terminal(
 @pytest.mark.parametrize(
     ("addr", "ours"),
     [
-        ("http://localhost:8750", True),
-        ("localhost:8750", True),
-        ("8750", True),
         ("http://127.0.0.1:8750", True),
-        ("http://[::1]:8750", True),
-        ("http://localhost:9999", False),
+        ("127.0.0.1:8750", True),
+        ("http://localhost:8750", False),
+        ("localhost:8750", False),
+        ("8750", False),
+        ("http://[::1]:8750", False),
+        ("[::1]:8750", False),
+        ("http://127.0.0.1:9999", False),
         ("https://example.com:8750", False),
-        ("http://localhost", False),
+        ("http://127.0.0.1", False),
         ("not an address", False),
     ],
 )
-def test_a_tunnel_forwards_to_this_port_only_on_this_machines_loopback(
+def test_a_tunnel_forwards_to_this_port_only_at_the_address_remote_listens_on(
     addr: str, ours: bool
 ) -> None:
+    """Only ``127.0.0.1:<port>``, where the panel's ngrok forwards (``UPSTREAM_HOST``):
+    ``localhost`` and the port alone resolve to ``[::1]`` first, where any account here may
+    listen (review of #243, round 18, 2/4)."""
     assert ngrok_tunnel.forwards_to(addr, 8750) is ours
+
+
+@pytest.mark.parametrize("addr", ["http://localhost:8750", "http://[::1]:8750"])
+def test_a_tunnel_the_agent_api_started_to_localhost_is_not_remotes_own(addr: str) -> None:
+    """ngrok's agent API on, another account listens on ``[::1]:8750``, deletes the panel's
+    ``command_line`` tunnel and starts one of that name to ``localhost:8750``: ngrok logs
+    ``started tunnel`` for it, and it read as Remote's own, its URL the link, the QR and
+    every push's origin, ``FOREIGN_TUNNEL`` never said (review of #243, round 18, 2/4)."""
+    tunnel = NgrokTunnel(8750)
+    line = json.dumps({**OURS, "addr": addr, "url": "https://evil.ngrok-free.app"})
+    assert tunnel._announces_this_tunnel(parse_log_line(line)) is False
+    assert tunnel._announces_this_tunnel(parse_log_line(json.dumps(OURS))) is True
 
 
 def test_parse_log_line_turns_an_authtoken_error_into_the_authtoken_hint() -> None:

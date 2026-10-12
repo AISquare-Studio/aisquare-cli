@@ -1723,9 +1723,12 @@ def _needs_scan_project(
     (:attr:`NeedsSources.board_project`), its rows by its own id. Under
     ``AISQUARE_TEAM_HUB`` every session and event is the hub's: read by the fleet
     project's id, the board was empty to the scan, and a manager's question or
-    result, a failed turn, the usage-limit dialog's words and a hand-over that
-    could not start its replacement never became a card or a push, while the
-    Board tab showed them (sweep 4 of #243).
+    result, a failed turn and the usage-limit dialog's words never became a card
+    or a push, while the Board tab showed them (sweep 4 of #243). The exits the
+    fleet announces are not the team's, though: they go to the row's own project
+    (``fleet._emit_exit``), and are read there (:func:`_needs_exits`). Read from the
+    hub's, a hand-over that could not start its replacement was no card and no
+    push (review of #243, round 18, 1/4).
     """
     from aisquare.services.fleet import RECENTLY_ENDED
 
@@ -1738,6 +1741,7 @@ def _needs_scan_project(
     day = now - max(QUESTION_HORIZON, RECENTLY_ENDED)
     board_read = _needs_read_or_none(lambda: sources.board_since(board_id, day), "board", project)
     board = board_read or []
+    exits = board if board_id == project.id else _needs_exits(sources, project, day)
     window = _needs_window(sources, project, board_id)
     authors = _needs_board_authors(board, now)
     sessions = _needs_read(
@@ -1783,14 +1787,16 @@ def _needs_scan_project(
             _needs_crashed(
                 ended,
                 rows,
-                board,
+                exits,
                 project=project,
                 now=now,
                 manager_live=manager_live,
                 sources=sources,
             )
         )
-        items.extend(_needs_manager_down(statuses, rows, board_read, project=project, now=now))
+        items.extend(
+            _needs_manager_down(statuses, rows, board_read, exits, project=project, now=now)
+        )
         items.extend(
             _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
         )
@@ -1903,6 +1909,13 @@ def _needs_session_event(
     except Exception:
         log.debug("remote: needs could not read %s's events", session_id, exc_info=True)
         return None
+
+
+def _needs_exits(sources: NeedsSources, project: ProjectInfo, day: datetime) -> list[TeamEvent]:
+    """The exits the fleet announced on ``project``'s own board since ``day`` (``agent_exited``,
+    by the row's ``project_id``), for a project whose agents write another board."""
+    read = _needs_read(lambda: sources.board_since(project.id, day), "exits", project)
+    return [event for event in read if event.kind == "agent_exited"]
 
 
 def _needs_board_of(sources: NeedsSources, project: ProjectInfo) -> str:
@@ -2018,7 +2031,7 @@ def _needs_still_remembered(
 def _needs_crashed(
     ended: Sequence[FleetAgent],
     rows: Sequence[FleetAgent],
-    board: Sequence[TeamEvent],
+    exits: Sequence[TeamEvent],
     *,
     project: ProjectInfo,
     now: datetime,
@@ -2031,7 +2044,7 @@ def _needs_crashed(
     Except the stop of a switch or a restart that then could not start the
     replacement (its ``/exit``, or the kill when that did not land in time):
     nothing took the agent's place, and the exit it announced says so
-    (``fleet.HANDOVER_FAILED``, read from the board's day, ``board``). An
+    (``fleet.HANDOVER_FAILED``, read from the day's ``exits``). An
     agent whose task is closed did its work; one a live manager has (it was
     nudged on the exit) is the manager's; one that was restarted since — a newer
     row holds its label — was handled. The manager's own crash is
@@ -2049,7 +2062,7 @@ def _needs_crashed(
         if _needs_is_manager(row.role):
             continue
         clean = row.exit_status in (0, None)
-        abandoned = clean and _needs_handover_failed(_needs_exit_of(row, board))
+        abandoned = clean and _needs_handover_failed(_needs_exit_of(row, exits))
         if clean and not abandoned:
             continue
         if newest.get(row.label, row.created_at) > row.created_at:
@@ -2096,15 +2109,15 @@ def _needs_handover_failed(event: TeamEvent | None) -> bool:
     )
 
 
-def _needs_exit_of(row: FleetAgent, board: Sequence[TeamEvent]) -> TeamEvent | None:
+def _needs_exit_of(row: FleetAgent, exits: Sequence[TeamEvent]) -> TeamEvent | None:
     """The exit the fleet announced for ``row`` (``agent_exited``, under its session), from
-    the board's day; none older than the row, which is an earlier row's of the session."""
+    the day's ``exits``; none older than the row, which is an earlier row's of the session."""
     if row.session_id is None:
         return None
     return max(
         (
             event
-            for event in board
+            for event in exits
             if event.kind == "agent_exited"
             and event.session_id == row.session_id
             and event.created_at >= row.created_at
@@ -2134,6 +2147,7 @@ def _needs_manager_down(
     statuses: Sequence[FleetAgentStatus],
     rows: Sequence[FleetAgent],
     board: Sequence[TeamEvent] | None,
+    exits: Sequence[TeamEvent],
     *,
     project: ProjectInfo,
     now: datetime,
@@ -2149,10 +2163,10 @@ def _needs_manager_down(
     once it is stopped, which followed every result and hid it. Not a clean
     exit a switch or a restart made, though, and then could not start the
     replacement for: the hand-over's own ``/exit`` is status 0, and the exit it
-    announces says so (``fleet.HANDOVER_FAILED``). That one is reported as a
-    stop is. ``board`` is ``None`` when the day could not be read: a stop is then
-    not reported at all, rather than for a last word nobody read; a crash needs no
-    board.
+    announces says so (``fleet.HANDOVER_FAILED``, read from the day's ``exits``).
+    That one is reported as a stop is. ``board`` is ``None`` when the day could not
+    be read: a stop is then not reported at all, rather than for a last word nobody
+    read; a crash needs no board.
     """
     managers = [row for row in rows if _needs_is_manager(row.role)]
     if not managers or any(row.ended_at is None for row in managers):
@@ -2172,7 +2186,7 @@ def _needs_manager_down(
         ]
         if not busy or board is None:
             return []
-        if manager.exit_status == 0 and not _needs_handover_failed(_needs_exit_of(manager, board)):
+        if manager.exit_status == 0 and not _needs_handover_failed(_needs_exit_of(manager, exits)):
             return []
         said = _needs_last_word(manager, board)
         if said is not None and said.kind == "result":

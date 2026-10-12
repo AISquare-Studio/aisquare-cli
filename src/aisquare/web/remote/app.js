@@ -1775,10 +1775,9 @@ function drawStrip(pre, payload) {
 /* A card on screen, with its pane strip when it gets one. */
 function cardEntry(item, withStrip) {
   let unwatch = null;
-  const project = item.project && typeof item.project === "object" ? item.project : {};
   const node = renderNeedsCard(item, document, {
     now: Date.now(), writable: writable(), stale: S.stale, onAnswer: answerCard, onAction: actOnCard, onSince: trackSince,
-    onStrip: withStrip ? (pre) => { unwatch = paneWatch(project.id, item.agent, (payload) => drawStrip(pre, payload)); } : null,
+    onStrip: withStrip ? (pre) => { unwatch = paneWatch(contextOf(item).pid, item.agent, (payload) => drawStrip(pre, payload)); } : null,
   });
   // keepFocus finds a button by these when the card is drawn anew.
   for (const one of node.querySelectorAll("button")) one.rowKey = item.id + " " + one.textContent;
@@ -1916,8 +1915,7 @@ async function answerCard(item, answer, row) {
   const quick = row ? Array.from(row.querySelectorAll("button.qa")) : [];
   for (const control of quick) control.classList.add("busy");
   gateButtons();
-  const project = item.project && typeof item.project === "object" ? item.project : {};
-  const res = await keysInTurn(project.id, item.agent, (at) => apiWrite(API.needsAnswer, { id: item.id, keys }, "Answer " + label, null, at));
+  const res = await keysInTurn(contextOf(item).pid, item.agent, (at) => apiWrite(API.needsAnswer, { id: item.id, keys }, "Answer " + label, null, at));
   for (const control of quick) control.classList.remove("busy");
   gateButtons();
   if (res.ok) return toast("Sent " + label + " to " + plainText(item.agent || "the agent"));
@@ -2159,7 +2157,8 @@ function actionSheet(kind, ctx) {
       if (res.status === 409 && res.error === "stale") {
         sheet.close();
         if (ctx.item) noLonger(ctx.item, res.data && res.data.current);
-        else toast(label + " changed since this screen loaded — look again, then retry.");
+        // The machine's sentence says what was done: an Escape may have gone first.
+        toast(plainText(res.message) || !ctx.item && label + " changed since this screen loaded — look again, then retry.");
         return;
       }
       if (res.status === 409 && res.error === "dialog_open" && !dismiss) {

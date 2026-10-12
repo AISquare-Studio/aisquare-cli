@@ -1971,7 +1971,8 @@ def test_an_answer_that_comes_after_the_human_moved_on_acts_on_its_own_sheet_onl
         **told,
         "toast": "Restart coder-1: The machine could not answer: tmux did not answer",
     }
-    assert late["restartStale"] == {
+    assert late["restartStale"] == {**told, "toast": "coder-1 is not the agent this was"}
+    assert late["restartStaleUnsaid"] == {
         **told,
         "toast": "coder-1 changed since this screen loaded — look again, then retry.",
     }
@@ -2789,7 +2790,26 @@ def test_a_card_refused_stale_says_so_in_its_place_and_the_feed_is_read_again(
         "later": ["card: coder-1 asks which approach to take"],
     }
     nothing = ["No longer needs you: nothing waits on coder-1 now."]
-    assert stale["stop"] == {"shown": nothing, "sheet": None}
+    assert stale["stop"] == {
+        "shown": nothing,
+        "sheet": None,
+        "toast": "coder-1 no longer shows that question",
+    }
+
+
+def test_a_stop_refused_stale_after_its_escape_says_the_escape_went(
+    boot_report: dict[str, Any],
+) -> None:
+    """A Stop on coder-1's prompt pressed Esc (No) first, and the manager restarted coder-1
+    meanwhile: the machine answered 409 ``stale``, its sentence saying the Escape went, and
+    the sheet threw it away for "changed since this screen loaded" or "nothing waits on
+    coder-1 now". The prompt was answered No and the phone never said so (review of #243,
+    round 18, 3/4). It says the machine's sentence, as the Tell sheet does."""
+    assert boot_report["staleCards"]["stopEscaped"] == {
+        "sheet": None,
+        "toast": "'coder-1' is another agent now (agt_2) — Escape was sent, nothing else was done",
+        "dismissed": [False, True],
+    }
 
 
 def test_a_cards_tell_refused_stale_keeps_its_sheet_and_what_was_typed(

@@ -636,7 +636,7 @@ def _remote_board_project(root: Path) -> ProjectInfo:
     under a relative hub, which ``team_project`` ignores with its one-time warning: asked of
     ``team_hub`` alone, it was ignored here without a word (review of #243, round 17, 2/2)."""
     from aisquare.core import orchestrator
-    from aisquare.core.workspace import find_project_root, project_id_for
+    from aisquare.core.workspace import current_project
     from aisquare.services import team as team_service
 
     hub = os.environ.get(orchestrator.TEAM_HUB_ENV_VAR, "")
@@ -647,8 +647,7 @@ def _remote_board_project(root: Path) -> ProjectInfo:
     if kept is not None and now - kept[0] < BOARD_PROJECT_TTL:
         return kept[1]
     if not hub.strip() and orchestrator.team_enabled():
-        found = find_project_root(root)
-        board = ProjectInfo(id=project_id_for(found), root=found, linked_repos=[])
+        board = current_project(root)
     else:
         board = team_service.resolve_project(root)
     with _board_projects_lock:

@@ -1732,6 +1732,7 @@ async function lateAnswers() {
     restartDone: await restartThenTell({ status: 200, json: { agent: { id: "agt_1", label: "coder-1" }, resumed: true, project: PROJECT } }),
     restartFailed: await restartThenTell({ status: 503, json: { error: "fleet_unavailable", message: "tmux did not answer" } }),
     restartStale: await restartThenTell({ status: 409, json: { error: "stale", message: "coder-1 is not the agent this was" } }),
+    restartStaleUnsaid: await restartThenTell({ status: 409, json: { error: "stale" } }),
     restartUnderATell: await restartUnderATell(),
     replyUnderAReply: await replyUnderAReply(),
     staleUnderATell: await staleUnderATell(),
@@ -3707,12 +3708,28 @@ async function staleCards() {
   click(buttonNamed(stopped.main(), "Stop…"));
   click(buttonNamed(stopped.run("UI.sheet"), "Stop"));
   await settle();
+  // The same Stop at a prompt: Esc (No) first, then coder-1 is another agent, the Escape sent.
+  const escaped = "'coder-1' is another agent now (agt_2) — Escape was sent, nothing else was done";
+  let stops = 0;
+  const pinned = await feed(crashed, {
+    "POST api/agent/stop": () => (++stops > 1
+      ? { status: 409, json: { error: "stale", message: escaped, current: { agent_id: "agt_2" } } }
+      : { status: 409, json: { error: "dialog_open", message: "coder-1 is showing a prompt" } }),
+  });
+  click(buttonNamed(pinned.main(), "Stop…"));
+  click(buttonNamed(pinned.run("UI.sheet"), "Stop"));
+  await settle();
+  click(buttonNamed(pinned.run("UI.sheet"), "Press Esc (No) first"));
+  await settle();
   return {
     answer,
     tell,
     tellReplaced,
     tellEnded,
-    stop: { shown: shown(stopped), sheet: sheetTitle(stopped) },
+    stop: { shown: shown(stopped), sheet: sheetTitle(stopped), toast: stopped.toast() },
+    stopEscaped: {
+      sheet: sheetTitle(pinned), toast: pinned.toast(), dismissed: pinned.sent("api/agent/stop").map((body) => body.dismiss_dialog === true),
+    },
   };
 }
 

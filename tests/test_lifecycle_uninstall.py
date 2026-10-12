@@ -134,7 +134,7 @@ def world(monkeypatch: pytest.MonkeyPatch) -> World:
     monkeypatch.setattr(agent_core, "remove_hooks", remove_hooks)
     monkeypatch.setattr(install_route, "exec_replace", exec_replace)
     # A live row is a running agent unless a test says its socket has no server.
-    monkeypatch.setattr(lifecycle, "_server_listening", lambda _socket: True)
+    monkeypatch.setattr(lifecycle, "_server_listening", lambda _socket, _there: True)
     return recorded
 
 
@@ -619,7 +619,13 @@ def test_a_clean_run_lets_the_package_go(
 # --- the fleet -------------------------------------------------------------------------
 
 
-def _live_agent(root: Path, label: str = "coder-1") -> None:
+def _live_agent(
+    root: Path,
+    label: str = "coder-1",
+    *,
+    socket: str = "asq",
+    created_at: datetime | None = None,
+) -> None:
     root.mkdir(parents=True, exist_ok=True)
     project = team_project(root)
     with store_session() as store:
@@ -630,9 +636,10 @@ def _live_agent(root: Path, label: str = "coder-1") -> None:
                 project_id=project.id,
                 label=label,
                 role="coder",
+                tmux_socket=socket,
                 pane_id="%1",
                 cwd=project.root,
-                created_at=datetime.now(tz=UTC),
+                created_at=created_at or datetime.now(tz=UTC),
             )
         )
 
@@ -685,7 +692,7 @@ def test_a_live_row_blocks_only_while_its_server_listens(
     monkeypatch.setattr(shutil, "which", which)
     asked: list[str] = []
 
-    def server_listening(name: str) -> bool:
+    def server_listening(name: str, _there: bool) -> bool:
         asked.append(name)
         return listening
 
@@ -704,37 +711,191 @@ def test_a_live_row_blocks_only_while_its_server_listens(
     else:
         assert result.exit_code == 0, result.output
         assert world.events[-1][0] == "package"
-        said = "but no server listens on their sockets, so none can be running"
+        said = "but none can be running: no server listens on their sockets, or they were"
         assert said in plan.output, plan.output
+
+
+def _without_tmux(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_which = shutil.which
+
+    def which(name: str, *args: Any, **kwargs: Any) -> str | None:
+        return None if name == "tmux" else real_which(name, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "which", which)
+
+
+def _asked(socket_name: str) -> bool:
+    """:func:`lifecycle._server_listening` as ``running_fleet`` asks: directory first."""
+    return lifecycle._server_listening(socket_name, lifecycle._socket_directory_there(socket_name))
 
 
 def test_the_probe_asks_the_socket_file_itself(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The probe needs no tmux: a listener on tmux's own path is a server; a stale
-    file nobody listens on, or no file at all, is none."""
+    file nobody listens on, or no file in tmux's directory, is none. No directory at
+    all is no answer (round 24 of #257): the server may keep its socket elsewhere."""
     import socket as socket_module
     import tempfile
 
     if not hasattr(socket_module, "AF_UNIX") or not hasattr(os, "getuid"):
         pytest.skip("AF_UNIX sockets and a POSIX uid are what tmux needs")
+    _without_tmux(monkeypatch)
     base = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp"))  # short: AF_UNIX paths are small
     monkeypatch.setenv("TMUX_TMPDIR", str(base))
     path = base / f"tmux-{os.getuid()}" / "probe"
-    path.parent.mkdir()
     server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
     try:
-        assert lifecycle._server_listening("probe") is False, "no file: no server"
+        assert _asked("probe") is True, "no directory: no answer, so maybe a server"
+        path.parent.mkdir(mode=0o700)
+        assert _asked("probe") is False, "no file: no server"
         server.bind(str(path))
         server.listen(1)
-        assert lifecycle._server_listening("probe") is True
+        assert _asked("probe") is True
         server.close()
-        assert lifecycle._server_listening("probe") is False, "a stale file: no server"
+        assert _asked("probe") is False, "a stale file: no server"
     finally:
         server.close()
         path.unlink(missing_ok=True)
-        path.parent.rmdir()
+        if path.parent.is_dir():
+            path.parent.rmdir()
         base.rmdir()
+
+
+@pytest.mark.parametrize(
+    ("answer", "there", "listening"),
+    [
+        ((0, "3.7c\n", ""), True, True),
+        ((1, "", "no server running on {path}\n"), True, False),
+        ((1, "", "error connecting to {path} (No such file or directory)\n"), True, False),
+        ((1, "", "error connecting to {path} (No such file or directory)\n"), False, True),
+        ((1, "", "error connecting to {elsewhere} (No such file or directory)\n"), False, False),
+        ((1, "", "error connecting to {path} (Permission denied)\n"), True, True),
+        ((1, "", "directory {parent} has unsafe permissions\n"), True, True),
+        (None, True, True),
+    ],
+    ids=[
+        "answers",
+        "stale-file",
+        "no-file",
+        "no-file-in-a-directory-tmux-made",
+        "no-file-where-tmux-keeps-its-own",
+        "denied",
+        "unsafe",
+        "no-answer-in-time",
+    ],
+)
+def test_tmux_on_path_is_asked_where_it_keeps_its_sockets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    answer: tuple[int, str, str] | None,
+    there: bool,
+    listening: bool,
+) -> None:
+    """Round 24 of #257: with tmux on PATH, only a socket at the path aisquare rebuilds
+    counted, so a tmux that keeps its sockets elsewhere (Termux) had every live agent read
+    as stopped, and uninstall went on under them. tmux is asked now: it answers wherever it
+    keeps them. Only its two "no server" answers count as none, and "no file" at this
+    shell's path only where the directory was there before tmux, which makes it, looked;
+    a refusal or no answer in time is not an answer. The conf is never written."""
+    from aisquare.core import tmux as tmux_core
+
+    if not hasattr(os, "getuid"):
+        pytest.skip("a POSIX uid is what tmux needs")
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))
+    path = tmux_core.TmuxServer("asq").socket_path()
+    elsewhere = tmp_path / "termux" / "tmux-1" / "asq"
+    real_which = shutil.which
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name, *a, **k: "/usr/bin/tmux" if name == "tmux" else real_which(name, *a, **k),
+    )
+    asked: list[list[str]] = []
+
+    def run(argv: Any, _stdin: bytes | None) -> tmux_core.Completed:
+        asked.append(list(argv))
+        if answer is None:
+            raise tmux_core.TmuxError("tmux did not answer within 30s")
+        code, out, err = answer
+        said = err.format(path=path, elsewhere=elsewhere, parent=path.parent)
+        return tmux_core.Completed(code, out, said)
+
+    monkeypatch.setattr(tmux_core, "_tmux", run)
+
+    assert lifecycle._server_listening("asq", there) is listening
+    assert asked == [["/usr/bin/tmux", "-L", "asq", "-f", os.devnull, *asked[0][5:]]]
+    assert asked[0][5:] == ["display-message", "-p", "#{version}"]
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="needs tmux on PATH")
+def test_each_socket_directory_is_looked_at_before_tmux_makes_it(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """tmux makes its socket directory as it looks (measured on 3.7c), so asked about one
+    socket it leaves the next a directory that was not there. Each is looked at first: two
+    rows on two sockets under a ``TMUX_TMPDIR`` that has no tmux directory both count, as a
+    fleet that may be alive under another ``TMUX_TMPDIR`` (round 24 of #257)."""
+    import tempfile
+
+    base = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp"))
+    monkeypatch.setenv("TMUX_TMPDIR", str(base))
+    directory = base / f"tmux-{os.getuid()}"
+    try:
+        assert lifecycle._server_listening("a", False) is True, "tmux finds no file: no answer"
+        assert directory.is_dir(), "control: tmux made its directory as it looked"
+        assert _asked("b") is False, "control: looked at after tmux, it is no file there"
+        directory.rmdir()
+        _initialised(runner, tmp_path)
+        _live_agent(tmp_path / "one", "coder-1", socket="a")
+        _live_agent(tmp_path / "two", "coder-2", socket="b")
+        live, unlistened, error = lifecycle.running_fleet()
+        assert (sorted(live), unlistened, error) == (["coder-1 (one)", "coder-2 (two)"], 0, None)
+    finally:
+        if directory.is_dir():
+            directory.rmdir()
+        base.rmdir()
+
+
+def test_a_row_started_before_the_last_boot_cannot_be_running(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reboot sweeps the socket directory, which no longer counts as no server (it may be
+    elsewhere), so after one uninstall would refuse again under agents that are gone (round
+    23 of #257). No process outlives a reboot: a row started before it does not count,
+    whatever its socket says, and is not asked; one started since is asked as before."""
+    asked: list[str] = []
+
+    def listening(name: str, _there: bool) -> bool:
+        asked.append(name)
+        return True
+
+    monkeypatch.setattr(lifecycle, "_server_listening", listening)
+    _initialised(runner, tmp_path)
+    _live_agent(
+        tmp_path / "old", "coder-1", socket="old", created_at=datetime(2026, 1, 1, tzinfo=UTC)
+    )
+    _live_agent(
+        tmp_path / "new", "coder-2", socket="new", created_at=datetime(2026, 1, 3, tzinfo=UTC)
+    )
+    monkeypatch.setattr(lifecycle, "_booted_at", lambda: datetime(2026, 1, 2, tzinfo=UTC))
+
+    assert lifecycle.running_fleet() == (("coder-2 (new)",), 1, None)
+    assert asked == ["new"]
+
+    monkeypatch.setattr(lifecycle, "_booted_at", lambda: None)  # where it cannot be told
+    asked.clear()
+    assert sorted(lifecycle.running_fleet()[0]) == ["coder-1 (old)", "coder-2 (new)"]
+    assert asked == ["new", "old"]
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith(("linux", "darwin")), reason="where the boot time is read"
+)
+def test_the_boot_time_is_read_where_the_machine_says_it() -> None:
+    booted = lifecycle._booted_at()
+    assert booted is not None and booted.tzinfo is not None
+    assert datetime(2000, 1, 1, tzinfo=UTC) < booted < datetime.now(tz=UTC)
 
 
 def test_ended_rows_do_not_count_as_live(

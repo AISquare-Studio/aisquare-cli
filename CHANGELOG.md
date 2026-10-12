@@ -30,7 +30,13 @@ and an aisquare that upgrades and uninstalls itself.**
   still hides 0.8.0, the command stops with "No solution found" instead of
   moving you back. From 0.8.0 on, `aisquare upgrade` does it for you and keeps
   them.
-- The store stays at schema v24; nothing migrates.
+- The store migrates to schema v25 on first open, from 0.7.0's v24. The step
+  adds two columns to `fleet_agent`: `socket_path` and `boot_id`, the socket
+  each agent's tmux server listened on and the boot it started in, recorded at
+  spawn. `upgrade` and `uninstall` ask that socket whether the agent may still
+  run. An agent started before 0.8.0 recorded neither, so it counts as running
+  until `aisquare fleet shutdown` ends it. 0.7.0 opens a v25 store as it is,
+  and the agents it starts record neither column.
 - `aisquare agents connect codex` and `… cursor` now exit 1 with "can't connect
   … yet", instead of reporting a connection that installed nothing. One 0.7.0
   recorded no longer reads as connected; `aisquare agents disconnect codex` (or

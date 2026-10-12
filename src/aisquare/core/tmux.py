@@ -71,6 +71,7 @@ Verified against tmux 3.7c (``tests/test_tmux.py`` re-verifies the live ones):
 from __future__ import annotations
 
 import contextlib
+import functools
 import itertools
 import os
 import re
@@ -318,6 +319,7 @@ _BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 _SYSCTL = ("/usr/sbin/sysctl", "/sbin/sysctl")
 
 
+@functools.cache
 def boot_id() -> str | None:
     """This boot's identity, or ``None`` where the machine keeps none.
 
@@ -329,6 +331,10 @@ def boot_id() -> str | None:
     before the boot (round 25 of #257). Linux draws ``boot_id`` at boot; macOS
     keeps ``kern.bootsessionuuid``, asked of ``sysctl`` on PATH or where macOS
     keeps it. The BSDs keep only a time, which moves the same way: ``None``.
+
+    Asked once per process, since the boot cannot change while it runs: on macOS each
+    question is a ``sysctl`` run, and asq asked once per spawn and again in each upgrade
+    or uninstall plan (round 26 of #257).
     """
     with contextlib.suppress(OSError, UnicodeDecodeError):
         said = _BOOT_ID.read_text(encoding="ascii").strip()

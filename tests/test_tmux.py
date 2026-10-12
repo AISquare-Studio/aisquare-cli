@@ -831,10 +831,13 @@ def test_the_boot_is_named_where_the_machine_names_it() -> None:
 
 
 def test_the_boot_is_asked_of_sysctl_where_macos_keeps_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
     """A launchd or cron PATH leaves /usr/sbin out (round 25 of #257): ``sysctl`` is
-    looked for where macOS keeps it too. Where the machine keeps no boot id, none."""
+    looked for where macOS keeps it too, once per process, as the boot cannot change
+    while it runs (round 26). Where the machine keeps no boot id, none."""
+    tmux_module.boot_id.cache_clear()
+    request.addfinalizer(tmux_module.boot_id.cache_clear)  # what the next test asks is real
     monkeypatch.setattr(tmux_module, "_BOOT_ID", tmp_path / "no-proc")
     monkeypatch.setattr(shutil, "which", lambda _name, *a, **k: None)
     monkeypatch.setattr(os, "access", lambda place, _mode: place == "/usr/sbin/sysctl")
@@ -847,8 +850,10 @@ def test_the_boot_is_asked_of_sysctl_where_macos_keeps_it(
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(sys, "platform", "darwin")
     assert tmux_module.boot_id() == "6B7A1D2E-0000-4000-8000-000000000001"
-    assert asked == [["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"]]
+    assert tmux_module.boot_id() == "6B7A1D2E-0000-4000-8000-000000000001"
+    assert asked == [["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"]], "asked once"
 
+    tmux_module.boot_id.cache_clear()  # another process
     monkeypatch.setattr(sys, "platform", "freebsd13")  # only a boot time, which moves
     assert tmux_module.boot_id() is None and len(asked) == 1
 

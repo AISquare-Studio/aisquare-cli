@@ -539,8 +539,9 @@ def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
             "with --forget each row whose socket does not answer is ended on your word:"
         )
     else:
+        live = f", leave {len(plan.held)} live" if plan.held else ""
         console.print(
-            f"about to shut down {len(plan.agents)} agent(s) "
+            f"about to shut down {len(plan.agents) - len(plan.held)} agent(s){live} "
             f"and kill {len(plan.sessions)} fleet session(s):"
         )
     names = {p.id: (p.codename or p.root.name or p.id) for p in plan.projects}
@@ -732,14 +733,22 @@ def shutdown(
         # The prompt names BOTH numbers: a plan with no live agent and one
         # leftover session asked "Shut down 0 agents?" while the real effect —
         # killing the session — sat only in the lines above (round 8 of #203).
+        # Nor does it count a row the run leaves live (round 28 of #257).
+        ending = len(plan.agents) - len(plan.held)
         parts = []
-        if plan.agents:
-            parts.append(f"{len(plan.agents)} agent{'s' if len(plan.agents) != 1 else ''}")
+        if ending:
+            parts.append(f"{ending} agent{'s' if ending != 1 else ''}")
         if plan.sessions:
             parts.append(
                 f"{len(plan.sessions)} tmux session{'s' if len(plan.sessions) != 1 else ''}"
             )
-        if not typer.confirm(f"Shut down {' and '.join(parts)}?", default=False):
+        if not parts:
+            # Every row is left live and no session goes: the run would change nothing,
+            # and would say the fleet is not down, as this does.
+            stdout_console().print("nothing to shut down: every agent above is left live")
+            raise typer.Exit(code=1)
+        live = f", leaving {len(plan.held)} live" if plan.held else ""
+        if not typer.confirm(f"Shut down {' and '.join(parts)}{live}?", default=False):
             stdout_console().print("nothing stopped")
             return
     try:

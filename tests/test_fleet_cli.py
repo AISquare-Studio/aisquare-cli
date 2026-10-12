@@ -899,6 +899,37 @@ def test_shutdown_asks_about_the_sessions_when_no_agent_is_live(
     assert asked == ["Shut down 1 tmux session?"]
 
 
+def test_shutdown_asks_about_the_rows_it_ends_not_the_ones_it_leaves_live(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 28 of #257: a held row is printed as left live, but the question still asked
+    "Shut down 2 agents", counting it; the run then left it live and exited 1. The plan and
+    the question count what the run ends, and say how many it leaves live."""
+    held = {"agt_manager": "its server's socket /tmp/tmux-1000/asq is gone"}
+    _install(monkeypatch, "shutdown_plan", _plan(held=held))
+    _install(monkeypatch, "shutdown", _report())
+    monkeypatch.setattr("aisquare.cli.fleet._stdin_is_a_terminal", lambda: True)
+    asked: list[str] = []
+
+    def confirm(text: str, *, default: bool = True, **kwargs: object) -> bool:
+        asked.append(text)
+        return False
+
+    monkeypatch.setattr("aisquare.cli.fleet.typer.confirm", confirm)
+    result = runner.invoke(app, ["fleet", "shutdown"])
+
+    out = _plain(result.stdout)
+    assert "about to shut down 1 agent(s), leave 1 live and kill 1 fleet session(s)" in out
+    assert asked == ["Shut down 1 agent and 1 tmux session, leaving 1 live?"]
+
+    every = {"agt_coderauth": "gone", "agt_manager": "gone"}
+    _install(monkeypatch, "shutdown_plan", _plan(held=every, sessions=[]))
+    nothing = runner.invoke(app, ["fleet", "shutdown"])
+
+    assert nothing.exit_code == 1 and len(asked) == 1, "nothing to ask: the fleet stays up"
+    assert "nothing to shut down: every agent above is left live" in _plain(nothing.stdout)
+
+
 def test_shutdown_reports_each_row_with_the_reason_the_service_gave(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:

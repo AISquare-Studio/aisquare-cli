@@ -28,11 +28,12 @@ all of them must reach it.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -327,7 +328,10 @@ class _WorkerThreads(WorkerManager):
     switch, a usage or credits read), and so does the removal of the view that started it,
     so a hand-over that went by the workers quit under a thread still opening the store
     (round 23 of #257). Every worker start passes through ``_new_worker``, ``@work``'s too,
-    so each thread worker's callable is counted here from its first line to its last.
+    so each thread worker's callable is counted here from its first line to its last. An
+    ``async def`` or an awaitable run in a thread is counted too: it is handed to Textual
+    as the callable that runs it in a loop of its own, as Textual's own runner would
+    (:func:`_in_its_own_loop`), since a cancel leaves that thread running as well (round 24).
 
     Textual's own thread workers are left out (:func:`_textuals_own`): the Onboard view's
     ``DirectoryTree`` lists each folder in one, ``_load_directory``, which writes nothing,
@@ -354,16 +358,12 @@ class _WorkerThreads(WorkerManager):
         thread: bool = False,
     ) -> Worker[Any]:
         waited = thread and not _textuals_own(work)
-        if (
-            waited
-            and callable(work)
-            and not inspect.iscoroutinefunction(getattr(work, "func", work))
-        ):
-            # The name and description Textual would give it, read off the callable before
-            # it is wrapped.
+        if waited and (callable(work) or inspect.isawaitable(work)):
+            # The name and description Textual would give it, read off the work before it
+            # is wrapped.
             name = name or getattr(work, "__name__", "") or ""
             description = description or repr(work)
-            work = self._counted(work, name)
+            work = self._counted(_in_its_own_loop(work), name)
         worker = super()._new_worker(
             work,
             node,
@@ -401,6 +401,23 @@ class _WorkerThreads(WorkerManager):
         with self._lock:
             names = set(+self._threads)
         return names | {worker.name for worker in self._waited if not worker.is_finished}
+
+
+def _in_its_own_loop(work: WorkType[Any]) -> Callable[[], Any]:
+    """``work`` as the plain callable its thread runs: an ``async def`` (or a ``partial`` of
+    one) or an awaitable is run to its end in an event loop of its own, as Textual runs one
+    in a thread (``Worker._run_threaded``); a plain callable is itself."""
+    if inspect.iscoroutinefunction(work) or inspect.iscoroutinefunction(
+        getattr(work, "func", None)
+    ):
+        return lambda: asyncio.run(_awaited(work()))  # type: ignore[operator]
+    if inspect.isawaitable(work):
+        return lambda: asyncio.run(_awaited(work))
+    return work
+
+
+async def _awaited(awaitable: Awaitable[Any]) -> Any:
+    return await awaitable
 
 
 def _textuals_own(work: object) -> bool:

@@ -28,7 +28,7 @@ from textual.dom import DOMNode
 from textual.message import Message
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
-from textual.worker import WorkerState
+from textual.worker import WorkerState, get_current_worker
 from typer.testing import CliRunner
 
 from aisquare.cli import install as install_cli
@@ -349,6 +349,58 @@ def test_update_waits_for_a_cancelled_doctor_run_whose_thread_still_runs(
     assert cancelled == (WorkerState.CANCELLED, False), "control: the worker reads finished"
     assert while_running == [], "no quit under its thread"
     assert exits == [("upgrade", "--reopen")], "the quit, once its thread has ended"
+
+
+@pytest.mark.parametrize("shape", ["async def", "awaitable"])
+def test_update_waits_for_a_cancelled_async_thread_worker_whose_thread_still_runs(
+    isolated_home: Path,
+    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    """Round 24 of #257: only a plain callable was counted from its first line to its last.
+    An ``async def`` run in a thread (or an awaitable) runs in a loop of its own on that
+    thread, which a cancel leaves running just the same, and Update quit under it. The
+    control: one not cancelled still answers, and knows its worker, as Textual runs it."""
+    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
+    started = threading.Event()
+    release = threading.Event()
+
+    async def held() -> None:
+        started.set()
+        release.wait(10)
+
+    async def answer() -> str:
+        await asyncio.sleep(0)
+        return get_current_worker().name
+
+    async def fn(pilot: Pilot[None]) -> tuple[bool, list[Any], list[Any], Any]:
+        app = pilot.app
+        assert isinstance(app, ui_app.FleetApp)
+        exits: list[Any] = []
+        app.exit = lambda *_args, **_kwargs: exits.append(app.hand_off)  # type: ignore[method-assign]
+        app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        work = held if shape == "async def" else held()
+        worker = app.run_worker(work, name="async-read", thread=True, exit_on_error=False)
+        assert await asyncio.to_thread(started.wait, 10)
+        worker.cancel()
+        await settle_page(app)
+        app.query_one("#doctor-update", Button).press()
+        await settle_page(app)
+        while_running = list(exits)
+        release.set()
+        await settle_until(app, lambda: exits)
+        asked = answer if shape == "async def" else answer()
+        answered = app.run_worker(asked, name="async-answer", thread=True, exit_on_error=False)
+        await answered.wait()
+        return worker.is_finished, while_running, exits, answered.result
+
+    finished, while_running, exits, answered = drive(fn)
+
+    assert finished, "control: the worker reads finished"
+    assert while_running == [], "no quit under its thread"
+    assert exits == [("upgrade", "--reopen")], "the quit, once its thread has ended"
+    assert answered == "async-answer", "run as Textual runs it: its result, its worker"
 
 
 @pytest.mark.parametrize("name", sorted(CUT_OFF))

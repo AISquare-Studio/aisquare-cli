@@ -538,6 +538,74 @@ def test_serve_refuses_a_projects_own_directory_as_its_dist(
         remote_server.run_foreground(dist_dir=project_root, port=free_port())
 
 
+@pytest.mark.parametrize("installed", [False, True], ids=["dist", "installed"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "a file others may write",
+        "a directory others may write",
+        "a file a shared group may write",
+        "a file another account owns",
+        "a file this account's own group may write",
+        "a hidden file others may write",
+        "a link",
+    ],
+)
+def test_a_build_another_account_may_change_is_no_page_to_serve(
+    isolated_home: Path,
+    built: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    installed: bool,
+    change: str,
+) -> None:
+    """``install-page`` narrows its copy's modes, but ``serve --dist`` serves a build in
+    place, and a page installed before the narrowing kept its build's: a build off a FAT
+    drive, ``/mnt/c`` or an archive, 0777 and 0666, was served as it was, and another
+    account could replace the page that takes the passphrase (review of #243, round 8, 3/6).
+    What a server never serves, a hidden file or a link's own mode, is no matter, nor is a
+    group that is this account's own."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("Windows keeps no group or other bits")
+    root = built
+    if installed:
+        root = remote_server.install_page(built)
+    script = root / "assets" / "app.js"
+    own_group = script.stat().st_gid if change.startswith("a file this account's") else None
+    monkeypatch.setattr(remote_server, "_remote_private_group", lambda: own_group)
+    if change == "a file others may write":
+        script.chmod(0o666)
+    elif change == "a directory others may write":
+        (root / "assets").chmod(0o777)
+    elif change.startswith("a file") and change.endswith("group may write"):
+        script.chmod(0o664)
+    elif change == "a file another account owns":
+        uid = os.getuid()
+        monkeypatch.setattr(os, "getuid", lambda: uid + 1)
+    elif change == "a hidden file others may write":
+        (root / "assets" / ".cache").write_text("")
+        (root / "assets" / ".cache").chmod(0o666)
+    else:
+        try:
+            (root / "linked.js").symlink_to(script)
+        except OSError:
+            pytest.skip("this platform cannot make the symlink")
+
+    problem = remote_server._page_missing(None if installed else built)
+
+    if change in {"a file this account's own group may write", "a hidden file others may write"}:
+        assert problem is None
+    elif change == "a link":
+        assert problem is None, "a link's own mode is 0777 and says nothing"
+    else:
+        assert problem is not None and "can be written by another account" in problem
+        assert str(root) in problem and "chmod -R go-w" in problem
+        if change != "a file another account owns":
+            changed = root / "assets" / ("app.js" if change.startswith("a file") else "")
+            assert problem.startswith(str(changed).rstrip("/") + " ")
+        with pytest.raises(NoRemotePage, match="can be written by another account"):
+            remote_server.run_foreground(dist_dir=None if installed else built, port=free_port())
+
+
 def test_install_page_leaves_behind_what_a_server_would_not_serve(
     isolated_home: Path, built: Path, tmp_path: Path
 ) -> None:

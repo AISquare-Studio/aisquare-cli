@@ -6238,6 +6238,8 @@ def _page_missing(dist_dir: Path | None) -> str | None:
     build, is refused as ``install-page`` refuses it (:func:`_page_project_not_build`). One
     that does not resolve, a symbolic link loop, is refused as such; an installed build that
     does not is no installed page, as :func:`build_app` serves it (:func:`_remote_resolved`).
+    A ``--dist`` or an installed build that another account may change is refused
+    (:func:`_page_open_to_others`).
     """
     if dist_dir is not None:
         dist = _remote_resolved(dist_dir)
@@ -6245,10 +6247,14 @@ def _page_missing(dist_dir: Path | None) -> str | None:
             return PAGE_DOES_NOT_RESOLVE.format(path=dist_dir)
         if not (dist / "index.html").is_file():
             return f"no index.html in {dist}"
-        return _page_project_not_build(dist)
+        return _page_project_not_build(dist) or _page_open_to_others(
+            dist, "or install it with asq remote install-page and serve without --dist"
+        )
     installed = _remote_resolved(remote_dist_dir())
     if installed is not None and (installed / "index.html").is_file():
-        return None
+        return _page_open_to_others(
+            installed, "or install the build again with asq remote install-page"
+        )
     from aisquare.services import remote_page
 
     return None if remote_page.bundled_page_present() else NO_PAGE_HINT
@@ -6259,6 +6265,81 @@ PAGE_DOES_NOT_RESOLVE = (
 )
 """Why a ``--dist`` or an ``install-page`` source that does not resolve is no page
 (:func:`_remote_resolved`)."""
+
+PAGE_OPEN_TO_OTHERS = (
+    "{path} can be written by another account, which could change the page that takes the "
+    "passphrase — chmod -R go-w {root}, {remedy}"
+)
+"""Why a ``--dist`` or an installed build that another account may change is no page
+(:func:`_page_open_to_others`)."""
+
+
+def _page_open_to_others(root: Path, remedy: str) -> str | None:
+    """The refusal of the build at ``root`` when another account may change what a server
+    serves from it; ``None`` when none may.
+
+    :func:`install_page` narrows its copy's modes (:func:`_page_copy_narrowed`), but a
+    ``--dist`` build is served in place, and a page installed before the narrowing kept its
+    build's: one made on a FAT or exFAT drive, on a WSL ``/mnt/c`` path, or out of an
+    archive that kept its 0777 and 0666 was served as it was, and another account could
+    replace ``index.html`` or its script, served before the passphrase, and take the
+    passphrase and the device's cookie (review of #243, round 8, 3/6).
+
+    Another account may change a directory or a file that others may write, that a group
+    may write other than this account's own (a user private group, the one Fedora and
+    Debian give each user with a umask of 002, holds no one else:
+    :func:`_remote_private_group`), or that an account other than this one or root owns.
+    What a server never serves is not looked at: a hidden name, and a link, whose own mode
+    says nothing and whose target in the build is looked at where it is. Windows keeps no
+    such modes.
+    """
+    import sys
+
+    if sys.platform == "win32":
+        return None
+    import stat
+
+    own_group = _remote_private_group()
+    owners = {os.getuid(), 0}
+    for directory, subdirectories, files in os.walk(root):
+        subdirectories[:] = [name for name in subdirectories if not name.startswith(".")]
+        shown = (os.path.join(directory, name) for name in files if not name.startswith("."))
+        for path in (directory, *shown):
+            try:
+                info = os.lstat(path)
+            except OSError:
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                continue
+            if (
+                info.st_mode & stat.S_IWOTH
+                or (info.st_mode & stat.S_IWGRP and info.st_gid != own_group)
+                or info.st_uid not in owners
+            ):
+                return PAGE_OPEN_TO_OTHERS.format(path=path, root=root, remedy=remedy)
+    return None
+
+
+def _remote_private_group() -> int | None:
+    """This account's own group when no other account is in it, a user private group;
+    ``None`` otherwise (macOS's ``staff``, SUSE's ``users``), or for an account with no
+    entry to look it up by."""
+    import sys
+
+    if sys.platform == "win32":
+        return None
+    import grp
+    import pwd
+
+    try:
+        user = pwd.getpwuid(os.getuid())
+        group = grp.getgrgid(user.pw_gid)
+    except KeyError:
+        return None
+    if group.gr_name != user.pw_name or set(group.gr_mem) - {user.pw_name}:
+        return None
+    return user.pw_gid
+
 
 _PAGE_PROJECT_FILES = ("package.json", "node_modules")
 """What a web project's own directory holds beside its source ``index.html``, and its built

@@ -747,13 +747,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             overview = None  # a directory we cannot read costs the line, never the frame
         else:
             return  # still running, or cancelled with the app: nothing to paint or owe
-        try:
-            sidebar = self.sidebar
-        except NoMatches:
-            # asq is closing: its frame went before this answer, which a thread worker
-            # finishing as the app shuts down delivers all the same (windows-latest, round
-            # 25 of #257). Nothing to paint, and no read to owe.
-            return
+        sidebar = self.sidebar
         self.accounts_overview = overview
         session_known = True
         try:
@@ -867,6 +861,18 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         )
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        """Paint what the app's own workers answered: the accounts read and the doctor.
+
+        Nothing once asq has stopped running. A thread worker that finishes as the app
+        shuts down delivers its answer all the same, after the frame it would paint has
+        gone, and the first query for it raised NoMatches out of this handler: the
+        accounts read's on windows-latest (round 25 of #257), and a doctor run's in
+        ``show_doctor`` and ``show_doctor_failure`` (round 26). One check here answers for
+        every worker the app runs. A view's own answers need none: Textual handles its
+        messages only until it is pruned, and prunes its children after that.
+        """
+        if not self.is_running:
+            return
         if event.worker.name == ACCOUNTS_WORKER:
             # Every read's answer, not only the newest read's: a worker is finished
             # before its StateChanged is handled, so a tick handled in between

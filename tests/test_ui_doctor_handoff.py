@@ -813,29 +813,34 @@ def test_an_owed_start_that_raises_is_said_and_the_rest_still_begin() -> None:
     assert app.hand_off is None and app._owed == {}
 
 
-def test_an_accounts_answer_that_lands_as_asq_closes_paints_nothing() -> None:
-    """Round 25 of #257, on windows-latest: an accounts read the call-off started answered
-    after the app had taken its frame down, and the query for the sidebar raised NoMatches
-    out of the worker's handler, failing the run. That answer has nothing to paint."""
-    from textual.css.query import NoMatches
+@pytest.mark.parametrize(
+    ("name", "state"),
+    [
+        (ui_app.ACCOUNTS_WORKER, WorkerState.SUCCESS),
+        (ui_app._DOCTOR_WORKER, WorkerState.SUCCESS),
+        (ui_app._DOCTOR_WORKER, WorkerState.ERROR),
+    ],
+    ids=["accounts", "doctor", "doctor-crashed"],
+)
+def test_an_answer_that_lands_as_asq_closes_paints_nothing(name: str, state: WorkerState) -> None:
+    """Rounds 25 and 26 of #257: a thread worker finishing as the app shuts down delivers
+    its answer after the frame has gone. On windows-latest the accounts read's query for
+    the sidebar raised NoMatches out of the handler, and a doctor run (one a call-off began,
+    then a quit) did the same in ``show_doctor`` and ``show_doctor_failure``. An app that
+    has stopped running paints none of them, and reads nothing to try."""
+    report = (None, []) if name == ui_app._DOCTOR_WORKER else None  # machine-wide, no findings
+    worker = SimpleNamespace(name=name, result=report, error=LookupError("the checks crashed"))
 
     class Closing:
-        accounts_overview: Any = "as it was"
-        _accounts_owed = True
+        is_running = False
+        _doctor_worker = worker  # the newest run: not dismissed as superseded
 
-        @property
-        def sidebar(self) -> Any:
-            raise NoMatches("No nodes match 'Sidebar' on PaneScreen(id='_default')")
+        def __getattr__(self, attribute: str) -> Any:
+            raise AssertionError(f"{attribute} read by an app that is closing")
 
-        def refresh_accounts(self) -> None:
-            raise AssertionError("no read is owed by an app that is closing")
+    answered = SimpleNamespace(state=state, worker=worker)
 
-    app = Closing()
-    answered = SimpleNamespace(state=WorkerState.SUCCESS, worker=SimpleNamespace(result=None))
-
-    ui_app.FleetApp._accounts_read(app, answered)  # type: ignore[arg-type]
-
-    assert app.accounts_overview == "as it was"
+    ui_app.FleetApp.on_worker_state_changed(Closing(), answered)  # type: ignore[arg-type]
 
 
 def test_no_start_on_asqs_own_schedule_begins_once_a_hand_over_is_pending(

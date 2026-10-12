@@ -1271,7 +1271,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
         The writers are waited for here too: one started from a page while the reads
         were waited out is cut off by a quit as much as any.
+
+        A hand-over called off ends the polling here, not only by the timer's stop: the timer
+        queues each poll (``set_timer`` goes by ``call_next``), and a poll already queued when
+        the second press was handled would quit asq with nothing to hand over (round 24).
         """
+        if self.hand_off is None:
+            return  # called off (_call_off_hand_off): a poll queued before the press ends here
         running = self._holding_the_quit()
         if not running:
             self.exit()

@@ -536,6 +536,44 @@ def test_a_hand_over_kept_waiting_says_by_what_and_a_second_press_calls_it_off(
     assert restarted, "asq's reads start again"
 
 
+def test_a_poll_queued_before_the_call_off_neither_waits_on_nor_quits(
+    isolated_home: Path,
+    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 24 of #257: the hand-over's timer only queues its poll (``set_timer`` goes by
+    ``call_next``), so stopping the timer cannot take back a poll already queued when the
+    second press is handled. That poll ran with nothing handed over: it said "Still
+    waiting" after "Called off", polled on, and once the read ended quit asq, which then
+    ran no command. The order here is the one a tick and a press queued together take."""
+    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
+    monkeypatch.setattr(ui_app, "_HAND_OFF_PATIENCE", 0.3)
+    release = threading.Event()
+
+    async def fn(pilot: Pilot[None]) -> tuple[list[str], list[Any]]:
+        app = pilot.app
+        assert isinstance(app, ui_app.FleetApp)
+        said: list[str] = []
+        exits: list[Any] = []
+        app.notify = lambda message, **_: said.append(str(message))  # type: ignore[method-assign]
+        app.exit = lambda *_args, **_kwargs: exits.append(app.hand_off)  # type: ignore[method-assign]
+        app.run_worker(release.wait, name="hung-read", thread=True, exit_on_error=False)
+        app.query_one("#doctor-update", Button).press()
+        await settle_until(app, lambda: len(said) == 2, group="held")
+        app.call_next(app._exit_when_read)  # the timer fired: its poll is queued
+        app._call_off_hand_off()  # the second press, handled before it
+        await settle_page(app, group="held")
+        release.set()
+        await settle_page(app)
+        return said, exits
+
+    said, exits = drive(fn)
+
+    assert said[1].startswith("Still waiting for hung-read"), "control: the wait was overdue"
+    assert said[2:] == ["Called off: asq carries on"], said
+    assert exits == [], "no quit once the read ended"
+
+
 def _starts_with_a_hand_over(pending: bool, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """The workers asq's own starts begin: a project's page opened (its Explainability and
     Settings tabs read on mount, and the shell's doctor runs for it), its Doctor tab, the

@@ -156,6 +156,18 @@ IMPLEMENTED: set[tuple[str, ...]] = {
         )
     ),
     *(("metrics", command) for command in ("show", "list")),
+    *(
+        ("remote", command)
+        for command in (
+            "serve",
+            "install-page",
+            "status",
+            "allow-write",
+            "regenerate-password",
+            "revoke",
+            "needs",
+        )
+    ),
 }
 
 

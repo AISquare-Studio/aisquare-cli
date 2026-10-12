@@ -453,6 +453,10 @@ The app — what bare `asq` runs. Explicit so a script or alias can reach it, an
 so `aisquare ui --help` exists. Without an interactive terminal it refuses with
 the reason (`not_a_tty`) rather than starting a full-screen app into a pipe.
 
+Press `R` for Remote control: the fleet on your phone through your own ngrok
+tunnel, with the link, a QR code and the passphrase in one panel — see
+[Phone control](remote.md).
+
 ---
 
 ## Accounts
@@ -537,10 +541,13 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   and is told in one line to continue, and no exit is announced for it —
   `--fresh` (or a transcript that is not on disk) starts new with a hand-off
   prompt built from the board instead; that agent takes the claims over too,
-  on its new session, and no exit is announced for it either. An agent whose
-  role, task (done or dropped) or binary would refuse the replacement is
-  refused before it is stopped, and a task that closes while it is being
-  stopped is left off the replacement.
+  on its new session, and no exit is announced for it either. Should the
+  replacement not start, the agent stays stopped, its task goes back to the
+  pool, and the board says `agent_exited` after all, as *exited (0): its
+  replacement did not start* (*exited (?)* when the stop had to kill it). An
+  agent whose role, task (done or dropped) or binary would refuse the
+  replacement is refused before it is stopped, and a task that closes while
+  it is being stopped is left off the replacement.
   With `on_limit = "switch"` (*on a usage limit* on the Settings tab) the fleet
   does this by itself when the limit lifts more than
   `wait_if_reset_within_minutes` away, in a worker detached from the agent's
@@ -1200,7 +1207,10 @@ they were (**Stop** clears them), and a running agent whose role, task,
 account or binary would refuse the restart is refused before it is stopped. A
 running agent is handed over the way `fleet switch` hands one over: its task
 stays claimed for the replacement, and the board says `restarted`, not
-`agent_exited`, so the manager is not woken to staff that task again. A resumed
+`agent_exited`, so the manager is not woken to staff that task again. Should the
+replacement not start, the task goes back to the pool and the board says
+`agent_exited` after all, as *exited (0): its replacement did not start*
+(*exited (?)* when the stop had to kill it). A resumed
 agent is typed one line telling it to carry on, as `fleet switch` types it, so
 it does not sit at the idle prompt `claude --resume` opens at. An agent a
 hand-over is already moving (a `fleet switch`, by hand or on a usage limit, or

@@ -419,6 +419,14 @@ def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
 _UTF16_BOMS = (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)
 
 
+def decode_by_bom(raw: bytes, *, errors: str = "strict") -> str:
+    """``raw`` decoded by the byte-order mark it opens with: UTF-16 after a UTF-16 mark, else
+    UTF-8 with any UTF-8 mark dropped (:func:`_parse_toml` says why). For any text file a
+    human may have saved on Windows: ``services.ngrok_tunnel`` reads ngrok's config with it.
+    """
+    return raw.decode("utf-16" if raw.startswith(_UTF16_BOMS) else "utf-8-sig", errors)
+
+
 def _parse_toml(raw: bytes) -> dict[str, Any]:
     """The TOML document in ``raw``, decoded by the byte-order mark it opens with.
 
@@ -440,8 +448,7 @@ def _parse_toml(raw: bytes) -> dict[str, Any]:
     as ``tomllib.load`` did: ``load_config`` reports it, and ``save_config``
     will not write over it unless told to discard it.
     """
-    encoding = "utf-16" if raw.startswith(_UTF16_BOMS) else "utf-8-sig"
-    loaded: dict[str, Any] = tomllib.loads(raw.decode(encoding))
+    loaded: dict[str, Any] = tomllib.loads(decode_by_bom(raw))
     return loaded
 
 

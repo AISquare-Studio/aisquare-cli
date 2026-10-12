@@ -237,6 +237,22 @@ def _project_name(project: ProjectInfo) -> str:
     return project.root.name or project.id
 
 
+def projects_json(
+    projects: list[ProjectInfo], *, group_names: Mapping[str, str] | None = None
+) -> list[dict[str, object]]:
+    """The ``project list --json`` payload — shared with the Remote Control server verbatim."""
+    names = group_names or {}
+    return [
+        {
+            **project.model_dump(mode="json"),
+            "name": _project_name(project),
+            "group": names.get(project.group_id or "", project.group_id),
+            "pinned": project.pinned_at is not None,
+        }
+        for project in projects
+    ]
+
+
 def emit_projects(
     projects: list[ProjectInfo],
     *,
@@ -259,19 +275,7 @@ def emit_projects(
     """
     names = group_names or {}
     if get_state().json_output:
-        typer.echo(
-            json.dumps(
-                [
-                    {
-                        **project.model_dump(mode="json"),
-                        "name": _project_name(project),
-                        "group": names.get(project.group_id or "", project.group_id),
-                        "pinned": project.pinned_at is not None,
-                    }
-                    for project in projects
-                ]
-            )
-        )
+        typer.echo(json.dumps(projects_json(projects, group_names=names)))
         return
     if not projects and filtered:
         stdout_console().print(filtered)

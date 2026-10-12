@@ -39,7 +39,7 @@ from aisquare.core import paths
 
 def write_replacing(
     target: Path,
-    body: str,
+    body: str | bytes,
     *,
     keep_mode: bool = True,
     durable: bool = True,
@@ -47,6 +47,7 @@ def write_replacing(
 ) -> bool:
     """Replace ``target``'s contents with ``body`` in one step.
 
+    ``body`` is text, or ``bytes`` to land exactly (:meth:`Replacement.publish`).
     ``keep_mode`` copies an existing target's permission bits onto the new
     file (a ``chmod 600`` stays a 600); the temp file is otherwise created at
     the umask default. ``durable`` fsyncs the temp before the rename and the
@@ -98,15 +99,24 @@ class Replacement:
         self._kept = kept
         self._durable = durable
 
-    def publish(self, body: str) -> None:
+    def publish(self, body: str | bytes) -> None:
         """Write ``body`` into the temp and rename it over the target, once.
+
+        A ``str`` is written as UTF-8 in text mode, as every text caller's always
+        has been, so on Windows each ``\\n`` lands as ``\\r\\n``. ``bytes`` land
+        exactly as given: ``services.remote_server`` keeps the bytes it wrote to
+        know its own write when it reads the file back, which a CR added per line
+        would defeat.
 
         A second call is refused: the temp has become the target, and the file
         it would write is a new one that no restriction was applied to.
         """
         if self.published:
             raise RuntimeError(f"{self.target} was already replaced by this temp")
-        with self._temporary.open("w", encoding="utf-8") as handle:
+        binary = isinstance(body, bytes)
+        with self._temporary.open(
+            "wb" if binary else "w", encoding=None if binary else "utf-8"
+        ) as handle:
             handle.write(body)
             if self._durable:
                 handle.flush()

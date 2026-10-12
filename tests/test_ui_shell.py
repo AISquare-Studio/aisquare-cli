@@ -46,6 +46,7 @@ from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HelpScreen, Panes
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.divider import WIDEST_ASK, Divider, cells
 from aisquare.cli.ui.groups import DropProject, GroupPicker
+from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.sidebar import (
     RESIZE_STEP,
     Activatable,
@@ -3482,6 +3483,7 @@ def test_run_ui_says_what_the_quit_could_not_save(
     class _Quit:
         def __init__(self, **options: object) -> None:
             self.unsaved = ["the theme was not saved: state.json.lock is held by another process"]
+            self.remote = RemoteController()  # off: nothing for run_ui to wait for
 
         def run(self) -> None:
             return None
@@ -3581,7 +3583,8 @@ def test_selecting_an_agent_focuses_its_pane_so_typing_reaches_the_agent_not_the
     focused_pane, alive, still_in_pane = drive(go)
     assert focused_pane, "the pane, not the sidebar, has the keyboard after a selection"
     assert alive is None, "q went to the agent, not to the app"
-    typed = [argv for argv in no_real_tmux if "send-keys" in argv and argv[-1] == "q"]
+    # Typed text goes as hex (``send-keys -H``): ``q`` is ``71``.
+    typed = [argv for argv in no_real_tmux if "send-keys" in argv and argv[-2:] == ("-H", "71")]
     assert typed, f"q was forwarded to tmux: {no_real_tmux[-3:]}"
     assert not still_in_pane, "F12 is the deliberate way back to the sidebar"
 

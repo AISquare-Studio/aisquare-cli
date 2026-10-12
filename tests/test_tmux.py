@@ -105,6 +105,8 @@ def _facts_line(**overrides: str) -> str:
         "mouse_sgr_flag": "0",
         "mouse_button_flag": "0",
         "mouse_all_flag": "0",
+        "start_time": "1790343472",
+        "window_activity": "1790350000",
         "pane_title": "fedora",
     }
     values.update(overrides)
@@ -734,7 +736,31 @@ def test_pane_facts_parses_a_live_pane(fake_bin: Path, conf: Path) -> None:
         in_mode=False,
         current_command="claude",
         title="fedora",
+        server_started=datetime(2026, 9, 25, 13, 37, 52, tzinfo=UTC),
+        last_output=datetime(2026, 9, 25, 15, 26, 40, tzinfo=UTC),
     )
+
+
+def test_the_facts_say_when_their_pane_last_printed_or_nothing() -> None:
+    """``#{window_activity}`` rides in the facts too: the remote's needs-you asked for it in a
+    third process, after the facts and the server's start, on every quarter-second poll of
+    an agent action. A tmux that does not say prints nothing, which is ``None``."""
+    printed = tmux_module._facts(_facts_line(window_activity="1790350000")).last_output
+    assert printed == datetime.fromtimestamp(1790350000, tz=UTC)
+    for silent in ("", "soon", "-1"):
+        assert tmux_module._facts(_facts_line(window_activity=silent)).last_output is None
+
+
+def test_the_facts_say_when_their_server_started_or_nothing(fake_bin: Path, conf: Path) -> None:
+    """``#{start_time}`` rides in the facts, the same answer :meth:`TmuxServer.started_at` gives:
+    the remote's live stream asked it in a second process for every frame. A tmux that does
+    not know the variable prints nothing for it, which judges nothing, as there."""
+    asked = _server(FakeTmux(Completed(0, "1790343472\n", "")), fake_bin, conf).started_at()
+    assert tmux_module._facts(_facts_line()).server_started == asked
+    for silent in ("", "soon", "-1"):
+        assert tmux_module._facts(_facts_line(start_time=silent)).server_started is None
+    title = f"a{_SEP}1790343472"
+    assert tmux_module._facts(_facts_line(start_time="", pane_title=title)).title == title
 
 
 def test_pane_facts_reads_which_mouse_reports_the_program_asked_for(
@@ -944,13 +970,20 @@ def test_capture_raises_when_the_pane_is_gone(fake_bin: Path, conf: Path) -> Non
 # --- input --------------------------------------------------------------------------------------
 
 
-def test_send_keys_and_send_literal_build_their_argv(fake_bin: Path, conf: Path) -> None:
-    """…including the escape send_literal's docstring records.
+def _hex(text: str) -> list[str]:
+    return [f"{byte:02x}" for byte in text.encode("utf-8")]
 
-    A TRAILING ``;`` is tmux's command separator even after ``-l --``: measured
-    on 3.7c, ``send-keys -l -- 'a;'`` puts ``a`` in the pane and drops the
-    semicolon (proved live in ``test_live_send_literal_delivers_a_trailing_semicolon``).
-    A ``;`` anywhere else is already data — the negative control on the escape.
+
+def test_send_keys_and_send_literal_build_their_argv(fake_bin: Path, conf: Path) -> None:
+    """Named keys go as NAMES; literal text goes as BYTES.
+
+    Literal text used to go as ``-l -- <string>``, which put tmux's argument
+    parser between the text and the pane: measured on 3.7c, ``-l -- 'a;'`` puts
+    ``a`` in the pane and drops the semicolon, so :func:`_data_arg` escaped the
+    separator. ``-H`` removes the string entirely, so nothing needs escaping and
+    the whole class of quirk is gone — including the trailing space that was
+    eating the remote page's space bar. (``_data_arg`` still guards
+    :meth:`spawn_window`, where an argv really is a command.)
     """
     fake = FakeTmux()
     server = _server(fake, fake_bin, conf)
@@ -960,10 +993,62 @@ def test_send_keys_and_send_literal_build_their_argv(fake_bin: Path, conf: Path)
     server.send_keys("%3")
     server.send_literal("%3", "")
     assert fake.commands() == [
-        ["send-keys", "-t", "%3", "C-c", "Enter"],
-        ["send-keys", "-t", "%3", "-l", "--", "-dash text; not a command"],
-        ["send-keys", "-t", "%3", "-l", "--", "a\\;"],
+        ["send-keys", "-t", "%3", "--", "C-c", "Enter"],
+        ["send-keys", "-t", "%3", "-H", *_hex("-dash text; not a command")],
+        ["send-keys", "-t", "%3", "-H", *_hex("a;")],
     ], "nothing to send is not a tmux call"
+
+
+def test_a_key_that_would_end_the_command_or_read_as_a_flag_stays_data(
+    fake_bin: Path, conf: Path
+) -> None:
+    """Keys are caller data: before ``--`` and :func:`_data_arg`, ``['Enter;', 'kill-server']``
+    killed the private server and ``[';', 'run-shell', …]`` ran a shell command (measured on
+    3.7c). ``--`` ends the flags, so ``-l`` is a key; a trailing ``;`` is escaped, so the next
+    argument is never a command of its own."""
+    fake = FakeTmux()
+    server = _server(fake, fake_bin, conf)
+    server.send_keys("%3", "-l", "Enter;", "kill-server", ";", "M-;")
+    assert fake.commands() == [
+        ["send-keys", "-t", "%3", "--", "-l", "Enter\\;", "kill-server", "\\;", "M-\\;"]
+    ]
+
+
+@pytest.mark.parametrize("key", ["", " ", "Enter\n", "C-c\r", "a\tb", "\x1b", "Up\x00"])
+def test_a_key_no_tmux_name_could_be_is_refused_before_tmux_runs(
+    fake_bin: Path, conf: Path, key: str
+) -> None:
+    fake = FakeTmux()
+    server = _server(fake, fake_bin, conf)
+    with pytest.raises(TmuxError, match="not a tmux key name"):
+        server.send_keys("%3", "Enter", key)
+    assert fake.commands() == [], "nothing at all was sent, not even the valid key before it"
+
+
+#: The most arguments tmux 3.7 takes in one command ("Limit MSG_COMMAND argument to
+#: between 0 and 1000", CHANGES 3.6b to 3.7); past it the client says "command too long".
+_TMUX_ARGUMENT_LIMIT = 1000
+
+
+def test_a_long_send_literal_is_cut_into_commands_tmux_37_accepts(
+    fake_bin: Path, conf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``-H`` spends an argument per byte, and chunks of 1024 failed every paste of 997
+    bytes or more on tmux 3.7. The live chunking test cannot see that on a tmux older than
+    the limit, CI's among them, so the arguments are counted here; the control is the old
+    chunk size, which the same count has to catch. Either way every byte goes, in order."""
+    text = "".join(chr(ord("a") + i % 26) for i in range(3000))
+
+    def longest_command() -> int:
+        fake = FakeTmux()
+        _server(fake, fake_bin, conf).send_literal("%3", text)
+        commands = fake.commands()
+        assert [byte for command in commands for byte in command[4:]] == _hex(text)
+        return max(len(command) for command in commands)
+
+    assert longest_command() <= _TMUX_ARGUMENT_LIMIT
+    monkeypatch.setattr(tmux_module, "_HEX_CHUNK", 1024)
+    assert longest_command() > _TMUX_ARGUMENT_LIMIT
 
 
 def test_paste_loads_the_buffer_from_stdin_then_pastes_bracketed(
@@ -1231,6 +1316,8 @@ def test_live_capture_returns_the_screen_with_colours_and_consumes_the_facts_lin
     assert all(_SEP not in line for line in capture.lines)
     assert capture.facts.pane_id == window.pane_id
     assert capture.facts.dead is False and capture.facts.dead_status is None
+    assert capture.facts.server_started is not None
+    assert capture.facts.server_started == live.started_at()
     assert capture.scrollback == 0
     assert _wait(lambda: live.capture(window.pane_id).facts.current_command == "cat")
 
@@ -1371,6 +1458,26 @@ def test_live_send_literal_delivers_a_trailing_semicolon(live: TmuxServer) -> No
     live.send_literal(window.pane_id, "RAW")
     live.send_keys(window.pane_id, "Enter")
     assert _wait(lambda: "run makeRAW" in _screen(live, window.pane_id))
+
+
+@requires_tmux
+def test_live_send_keys_sends_keys_and_never_tmux_syntax(live: TmuxServer) -> None:
+    """``--`` and the escaped separator, measured on the pane the keys go to.
+
+    ``-l`` is no key name, so it arrives as the text it spells instead of being read as
+    the flag that turns every other key into text. ``;`` arrives as itself, and what
+    follows it is typed, not run: the option it would have set stays unset. Enter and
+    C-c still do what they name.
+    """
+    window = _spawn(live, "asq-test-fox", "w0", CAT)
+    assert _wait(lambda: "plain" in _screen(live, window.pane_id))
+
+    live.send_keys(window.pane_id, "-l", ";", "set-option", "-g", "@asq_injected", "yes", "Enter")
+    assert _wait(lambda: "-l;set-option-g@asq_injectedyes" in _screen(live, window.pane_id))
+    assert live.run("show-options", "-gqv", "@asq_injected").strip() == "", "nothing ran"
+
+    live.send_keys(window.pane_id, "C-c")
+    assert _wait(lambda: (facts := live.pane_facts(window.pane_id)) is not None and facts.dead)
 
 
 @requires_tmux

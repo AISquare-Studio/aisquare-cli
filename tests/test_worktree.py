@@ -130,6 +130,40 @@ def test_team_and_context_agree_inside_a_submodule(
     assert team_project(sub).root == find_project_root(sub)
 
 
+@pytest.mark.parametrize("layout", ["submodule-worktree", "moved-principal", "windows-gitdir"])
+def test_a_worktree_git_gives_no_principal_is_its_own_root(
+    layout: str,
+    repo_with_worktree: tuple[Path, Path],
+    repo_with_submodule: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A linked worktree of a submodule (``git_common_root`` leaves it to the marker walk),
+    one whose principal moved, and one whose ``gitdir:`` is a Windows path read from WSL
+    are each their own root, whether git answers or not: a checkout, which ``serve
+    --stdio`` activates in, never git's bookkeeping or a directory that is not there
+    (review of #243, round 13, 1/4)."""
+    from aisquare.core import orchestrator, workspace
+
+    repo, worktree = repo_with_worktree
+    _, sub = repo_with_submodule
+    if layout == "submodule-worktree":
+        start = tmp_path / "dep-wt"
+        _git("worktree", "add", "-q", str(start), "-b", "wt", cwd=sub)
+    elif layout == "moved-principal":
+        repo.rename(tmp_path / "moved")
+        start = worktree
+    else:
+        start = tmp_path / "wsl"
+        start.mkdir()
+        (start / ".git").write_text("gitdir: C:/Users/me/repo/.git/worktrees/wsl\n")
+    assert find_project_root(start) == start.resolve(), "with git"
+    monkeypatch.setattr(workspace, "git_common_root", lambda start: None)
+    monkeypatch.setattr(orchestrator, "git_common_root", lambda start: None)
+    assert find_project_root(start) == start.resolve(), "with git failing"
+    assert team_project(start).root == start.resolve()
+
+
 def test_a_plain_repo_is_still_its_own_root(tmp_path: Path) -> None:
     repo = tmp_path / "plain"
     (repo / "src").mkdir(parents=True)

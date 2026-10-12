@@ -556,7 +556,7 @@ def _local_zone(now: datetime) -> tzinfo:
     return now.astimezone().tzinfo or UTC
 
 
-def format_reset(when: datetime | None, *, now: datetime | None = None) -> str:
+def format_reset(when: datetime | None, *, now: datetime | None = None, clock: bool = True) -> str:
     """When a rate-limit window lifts, as a distance AND a clock time: ``in 3h 10m (18:00)``.
 
     The ONE formatter for every surface that shows a reset — ``accounts usage``
@@ -576,7 +576,9 @@ def format_reset(when: datetime | None, *, now: datetime | None = None) -> str:
 
     ``now`` is the clock to measure against; production reads the wall clock,
     tests pass one so the midnight boundary can be pinned. Returns ``""`` for
-    ``None`` so callers can append it unconditionally.
+    ``None`` so callers can append it unconditionally. ``clock=False`` is the
+    distance alone, ``in 3h 10m``, for a reader whose clock is not this
+    machine's: the Remote's phone, which tells the time itself.
     """
     if when is None:
         return ""
@@ -610,6 +612,8 @@ def format_reset(when: datetime | None, *, now: datetime | None = None) -> str:
         distance = f"{hours}h" if minutes == 0 else f"{hours}h {minutes:02d}m"
     else:
         distance = f"{days}d" if hours == 0 else f"{days}d {hours}h"
+    if not clock:
+        return f"in {distance}"
     if local_when.date() == local_now.date():
         return f"in {distance} ({local_when:%H:%M})"
     return f"in {distance} ({local_when:%a %H:%M})"

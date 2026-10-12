@@ -33,11 +33,12 @@ from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.app import ACCOUNTS_WORKER, FleetApp
-from aisquare.cli.ui.sidebar import AccountsSection, AccountsTitle
+from aisquare.cli.ui.sidebar import AccountsSection, AccountsSelected, AccountsTitle
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views.accounts import (
     SIGN_IN_WORKER,
+    USAGE_WORKER,
     AccountRow,
     AccountsView,
     account_line_text,
@@ -666,6 +667,47 @@ def test_a_keychain_backed_account_is_asked_and_its_row_says_why(
     assert calls == [1]  # asked, although its token state is "missing"
     assert "usage: credentials are in the macOS Keychain" in first
     assert "usage: …" not in first
+
+
+def test_a_page_shown_before_its_first_frame_reads_the_usage_when_the_frame_lands(
+    no_network: dict[str, Any],
+) -> None:
+    """``on_show`` starts the usage reading, and has no slots to ask about on a page shown
+    before its first frame: opened while the shell's first accounts read still waits, as a
+    remembered Accounts page is at launch, or with its ``Show`` handled while the app's
+    handler still awaited the mount (windows-latest, CI runs 36078630575 and 37719330211).
+    The frame painted the rows, and they said ``usage: …`` until the minute tick. The read
+    is held here as a busy registry holds it."""
+    no_network["usage"] = ClaudeUsage(
+        available=True, session_percent=60, session_resets_at=NOW + timedelta(hours=3)
+    )
+    release = threading.Event()
+
+    def reader() -> AccountsOverview:
+        release.wait(10)
+        return _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
+
+    async def run() -> tuple[list[int], list[int], str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
+        async with app.run_test(size=SIZE) as pilot:
+            try:
+                await pilot.pause()
+                app.post_message(AccountsSelected())  # as a launch restores the page
+                await settle_page(app, group=USAGE_WORKER)
+                view = app.query_one("#accounts", AccountsView)
+                assert app.current_view() is view and view._on_screen, "the page is up"
+                assert view.overview is None, "and the first read still waits"
+                while_held = list(no_network["usage_calls"])
+            finally:
+                release.set()
+            await accounts_read(app)  # the first frame, painted
+            await settle_page(app, group=USAGE_WORKER)  # and the reading it started
+            return while_held, sorted(no_network["usage_calls"]), line(view, 1)
+
+    while_held, calls, first = asyncio.run(run())
+    assert while_held == []  # no slots to ask about yet
+    assert calls == [1, 2]
+    assert "session ▮▮▮▯▯ 60%" in first and "usage: …" not in first
 
 
 # --- AISquare: the device flow as a card --------------------------------------------------------

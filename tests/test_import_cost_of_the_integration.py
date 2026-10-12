@@ -199,11 +199,18 @@ def test_the_load_bearing_imports_are_still_there() -> None:
     probe is not doing TLS from module scope any more, lose `sqlite3` and the
     spool's store moved. Either is worth a red test; `array` arriving on 3.13
     is not.
+
+    A member the base set already imports is not asked of the difference, which
+    cannot hold it: that is a floating dependency's import, not this package's.
+    pydantic 2.14's `types` imports `secrets` at module scope, which brings
+    `hashlib` into every command, so on a fresh install `hashlib` left the
+    explainability CLI's cost, and deferring it here would now save nothing.
     """
     added = _uniquely_imported()
+    expected = LOAD_BEARING - _top_level_modules(_BASE)
 
-    assert added >= LOAD_BEARING, (
-        f"{sorted(LOAD_BEARING - added)} no longer arrives with the explainability "
+    assert added >= expected, (
+        f"{sorted(expected - added)} no longer arrives with the explainability "
         "CLI.\nIf that is deliberate — an import deferred into the function that "
         "needs it, or a feature removed — update LOAD_BEARING so the record keeps "
         "describing the truth."

@@ -28,7 +28,7 @@ all of them must reach it.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -36,11 +36,13 @@ from typing import Any, ClassVar
 
 from rich.text import Text
 from textual import events
-from textual.app import ComposeResult
+from textual.app import ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.screen import ModalScreen
+from textual.message import Message
+from textual.notifications import SeverityLevel
+from textual.screen import ModalScreen, Screen
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState
@@ -57,6 +59,7 @@ from aisquare.cli.ui.groups import (
     TogglePin,
     UndoLayout,
 )
+from aisquare.cli.ui.remote_control import SWITCHES, RemoteController, ngrok_ends_with
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AddProject,
@@ -75,6 +78,7 @@ from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
+from aisquare.cli.ui.views.remote import RemotePanel
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, store_session
@@ -170,6 +174,18 @@ class FleetSnapshot:
         return next((s for s in self.agents.get(project_id, []) if s.agent.id == agent_id), None)
 
 
+class RemoteNews(Message):
+    """What the Remote controller says the human should hear (``RemoteController.on_news``),
+    posted from whichever thread learned it: ``post_message`` is safe from any thread.
+    ``done``: what a control's write did (``RemoteController.on_done``), said in any case."""
+
+    def __init__(self, text: str, trouble: bool, *, done: bool = False) -> None:
+        super().__init__()
+        self.text = text
+        self.trouble = trouble
+        self.done = done
+
+
 class HelpScreen(ModalScreen[None]):
     """The keys, in one place. Esc, q or ? closes."""
 
@@ -207,6 +223,7 @@ class HelpScreen(ModalScreen[None]):
             ("divider", "drag the line beside the sidebar to resize it; double-click puts it back"),
             ("> < =", "from the sidebar: widen, narrow, reset the divider"),
             ("t", "themes (applied live, autosaved)"),
+            ("R", "remote control — the fleet on your phone: link, QR, password, devices"),
             ("r", "refresh now"),
             ("a", "show or hide the captured directories (never added)"),
             ("F1", "command palette"),
@@ -326,6 +343,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         Binding("q", "quit", "quit"),
         Binding("ctrl+q", "quit", "quit", show=False),
         Binding("t", "pick_theme", "theme"),
+        # Off the footer, which must fit 80 columns; the ? screen and the palette list it.
+        Binding("R", "remote_panel", "remote", show=False),
         Binding("r", "refresh_now", "refresh"),
         Binding("a", "toggle_captured", "captured", show=False),
         Binding("question_mark", "help", "help", key_display="?"),
@@ -334,6 +353,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         {
             "quit",
             "pick_theme",
+            "remote_panel",
             "refresh_now",
             "help",
             "command_palette",
@@ -350,8 +370,21 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         doctor: DoctorRunner | None = diagnostics.doctor,
         escape_key: str | None = None,
         accounts: AccountsReader | None = accounts_service.overview,
+        remote: RemoteController | None = None,
     ) -> None:
         super().__init__()
+        self.remote = remote if remote is not None else RemoteController()
+        """The Remote (``R``) model — one per app, so the tunnel outlives the dialog."""
+        self._remote_savers = {
+            key: Autosave(self, key, what=what) for key, what in SWITCHES.items()
+        }
+        """Remote's two switches' saves, as the theme's (``autosave.py``)."""
+        self.remote.save_switch = self._save_remote_switch
+        self.remote.on_news = self._post_remote_news
+        self.remote.on_done = self._post_remote_done
+        # A start saves its switch here once its deadline is written on the controller's
+        # writer thread, in order with a turn-off's own save (post_message is thread-safe).
+        self.remote.call_back = self.call_later
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
         self._accounts = accounts
@@ -405,6 +438,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.set_interval(self.refresh_seconds, self.refresh_data)
         self.run_doctor()
         self._restore_selection()
+        # wait=False here and below: a Remote that stops runs down on a thread of its own,
+        # since stopping uvicorn and ngrok froze the fleet UI for seconds (r3 review of #243).
+        self.remote.restore(wait=False)
+        self.set_interval(30.0, self._remote_auto_off)
+        self.set_interval(30.0, self.remote.revive_tunnel_if_dead)
 
     # --- what was open (#144) ---------------------------------------------------------
 
@@ -489,6 +527,47 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # stays-open picker instead of textual's pick-and-close one.
         self.action_pick_theme()
 
+    # --- remote (R) ------------------------------------------------------------------
+
+    def action_remote_panel(self) -> None:
+        self.push_screen(RemotePanel(self.remote))
+
+    def _save_remote_switch(self, key: str, value: object) -> None:
+        """A Remote switch's save, as the theme's: on a thread of its own, a refusal toasted
+        once and said again at quit. Saved where it changed, it waited for ``state.json``'s
+        lock on Textual's thread, two seconds a key while another process held it (r3 review
+        of #243: nothing that stops or saves Remote may hold that thread)."""
+        self._remote_savers[key].remember(value)
+
+    def _post_remote_news(self, text: str, trouble: bool) -> None:
+        self.post_message(RemoteNews(text, trouble))
+
+    def _post_remote_done(self, text: str, trouble: bool) -> None:
+        self.post_message(RemoteNews(text, trouble, done=True))
+
+    def on_remote_news(self, news: RemoteNews) -> None:
+        """Toast what Remote says, unless the R panel is open, whose status line says it:
+        a Remote that did not come back at start, a tunnel that did not come up, auto-off.
+        Said only there, the human found out from the phone, away from the desk (sweep of
+        #243). What a control's write did (a new passphrase, a revoke) is said in any case:
+        no line of the panel says it."""
+        if not news.done and isinstance(self.screen, RemotePanel):
+            return
+        severity: SeverityLevel = "warning" if news.trouble else "information"
+        self.notify(news.text, title="Remote", severity=severity, timeout=10, markup=False)
+
+    def _remote_auto_off(self) -> None:
+        """The 30 s auto-off check; a Remote whose timer ran out stops without this thread."""
+        self.remote.enforce_auto_off(wait=False)
+
+    def get_system_commands(self, screen: Screen[Any]) -> Iterable[SystemCommand]:
+        yield from super().get_system_commands(screen)
+        yield SystemCommand(
+            "Remote control",
+            "Remote on/off, link + QR, password, devices (R)",
+            self.action_remote_panel,
+        )
+
     def watch_theme(self, theme_name: str) -> None:
         # Fires on ANY theme change (our picker or the palette): every change is
         # the save. Not while the saved theme is being restored at mount.
@@ -499,6 +578,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self._theme_autosave.remember(theme_name)
 
     def on_unmount(self) -> None:
+        # The TUI is leaving: no ngrok may outlive it. The saved switches stay, so a
+        # Remote that was on comes back on at the next start (restore()). It stops on a
+        # thread of its own, started first so the saves below overlap it; run_ui waits
+        # for it once the terminal is back.
+        self.remote.shutdown_for_exit(wait=False)
         # Every saver — the theme's here, the divider's — started first and joined
         # against ONE deadline, so quit waits once, not once per preference.
         self.unsaved = Autosave.flush_all(self)
@@ -1093,9 +1177,39 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return store.list_projects()
 
 
+REMOTE_QUIT_QUIET_SECONDS = 0.5
+"""How long ``run_ui`` waits for a Remote still stopping before it says that it is."""
+
+
 def run_ui(**options: Any) -> None:
-    """Run the fleet UI until the user quits; then say what its last saves could not land."""
+    """Run the fleet UI until the user quits; then say what its last saves could not land,
+    and see out a phone's write that still runs, saying so: a Ctrl-C there quits at once.
+
+    A Remote that was on stops on a thread of its own at quit (``on_unmount``), so the
+    screen did not freeze while uvicorn and ngrok wound down; the process waits for
+    them here, with the terminal back, and never ends before its ngrok. A Ctrl-C in
+    that wait quits at once as well, its ngrok stopped first: a phone's write still
+    running is what holds a stop up (uvicorn waits for the request), and raised out of
+    here the Ctrl-C was Click's "Aborted!", after which Python's exit waited for the
+    write all the same, silently. What the quit could not save is said before either
+    wait, so a quit at once keeps it. A hangup or a SIGTERM ends the process as ever, its
+    ngrok first (``ngrok_ends_with``).
+    """
+    from aisquare.services import remote_server
+
     app = FleetApp(**options)
-    app.run()
-    for line in app.unsaved:
-        stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
+    with ngrok_ends_with():
+        app.run()
+        for line in app.unsaved:
+            stderr_console().print(f"⚠ {line}", markup=False, highlight=False)
+        try:
+            if not app.remote.wait_until_off(REMOTE_QUIT_QUIET_SECONDS):
+                stderr_console().print("stopping Remote (its server and ngrok)…", markup=False)
+                app.remote.wait_until_off()
+        except KeyboardInterrupt:
+            try:  # the thread that would stop ngrok ends with the process
+                app.remote.stop_tunnel_now()
+            finally:
+                remote_server._remote_quit_now()
+        # A phone's write still running would hold the exit as long as it runs: said, not silent.
+        remote_server.remote_wait_for_writes()

@@ -210,6 +210,8 @@ _FACTS_FIELDS = (
     "mouse_sgr_flag",
     "mouse_button_flag",
     "mouse_all_flag",
+    "start_time",
+    "window_activity",
     "pane_title",
 )
 _FACTS_FORMAT = _SEP.join(f"#{{{name}}}" for name in _FACTS_FIELDS)
@@ -247,6 +249,16 @@ _UNTARGETABLE = frozenset(".:")
 #: it) dies. So every argument that carries CALLER data is passed through
 #: :func:`_data_arg` first.
 _ARGV_SEPARATOR = ";"
+
+_HEX_CHUNK = 512
+"""Bytes per ``send-keys -H`` call — one argument each, so a paste is cut up.
+
+tmux 3.7 refuses a command of more than 1000 arguments ("Limit MSG_COMMAND
+argument to between 0 and 1000", CHANGES 3.6b to 3.7) with "command too long",
+and ``send-keys -t <pane> -H`` spends four of them: measured on 3.7c, 996 bytes
+go and 997 do not, so chunks of 1024 failed every paste of 997 bytes or more.
+512 leaves room for a flag added to the call later. Older tmux has no such
+limit, CI's included, so ``tests/test_tmux.py`` counts the arguments instead."""
 
 
 class TmuxError(RuntimeError):
@@ -346,6 +358,17 @@ class PaneFacts:
     tracking) or for every motion (``?1003``). Without either, a program gets
     presses and releases only, and a drag forwarded to it would be a report it
     never asked for (#148)."""
+    server_started: datetime | None = None
+    """When the server that answered started (``#{start_time}``), as
+    :meth:`TmuxServer.started_at` says it, and ``None`` when tmux does not say.
+    Asked in the same command as the rest, so a frame says which server's
+    lifetime its pane id belongs to without a second process: the remote's live
+    stream asked separately, once per watched pane per tick."""
+    last_output: datetime | None = None
+    """When the pane's window last printed (``#{window_activity}``), to the second rounded
+    down; ``None`` when tmux does not say. Asked with the rest for the same reason: the
+    remote's needs-you asked whether a pane was quiet in a third process, after two for
+    the facts and the start, on every quarter-second poll of an agent action."""
 
 
 @dataclass(frozen=True)
@@ -409,6 +432,14 @@ def _optional_int(value: str) -> int | None:
         return None
 
 
+def _epoch(epoch: str) -> datetime | None:
+    """A time as tmux prints one (``#{start_time}``, ``#{window_activity}``), whole seconds
+    since the epoch; ``None`` for anything else, a tmux too old to know the variable (an
+    empty answer) included."""
+    epoch = epoch.strip()
+    return datetime.fromtimestamp(int(epoch), tz=UTC) if epoch.isdigit() else None
+
+
 def _facts(line: str) -> PaneFacts:
     # maxsplit: the title is last and is the one field a program controls.
     fields = line.split(_SEP, len(_FACTS_FIELDS) - 1)
@@ -432,6 +463,8 @@ def _facts(line: str) -> PaneFacts:
         mouse_on=values["mouse_any_flag"] == "1",
         mouse_sgr=values["mouse_sgr_flag"] == "1",
         mouse_drag=values["mouse_button_flag"] == "1" or values["mouse_all_flag"] == "1",
+        server_started=_epoch(values["start_time"]),
+        last_output=_epoch(values["window_activity"]),
     )
 
 
@@ -844,8 +877,7 @@ class TmuxServer:
             if _ABSENT.search(completed.stderr):
                 return None
             raise TmuxError(completed.stderr.strip() or "tmux display-message could not be reached")
-        epoch = completed.stdout.strip()
-        return datetime.fromtimestamp(int(epoch), tz=UTC) if epoch.isdigit() else None
+        return _epoch(completed.stdout)
 
     def spawn_window(
         self,
@@ -1184,6 +1216,29 @@ class TmuxServer:
             wrapped=None if wrapped is None else wrapped[: facts.height],
         )
 
+    def capture_history(self, pane_id: str, *, history: int) -> Capture:
+        """Scrollback PLUS the live screen, oldest row first, in ONE contiguous frame.
+
+        :meth:`capture` answers "what is on this screen now" and so slices to
+        exactly one screen height; this answers "what has this pane said", a
+        different question, and keeping the rows above the screen is the whole
+        point of it.
+
+        Still one process: ``capture-pane -S -<n>`` with no ``-E`` runs from n
+        lines above the screen top to the bottom of the live screen, and tmux
+        clamps n to the history it actually has. The alternative — calling
+        :meth:`capture` once per screenful and stitching — costs a process per
+        ~50 rows AND cannot produce a consistent snapshot, because a live pane
+        moves between the calls, so the seams would duplicate or drop rows.
+
+        ``Capture.scrollback`` is MEASURED here rather than inferred: the frame
+        keeps every row, so the count above the screen is ``len(rows) - height``
+        and does not have to be predicted from ``history_size``.
+        """
+        history = max(0, history)
+        rows, _, facts = self._frame(pane_id, history, None, False)
+        return Capture(lines=rows, facts=facts, scrollback=max(0, len(rows) - facts.height))
+
     def _frame(
         self, pane_id: str, scrollback: int, height: int | None, flags: bool
     ) -> tuple[list[str], list[bool] | None, PaneFacts]:
@@ -1214,20 +1269,44 @@ class TmuxServer:
     # --- input --------------------------------------------------------------------------
 
     def send_keys(self, pane_id: str, *keys: str) -> None:
-        """Named keys (``Enter``, ``C-c``, ``BTab``…) — tmux's own vocabulary."""
-        if keys:
-            self.run("send-keys", "-t", pane_id, *keys)
+        """Named keys (``Enter``, ``C-c``, ``BTab``…) — tmux's own vocabulary, and only that.
+
+        Every argument after ``-t <pane>`` used to go to tmux as it came, and a
+        key is caller data: measured on 3.7c, ``'Enter;' set -g @x 1`` set the
+        option and ``';' run-shell …`` ran the shell command, because tmux ends
+        a command at any argument whose LAST character is ``;``
+        (:data:`_ARGV_SEPARATOR`), and a key starting with ``-`` parsed as a
+        flag. So ``--`` ends the flags (``-l`` is the KEY ``-l``, sent as the
+        text it spells), :func:`_data_arg` escapes a trailing separator, and a
+        key that is empty or holds whitespace or a control character is
+        refused: no key name has one, and tmux would split or mangle it. This
+        is the floor under every caller; the remote's allowlist
+        (``remote_server.check_remote_key_names``) is the boundary itself.
+        """
+        if not keys:
+            return
+        for key in keys:
+            if not key or any(char.isspace() or ord(char) < 0x20 for char in key):
+                raise TmuxError(f"{key!r} is not a tmux key name")
+        self.run("send-keys", "-t", pane_id, "--", *(_data_arg(key) for key in keys))
 
     def send_literal(self, pane_id: str, text: str) -> None:
-        """Literal text, exactly as typed (``-l``), even when it starts with ``-``.
+        """Literal text, byte for byte, through the hex path — nothing parses it.
 
-        A TRAILING ``;`` is tmux's command separator even after ``-l`` — measured
-        on 3.7c: ``send-keys -l -- ';'`` sends nothing and ``'a;'`` sends ``a``,
-        while ``'a\\;'`` arrives as ``a;``. So the last ``;`` is escaped
-        (:func:`_data_arg`, the same escape :meth:`spawn_window` applies).
+        This used to go through ``send-keys -l -- <arg>``, where tmux's own
+        argument handling reads the string before the pane does: measured on
+        3.7c, ``-l -- ';'`` sends NOTHING and ``'a;'`` sends ``a``, which is why
+        :func:`_data_arg` exists to escape a trailing separator. That workaround
+        is one known quirk of a parser whose behaviour varies by version, and
+        every character typed from the remote page crosses it.
+
+        ``-H`` takes the bytes as hex pairs, so there is no string for any
+        version of any parser to interpret — a space, a trailing space, a tab, a
+        lone ``;`` and a multi-byte character all arrive exactly as sent. The
+        cost is argv length, which :meth:`send_bytes` bounds.
         """
         if text:
-            self.run("send-keys", "-t", pane_id, "-l", "--", _data_arg(text))
+            self.send_bytes(pane_id, text.encode("utf-8"))
 
     def send_bytes(self, pane_id: str, data: bytes) -> None:
         """Raw bytes, one hex pair per argument (``-H``).
@@ -1236,9 +1315,16 @@ class TmuxServer:
         a string and tmux re-emits it as UTF-8, so ``chr(0x98)`` arrives as
         ``C2 98`` — measured on 3.7c, the X10 mouse encoding's column byte for
         any cell past 95 split in two, with the row byte then read as text.
+
+        Sent in chunks of :data:`_HEX_CHUNK` bytes because ``-H`` costs one argv
+        element PER BYTE: a pasted paragraph would otherwise build a command tmux
+        3.7 refuses (more than 1000 arguments) and, longer still, a command line
+        that fails with E2BIG. Chunks go in order down one synchronous path, so
+        the pane sees one uninterrupted stream; a typed run is one call.
         """
-        if data:
-            self.run("send-keys", "-t", pane_id, "-H", *(f"{byte:02x}" for byte in data))
+        for start in range(0, len(data), _HEX_CHUNK):
+            chunk = data[start : start + _HEX_CHUNK]
+            self.run("send-keys", "-t", pane_id, "-H", *(f"{byte:02x}" for byte in chunk))
 
     def paste(self, pane_id: str, text: str) -> None:
         """Bracketed paste: the agent sees one paste, not one Enter per line.

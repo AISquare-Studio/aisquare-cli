@@ -45,6 +45,7 @@ DOCS = [
     Path("docs/store-migration-race.md"),
     Path("README.md"),
     Path("docs/fleet.md"),
+    Path("docs/remote.md"),
 ]
 
 #: References that name a file OUTSIDE this repo, each with the reason it

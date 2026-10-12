@@ -28,7 +28,7 @@ import sqlite3
 import sys
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1011,8 +1011,13 @@ class ContextStore(Protocol):
     ) -> list[PromptRecord]: ...
     def team_active(self, project_id: str) -> bool: ...
     def upsert_session(self, session: TeamSession) -> TeamSession: ...
-    def get_session(self, session_id: str) -> TeamSession | None: ...
+    def get_session(
+        self, session_id: str, *, project_ids: Collection[str] | None = None
+    ) -> TeamSession | None: ...
     def team_sessions(self, project_id: str) -> list[TeamSession]: ...
+    def team_sessions_seen_since(
+        self, project_id: str, since: datetime | None, *, ids: Sequence[str] = ()
+    ) -> list[TeamSession]: ...
     def update_session(
         self,
         session_id: str,
@@ -1032,7 +1037,9 @@ class ContextStore(Protocol):
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
     def release_claims(self, session_id: str) -> list[TeamTask]: ...
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]: ...
-    def get_task(self, ref: str) -> TeamTask | None: ...
+    def get_task(
+        self, ref: str, *, project_ids: Collection[str] | None = None
+    ) -> TeamTask | None: ...
     def team_tasks(
         self, project_id: str, *, status: TaskStatus | None = None
     ) -> list[TeamTask]: ...
@@ -1084,6 +1091,17 @@ class ContextStore(Protocol):
         task_id: str | None = None,
         limit: int = 30,
     ) -> list[TeamEvent]: ...
+    def team_events_since(
+        self,
+        project_id: str,
+        since: datetime,
+        *,
+        kinds: Sequence[str],
+        human_kinds: Sequence[str] = (),
+    ) -> list[TeamEvent]: ...
+    def newest_session_event(
+        self, project_id: str, session_id: str, kind: str, *, since: datetime
+    ) -> TeamEvent | None: ...
     def latest_seq(self, project_id: str) -> int: ...
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
@@ -1091,6 +1109,7 @@ class ContextStore(Protocol):
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
+    def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
     def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
@@ -1830,12 +1849,12 @@ class SqliteStore:
         """
         removed = self._conn.execute(
             "DELETE FROM team_meta WHERE key = ? OR key GLOB ?",
-            (f"distill_seq:{project_id}", f"signal/{_glob_prefix(project_id)[:-1]}/*"),
+            (f"distill_seq:{project_id}", f"signal/{_glob_escape(project_id)}/*"),
         ).rowcount
         for start in range(0, len(sessions), _META_BATCH):
             batch = sessions[start : start + _META_BATCH]
             keys = [f"nudge:{sid}" for sid in batch]
-            globs = [f"continuations:{_glob_prefix(sid)[:-1]}:*" for sid in batch]
+            globs = [f"continuations:{_glob_escape(sid)}:*" for sid in batch]
             clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
             removed += self._conn.execute(
                 f"DELETE FROM team_meta WHERE {' OR '.join(clauses)}", (*keys, *globs)
@@ -1984,15 +2003,21 @@ class SqliteStore:
         assert stored is not None  # just upserted
         return stored
 
-    def get_session(self, session_id: str) -> TeamSession | None:
+    def get_session(
+        self, session_id: str, *, project_ids: Collection[str] | None = None
+    ) -> TeamSession | None:
+        """The session ``session_id`` names, an id or an id prefix; with ``project_ids``, among
+        the sessions of those boards only, ambiguity included (:func:`_on_boards`)."""
+        scope, boards = _on_boards(project_ids)
         row = self._conn.execute(
-            f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id = ?", (session_id,)
+            f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id = ?{scope}",
+            (session_id, *boards),
         ).fetchone()
         if row is not None:
             return _row_to_session(row)
         matches = self._conn.execute(
-            f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id GLOB ? LIMIT 2",
-            (_glob_prefix(session_id),),
+            f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id GLOB ?{scope} LIMIT 2",
+            (_glob_prefix(session_id), *boards),
         ).fetchall()
         if len(matches) > 1:
             raise AmbiguousIdError(session_id)
@@ -2005,6 +2030,36 @@ class SqliteStore:
             (project_id,),
         ).fetchall()
         return [_row_to_session(row) for row in rows]
+
+    def team_sessions_seen_since(
+        self, project_id: str, since: datetime | None, *, ids: Sequence[str] = ()
+    ) -> list[TeamSession]:
+        """The project's sessions seen at or after ``since``, and those named in ``ids`` however
+        long ago they were seen; newest seen first. ``None`` for ``since``: those named alone.
+
+        For a reader that runs every few seconds and needs the live few (``remote``'s needs
+        scan), or the few its events name (``remote``'s board frame): :meth:`team_sessions`
+        is every session the project ever had, and every Claude Code start adds one that is
+        never deleted. The window rides the ``(project_id, last_seen_at)`` index; ``since``
+        compares as the stored ISO-8601 UTC strings do.
+        """
+        rows: list[sqlite3.Row] = []
+        if since is not None:
+            rows = self._conn.execute(
+                f"SELECT {_SESSION_COLUMNS} FROM team_session "
+                "WHERE project_id = ? AND last_seen_at >= ?",
+                (project_id, since.astimezone(UTC).isoformat()),
+            ).fetchall()
+        named = sorted(set(ids))
+        for start in range(0, len(named), 500):  # well under SQLite's bound on parameters
+            chunk = named[start : start + 500]
+            rows += self._conn.execute(
+                f"SELECT {_SESSION_COLUMNS} FROM team_session "
+                f"WHERE project_id = ? AND id IN ({', '.join('?' * len(chunk))})",
+                (project_id, *chunk),
+            ).fetchall()
+        sessions = {row["id"]: _row_to_session(row) for row in rows}
+        return sorted(sessions.values(), key=lambda session: session.last_seen_at, reverse=True)
 
     def update_session(
         self,
@@ -2280,25 +2335,30 @@ class SqliteStore:
         assert row is not None  # inserted or already present
         return _row_to_task(row), created
 
-    def get_task(self, ref: str) -> TeamTask | None:
+    def get_task(self, ref: str, *, project_ids: Collection[str] | None = None) -> TeamTask | None:
+        """The task ``ref`` names, an id, an id prefix or an id tail; with ``project_ids``,
+        among the tasks of those boards only, ambiguity included (:func:`_on_boards`)."""
+        scope, boards = _on_boards(project_ids)
         row = self._conn.execute(
-            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id = ?", (ref,)
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id = ?{scope}", (ref, *boards)
         ).fetchone()
         if row is not None:
             return _row_to_task(row)
         matches = self._conn.execute(
-            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ? LIMIT 2",
-            (_glob_prefix(ref),),
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ?{scope} LIMIT 2",
+            (_glob_prefix(ref), *boards),
         ).fetchall()
         if len(matches) > 1:
             raise AmbiguousIdError(ref)
         if matches:
             return _row_to_task(matches[0])
+        if not _ref_stripped(ref):
+            return None  # no tail either: ``*`` alone ends every id
         # Boards display the id *tail* (the unique random part), so tails
         # must resolve too: fall back to a suffix match.
         matches = self._conn.execute(
-            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ? LIMIT 2",
-            (f"*{_glob_prefix(ref)[:-1]}",),
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ?{scope} LIMIT 2",
+            (f"*{_ref_stripped(ref)}", *boards),
         ).fetchall()
         if len(matches) > 1:
             raise AmbiguousIdError(ref)
@@ -2595,7 +2655,7 @@ class SqliteStore:
         """Every ``team_meta`` entry under ``prefix``, key → value."""
         rows = self._conn.execute(
             "SELECT key, value FROM team_meta WHERE key GLOB ? ORDER BY key",
-            (f"{_glob_prefix(prefix)[:-1]}*",),
+            (f"{_glob_escape(prefix)}*",),
         ).fetchall()
         return {str(row["key"]): str(row["value"]) for row in rows}
 
@@ -2747,6 +2807,69 @@ class SqliteStore:
             (project_id, limit),
         ).fetchall()
         return [_row_to_event(row) for row in reversed(rows)]
+
+    def team_events_since(
+        self,
+        project_id: str,
+        since: datetime,
+        *,
+        kinds: Sequence[str],
+        human_kinds: Sequence[str] = (),
+    ) -> list[TeamEvent]:
+        """The project's events of ``kinds`` written at or after ``since``, and those of
+        ``human_kinds`` the human wrote (no session), oldest first.
+
+        For a reader that runs every few seconds over the last day of a board (``remote``'s
+        needs scan), however busy that day was. ``created_at`` has no index, so a filter on
+        it alone walks every event the project ever had. Events are written in ``seq``
+        order, each stamped as it is written, so the read starts past the newest event
+        written before ``since``, found walking back from the newest on the ``(project_id,
+        seq)`` index: it costs the events since ``since``, not the project's history.
+        ``since`` compares as the stored ISO-8601 UTC strings do.
+        """
+        moment = since.astimezone(UTC).isoformat()
+        wanted: list[str] = []
+        params: list[str] = [project_id, project_id, moment, moment]
+        if kinds:
+            wanted.append(f"kind IN ({', '.join('?' * len(kinds))})")
+            params += kinds
+        if human_kinds:
+            wanted.append(f"(session_id IS NULL AND kind IN ({', '.join('?' * len(human_kinds))}))")
+            params += human_kinds
+        if not wanted:
+            return []
+        rows = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE project_id = ? AND seq > COALESCE("
+            "(SELECT seq FROM team_event WHERE project_id = ? AND created_at < ? "
+            "ORDER BY seq DESC LIMIT 1), 0) "
+            f"AND created_at >= ? AND ({' OR '.join(wanted)}) ORDER BY seq",
+            params,
+        ).fetchall()
+        return [_row_to_event(row) for row in rows]
+
+    def newest_session_event(
+        self, project_id: str, session_id: str, kind: str, *, since: datetime
+    ) -> TeamEvent | None:
+        """The session's newest event of ``kind`` written at or after ``since``; ``None``.
+
+        For a reader that asks every few seconds (``remote``'s needs scan). It walks back
+        from the newest event on the ``(project_id, seq)`` index and stops at the first
+        that is either the one asked for or written before ``since``, so a session that
+        has no such event costs the events since ``since``: asked with a filter on the
+        session and the kind alone, it cost every event the project ever had, each time.
+        ``since`` compares as the stored ISO-8601 UTC strings do.
+        """
+        moment = since.astimezone(UTC).isoformat()
+        row = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE project_id = ? "
+            "AND ((session_id = ? AND kind = ?) OR created_at < ?) ORDER BY seq DESC LIMIT 1",
+            (project_id, session_id, kind, moment),
+        ).fetchone()
+        if row is None:
+            return None
+        event = _row_to_event(row)
+        asked = event.session_id == session_id and event.kind == kind and event.created_at >= since
+        return event if asked else None
 
     def latest_seq(self, project_id: str) -> int:
         row = self._conn.execute(
@@ -3330,6 +3453,21 @@ class SqliteStore:
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 
+    def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]:
+        """The project's rows that ended at or after ``since``, oldest first.
+
+        Filtered here, not by the caller: every spawn, restart and switch adds a row that is
+        never deleted, and a reader that runs every few seconds for the last day's endings
+        (``remote``'s needs scan) built every row the project ever had to keep a handful.
+        ``since`` compares as the stored ISO-8601 UTC strings do.
+        """
+        rows = self._conn.execute(
+            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            "WHERE project_id = ? AND ended_at >= ? ORDER BY created_at, id",
+            (project_id, since.astimezone(UTC).isoformat()),
+        ).fetchall()
+        return [_row_to_fleet_agent(row) for row in rows]
+
     def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None:
         """The live fleet row recorded against ``session_id``, if there is one.
 
@@ -3683,10 +3821,46 @@ class SqliteStore:
         self._conn.close()
 
 
+def _on_boards(project_ids: Collection[str] | None) -> tuple[str, tuple[str, ...]]:
+    """The clause that keeps a lookup to the rows of ``project_ids``, and its values; none for
+    ``None``. A lookup kept to them is ambiguous only among them: the remote's, whose phone
+    may reach only some boards, was told by an ``ambiguous_id`` which prefixes another
+    board's tasks and sessions had (review of #243, round 10, 5/7)."""
+    if project_ids is None:
+        return "", ()
+    boards = tuple(project_ids)
+    return f" AND project_id IN ({', '.join('?' * len(boards))})", boards
+
+
+_GLOB_METACHARACTERS = str.maketrans("", "", "*?[")
+
+
+def _glob_escape(text: str) -> str:
+    """``text`` as a GLOB pattern that matches ``text`` itself: each ``*``, ``?`` and ``[`` in
+    a class of its own (``[*]``), as GLOB has no escape character.
+
+    It took them out, as a ref lookup does (:func:`_ref_stripped`), and so did not stand
+    for itself: ``x[1`` was the prefix ``x1``, and a purge of the keys under an id holding
+    one would have taken another id's (review of #243, round 11, 8/9)."""
+    return re.sub(r"([*?\[])", r"[\1]", text)
+
+
+def _ref_stripped(ref: str) -> str:
+    """``ref`` with the GLOB metacharacters taken out, as an id lookup reads a ref: no id
+    holds one, and ``ses_abc*`` is the prefix ``ses_abc``."""
+    return ref.translate(_GLOB_METACHARACTERS)
+
+
 def _glob_prefix(ref: str) -> str:
-    """Escape GLOB metacharacters in ``ref`` and append a wildcard."""
-    escaped = ref.translate({ord("*"): None, ord("?"): None, ord("["): None})
-    return f"{escaped}*"
+    """The GLOB pattern of an id that starts with ``ref``, its metacharacters taken out
+    (:func:`_ref_stripped`); one that matches no id when nothing is left of it.
+
+    ``*`` was then ``*``, which matched every id: a ref of ``*``, ``?`` or ``[`` named every
+    project, task and session the store had, and a refusal of it as ambiguous listed them
+    (review of #243, round 10, 7/7). An empty pattern matches only an empty id, which none is.
+    """
+    stripped = _ref_stripped(ref)
+    return f"{stripped}*" if stripped else ""
 
 
 _DEFAULT_BUSY_MS = 5000

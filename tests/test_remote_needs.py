@@ -3957,6 +3957,29 @@ def test_a_manager_starting_takes_them_until_its_session_should_have_registered(
     assert cards(now + starting) == [("board_question", "coder-1"), ("board_result", "coder-2")]
 
 
+@pytest.mark.parametrize(
+    ("ahead", "starting"),
+    [
+        pytest.param(remote_needs._NEEDS_STARTING - timedelta(seconds=1), True,
+                     id="written while the scan ran"),
+        pytest.param(remote_needs._NEEDS_STARTING, False, id="further ahead than the grace"),
+        pytest.param(timedelta(hours=1), False, id="the clock set back an hour"),
+    ],
+)  # fmt: skip
+def test_a_manager_dated_ahead_of_the_scan_is_starting_only_within_the_grace(
+    ahead: timedelta, starting: bool
+) -> None:
+    """A live manager row whose session has yet to register is starting for
+    ``_NEEDS_STARTING`` (round 26, 1/2). With no lower bound, a row dated after the scan,
+    the clock set back since its spawn, was starting until the clock caught up with it: a
+    manager that never registered held every coder's question to it, and every crash, off
+    the phone all that time (review of #243, round 27, 6/6)."""
+    manager = _row("manager", role="manager", created=NOW + ahead)
+    fleet = _crew_and_manager(_status(manager, "working"))
+    cards = [(item.kind, item.agent) for item in _scan(fleet)]
+    assert cards == ([] if starting else [("board_question", "coder-1"), ("crashed", "coder-2")])
+
+
 _READS = (
     "list_agents",
     "has_live_agents",

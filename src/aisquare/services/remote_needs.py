@@ -1665,6 +1665,8 @@ def _needs_nudged(
     :data:`_NEEDS_STARTING` whose session has yet to register is starting, not one that
     cannot take them: read as none, a restart, a switch or a spawn made every coder's open
     question and result to it of the day a card, due at once (review of #243, round 26, 1/2).
+    So is one dated less than that ahead of the scan, written while it ran; dated further
+    ahead (the clock set back), it was starting until the clock caught up (round 27, 6/6).
 
     The one rule for which manager keeps an item off the phone: a coder's question or
     result to the manager, a crash, and for a while the push of a limit. A turn that
@@ -1692,7 +1694,7 @@ def _needs_nudged(
     if status is None or status.state in _NEEDS_NOT_ACTING:
         return None
     woken = status.session is not None and status.session.ended_at is None
-    return manager if woken or now - manager.created_at < _NEEDS_STARTING else None
+    return manager if woken or abs(now - manager.created_at) < _NEEDS_STARTING else None
 
 
 def _needs_manager(rows: Sequence[FleetAgent]) -> FleetAgent | None:

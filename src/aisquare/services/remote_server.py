@@ -531,10 +531,6 @@ def _resolve_project(ref: str | None) -> ProjectInfo:
         raise NoSuchProject(str(exc)) from exc
 
 
-_GLOB_CHARACTERS = str.maketrans("", "", "*?[")
-"""What the store takes out of an id prefix before it matches ids that start with it."""
-
-
 def _remote_projects_named(ref: str) -> list[ProjectInfo]:
     """The projects a phone's ``ref``, an id prefix, a name or a codename, names among those
     it is shown (:func:`_remote_shown`).
@@ -545,12 +541,12 @@ def _remote_projects_named(ref: str) -> list[ProjectInfo]:
     directory, so that no phone reads their board, tasks and memory. A ref of ``*``, an id
     prefix with nothing left once its glob characters are taken out, matched every one,
     and its refusal named them all; an id prefix then read any one's board, memory, tasks,
-    panes and transcripts (review of #243, round 9, 6/6). Such a ref now names nothing.
+    panes and transcripts (review of #243, round 9, 6/6). Such a ref now names nothing, by
+    the store's own rule (``store._glob_prefix``), which a copy of its table here had to
+    keep in step with (round 10, 7/7).
     """
     from aisquare.core.store import store_session
 
-    if not ref.translate(_GLOB_CHARACTERS):
-        return []
     with store_session() as store:
         matches = store.find_projects(ref)
     return _remote_shown(matches)

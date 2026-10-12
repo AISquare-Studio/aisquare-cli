@@ -231,6 +231,39 @@ def test_find_projects_by_name_and_id_prefix(store: ContextStore) -> None:
     assert store.find_projects("nope") == []
 
 
+@pytest.mark.parametrize("ref", ["*", "?", "[", "*?[", ""])
+def test_a_ref_with_nothing_left_once_its_glob_characters_go_names_nothing(
+    store: ContextStore, ref: str
+) -> None:
+    """``*`` was an id prefix of every id: it named the one project, task or session a
+    store had, and was ambiguous with two, a refusal that listed every one of them, the
+    directories the hooks only captured included (review of #243, round 10, 7/7)."""
+    from aisquare.models import TeamSession, TeamTask
+
+    now = datetime.now(tz=UTC)
+    store.ensure_project(ProjectInfo(id="prj_captured", root=Path("/tmp/captured")))
+    for n in (1, 2):
+        store.upsert_task(
+            TeamTask(
+                id=f"tsk_{n}", project_id=PROJECT.id, key=f"k{n}", title=f"task {n}",
+                created_at=now, updated_at=now,
+            )
+        )  # fmt: skip
+        store.upsert_session(
+            TeamSession(
+                id=f"ses_{n}", project_id=PROJECT.id, role="coder",
+                started_at=now, last_seen_at=now,
+            )
+        )  # fmt: skip
+        store.add(_entry(f"entry {n}"))
+    assert store.find_projects(ref) == []
+    assert store.get_task(ref) is None, "nor any task by its tail"
+    assert store.get_session(ref) is None
+    assert store.get(ref) is None
+    assert store.get_task("tsk_1") is not None and store.get_task("1") is not None
+    assert [p.id for p in store.find_projects("prj_c*")] == ["prj_captured"]
+
+
 def test_add_linked_repo_is_idempotent(store: ContextStore) -> None:
     updated = store.add_linked_repo(PROJECT.id, "git@github.com:acme/app.git")
     assert updated.linked_repos == ["git@github.com:acme/app.git"]

@@ -1845,12 +1845,12 @@ class SqliteStore:
         """
         removed = self._conn.execute(
             "DELETE FROM team_meta WHERE key = ? OR key GLOB ?",
-            (f"distill_seq:{project_id}", f"signal/{_glob_prefix(project_id)[:-1]}/*"),
+            (f"distill_seq:{project_id}", f"signal/{_glob_escape(project_id)}/*"),
         ).rowcount
         for start in range(0, len(sessions), _META_BATCH):
             batch = sessions[start : start + _META_BATCH]
             keys = [f"nudge:{sid}" for sid in batch]
-            globs = [f"continuations:{_glob_prefix(sid)[:-1]}:*" for sid in batch]
+            globs = [f"continuations:{_glob_escape(sid)}:*" for sid in batch]
             clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
             removed += self._conn.execute(
                 f"DELETE FROM team_meta WHERE {' OR '.join(clauses)}", (*keys, *globs)
@@ -2339,11 +2339,13 @@ class SqliteStore:
             raise AmbiguousIdError(ref)
         if matches:
             return _row_to_task(matches[0])
+        if not _glob_escape(ref):
+            return None  # no tail either: ``*`` alone ends every id
         # Boards display the id *tail* (the unique random part), so tails
         # must resolve too: fall back to a suffix match.
         matches = self._conn.execute(
             f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ? LIMIT 2",
-            (f"*{_glob_prefix(ref)[:-1]}",),
+            (f"*{_glob_escape(ref)}",),
         ).fetchall()
         if len(matches) > 1:
             raise AmbiguousIdError(ref)
@@ -2640,7 +2642,7 @@ class SqliteStore:
         """Every ``team_meta`` entry under ``prefix``, key → value."""
         rows = self._conn.execute(
             "SELECT key, value FROM team_meta WHERE key GLOB ? ORDER BY key",
-            (f"{_glob_prefix(prefix)[:-1]}*",),
+            (f"{_glob_escape(prefix)}*",),
         ).fetchall()
         return {str(row["key"]): str(row["value"]) for row in rows}
 
@@ -3806,10 +3808,24 @@ class SqliteStore:
         self._conn.close()
 
 
+_GLOB_METACHARACTERS = str.maketrans("", "", "*?[")
+
+
+def _glob_escape(ref: str) -> str:
+    """``ref`` with the GLOB metacharacters taken out, to stand for itself in a pattern."""
+    return ref.translate(_GLOB_METACHARACTERS)
+
+
 def _glob_prefix(ref: str) -> str:
-    """Escape GLOB metacharacters in ``ref`` and append a wildcard."""
-    escaped = ref.translate({ord("*"): None, ord("?"): None, ord("["): None})
-    return f"{escaped}*"
+    """The GLOB pattern of an id that starts with ``ref``, its metacharacters taken out; one
+    that matches no id when nothing is left of it.
+
+    ``*`` was then ``*``, which matched every id: a ref of ``*``, ``?`` or ``[`` named every
+    project, task and session the store had, and a refusal of it as ambiguous listed them
+    (review of #243, round 10, 7/7). An empty pattern matches only an empty id, which none is.
+    """
+    escaped = _glob_escape(ref)
+    return f"{escaped}*" if escaped else ""
 
 
 _DEFAULT_BUSY_MS = 5000

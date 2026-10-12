@@ -160,6 +160,12 @@ _NEEDS_DAY_KINDS = (*_NEEDS_ASKED, "agent_exited", "turn_failed")
 opens a board item or moves on from one, the exits the fleet announces, and the turns that
 died on an API error."""
 
+_NEEDS_BY_DAY = _NEEDS_BOARD_KINDS | {"failed"}
+"""The items the board's day decides: its questions and results, and a turn that failed (rule 10
+of :func:`needs_from_agent`). ``_NEEDS_BY_EXITS``: the ones the exits the fleet announced
+decide, whether a clean stop was a hand-over that failed."""
+_NEEDS_BY_EXITS = frozenset({"crashed", "manager_down"})
+
 _NEEDS_ACTIONS: dict[str, tuple[str, ...]] = {
     "permission": ("answer", "open", "dismiss"),
     "question": ("answer", "open", "dismiss"),
@@ -1714,6 +1720,9 @@ class _NeedsProject:
     """``None``: the ended rows could not be read."""
     tails: dict[str, TranscriptTail | None]
     """Agent id → the tail its items were read from."""
+    unread: frozenset[str]
+    """The kinds of item it could not judge, the read that decides them failed
+    (:data:`_NEEDS_BY_DAY`, :data:`_NEEDS_BY_EXITS`)."""
 
 
 _T = TypeVar("_T")
@@ -1767,7 +1776,9 @@ def _needs_scan_project(
     #243, rounds 22 to 24). The ended rows go back a day before the board's day: a result
     to the manager is judged by the stop in its own day (:func:`needs_from_board`), and read
     a day from now, a result an hour after a stop became a card once the stop was a day
-    old (round 25, 3/4).
+    old (round 25, 3/4). A board's day, or its exits, not read decide no item: ``unread``
+    names the kinds they decide, which stand as the last scan had them (:func:`scan_needs_you`).
+    Read as none, a failed hand-over was no card and a Restart on it a 409 (round 26, 2/2).
     ``first_seen`` dates the items whose facts carry no date (a pane gone, tmux
     not answering) from the first scan that saw them; ``seen`` collects what
     this scan saw, so the caller can forget the rest. ``answers`` says whether a
@@ -1792,7 +1803,9 @@ def _needs_scan_project(
     ended = _needs_read_or_none(
         lambda: sources.ended_agents(project.id, day - RECENTLY_ENDED), "rows", project
     )
-    board = _needs_read(lambda: sources.board_since(board_id, day), "board", project)
+    board_read = _needs_read_or_none(lambda: sources.board_since(board_id, day), "board", project)
+    board = board_read or []
+    unread: frozenset[str] = frozenset() if board_read is not None else _NEEDS_BY_DAY
     window = _needs_window(sources, project, board_id)
     listed = statuses or []
     rows = list(
@@ -1826,19 +1839,21 @@ def _needs_scan_project(
                 pane_output=_needs_output_of(sources, status.agent),
             ):
                 items.append(_needs_dated(item, first_seen, seen) if item.kind == "lost" else item)
-        exits = board if board_id == project.id else _needs_exits(sources, project, day)
+        exits = board_read if board_id == project.id else _needs_exits(sources, project, day)
+        if exits is None:
+            unread |= _NEEDS_BY_EXITS
         items.extend(
             _needs_crashed(
                 ended or [],
                 rows,
-                exits,
+                exits or [],
                 project=project,
                 now=now,
                 manager_live=taking is not None,
                 sources=sources,
             )
         )
-        items.extend(_needs_manager_down(manager, exits, project=project, now=now))
+        items.extend(_needs_manager_down(manager, exits or [], project=project, now=now))
         items.extend(
             _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
         )
@@ -1859,7 +1874,7 @@ def _needs_scan_project(
             stopped=stopped if own else None,
         )
     )
-    return _NeedsProject(items=items, statuses=listed, ended=ended, tails=tails)
+    return _NeedsProject(items=items, statuses=listed, ended=ended, tails=tails, unread=unread)
 
 
 def _needs_tail_of(sources: NeedsSources, status: FleetAgentStatus) -> TranscriptTail | None:
@@ -1967,11 +1982,14 @@ def _needs_session_event(
         return None
 
 
-def _needs_exits(sources: NeedsSources, project: ProjectInfo, day: datetime) -> list[TeamEvent]:
+def _needs_exits(
+    sources: NeedsSources, project: ProjectInfo, day: datetime
+) -> list[TeamEvent] | None:
     """The exits the fleet announced on ``project``'s own board since ``day`` (``agent_exited``,
-    by the row's ``project_id``), for a project whose agents write another board. Only
-    those: the day's other kinds are its board's (review of #243, round 19, 3/3)."""
-    return _needs_read(lambda: sources.exits_since(project.id, day), "exits", project)
+    by the row's ``project_id``), for a project whose agents write another board; ``None``:
+    they could not be read. Only those: the day's other kinds are its board's (review of
+    #243, round 19, 3/3)."""
+    return _needs_read_or_none(lambda: sources.exits_since(project.id, day), "exits", project)
 
 
 def _needs_board_of(sources: NeedsSources, project: ProjectInfo) -> str:
@@ -2292,11 +2310,14 @@ def scan_needs_you(
     dismissed: Collection[str],
     first_seen: MutableMapping[str, datetime] | None = None,
     failing: MutableSet[str] | None = None,
+    kept: Sequence[NeedsItem] = (),
 ) -> list[NeedsItem]:
     """Every item across every project, dismissals dropped, ranked by kind then ``since``.
 
     A project whose listing fails still yields its board items, and one that
-    fails outright costs only its own items. ``first_seen`` is the watcher's
+    fails outright costs only its own items. ``kept`` is the last scan's items: those
+    of a kind a project's scan could not judge (:attr:`_NeedsProject.unread`) stand as
+    they were. ``first_seen`` is the watcher's
     memory of when it first saw the items whose facts carry no date; without
     it, each scan is the first. What it holds for a project that could not be
     looked at this time is kept for the next look. ``failing`` is the watcher's
@@ -2335,6 +2356,8 @@ def scan_needs_you(
             failing.discard(project.id)
             log.info("remote: the needs scan of %s works again", project.id)
         items.extend(scanned.items)
+        # After the fresh ones: of an id twice, ranked, the first stands.
+        items.extend(i for i in kept if i.project_id == project.id and i.kind in scanned.unread)
     for key in [key for key in memory if key not in seen]:
         del memory[key]
     items = _needs_board_once(items, boards)
@@ -2483,7 +2506,9 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
     the label has had no row at all among the scan's (two days of ended ones), and a
     503 ``RequestError`` when it has no live row and the ended rows could not be read:
     unknown is not absent, and a Restart on a ``crashed`` or ``manager_down`` card was
-    told "That agent is gone." (review of #243, round 25, 4/4).
+    told "That agent is gone." (review of #243, round 25, 4/4). So is a label with no
+    item whose item the day or the exits not read would decide (:func:`_needs_unjudged`):
+    a Restart on a failed hand-over's card was a 409 ``stale`` (round 26, 2/2).
     """
     from aisquare.services import fleet as fleet_service
     from aisquare.services.remote_server import RequestError
@@ -2513,13 +2538,26 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
         raise fleet_service.NoSuchAgent(f"no agent {label!r} in {where} within the last two days")
     newest = max(rows, key=lambda row: row.created_at)
     status = next((s for s in scanned.statuses if s.agent.id == newest.id), None)
+    items = tuple(item for item in scanned.items if item.agent == label)
+    if not items and _needs_unjudged(newest, status, scanned.unread):
+        raise RequestError(503, "unavailable", f"the board of {where} could not be read")
     return _needs_snapshot(
         project,
         status,
         None if status is None else scanned.tails.get(status.agent.id),
-        tuple(item for item in scanned.items if item.agent == label),
+        items,
         when,
     )
+
+
+def _needs_unjudged(
+    row: FleetAgent, status: FleetAgentStatus | None, unread: frozenset[str]
+) -> bool:
+    """Whether ``row``'s item may be of a kind its scan could not judge (``unread``): a clean
+    stop's, which its exit says was a hand-over that failed, or a waiting agent's failed turn."""
+    if row.ended_at is not None:
+        return row.exit_status in (0, None) and not unread.isdisjoint(_NEEDS_BY_EXITS)
+    return status is not None and status.state == "waiting" and "failed" in unread
 
 
 def needs_single_agent_now(
@@ -3222,6 +3260,7 @@ class RemoteNeedsWatcher:
                 dismissed=(),
                 first_seen=self._first_seen,
                 failing=self._failing_projects,
+                kept=self.needs_items_now(),
             )
             scanned = [item for item in everything if item.id not in dismissed]
             with self._lock:

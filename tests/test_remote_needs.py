@@ -4075,6 +4075,73 @@ def test_a_manager_starting_takes_them_until_its_session_should_have_registered(
     assert cards(now + starting) == [("board_question", "coder-1"), ("board_result", "coder-2")]
 
 
+def _day_unread(sources: NeedsSources, *, hub: bool) -> NeedsSources:
+    """``sources`` with the read of the exits failing: the board's day, or under a hub the
+    project's own exits."""
+
+    def locked(*args: Any) -> list[Any]:
+        raise RuntimeError("database is locked")
+
+    return replace(sources, exits_since=locked) if hub else replace(sources, board_since=locked)
+
+
+@pytest.mark.parametrize("hub", [False, True], ids=["its own board", "a hub"])
+def test_with_the_exits_unread_a_failed_hand_over_stays_and_an_actions_check_is_a_503(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: bool
+) -> None:
+    """A board's day, or under a hub the exits, that could not be read read as no exits: the
+    ``manager_down`` card of a hand-over that failed, and the ``crashed`` one of a coder's,
+    went for that scan, their push streak with them, and a Restart on either was a 409
+    ``stale`` (review of #243, round 26, 2/2). Unknown is not absent: they stand as the last
+    scan had them, and an action's check is a 503, to try again."""
+    from aisquare.services import remote_actions
+    from aisquare.services.remote_server import RequestError
+
+    seats = (_manager_of("alpha", end="hand-over"), _Seat("alpha", "coder-1", end="hand-over"))
+    alpha = _seated(tmp_path, monkeypatch, seats, hub=hub)["alpha"]
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    live = remote_needs.live_needs_sources
+    now = datetime.now(UTC)
+    last = scan_needs_you(live(), now=now, dismissed=())
+    assert [(item.kind, item.agent) for item in last] == [
+        ("manager_down", "manager"),
+        ("crashed", "coder-1"),
+    ]
+    unread = _day_unread(live(), hub=hub)
+    assert scan_needs_you(unread, now=now, dismissed=()) == [], "no last scan: nothing new"
+    assert scan_needs_you(unread, now=now, dismissed=(), kept=last) == last
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: _day_unread(live(), hub=hub))
+    for item in last:
+        assert item.agent is not None and item.agent_id is not None
+        with pytest.raises(RequestError) as refused:
+            remote_actions.action_check_needs(alpha, item.agent, item.agent_id, item.id)
+        assert (refused.value.status, refused.value.error) == (503, "unavailable")
+
+
+def test_with_the_day_unread_the_watcher_keeps_a_failed_turn_and_its_check_is_a_503(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The board's day decides a turn that failed too (rule 10): with it unread, the watcher
+    keeps the card its last scan published, and an action's check of the agent is a 503."""
+    from aisquare.services.remote_server import RequestError
+
+    status, tail, events = _turn_failed()
+    fleet = Fleet(agents=[status], events=events, tails={"/transcripts/coder-1.jsonl": tail})
+    app = build_app(runtime, sources=_server_sources(), dist_dir=tmp_path)
+    watcher = RemoteNeedsWatcher(app.kit, sources=lambda: _sources(fleet), clock=lambda: NOW)
+    (failed,) = watcher.scan_needs_now()
+    assert failed.kind == "failed"
+    fleet.board_fails = True
+    assert watcher.scan_needs_now() == [failed]
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: _sources(fleet))
+    with pytest.raises(RequestError) as refused:
+        needs_agent_now(PROJECT, "coder-1", now=NOW)
+    assert (refused.value.status, refused.value.error) == (503, "unavailable")
+    fleet.board_fails = False
+    assert [item.id for item in needs_agent_now(PROJECT, "coder-1", now=NOW).items] == [failed.id]
+
+
 def test_under_a_hub_a_projects_needs_read_no_other_projects_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

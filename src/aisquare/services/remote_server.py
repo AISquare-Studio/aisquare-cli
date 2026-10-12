@@ -6615,14 +6615,21 @@ def _page_open_refusal(path: str | Path, root: Path, remedy: str, *, inside: boo
     (:data:`PAGE_PLACE_OPEN_TO_OTHERS`), with the command that closes it: ``chmod go-w`` of
     the whole build, or of that directory.
 
-    Where a macOS ACL lets another account change it, ``chmod -N`` as well, which removes
-    the ACL: a mode ``chmod`` leaves every ACL entry in place, and the next start refused
-    the build the same way (review of #243, round 11, 2/9). On Linux, ``chmod go-w`` lowers
-    the ACL's mask, which every named entry is held to (:func:`_page_entry_open`)."""
+    Where a macOS ACL lets another account change it, the entries go as well: a mode
+    ``chmod`` leaves every ACL entry in place, and the next start refused the build the
+    same way (review of #243, round 11, 2/9). In the build, ``chmod -R -N``, which removes
+    every entry, where macOS puts none of its own. Above it, each entry that allows a
+    write, by its number in ``ls -le`` (``chmod -a#``): the directory is often a folder of
+    the home, whose ``everyone deny delete`` ``chmod -N`` removed with the rest (review of
+    #243, round 12, 7/10). On Linux, ``chmod go-w`` lowers the ACL's mask, which every
+    named entry is held to (:func:`_page_entry_open`)."""
     target, recursive = (root, "-R ") if inside else (path, "")
     fix = f"chmod {recursive}go-w {target}"
     if _page_darwin_acl_allows_write(path):
-        fix = f"{fix} and chmod {recursive}-N {target}"
+        if inside:
+            fix += f" and chmod -R -N {root}"
+        else:
+            fix += f" and chmod -a# <n> {path} for each entry of ls -le {path} that allows a write"
     template = PAGE_OPEN_TO_OTHERS if inside else PAGE_PLACE_OPEN_TO_OTHERS
     return template.format(path=path, root=root, fix=fix, remedy=remedy)
 

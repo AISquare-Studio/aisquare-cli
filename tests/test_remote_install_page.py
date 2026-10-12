@@ -838,14 +838,17 @@ def test_a_build_a_macos_acl_opens_is_told_the_chmod_that_removes_the_acl(
 ) -> None:
     """A mode ``chmod`` leaves every ACL entry in place: a build refused for a macOS ACL
     was told ``chmod -R go-w``, and the next start refused it the same way (review of
-    #243, round 11, 2/9). The refusal names ``chmod -N`` as well, for the entry it found."""
+    #243, round 11, 2/9). The refusal names ``chmod -R -N`` of the build as well. Above
+    it, ``chmod -N`` removed macOS's own ``everyone deny delete`` from a folder of the home
+    with the entry it found (review of #243, round 12, 7/10), so it names ``chmod -a#``
+    of each entry that allows a write, and never ``-N``."""
     if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
         pytest.skip("Windows keeps no such modes")
     for path in (built, *built.rglob("*")):
         path.chmod(0o755 if path.is_dir() else 0o644)
     index = built / "index.html"
     opened = index if where == "in the build" else built.parent
-    acl = f"!#acl 1\n{BOB}:allow:read,write,add_file\n"
+    acl = f"!#acl 1\n{HOME_FOLDERS}\n{BOB}:allow:read,write,add_file\n"
     monkeypatch.setattr(remote_server, "_remote_private_group", lambda: None)
     monkeypatch.setattr(
         remote_server, "_darwin_acl_text", lambda path: acl if path == str(opened) else None
@@ -862,12 +865,11 @@ def test_a_build_a_macos_acl_opens_is_told_the_chmod_that_removes_the_acl(
             path=index, fix=f"chmod -R go-w {built} and chmod -R -N {built}", remedy=remedy
         )
     else:
+        each = f"chmod -a# <n> {opened} for each entry of ls -le {opened} that allows a write"
         assert problem == remote_server.PAGE_PLACE_OPEN_TO_OTHERS.format(
-            path=opened,
-            root=built,
-            fix=f"chmod go-w {opened} and chmod -N {opened}",
-            remedy=remedy,
+            path=opened, root=built, fix=f"chmod go-w {opened} and {each}", remedy=remedy
         )
+        assert problem is not None and "-N" not in problem
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="chmod +a is macOS's")

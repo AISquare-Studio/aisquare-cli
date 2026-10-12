@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.8.0] - 2026-10-09
+## [0.8.0] - 2026-10-12
 
 **A first run you can follow, from an empty home to a manager and two coders,
 and an aisquare that upgrades and uninstalls itself.**

@@ -1081,6 +1081,12 @@ class UninstallPlan:
     """Those of :attr:`live_agents` whose server's socket is gone or could not be asked: no
     tmux client reaches them, so ``fleet shutdown`` leaves them live, and only its
     ``--forget`` ends their rows (round 27 of #257)."""
+    listening: tuple[str, ...] = ()
+    """The rest of :attr:`live_agents`: a server answers on their socket, so ``--forget``
+    leaves them live. Sorted per row, never by subtracting :attr:`unreached` from
+    :attr:`live_agents`: a label names its project's folder, and two folders share a name
+    (``~/work/api``, ``~/oss/api``), so one ``manager (api)`` unreached hid the other that
+    answers (round 29 of #257)."""
     plugins: tuple[agent_core.ClaudePlugin, ...] = ()
     """Where the aisquare Claude Code plugin is enabled: in a config dir (user scope) or
     in a repository (project and local scope). Uninstall leaves it, as Claude Code owns
@@ -1178,12 +1184,11 @@ class UninstallPlan:
                 # Not "no tmux, so no server": a server outlives its program leaving PATH.
                 # The way out is the operator's word (round 27 of #257), but for a row whose
                 # socket answers, which `--forget` leaves live (round 28).
-                listening = tuple(a for a in self.live_agents if a not in self.unreached)
                 held = ""
-                if listening:
-                    one = len(listening) == 1
+                if self.listening:
+                    one = len(self.listening) == 1
                     held = (
-                        f" A server answers on the socket of {', '.join(listening)}, so "
+                        f" A server answers on the socket of {', '.join(self.listening)}, so "
                         f"{'it is' if one else 'they are'} likely running, and --forget "
                         f"leaves {'its row' if one else 'their rows'} live."
                     )
@@ -2038,6 +2043,7 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         fleet_error=fleet_error,
         tmux_unusable=_tmux_unusable() if live else None,
         unreached=tuple(label for label, answer in answers if answer != "answers"),
+        listening=tuple(label for label, answer in answers if answer == "answers"),
         plugins=_plugins(claude_dirs),
         plugin_answers=_plugin_answers_there(),
     )

@@ -636,6 +636,7 @@ def _live_agent(
     created_at: datetime | None = None,
     socket_path: Path | None = None,
     boot_id: str | None = None,
+    agent_id: str | None = None,
 ) -> None:
     root.mkdir(parents=True, exist_ok=True)
     project = team_project(root)
@@ -643,7 +644,7 @@ def _live_agent(
         store.ensure_project(project)
         store.upsert_fleet_agent(
             FleetAgent(
-                id=f"agt_{label}",
+                id=agent_id or f"agt_{label}",
                 project_id=project.id,
                 label=label,
                 role="coder",
@@ -735,6 +736,45 @@ def test_with_no_usable_tmux_the_refusal_says_why_and_names_the_operators_word(
     assert "A server answers on the socket of coder-2 (other), so it is likely running" in said
     assert "--forget leaves its row live. Once tmux is usable" in said
     assert "or, if coder-1 (repo) is not running, end its row on your word" in said
+
+
+def test_two_rows_of_one_label_are_told_apart_by_what_their_sockets_say(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 29 of #257: with tmux unusable, the rows a server answers for were worked out
+    by taking the unreached rows' labels out of the live ones', and a label names only the
+    project's folder. Two projects in folders of one name, `work/api` and `oss/api`, each
+    with a live manager, read "manager (api)" twice: one unreached hid the other, so the
+    refusal never said a server answers for it and `--forget` leaves it live."""
+
+    def unusable(_self: TmuxServer) -> None:
+        raise TmuxUnavailable("tmux is not installed (or not on PATH) — the fleet needs it")
+
+    monkeypatch.setattr(TmuxServer, "require", unusable)
+    listening = tmp_path / "listening.sock"
+    monkeypatch.setattr(
+        TmuxServer,
+        "listener",
+        lambda _self, recorded=None: "answers" if recorded == listening else "gone",
+    )
+    _initialised(runner, tmp_path)
+    _live_agent(tmp_path / "work" / "api", "manager", agent_id="agt_work", socket_path=listening)
+    _live_agent(tmp_path / "oss" / "api", "manager", agent_id="agt_oss")
+    _hooked(isolated_agent_home / ".claude", tool.script)
+
+    plan = lifecycle.uninstall_plan()
+    said = " ".join(runner.invoke(app, ["uninstall", "--yes"]).stderr.split())
+
+    assert "A server answers on the socket of manager (api), so it is likely running" in said
+    assert "or, if manager (api) is not running, end its row on your word" in said
+    assert plan.live_agents == ("manager (api)", "manager (api)")
+    assert plan.listening == ("manager (api)",) and plan.unreached == ("manager (api)",)
+    assert world.events == []
 
 
 def test_a_row_shutdown_cannot_reach_is_named_with_the_way_out(

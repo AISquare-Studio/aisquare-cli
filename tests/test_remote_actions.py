@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import sqlite3
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -1456,6 +1457,51 @@ def test_a_row_replaced_while_the_dialog_closes_is_stale_and_says_the_escape_wen
     assert phone.audit() == [(name, f"{_acted_on(name, project)} dismissed=yes refused=stale")]
 
 
+READ_FAILURES = [
+    (sqlite3.OperationalError("database is locked"), 400, "write_failed"),
+    (fleet_service.NoSuchAgent("no agent 'coder-1'"), 404, "no_such_agent"),
+]
+"""A read after an Escape that fails, and the refusal it is: a store locked past its busy
+timeout, and a refusal of the fleet's (:func:`fleet_refusal`)."""
+
+
+@pytest.mark.parametrize("name", PINNED_ACTIONS)
+@pytest.mark.parametrize(("error", "status", "code"), READ_FAILURES)
+def test_a_read_that_fails_while_the_dialog_closes_says_the_escape_went(
+    phone: Phone,
+    fleet: FleetCalls,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    name: str,
+    error: Exception,
+    status: int,
+    code: str,
+) -> None:
+    """The Escape had answered the agent's prompt No, then the wait for the dialog to close
+    failed: the phone got "database is locked" alone (review of #243, round 17, 1/2)."""
+    _row(project)
+    needs.dialog = True
+    needs.lag = 3
+
+    def fails_on_the_second_read() -> None:
+        if needs.reads == 2:
+            raise error
+
+    needs.before_read = fails_on_the_second_read
+    response = phone.post(name, **PINNED, dismiss_dialog=True)
+    assert (response.status_code, response.json()) == (
+        status,
+        {
+            "error": code,
+            "message": f"{error} — Escape had been sent first, which answers a prompt No or "
+            "stops a running tool",
+        },
+    )
+    assert pane.keys() == ["Escape"] and fleet.calls == []
+    assert phone.audit() == [(name, f"{_acted_on(name, project)} dismissed=yes refused={code}")]
+
+
 def test_a_force_stop_types_nothing_so_it_skips_the_guard(
     phone: Phone, fleet: FleetCalls, needs: FakeNeeds, pane: FakePane, project: ProjectInfo
 ) -> None:
@@ -2173,6 +2219,45 @@ def test_a_row_replaced_while_the_interrupt_waits_gets_nothing_typed(
             "agent/tell",
             f"tell coder-1@{project.id} mode=interrupt delivered=no escape=sent "
             'refused=stale text=2ch "hi"',
+        )
+    ]
+
+
+@pytest.mark.parametrize(("error", "status", "code"), READ_FAILURES)
+def test_a_read_that_fails_while_the_interrupt_waits_says_the_escape_went(
+    phone: Phone,
+    needs: FakeNeeds,
+    pane: FakePane,
+    project: ProjectInfo,
+    error: Exception,
+    status: int,
+    code: str,
+) -> None:
+    """The Escape had cut the agent's turn short, and nothing was typed: the phone is told
+    the one as well as the other (review of #243, round 17, 1/2)."""
+    _row(project)
+    needs.lag = 3
+
+    def fails_on_the_second_read() -> None:
+        if needs.reads == 2:
+            raise error
+
+    needs.before_read = fails_on_the_second_read
+    response = phone.post("agent/tell", agent=LABEL, text="hi", mode="interrupt")
+    assert (response.status_code, response.json()) == (
+        status,
+        {
+            "error": code,
+            "message": f"{error} — Escape had been sent first, which answers a prompt No or "
+            "stops a running tool",
+        },
+    )
+    assert pane.sent == [("%7", "key", "Escape")], "nothing typed"
+    assert phone.audit() == [
+        (
+            "agent/tell",
+            f"tell coder-1@{project.id} mode=interrupt delivered=no escape=sent "
+            f'refused={code} text=2ch "hi"',
         )
     ]
 

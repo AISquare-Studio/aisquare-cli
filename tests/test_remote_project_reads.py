@@ -841,6 +841,27 @@ def test_a_roots_board_is_team_projects_after_one_git_call_and_kept_a_minute(
     assert asked == [], "a hub's board runs no git"
 
 
+def test_a_relative_hub_is_ignored_for_a_roots_board_as_team_project_ignores_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``team_project`` ignores a relative ``AISQUARE_TEAM_HUB`` and says so, once. Asked of
+    ``team_hub`` alone, the board lookup ignored it without a word, and a ``remote serve``
+    whose phones read only the Board tab and needs-you never said its hub was not one
+    (review of #243, round 17, 2/2)."""
+    from aisquare.core import orchestrator
+
+    monkeypatch.setattr(orchestrator, "_WARNED_HUBS", set())
+    checkout = tmp_path / "checkout"
+    (checkout / ".git").mkdir(parents=True)
+    monkeypatch.setenv(orchestrator.TEAM_HUB_ENV_VAR, "relative/hub")
+    board = remote_server._remote_board_project(checkout)
+    err = capsys.readouterr().err
+    assert "AISQUARE_TEAM_HUB='relative/hub' is a RELATIVE path" in err, err
+    assert board.root == checkout.resolve(), "the checkout's board, not the hub's"
+    assert board == orchestrator.team_project(checkout)
+    assert capsys.readouterr().err == "", "said once, as team_project says it"
+
+
 # --- the socket: project panes, subscribe_board, caps ---------------------------------------
 
 

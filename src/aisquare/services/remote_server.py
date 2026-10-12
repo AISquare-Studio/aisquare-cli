@@ -632,18 +632,21 @@ def _remote_board_project(root: Path) -> ProjectInfo:
     One ``git`` call for each lookup: ``team_project`` asks ``git_common_root`` and then
     ``find_project_root``, which asks it again where it failed, and ``find_project_root``
     alone gives the same answer. Under a hub, where ``team_project`` runs no ``git``, and
-    with the board off, which ``resolve_project`` refuses, the answer is theirs."""
+    with the board off, which ``resolve_project`` refuses, the answer is theirs. So it is
+    under a relative hub, which ``team_project`` ignores with its one-time warning: asked of
+    ``team_hub`` alone, it was ignored here without a word (review of #243, round 17, 2/2)."""
     from aisquare.core import orchestrator
     from aisquare.core.workspace import find_project_root, project_id_for
     from aisquare.services import team as team_service
 
-    key = (root, os.environ.get(orchestrator.TEAM_HUB_ENV_VAR, ""))
+    hub = os.environ.get(orchestrator.TEAM_HUB_ENV_VAR, "")
+    key = (root, hub)
     now = time.monotonic()
     with _board_projects_lock:
         kept = _board_projects.get(key)
     if kept is not None and now - kept[0] < BOARD_PROJECT_TTL:
         return kept[1]
-    if orchestrator.team_hub() is None and orchestrator.team_enabled():
+    if not hub.strip() and orchestrator.team_enabled():
         found = find_project_root(root)
         board = ProjectInfo(id=project_id_for(found), root=found, linked_repos=[])
     else:

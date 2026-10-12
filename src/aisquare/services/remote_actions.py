@@ -763,11 +763,22 @@ def action_settle(
     One Interrupt & tell was up to 32 scans of the project, with this agent's lock
     held: tmux on every socket, every row the project ever had, its board and
     every agent's transcript (review of #243, round 3, 4/13).
+
+    A read that fails says the Escape went (:data:`_ESCAPE_SENT`), as a refusal from
+    here does: a store locked past its busy timeout was "database is locked" alone, the
+    agent's prompt answered No (review of #243, round 17, 1/2).
     """
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         time.sleep(ACTION_POLL_SECONDS)
-        snap = action_fleet_call(lambda: remote_needs.needs_single_agent_now(target, label))
+        try:
+            snap = action_fleet_call(lambda: remote_needs.needs_single_agent_now(target, label))
+        except RequestError as exc:
+            exc.message = f"{exc.message} — {_ESCAPE_SENT}"
+            raise
+        except Exception as exc:
+            log.warning("remote: a read after an Escape failed: %s", exc)
+            raise RequestError(400, "write_failed", f"{exc} — {_ESCAPE_SENT}") from exc
         if reached(action_still_pinned(target, label, pin, snap, escaped=True)):
             return snap
     return None

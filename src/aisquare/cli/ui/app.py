@@ -321,7 +321,8 @@ class Panes(Horizontal):
 
 
 class _WorkerThreads(WorkerManager):
-    """The app's worker manager, which also knows the thread workers a quit would cut off.
+    """The app's worker manager, which also knows the thread workers a quit would cut off,
+    and holds back the reads asq starts while it waits to hand its terminal over.
 
     Textual's ``Worker.cancel`` cancels the task that awaits a thread worker's thread, not
     the thread: the callable runs on while the worker reads finished and leaves
@@ -334,6 +335,17 @@ class _WorkerThreads(WorkerManager):
     as the callable that runs it in a loop of its own, as Textual's own runner would
     (:func:`_in_its_own_loop`), since a cancel leaves that thread running as well (round 24).
 
+    The hand-over waits out every thread worker still running
+    (``FleetApp._holding_the_quit``), so a read that began after its last look would be cut
+    off by the quit. While one is pending (``app.hand_off``), a read (:func:`_waited_reads`)
+    is made but not started: it is held, and the newest start of a node's read replaces one
+    held before it, as a newer exclusive start cancels an older. A call-off starts each
+    held read once (:meth:`release`), and the quit drops them (:meth:`drop_held`). Held
+    here, a read is held whatever began it (a tick, a page's mount or show, a tab, a
+    keystroke): each start site asked for itself until round 26, and rounds 19 to 25 each
+    found one that did not. A writer, and any worker not filed as a read, starts as ever
+    and is waited out, so nothing anyone asked to write is dropped.
+
     Textual's own thread workers are left out (:func:`_textuals_own`): the Onboard view's
     ``DirectoryTree`` lists each folder in one, ``_load_directory``, which writes nothing,
     and one listing a hung mount never ends (round 23).
@@ -344,11 +356,14 @@ class _WorkerThreads(WorkerManager):
         self._lock = threading.Lock()
         self._threads: Counter[str] = Counter()
         self._waited: set[Worker[Any]] = set()
+        self._held: dict[tuple[DOMNode, str], tuple[Worker[Any], bool]] = {}
+        """The reads held for a pending hand-over, by node and name, each with whether it
+        is exclusive (applied when it starts)."""
 
     def _new_worker(self, work: WorkType[Any], node: Any, *args: Any, **kwargs: Any) -> Worker[Any]:
         # Textual's private method, so what it is given is handed on as it came: a keyword
         # a later 8.x adds to `run_worker` and passes here must reach it, or every worker
-        # start raises TypeError (round 25 of #257). Only the three read here are named.
+        # start raises TypeError (round 25 of #257). Only those read here are named.
         waited = bool(kwargs.get("thread")) and not _textuals_own(work)
         if waited and (callable(work) or inspect.isawaitable(work)):
             # The name and description Textual would give it, read off the work before it
@@ -356,10 +371,60 @@ class _WorkerThreads(WorkerManager):
             name = kwargs.get("name") or getattr(work, "__name__", "") or ""
             kwargs.update(name=name, description=kwargs.get("description") or repr(work))
             work = self._counted(_in_its_own_loop(work), name)
+        held = (
+            waited
+            and kwargs.get("start", True)
+            and getattr(self._app, "hand_off", None) is not None
+            and kwargs.get("name") in _waited_reads()
+        )
+        if held:
+            exclusive = bool(kwargs.pop("exclusive", False))
+            worker = super()._new_worker(work, node, *args, **{**kwargs, "start": False})
+            replaced = self._held.pop((node, worker.name), None)
+            if replaced is not None:
+                self._remove_worker(replaced[0])
+            self._held[(node, worker.name)] = (worker, exclusive)
+            return worker
         worker = super()._new_worker(work, node, *args, **kwargs)
         if waited:
             self._waited.add(worker)
         return worker
+
+    def release(self) -> list[tuple[str, Exception]]:
+        """Start each read held for a hand-over now called off, once, for a node still in
+        the app and not cancelled since (a newer session's credits, a view removed).
+
+        Each on its own: one that raises is answered, ``(name, error)``, and the rest
+        still start. In the key's handler, the first to raise took asq down on the press
+        that keeps it open, and the starts after it never ran (round 25 of #257).
+        """
+        held, self._held = self._held, {}
+        failed: list[tuple[str, Exception]] = []
+        for (node, name), (worker, exclusive) in held.items():
+            if worker.is_cancelled or not node.is_attached:
+                self._remove_worker(worker)
+                continue
+            try:
+                if exclusive:
+                    for other in list(self):
+                        if (
+                            other is not worker
+                            and other.node is node
+                            and other.group == worker.group
+                        ):
+                            other.cancel()
+                self._waited.add(worker)
+                worker._start(self._app, self._remove_worker)
+            except Exception as exc:
+                self._remove_worker(worker)
+                failed.append((name, exc))
+        return failed
+
+    def drop_held(self) -> None:
+        """Forget every held read: asq quits, and a read it never began loses nothing."""
+        held, self._held = self._held, {}
+        for worker, _exclusive in held.values():
+            self._remove_worker(worker)
 
     def _remove_worker(self, worker: Worker[Any]) -> None:
         self._waited.discard(worker)
@@ -463,9 +528,6 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._hand_off_overdue = False
         """The pending hand-over has waited ``_HAND_OFF_PATIENCE``: a second press calls it off."""
         self._hand_off_poll: Timer | None = None
-        self._owed: dict[Callable[[], object], DOMNode] = {}
-        """The starts that stood down while a hand-over waited, each with its node: run once
-        if the hand-over is called off (:meth:`owe`)."""
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
         self._accounts = accounts
@@ -647,12 +709,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def refresh_data(self) -> None:
         """Re-read projects and agents; keep (and label) the last frame if the store is busy.
 
-        Not once asq is handing the terminal over: the tick is what starts the reads
-        a hand-over waits out (``_exit_when_read``). Owed then (:meth:`owe`).
+        While asq waits to hand its terminal over too: the reads this starts are held
+        (:class:`_WorkerThreads`), and this one ends on the UI thread before any quit.
         """
-        if self.hand_off is not None:
-            self.owe(self, self.refresh_data)
-            return
         sidebar = self.sidebar
         try:
             with store_session() as store:
@@ -715,14 +774,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """
         if self._accounts is None:
             return
-        if self.hand_off is not None:
-            # asq quits once the reads running end. Owed as the tick, which reads them after
-            # the frame and is owed too: a call-off then reads them once, not twice.
-            self.owe(self, self.refresh_data)
-            return
         reading = self._accounts_worker
         if reading is not None and not reading.is_finished:
-            self._accounts_owed = True
+            # A read held for a pending hand-over has not begun, and reads what this would.
+            self._accounts_owed = reading.state is not WorkerState.PENDING
             return
         self._accounts_owed = False
         self._accounts_worker = self.run_worker(
@@ -836,9 +891,6 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         past cancelling.
         """
         if self._doctor is None:
-            return
-        if self.hand_off is not None:
-            self.owe(self, self.run_doctor)  # asq quits once the reads running end
             return
         injected: DoctorRunner = self._doctor
         project = self._scoped_project()
@@ -1267,8 +1319,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         and a retry had the same odds (round 20). Waited for by default, not by a list of
         the reads that write: rounds 19 to 22 each found a read, filed as one that writes
         nothing, that opened the store or wrote a cache. None starts once ``hand_off`` is
-        set (``handoff.handing_over``), so none can start between the last look and the
-        quit either.
+        set (:class:`_WorkerThreads` holds them), so none can start between the last look
+        and the quit either.
 
         A read that never ends (a store on a hung mount) would hold the quit for good, with
         nothing on screen after the first toast: past ``_HAND_OFF_PATIENCE`` the wait names
@@ -1303,6 +1355,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return  # called off (_call_off_hand_off): a poll queued before the press ends here
         running = self._holding_the_quit()
         if not running:
+            self._worker_threads.drop_held()
             self.exit()
             return
         waited = time.monotonic() - self._hand_off_since
@@ -1317,42 +1370,28 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._hand_off_poll = self.set_timer(_QUIT_POLL, self._exit_when_read)
 
     def _call_off_hand_off(self) -> None:
-        """Stay in asq: stop waiting, and start what stood down meanwhile, once each.
+        """Stay in asq: stop waiting, and start the reads held meanwhile, once each.
 
-        Until round 23 a hand-over always ended in a quit, so a start that stood down
-        (``handoff.handing_over``) lost nothing. Now asq carries on, and a page left as the
-        wait found it showed the old project's doctor report under the new one's name, a
-        Settings tab with no slot to pick, Welcome's path box never judged and an empty
-        Project Doctor tab (round 24 of #257). Each owed start runs once, for a node still
-        in the app; the ticks start again on their own. Each on its own: one that raises (a
-        view being remounted, its widget not there) is said, and the rest still run. In the
-        key's handler, the first to raise took asq down, the second press that keeps asq open
-        quit it with a traceback, and the starts after it never ran (round 25).
+        Until round 23 a hand-over always ended in a quit, so a read held back lost
+        nothing. Now asq carries on, and a page left as the wait found it showed the old
+        project's doctor report under the new one's name, a Settings tab with no slot to
+        pick, Welcome's path box never judged and an empty Project Doctor tab (round 24 of
+        #257). Each held read starts once, for a node still in the app
+        (:meth:`_WorkerThreads.release`); the ticks go on as they did. One that cannot start
+        is said, and the rest still start (round 25).
         """
         if self._hand_off_poll is not None:
             self._hand_off_poll.stop()
         self.hand_off = None
         self._hand_off_overdue = False
         self.notify("Called off: asq carries on", timeout=4)
-        owed, self._owed = self._owed, {}
-        for start, node in owed.items():
-            if not node.is_attached:
-                continue
-            try:
-                start()
-            except Exception as exc:
-                self.notify(
-                    f"could not start {getattr(start, '__name__', 'a read')} again: {exc}",
-                    severity="warning",
-                    timeout=6,
-                    markup=False,
-                )
-
-    def owe(self, node: DOMNode, start: Callable[[], object]) -> None:
-        """``start``, ``node``'s, stood down for the pending hand-over: run it if that is
-        called off. Once, however often it stood down meanwhile (a tick every two seconds):
-        a bound method is the same start each time it is read."""
-        self._owed[start] = node
+        for name, exc in self._worker_threads.release():
+            self.notify(
+                f"could not start {_in_words([name])} again: {exc}",
+                severity="warning",
+                timeout=6,
+                markup=False,
+            )
 
     def _holding_the_quit(self) -> list[str]:
         """The workers a quit would cut off that still run, by name: any thread worker but

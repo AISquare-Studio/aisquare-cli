@@ -25,11 +25,10 @@ from typing import Any
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.dom import DOMNode
 from textual.message import Message
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
-from textual.worker import WorkerState, get_current_worker
+from textual.worker import Worker, WorkerState, get_current_worker
 from typer.testing import CliRunner
 
 from aisquare.cli import install as install_cli
@@ -60,7 +59,7 @@ from tests.ui_workers import settle_page, settle_until
 _REAL_EXEC_SELF = selfcli.exec_self
 
 #: Textual's own, which a test that records every worker start wraps.
-_REAL_RUN_WORKER = DOMNode.run_worker
+_REAL_START = Worker._start
 
 # --------------------------------------------------------------------------- the view
 
@@ -272,7 +271,9 @@ def test_update_waits_out_every_other_worker_and_starts_no_other_meanwhile(
     monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
     release = threading.Event()
 
-    async def fn(pilot: Pilot[None]) -> tuple[list[str], list[Any], list[str], list[Any]]:
+    async def fn(
+        pilot: Pilot[None],
+    ) -> tuple[list[str], list[Any], list[str], list[str], list[Any]]:
         app = pilot.app
         assert isinstance(app, ui_app.FleetApp)
         said: list[str] = []
@@ -292,16 +293,19 @@ def test_update_waits_out_every_other_worker_and_starts_no_other_meanwhile(
         welcome._tick()  # Welcome's own tick: its look and step 1's list
         welcome.look(full=True)
         welcome.find_candidates()
-        started = [str(w.name) for w in app.workers if w not in before]
+        new = [w for w in app.workers if w not in before]
+        started = [str(w.name) for w in new if w.state is not WorkerState.PENDING]
+        held = [str(w.name) for w in new if w.state is WorkerState.PENDING]
         release.set()
         await settle_until(app, lambda: exits)
-        return said, while_held, started, exits
+        return said, while_held, started, held, exits
 
-    said, while_held, started, exits = drive(fn)
+    said, while_held, started, held, exits = drive(fn)
 
     assert said == ["asq quits once the reads running end"], "not refused: waited out"
     assert while_held == [], "no quit under the read"
     assert started == [], "nothing new to wait for"
+    assert held and set(held) <= set(ui_app._waited_reads()), "each read asked for, held"
     assert exits == [("upgrade", "--reopen")], "the quit, once it has ended"
 
 
@@ -683,16 +687,15 @@ def _starts_with_a_hand_over(
     monkeypatch.setattr(accounts_view, "_read_credits", lambda _session: [])
     monkeypatch.setattr(accounts_service, "read_usage_with_trends", lambda _accounts: {})
     monkeypatch.setattr(explainability_view, "status_report", lambda _project: None)
-    # Every start, read where it is made: a quick worker has left ``app.workers`` by the
-    # time the steps end. ``@work`` starts through ``run_worker`` too.
+    # Every start, read as it begins: a quick worker has left ``app.workers`` by the time
+    # the steps end, and a read held for the hand-over begins only if it is called off.
     names: list[str] = []
 
-    def run_worker(node: DOMNode, *args: Any, **kwargs: Any) -> Any:
-        worker = _REAL_RUN_WORKER(node, *args, **kwargs)
+    def start(worker: Worker[Any], *args: Any, **kwargs: Any) -> None:
         names.append(str(worker.name))
-        return worker
+        _REAL_START(worker, *args, **kwargs)
 
-    monkeypatch.setattr(DOMNode, "run_worker", run_worker)
+    monkeypatch.setattr(Worker, "_start", start)
     release = threading.Event()
 
     async def fn(pilot: Pilot[None]) -> list[str]:
@@ -740,13 +743,22 @@ def test_a_called_off_hand_over_begins_each_start_that_stood_down_once(
     so a start that stood down lost nothing. Called off, asq carried on with what the wait
     had skipped: the Doctor section named the new project over the old one's report, the
     Settings tab offered no slot, Welcome never judged its path box, the Project Doctor tab
-    stayed empty. Each start that stood down is owed and begins once on the call-off (the
-    shell's tick too, which reads the accounts after the frame), and a full look stays full;
-    one owed by a view no longer in the app does not. The control is the same steps with
-    no hand-over."""
+    stayed empty. Each read held meanwhile begins once on the call-off (the shell's
+    accounts read too, however many ticks asked for it), and a full look stays full; one
+    held for a view no longer in the app does not. The control is the same steps with no
+    hand-over."""
     monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
     seed(tmp_path, ("prj_a", "alpha", None))
     looks: list[bool] = []
+    claude = welcome_view.DEFAULT_SEAMS.claude
+
+    def asked(full: bool, root: Path | None) -> Any:
+        looks.append(full)
+        return claude(full, root)
+
+    # Welcome's look takes its seams as it is made, and a held one was made before the call-off.
+    seams = dataclasses.replace(welcome_view.DEFAULT_SEAMS, claude=asked)
+    monkeypatch.setattr(welcome_view, "DEFAULT_SEAMS", seams)
 
     async def call_off(app: ui_app.FleetApp, names: list[str]) -> list[str]:
         welcome = app.query_one(welcome_view.WelcomeView)
@@ -755,15 +767,12 @@ def test_a_called_off_hand_over_begins_each_start_that_stood_down_once(
         for _ in range(2):  # the shell's tick, and the accounts read it starts
             app.refresh_data()
             app.refresh_accounts()
-        app.owe(Static(), lambda: names.append("a removed view's"))
+        gone = Static()  # a view that asked for a read, then left the app
+        await app.screen.mount(gone)
+        gone.run_worker(lambda: None, name=ui_app._DOCTOR_WORKER, thread=True, exit_on_error=False)
+        await gone.remove()
         app.query_one(accounts_view.AccountsView)._on_screen = True  # shown again by then
-        claude = welcome.seams.claude
-
-        def asked(full: bool, root: Path | None) -> Any:
-            looks.append(full)
-            return claude(full, root)
-
-        welcome.seams = dataclasses.replace(welcome.seams, claude=asked)
+        looks.clear()  # the looks before the hand-over
         mark = len(names)
         app._call_off_hand_off()
         await settle_page(app, group="held")
@@ -775,42 +784,103 @@ def test_a_called_off_hand_over_begins_each_start_that_stood_down_once(
     assert owed == sorted(
         [*started, ui_app.ACCOUNTS_WORKER, welcome_view.worker_name("validate")]
     ), "each start that stood down, once, and nothing else"
-    assert looks == [True], "the look owed is the full one asked for"
+    assert looks == [True], "the look held is the full one asked for"
 
 
-def test_an_owed_start_that_raises_is_said_and_the_rest_still_begin() -> None:
-    """Round 25 of #257: the owed starts ran in a bare loop inside the key's handler, so
-    one that raised (a view being remounted, its widget not there) took asq down on the
-    press that should keep it open, and every start after it was lost."""
+def test_a_held_read_that_cannot_start_is_said_and_the_rest_still_begin() -> None:
+    """Round 25 of #257: the starts owed to a call-off ran in a bare loop inside the key's
+    handler, so one that raised took asq down on the press that should keep it open, and
+    every start after it was lost. The held reads start each on its own."""
     began: list[str] = []
     said: list[tuple[str, str | None]] = []
 
-    def refresh_data() -> None:
-        began.append("refresh_data")
+    class Node:
+        is_attached = True
 
-    def run_doctor() -> None:
-        raise LookupError("No nodes match '#doctor-report'")
+    class Held:
+        is_cancelled = False
 
-    def refresh_credits() -> None:
-        began.append("refresh_credits")
+        def __init__(self, name: str) -> None:
+            self.name = self.group = name
+            self.node = node
 
-    attached = SimpleNamespace(is_attached=True)
+        def _start(self, _app: Any, _done: Any) -> None:
+            if self.name == ui_app._DOCTOR_WORKER:
+                raise LookupError("No nodes match '#doctor-report'")
+            began.append(self.name)
+
+    node = Node()
+    threads = ui_app._WorkerThreads(SimpleNamespace())
+    for name in (ui_app.ACCOUNTS_WORKER, ui_app._DOCTOR_WORKER, accounts_view.CREDITS_WORKER):
+        threads._held[(node, name)] = (Held(name), False)  # type: ignore[index, assignment]
     app = SimpleNamespace(
         _hand_off_poll=None,
         hand_off=("upgrade", "--reopen"),
         _hand_off_overdue=True,
-        _owed={refresh_data: attached, run_doctor: attached, refresh_credits: attached},
+        _worker_threads=threads,
         notify=lambda text, *, severity="information", **_: said.append((text, severity)),
     )
 
     ui_app.FleetApp._call_off_hand_off(app)  # type: ignore[arg-type]
 
-    assert began == ["refresh_data", "refresh_credits"], "the starts after it still begin"
+    assert began == [ui_app.ACCOUNTS_WORKER, accounts_view.CREDITS_WORKER], "the rest begin"
     assert said[0] == ("Called off: asq carries on", "information")
     assert said[1:] == [
-        ("could not start run_doctor again: No nodes match '#doctor-report'", "warning")
+        ("could not start the doctor's checks again: No nodes match '#doctor-report'", "warning")
     ]
-    assert app.hand_off is None and app._owed == {}
+    assert app.hand_off is None and threads._held == {}
+
+
+def test_a_read_asked_for_while_a_hand_over_waits_is_held_and_a_write_is_not() -> None:
+    """Round 26 of #257: each start site asked whether a hand-over was pending, and rounds
+    19 to 25 each found one that did not. The worker manager holds every read instead: made
+    but not begun, the newest start of a node's read in place of one held before it, begun
+    on a call-off and forgotten on the quit. A writer begins as ever, and is waited for, so
+    nothing anyone asked to write is dropped."""
+    ran: list[str] = []
+
+    class Holding(App[None]):
+        hand_off: tuple[str, ...] | None = None
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._workers = self._worker_threads = ui_app._WorkerThreads(self)
+
+    def start(app: Holding, name: str, said: str, *, exclusive: bool = False) -> Any:
+        return app.run_worker(
+            lambda: ran.append(said),
+            name=name,
+            group=name,
+            exclusive=exclusive,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    async def run() -> None:
+        app = Holding()
+        async with app.run_test() as pilot:
+            app.hand_off = ("upgrade", "--reopen")
+            first = start(app, ui_app._DOCTOR_WORKER, "the first doctor", exclusive=True)
+            newest = start(app, ui_app._DOCTOR_WORKER, "the newest doctor", exclusive=True)
+            write = start(app, doctor_view.FIX_WORKER, "a fix")
+            await app.workers.wait_for_complete([write])
+            assert (first.state, newest.state) == (WorkerState.PENDING, WorkerState.PENDING)
+            assert first not in set(app.workers) and newest in set(app.workers)
+            assert ran == ["a fix"], "the writer began; the reads are held"
+            assert app._worker_threads.running() == set(), "a held read holds no quit"
+
+            app.hand_off = None  # called off
+            assert app._worker_threads.release() == []
+            await app.workers.wait_for_complete([newest])
+            assert ran == ["a fix", "the newest doctor"], "the newest read, once"
+
+            app.hand_off = ("uninstall",)
+            dropped = start(app, accounts_view.USAGE_WORKER, "a usage read")
+            app._worker_threads.drop_held()  # the quit
+            await pilot.pause()
+            assert dropped not in set(app.workers) and ran[-1] == "the newest doctor"
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
@@ -828,7 +898,7 @@ def test_an_answer_that_lands_as_asq_closes_paints_nothing(name: str, state: Wor
     the sidebar raised NoMatches out of the handler, and a doctor run (one a call-off began,
     then a quit) did the same in ``show_doctor`` and ``show_doctor_failure``. An app that
     has stopped running paints none of them, and reads nothing to try."""
-    report = (None, []) if name == ui_app._DOCTOR_WORKER else None  # machine-wide, no findings
+    report: tuple[None, list[Any]] | None = (None, []) if name == ui_app._DOCTOR_WORKER else None
     worker = SimpleNamespace(name=name, result=report, error=LookupError("the checks crashed"))
 
     class Closing:

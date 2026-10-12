@@ -49,7 +49,6 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli import watch
 from aisquare.cli.common import local_time
-from aisquare.cli.ui.handoff import handing_over
 from aisquare.core.store import unmet_needs
 from aisquare.models import CLOSED_STATUSES, ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import claude_accounts as accounts_service
@@ -268,12 +267,10 @@ class BoardPanel(Vertical):
         block paints the last good map (the built-in names before the first
         answer) and repaints when the worker answers, as the agent header does
         (``views.agent``). Asked only once several accounts are in play, the
-        only time the block shows one. Not while asq hands its terminal over (``handoff``).
+        only time the block shows one.
         """
         if len({s.account for s in sessions if s.ended_at is None and s.account}) < 2:
             return
-        if handing_over(self):
-            return  # owed nothing: the board's next tick asks again
         now = time.monotonic()
         if self._labels_asked_at is not None and now - self._labels_asked_at < LABELS_TTL:
             return

@@ -40,7 +40,6 @@ from textual.widgets import Button, Static, TabbedContent, TabPane
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.board import BoardPanel
-from aisquare.cli.ui.handoff import handing_over
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
 from aisquare.cli.ui.views.agent import shown_pane
 from aisquare.cli.ui.views.doctor import DoctorView
@@ -389,11 +388,8 @@ class ProjectView(TabbedContent):
         """Run this project's checks off the UI thread; the worker state paints them.
 
         Lazy and exclusive: the tab is the only trigger, and re-opening it
-        refreshes the report instead of stacking runs. Not while asq hands its
-        terminal over (``handoff``).
+        refreshes the report instead of stacking runs.
         """
-        if handing_over(self, self.run_project_doctor):
-            return
         root = self.project.root
         self.run_worker(
             lambda: self._doctor(root),

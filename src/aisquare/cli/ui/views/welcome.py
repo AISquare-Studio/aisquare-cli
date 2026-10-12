@@ -52,7 +52,6 @@ from textual.widget import Widget
 from textual.widgets import Button, Input, Static
 from textual.worker import Worker, WorkerState
 
-from aisquare.cli.ui.handoff import handing_over
 from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, short_path
 from aisquare.cli.ui.views.onboard import render_verdict
 from aisquare.core.store import store_session
@@ -521,11 +520,7 @@ class WelcomeView(VerticalScroll):
         only what is not ready yet: Claude Code, tmux, gh. A full look asked for
         while another look runs is owed, and starts when that one lands, so
         *Check again*, a finished Connect and a return to the page are never lost.
-        Not while asq hands its terminal over (``handoff``): owed then, a full one as full.
         """
-        if handing_over(self, self._owed_look):
-            self._full_owed = self._full_owed or full
-            return
         if self._in_flight("look"):
             self._full_owed = self._full_owed or full
             return
@@ -546,11 +541,6 @@ class WelcomeView(VerticalScroll):
             )
 
         self._run("look", probe)
-
-    def _owed_look(self) -> None:
-        """The look a hand-over stood down, once it is called off: full if one was asked."""
-        full, self._full_owed = self._full_owed, False
-        self.look(full=full)
 
     def _not_ready(self) -> bool:
         claude, tmux, project = self.claude, self.tmux, self.project
@@ -645,11 +635,8 @@ class WelcomeView(VerticalScroll):
         than opening the store beside it. A shell that could not read its store
         has no frame to wait for (``FleetApp.store_error``), and then the store is
         asked directly, which says why. The wait is in the worker, where a
-        settling test waits for it too. Not while asq hands its terminal over
-        (``handoff``): asked directly, the store is opened, and made where there is none.
+        settling test waits for it too.
         """
-        if handing_over(self, self.find_candidates):
-            return
         app = self.app
         shell = hasattr(app, "snapshot")
         seams = self.seams
@@ -732,11 +719,8 @@ class WelcomeView(VerticalScroll):
         stalled the shell between keys (review of #257). One judgement runs at a time,
         and text typed meanwhile is judged when it lands (:meth:`_judged`), so the
         verdict always ends on what the box holds — the latest text wins.
-
-        Not once asq is handing the terminal over (``handoff``): opening the store, this
-        writes, so the hand-over waits it out and must not have another to wait for.
         """
-        if self._in_flight("validate") or handing_over(self, self._judge):
+        if self._in_flight("validate"):
             return
         text, validate = self._typed, self.seams.validate
 

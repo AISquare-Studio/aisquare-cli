@@ -33,7 +33,6 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Input, Label, Select, Static, Switch
 from textual.worker import Worker, WorkerState
 
-from aisquare.cli.ui.handoff import handing_over
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import codenames, paths
 from aisquare.core.config import (
@@ -176,11 +175,8 @@ class SettingsView(VerticalScroll):
         it in its constructor, on the event loop (review of #205, fourth round)
         — work the Accounts page and the agent header keep in thread workers.
         The selects compose with the bindings alone and gain the slots when the
-        worker answers (:meth:`_accounts_read`). Not while asq hands its terminal
-        over (``handoff``): the selects keep the bindings alone.
+        worker answers (:meth:`_accounts_read`).
         """
-        if handing_over(self, self._load_accounts):
-            return
         self.run_worker(
             self._read_accounts,
             name=ACCOUNTS_WORKER,

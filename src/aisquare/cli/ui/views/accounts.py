@@ -53,7 +53,6 @@ from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.common import format_reset, local_time
-from aisquare.cli.ui.handoff import handing_over
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.core import browser, paths
 from aisquare.core import claude_accounts as core
@@ -707,10 +706,9 @@ class AccountsView(Vertical):
         Every signed-in slot, not only those with a readable token: the service
         answers a Keychain-backed (macOS) or expired token with its reason and
         no request, and that reason is what the row must show instead of a
-        ``usage: …`` that never resolves. Not while asq hands its terminal over: the
-        hand-over waits for the reading (``handoff``).
+        ``usage: …`` that never resolves.
         """
-        if not self._on_screen or self.overview is None or handing_over(self, self.refresh_usage):
+        if not self._on_screen or self.overview is None:
             return
         accounts = [status.account for status in self.overview.accounts if status.signed_in]
         if not accounts:
@@ -740,15 +738,14 @@ class AccountsView(Vertical):
         previous one, on screen or not: the page keeps its line while hidden,
         and showing it again must not put the last session's bars under this
         session's card (review of #173, round 2). The new session's are read
-        when the page is on screen, and not while asq hands its terminal over: the
-        reading opens the store and writes its cache (``handoff``).
+        when the page is on screen.
         """
         session = self.session
         if session != self._credits_for:
             self.workers.cancel_group(self, CREDITS_WORKER)
             self.query_one("#aisquare-credits", Static).update("")
             self._credits_for = session
-        if session is None or not self._on_screen or handing_over(self, self.refresh_credits):
+        if session is None or not self._on_screen:
             return
         self.run_worker(
             lambda: (session, _read_credits(session)),

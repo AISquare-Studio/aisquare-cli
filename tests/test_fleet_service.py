@@ -4283,6 +4283,27 @@ def test_shutdown_forget_ends_every_row_unchecked_where_tmux_is_not_usable(
         assert store.fleet_agents(project.id, live_only=True) == []
 
 
+def test_a_forget_plan_without_usable_tmux_names_the_rows_it_ends_as_lost(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Round 29 of #257: with tmux unusable, `shutdown(forget=True)` ends every row its plan
+    does not hold, unchecked, but the plan's `lost` stayed empty, so `fleet shutdown --forget
+    --json` printed `"lost": {}` over the rows it was about to end. It names them, with the
+    socket no tmux here could ask, and still none it leaves live."""
+    coder = _coder(project)
+    tmux.installed = False
+
+    held = fleet_service.shutdown_plan(project, forget=True)  # its socket answers: left live
+    tmux.running = False  # its server exited, leaving the socket file: nobody listens
+    plan = fleet_service.shutdown_plan(project, forget=True)
+    report = fleet_service.shutdown(project, forget=True)
+
+    assert coder.id in held.held and held.lost == {}
+    assert plan.tmux_unusable is not None and plan.held == {}
+    assert plan.lost == {coder.id: coder.tmux_socket}
+    assert [row.agent.id for row in report.recorded] == list(plan.lost)
+
+
 def test_shutdown_refuses_when_the_socket_cannot_be_asked(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

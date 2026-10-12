@@ -412,7 +412,9 @@ class ShutdownPlan:
     it does not end."""
     lost: dict[str, str] = field(default_factory=dict)
     """Rows the run would record lost, by id, with the socket no server answered on: its
-    name, or the path its server said it listened on (:func:`_address`)."""
+    name, or the path its server said it listened on (:func:`_address`). Under
+    :attr:`tmux_unusable`, every row not :attr:`held`, with the socket no tmux here could
+    ask."""
     tmux_unusable: str | None = None
     """Why tmux is not usable here, for a ``forget`` plan: every row is then ended
     unchecked, on the operator's word, but for those in :attr:`held`, whose socket
@@ -3895,16 +3897,25 @@ def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -
     unusable = _shutdown_tmux(config, forget=forget)
     targets = _shutdown_targets(project)
     if unusable is not None:
+        rows = [agent for _, agents in targets for agent in agents]
+        held_live = {
+            agent_id: f"{why} — {way}"
+            for agent_id, (answer, why, way) in _held_rows(
+                targets, {}, config, unusable=True
+            ).items()
+            if answer == "answers"  # what --forget may not end (_shutdown_row)
+        }
         return ShutdownPlan(
             projects=[current for current, agents in targets if agents],
-            agents=[agent for _, agents in targets for agent in agents],
+            agents=rows,
             tmux_unusable=unusable,
-            held={
-                agent_id: f"{why} — {way}"
-                for agent_id, (answer, why, way) in _held_rows(
-                    targets, {}, config, unusable=True
-                ).items()
-                if answer == "answers"  # what --forget may not end (_shutdown_row)
+            held=held_live,
+            # Every other row is ended unchecked (`_record_lost`), so the plan says so: a
+            # script reading `--json`'s `lost` saw nothing being ended (round 29 of #257).
+            lost={
+                agent.id: str(_address(agent, config))
+                for agent in rows
+                if agent.id not in held_live
             },
         )
     sockets = _shutdown_sockets(targets, config)

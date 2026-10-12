@@ -989,6 +989,11 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
         ],
         board_events=board_events,
         board_since=board_since,
+        exits_since=lambda pid, since: [
+            event
+            for event in fleet.events
+            if event.kind == "agent_exited" and event.created_at >= since
+        ],
         board_sessions=lambda pid, since, ids: [
             session
             for session in fleet.sessions
@@ -3624,6 +3629,112 @@ def test_a_coder_whose_hand_over_never_started_its_replacement_is_reported_under
     assert [(item.kind, item.project_id, item.agent, item.reason) for item in items] == [
         ("crashed", alpha.id, "coder-1", "coder-1 stopped, and its replacement did not start")
     ]
+
+
+@pytest.mark.parametrize(
+    ("hub", "manager_in", "crew_in", "case", "expected"),
+    [
+        pytest.param(False, "alpha", "alpha", "crash", [], id="no hub, crash"),
+        pytest.param(True, "alpha", "alpha", "crash", [], id="hub, one project, crash"),
+        pytest.param(
+            True, "alpha", "beta", "crash", [("crashed", "beta", "coder-1")],
+            id="hub, two projects, crash",
+        ),
+        pytest.param(
+            False, "alpha", "alpha", "hand-over", [("manager_down", "alpha", "manager")],
+            id="no hub, hand-over",
+        ),
+        pytest.param(
+            True, "alpha", "alpha", "hand-over", [("manager_down", "alpha", "manager")],
+            id="hub, one project, hand-over",
+        ),
+        pytest.param(
+            True, "beta", "alpha", "hand-over", [("manager_down", "beta", "manager")],
+            id="hub, two projects, hand-over",
+        ),
+    ],
+)  # fmt: skip
+def test_a_row_its_exit_and_its_manager_are_its_fleet_projects_not_its_boards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hub: bool,
+    manager_in: str,
+    crew_in: str,
+    case: str,
+    expected: list[tuple[str, str, str]],
+) -> None:
+    """Under ``AISQUARE_TEAM_HUB`` several fleet projects write one board, and the scan took
+    the board for the project: a live manager in alpha hid beta's crashed coder, whom no
+    manager was nudged about (review of #243, round 19, 1/3), and a manager whose switch
+    never started its replacement was no card while its crew sat in another project (round
+    19, 2/3). A crash is its own project's manager's; a manager's crew is the board's. An
+    action's check of the card finds what the scan found."""
+    now = datetime.now(UTC)
+    hour_ago = now - timedelta(hours=1)
+    stopped = now - timedelta(minutes=10)
+    with store_session() as store:
+        projects = {
+            name: store.onboard_project(_rooted(tmp_path / name)) for name in ("alpha", "beta")
+        }
+        board = None
+        if hub:
+            board = _rooted(tmp_path / "hub")
+            monkeypatch.setenv("AISQUARE_TEAM_HUB", str(board.root))
+            store.ensure_project(board)
+        crashing = case == "crash"
+        rows = (
+            (projects[manager_in], "manager", "manager", "%1", not crashing),
+            (projects[crew_in], "coder-1", "coder", "%2", crashing),
+        )
+        for project, label, role, pane, ends in rows:
+            seen = stopped if ends else now - timedelta(minutes=1)
+            store.upsert_session(
+                TeamSession(
+                    id=f"ses_{label}", project_id=(board or project).id, role=role, label=label,
+                    started_at=hour_ago, last_seen_at=seen, state="working",
+                )
+            )  # fmt: skip
+            row = store.upsert_fleet_agent(
+                FleetAgent(
+                    id=f"agt_{label}", project_id=project.id, label=label, role=role,
+                    pane_id=pane, session_id=f"ses_{label}", cwd=project.root, created_at=hour_ago,
+                    ended_at=stopped if ends else None,
+                    exit_status=(1 if crashing else 0) if ends else None,
+                )
+            )  # fmt: skip
+            if ends:
+                why = None if crashing else fleet_service.HANDOVER_FAILED
+                fleet_service._emit_exit(store, row, why=why)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
+    items = scan_needs_you(remote_needs.live_needs_sources(), now=now, dismissed=())
+    names = {project.id: name for name, project in projects.items()}
+    assert [(item.kind, names[item.project_id], item.agent) for item in items] == expected
+    for item in items:
+        assert item.agent is not None
+        snap = needs_agent_now(projects[names[item.project_id]], item.agent, now=now)
+        assert needs_item_current(snap, item.id), "the card's Restart finds it current"
+
+
+def test_a_project_on_another_board_reads_its_own_exits_only_with_a_listing() -> None:
+    """The exits of a project whose agents write another board were its own board's whole
+    day, every kind the scan reads, for its ``agent_exited`` alone, and were read when
+    the listing failed, though only the rules a listing feeds read them (review of #243,
+    round 19, 3/3)."""
+    asked: list[str] = []
+
+    def exits_since(pid: str, since: datetime) -> list[TeamEvent]:
+        asked.append(pid)
+        return []
+
+    for fails, reads in ((False, [PROJECT.id]), (True, [])):
+        asked.clear()
+        fleet = Fleet(agents=[_status(_row(), "working")], listing_fails=fails)
+        sources = replace(
+            _sources(fleet), board_project=lambda project: "prj_hub", exits_since=exits_since
+        )
+        scan_needs_you(sources, now=NOW, dismissed=())
+        assert asked == reads
 
 
 def test_under_a_team_hub_a_projects_rows_are_derived_again_in_one_look_at_tmux(

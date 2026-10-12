@@ -389,6 +389,10 @@ class NeedsSources:
     ended on an API error (``turn_failed``). An item lives for :data:`QUESTION_HORIZON`
     however busy the board is, so it is read by time, not from a window of the newest
     events that 300 notes push it out of."""
+    exits_since: Callable[[str, datetime], list[TeamEvent]]
+    """The project's own ``agent_exited`` events written at or after the given time: the
+    fleet announces a row's exit on its row's project (``fleet._emit_exit``), so a project
+    whose agents write another board finds none in that board's day."""
     board_sessions: Callable[[str, datetime, Collection[str]], list[TeamSession]]
     """The project's sessions seen at or after the given time, and those with the given ids:
     the ones a live manager may be, and the authors of the board's open questions."""
@@ -1643,9 +1647,9 @@ def _needs_manager_live(
     would not answer. Otherwise a manager session with no fleet row (one started
     outside the fleet, say) counts while it has not ended, is not parked on a
     limit and was seen within the board's stale window. A session that has a row
-    (``rowed``) is its row's to decide: a crash fires no ``SessionEnd``, so a
-    dead manager's session read live for half an hour after it died, and a
-    parked one's for as long as it waited.
+    (``rowed``), in this project or another, is its row's to decide: a crash fires
+    no ``SessionEnd``, so a dead manager's session read live for half an hour after
+    it died, and a parked one's for as long as it waited.
     """
     if any(_needs_is_manager(row.role) for row in live_rows):
         return True
@@ -1679,6 +1683,25 @@ class _NeedsProject:
     """Agent id → the tail its items were read from."""
 
 
+@dataclass(frozen=True)
+class _NeedsRows:
+    """One fleet project's rows, as a scan reads them before it judges any project."""
+
+    project: ProjectInfo
+    board: str
+    """The id of the board its agents write (:func:`_needs_board_of`)."""
+    statuses: list[FleetAgentStatus] | None
+    """Its listing, through :func:`_needs_unheard`; ``None``: it failed."""
+    ended: list[FleetAgent]
+    """Its rows that ended within ``RECENTLY_ENDED``."""
+
+    @property
+    def needs_rows(self) -> list[FleetAgent]:
+        """Every row of the project the scan read, once."""
+        listed = (status.agent for status in self.statuses or [])
+        return list({row.id: row for row in [*self.ended, *listed]}.values())
+
+
 _T = TypeVar("_T")
 
 
@@ -1699,49 +1722,89 @@ def _needs_read_or_none(
         return None
 
 
-def _needs_scan_project(
+def _needs_listing(sources: NeedsSources, project: ProjectInfo) -> list[FleetAgentStatus] | None:
+    """``project``'s ``list_agents``, empty when it has no live row to list
+    (:func:`_needs_has_live`); ``None``: it failed."""
+    try:
+        return sources.list_agents(project) if _needs_has_live(sources, project) else []
+    except Exception:
+        log.debug("remote: needs could not list the agents of %s", project.id, exc_info=True)
+        return None
+
+
+def _needs_rows_of(
     sources: NeedsSources,
     project: ProjectInfo,
     statuses: list[FleetAgentStatus] | None,
+    *,
+    board: str,
+    now: datetime,
+    answers: Callable[[str], bool],
+) -> _NeedsRows:
+    """``project``'s rows: ``statuses``, its listing (``None``: it failed), with each live row
+    on a tmux server that does not answer read ``unknown`` (``answers``, asked once per
+    socket for a whole scan: :func:`_needs_unheard`), and its rows ended within
+    ``RECENTLY_ENDED``."""
+    from aisquare.services.fleet import RECENTLY_ENDED
+
+    return _NeedsRows(
+        project=project,
+        board=board,
+        statuses=None if statuses is None else _needs_unheard(statuses, answers),
+        ended=_needs_read(
+            lambda: sources.ended_agents(project.id, now - RECENTLY_ENDED), "rows", project
+        ),
+    )
+
+
+def _needs_mates(fleet: Sequence[_NeedsRows], own: _NeedsRows) -> list[_NeedsRows]:
+    """The projects of ``fleet`` but ``own`` whose agents write ``own``'s board."""
+    return [mate for mate in fleet if mate.board == own.board and mate.project.id != own.project.id]
+
+
+def _needs_scan_project(
+    sources: NeedsSources,
+    own: _NeedsRows,
+    mates: Sequence[_NeedsRows],
     *,
     now: datetime,
     first_seen: MutableMapping[str, datetime],
     seen: set[str],
     accounts: AccountsSettings | None,
-    answers: Callable[[str], bool] | None = None,
 ) -> _NeedsProject:
-    """Every item of one project. ``statuses`` is its ``list_agents``; ``None``, it failed.
+    """Every item of one fleet project, ``own``. ``mates`` are the other fleet projects
+    whose agents write its board (:func:`_needs_mates`).
 
     Without a listing only the board speaks: an agent's state, a crash, a
     manager gone and tmux down all depend on rows the listing could not read.
     ``first_seen`` dates the items whose facts carry no date (a pane gone, tmux
     not answering) from the first scan that saw them; ``seen`` collects what
-    this scan saw, so the caller can forget the rest. ``answers`` says whether a
-    tmux server answers (:func:`_needs_unheard`), once per socket for a whole scan.
+    this scan saw, so the caller can forget the rest.
 
     The board's sessions and events are read from the project's board
     (:attr:`NeedsSources.board_project`), its rows by its own id. Under
     ``AISQUARE_TEAM_HUB`` every session and event is the hub's: read by the fleet
     project's id, the board was empty to the scan, and a manager's question or
     result, a failed turn and the usage-limit dialog's words never became a card
-    or a push, while the Board tab showed them (sweep 4 of #243). The exits the
-    fleet announces are not the team's, though: they go to the row's own project
-    (``fleet._emit_exit``), and are read there (:func:`_needs_exits`). Read from the
-    hub's, a hand-over that could not start its replacement was no card and no
-    push (review of #243, round 18, 1/4).
+    or a push, while the Board tab showed them (sweep 4 of #243).
+
+    A row, its exit and its manager are its fleet project's, though, not the
+    board's. The fleet announces an exit on the row's own project
+    (``fleet._emit_exit``), where it is read (:func:`_needs_exits`; from the hub's,
+    a hand-over that could not start its replacement was no card, review of #243,
+    round 18, 1/4), and nudges that project's manager row (``fleet.nudge_manager``).
+    So a manager is this project's when it is one of its rows, or a session that
+    no row of any project writing the board holds, on this project's own board: a
+    manager row in another project hid a crashed coder nobody was told of (round
+    19, 1/3). Its crew is every agent on the board (:func:`_needs_manager_down`):
+    under a hub the manager's own project may hold none of it (round 19, 2/3).
     """
     from aisquare.services.fleet import RECENTLY_ENDED
 
-    if statuses is not None:
-        statuses = _needs_unheard(statuses, answers or _needs_hearing(sources))
-    ended = _needs_read(
-        lambda: sources.ended_agents(project.id, now - RECENTLY_ENDED), "rows", project
-    )
-    board_id = _needs_board_of(sources, project)
+    project, statuses, board_id = own.project, own.statuses, own.board
     day = now - max(QUESTION_HORIZON, RECENTLY_ENDED)
     board_read = _needs_read_or_none(lambda: sources.board_since(board_id, day), "board", project)
     board = board_read or []
-    exits = board if board_id == project.id else _needs_exits(sources, project, day)
     window = _needs_window(sources, project, board_id)
     authors = _needs_board_authors(board, now)
     sessions = _needs_read(
@@ -1750,14 +1813,16 @@ def _needs_scan_project(
         project,
     )
     listed = statuses or []
-    rows = list({row.id: row for row in [*ended, *(status.agent for status in listed)]}.values())
-    rowed = {row.session_id for row in rows if row.session_id}
+    rows = own.needs_rows
+    rowed = {row.session_id for one in (own, *mates) for row in one.needs_rows if row.session_id}
+    # A session no row holds is the project's whose board it is on: a hub's is none of these.
+    unrowed = sessions if board_id == project.id else []
     acting = [
         status.agent
         for status in listed
         if status.agent.ended_at is None and status.state not in _NEEDS_NOT_ACTING
     ]
-    manager_live = _needs_manager_live(acting, rowed, sessions, now)
+    manager_live = _needs_manager_live(acting, rowed, unrowed, now)
     items: list[NeedsItem] = []
     tails: dict[str, TranscriptTail | None] = {}
     if statuses is not None:
@@ -1768,7 +1833,7 @@ def _needs_scan_project(
                 # Its own items wait for no manager but another: a manager at a prompt of
                 # its own reads attention, live, and is no one to leave them to.
                 others = [row for row in acting if row.id != status.agent.id]
-                live = _needs_manager_live(others, rowed, sessions, now)
+                live = _needs_manager_live(others, rowed, unrowed, now)
             for item in needs_from_agent(
                 status,
                 tail,
@@ -1783,9 +1848,10 @@ def _needs_scan_project(
                 pane_output=_needs_output_of(sources, status.agent),
             ):
                 items.append(_needs_dated(item, first_seen, seen) if item.kind == "lost" else item)
+        exits = board if board_id == project.id else _needs_exits(sources, project, day)
         items.extend(
             _needs_crashed(
-                ended,
+                own.ended,
                 rows,
                 exits,
                 project=project,
@@ -1794,16 +1860,15 @@ def _needs_scan_project(
                 sources=sources,
             )
         )
-        items.extend(
-            _needs_manager_down(statuses, rows, board_read, exits, project=project, now=now)
-        )
+        crew = [*statuses, *(status for mate in mates for status in mate.statuses or [])]
+        items.extend(_needs_manager_down(crew, rows, board_read, exits, project=project, now=now))
         items.extend(
             _needs_fleet_down(statuses, project=project, now=now, first_seen=first_seen, seen=seen)
         )
     items.extend(
         needs_from_board(board, sessions, rows, project=project, now=now, manager_live=manager_live)
     )
-    return _NeedsProject(items=items, statuses=listed, ended=ended, tails=tails)
+    return _NeedsProject(items=items, statuses=listed, ended=own.ended, tails=tails)
 
 
 def _needs_tail_of(sources: NeedsSources, status: FleetAgentStatus) -> TranscriptTail | None:
@@ -1913,9 +1978,9 @@ def _needs_session_event(
 
 def _needs_exits(sources: NeedsSources, project: ProjectInfo, day: datetime) -> list[TeamEvent]:
     """The exits the fleet announced on ``project``'s own board since ``day`` (``agent_exited``,
-    by the row's ``project_id``), for a project whose agents write another board."""
-    read = _needs_read(lambda: sources.board_since(project.id, day), "exits", project)
-    return [event for event in read if event.kind == "agent_exited"]
+    by the row's ``project_id``), for a project whose agents write another board. Only
+    those: the day's other kinds are its board's (review of #243, round 19, 3/3)."""
+    return _needs_read(lambda: sources.exits_since(project.id, day), "exits", project)
 
 
 def _needs_board_of(sources: NeedsSources, project: ProjectInfo) -> str:
@@ -2045,8 +2110,8 @@ def _needs_crashed(
     replacement (its ``/exit``, or the kill when that did not land in time):
     nothing took the agent's place, and the exit it announced says so
     (``fleet.HANDOVER_FAILED``, read from the day's ``exits``). An
-    agent whose task is closed did its work; one a live manager has (it was
-    nudged on the exit) is the manager's; one that was restarted since — a newer
+    agent whose task is closed did its work; one a live manager of its project has
+    (it was nudged on the exit) is the manager's; one that was restarted since — a newer
     row holds its label — was handled. The manager's own crash is
     ``manager_down``.
     """
@@ -2144,7 +2209,7 @@ def _needs_last_word(row: FleetAgent, board: Sequence[TeamEvent]) -> TeamEvent |
 
 
 def _needs_manager_down(
-    statuses: Sequence[FleetAgentStatus],
+    crew: Sequence[FleetAgentStatus],
     rows: Sequence[FleetAgent],
     board: Sequence[TeamEvent] | None,
     exits: Sequence[TeamEvent],
@@ -2155,8 +2220,8 @@ def _needs_manager_down(
     """The manager has ended and none replaced it, while its crew still needs one.
 
     A failing exit status is always reported. A forced stop (no status) is
-    reported only while another agent still works, waits on a prompt or is
-    limited, and the manager's last word on the board was not its ``result``:
+    reported only while an agent of its ``crew`` still works, waits on a prompt or
+    is limited, and the manager's last word on the board was not its ``result``:
     a manager stopped after reporting, or exiting cleanly, finished its job.
     Its last word is its newest question, result or decision of the board's
     day (``board``), not the exit the fleet announces for it under its session
@@ -2167,6 +2232,12 @@ def _needs_manager_down(
     That one is reported as a stop is. ``board`` is ``None`` when the day could not
     be read: a stop is then not reported at all, rather than for a last word nobody
     read; a crash needs no board.
+
+    ``crew`` is the listing of every fleet project that writes the board, ``rows``'
+    and the rest, a manager of any of them aside: under ``AISQUARE_TEAM_HUB`` a
+    manager's crew may sit in another project, and counted in its own alone, a
+    stop or a hand-over that left that crew without it was no card (review of
+    #243, round 19, 2/3).
     """
     managers = [row for row in rows if _needs_is_manager(row.role)]
     if not managers or any(row.ended_at is None for row in managers):
@@ -2179,8 +2250,8 @@ def _needs_manager_down(
     else:
         busy = [
             status
-            for status in statuses
-            if status.agent.id != manager.id
+            for status in crew
+            if not _needs_is_manager(status.agent.role)
             and status.agent.ended_at is None
             and status.state in ("working", "attention", "limited")
         ]
@@ -2278,32 +2349,35 @@ def scan_needs_you(
     looked at this time is kept for the next look. ``failing`` is the watcher's
     memory of the projects whose scans fail: one warning a streak, not one every
     3 s (:func:`_needs_failed`).
+
+    Every project's rows are read before any project is judged: a project's
+    judgement reads the rows of the others that write its board (:func:`_needs_mates`).
     """
     memory: MutableMapping[str, datetime] = {} if first_seen is None else first_seen
     seen: set[str] = set()
     accounts = _needs_accounts(sources)
     answers = _needs_hearing(sources)
     items: list[NeedsItem] = []
-    projects = sources.list_projects()
-    for project in projects:
-        statuses: list[FleetAgentStatus] | None
-        try:
-            statuses = sources.list_agents(project) if _needs_has_live(sources, project) else []
-        except Exception:
-            log.debug("remote: needs could not list the agents of %s", project.id, exc_info=True)
-            statuses = None
+    fleet: list[_NeedsRows] = []
+    for project in sources.list_projects():
+        statuses = _needs_listing(sources, project)
         if statuses is None:
             _needs_still_remembered(memory, seen, project)
+        board = _needs_board_of(sources, project)
+        fleet.append(
+            _needs_rows_of(sources, project, statuses, board=board, now=now, answers=answers)
+        )
+    for own in fleet:
+        project = own.project
         try:
             scanned = _needs_scan_project(
                 sources,
-                project,
-                statuses,
+                own,
+                _needs_mates(fleet, own),
                 now=now,
                 first_seen=memory,
                 seen=seen,
                 accounts=accounts,
-                answers=answers,
             )
         except Exception as exc:
             _needs_failed(f"the needs scan of {project.id}", exc, failing, project.id)
@@ -2315,13 +2389,11 @@ def scan_needs_you(
         items.extend(scanned.items)
     for key in [key for key in memory if key not in seen]:
         del memory[key]
-    items = _needs_board_once(items, projects, sources)
+    items = _needs_board_once(items, fleet)
     return _needs_ranked([item for item in items if item.id not in dismissed])
 
 
-def _needs_board_once(
-    items: Sequence[NeedsItem], projects: Sequence[ProjectInfo], sources: NeedsSources
-) -> list[NeedsItem]:
+def _needs_board_once(items: Sequence[NeedsItem], fleet: Sequence[_NeedsRows]) -> list[NeedsItem]:
     """``items`` with each question or result of a board that several projects write one card.
 
     Under ``AISQUARE_TEAM_HUB`` every project's board is the hub's, so each project's scan
@@ -2330,10 +2402,10 @@ def _needs_board_once(
     that no row asked (a manager started outside the fleet) is the card of the board's
     own project when it is listed, else of the first project that writes the board.
     """
-    boards = {project.id: _needs_board_of(sources, project) for project in projects}
+    boards = {own.project.id: own.board for own in fleet}
     writers: dict[str, list[str]] = {}
-    for project in projects:
-        writers.setdefault(boards[project.id], []).append(project.id)
+    for own in fleet:
+        writers.setdefault(own.board, []).append(own.project.id)
     shared = {board: ids for board, ids in writers.items() if len(ids) > 1}
     if not shared:
         return list(items)
@@ -2426,11 +2498,13 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
     """One agent of ``project`` re-derived now, synchronously: never call it on the event loop.
 
     It runs the scan's part for this one project — one listing, its ended rows,
-    its board, the cached tails — plus tmux questions about the label's pane: is
-    its foreground the agent, and has its window been quiet. Only a pane the
-    listing vouched for is asked about: one that reads ``lost`` may be another
-    agent's pane under the row's old id, and an Escape an action sends on the
-    strength of the answer would land in that agent's turn. The listing is not
+    its board, the cached tails, and the rows of the projects that write its board
+    too, which the scan judges it by (:func:`_needs_mates_of`) — plus tmux
+    questions about the label's pane: is its foreground the agent, and has its
+    window been quiet. Only a pane the listing vouched for is asked about: one
+    that reads ``lost`` may be another agent's pane under the row's old id, and an
+    Escape an action sends on the strength of the answer would land in that
+    agent's turn. The listing is not
     caught here: a snapshot made without it would claim a pane shows no dialog
     when nobody asked. Raises ``fleet.NoSuchAgent`` only when the label has had
     no row at all within ``RECENTLY_ENDED``.
@@ -2439,11 +2513,14 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
 
     when = now or _needs_now()
     sources = live_needs_sources()
+    answers = _needs_hearing(sources)
     statuses = sources.list_agents(project)
+    board = _needs_board_of(sources, project)
+    own = _needs_rows_of(sources, project, statuses, board=board, now=when, answers=answers)
     scanned = _needs_scan_project(
         sources,
-        project,
-        statuses,
+        own,
+        _needs_mates_of(sources, own, now=when, answers=answers),
         now=when,
         first_seen={},
         seen=set(),
@@ -2465,6 +2542,23 @@ def needs_agent_now(project: ProjectInfo, label: str, *, now: datetime | None = 
         tuple(item for item in scanned.items if item.agent == label),
         when,
     )
+
+
+def _needs_mates_of(
+    sources: NeedsSources, own: _NeedsRows, *, now: datetime, answers: Callable[[str], bool]
+) -> list[_NeedsRows]:
+    """:func:`_needs_mates` for one project's scan alone: the listed projects but ``own``
+    whose agents write its board, each listed and read as the scan reads it. A project
+    whose board is its own alone costs no listing but its own."""
+    mates: list[_NeedsRows] = []
+    for project in _needs_read(sources.list_projects, "projects", own.project):
+        if project.id == own.project.id or _needs_board_of(sources, project) != own.board:
+            continue
+        statuses = _needs_listing(sources, project)
+        mates.append(
+            _needs_rows_of(sources, project, statuses, board=own.board, now=now, answers=answers)
+        )
+    return mates
 
 
 def needs_single_agent_now(
@@ -2726,6 +2820,10 @@ def live_needs_sources() -> NeedsSources:
                 project_id, since, kinds=_NEEDS_DAY_KINDS, human_kinds=_NEEDS_REPLIED
             )
 
+    def needs_exits_since(project_id: str, since: datetime) -> list[TeamEvent]:
+        with store_session() as store:
+            return store.team_events_since(project_id, since, kinds=("agent_exited",))
+
     def needs_board_sessions(
         project_id: str, since: datetime, ids: Collection[str]
     ) -> list[TeamSession]:
@@ -2771,6 +2869,7 @@ def live_needs_sources() -> NeedsSources:
         ended_agents=needs_rows_ended,
         board_events=needs_board_events,
         board_since=needs_board_since,
+        exits_since=needs_exits_since,
         board_sessions=needs_board_sessions,
         task_status=needs_task_status,
         transcript_tail=_needs_cached_tail,

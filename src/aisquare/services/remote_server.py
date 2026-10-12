@@ -604,37 +604,43 @@ def _remote_reachable_projects() -> list[ProjectInfo]:
     return _remote_reachable(rows if held else [*rows, current], current)
 
 
-_board_projects: dict[tuple[Path, str], ProjectInfo] = {}
+BOARD_PROJECT_TTL = 60.0
+"""How long :func:`_remote_board_project` keeps a root's board, in seconds."""
+
+_board_projects: dict[tuple[Path, str], tuple[float, ProjectInfo]] = {}
 """The board project of each project root under each ``AISQUARE_TEAM_HUB`` (blank for none),
-as :func:`_remote_board_project` resolved it."""
+as :func:`_remote_board_project` resolved it, with when (``time.monotonic``)."""
 _board_projects_lock = threading.Lock()
 
 
 def _remote_board_project(root: Path) -> ProjectInfo:
     """The board of the project at ``root``, as ``asq board`` run there resolves it,
-    ``AISQUARE_TEAM_HUB`` and worktrees included, kept for each root under each hub:
-    ``team_project`` runs ``git``, and neither the hub nor where a checkout's repository
-    lives changes under a running server (:func:`remote_board_payload`).
+    ``AISQUARE_TEAM_HUB`` and worktrees included, kept for each root under each hub for
+    :data:`BOARD_PROJECT_TTL`: ``team_project`` runs ``git`` (:func:`remote_board_payload`).
 
     The one place it is kept, which the Board tab, the board writes and the needs watcher
     all read. Each kept its own, and each kept whatever its first lookup said: a worktree
     whose ``git`` failed in one was its own board there and its principal checkout's in
     another, and the Board tab listed tasks no claim found (review of #243, round 11, 6/9).
-    Every answer is kept, a failed ``git``'s too: ``team_project`` gives the board a working
-    ``git`` does either way (``workspace.find_project_root``). Telling a failed ``git``'s
-    answer apart by its shape missed a project below a worktree's root, and ran ``git``
-    twice a second for a worktree whose ``git`` always fails (review of #243, round 12,
-    2/10 to 4/10)."""
+    A failed ``git``'s answer is kept too, and is a working ``git``'s: the checkout's
+    ``.git`` is read as ``git`` reads it (``workspace.find_project_root``). Telling it apart
+    by its shape missed a project below a worktree's root, and ran ``git`` twice a second
+    for a worktree whose ``git`` always fails (review of #243, round 12, 2/10 to 4/10).
+    Kept for the process on the premise that the two agree, a ``--separate-git-dir``
+    checkout's, which they did not, held the Board tab to another board until a restart
+    (review of #243, round 13, 2/4): no answer is kept past a minute."""
     from aisquare.core import orchestrator
     from aisquare.services import team as team_service
 
     key = (root, os.environ.get(orchestrator.TEAM_HUB_ENV_VAR, ""))
+    now = time.monotonic()
     with _board_projects_lock:
-        board = _board_projects.get(key)
-    if board is None:
-        board = team_service.resolve_project(root)
-        with _board_projects_lock:
-            board = _board_projects.setdefault(key, board)
+        kept = _board_projects.get(key)
+    if kept is not None and now - kept[0] < BOARD_PROJECT_TTL:
+        return kept[1]
+    board = team_service.resolve_project(root)
+    with _board_projects_lock:
+        _board_projects[key] = (now, board)
     return board
 
 
@@ -2772,11 +2778,10 @@ def remote_board_payload(project: str | None = None, *, glance: bool = False) ->
     resolved the board through ``team_project``, a ``git rev-parse`` process, wrote the
     store (``ensure_project``, a write transaction beside every hook's), and read every
     session and task the project ever had, for the frame to drop all but a few (review
-    of #243, round 4). Now the board project of each root is resolved once and kept
-    (:func:`_remote_board_project`), as the TUI's Board tab resolves its own once: neither
-    the hub nor where a checkout's repository lives changes under a running server.
-    ``board_data`` then reads the events and the sessions they name (``glance``). ``GET
-    api/board`` still reads the whole board, as ``asq board --json`` prints it.
+    of #243, round 4). Now the board project of each root is resolved once a minute
+    (:func:`_remote_board_project`). ``board_data`` then reads the events and the sessions
+    they name (``glance``). ``GET api/board`` still reads the whole board, as ``asq board
+    --json`` prints it.
 
     #240 fold: pass ``exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS`` here (one line).
     """

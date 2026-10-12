@@ -1223,7 +1223,10 @@ class UninstallPlan:
             )
         lasting = self.lasting_plugins
         fetching = tuple(entry for entry in self.lasting_mcp if entry.fetches)
-        if self.purges and fetching:
+        # A purge deletes the home, or with the home already gone still the plugin's answers
+        # (round 27 of #257); the next session undoing either is the same (round 28).
+        purging = self.purges or self.deletes_answers
+        if purging and fetching:
             # As a plugin below: Claude Code's next session starts the server, uvx fetches
             # aisquare, and `aisquare serve` makes the home again (review of #257). One
             # naming the installed program can only fail once the package is gone.
@@ -1235,7 +1238,7 @@ class UninstallPlan:
                 f"{'; '.join(mcp_removal(entry) for entry in fetching)}",
                 error="mcp_registered",
             )
-        if self.purges and lasting:
+        if purging and lasting:
             # A purge the next session undoes is not one: refused like the fleet, with
             # the command that clears the way. A plain uninstall only says so.
             where = ", ".join(plugin_place(plugin) for plugin in lasting)

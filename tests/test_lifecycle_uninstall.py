@@ -1301,6 +1301,34 @@ def test_a_purge_deletes_the_plugins_answers_when_the_home_is_already_gone(
     assert not paths.aisquare_home().exists(), "and no home was made"
 
 
+def test_a_purge_with_the_home_already_gone_still_waits_for_the_plugin(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 28 of #257: with ``~/.aisquare`` already gone, ``--purge`` still deletes the
+    plugin's answers (round 27), but its "would not last" refusals asked only whether the
+    home was deleted. The enabled plugin's next session writes the answers again, and
+    through uvx makes the home: a purge it undoes is refused, as with a home to delete."""
+    monkeypatch.setattr(agent_core, "plugin_route_supported", lambda: True)  # the route's rule
+    answers = isolated_agent_home / ".cache" / "aisquare" / "plugin-tested-python"
+    answers.parent.mkdir(parents=True)
+    answers.write_text("ranged 1760000000 /home/u/.local/bin/uv >=3.11,<3.14\n", "utf-8")
+    site = _plugin_installed(isolated_agent_home / ".claude")
+    assert not paths.aisquare_home().exists(), "no home: never made, or deleted by hand"
+
+    purge = runner.invoke(app, ["--json", "uninstall", "--yes", "--purge"])
+
+    refused = _one_object(purge.stdout)
+    assert (purge.exit_code, refused["error"]) == (1, "plugin_enabled"), refused
+    assert agent_core.claude_plugin_command("uninstall", site) in refused["detail"]
+    assert answers.is_file() and world.events == [], "nothing deleted"
+
+
 def test_the_folder_the_plugins_answers_are_in_stays_while_it_holds_anything_else(
     tool: Tool,
     world: World,

@@ -5321,7 +5321,8 @@ def build_remote_app(
         was looked up as many as three times (review of #243, round 12, 10/10), and only
         for one that needs it: the installed build's, which may be the bundled page, and a
         ``--dist``'s index and the deep links it answers, not each of its files (review of
-        #243, round 13, 4/4).
+        #243, round 13, 4/4). An ``index.html`` asked for by name is that same lookup (round
+        14, 3/3).
 
         The installed build is looked up for each request, one ``realpath``: looked up once,
         as the app was built, a ``remote-dist`` that is a link to a build of the human's own
@@ -5355,19 +5356,19 @@ def build_remote_app(
             )
 
         @functools.cache
-        def page_index() -> Path | None:
-            return _built_page_file(dist, "index.html")
+        def page_file(name: str) -> Path | None:
+            return _built_page_file(dist, name)
 
-        if dist_dir is None and page_index() is None:
+        if dist_dir is None and page_file("index.html") is None:
             response = bundled_page()
-        elif rel and (candidate := _built_page_file(dist, rel)) is not None:
+        elif rel and (candidate := page_file(rel)) is not None:
             response = built_file(candidate, rel)
         elif rel and not _is_navigation(rel, request.headers.get("accept", "")):
             # A file was asked for and there is no such file. Saying so is the
             # whole point: the SPA document under a .js name is a boot failure
             # with no error, and the 200 hides which build is actually installed.
             response = _json_error(404, "not_found", f"no such file in the built page: {rel}")
-        elif (found := page_index()) is not None:
+        elif (found := page_file("index.html")) is not None:
             response = built_file(found, "index.html")
         else:
             log.warning("remote: %s", _page_no_index(dist))

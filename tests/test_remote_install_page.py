@@ -435,7 +435,9 @@ def test_the_index_is_looked_up_once_for_each_request(
     needed an answer of its own (sweep 4 of #243; review of #243, round 12, 10/10). Once:
     the installed build, a ``--dist`` and a ``--dist`` with no index each look once, for
     the index itself and for a deep link it answers. A file of a ``--dist`` looked it up
-    too, which no answer of it needs (review of #243, round 13, 4/4): not at all."""
+    too, which no answer of it needs (review of #243, round 13, 4/4): not at all. The
+    installed build's ``index.html``, asked for by name, looked it up twice (round 14,
+    3/3)."""
     remote_server.install_page(built)
     unbuilt = tmp_path / "unbuilt"
     unbuilt.mkdir()
@@ -450,7 +452,7 @@ def test_the_index_is_looked_up_once_for_each_request(
     runtime = Runtime(remote_state_path(), remote_audit_path())
     for dist_dir, status in ((None, 200), (built, 200), (unbuilt, 404)):
         client = make_client(build_app(runtime, dist_dir=dist_dir))
-        for path in ("", "fleet/coder-1", "assets/app.js"):
+        for path in ("", "index.html", "fleet/coder-1", "assets/app.js"):
             looked.clear()
             response = client.get(f"/r/{runtime.token}/{path}", headers={"accept": "text/html"})
             assert response.status_code == status, (dist_dir, path, response.text)

@@ -6420,9 +6420,18 @@ def _page_copy_removed(root: Path) -> None:
     directory holds: ``ignore_errors`` left each failed copy of a read-only build where it
     was, as sweep 4 of #243 had them before, and an older install's copy the same way once
     the next install moved it aside (review of #243, round 8, 1/6).
+
+    A link is removed as a link: a ``remote-dist`` that was a link to a build of the
+    human's own was moved aside as one, and the walk went through it, gave that build's
+    read-only directories their owner's write, and ``rmtree``, which refuses a link, left
+    the link behind for each install (review of #243, round 9, 4/6).
     """
     import stat
 
+    if root.is_symlink():
+        with contextlib.suppress(OSError):
+            root.unlink()
+        return
     for directory, _subdirectories, _files in os.walk(root):
         with contextlib.suppress(OSError):
             mode = stat.S_IMODE(os.lstat(directory).st_mode)
@@ -6477,12 +6486,14 @@ def install_page(source: Path) -> Path:
         shutil.copytree(source, staging, ignore=functools.partial(_page_copy_skips, source))
         _page_copy_narrowed(staging)
         _page_copy_removed(previous)
-        if destination.exists():
+        # A link counts whether or not it leads anywhere: one that leads nowhere is still a
+        # name the copy cannot be renamed onto.
+        if os.path.lexists(destination):
             destination.rename(previous)
         try:
             staging.rename(destination)
         except OSError:
-            if previous.exists() and not destination.exists():
+            if os.path.lexists(previous) and not os.path.lexists(destination):
                 previous.rename(destination)
             raise
     except BaseException:

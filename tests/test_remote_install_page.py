@@ -252,6 +252,34 @@ def test_a_read_only_build_installs_and_leaves_no_copy_behind(
                 path.chmod(0o755)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows keeps no owner write bit on a directory")
+@pytest.mark.parametrize("leads", ["to a build", "nowhere"])
+def test_install_page_over_a_linked_page_replaces_the_link_and_leaves_its_build_as_it_was(
+    isolated_home: Path, built: Path, tmp_path: Path, leads: str
+) -> None:
+    """A ``remote-dist`` that is a link to a build of the human's own was moved aside as a
+    link, and its removal walked through it: the build's read-only directories were given
+    their owner's write, and the link was left in ``~/.aisquare`` for each install (review
+    of #243, round 9, 4/6). One that leads nowhere is replaced too."""
+    own = tmp_path / "own-build"
+    shutil.copytree(built, own)
+    (own / "index.html").write_text("<!doctype html><title>my build</title>")
+    (own / "assets").chmod(0o555)
+    remote_dist_dir().parent.mkdir(parents=True, exist_ok=True)
+    remote_dist_dir().symlink_to(own if leads == "to a build" else tmp_path / "gone")
+    try:
+        destination = remote_server.install_page(built)
+
+        assert not destination.is_symlink()
+        assert (destination / "index.html").read_text() == (built / "index.html").read_text()
+        assert stat.S_IMODE((own / "assets").stat().st_mode) == 0o555, "the build is its own"
+        assert (own / "index.html").read_text().endswith("my build</title>")
+        home = remote_dist_dir().parent
+        assert [p.name for p in home.iterdir() if p.name.startswith(".remote-dist.")] == []
+    finally:
+        (own / "assets").chmod(0o755)
+
+
 def test_install_page_without_an_index_html_refuses_and_installs_nothing(
     isolated_home: Path, tmp_path: Path
 ) -> None:

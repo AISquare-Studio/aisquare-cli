@@ -1085,6 +1085,85 @@ def test_a_hidden_file_of_the_build_is_never_served(
         assert response.text.startswith("<!doctype html>"), "only ever the document"
 
 
+@pytest.mark.parametrize("leads", ["out of the build", "to a hidden file"])
+def test_an_index_html_that_is_a_link_to_no_file_of_the_build_is_no_page(
+    isolated_home: Path, built: Path, tmp_path: Path, leads: str
+) -> None:
+    """``index.html`` alone was asked only whether it was a file: a ``--dist`` whose index led
+    to ``../.env`` served that file at ``/r/<token>/`` before the passphrase, and
+    ``install-page`` left the link behind and installed a page with no index (review of
+    #243, round 11, 1/9). It is held to the rule every other file of the build is."""
+    _hidden_files(built)
+    (tmp_path / ".env").write_text(SECRET)
+    index = built / "index.html"
+    index.unlink()
+    try:
+        index.symlink_to(tmp_path / ".env" if leads == "out of the build" else built / ".env")
+    except OSError:
+        pytest.skip("this platform cannot make the symlink")
+    refusal = remote_server.PAGE_INDEX_LINKED.format(index=index, root=built.resolve())
+
+    assert remote_server._page_missing(built) == refusal
+    runtime = Runtime(remote_state_path(), remote_audit_path())
+    client = make_client(build_app(runtime, dist_dir=built))
+    for path in ("", "index.html", "fleet/coder-1"):
+        response = client.get(f"/r/{runtime.token}/{path}", headers={"accept": "text/html"})
+        assert SECRET not in response.text
+        assert response.status_code == 404, response.text
+
+    with pytest.raises(NoRemotePage) as refused:
+        remote_server.install_page(built)
+    assert str(refused.value) == refusal
+    assert not remote_dist_dir().exists()
+
+
+def test_an_installed_index_html_linked_out_of_the_build_by_hand_is_the_bundled_page(
+    isolated_home: Path, built: Path, tmp_path: Path
+) -> None:
+    """An installed build is served by the same rule: an ``index.html`` put there by hand as
+    a link out of it is no installed page, and the bundled page is served in its place
+    (review of #243, round 11, 1/9)."""
+    (tmp_path / ".env").write_text(SECRET)
+    index = remote_server.install_page(built) / "index.html"
+    index.unlink()
+    try:
+        index.symlink_to(tmp_path / ".env")
+    except OSError:
+        pytest.skip("this platform cannot make the symlink")
+
+    assert remote_server._page_missing(None) is None
+    runtime = Runtime(remote_state_path(), remote_audit_path())
+    response = make_client(build_app(runtime)).get(
+        f"/r/{runtime.token}/", headers={"accept": "text/html"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.text == remote_page.bundled_page_files()["index.html"].decode("utf-8")
+
+
+def test_install_page_copies_an_index_html_linked_to_a_file_of_the_build(
+    isolated_home: Path, built: Path
+) -> None:
+    """A link that stays inside the build is a file of it, ``index.html`` too: its content
+    is installed under the link's name, and served."""
+    (built / "pages").mkdir()
+    (built / "pages" / "main.html").write_text("<!doctype html><title>linked in</title>")
+    (built / "index.html").unlink()
+    try:
+        (built / "index.html").symlink_to(built / "pages" / "main.html")
+    except OSError:
+        pytest.skip("this platform cannot make the symlink")
+
+    assert remote_server._page_missing(built) is None
+    destination = remote_server.install_page(built)
+    assert not (destination / "index.html").is_symlink()
+    assert "linked in" in (destination / "index.html").read_text()
+    runtime = Runtime(remote_state_path(), remote_audit_path())
+    response = make_client(build_app(runtime)).get(
+        f"/r/{runtime.token}/", headers={"accept": "text/html"}
+    )
+    assert response.status_code == 200 and "linked in" in response.text
+
+
 @pytest.mark.parametrize("installed", [False, True], ids=["dist", "install-page"])
 def test_a_symlink_loop_in_the_build_is_a_file_it_does_not_have_on_every_python(
     isolated_home: Path, built: Path, installed: bool, monkeypatch: pytest.MonkeyPatch

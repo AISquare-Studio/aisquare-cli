@@ -5258,6 +5258,12 @@ def build_remote_app(
         change, is 404 ``no_dist`` too (:data:`PAGE_NOT_SERVED`), asked about as it is
         served (:func:`_page_served_open_to_others`).
 
+        ``index.html`` is held to the rule every other file is (:func:`_built_page_file`).
+        Only asked whether it was a file, a link, it was served from wherever it led: a
+        ``--dist`` whose ``index.html`` led to ``../.env`` gave that file out to anyone
+        holding the link (review of #243, round 11, 1/9). One that leads out of the build
+        or to a hidden file is no index.
+
         The installed build is looked up for each request, one ``realpath``: looked up once,
         as the app was built, a ``remote-dist`` that is a link to a build of the human's own
         was served from the link's target after ``install-page`` replaced the link with a
@@ -5269,7 +5275,6 @@ def build_remote_app(
 
         rel = request.path_params.get("path", "")
         dist = given if given is not None else _remote_page_root(remote_dist_dir())
-        index = dist / "index.html"
 
         def bundled_page() -> Response:
             bundled = remote_page.bundled_page_response(rel, request)
@@ -5286,7 +5291,7 @@ def build_remote_app(
                 headers={"cache-control": cache_control},
             )
 
-        if dist_dir is None and not index.is_file():
+        if dist_dir is None and _built_page_file(dist, "index.html") is None:
             response = bundled_page()
         elif rel and (candidate := _built_page_file(dist, rel)) is not None:
             response = built_file(candidate, _cache_control(rel))
@@ -5295,12 +5300,12 @@ def build_remote_app(
             # whole point: the SPA document under a .js name is a boot failure
             # with no error, and the 200 hides which build is actually installed.
             response = _json_error(404, "not_found", f"no such file in the built page: {rel}")
-        elif index.is_file():
+        elif (index := _built_page_file(dist, "index.html")) is not None:
             response = built_file(index, INDEX_CACHE_CONTROL)
         elif dist_dir is None:
             response = bundled_page()
         else:
-            log.warning("remote: no index.html in %s", dist)
+            log.warning("remote: %s", _page_no_index(dist) or f"no index.html in {dist}")
             response = _json_error(404, "no_dist", NO_DIST_INDEX)
         response.headers.update(remote_page.remote_page_headers())
         return response
@@ -6481,16 +6486,42 @@ def _page_missing(dist_dir: Path | None) -> str | None:
         dist = _remote_resolved(dist_dir)
         if dist is None:
             return PAGE_DOES_NOT_RESOLVE.format(path=dist_dir)
-        if not (dist / "index.html").is_file():
-            return f"no index.html in {dist}"
+        no_index = _page_no_index(dist)
+        if no_index is not None:
+            return no_index
         return _page_project_not_build(dist) or _page_open_to_others(dist, PAGE_DIST_REMEDY)
     installed = _remote_resolved(remote_dist_dir())
-    if installed is not None and (installed / "index.html").is_file():
+    if installed is not None and _built_page_file(installed, "index.html") is not None:
         return _page_open_to_others(installed, PAGE_INSTALLED_REMEDY)
     from aisquare.services import remote_page
 
     return None if remote_page.bundled_page_present() else NO_PAGE_HINT
 
+
+def _page_no_index(dist: Path, unbuilt: str = "") -> str | None:
+    """Why the build at ``dist``, resolved, has no ``index.html`` a server would serve
+    (:func:`_built_page_file`); ``None`` when it has one. ``unbuilt`` follows the sentence
+    for a build with no ``index.html`` at all.
+
+    A link that leads out of the build, or to a hidden file in it, is no index, as it is
+    no other file: asked only whether it was a file, a ``--dist`` whose ``index.html`` led
+    to ``../.env`` served that file before the passphrase, and ``install-page`` left the
+    link behind and said it had installed a page with no index (review of #243, round 11,
+    1/9)."""
+    if _built_page_file(dist, "index.html") is not None:
+        return None
+    index = dist / "index.html"
+    if index.is_symlink():
+        return PAGE_INDEX_LINKED.format(index=index, root=dist)
+    return f"no index.html in {dist}{unbuilt}"
+
+
+PAGE_INDEX_LINKED = (
+    "{index} is a link that leads out of {root}, to a hidden file in it, or to nothing, "
+    "which a server never serves — put the file itself in the build"
+)
+"""Why a ``--dist`` or an ``install-page`` source whose ``index.html`` is a link to no file
+of the build is no page (:func:`_page_no_index`)."""
 
 PAGE_DOES_NOT_RESOLVE = (
     "{path} does not resolve to a directory: a symbolic link in it leads round in a loop"
@@ -6912,19 +6943,19 @@ def _page_copy_removed(root: Path) -> None:
 def install_page(source: Path) -> Path:
     """Copy a built ``aisquare-remote`` dist into :func:`remote_dist_dir`, atomically.
 
-    ``source`` must resolve (:func:`_remote_resolved`), contain ``index.html``, and be no
-    web project's own directory (:func:`_page_project_not_build`), or :class:`NoRemotePage`
-    says why, which ``asq remote install-page`` answers as ``invalid_dist``: the one place a
-    source is checked, where the command checked the first two again in words of its own
-    (review of #243, round 8, 5/6). What a server would not serve from ``source`` stays
-    behind (:func:`_built_page_file`): its hidden files, as the bundled page's do, which is
-    where a project keeps ``.env`` and ``.git``, and a link that leads out of it or to a
-    hidden file, whose content the copy would otherwise hold under the link's own name.
-    Nothing in the copy is writable by group or others, whatever the build's modes were
-    (:func:`_page_copy_narrowed`). The copy lands in a staging directory beside the
-    destination and is swapped in with two renames — same filesystem, so each rename is
-    atomic — rather than removing the destination first, so a server reading the old page
-    mid-swap never sees a half-written one.
+    ``source`` must resolve (:func:`_remote_resolved`), contain an ``index.html`` a server
+    would serve (:func:`_page_no_index`), and be no web project's own directory
+    (:func:`_page_project_not_build`), or :class:`NoRemotePage` says why, which ``asq remote
+    install-page`` answers as ``invalid_dist``: the one place a source is checked, where the
+    command checked the first two again in words of its own (review of #243, round 8, 5/6).
+    What a server would not serve from ``source`` stays behind (:func:`_built_page_file`):
+    its hidden files, as the bundled page's do, which is where a project keeps ``.env`` and
+    ``.git``, and a link that leads out of it or to a hidden file, whose content the copy
+    would otherwise hold under the link's own name. Nothing in the copy is writable by group
+    or others, whatever the build's modes were (:func:`_page_copy_narrowed`). The copy lands
+    in a staging directory beside the destination and is swapped in with two renames — same
+    filesystem, so each rename is atomic — rather than removing the destination first, so a
+    server reading the old page mid-swap never sees a half-written one.
 
     The staging directory is made inside one only this account may enter (``mkdtemp``'s
     0700), and leaves it only once its modes are narrowed. Made beside the destination,
@@ -6937,10 +6968,9 @@ def install_page(source: Path) -> Path:
     if resolved is None:
         raise NoRemotePage(PAGE_DOES_NOT_RESOLVE.format(path=source))
     source = resolved
-    if not (source / "index.html").is_file():
-        raise NoRemotePage(
-            f"no index.html in {source} — build aisquare-remote first (npm run build)"
-        )
+    no_index = _page_no_index(source, " — build aisquare-remote first (npm run build)")
+    if no_index is not None:
+        raise NoRemotePage(no_index)
     project = _page_project_not_build(source)
     if project is not None:
         raise NoRemotePage(project)

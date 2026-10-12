@@ -1332,6 +1332,40 @@ def test_a_purge_takes_what_a_launcher_cut_short_left_wherever_claude_code_kept_
     assert not cut_short.exists() and not folder.exists(), "the copy, and the folder made for it"
 
 
+def test_a_purge_finds_the_answers_a_flatpak_ides_claude_code_kept_and_says_where_it_looked(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+) -> None:
+    """Round 27 of #257: Claude Code in a Flatpak IDE's terminal runs the launcher with that
+    app's ``XDG_CACHE_HOME`` (``~/.var/app/<id>/cache``), which a purge from a plain shell
+    never asked, so it reported a clean purge and left the file. Each Flatpak app's cache is
+    asked too, and every purge says where it looked, as any other place is past its sight."""
+    sandboxed = isolated_agent_home / ".var" / "app" / "com.visualstudio.code" / "cache"
+    answers = sandboxed / "aisquare" / "plugin-tested-python"
+    answers.parent.mkdir(parents=True)
+    answers.write_text("ranged 1760000000 /home/u/.local/bin/uv >=3.11,<3.14\n", "utf-8")
+    (isolated_agent_home / ".var" / "app" / "org.gimp.GIMP").mkdir()  # no cache: none asked
+    _initialised(runner, tmp_path)
+
+    planned = runner.invoke(app, ["uninstall", "--dry-run", "--purge"]).stdout
+    as_json = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
+    result = runner.invoke(app, ["uninstall", "--yes", "--purge"])
+
+    assert as_json["plugin_answers"] == [{"path": str(answers), "action": "delete"}]
+    assert f"DELETE {answers}" in planned
+    looked = " ".join(lifecycle.ANSWERS_LOOKED_FOR.split())
+    assert looked in " ".join(planned.split()), planned
+    assert result.exit_code == 0, result.output
+    assert f"✓ deleted {answers}" in result.stdout
+    assert looked in " ".join(result.stdout.split()), "the report says it too, under --yes"
+    assert not answers.parent.exists() and sandboxed.is_dir(), "the app's cache is its own"
+
+
 def _repo_plugin_installed(
     config_dir: Path, repo: Path, scope: str, *, enabled: bool = True
 ) -> Path:

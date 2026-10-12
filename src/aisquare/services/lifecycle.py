@@ -1901,17 +1901,41 @@ def plugin_answers(cache: str | None = None) -> Path:
     return agent_core.xdg_cache_home(cache) / "aisquare" / "plugin-tested-python"
 
 
+#: Where a purge looks for the plugin's answers, and what it cannot see: said with every
+#: purge, in its plan and its report (round 27 of #257).
+ANSWERS_LOOKED_FOR = (
+    "the plugin's answers about uv are looked for under $XDG_CACHE_HOME, ~/.cache and each "
+    "Flatpak app's cache (~/.var/app/*/cache); a Claude Code run under any other "
+    "XDG_CACHE_HOME keeps them in aisquare/plugin-tested-python there, to delete by hand"
+)
+
+
+def _flatpak_caches() -> list[Path]:
+    """Each Flatpak app's cache, ``~/.var/app/<app id>/cache``: the ``XDG_CACHE_HOME`` a
+    Flatpak sets for the app it runs, an IDE whose terminal runs Claude Code among them."""
+    apps = agent_core.home() / ".var" / "app"
+    try:
+        names = sorted(os.listdir(apps))
+    except OSError:
+        return []
+    return [apps / name / "cache" for name in names]
+
+
 def _plugin_answers_there() -> tuple[Path, ...]:
     """Each place :func:`plugin_answers` may be holding something of the launcher's: the
     file (or a link by its name), or what a launcher cut short left beside it
     (:func:`_answers_cut_short`), with or without the file (round 26 of #257).
 
-    Asked under this shell's ``XDG_CACHE_HOME`` and under ``~/.cache``. The launcher
-    runs with the variables Claude Code started with, which this shell cannot read, and
-    a Claude Code started from a desktop launcher or an IDE often has none of the shell's.
+    Asked under this shell's ``XDG_CACHE_HOME``, under ``~/.cache``, and under each
+    Flatpak app's cache (:func:`_flatpak_caches`). The launcher runs with the variables
+    Claude Code started with, which this shell cannot read: a Claude Code started from a
+    desktop launcher or an IDE often has none of the shell's, and one in a Flatpak IDE's
+    terminal has that app's own (round 27). Any other is past what this can see, which
+    every purge says (:data:`ANSWERS_LOOKED_FOR`).
     """
     places: dict[str, Path] = {}
-    for answers in (plugin_answers(), plugin_answers("")):
+    caches = (plugin_answers(str(cache)) for cache in _flatpak_caches())
+    for answers in (plugin_answers(), plugin_answers(""), *caches):
         places.setdefault(os.path.realpath(answers.parent), answers)  # one folder, asked once
     found: list[Path] = []
     for answers in places.values():
@@ -2048,7 +2072,9 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
         purge_error=purge_error,
         answers_deleted=answers_deleted,
         plugin_answers_errors=tuple(answers_errors),
-        notes=tuple(_uninstall_notes(plan, removals, purged=purged)),
+        notes=tuple(
+            _uninstall_notes(plan, removals, purged=purged, answers_deleted=answers_deleted)
+        ),
     )
 
 
@@ -2124,11 +2150,17 @@ def _purge(home: Path) -> tuple[bool, str | None]:
 
 
 def _uninstall_notes(
-    plan: UninstallPlan, removals: Iterable[HookRemoval], *, purged: bool = False
+    plan: UninstallPlan,
+    removals: Iterable[HookRemoval],
+    *,
+    purged: bool = False,
+    answers_deleted: bool = False,
 ) -> list[str]:
     notes: list[str] = []
     if any(removal.ok for removal in removals):
         notes.append("open Claude Code sessions keep the hooks they started with — restart them")
+    if answers_deleted:
+        notes.append(ANSWERS_LOOKED_FOR)
     for entry in plan.lasting_mcp if purged else plan.mcp:
         notes.append(mcp_note(entry))
     for plugin in plan.lasting_plugins if purged else plan.plugins:

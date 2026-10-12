@@ -71,7 +71,9 @@ every session and capture your prompts:
 directory they find: the connected ones, `$CLAUDE_CONFIG_DIR`, each `~/.claude*`
 that holds them, and the account slots, removed ones included. With `--purge`,
 `~/.aisquare`, its account slots and the plugin's `plugin-tested-python` are
-deleted too; on macOS the slots' sign-in tokens stay in the Keychain.
+deleted too; on macOS the slots' sign-in tokens stay in the Keychain. That file
+is looked for under `$XDG_CACHE_HOME`, `~/.cache` and each Flatpak app's cache;
+one a Claude Code kept under any other `XDG_CACHE_HOME` is yours to delete.
 
 Fleet agents (`asq`, `aisquare fleet spawn`) start with
 `--permission-mode auto` unless their role or the command says otherwise. In

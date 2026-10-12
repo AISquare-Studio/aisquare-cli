@@ -574,6 +574,7 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
     if plan.deletes_answers:
         for answers in plan.plugin_answers:
             _say(f"  DELETE {_plugin_answers_line(answers)}")
+        _say(f"  · {lifecycle_service.ANSWERS_LOOKED_FOR}")
     if plan.blocked:
         # What the run does: a site it cannot clean fails it, and it keeps both.
         _say(f"  then stop: {_blocked_keeps(plan)}, as {_blocked_reason(plan)}")

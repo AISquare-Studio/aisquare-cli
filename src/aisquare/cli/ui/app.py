@@ -345,37 +345,18 @@ class _WorkerThreads(WorkerManager):
         self._threads: Counter[str] = Counter()
         self._waited: set[Worker[Any]] = set()
 
-    def _new_worker(
-        self,
-        work: WorkType[Any],
-        node: Any,
-        *,
-        name: str | None = "",
-        group: str = "default",
-        description: str = "",
-        exit_on_error: bool = True,
-        start: bool = True,
-        exclusive: bool = False,
-        thread: bool = False,
-    ) -> Worker[Any]:
-        waited = thread and not _textuals_own(work)
+    def _new_worker(self, work: WorkType[Any], node: Any, *args: Any, **kwargs: Any) -> Worker[Any]:
+        # Textual's private method, so what it is given is handed on as it came: a keyword
+        # a later 8.x adds to `run_worker` and passes here must reach it, or every worker
+        # start raises TypeError (round 25 of #257). Only the three read here are named.
+        waited = bool(kwargs.get("thread")) and not _textuals_own(work)
         if waited and (callable(work) or inspect.isawaitable(work)):
             # The name and description Textual would give it, read off the work before it
             # is wrapped.
-            name = name or getattr(work, "__name__", "") or ""
-            description = description or repr(work)
+            name = kwargs.get("name") or getattr(work, "__name__", "") or ""
+            kwargs.update(name=name, description=kwargs.get("description") or repr(work))
             work = self._counted(_in_its_own_loop(work), name)
-        worker = super()._new_worker(
-            work,
-            node,
-            name=name,
-            group=group,
-            description=description,
-            exit_on_error=exit_on_error,
-            start=start,
-            exclusive=exclusive,
-            thread=thread,
-        )
+        worker = super()._new_worker(work, node, *args, **kwargs)
         if waited:
             self._waited.add(worker)
         return worker

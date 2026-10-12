@@ -404,6 +404,43 @@ def test_update_waits_for_a_cancelled_async_thread_worker_whose_thread_still_run
     assert answered == "async-answer", "run as Textual runs it: its result, its worker"
 
 
+def test_the_worker_manager_hands_textual_whatever_textual_gave_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 25 of #257: ``_new_worker`` is Textual's private method, overridden with the
+    keywords 8.2 passes, while any 8.x is accepted. One a later release adds made every
+    worker start raise TypeError. What comes in goes on, and a thread worker is still
+    counted under the name Textual would give it."""
+    from textual.worker_manager import WorkerManager
+
+    handed: list[tuple[Any, tuple[Any, ...], dict[str, Any]]] = []
+
+    @dataclass(eq=False)
+    class Started:
+        name: str | None
+        is_finished: bool = False
+
+    def textuals(_self: Any, work: Any, _node: Any, *args: Any, **kwargs: Any) -> Any:
+        handed.append((work, args, kwargs))
+        return Started(kwargs.get("name"))
+
+    monkeypatch.setattr(WorkerManager, "_new_worker", textuals)
+    manager = ui_app._WorkerThreads(SimpleNamespace())
+    seen: list[set[str]] = []
+
+    def read() -> str:
+        seen.append(manager.running())
+        return "read"
+
+    manager._new_worker(read, None, thread=True, exclusive=True, later_keyword="kept")
+    work, args, kwargs = handed[0]
+    assert args == () and kwargs["later_keyword"] == "kept" and kwargs["exclusive"] is True
+    assert kwargs["name"] == "read" and kwargs["description"] == repr(read)
+    assert work() == "read" and seen == [{"read"}], "counted from its first line to its last"
+    manager._new_worker(read, None, "positional", group="g")
+    assert handed[1] == (read, ("positional",), {"group": "g"}), "not a thread: as it came"
+
+
 @pytest.mark.parametrize("name", sorted(CUT_OFF))
 def test_update_does_not_wait_for_a_worker_that_is_safe_to_cut_off(
     isolated_home: Path,

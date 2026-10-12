@@ -2080,8 +2080,12 @@ def _needs_crashed(
     (``fleet.HANDOVER_FAILED``, read from the day's ``exits``). An agent whose task
     is closed did its work; one the fleet woke a live manager for (``manager_live``,
     :func:`_needs_nudged`) is the manager's; one that was restarted since — a newer
-    row holds its label — was handled. The manager's own crash is ``manager_down``.
+    row holds its label — was handled. The ``manager`` row's own crash is
+    ``manager_down``; a numbered seat's is a crash like any agent's, which the fleet
+    wakes the ``manager`` for.
     """
+    from aisquare.services.fleet import MANAGER_LABEL
+
     if manager_live:
         return []
     newest: dict[str, datetime] = {}
@@ -2091,7 +2095,7 @@ def _needs_crashed(
     for row in ended:
         if row.ended_at is None or now - row.ended_at > CRASH_WINDOW:
             continue
-        if _needs_is_manager(row.role):
+        if row.label == MANAGER_LABEL:
             continue
         clean = row.exit_status in (0, None)
         abandoned = clean and _needs_handover_failed(_needs_exit_of(row, exits))
@@ -2184,7 +2188,7 @@ def _needs_manager_down(
     project: ProjectInfo,
     now: datetime,
 ) -> list[NeedsItem]:
-    """The manager has ended and none replaced it, while its crew still needs one.
+    """The ``manager`` row has ended and none replaced it, while its crew still needs one.
 
     A failing exit status is always reported. A forced stop (no status) is
     reported only while an agent of its crew still works, waits on a prompt or
@@ -2201,9 +2205,13 @@ def _needs_manager_down(
     read; a crash needs no board.
 
     Its crew is the project's own agents, ``statuses``, on a shared board as on its own
-    (:func:`_needs_nudged`).
+    (:func:`_needs_nudged`). The row judged is the one the fleet nudges: a numbered seat
+    that runs is woken for nothing, so it hid the ``manager``'s crash, reported nowhere
+    (review of #243, round 22, 5/7); one that ends is :func:`_needs_crashed`'s.
     """
-    seats = [row for row in rows if _needs_is_manager(row.role)]
+    from aisquare.services.fleet import MANAGER_LABEL
+
+    seats = [row for row in rows if row.label == MANAGER_LABEL]
     if not seats or any(row.ended_at is None for row in seats):
         return []
     manager = max(seats, key=lambda row: row.created_at)

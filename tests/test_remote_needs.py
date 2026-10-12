@@ -3755,6 +3755,28 @@ def _seated(
             id="no hub, managers the nudge never wakes: no row, a numbered seat",
         ),
         pytest.param(
+            False,
+            (
+                _manager_of("alpha", end="crash"),
+                _manager_of("alpha", "manager-2"),
+                _Seat("alpha", "coder-1", asks=True),
+            ),
+            [("board_question", "alpha", "coder-1", 0), ("manager_down", "alpha", "manager", 60)],
+            id="no hub, a numbered seat that runs hides no crash of the manager",
+        ),
+        pytest.param(
+            False,
+            (_manager_of("alpha"), _manager_of("alpha", "manager-2", end="crash")),
+            [],
+            id="no hub, a numbered seat's crash, the live manager woken for it",
+        ),
+        pytest.param(
+            False,
+            (_manager_of("alpha", "manager-2", end="crash"), _Seat("alpha", "coder-1")),
+            [("crashed", "alpha", "manager-2", 30)],
+            id="no hub, a numbered seat's crash, no manager",
+        ),
+        pytest.param(
             True,
             (
                 _manager_of("alpha"),
@@ -3815,7 +3837,9 @@ def test_a_live_manager_keeps_an_item_off_the_phone_only_on_its_projects_own_boa
     showed and no nudge reached (review of #243, rounds 18 to 21; 1/8 of round 21 a
     silent stall). On its own board a project's live ``manager`` row, the one the fleet's
     nudge wakes, keeps a question to it and a crash off the phone and holds back a
-    limit's push; nothing else does. Under ``AISQUARE_TEAM_HUB`` every question, result,
+    limit's push; nothing else does. A crash of that ``manager`` is ``manager_down``
+    whatever numbered seat runs (round 22, 5/7), and a numbered seat's own crash is a
+    crash like any agent's. Under ``AISQUARE_TEAM_HUB`` every question, result,
     crash, limit and failed hand-over is a card and a push, and a manager that is down is
     its own project's, from that project's rows. Each tuple is a card's kind, project,
     agent and the seconds its push waits. An action's check of each agent finds what the

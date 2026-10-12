@@ -1338,7 +1338,7 @@ def _accounts_kept(logins: Mapping[Path, ClaudeIdentity | None]) -> tuple[str, .
     """
     described: list[str] = []
     for account in accounts_core.managed_accounts():
-        key = _file_identity(accounts_core.claude_json_path(account))
+        key = agent_core.dir_identity(accounts_core.claude_json_path(account))
         identity = logins[key] if key in logins else accounts_core.identity(account)
         who = identity.email if identity is not None else "not signed in"
         described.append(f"slot {account.slot}: {who}")
@@ -1485,23 +1485,14 @@ def _fetches_aisquare(spec: object) -> bool:
     )
 
 
-def _file_identity(spelled: Path) -> Path:
-    """The file ``spelled`` reaches, links resolved, so one file reached two ways is one;
-    as spelled where pathlib cannot resolve it (a symlink loop raises RuntimeError on 3.11
-    and 3.12)."""
-    try:
-        return agent_core.dir_identity(spelled)
-    except (OSError, RuntimeError):
-        return spelled
-
-
 def _mcp_registrations(
     directories: Iterable[Path],
 ) -> tuple[tuple[McpRegistration, ...], dict[Path, ClaudeIdentity | None]]:
     """aisquare's MCP servers in every ``.claude.json`` these directories use, and in the
     ``.mcp.json`` of every project those list (:func:`_project_registrations`) — read only.
-    Beside them, the login each ``.claude.json`` read records, by :func:`_file_identity`,
-    for :func:`_accounts_kept`, so no file is parsed twice.
+    Beside them, the login each ``.claude.json`` read records, by the file it reaches
+    (``agent_core.dir_identity``, which falls back to the spelling where pathlib cannot
+    resolve one), for :func:`_accounts_kept`, so no file is parsed twice.
 
     Listed, never edited: ``.claude.json`` is Claude Code's own file, rewritten by
     every running session, and a second writer racing them is how a login gets
@@ -1516,7 +1507,7 @@ def _mcp_registrations(
         for spelled in agent_core.claude_json_paths(directory):
             # The file itself: a slot linked to ~/.claude, or a ~/.claude* sibling that is a
             # link, reaches it twice. read_json fails open.
-            path = _file_identity(spelled)
+            path = agent_core.dir_identity(spelled)
             if path in read:
                 continue
             read.add(path)

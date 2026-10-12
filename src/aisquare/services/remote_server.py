@@ -2091,6 +2091,13 @@ def remote_project_ref(ref: str) -> ProjectInfo:
     ``RuntimeError`` ("Symlink loop from ...") on Python 3.11 and 3.12, which CI runs,
     and no error on 3.13. ``KeyError`` and ``ValueError`` are
     ``project_service.resolve``'s, for nothing and several matching.
+
+    A directory with no project of its own is looked up to the project it is in, which
+    asks for its ``.git``: from Python 3.14 that answers "none" for a directory this
+    account may not look inside, where it raised, and the lookup went on to the project
+    around it, which the remove then forgot (review of #243, round 9, 5/6). Such a
+    directory is still 404 ``not_found`` unless it is a project's own root
+    (:func:`_remote_may_look_inside`).
     """
     from aisquare.services import project as project_service
 
@@ -2103,9 +2110,13 @@ def remote_project_ref(ref: str) -> ProjectInfo:
         raise no_such from None
     if path.is_absolute():
         try:
-            return project_service.resolve(str(path))
+            found = project_service.resolve(str(path))
+            passed = found.root != path.resolve() and path.is_dir()
         except (OSError, RuntimeError):
             raise no_such from None
+        if passed and not _remote_may_look_inside(path):
+            raise no_such
+        return found
     if ref in (".", "..") or any(separator in ref for separator in {"/", os.sep}):
         raise RequestError(
             400,

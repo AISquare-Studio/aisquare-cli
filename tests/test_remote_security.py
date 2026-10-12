@@ -2363,6 +2363,35 @@ def test_a_path_over_the_cap_is_413(home: Path) -> None:
     assert (refused.value.status, refused.value.error) == (413, "too_large")
 
 
+@pytest.mark.skipif(not can_deny_reads(), reason="chmod(0) denies nothing here (root, or NTFS)")
+@pytest.mark.parametrize("named", ["a directory in it", "its own root"])
+def test_removing_a_directory_this_account_may_not_look_inside_forgets_only_what_it_names(
+    home: Path, runtime: Runtime, tmp_path: Path, named: str
+) -> None:
+    """``project/remove`` reads a path as ``project forget`` does: a directory with no
+    project of its own is looked up to the project it is in, and from Python 3.14 that
+    lookup passes a directory it may not look inside rather than raise. Removing
+    ``~/code/alpha/locked`` forgot ``alpha`` (review of #243, round 9, 5/6). A project
+    whose own root it may not look inside is still found by that root, as before."""
+    (alpha,) = _projects(home, "code/alpha")
+    client = _project_writes(runtime, tmp_path)
+    where = alpha.root / "locked" if named == "a directory in it" else alpha.root
+    if named == "a directory in it":
+        where.mkdir()
+    where.chmod(0)
+    try:
+        answer = client.post(f"{base(runtime)}/api/project/remove", json={"ref": str(where)})
+    finally:
+        where.chmod(0o755)
+
+    if named == "a directory in it":
+        assert (answer.status_code, answer.json()["error"]) == (404, "not_found"), answer.text
+        assert [project.id for project in project_service.list_projects()] == [alpha.id]
+    else:
+        assert answer.status_code == 200, answer.text
+        assert project_service.list_projects() == []
+
+
 def test_an_added_project_is_listed_where_the_phone_and_the_cli_look(
     home: Path, runtime: Runtime, tmp_path: Path
 ) -> None:

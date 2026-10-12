@@ -2491,10 +2491,12 @@ def needs_single_agent_now(
     them: an action matches its card on :func:`needs_agent_now`'s snapshot, before
     it sends anything. ``status`` is never ``None``: an ended row reads
     ``exited``. Nothing is recorded: a dead pane reads ``exited``, and the next
-    listing ends its row. Raises ``fleet.NoSuchAgent`` when no row holds the label.
+    listing ends its row. Raises ``fleet.NoSuchAgent`` when no row holds the label, and a
+    503 ``RequestError`` when its tail could not be read, as :func:`needs_agent_now` does.
     """
     from aisquare.core.store import store_session
     from aisquare.services import fleet as fleet_service
+    from aisquare.services.remote_server import RequestError
 
     when = now or _needs_now()
     with store_session() as store:
@@ -2502,7 +2504,10 @@ def needs_single_agent_now(
     if row is None:
         raise fleet_service.NoSuchAgent(f"no agent {label!r} in {project.root.name or project.id}")
     status = fleet_service.status_of(row)
-    tail = _needs_tail_of(live_needs_sources(), status, _NeedsReads(project))
+    reads = _NeedsReads(project)
+    tail = _needs_tail_of(live_needs_sources(), status, reads)
+    if reads.failed is not None:
+        raise RequestError(503, "unavailable", f"{label} could not be read: {reads.failed}")
     items = needs_from_agent(status, tail, project=project, events=(), now=when)
     return _needs_snapshot(project, status, tail, tuple(items), when)
 

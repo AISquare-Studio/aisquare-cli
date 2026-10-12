@@ -2879,11 +2879,16 @@ class _TailOnly:
 
 
 def _alone_of(
-    fleet: Fleet, tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch, label: str = "coder-1"
+    fleet: Fleet,
+    tmux: FakeTmux,
+    monkeypatch: pytest.MonkeyPatch,
+    label: str = "coder-1",
+    read: Callable[[str], TranscriptTail | None] | None = None,
 ) -> AgentNow:
     """``needs_single_agent_now`` over the facts :func:`_now_of` scans: the rows in the store,
-    each derived as the fake fleet lists it, the tails as it holds them. Listing the project,
-    or asking the live sources for anything but a tail, fails the test."""
+    each derived as the fake fleet lists it, the tails as it holds them (or as ``read`` reads
+    them). Listing the project, or asking the live sources for anything but a tail, fails the
+    test."""
     statuses = {status.agent.id: status for status in fleet.agents}
     with store_session() as store:
         for status in fleet.agents:
@@ -2891,7 +2896,8 @@ def _alone_of(
     monkeypatch.setattr(fleet_service, "status_of", lambda row: statuses[row.id])
     monkeypatch.setattr(fleet_service, "list_agents", _never)
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
-    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: _TailOnly(fleet.tails.get))
+    tails = _TailOnly(read or fleet.tails.get)
+    monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: tails)
     return needs_single_agent_now(PROJECT, label, now=NOW)
 
 
@@ -2973,6 +2979,24 @@ def test_without_the_board_a_dialogs_item_is_still_a_dialog(
     assert [item.kind for item in scanned.items] == ["limited"]
     assert [item.kind for item in alone.items] == ["permission"]
     assert needs_dialog_open(scanned) and needs_dialog_open(alone)
+
+
+def test_the_agent_alone_whose_tail_cannot_be_read_is_a_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown is not absent, here as in the project's scan: the read went through a
+    ``_NeedsReads`` nobody asked, and a tail it could not read was none (review of #243,
+    round 28, 9/10)."""
+    from aisquare.services.remote_server import RequestError
+
+    def locked(path: str) -> TranscriptTail | None:
+        raise RuntimeError("database is locked")
+
+    fleet = _working(_tail(_tool("toolu_a")), state="attention")
+    with pytest.raises(RequestError) as refused:
+        _alone_of(fleet, FakeTmux(reference=NOW), monkeypatch, read=locked)
+    assert (refused.value.status, refused.value.error) == (503, "unavailable")
+    assert refused.value.message == "coder-1 could not be read: database is locked"
 
 
 def test_the_agent_alone_is_derived_on_its_own_server_and_its_transcript_alone_is_read(

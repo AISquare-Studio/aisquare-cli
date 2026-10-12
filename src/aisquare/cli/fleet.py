@@ -522,6 +522,7 @@ def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
                     "agents": [a.model_dump(mode="json") for a in plan.agents],
                     "sessions": plan.sessions,
                     "absent_sockets": plan.absent_sockets,
+                    "held": plan.held,
                     "tmux_unusable": plan.tmux_unusable,
                 }
             )
@@ -546,6 +547,8 @@ def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
         where = names.get(agent.project_id, agent.project_id)
         if plan.tmux_unusable is not None:
             console.print(f"  ✗ {agent.label} · {where} — recorded lost, unchecked")
+        elif agent.id in plan.held:
+            console.print(f"  ⚠ {agent.label} · {where} — left live: {plan.held[agent.id]}")
         elif agent.tmux_socket in plan.absent_sockets:
             console.print(
                 f"  ✗ {agent.label} · {where} — recorded lost "
@@ -682,8 +685,9 @@ def shutdown(
         bool,
         typer.Option(
             "--forget",
-            help="Where tmux is not usable here, end every row on your word, unchecked, "
-            "instead of refusing. Only for agents you know are not running.",
+            help="End on your word the rows of agents this cannot reach — a server whose "
+            "socket is gone, or no usable tmux here — instead of leaving them live or "
+            "refusing. Only for agents you know are not running.",
         ),
     ] = False,
 ) -> None:
@@ -702,10 +706,12 @@ def shutdown(
     terminal it is a dry run unless --yes, and under --json without --yes it
     prints the plan and changes nothing. Board notes and tasks are kept, the
     ended rows' claims are released, and a `fleet-paused` signal is cleared.
-    With no usable tmux it refuses; `--forget` then ends the rows unchecked,
-    for agents you know are not running. Exits 1 when any row was left live
-    or a claim release was refused, and 130 when interrupted — with the
-    report of how far it got either way.
+    A row whose agent may still run though its server did not answer (its
+    socket gone, or a server where this shell's tmux does not look) is left
+    live with what to do, and with no usable tmux it refuses; `--forget`
+    ends those rows on your word, for agents you know are not running. Exits
+    1 when any row was left live or a claim release was refused, and 130
+    when interrupted — with the report of how far it got either way.
     """
     refuse_conflicting_scope(every, project)
     target = None if every else _project(project)

@@ -17,7 +17,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import sqlite3
 import sys
 from collections.abc import Iterable, Mapping
@@ -38,7 +37,7 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.core.store import store_session
-from aisquare.core.tmux import TmuxServer, TmuxUnavailable, boot_id
+from aisquare.core.tmux import SocketAnswer, TmuxServer, boot_id, server_may_run
 from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import current_project
 from aisquare.models import ClaudeIdentity, SetupReport
@@ -1074,6 +1073,10 @@ class UninstallPlan:
     """Whether tmux is not installed here while :attr:`live_agents` may run: ``fleet
     shutdown`` can then stop none of them, and only its ``--forget`` ends their rows
     (round 27 of #257)."""
+    unreached: tuple[str, ...] = ()
+    """Those of :attr:`live_agents` whose server's socket is gone or could not be asked: no
+    tmux client reaches them, so ``fleet shutdown`` leaves them live, and only its
+    ``--forget`` ends their rows (round 27 of #257)."""
     plugins: tuple[agent_core.ClaudePlugin, ...] = ()
     """Where the aisquare Claude Code plugin is enabled: in a config dir (user scope) or
     in a repository (project and local scope). Uninstall leaves it, as Claude Code owns
@@ -1159,8 +1162,21 @@ class UninstallPlan:
                     f"or, if they are not running, end their rows on your word: {FLEET_FORGET}",
                     error="fleet_running",
                 )
+            unreached = ""
+            if self.unreached:
+                # `fleet shutdown` cannot reach them, and leaves them live: said, with the
+                # two ways on (round 27 of #257).
+                one = len(self.unreached) == 1
+                unreached = (
+                    f"; it cannot reach {', '.join(self.unreached)}, as the socket "
+                    f"{'its' if one else 'their'} tmux server listened on is gone or could not "
+                    f"be asked. If {'it is' if one else 'they are'} still running, send that "
+                    f"server SIGUSR1, which makes tmux create its socket again, and run it "
+                    f"again; if not, end {'its row' if one else 'their rows'} on your word: "
+                    f"{FLEET_FORGET}"
+                )
             return UninstallRefused(
-                f"{running} Stop them first: {FLEET_SHUTDOWN}", error="fleet_running"
+                f"{running} Stop them first: {FLEET_SHUTDOWN}{unreached}", error="fleet_running"
             )
         if self.purge and self.purge_refusal is not None:
             return UninstallRefused(
@@ -1807,58 +1823,24 @@ def _live_fleet_agents() -> tuple[tuple[_LiveRow, ...], str | None]:
     )
 
 
-def _listens(path: Path | None) -> bool:
-    """Whether a server may be listening on the socket at ``path``, asked of the socket
-    itself (no tmux needed). ``None`` is a host with no POSIX uid, where no tmux server
-    can exist.
-
-    ``False`` only on evidence that none is, because the cost of being wrong is removing
-    hooks (or, with --purge, the home) under running agents: a file nobody listens on.
-    tmux leaves its socket file when its server exits (tmux 3.7, measured), so a stale
-    file is that evidence. No file is not: something else took it while the server may
-    run on, systemd-tmpfiles ageing out ``/tmp/tmux-<uid>``, logind removing
-    ``/run/user/<uid>`` at logout, or a private ``/tmp`` (round 26 of #257). A refusal
-    to look (a denied directory) is no evidence either.
-    """
-    family = getattr(socket, "AF_UNIX", None)
-    if path is None or family is None:
-        return False  # no POSIX uid or no AF_UNIX, so no tmux server can exist here
-    probe = socket.socket(family, socket.SOCK_STREAM)
-    probe.settimeout(2.0)
-    try:
-        probe.connect(str(path))
-    except ConnectionRefusedError:
-        return False
-    except OSError:
-        return True
-    finally:
-        probe.close()
-    return True
-
-
-def _may_run(row: _LiveRow, this_boot: str | None) -> bool:
-    """Whether the agent of live ``row`` may still be running.
-
-    Asked of what its spawn recorded, never inferred from the shell asking (round 25 of
-    #257). A row from another boot cannot be running: no process outlives a reboot. One
-    with its server's socket path is asked at that path, whatever ``TMUX_TMPDIR`` this
-    shell has and wherever this tmux build keeps sockets. A row from before v25 recorded
-    neither and is asked at tmux's default path for this shell
-    (``TmuxServer.socket_path``). Either way only a stale socket file shows no server
-    (:func:`_listens`), so a row whose socket is gone counts until ``fleet shutdown``,
-    which the refusal names, ends it. Whether that path's directory is there settled
-    nothing: tmux makes it as it looks, so any probe made it there (round 24 and 25).
+def _may_run(row: _LiveRow, this_boot: str | None) -> SocketAnswer | None:
+    """Whether the agent of live ``row`` may still be running, and why; ``None`` when it
+    cannot be. :func:`~aisquare.core.tmux.server_may_run`, the rule ``fleet shutdown`` asks
+    too, so a row counted here is never one it ends as gone (round 27 of #257): one whose
+    socket is gone counts until ``fleet shutdown --forget`` ends it on the operator's word.
     """
     _label, socket_name, recorded, booted = row
-    if booted is not None and this_boot is not None and booted != this_boot:
-        return False
-    if recorded is not None:
-        return _listens(recorded)
-    try:
-        path: Path | None = TmuxServer(socket_name).socket_path()
-    except TmuxUnavailable:
-        path = None
-    return _listens(path)
+    return server_may_run(TmuxServer(socket_name), recorded, booted, this_boot)
+
+
+def _fleet_answers() -> tuple[tuple[tuple[str, SocketAnswer], ...], int, str | None]:
+    """:func:`running_fleet`, with what each live row's socket said (:func:`_may_run`)."""
+    rows, fleet_error = _live_fleet_agents()
+    this_boot = boot_id() if rows else None
+    live = tuple(
+        (row[0], answer) for row in rows if (answer := _may_run(row, this_boot)) is not None
+    )
+    return live, len(rows) - len(live), fleet_error
 
 
 def running_fleet() -> tuple[tuple[str, ...], int, str | None]:
@@ -1866,10 +1848,8 @@ def running_fleet() -> tuple[tuple[str, ...], int, str | None]:
     that cannot be (:func:`_may_run`), and why the fleet could not be read. The one count
     upgrade and uninstall both act on.
     """
-    rows, fleet_error = _live_fleet_agents()
-    this_boot = boot_id() if rows else None
-    live = tuple(row[0] for row in rows if _may_run(row, this_boot))
-    return live, len(rows) - len(live), fleet_error
+    live, unlistened, fleet_error = _fleet_answers()
+    return tuple(label for label, _ in live), unlistened, fleet_error
 
 
 def plugin_answers(cache: str | None = None) -> Path:
@@ -1931,7 +1911,8 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         entries = tuple(sorted(c.name for c in home.iterdir())) if home.is_dir() else ()
     except OSError:
         entries = ()
-    live, unlistened, fleet_error = running_fleet()
+    answers, unlistened, fleet_error = _fleet_answers()
+    live = tuple(label for label, _ in answers)
     custom = custom_home(home)
     claude_dirs = [*candidates, *_claude_dirs_for_mcp()]
     mcp, logins = _mcp_registrations(claude_dirs)
@@ -1954,6 +1935,7 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         unlistened=unlistened,
         fleet_error=fleet_error,
         no_tmux=bool(live) and not TmuxServer().available(),
+        unreached=tuple(label for label, answer in answers if answer != "answers"),
         plugins=_plugins(claude_dirs),
         plugin_answers=_plugin_answers_there(),
     )

@@ -319,6 +319,20 @@ way `fleet stop` stops one (`/exit`, grace, kill), then the fleet's own tmux
 exit status where tmux exposed one, and rows whose socket had no server as
 *lost*, each with the reason the service gave.
 
+A row whose server did not answer is ended as lost only where it cannot be
+running: it started before the last boot, or its socket file is there with
+nothing listening, which is what tmux leaves when its server exits. Otherwise
+its row is **left live**, with what to do, because `aisquare uninstall` asks
+the same socket and would still count it:
+
+- a server listens at the socket the row recorded, where this shell's tmux
+  does not look (it was started under another `TMUX_TMPDIR`): run it again
+  with the `TMUX_TMPDIR` the report names;
+- the socket file is gone (systemd-tmpfiles or a logout removed it while the
+  server ran on), so no tmux client can reach the server: if it still runs,
+  send that tmux server `SIGUSR1`, which makes tmux create its socket again,
+  and run it again.
+
 It ends running work, so it asks first: it prints what it would end and
 confirms at a terminal (default **no**), and off a terminal it is a dry run
 unless `--yes`. Under `--json` without `--yes` it prints the plan
@@ -328,12 +342,13 @@ unless `--yes`. Under `--json` without `--yes` it prints the plan
 is recorded for it** — a status is only ever read from a pane that already reads
 dead — and no `SessionEnd` hook runs.
 
-`--forget` is your word that the fleet's agents are not running, for where
-tmux cannot be used here (removed, too old, or not answering for its version):
-each row is ended as lost, unchecked, and nothing is stopped or killed.
-Without it such a run refuses, because a tmux server outlives its program
-leaving `PATH`. `aisquare uninstall` names it when tmux is not installed and a
-row may still be running.
+`--forget` is your word that the agents it cannot reach are not running: the
+rows it would leave live as above are ended as lost instead. Where tmux cannot
+be used here (removed, too old, or not answering for its version), every row is
+ended as lost, unchecked, and nothing is stopped or killed; without `--forget`
+such a run refuses, because a tmux server outlives its program leaving `PATH`.
+`aisquare uninstall` names it for a row it counts as running that no tmux here
+can reach.
 
 What it kills is the fleet's own `asq-<codename>` sessions, never the server:
 `tmux kill-server` would take down every session on that socket, and the fleet's

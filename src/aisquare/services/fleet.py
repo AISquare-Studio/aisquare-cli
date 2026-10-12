@@ -345,7 +345,9 @@ class ShutdownReport:
     session would kill an agent whose pane tmux had just confirmed alive. The same
     rule spares a session that outlived the late dead pane removed from it."""
     servers_absent: list[str] = field(default_factory=list)
-    """Sockets with no server to ask — the rows on them went to ``recorded``."""
+    """Sockets with no server to ask — the rows on them went to ``recorded``, but for a
+    row whose agent may still run (:func:`_unreached`), which went to ``failed`` unless
+    the operator said ``forget``."""
     claims_released: list[str] = field(default_factory=list)
     """Task ids released from the ended rows' board sessions (``release_claims``)."""
     release_failures: list[str] = field(default_factory=list)
@@ -402,6 +404,9 @@ class ShutdownPlan:
     sessions: list[str] = field(default_factory=list)
     """``<socket>:<session>`` for every fleet session the kill phase would target."""
     absent_sockets: list[str] = field(default_factory=list)
+    held: dict[str, str] = field(default_factory=dict)
+    """Rows on an absent socket the run would LEAVE LIVE, by id, with why: their agent may
+    still run (:func:`_unreached`). Empty under ``forget``, which ends them."""
     tmux_unusable: str | None = None
     """Why tmux is not usable here, for a ``forget`` plan: every row is then ended
     unchecked, on the operator's word, and nothing is stopped or killed."""
@@ -2950,6 +2955,71 @@ def _shutdown_probe(sockets: Sequence[str], config: FleetSettings) -> dict[str, 
     return answering
 
 
+def _unreached(
+    agent: FleetAgent, config: FleetSettings, this_boot: str | None
+) -> tuple[str, str] | None:
+    """``(why, what to do)`` for a row whose server did not answer through tmux but whose
+    agent may still run; ``None`` when it cannot be running.
+
+    The rule ``uninstall`` asks (:func:`~aisquare.core.tmux.server_may_run`): only a row
+    from another boot or a stale socket file shows the agent gone. Ending a row on less
+    stopped nothing, and the next ``uninstall`` went on under the running agents: a socket
+    file taken from under its server, or a server started under another ``TMUX_TMPDIR``,
+    which ``tmux -L`` from this shell does not reach (round 27 of #257). The socket asked is
+    the one the row recorded, else where this shell's tmux looks.
+    """
+    srv = server_for(agent.tmux_socket, config)
+    answer = tmux_core.server_may_run(srv, agent.socket_path, agent.boot_id, this_boot)
+    if answer is None:
+        return None
+    try:
+        here = srv.socket_path()
+    except TmuxUnavailable:
+        return None  # no POSIX uid: no tmux server can exist here
+    path = agent.socket_path or here
+    if answer == "answers":
+        if _same_socket(path, here):
+            return f"a server came up on its socket {path} after it was asked", "run this again"
+        if path.name == agent.tmux_socket and path.parent.name == here.parent.name:
+            way = f"run this again with TMUX_TMPDIR={path.parent.parent}"  # tmux-<uid> in it
+        else:
+            way = "run this again from a shell whose tmux looks there"
+        return (
+            f"a server listens on its socket {path}, where tmux from this shell does not look",
+            way,
+        )
+    if answer == "gone":
+        return (
+            f"its server's socket {path} is gone, so no tmux client can reach the server, "
+            "which may still be running",
+            "if it is, send that server SIGUSR1, which makes tmux create its socket again, and "
+            "run this again; if it is not, --forget ends its row on your word",
+        )
+    return (
+        f"its server's socket {path} could not be asked, so its agent may still be running",
+        "run this again where it can be asked, or, if it is not running, --forget ends its row "
+        "on your word",
+    )
+
+
+def _held_rows(
+    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]],
+    answering: Mapping[str, bool],
+    config: FleetSettings,
+) -> dict[str, tuple[str, str]]:
+    """:func:`_unreached` for each row on a socket that did not answer, by id, where its
+    agent may still run."""
+    this_boot = tmux_core.boot_id()
+    held: dict[str, tuple[str, str]] = {}
+    for _, agents in targets:
+        for agent in agents:
+            if not answering.get(agent.tmux_socket):
+                unreached = _unreached(agent, config, this_boot)
+                if unreached is not None:
+                    held[agent.id] = unreached
+    return held
+
+
 def _fleet_sessions(
     srv: TmuxServer,
     targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]],
@@ -3284,8 +3354,12 @@ def _shutdown_row(
     force: bool,
     grace: float,
     unusable: str | None = None,
+    held: Mapping[str, tuple[str, str]] | None = None,
+    forget: bool = False,
 ) -> None:
-    """Stop one row where its server answers; record it lost where it does not.
+    """Stop one row where its server answers; record it lost where it does not, unless its
+    agent may still run (``held``, :func:`_unreached`): left live then, saying why and what
+    to do, or under ``forget`` ended on the operator's word.
 
     ``stop``'s refusal is not swallowed. It refuses on exactly one verdict —
     ``_verify_gone`` looked again and the pane is VERIFIABLY still alive — which
@@ -3304,7 +3378,14 @@ def _shutdown_row(
         _record_lost(agent, f"ended on your word (--forget), unchecked: {unusable}", report)
         return
     if not answering.get(agent.tmux_socket):
-        _record_lost(agent, f"no server answered on socket {agent.tmux_socket!r}", report)
+        unreached = (held or {}).get(agent.id)
+        if unreached is None:
+            _record_lost(agent, f"no server answered on socket {agent.tmux_socket!r}", report)
+        elif forget:
+            _record_lost(agent, f"ended on your word (--forget): {unreached[0]}", report)
+        else:
+            report.failed.append(ShutdownRow(agent, f"{unreached[0]} — left live: {unreached[1]}"))
+            _not_down(report, agent.project_id)
         return
     try:
         # The snapshot's row is the row stopped — THAT pane, whatever label a
@@ -3458,6 +3539,19 @@ def _record_late_rows(
                 _not_down(report, agent.project_id)
                 continue
             if reachable is False:
+                # The rule every other row is held to (`_unreached`); never forgotten, as no
+                # plan the operator saw named it.
+                unreached = _unreached(agent, config, tmux_core.boot_id())
+                if unreached is not None:
+                    report.failed.append(
+                        ShutdownRow(
+                            agent,
+                            f"it was spawned during the shutdown; {unreached[0]} — left live: "
+                            f"{unreached[1]}",
+                        )
+                    )
+                    _not_down(report, agent.project_id)
+                    continue
                 _record_lost(
                     agent,
                     f"it was spawned during the shutdown and no server answers on socket "
@@ -3675,11 +3769,13 @@ def shutdown_plan(project: ProjectInfo | None = None, *, forget: bool = False) -
                 "to show a plan that may be short of what a shutdown would kill; try again "
                 "once tmux answers"
             ) from exc
+    held = {} if forget else _held_rows(targets, answering, config)
     return ShutdownPlan(
         projects=[current for current, agents in targets if agents],
         agents=[agent for _, agents in targets for agent in agents],
         sessions=sessions,
         absent_sockets=[socket for socket in sockets if not answering[socket]],
+        held={agent_id: f"{why} — {way}" for agent_id, (why, way) in held.items()},
     )
 
 
@@ -3729,8 +3825,15 @@ def shutdown(
     every project this run confirmed down, because the fleet it paused is gone;
     a project with a surviving or unverified agent keeps it.
 
-    ``forget`` is the operator's word where tmux cannot be used here: each row is
-    ended unchecked (:func:`_shutdown_tmux`), and nothing is stopped or killed.
+    A row on a socket with no server whose agent may still run — its socket file gone
+    from under its server, or the server listening where this shell's tmux does not look
+    — is not ended: the rule ``uninstall`` asks (:func:`_unreached`) still counts it, so
+    ending it stopped nothing and let the next ``uninstall`` go on under it. It is left
+    live with what to do (round 27 of #257).
+
+    ``forget`` is the operator's word that the agents it cannot reach are not running:
+    such rows are ended as lost, and where tmux cannot be used here every row is ended
+    unchecked (:func:`_shutdown_tmux`), with nothing stopped or killed.
     """
     config = settings()
     report = ShutdownReport()
@@ -3745,10 +3848,12 @@ def shutdown(
         unusable = _shutdown_tmux(config, forget=forget)
         targets = _shutdown_targets(project)
         sockets = _shutdown_sockets(targets, config)
+        held: dict[str, tuple[str, str]] = {}
         if unusable is None:
             _refuse_from_inside(sockets, config)
             answering = _shutdown_probe(sockets, config)
             report.servers_absent.extend(socket for socket in sockets if not answering[socket])
+            held = _held_rows(targets, answering, config)
         else:
             answering = dict.fromkeys(sockets, False)  # none asked: nothing stopped or killed
         handled: set[str] = set()
@@ -3775,6 +3880,8 @@ def shutdown(
                         force=force,
                         grace=grace,
                         unusable=unusable,
+                        held=held,
+                        forget=forget,
                     )
         except Exception:
             # The kill phase runs even if a row could not be recorded: "shutdown

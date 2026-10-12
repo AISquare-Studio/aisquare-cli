@@ -35,8 +35,9 @@ and an aisquare that upgrades and uninstalls itself.**
   each agent's tmux server listened on and the boot it started in, recorded at
   spawn. `upgrade` and `uninstall` ask that socket whether the agent may still
   run. An agent started before 0.8.0 recorded neither, so it counts as running
-  until `aisquare fleet shutdown` ends it. 0.7.0 opens a v25 store as it is,
-  and the agents it starts record neither column.
+  until `aisquare fleet shutdown` ends it, or, where its socket is gone (a
+  reboot clears `/tmp`), `aisquare fleet shutdown --forget`. 0.7.0 opens a v25
+  store as it is, and the agents it starts record neither column.
 - `aisquare agents connect codex` and `… cursor` now exit 1 with "can't connect
   … yet", instead of reporting a connection that installed nothing. One 0.7.0
   recorded no longer reads as connected; `aisquare agents disconnect codex` (or
@@ -71,10 +72,12 @@ and an aisquare that upgrades and uninstalls itself.**
   aisquare, is named with the command that removes it, and `--purge` waits
   for it (#253). `--purge` also deletes the one file aisquare keeps outside
   the home: the plugin's answers about uv, in `~/.cache/aisquare`.
-- `aisquare fleet shutdown --forget` ends the fleet's rows on your word,
-  unchecked, where tmux cannot be used: for agents you know are not running.
-  `aisquare uninstall` names it when tmux is not installed and a fleet agent
-  may still be running, which it otherwise refused with no way out.
+- `aisquare fleet shutdown --forget` ends on your word the rows of agents it
+  cannot reach, for agents you know are not running: a server whose socket
+  file is gone, or every row where tmux cannot be used here. Without it,
+  `shutdown` leaves such a row live and says what to do, as `aisquare
+  uninstall` still counts it. Uninstall names `--forget` for those rows, which
+  it otherwise refused with no way out.
 - **Update and Uninstall in asq's Doctor** hand the terminal to
   `aisquare upgrade` and `aisquare uninstall`, which show their plan and ask;
   after an update, asq reopens on the version just installed (#254). Work

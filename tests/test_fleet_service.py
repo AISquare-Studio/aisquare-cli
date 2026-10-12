@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -50,6 +51,7 @@ from aisquare.core.tmux import (
     Completed,
     PaneFacts,
     Runner,
+    SocketAnswer,
     TmuxError,
     TmuxServer,
     TmuxUnavailable,
@@ -57,7 +59,7 @@ from aisquare.core.tmux import (
 )
 from aisquare.core.version import __version__
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
-from aisquare.services import auto_mode
+from aisquare.services import auto_mode, lifecycle
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.explainability import PIPELINE_ID_ENV_VAR
@@ -130,6 +132,11 @@ class FakeTmux(TmuxServer):
         that loses a race with a server reload. It is the one state that separates
         "the kill happened" from "the kill was attempted" — which `stop` used to
         collapse into a suppressed `TmuxError` (review of #121, round 9)."""
+        self.socket_file = True
+        """Whether the socket FILE is where the server made it. tmux leaves it when its
+        server exits, so a dead server's file is stale and shows no server; False is the
+        file taken from under the server (systemd-tmpfiles, logind), which shows nothing
+        (`listener`, the rule `uninstall` asks too)."""
         self.socket_denied = False
         """The socket is THERE but this user may not open it: tmux exits 1 with
         `(Permission denied)` — the same exit code as an absent server. `reachable()`
@@ -382,6 +389,12 @@ class FakeTmux(TmuxServer):
     def started_at(self) -> datetime | None:
         self.reachable()
         return self.started if self._read() else None
+
+    def listener(self, recorded: Path | None = None) -> SocketAnswer | None:
+        """What the socket file says, asked of it rather than of tmux (:attr:`socket_file`)."""
+        if not self.socket_file:
+            return "gone"
+        return "answers" if self.running else None
 
     def server_socket_path(self) -> Path | None:
         """What ``#{socket_path}`` answers: where this server listens, while it runs."""
@@ -3811,23 +3824,118 @@ def test_shutdown_records_rows_lost_with_a_reason_when_the_server_was_killed_by_
         assert store.fleet_agents(project.id, live_only=True) == []
 
 
+_needs_unix_sockets = pytest.mark.skipif(
+    not hasattr(os, "getuid") or not hasattr(socket, "AF_UNIX"),
+    reason="AF_UNIX sockets and a POSIX uid are what tmux needs",
+)
+
+
+@contextmanager
+def _socket_file(name: str, *, listening: bool) -> Iterator[Path]:
+    """A real socket file at ``<short dir>/tmux-<uid>/<name>``, the shape tmux makes:
+    listening, or stale, as tmux leaves it when its server exits. Under ``/tmp``, as an
+    AF_UNIX path is small (about 100 bytes)."""
+    import tempfile
+
+    base = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp"))
+    path = base / f"tmux-{os.getuid()}" / name
+    path.parent.mkdir()
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(str(path))
+        server.listen(1)
+        if not listening:
+            server.close()
+        yield path
+    finally:
+        server.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def _recorded_at(agent: FleetAgent, path: Path) -> FleetAgent:
+    """``agent`` as if its server had said, at spawn, that it listens at ``path``."""
+    with store_session() as store:
+        return store.upsert_fleet_agent(agent.model_copy(update={"socket_path": path}))
+
+
+@_needs_unix_sockets
 def test_shutdown_records_rows_lost_over_the_real_tmux_wrapper(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The same absent-socket path against the REAL ``TmuxServer`` over a refusing
     runner (``_unreachable_server``), not the fake: every swallow of a non-zero exit
     is exercised, so ``answers()`` reading False here is tmux's own behaviour rather
-    than the fake's ``running`` flag agreeing with the service."""
-    coder = _coder(project)
+    than the fake's ``running`` flag agreeing with the service. The socket file the
+    row recorded is real and stale, as tmux leaves it, which shows no server."""
     dead = _unreachable_server()
-    monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+    coder = _coder(project)
+    with _socket_file(coder.tmux_socket, listening=False) as stale:
+        coder = _recorded_at(coder, stale)
+        monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
 
-    report = fleet_service.shutdown(project)
+        report = fleet_service.shutdown(project)
 
     assert [row.agent.id for row in report.recorded] == [coder.id]
     assert report.stopped == [] and report.failed == []
     assert report.servers_absent == [coder.tmux_socket]
     assert report.sessions_killed == [] and report.sessions_absent == []
+
+
+def test_shutdown_leaves_live_a_row_whose_socket_was_taken_from_under_its_server(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Round 27 of #257: `uninstall` counts a row whose socket file is gone as running, as
+    systemd-tmpfiles or logind can take it while the server runs on, and names `fleet
+    shutdown`. That ended the row as lost because `tmux -L` found no server, stopping
+    nothing, and the next `uninstall` went on under the running agent. Both now ask one
+    rule: the row is left live with what to do, until `--forget` is the operator's word."""
+    coder = _coder(project)
+    tmux.running = False  # no tmux client reaches the server…
+    tmux.socket_file = False  # …because its socket file is gone, not because it exited
+
+    plan = fleet_service.shutdown_plan(project)
+    report = fleet_service.shutdown(project)
+
+    assert "is gone" in plan.held[coder.id]
+    assert report.recorded == [] and report.stopped == []
+    assert [row.agent.id for row in report.failed] == [coder.id]
+    reason = report.failed[0].reason
+    assert "is gone, so no tmux client can reach the server" in reason
+    assert "SIGUSR1" in reason and "--forget ends its row on your word" in reason
+    assert report.incomplete_projects == [project.id], "not confirmed down"
+    assert lifecycle.running_fleet()[0] != (), "uninstall still counts it: the two agree"
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+
+    forgotten = fleet_service.shutdown(project, forget=True)
+
+    assert [row.agent.id for row in forgotten.recorded] == [coder.id]
+    assert forgotten.recorded[0].reason.startswith("ended on your word (--forget): its server's")
+    assert forgotten.failed == []
+    assert fleet_service.shutdown_plan(project).agents == []
+    assert lifecycle.running_fleet()[0] == ()
+
+
+@_needs_unix_sockets
+def test_shutdown_leaves_live_a_row_whose_server_listens_where_this_shell_does_not_look(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 27 of #257: a server started under a ``TMUX_TMPDIR`` this shell lacks listens
+    at the path its row recorded, which `tmux -L` from here never asks. `uninstall` counts
+    the row; `shutdown` ended it as lost. It is left live, with the ``TMUX_TMPDIR`` that
+    reaches the server."""
+    dead = _unreachable_server()
+    coder = _coder(project)
+    with _socket_file(coder.tmux_socket, listening=True) as elsewhere:
+        coder = _recorded_at(coder, elsewhere)
+        monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+
+        report = fleet_service.shutdown(project)
+
+    assert report.recorded == [] and [row.agent.id for row in report.failed] == [coder.id]
+    reason = report.failed[0].reason
+    assert f"a server listens on its socket {elsewhere}" in reason
+    assert f"run this again with TMUX_TMPDIR={elsewhere.parent.parent}" in reason
 
 
 def test_shutdown_defaults_to_one_project_and_all_reaches_every_project(

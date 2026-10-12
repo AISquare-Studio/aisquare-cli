@@ -76,12 +76,14 @@ import itertools
 import os
 import re
 import shutil
+import socket as socket_module
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from aisquare.core import paths
 from aisquare.core.spawn import untraced_env
@@ -359,6 +361,62 @@ def boot_id() -> str | None:
         return None
     said = completed.stdout.strip()
     return said if completed.returncode == 0 and said else None
+
+
+SocketAnswer = Literal["answers", "gone", "unasked"]
+"""What a server's socket file says when asked directly (:func:`socket_answer`): a listener
+(``"answers"``), no file there (``"gone"``), or no answer to be had (``"unasked"``)."""
+
+
+def socket_answer(path: Path | None) -> SocketAnswer | None:
+    """Whether a server may be listening on the socket at ``path``, asked of the socket
+    itself (no tmux needed), and why. ``None`` is a host with no POSIX uid, where no tmux
+    server can exist.
+
+    ``None`` only on evidence that none is, because the cost of being wrong is ending the
+    row of a running agent, or removing hooks (with ``uninstall --purge``, the home) under
+    it: a file nobody listens on. tmux leaves its socket file when its server exits (tmux
+    3.7, measured), so a stale file is that evidence. No file is not (``"gone"``):
+    something else took it while the server may run on, systemd-tmpfiles ageing out
+    ``/tmp/tmux-<uid>``, logind removing ``/run/user/<uid>`` at logout, or a private
+    ``/tmp`` (round 26 of #257). Neither is a refusal to look, a denied directory, or a
+    connect that timed out (``"unasked"``).
+    """
+    family = getattr(socket_module, "AF_UNIX", None)
+    if path is None or family is None:
+        return None  # no POSIX uid or no AF_UNIX, so no tmux server can exist here
+    probe = socket_module.socket(family, socket_module.SOCK_STREAM)
+    probe.settimeout(2.0)
+    try:
+        probe.connect(str(path))
+    except ConnectionRefusedError:
+        return None
+    except FileNotFoundError:
+        return "gone"
+    except OSError:
+        return "unasked"
+    finally:
+        probe.close()
+    return "answers"
+
+
+def server_may_run(
+    srv: TmuxServer, recorded: Path | None, booted: str | None, this_boot: str | None
+) -> SocketAnswer | None:
+    """Whether the agent of a live fleet row may still be running on ``srv``, and why; ``None``
+    when it cannot be. The one rule ``upgrade``, ``uninstall`` and ``fleet shutdown`` ask, so
+    a row one of them counts as running is never one another ends as gone (round 27 of #257).
+
+    Asked of what its spawn recorded, never inferred from the shell asking (round 25). A row
+    from another boot (``booted``, against ``this_boot``) cannot be running: no process
+    outlives a reboot. Otherwise its server's socket is asked (:meth:`TmuxServer.listener`)
+    at ``recorded``, where the server said it listened, whatever ``TMUX_TMPDIR`` this shell
+    has and wherever this tmux build keeps sockets; a row from before v25 recorded neither
+    and is asked where this shell's tmux looks.
+    """
+    if booted is not None and this_boot is not None and booted != this_boot:
+        return None
+    return srv.listener(recorded)
 
 
 def parse_version(text: str) -> tuple[int, int] | None:
@@ -1181,6 +1239,19 @@ class TmuxServer:
             raise TmuxUnavailable("no tmux socket on this platform — the fleet needs a POSIX host")
         base = os.environ.get("TMUX_TMPDIR") or "/tmp"
         return Path(base) / f"tmux-{getuid()}" / self.socket
+
+    def listener(self, recorded: Path | None = None) -> SocketAnswer | None:
+        """:func:`socket_answer` for this server's socket: at ``recorded``, the path the server
+        said it listened on (``FleetAgent.socket_path``), else at :meth:`socket_path`. Asked of
+        the socket, so it needs no tmux. Whether that path's directory is there settles
+        nothing: tmux makes it as it looks, so any probe made it there (round 24 and 25 of
+        #257)."""
+        if recorded is None:
+            try:
+                recorded = self.socket_path()
+            except TmuxUnavailable:
+                return None  # no POSIX uid: no tmux server can exist here
+        return socket_answer(recorded)
 
     def server_socket_path(self) -> Path | None:
         """The socket the RUNNING server listens on, as it says (``#{socket_path}``).

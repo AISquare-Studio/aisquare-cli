@@ -813,6 +813,31 @@ def test_an_owed_start_that_raises_is_said_and_the_rest_still_begin() -> None:
     assert app.hand_off is None and app._owed == {}
 
 
+def test_an_accounts_answer_that_lands_as_asq_closes_paints_nothing() -> None:
+    """Round 25 of #257, on windows-latest: an accounts read the call-off started answered
+    after the app had taken its frame down, and the query for the sidebar raised NoMatches
+    out of the worker's handler, failing the run. That answer has nothing to paint."""
+    from textual.css.query import NoMatches
+
+    class Closing:
+        accounts_overview: Any = "as it was"
+        _accounts_owed = True
+
+        @property
+        def sidebar(self) -> Any:
+            raise NoMatches("No nodes match 'Sidebar' on PaneScreen(id='_default')")
+
+        def refresh_accounts(self) -> None:
+            raise AssertionError("no read is owed by an app that is closing")
+
+    app = Closing()
+    answered = SimpleNamespace(state=WorkerState.SUCCESS, worker=SimpleNamespace(result=None))
+
+    ui_app.FleetApp._accounts_read(app, answered)  # type: ignore[arg-type]
+
+    assert app.accounts_overview == "as it was"
+
+
 def test_no_start_on_asqs_own_schedule_begins_once_a_hand_over_is_pending(
     isolated_home: Path,
     tmp_path: Path,

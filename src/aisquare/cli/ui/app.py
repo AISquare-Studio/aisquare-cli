@@ -747,7 +747,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             overview = None  # a directory we cannot read costs the line, never the frame
         else:
             return  # still running, or cancelled with the app: nothing to paint or owe
-        sidebar = self.sidebar
+        try:
+            sidebar = self.sidebar
+        except NoMatches:
+            # asq is closing: its frame went before this answer, which a thread worker
+            # finishing as the app shuts down delivers all the same (windows-latest, round
+            # 25 of #257). Nothing to paint, and no read to owe.
+            return
         self.accounts_overview = overview
         session_known = True
         try:

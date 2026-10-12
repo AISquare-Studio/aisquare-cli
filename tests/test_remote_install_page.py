@@ -904,10 +904,11 @@ def test_a_group_that_is_another_accounts_own_is_no_private_group(
     monkeypatch.setattr(pwd, "getpwuid", lambda uid: me)
     monkeypatch.setattr(grp, "getgrgid", lambda gid: SimpleNamespace(gr_name="anmol", gr_mem=[]))
     monkeypatch.setattr(pwd, "getpwall", lambda: accounts)
-    private_group = remote_server._remote_private_group.__wrapped__  # past the process's cache
-    assert private_group() == 1000
+    monkeypatch.setattr(remote_server, "_private_group", None)
+    assert remote_server._remote_private_group() == 1000
     accounts.append(SimpleNamespace(pw_name="build", pw_uid=1001, pw_gid=1000))
-    assert private_group() is None
+    remote_server._private_group = None  # past the minute it is kept
+    assert remote_server._remote_private_group() is None
 
 
 def test_a_group_of_an_account_the_system_does_not_list_is_no_private_group(
@@ -927,7 +928,47 @@ def test_a_group_of_an_account_the_system_does_not_list_is_no_private_group(
     monkeypatch.setattr(pwd, "getpwuid", lambda uid: me)
     monkeypatch.setattr(grp, "getgrgid", lambda gid: SimpleNamespace(gr_name="anmol", gr_mem=[]))
     monkeypatch.setattr(pwd, "getpwall", lambda: [SimpleNamespace(pw_name="root", pw_uid=0)])
-    assert remote_server._remote_private_group.__wrapped__() is None
+    monkeypatch.setattr(remote_server, "_private_group", None)
+    assert remote_server._remote_private_group() is None
+
+
+def test_the_private_group_is_asked_again_after_a_minute_and_a_failed_lookup_is_not_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kept for the process, a group that gained a member while the TUI ran was still taken
+    for a private one, its group-writable page let through to the new member, and a lookup
+    that failed once, sssd restarting, refused every entry a group may write until the TUI
+    restarted (review of #243, round 12, 6/10). Kept for a minute, and a failed lookup not
+    at all."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("Windows has no groups to ask")
+    import grp
+    import pwd
+    from types import SimpleNamespace
+
+    me = SimpleNamespace(pw_name="anmol", pw_uid=1000, pw_gid=1000)
+    accounts = [me]
+    failing = [True]
+
+    def getpwuid(uid: int) -> SimpleNamespace:
+        if failing:
+            raise KeyError(uid)
+        return me
+
+    monkeypatch.setattr(os, "getuid", lambda: 1000)
+    monkeypatch.setattr(pwd, "getpwuid", getpwuid)
+    monkeypatch.setattr(grp, "getgrgid", lambda gid: SimpleNamespace(gr_name="anmol", gr_mem=[]))
+    monkeypatch.setattr(pwd, "getpwall", lambda: accounts)
+    monkeypatch.setattr(remote_server, "_private_group", None)
+    assert remote_server._remote_private_group() is None, "the lookup failed"
+    failing.clear()
+    assert remote_server._remote_private_group() == 1000, "and was not kept"
+    accounts.append(SimpleNamespace(pw_name="bob", pw_uid=1001, pw_gid=1000))
+    assert remote_server._remote_private_group() == 1000, "kept within the minute"
+    assert remote_server._private_group is not None
+    when, answer = remote_server._private_group
+    remote_server._private_group = (when - remote_server.PRIVATE_GROUP_TTL, answer)
+    assert remote_server._remote_private_group() is None, "asked again after it"
 
 
 def test_the_accounts_are_listed_once_and_only_for_an_entry_a_group_may_write(
@@ -936,7 +977,7 @@ def test_the_accounts_are_listed_once_and_only_for_an_entry_a_group_may_write(
     """``pwd.getpwall`` read every account twice for each start, on Textual's thread for the
     R panel's, and every account of a directory that lists them (review of #243, round 11,
     4/9). Asked for no build that no group may write, an installed one included, and once
-    for the process."""
+    within the minute its answer is kept."""
     if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
         pytest.skip("Windows has no groups to ask")
     import pwd
@@ -949,21 +990,18 @@ def test_the_accounts_are_listed_once_and_only_for_an_entry_a_group_may_write(
         return real()
 
     monkeypatch.setattr(pwd, "getpwall", getpwall)
-    remote_server._remote_private_group.cache_clear()
-    try:
-        for path in (built, *built.rglob("*")):
-            path.chmod(0o755 if path.is_dir() else 0o644)
-        remedy = remote_server.PAGE_DIST_REMEDY
+    monkeypatch.setattr(remote_server, "_private_group", None)
+    for path in (built, *built.rglob("*")):
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    remedy = remote_server.PAGE_DIST_REMEDY
+    remote_server._page_open_to_others(built, remedy)
+    remote_server._page_served_open_to_others(built, built / "index.html", remedy)
+    assert listed == [], "no entry a group may write"
+    (built / "index.html").chmod(0o664)
+    for _ in range(3):
         remote_server._page_open_to_others(built, remedy)
         remote_server._page_served_open_to_others(built, built / "index.html", remedy)
-        assert listed == [], "no entry a group may write"
-        (built / "index.html").chmod(0o664)
-        for _ in range(3):
-            remote_server._page_open_to_others(built, remedy)
-            remote_server._page_served_open_to_others(built, built / "index.html", remedy)
-        assert len(listed) <= 1, "once for the process"
-    finally:
-        remote_server._remote_private_group.cache_clear()
+    assert len(listed) <= 1, "once within the minute"
 
 
 @pytest.mark.skipif(not can_deny_reads(), reason="this account lists any directory (root, or NTFS)")

@@ -6905,7 +6905,14 @@ def _darwin_libc() -> Any:
     return libc
 
 
-@functools.cache
+PRIVATE_GROUP_TTL = 60.0
+"""How long :func:`_remote_private_group`'s answer is kept, in seconds."""
+
+_private_group: tuple[float, int | None] | None = None
+""":func:`_remote_private_group`'s last answer, with when it was worked out
+(``time.monotonic``)."""
+
+
 def _remote_private_group() -> int | None:
     """This account's own group when no other account is in it, a user private group;
     ``None`` otherwise (macOS's ``staff``, SUSE's ``users``), or for an account with no
@@ -6915,20 +6922,28 @@ def _remote_private_group() -> int | None:
 
     The account is looked up by its uid and its group by its gid, which settles any group
     not named for this account alone. Only one that is needs the accounts listed, since no
-    lookup finds the accounts whose own group it is: once for the process, and only for an
-    entry that group may write (:func:`_page_entry_open`), never for an installed build,
-    whose copy no group may write. The list was read twice for each start, on Textual's
-    thread for the R panel's, every account of a directory that lists its accounts with it
-    (sssd's ``enumerate``, NIS) (review of #243, round 11, 4/9).
+    lookup finds the accounts whose own group it is, and only for an entry that group may
+    write (:func:`_page_entry_open`), never for an installed build, whose copy no group may
+    write. The list was read twice for each start, on Textual's thread for the R panel's,
+    every account of a directory that lists its accounts with it (sssd's ``enumerate``,
+    NIS) (review of #243, round 11, 4/9). So the answer is kept for
+    :data:`PRIVATE_GROUP_TTL`. Kept for the process, a group that gained a member while the
+    TUI ran was still taken for a private one, and one failed lookup refused every entry a
+    group may write until it restarted (review of #243, round 12, 6/10): a lookup that
+    fails is not kept.
 
     Only accounts the system lists are seen. A directory that lists none, sssd's and LDAP's
     default, does not list this account either when it is one of its own, and its group is
     then not taken for a private one: whoever shares it cannot be seen. A local account's
     group that a directory account not listed has for its own is not seen."""
+    global _private_group
     import sys
 
     if sys.platform == "win32":
         return None
+    kept, now = _private_group, time.monotonic()
+    if kept is not None and now - kept[0] < PRIVATE_GROUP_TTL:
+        return kept[1]
     import grp
     import pwd
 
@@ -6937,15 +6952,16 @@ def _remote_private_group() -> int | None:
         group = grp.getgrgid(user.pw_gid)
     except KeyError:
         return None
-    if group.gr_name != user.pw_name or set(group.gr_mem) - {user.pw_name}:
-        return None
-    accounts = pwd.getpwall()
-    if all(other.pw_uid != user.pw_uid for other in accounts):
-        return None  # its accounts are not listed, so those that share its group are not seen
-    others = (other for other in accounts if other.pw_uid != user.pw_uid)
-    if any(other.pw_gid == user.pw_gid for other in others):
-        return None
-    return user.pw_gid
+    answer: int | None = None
+    if group.gr_name == user.pw_name and not set(group.gr_mem) - {user.pw_name}:
+        accounts = pwd.getpwall()
+        # Where this account is not listed, neither are those that share its group.
+        listed = any(other.pw_uid == user.pw_uid for other in accounts)
+        others = (other for other in accounts if other.pw_uid != user.pw_uid)
+        if listed and all(other.pw_gid != user.pw_gid for other in others):
+            answer = user.pw_gid
+    _private_group = (now, answer)
+    return answer
 
 
 _PAGE_PROJECT_FILES = ("package.json", "node_modules")

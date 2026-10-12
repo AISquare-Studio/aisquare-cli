@@ -939,8 +939,6 @@ class Fleet:
     """When every pane last printed, as tmux tells it; ``None``: it would not say."""
     windows: int = 0
     """How many times the scan read the window of the newest events."""
-    board_fails: bool = False
-    """The read of the board's day raises, as a store held past its busy timeout does."""
 
 
 def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> NeedsSources:
@@ -956,8 +954,6 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
 
     def board_since(pid: str, since: datetime) -> list[TeamEvent]:
         """The store's ``team_events_since`` over the kinds the live source asks for."""
-        if fleet.board_fails:
-            raise RuntimeError("database is locked")
         return [
             event
             for event in fleet.events

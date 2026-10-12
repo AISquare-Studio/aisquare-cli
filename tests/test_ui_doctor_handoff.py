@@ -580,7 +580,7 @@ def test_a_hand_over_kept_waiting_says_by_what_and_a_second_press_calls_it_off(
     assert early == overdue == ("upgrade", "--reopen"), "waiting, the early press ignored"
     assert said[:2] == [
         "asq quits once the reads running end",
-        "Still waiting for hung-read after 0 s. Press Update or Uninstall again to stay "
+        "Still waiting for a read after 0 s. Press Update or Uninstall again to stay "
         "in asq; quit, and it runs once they end.",
     ], said
     assert said[2:] == ["Called off: asq carries on"], said
@@ -621,7 +621,7 @@ def test_a_poll_queued_before_the_call_off_neither_waits_on_nor_quits(
 
     said, exits = drive(fn)
 
-    assert said[1].startswith("Still waiting for hung-read"), "control: the wait was overdue"
+    assert said[1].startswith("Still waiting for a read"), "control: the wait was overdue"
     assert said[2:] == ["Called off: asq carries on"], said
     assert exits == [], "no quit once the read ended"
 

@@ -163,6 +163,21 @@ def test_the_lists_name_only_workers_the_ui_starts_and_never_both() -> None:
     assert len(WAITED) >= 10, f"the walk found too few to wait for: {sorted(WAITED)}"
 
 
+def test_the_overdue_toast_names_every_read_it_waits_for_in_words() -> None:
+    """Round 24 of #257: past its patience the hand-over named what it waited for by the
+    workers' names (``doctor``, ``shell-accounts``, ``welcome-validate``), where the
+    refusal beside it speaks in words. Every read the UI starts has words now, a writer
+    keeps the refusal's, and a worker neither list knows is "a read"."""
+    reads = ui_app._waited_reads()
+    assert set(reads) == WAITED, set(reads) ^ WAITED
+    assert all(words and words != name for name, words in reads.items())
+    assert ui_app._in_words([ui_app._DOCTOR_WORKER]) == "the doctor's checks"
+    assert ui_app._in_words(
+        [ui_app.ACCOUNTS_WORKER, "hung-read", welcome_view.worker_name("validate"), "other"]
+    ) == ("the accounts' read, a read and Welcome's folder check")
+    assert ui_app._in_words([accounts_view.ARRANGE_WORKER]) == WRITING[accounts_view.ARRANGE_WORKER]
+
+
 def test_the_accounts_readers_write_the_store_so_update_waits_for_them(fake_home: Path) -> None:
     """Round 19 of #257: listed here as readers, a usage reading and the reads of the slots
     let Update quit under them. A usage reading records a sample per account

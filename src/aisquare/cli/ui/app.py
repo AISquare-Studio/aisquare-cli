@@ -1303,7 +1303,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if not self._hand_off_overdue and waited >= _HAND_OFF_PATIENCE:
             self._hand_off_overdue = True
             self.notify(
-                f"Still waiting for {', '.join(running)} after {waited:.0f} s. Press Update "
+                f"Still waiting for {_in_words(running)} after {waited:.0f} s. Press Update "
                 "or Uninstall again to stay in asq; quit, and it runs once they end.",
                 severity="warning",
                 timeout=10,
@@ -1416,6 +1416,50 @@ def _writing_workers() -> dict[str, str]:
         accounts.REMOVE_WORKER: "an account's removal",
         accounts.ARRANGE_WORKER: "an account change",
     }
+
+
+def _waited_reads() -> dict[str, str]:
+    """Every read a hand-over waits out, by name, in a toast's words.
+
+    What the overdue toast names (``FleetApp._exit_when_read``), in the voice of the
+    refusal's :func:`_writing_workers`: it listed the workers by name, ``doctor``,
+    ``shell-accounts``, ``welcome-validate`` (round 24 of #257). tests/test_ui_writing_workers.py
+    checks that every read the UI starts is here.
+    """
+    from aisquare.cli.ui import board
+    from aisquare.cli.ui.views import (
+        accounts,
+        agent,
+        doctor,
+        explainability,
+        project,
+        settings,
+        welcome,
+    )
+
+    return {
+        _DOCTOR_WORKER: "the doctor's checks",
+        ACCOUNTS_WORKER: "the accounts' read",
+        doctor.ROUTE_WORKER: "how aisquare was installed",
+        project.DOCTOR_WORKER: "a project's checks",
+        accounts.USAGE_WORKER: "the accounts' usage",
+        accounts.CREDITS_WORKER: "the workspaces' credits",
+        agent.LABELS_WORKER: "an agent's account names",
+        board.LABELS_WORKER: "a board's account names",
+        explainability.STATUS_WORKER: "Explainability's status",
+        settings.ACCOUNTS_WORKER: "the Settings tab's accounts",
+        welcome.worker_name("look"): "Welcome's checks",
+        welcome.worker_name("candidates"): "Welcome's folder list",
+        welcome.worker_name("validate"): "Welcome's folder check",
+    }
+
+
+def _in_words(names: list[str]) -> str:
+    """``names``, workers a hand-over waits for, as the toast says them: a read or a writer
+    in its words (:func:`_waited_reads`, :func:`_writing_workers`), any other as "a read"."""
+    words = {**_waited_reads(), **_writing_workers()}
+    said = list(dict.fromkeys(words.get(name, "a read") for name in names))
+    return said[0] if len(said) == 1 else f"{', '.join(said[:-1])} and {said[-1]}"
 
 
 def _cut_off_workers() -> frozenset[str]:

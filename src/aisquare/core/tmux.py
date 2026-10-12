@@ -71,7 +71,6 @@ Verified against tmux 3.7c (``tests/test_tmux.py`` re-verifies the live ones):
 from __future__ import annotations
 
 import contextlib
-import functools
 import itertools
 import os
 import re
@@ -321,7 +320,10 @@ _BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 _SYSCTL = ("/usr/sbin/sysctl", "/sbin/sysctl")
 
 
-@functools.cache
+#: This boot's identity once :func:`boot_id` has found it; ``None`` until then.
+_boot: str | None = None
+
+
 def boot_id() -> str | None:
     """This boot's identity, or ``None`` where the machine keeps none.
 
@@ -334,10 +336,20 @@ def boot_id() -> str | None:
     keeps ``kern.bootsessionuuid``, asked of ``sysctl`` on PATH or where macOS
     keeps it. The BSDs keep only a time, which moves the same way: ``None``.
 
-    Asked once per process, since the boot cannot change while it runs: on macOS each
-    question is a ``sysctl`` run, and asq asked once per spawn and again in each upgrade
-    or uninstall plan (round 26 of #257).
+    Kept for the process once found, since the boot cannot change while it runs: on macOS
+    each question is a ``sysctl`` run, and asq asked once per spawn and again in each
+    upgrade or uninstall plan (round 26 of #257). Only once found: asq is one process that
+    spawns every agent, and a ``sysctl`` that failed or timed out once, kept, left every
+    later spawn with no boot recorded (round 28).
     """
+    global _boot
+    if _boot is None:
+        _boot = _ask_boot_id()
+    return _boot
+
+
+def _ask_boot_id() -> str | None:
+    """:func:`boot_id`, asked of the machine."""
     with contextlib.suppress(OSError, UnicodeDecodeError):
         said = _BOOT_ID.read_text(encoding="ascii").strip()
         if said:

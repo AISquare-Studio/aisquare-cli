@@ -857,13 +857,12 @@ def test_the_boot_is_named_where_the_machine_names_it() -> None:
 
 
 def test_the_boot_is_asked_of_sysctl_where_macos_keeps_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A launchd or cron PATH leaves /usr/sbin out (round 25 of #257): ``sysctl`` is
     looked for where macOS keeps it too, once per process, as the boot cannot change
     while it runs (round 26). Where the machine keeps no boot id, none."""
-    tmux_module.boot_id.cache_clear()
-    request.addfinalizer(tmux_module.boot_id.cache_clear)  # what the next test asks is real
+    monkeypatch.setattr(tmux_module, "_boot", None)  # put back after: the next test's is real
     monkeypatch.setattr(tmux_module, "_BOOT_ID", tmp_path / "no-proc")
     monkeypatch.setattr(shutil, "which", lambda _name, *a, **k: None)
     monkeypatch.setattr(os, "access", lambda place, _mode: place == "/usr/sbin/sysctl")
@@ -879,9 +878,39 @@ def test_the_boot_is_asked_of_sysctl_where_macos_keeps_it(
     assert tmux_module.boot_id() == "6B7A1D2E-0000-4000-8000-000000000001"
     assert asked == [["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"]], "asked once"
 
-    tmux_module.boot_id.cache_clear()  # another process
+    monkeypatch.setattr(tmux_module, "_boot", None)  # another process
     monkeypatch.setattr(sys, "platform", "freebsd13")  # only a boot time, which moves
     assert tmux_module.boot_id() is None and len(asked) == 1
+
+
+def test_a_boot_id_that_could_not_be_had_is_asked_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 28 of #257: a ``sysctl`` that failed or timed out once was kept for the life of
+    the process, so asq recorded no boot for every agent it spawned after. Only an answer
+    found is kept."""
+    monkeypatch.setattr(tmux_module, "_boot", None)  # put back after: the next test's is real
+    monkeypatch.setattr(tmux_module, "_BOOT_ID", tmp_path / "no-proc")
+    monkeypatch.setattr(shutil, "which", lambda _name, *a, **k: "/usr/sbin/sysctl")
+    answers: list[subprocess.CompletedProcess[str] | subprocess.TimeoutExpired] = [
+        subprocess.TimeoutExpired(["sysctl"], 5),
+        subprocess.CompletedProcess(["sysctl"], 1, "", "sysctl: unknown oid"),
+        subprocess.CompletedProcess(["sysctl"], 0, "6B7A1D2E-0000-4000-8000-000000000002\n", ""),
+    ]
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        answer = answers.pop(0)
+        if isinstance(answer, subprocess.TimeoutExpired):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    assert tmux_module.boot_id() is None, "timed out"
+    assert tmux_module.boot_id() is None, "failed"
+    assert tmux_module.boot_id() == "6B7A1D2E-0000-4000-8000-000000000002"
+    assert tmux_module.boot_id() == "6B7A1D2E-0000-4000-8000-000000000002" and answers == []
 
 
 def test_kill_and_rename_and_attach_build_exact_targets(fake_bin: Path, conf: Path) -> None:

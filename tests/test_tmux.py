@@ -53,6 +53,7 @@ from aisquare.core.tmux import (
     WindowInfo,
     _tmux,
     parse_version,
+    socket_answer,
 )
 from tests import fakebin
 from tests.fsperms import can_deny_reads, can_deny_writes
@@ -239,6 +240,31 @@ def test_argv_names_the_socket_and_the_conf(fake_bin: Path, conf: Path) -> None:
         "-F",
         "#S",
     ]
+
+
+def test_at_asks_for_the_socket_at_its_path_through_the_same_runner(
+    fake_bin: Path, conf: Path
+) -> None:
+    """Round 28 of #257: a recorded row's server is asked where it said it listened (``-S``),
+    not where ``-L`` finds the name from this shell, which may be another server."""
+    fake = FakeTmux(Completed(0, "3.7\n", ""))
+    server = _server(fake, fake_bin, conf, socket="asq-x")
+    recorded = Path("/run/user/1000/tmux-1000/asq-x")
+
+    there = server.at(recorded)
+
+    assert server.at(None) is server and there.at(recorded) is there
+    assert there.argv("list-sessions") == [
+        str(fake_bin),
+        "-S",
+        str(recorded),
+        "-f",
+        str(conf),
+        "list-sessions",
+    ]
+    assert there.socket_path() == recorded and there.listener() == socket_answer(recorded)
+    assert there.socket == "asq-x" and server.path is None, "the name kept, the first untouched"
+    assert there.reachable() and fake.calls[0][0][1:3] == ["-S", str(recorded)]
 
 
 def test_run_maps_a_failure_to_tmux_error_carrying_stderr(fake_bin: Path, conf: Path) -> None:
@@ -1646,6 +1672,34 @@ def test_live_socket_path_is_where_tmux_put_it_and_outlives_the_server(live: Tmu
     live.kill_server()
     assert live.list_sessions() == []
     assert live.socket_path().exists(), "the file tmux leaves behind — what the fixture tidies"
+
+
+@requires_tmux
+def test_live_a_server_under_another_tmux_tmpdir_is_reached_at_the_path_it_said(
+    live: TmuxServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 28 of #257: ``-L`` from a shell without the spawning shell's ``TMUX_TMPDIR`` asks
+    another directory; the path the server said it listens on (what a spawn records) reaches
+    it from any shell."""
+    import tempfile
+
+    elsewhere = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp"))  # an AF_UNIX path is short
+    monkeypatch.setenv("TMUX_TMPDIR", str(elsewhere))
+    window = _spawn(live, "asq-test-elk", "w0", CAT)
+    recorded = live.server_socket_path()
+    monkeypatch.delenv("TMUX_TMPDIR")
+    assert recorded is not None and recorded.parent.parent == elsewhere
+    there = live.at(recorded)
+    try:
+        assert live.reachable() is False, "-L asks this shell's directory, where none is"
+        assert there.reachable() is True
+        facts = there.pane_facts_or_raise(window.pane_id)
+        assert facts is not None and facts.pane_id == window.pane_id
+    finally:
+        with contextlib.suppress(TmuxError):
+            there.kill_server()
+        shutil.rmtree(elsewhere, ignore_errors=True)
+    assert there.reachable() is False, "no server at the path: tmux says none"
 
 
 @requires_tmux

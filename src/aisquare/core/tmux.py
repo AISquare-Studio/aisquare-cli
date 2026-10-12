@@ -593,7 +593,7 @@ size on first attach (``TerminalPane._sync_size``), as before.
 
 
 class TmuxServer:
-    """A handle on one private tmux server (``-L socket``).
+    """A handle on one private tmux server (``-L socket``, or ``-S path``: :meth:`at`).
 
     Every method raises :class:`TmuxUnavailable` when there is no usable tmux
     and :class:`TmuxError` when a command fails, so callers decide what a
@@ -607,8 +607,12 @@ class TmuxServer:
         binary: str | None = None,
         conf: Path | None = None,
         runner: Runner | None = None,
+        path: Path | None = None,
     ) -> None:
         self.socket = socket
+        self.path = path
+        """Where this handle asks for the socket (``tmux -S``), set by :meth:`at`; ``None``
+        asks for it by name (``tmux -L``), in the directory this shell's tmux looks in."""
         self._binary = binary
         self._conf = conf
         self._runner: Runner = runner or _tmux
@@ -768,7 +772,26 @@ class TmuxServer:
 
     def argv(self, *args: str) -> list[str]:
         """The full command line for one tmux invocation on this server."""
+        if self.path is not None:
+            return [self.binary(), "-S", str(self.path), "-f", str(self.conf_path()), *args]
         return self._argv_on(self.socket, str(self.conf_path()), *args)
+
+    def at(self, path: Path | None) -> TmuxServer:
+        """This server asked for at ``path`` (``tmux -S``), the socket a recorded row's server
+        said it listened on (``FleetAgent.socket_path``); this handle when ``path`` is ``None``.
+
+        ``-L`` finds a socket by name in the directory this shell's tmux looks in. A server
+        started under another ``TMUX_TMPDIR`` is not there, and another server on the same
+        name may be, whose pane ids, numbered from ``%0`` by every server, name other agents
+        (round 28 of #257). tmux answers at a path as it does for a name, measured on 3.7c:
+        ``no server running on <path>`` for a stale file, ``error connecting to <path> (No
+        such file or directory)`` for none.
+        """
+        if path is None or path == self.path:
+            return self
+        return TmuxServer(
+            self.socket, binary=self._binary, conf=self._conf, runner=self._runner, path=path
+        )
 
     def run(self, *args: str, stdin: bytes | None = None) -> str:
         """Run one tmux command (``;`` arguments chain several) and return stdout."""
@@ -1232,8 +1255,11 @@ class TmuxServer:
 
         :class:`TmuxUnavailable` where there is no uid (Windows outside WSL):
         the fleet modules must import there (plan §3.9), but there is no tmux
-        and so no socket to point at.
+        and so no socket to point at. A handle asked for at a path (:meth:`at`)
+        answers that path.
         """
+        if self.path is not None:
+            return self.path
         getuid = getattr(os, "getuid", None)
         if getuid is None:
             raise TmuxUnavailable("no tmux socket on this platform — the fleet needs a POSIX host")

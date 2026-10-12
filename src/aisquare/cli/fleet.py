@@ -523,6 +523,7 @@ def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
                     "sessions": plan.sessions,
                     "absent_sockets": plan.absent_sockets,
                     "held": plan.held,
+                    "lost": plan.lost,
                     "tmux_unusable": plan.tmux_unusable,
                 }
             )
@@ -549,10 +550,10 @@ def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
             console.print(f"  ✗ {agent.label} · {where} — recorded lost, unchecked")
         elif agent.id in plan.held:
             console.print(f"  ⚠ {agent.label} · {where} — left live: {plan.held[agent.id]}")
-        elif agent.tmux_socket in plan.absent_sockets:
+        elif agent.id in plan.lost:
             console.print(
                 f"  ✗ {agent.label} · {where} — recorded lost "
-                f"(no server answers on '{agent.tmux_socket}')"
+                f"(no server answers on '{plan.lost[agent.id]}')"
             )
         else:
             console.print(f"  💤 {agent.label} · {where} — stopped ({agent.pane_id})")
@@ -706,9 +707,9 @@ def shutdown(
     terminal it is a dry run unless --yes, and under --json without --yes it
     prints the plan and changes nothing. Board notes and tasks are kept, the
     ended rows' claims are released, and a `fleet-paused` signal is cleared.
-    A row whose agent may still run though its server did not answer (its
-    socket gone, or a server where this shell's tmux does not look) is left
-    live with what to do, and with no usable tmux it refuses; `--forget`
+    Each agent's server is asked at the socket its row recorded. A row whose
+    agent may still run though its server did not answer (its socket gone) is
+    left live with what to do, and with no usable tmux it refuses; `--forget`
     ends those rows on your word, for agents you know are not running. Exits
     1 when any row was left live or a claim release was refused, and 130
     when interrupted — with the report of how far it got either way.

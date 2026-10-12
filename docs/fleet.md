@@ -319,19 +319,20 @@ way `fleet stop` stops one (`/exit`, grace, kill), then the fleet's own tmux
 exit status where tmux exposed one, and rows whose socket had no server as
 *lost*, each with the reason the service gave.
 
+Each agent's server is asked at the socket its row recorded at spawn (`tmux
+-S`), so a server started under another `TMUX_TMPDIR` is reached and stopped
+from any shell. Another server that `tmux -L` reaches from this shell under the
+same socket name is not the agent's, and is never asked about it: its pane ids
+name other agents.
+
 A row whose server did not answer is ended as lost only where it cannot be
 running: it started before the last boot, or its socket file is there with
 nothing listening, which is what tmux leaves when its server exits. Otherwise
 its row is **left live**, with what to do, because `aisquare uninstall` asks
-the same socket and would still count it:
-
-- a server listens at the socket the row recorded, where this shell's tmux
-  does not look (it was started under another `TMUX_TMPDIR`): run it again
-  with the `TMUX_TMPDIR` the report names;
-- the socket file is gone (systemd-tmpfiles or a logout removed it while the
-  server ran on), so no tmux client can reach the server: if it still runs,
-  send that tmux server `SIGUSR1`, which makes tmux create its socket again,
-  and run it again.
+the same socket and would still count it. Most often the socket file is gone
+(systemd-tmpfiles or a logout removed it while the server ran on), so no tmux
+client can reach the server: if it still runs, send that tmux server
+`SIGUSR1`, which makes tmux create its socket again, and run it again.
 
 It ends running work, so it asks first: it prints what it would end and
 confirms at a terminal (default **no**), and off a terminal it is a dry run

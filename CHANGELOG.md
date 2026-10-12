@@ -77,7 +77,10 @@ and an aisquare that upgrades and uninstalls itself.**
   file is gone, or every row where tmux cannot be used here. Without it,
   `shutdown` leaves such a row live and says what to do, as `aisquare
   uninstall` still counts it. Uninstall names `--forget` for those rows, which
-  it otherwise refused with no way out.
+  it otherwise refused with no way out. `fleet shutdown` and `fleet stop` ask
+  each agent's tmux server at the socket its row recorded, so one started
+  under another `TMUX_TMPDIR` is stopped from any shell, and another server on
+  the same socket name is never taken for it.
 - **Update and Uninstall in asq's Doctor** hand the terminal to
   `aisquare upgrade` and `aisquare uninstall`, which show their plan and ask;
   after an update, asq reopens on the version just installed (#254). Work

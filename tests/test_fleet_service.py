@@ -154,6 +154,9 @@ class FakeTmux(TmuxServer):
         """Sockets that answer with a DIFFERENT server than this fake (see the
         `tmux` fixture): one gone, one healthy, which is the state `shutdown` and
         the doctor decide per socket and nothing could otherwise reproduce."""
+        self.per_path: dict[Path, TmuxServer] = {}
+        """Servers asked for at a path (``tmux -S``, :meth:`at`) that is not where ``-L``
+        reaches this one: a server started under another ``TMUX_TMPDIR``."""
         self.sessions: dict[str, list[WindowInfo]] = {}
         self.facts: dict[str, PaneFacts] = {}
         self.output_at: dict[str, datetime] = {}
@@ -396,9 +399,17 @@ class FakeTmux(TmuxServer):
             return "gone"
         return "answers" if self.running else None
 
+    def socket_path(self) -> Path:
+        """Where this server keeps its socket, and where ``-L`` from this shell finds it."""
+        return Path("/run/fake/tmux-1000") / self.socket
+
     def server_socket_path(self) -> Path | None:
         """What ``#{socket_path}`` answers: where this server listens, while it runs."""
-        return Path("/run/fake/tmux-1000") / self.socket if self._read() else None
+        return self.socket_path() if self._read() else None
+
+    def at(self, path: Path | None) -> TmuxServer:
+        """The server listening at ``path`` (:attr:`per_path`), else this one."""
+        return self.per_path.get(path, self) if path is not None else self
 
     def pane_pid(self, pane_id: str) -> int | None:
         self.binary()
@@ -3862,7 +3873,13 @@ def test_shutdown_records_rows_lost_over_the_real_tmux_wrapper(
     is exercised, so ``answers()`` reading False here is tmux's own behaviour rather
     than the fake's ``running`` flag agreeing with the service. The socket file the
     row recorded is real and stale, as tmux leaves it, which shows no server."""
-    dead = _unreachable_server()
+    asked: list[list[str]] = []
+
+    def refusing(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        asked.append(list(argv))
+        return Completed(1, "", _UNREACHABLE)
+
+    dead = _real_server(refusing)
     coder = _coder(project)
     with _socket_file(coder.tmux_socket, listening=False) as stale:
         coder = _recorded_at(coder, stale)
@@ -3871,8 +3888,10 @@ def test_shutdown_records_rows_lost_over_the_real_tmux_wrapper(
         report = fleet_service.shutdown(project)
 
     assert [row.agent.id for row in report.recorded] == [coder.id]
+    assert report.recorded[0].reason == f"no server answered on socket '{stale}'"
     assert report.stopped == [] and report.failed == []
-    assert report.servers_absent == [coder.tmux_socket]
+    assert report.servers_absent == [coder.tmux_socket, str(stale)], "today's, and the row's"
+    assert any(argv[1:3] == ["-S", str(stale)] for argv in asked), "asked where it recorded"
     assert report.sessions_killed == [] and report.sessions_absent == []
 
 
@@ -3913,25 +3932,34 @@ def test_shutdown_leaves_live_a_row_whose_socket_was_taken_from_under_its_server
     assert lifecycle.running_fleet()[0] == ()
 
 
-def test_shutdown_leaves_live_a_row_whose_server_listens_where_this_shell_does_not_look(
+def test_shutdown_stops_a_row_on_the_server_at_the_path_it_recorded(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round 27 of #257: a server started under a ``TMUX_TMPDIR`` this shell lacks listens
-    at the path its row recorded, which `tmux -L` from here never asks. `uninstall` counts
-    the row; `shutdown` ended it as lost. It is left live, with the ``TMUX_TMPDIR`` that
-    reaches the server."""
-    dead = _unreachable_server()
-    coder = _coder(project)
-    with _socket_file(coder.tmux_socket, listening=True) as elsewhere:
-        coder = _recorded_at(coder, elsewhere)
-        monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+    """Round 28 of #257: a row is asked of the server at the path its spawn recorded (``tmux
+    -S``), not whatever ``tmux -L`` reaches from this shell. A shell without the spawning
+    shell's ``TMUX_TMPDIR`` reaches another server on the same name, whose ``%1`` is a
+    stranger: ``/exit`` was typed into it, or, were it younger than the row, the row was
+    ended as gone under its running agent. Its own server is stopped and its session
+    killed; the stranger is not touched."""
+    coder = _coder(project)  # its own server: `tmux`, which holds its pane
+    elsewhere = Path("/run/user/1000/tmux-1000") / coder.tmux_socket
+    coder = _recorded_at(coder, elsewhere)
+    stranger = FakeTmux()  # what `-L` reaches from this shell
+    stranger.spawn_window("asq-someone", name="manager", cwd=project.root, command=["claude"])
+    assert stranger.facts.keys() == tmux.facts.keys() == {coder.pane_id}, "the same %1"
+    stranger.per_path[elsewhere] = tmux
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: stranger)
 
-        report = fleet_service.shutdown(project)
+    plan = fleet_service.shutdown_plan(project)
+    report = fleet_service.shutdown(project)
 
-    assert report.recorded == [] and [row.agent.id for row in report.failed] == [coder.id]
-    reason = report.failed[0].reason
-    assert f"a server listens on its socket {elsewhere}" in reason
-    assert f"run this again with TMUX_TMPDIR={elsewhere.parent.parent}" in reason
+    assert plan.sessions == [f"{elsewhere}:asq-{_codename(project)}"] and plan.lost == {}
+    assert [a.id for a in report.stopped] == [coder.id], report
+    assert report.recorded == [] and report.failed == []
+    assert (coder.pane_id, "literal", "/exit") in tmux.typed and tmux.killed == [coder.pane_id]
+    assert report.sessions_absent == [f"{elsewhere}:asq-{_codename(project)}"], "with its window"
+    assert stranger.typed == [] and stranger.killed == [] and stranger.killed_sessions == []
+    assert not stranger.facts[coder.pane_id].dead, "the stranger runs on"
 
 
 def test_shutdown_defaults_to_one_project_and_all_reaches_every_project(
@@ -4476,14 +4504,14 @@ def test_shutdown_inside_guard_keeps_commas_in_the_socket_path(
 
     monkeypatch.setenv("TMUX", f"{socket_path},4242,0")
     with pytest.raises(FleetError, match="INSIDE the fleet's own tmux server"):
-        fleet_service._refuse_from_inside(["asq,shared"], config)
+        fleet_service._refuse_from_inside([fleet_service._Address("asq,shared")], config)
 
     # the truncation the old parse produced is NOT this socket — and a different
     # comma-free socket is not either
     monkeypatch.setenv("TMUX", f"{str(socket_path).split(',')[0]},4242,0")
-    fleet_service._refuse_from_inside(["asq,shared"], config)
+    fleet_service._refuse_from_inside([fleet_service._Address("asq,shared")], config)
     monkeypatch.setenv("TMUX", "/tmp/tmux-0/somebody-elses,4242,0")
-    fleet_service._refuse_from_inside(["asq,shared"], config)
+    fleet_service._refuse_from_inside([fleet_service._Address("asq,shared")], config)
 
 
 def test_shutdown_reports_a_failed_final_scan_and_keeps_the_pause(
@@ -5000,7 +5028,9 @@ def test_a_label_reused_mid_shutdown_stops_the_snapshots_row_and_not_the_new_age
     real_probe = fleet_service._shutdown_probe
     new_ids: list[str] = []
 
-    def exit_and_reuse_the_label(*args: object, **kwargs: object) -> dict[str, bool]:
+    def exit_and_reuse_the_label(
+        *args: object, **kwargs: object
+    ) -> dict[fleet_service._Address, bool]:
         # Between the snapshot and the first row's turn: the old coder-1 exits
         # on its own (its hook ends the row) and a new coder-1 is spawned.
         with store_session() as store:
@@ -5422,7 +5452,7 @@ def test_shutdown_keeps_the_claim_of_a_row_on_a_socket_that_refused_after_the_pr
         assert store.claim_task(task.id, coder.session_id, lease)
     real_probe = fleet_service._shutdown_probe
 
-    def probe_then_refuse(*args: object, **kwargs: object) -> dict[str, bool]:
+    def probe_then_refuse(*args: object, **kwargs: object) -> dict[fleet_service._Address, bool]:
         answering = real_probe(*args, **kwargs)  # type: ignore[arg-type]
         tmux.socket_denied = True  # it answered, and only THEN refused
         return answering
@@ -5755,7 +5785,7 @@ def test_shutdown_plan_refuses_rather_than_showing_a_plan_short_of_a_session(
     coder = _coder(project)
     real_probe = fleet_service._shutdown_probe
 
-    def probe_then_deny(*args: object, **kwargs: object) -> dict[str, bool]:
+    def probe_then_deny(*args: object, **kwargs: object) -> dict[fleet_service._Address, bool]:
         answering = real_probe(*args, **kwargs)  # type: ignore[arg-type]
         tmux.socket_denied = True  # the socket stops answering right after the probe
         return answering

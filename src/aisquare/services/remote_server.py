@@ -6287,6 +6287,13 @@ PAGE_NOT_READ = (
 """Why a ``--dist`` or an installed build with a directory this account cannot list is no
 page (:func:`_page_open_to_others`)."""
 
+PAGE_PLACE_OPEN_TO_OTHERS = (
+    "{path} can be changed by another account, which could put a page of its own in place of "
+    "{root} and take the passphrase — chmod go-w {path} if it is yours, {remedy}"
+)
+"""Why a ``--dist`` or an installed build in a directory another account may change is no
+page (:func:`_page_open_to_others`)."""
+
 
 def _page_open_to_others(root: Path, remedy: str) -> str | None:
     """The refusal of the build at ``root`` when another account may change what a server
@@ -6307,6 +6314,14 @@ def _page_open_to_others(root: Path, remedy: str) -> str | None:
     passed (review of #243, round 9, 3/6). What a server never serves is not looked at: a
     hidden name, and a link, whose own mode says nothing and whose target in the build is
     looked at where it is. Windows keeps no such modes.
+
+    Each directory above ``root`` is looked at too, as sshd's ``StrictModes`` looks above
+    ``authorized_keys``: the server finds each file by its path, and another account that
+    may change a directory above the build may rename the build away and put its own in
+    its place, all of whose files pass. A shared checkout's ``root:dev 2775`` did, for any
+    member of ``dev`` (review of #243, round 9, 2/6). Above the build, a directory with the
+    sticky bit, ``/tmp``'s, is closed to others all the same: only the owner of a name in
+    it, the directory's own owner and root may rename the name, and each is looked at.
     """
     import sys
 
@@ -6339,22 +6354,31 @@ def _page_open_to_others(root: Path, remedy: str) -> str | None:
                 return problem
     if unread:
         return PAGE_NOT_READ.format(path=unread[0].filename or root, root=root, remedy=remedy)
+    for parent in root.parents:
+        try:
+            info = os.lstat(parent)
+        except OSError:
+            continue
+        if _page_entry_open(info, own_group, above=True):
+            return PAGE_PLACE_OPEN_TO_OTHERS.format(path=parent, root=root, remedy=remedy)
     return None
 
 
-def _page_entry_open(info: os.stat_result, own_group: int | None) -> bool:
+def _page_entry_open(info: os.stat_result, own_group: int | None, *, above: bool = False) -> bool:
     """Whether another account may change the file or directory ``info`` was read from:
     one that others may write, that a group may write other than this account's own (a
     user private group, the one Fedora and Debian give each user with a umask of 002,
     holds no one else: :func:`_remote_private_group`), or that an account other than this
-    one or root owns."""
+    one or root owns. ``above``: a directory above a build, where the sticky bit keeps
+    others from renaming what this account or root owns in it, and so from the build."""
     import stat
 
-    return bool(
-        info.st_mode & stat.S_IWOTH
-        or (info.st_mode & stat.S_IWGRP and info.st_gid != own_group)
-        or info.st_uid not in {os.getuid(), 0}
+    writable = info.st_mode & stat.S_IWOTH or (
+        info.st_mode & stat.S_IWGRP and info.st_gid != own_group
     )
+    if above and info.st_mode & stat.S_ISVTX:
+        writable = False
+    return bool(writable) or info.st_uid not in {os.getuid(), 0}
 
 
 def _remote_private_group() -> int | None:

@@ -670,6 +670,59 @@ def test_a_directory_of_the_build_this_account_cannot_list_is_still_looked_at(
     assert says in problem and f"go-w {root}," in problem
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows keeps no group or other bits")
+@pytest.mark.parametrize("installed", [False, True], ids=["dist", "installed"])
+@pytest.mark.parametrize("up", [1, 2], ids=["parent", "grandparent"])
+@pytest.mark.parametrize(
+    ("mode", "group", "served"),
+    [
+        (0o775, "shared", False),
+        (0o777, "shared", False),
+        (0o1777, "shared", True),
+        (0o775, "this account's own", True),
+    ],
+    ids=["a-shared-group-may-write", "others-may-write", "others-may-write-sticky", "own-group"],
+)
+def test_a_build_in_a_directory_another_account_may_change_is_no_page_to_serve(
+    isolated_home: Path,
+    built: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    installed: bool,
+    up: int,
+    mode: int,
+    group: str,
+    served: bool,
+) -> None:
+    """The check looked at the build and below it, never above: a member of the group of a
+    shared checkout's ``root:dev 2775`` could rename the build away and put its own in its
+    place, every file of which passed (review of #243, round 9, 2/6). For the installed
+    build, what is above is ``~/.aisquare`` and the home. A directory with the sticky bit,
+    as ``/tmp`` has, lets no one else rename what is in it."""
+    if installed:
+        root = remote_server.install_page(built)
+    else:
+        root = tmp_path / "outer" / "inner" / "dist"
+        shutil.copytree(built, root)
+    above = root.parents[up - 1]
+    shared = group == "shared"
+    monkeypatch.setattr(
+        remote_server, "_remote_private_group", lambda: None if shared else above.stat().st_gid
+    )
+    above.chmod(mode)
+    try:
+        problem = remote_server._page_missing(None if installed else root)
+    finally:
+        above.chmod(0o700)
+
+    if served:
+        assert problem is None
+    else:
+        assert problem is not None
+        assert problem.startswith(f"{above} can be changed by another account"), problem
+        assert f"in place of {root} " in problem and f"chmod go-w {above} " in problem
+
+
 def test_install_page_leaves_behind_what_a_server_would_not_serve(
     isolated_home: Path, built: Path, tmp_path: Path
 ) -> None:

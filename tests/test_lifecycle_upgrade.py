@@ -1898,6 +1898,7 @@ def test_only_uvs_own_cache_makes_a_uvx_run(
     for name in ("UV_CACHE_DIR", "XDG_CACHE_HOME"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
     monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData" / "Local"))
     prefix = home / "Code" / "archive-v1" / ".venv"
     if where == "UV_CACHE_DIR":
@@ -1916,6 +1917,27 @@ def test_only_uvs_own_cache_makes_a_uvx_run(
     in_uvs_cache = where != "an archived checkout"
     assert route.kind == (install_route.UVX if in_uvs_cache else install_route.VENV), route
     assert install_route.runs_from_uv_cache() is in_uvs_cache
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uv's Windows cache is under LOCALAPPDATA")
+@pytest.mark.parametrize("xdg", ["", "relative/cache", "absolute"])
+def test_uvs_cache_and_the_plugins_answers_follow_one_xdg_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, xdg: str
+) -> None:
+    """Round 27 of #257: ``${XDG_CACHE_HOME:-~/.cache}`` was written twice, for uv's cache
+    and for the plugin's answers, each finding the home its own way, and neither ignored a
+    relative ``XDG_CACHE_HOME`` as the XDG spec says (and uv does). One rule serves both,
+    and a redirected home moves both."""
+    home = tmp_path / "home"
+    monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
+    value = str(tmp_path / "xdg") if xdg == "absolute" else xdg
+    monkeypatch.setenv("XDG_CACHE_HOME", value)
+    cache = tmp_path / "xdg" if xdg == "absolute" else home / ".cache"
+
+    assert agent_core.xdg_cache_home() == cache
+    assert lifecycle.plugin_answers() == cache / "aisquare" / "plugin-tested-python"
+    assert install_route._uv_cache_roots() == [install_route._cache_key(str(cache / "uv"))]
 
 
 def test_a_move_back_plans_no_reconnect_and_asks_to_move_back(

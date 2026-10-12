@@ -236,8 +236,13 @@ _find() {
 _tested='>=3.11,<3.14'
 
 # Where the answers below are kept between events: one line each, `ranged` or `plain`,
-# when it was asked (seconds since 1970), then what it was asked under (_key).
-_answers=${XDG_CACHE_HOME:-$HOME/.cache}/aisquare
+# when it was asked (seconds since 1970), then what it was asked under (_key). Under
+# XDG_CACHE_HOME, unless it is relative, which the XDG spec says to ignore, as uv does
+# and `aisquare uninstall --purge` reads it (core.agents.xdg_cache_home).
+case ${XDG_CACHE_HOME:-} in
+    /*) _answers=$XDG_CACHE_HOME/aisquare ;;
+    *) _answers=$HOME/.cache/aisquare ;;
+esac
 _answer_file=$_answers/plugin-tested-python
 # Seconds a `plain` answer stands. It may be a moment's: no network, so no fetch.
 _plain_for=300

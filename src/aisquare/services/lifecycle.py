@@ -1893,13 +1893,12 @@ def plugin_answers(cache: str | None = None) -> Path:
 
     ``${XDG_CACHE_HOME:-~/.cache}/aisquare/plugin-tested-python``, as
     plugins/claude-code/scripts/aisquare-hook names it, ``cache`` standing for
-    ``XDG_CACHE_HOME`` (this shell's when ``None``): whether uv has a Python aisquare is
-    tested on, per uv and its settings. The one file aisquare writes outside the home,
-    so ``--purge`` would have left it, holding a uv path (round 20 of #257).
+    ``XDG_CACHE_HOME`` (this shell's when ``None``; :func:`agent_core.xdg_cache_home`):
+    whether uv has a Python aisquare is tested on, per uv and its settings. The one file
+    aisquare writes outside the home, so ``--purge`` would have left it, holding a uv
+    path (round 20 of #257).
     """
-    if cache is None:
-        cache = os.environ.get("XDG_CACHE_HOME", "")
-    return Path(cache or str(agent_core.home() / ".cache")) / "aisquare" / "plugin-tested-python"
+    return agent_core.xdg_cache_home(cache) / "aisquare" / "plugin-tested-python"
 
 
 def _plugin_answers_there() -> tuple[Path, ...]:

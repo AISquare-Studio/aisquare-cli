@@ -102,6 +102,22 @@ def home() -> Path:
     return _home()
 
 
+def xdg_cache_home(value: str | None = None) -> Path:
+    """Where a user's caches go: ``$XDG_CACHE_HOME``, else ``~/.cache`` under :func:`home`.
+
+    ``value`` stands for the variable, this process's when ``None``. One that is unset,
+    empty or relative is ignored, as the XDG spec says and uv does. The one rule for the
+    plugin's answers (``lifecycle.plugin_answers``), which the plugin's launcher keeps
+    too, and for uv's own cache (``install_route._uv_cache_roots``), so a test that
+    redirects the home moves both (round 27 of #257).
+    """
+    if value is None:
+        value = os.environ.get("XDG_CACHE_HOME", "")
+    if value and os.path.isabs(value):
+        return Path(value)
+    return home() / ".cache"
+
+
 def _claude_home(config_dir: Path | None = None) -> Path:
     """Claude Code's config directory.
 

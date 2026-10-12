@@ -68,6 +68,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 from urllib.parse import parse_qsl, unquote, urlparse, urlsplit, urlunsplit
 
+from aisquare.core import agents as agent_core
 from aisquare.core.version import DISTRIBUTION, __version__
 
 UV_TOOL = "uv-tool"
@@ -1037,18 +1038,14 @@ def _uv_cache_environment(prefix: Path) -> bool:
 def _uv_cache_roots() -> list[str]:
     """Where uv keeps its cache unless its command line or a uv.toml moves it, as
     :func:`_cache_key` compares them: ``UV_CACHE_DIR``, and the platform default
-    (``$XDG_CACHE_HOME/uv`` or ``~/.cache/uv``; ``%LOCALAPPDATA%\\uv\\cache`` on Windows)."""
+    (``uv`` under :func:`agent_core.xdg_cache_home`; ``%LOCALAPPDATA%\\uv\\cache`` on
+    Windows)."""
     named = [os.environ.get("UV_CACHE_DIR") or ""]
     if sys.platform == "win32":
         local = os.environ.get("LOCALAPPDATA")
         named.append(os.path.join(local, "uv", "cache") if local else "")
     else:
-        xdg = os.environ.get("XDG_CACHE_HOME")
-        named.append(
-            os.path.join(xdg, "uv")
-            if xdg
-            else os.path.join(os.path.expanduser("~"), ".cache", "uv")
-        )
+        named.append(str(agent_core.xdg_cache_home() / "uv"))
     return [key for root in named if root and (key := _cache_key(root))]
 
 

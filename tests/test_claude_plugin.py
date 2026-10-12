@@ -365,7 +365,12 @@ class Machine:
         )
 
     def run(
-        self, event: str, *, stdin: bytes = b"", env: Mapping[str, str] | None = None
+        self,
+        event: str,
+        *,
+        stdin: bytes = b"",
+        env: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         assert _SH is not None
         base = {
@@ -377,6 +382,7 @@ class Machine:
             [_SH, str(LAUNCHER), event],
             input=stdin,
             env={**base, **(env or {})},
+            cwd=cwd,
             capture_output=True,
             timeout=60,
             check=False,
@@ -1090,6 +1096,29 @@ def test_a_plain_answer_is_asked_again_once_five_minutes_have_passed(machine: Ma
     assert within == (False, 2), "read: asked at session start alone"
     assert after == (True, 4), "asked again, and uv may fetch one now"
     assert len(machine.calls("uv")) == 4 and _ranged(machine.ran("uvx")), "ranged: kept"
+
+
+@posix_only
+@pytest.mark.parametrize("xdg", ["relative", "absolute"])
+def test_the_answers_are_kept_where_uninstall_looks_for_them(
+    machine: Machine, tmp_path: Path, xdg: str
+) -> None:
+    """Round 27 of #257: the launcher and ``uninstall --purge`` name the answers' folder by
+    one rule (``core.agents.xdg_cache_home``): under ``XDG_CACHE_HOME``, unless it is
+    relative, which the XDG spec says to ignore. Followed, a relative one put them under
+    whatever folder the session started in, where no purge could find them."""
+    machine.fake("uvx")
+    machine.fake_uv(installed=True)
+    started_in = tmp_path / "repo"
+    started_in.mkdir()
+    absolute = tmp_path / "xdg"
+    value = "cache" if xdg == "relative" else str(absolute)
+
+    machine.run("session-start", env={"XDG_CACHE_HOME": value}, cwd=started_in)
+
+    kept = (absolute if xdg == "absolute" else machine.home / ".cache") / "aisquare"
+    assert (kept / "plugin-tested-python").is_file()
+    assert list(started_in.iterdir()) == [], "nothing under the session's folder"
 
 
 @posix_only

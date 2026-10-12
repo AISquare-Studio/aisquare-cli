@@ -58,6 +58,6 @@ A plugin installed at project or local scope is the exception: it runs only in i
 
 ## Removing it
 
-Run `/plugin uninstall aisquare@aisquare-cli`, and `/plugin marketplace remove aisquare-cli` if you no longer want the marketplace. Your memory stays in `~/.aisquare`, and the plugin's answers about uv stay in `~/.cache/aisquare` (delete that folder if you want them gone; `aisquare uninstall --purge` deletes them with the home). A project or local install is removed from inside its repository, with its scope: `claude plugin uninstall aisquare@aisquare-cli --scope project` (or `--scope local`).
+Run `/plugin uninstall aisquare@aisquare-cli`, and `/plugin marketplace remove aisquare-cli` if you no longer want the marketplace. Your memory stays in `~/.aisquare`, and the plugin's answers about uv stay in `~/.cache/aisquare` (delete that folder if you want them gone; `aisquare uninstall --purge` deletes them, with the home where it is still there). A project or local install is removed from inside its repository, with its scope: `claude plugin uninstall aisquare@aisquare-cli --scope project` (or `--scope local`).
 
 `aisquare uninstall` leaves the plugin to you, because the plugin is Claude Code's: it names the command that removes each install, at every scope, and `--purge` waits until they are gone, since the plugin would run aisquare again and make `~/.aisquare` anew.

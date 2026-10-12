@@ -493,7 +493,7 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
             "action": "delete" if plan.purges else "keep",
         },
         "plugin_answers": [
-            {"path": str(answers), "action": "delete" if plan.purges else "keep"}
+            {"path": str(answers), "action": "delete" if plan.deletes_answers else "keep"}
             for answers in plan.plugin_answers
         ],
         "purge_refusal": plan.purge_refusal,
@@ -571,6 +571,7 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
             # sign-in tokens in the Keychain, which nothing here touches (review of #253).
             _say("    their sign-in tokens stay in the macOS Keychain: sign out in each slot")
             _say("    (/logout in Claude Code) first to remove them")
+    if plan.deletes_answers:
         for answers in plan.plugin_answers:
             _say(f"  DELETE {_plugin_answers_line(answers)}")
     if plan.blocked:
@@ -582,12 +583,14 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
         _say(f"  then tell you to remove the package yourself: {plan.package_command}")
         _say(f"    (aisquare does not run it: {plan.package_reason})")
     _say("and keep:")
+    # Offered only where --purge could delete it, never for a home the guard refuses.
+    offer = not plan.purge and plan.purge_refusal is None
     if plan.home_exists and not plan.purges:
-        # Offered only where --purge could delete it, never for a home the guard refuses.
-        offer = not plan.purge and plan.purge_refusal is None
         _say(f"  {_home_line(plan)}{' (delete it too with --purge)' if offer else ''}")
+    if not plan.deletes_answers:
+        with_it = " (and this with it)" if plan.home_exists else " (delete it with --purge)"
         for answers in plan.plugin_answers:
-            _say(f"  {_plugin_answers_line(answers)}{' (and this with it)' if offer else ''}")
+            _say(f"  {_plugin_answers_line(answers)}{with_it if offer else ''}")
     lasting_mcp = plan.lasting_mcp
     if lasting_mcp:
         _say("  MCP servers that run aisquare (Claude Code owns .claude.json; remove each with")
@@ -633,7 +636,7 @@ def _emit_uninstall_report(report: lifecycle_service.UninstallReport) -> None:
                 "plugin_answers": [
                     {
                         "path": str(answers),
-                        "deleted": report.purged and answers not in answers_errors,
+                        "deleted": report.answers_deleted and answers not in answers_errors,
                         "error": answers_errors.get(answers),
                     }
                     for answers in plan.plugin_answers
@@ -661,15 +664,15 @@ def _emit_uninstall_report(report: lifecycle_service.UninstallReport) -> None:
             _say(f"✗ hooks in {hook.config_dir} were not removed: {hook.error}")
     if report.purged:
         _say(f"✓ deleted {plan.home}")
-        for answers in plan.plugin_answers:
-            if answers in answers_errors:
-                _say(f"⚠ {answers} was not deleted: {answers_errors[answers]}")
-            else:
-                _say(f"✓ deleted {answers}")
     elif report.purge_error is not None:
         _say(f"✗ {plan.home} was not deleted: {report.purge_error}")
     elif plan.home_exists:
         _say(f"· kept {plan.home} — delete it by hand if you do not want it")
+    for answers in plan.plugin_answers if report.answers_deleted else ():
+        if answers in answers_errors:
+            _say(f"⚠ {answers} was not deleted: {answers_errors[answers]}")
+        else:
+            _say(f"✓ deleted {answers}")
     if report.record_error is not None:
         _say(
             f"⚠ agents.json still lists connections: it could not be updated "
@@ -703,6 +706,7 @@ def _uninstall_question(plan: lifecycle_service.UninstallPlan) -> str | None:
         steps.append(f"remove aisquare's hooks from {count} director{'ies' if count != 1 else 'y'}")
     if plan.purges:
         steps.append(f"DELETE {plan.home}")
+    if plan.deletes_answers:
         steps.extend(f"DELETE {answers}" for answers in plan.plugin_answers)
     if plan.package_reason is None and not plan.blocked:
         steps.append("remove the package")

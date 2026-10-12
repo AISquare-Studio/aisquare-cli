@@ -1235,6 +1235,41 @@ def test_the_plugins_answers_about_uv_are_named_beside_the_home_and_deleted_with
     assert cache.is_dir(), "the cache itself is the user's"
 
 
+def test_a_purge_deletes_the_plugins_answers_when_the_home_is_already_gone(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+) -> None:
+    """Round 27 of #257: the answers went only once the home was deleted, so with
+    ``~/.aisquare`` already deleted by hand, ``--purge`` neither planned nor deleted them,
+    though they hold uv's paths and the session's PATH and ``--purge`` says it deletes them.
+    They follow ``--purge``, not the home; a plain uninstall still keeps them."""
+    answers = isolated_agent_home / ".cache" / "aisquare" / "plugin-tested-python"
+    answers.parent.mkdir(parents=True)
+    answers.write_text("ranged 1760000000 /home/u/.local/bin/uv >=3.11,<3.14\n", "utf-8")
+    (answers.parent / "plugin-tested-python.4242").write_text("plain 1760000000 uv\n", "utf-8")
+    assert not paths.aisquare_home().exists(), "no home: never made, or deleted by hand"
+
+    kept = runner.invoke(app, ["uninstall", "--dry-run"]).stdout
+    plain = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+    planned = runner.invoke(app, ["uninstall", "--dry-run", "--purge"]).stdout
+    as_json = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
+    result = runner.invoke(app, ["uninstall", "--yes", "--purge"])
+
+    assert f"{answers} — the Claude Code plugin's answers about uv's Pythons (delete it" in kept
+    assert plain["plugin_answers"] == [{"path": str(answers), "action": "keep"}]
+    assert f"DELETE {answers} — the Claude Code plugin's answers" in planned, planned
+    assert as_json["plugin_answers"] == [{"path": str(answers), "action": "delete"}]
+    assert result.exit_code == 0, result.output
+    assert f"✓ deleted {answers}" in result.stdout, result.stdout
+    assert not answers.parent.exists(), "the file, what a launcher cut short left, the folder"
+    assert not paths.aisquare_home().exists(), "and no home was made"
+
+
 def test_the_folder_the_plugins_answers_are_in_stays_while_it_holds_anything_else(
     tool: Tool,
     world: World,

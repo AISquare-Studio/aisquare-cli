@@ -1090,7 +1090,7 @@ class UninstallPlan:
     """The files the plugin's launcher keeps uv's answers in (:func:`plugin_answers`), each
     where it or what a launcher cut short left beside it is there
     (:func:`_plugin_answers_there`): outside the home, so named beside it, and deleted
-    with it."""
+    with --purge (:attr:`deletes_answers`)."""
 
     @property
     def package_command(self) -> str:
@@ -1123,6 +1123,15 @@ class UninstallPlan:
             and self.purge_refusal is None
             and all(self.in_home(site.config_dir) for site in self.unreadable)
         )
+
+    @property
+    def deletes_answers(self) -> bool:
+        """Whether this run deletes the plugin's answers (:attr:`plugin_answers`): with --purge
+        on a home the guard lets it delete, unless a site whose hooks cannot be taken out keeps
+        the package (:attr:`blocked`). Not tied to deleting the home: they are outside it, so
+        a home already gone is no reason to keep them, and they hold uv's paths and the
+        session's PATH (round 27 of #257)."""
+        return self.purge and self.purge_refusal is None and not self.blocked
 
     def in_home(self, path: Path) -> bool:
         """Whether ``path`` is inside the home, so a purge deletes it with everything in it."""
@@ -1257,9 +1266,12 @@ class UninstallReport:
     """Why agents.json could not be updated, when it could not."""
     purged: bool = False
     purge_error: str | None = None
+    answers_deleted: bool = False
+    """Whether the plan's answers files were deleted (:attr:`UninstallPlan.deletes_answers`),
+    each but those in :attr:`plugin_answers_errors`."""
     plugin_answers_errors: tuple[tuple[Path, str], ...] = ()
-    """Each answers file of the plan's that was not deleted with the home, and why. A
-    cache: said, and it fails nothing."""
+    """Each answers file of the plan's that could not be deleted, and why. A cache: said,
+    and it fails nothing."""
     notes: tuple[str, ...] = ()
 
     @property
@@ -1999,16 +2011,18 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
     removals.extend(HookRemoval(site.config_dir, False, site.reason) for site in blocking)
     purged, purge_error = False, None
     hooks_failed = any(not removal.ok for removal in removals)
-    answers_errors: list[tuple[Path, str]] = []
     if plan.purges and not hooks_failed:
         purged, purge_error = _purge(plan.home)
-        if purged:
-            for answers in plan.plugin_answers:
-                error = _delete_plugin_answers(answers)
-                if error is not None:
-                    answers_errors.append((answers, error))
     elif plan.purge and plan.home_exists and hooks_failed:
         purge_error = "not attempted: hooks were left in a directory above"
+    # Outside the home, so asked of --purge, not of the home's delete: a home already gone
+    # left them otherwise (round 27 of #257).
+    answers_deleted = plan.deletes_answers and not hooks_failed
+    answers_errors: list[tuple[Path, str]] = []
+    for answers in plan.plugin_answers if answers_deleted else ():
+        error = _delete_plugin_answers(answers)
+        if error is not None:
+            answers_errors.append((answers, error))
     if not purged:
         # The purge that would have taken them did not happen: they are still there.
         removals.extend(
@@ -2033,6 +2047,7 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
         record_error=record_error,
         purged=purged,
         purge_error=purge_error,
+        answers_deleted=answers_deleted,
         plugin_answers_errors=tuple(answers_errors),
         notes=tuple(_uninstall_notes(plan, removals, purged=purged)),
     )

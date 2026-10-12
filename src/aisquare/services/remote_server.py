@@ -101,7 +101,14 @@ from aisquare.core.paths import (
     restrict_to_owner,
 )
 from aisquare.core.version import __version__
-from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TurnMetric
+from aisquare.models import (
+    FleetAgent,
+    FleetAgentStatus,
+    ProjectInfo,
+    TeamSession,
+    TeamTask,
+    TurnMetric,
+)
 
 if TYPE_CHECKING:
     import asyncio
@@ -571,6 +578,72 @@ def _remote_reachable(projects: list[ProjectInfo]) -> list[ProjectInfo]:
 
     current = fleet_service.resolve_project(None).id
     return [p for p in projects if p.onboarded_at is not None or p.id == current]
+
+
+def _remote_reachable_projects() -> list[ProjectInfo]:
+    """Every project a phone may reach (:func:`_remote_reachable`): those ``api/projects``
+    lists, and the current one."""
+    from aisquare.core.store import store_session
+    from aisquare.services import fleet as fleet_service
+
+    with store_session() as store:
+        listed = store.list_projects()
+    current = fleet_service.resolve_project(None)
+    return listed if any(p.id == current.id for p in listed) else [*listed, current]
+
+
+BoardProjects = dict[tuple[Path, str], ProjectInfo]
+"""The board project of each project root under each ``AISQUARE_TEAM_HUB``, resolved once."""
+
+
+def _remote_board_project(root: Path, boards: BoardProjects) -> ProjectInfo:
+    """The board of the project at ``root``, as ``asq board`` run there resolves it,
+    ``AISQUARE_TEAM_HUB`` and worktrees included, kept in ``boards``: ``team_project`` runs
+    ``git``, and neither the hub nor where a checkout's repository lives changes under a
+    running server (:func:`remote_board_payload`)."""
+    from aisquare.core import orchestrator
+    from aisquare.services import team as team_service
+
+    key = (root, os.environ.get(orchestrator.TEAM_HUB_ENV_VAR, ""))
+    board = boards.get(key)
+    if board is None:
+        board = boards[key] = team_service.resolve_project(root)
+    return board
+
+
+def _remote_boards(boards: BoardProjects | None = None) -> set[str]:
+    """The boards a phone may reach: each reachable project's (:func:`_remote_board_project`),
+    which its Board and Tasks tabs read, and the project's own id. A task's or a session's
+    ``project_id`` is the board it is on, which is a project's own unless a hub or a
+    worktree makes it another's. A root that cannot be looked at adds its own id alone."""
+    known: BoardProjects = {} if boards is None else boards
+    reach: set[str] = set()
+    for project in _remote_reachable_projects():
+        reach.add(project.id)
+        with contextlib.suppress(OSError):
+            reach.add(_remote_board_project(project.root, known).id)
+    return reach
+
+
+def _remote_task(ref: str, boards: BoardProjects | None = None) -> TeamTask:
+    """The task a phone's ``ref``, an id, an id prefix or an id tail, names among those on a
+    board it may reach (:func:`_remote_boards`): ``KeyError(ref)`` for none, as the board's
+    services raise it, and ``AmbiguousIdError`` for several there
+    (:func:`_remote_board_refusals`).
+
+    The services read a ref across every board, captured directories' included: a claim or
+    a close of a captured project's task answered with its title and detail, and the
+    answers to ``tsk_0``, ``tsk_00`` and on, a 200, a 404 or an ``ambiguous_id``, told
+    which ids were there (review of #243, round 10, 5/7). The service is then given the
+    task's id."""
+    from aisquare.core.store import store_session
+
+    reach = _remote_boards(boards)
+    with store_session() as store:
+        task = store.get_task(ref, project_ids=reach)
+    if task is None:
+        raise KeyError(ref)
+    return task
 
 
 @contextlib.contextmanager
@@ -2611,10 +2684,6 @@ BOARD_EVENTS = 200
 Board tab draws. ``asq board --json`` prints five, a glance in a terminal."""
 
 
-BoardProjects = dict[tuple[Path, str], ProjectInfo]
-"""The board project of each project root under each ``AISQUARE_TEAM_HUB``, resolved once."""
-
-
 def remote_board_payload(
     project: str | None = None, *, boards: BoardProjects | None = None
 ) -> dict[str, object]:
@@ -2651,16 +2720,10 @@ def remote_board_payload(
     #240 fold: pass ``exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS`` here (one line).
     """
     from aisquare.cli.team import board_json
-    from aisquare.core import orchestrator
     from aisquare.services import team as team_service
 
     cwd = _resolve_project(project).root
-    board: ProjectInfo | None = None
-    if boards is not None:
-        key = (cwd, os.environ.get(orchestrator.TEAM_HUB_ENV_VAR, ""))
-        board = boards.get(key)
-        if board is None:
-            board = boards[key] = team_service.resolve_project(cwd)
+    board = None if boards is None else _remote_board_project(cwd, boards)
     return board_json(
         *team_service.board_data(cwd, events=BOARD_EVENTS, project=board, glance=boards is not None)
     )
@@ -3076,19 +3139,26 @@ def _remote_board_refusals(*refs: tuple[str, str | None, str]) -> Iterator[None]
 def _remote_ref_unknown(ref: str, named: list[tuple[str, str]]) -> tuple[str, str]:
     """Which of ``named``, the ``(field, kind)`` of every field that sent ``ref``, names
     nothing: the one field, or when two sent the same ref (``as`` and ``task``), the
-    first one the store has nothing for. The services raise ``KeyError(ref)`` for each."""
+    first one the store has nothing for on a board a phone may reach
+    (:func:`_remote_boards`). The services raise ``KeyError(ref)`` for each."""
     if len(named) > 1:
         from aisquare.core.store import store_session
 
-        with contextlib.suppress(Exception), store_session() as store:
-            for field, kind in named:
-                found = store.get_session(ref) if kind == "session" else store.get_task(ref)
-                if found is None:
-                    return field, kind
+        with contextlib.suppress(Exception):
+            reach = _remote_boards()
+            with store_session() as store:
+                for field, kind in named:
+                    found = (
+                        store.get_session(ref, project_ids=reach)
+                        if kind == "session"
+                        else store.get_task(ref, project_ids=reach)
+                    )
+                    if found is None:
+                        return field, kind
     return named[0]
 
 
-def _remote_author(ref: str | None) -> str | None:
+def _remote_author(ref: str | None, boards: BoardProjects | None = None) -> str | None:
     """The id of the session a board write's ``as`` names, which the board's service is
     given in its place and the audit line records: what the server resolved, never what
     the body said. ``KeyError(ref)`` for one that names none, as the services raise it
@@ -3098,9 +3168,14 @@ def _remote_author(ref: str | None) -> str | None:
     ``ses_abc`` with 400 ``*`` after it named ``ses_abc123def``, and the note's line said
     ``as=ses_abc****…``, cut at 300 characters before its ``to=``, and never named the
     session the note was posted as; ``ses_a?b?c[`` read as a ref that named nothing
-    (sweep 5 of #243). Read by the board's own reading of ``as`` (``team._resolve_session``),
-    which the services then read again: one of its own here could come to name another
-    session than the one the note is posted as, or none.
+    (sweep 5 of #243). Read here once, and the services given the id it found: a reading of
+    their own could come to name another session than the one the note is posted as, or
+    none.
+
+    A session on a board a phone may reach (:func:`_remote_boards`): the services read
+    ``as`` across every board, and a note posted as a captured project's session went on
+    that project's board, the session's own board winning over ``project`` (review of #243,
+    round 10, 5/7).
 
     Read only once the board is on, as the services read it: with the orchestrator off, an
     ``as`` that named no session was 404 ``not_found``, or 400 ``ambiguous_id``, where
@@ -3114,9 +3189,12 @@ def _remote_author(ref: str | None) -> str | None:
         return None
     from aisquare.core.store import store_session
 
+    reach = _remote_boards(boards)
     with store_session() as store:
-        session = team_service._resolve_session(store, ref)
-    return None if session is None else session.id
+        session = store.get_session(ref, project_ids=reach)
+    if session is None:
+        raise KeyError(ref)
+    return session.id
 
 
 def live_writes() -> Writes:
@@ -3124,6 +3202,7 @@ def live_writes() -> Writes:
     from aisquare.services import remote_actions
 
     exit_keys = _ExitKeyGuard()
+    boards: BoardProjects = {}
 
     def task_claim(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         from aisquare.services import team as team_service
@@ -3131,8 +3210,8 @@ def live_writes() -> Writes:
         ref = _required(body, "ref", limit=BOARD_REF_MAX)
         author = _optional_ref(body, "as", limit=BOARD_REF_MAX)
         with _remote_board_refusals(("ref", ref, "task"), ("as", author, "session")):
-            session = _remote_author(author)
-            task = team_service.claim_task(ref, session_ref=session)
+            session = _remote_author(author, boards)
+            task = team_service.claim_task(_remote_task(ref, boards).id, session_ref=session)
         return {"task": task.model_dump(mode="json")}, f"claimed {task.id} as={session or '-'}"
 
     def task_done(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -3145,8 +3224,9 @@ def live_writes() -> Writes:
         if note is not None:
             check_note_text(note, "note")
         with _remote_board_refusals(("ref", ref, "task"), ("as", author, "session")):
-            session = _remote_author(author)
-            task = team_service.finish_task(ref, note=note, session_ref=session)
+            session = _remote_author(author, boards)
+            found = _remote_task(ref, boards)
+            task = team_service.finish_task(found.id, note=note, session_ref=session)
         return {"task": task.model_dump(mode="json")}, f"done {task.id} as={session or '-'}"
 
     def write_note(body: dict[str, Any]) -> tuple[dict[str, object], str]:
@@ -3189,14 +3269,15 @@ def live_writes() -> Writes:
         task = _optional_ref(body, "task", limit=BOARD_REF_MAX)
         try:
             with _remote_board_refusals(("as", author, "session"), ("task", task, "task")):
-                session = _remote_author(author)
+                session = _remote_author(author, boards)
+                cwd = _resolve_project(project).root
                 event = team_service.add_note(
                     text,
                     session_ref=session,
-                    task_ref=task,
+                    task_ref=None if task is None else _remote_task(task, boards).id,
                     to_role=to,
                     kind=kind,
-                    cwd=_resolve_project(project).root,
+                    cwd=cwd,
                 )
         except ValueError as exc:  # a task of another project's board, as ``asq note`` says
             if task is None or type(exc) is not ValueError:

@@ -271,27 +271,30 @@ def test_a_board_writes_audit_line_names_the_session_it_resolved_not_the_ref_it_
     )
 
 
-def test_a_board_writes_as_is_read_as_the_board_reads_it(
+def test_a_board_writes_as_is_read_once_and_the_board_is_given_what_it_named(
     phone: TestClient, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The session ``as`` names is resolved once for the audit line and again by the board's
-    service: read by a copy of the board's reading, the two could come to name different
-    sessions, or the copy none, and a note the board would take was refused or audited as
-    another session. Whatever the board reads ``as`` to name, the line names."""
+    """The session ``as`` names is resolved once, for the audit line and among the boards a
+    phone may reach, and the board's service is given its id: read again by the service,
+    the ref could come to name another session than the line's, or none. Whatever ``as``
+    named, the note is posted as, and the line names."""
     from aisquare.services import team as team_service
 
     (alpha,) = (p for p in project_service.list_projects() if p.root.name == "alpha")
     _session(alpha, "ses_abc123def")
+    given: list[str | None] = []
     resolve = team_service._resolve_session
 
-    def read_a_role_too(store: Any, ref: str | None) -> TeamSession | None:
-        return resolve(store, "ses_abc123def" if ref == "manager" else ref)
+    def recorded(store: Any, ref: str | None) -> TeamSession | None:
+        given.append(ref)
+        return resolve(store, ref)
 
-    monkeypatch.setattr(team_service, "_resolve_session", read_a_role_too)
+    monkeypatch.setattr(team_service, "_resolve_session", recorded)
 
-    posted = phone.post(f"{base(runtime)}/api/note", json={"text": "hi", "as": "manager"})
+    posted = phone.post(f"{base(runtime)}/api/note", json={"text": "hi", "as": "ses_abc"})
 
     assert posted.status_code == 200, posted.text
+    assert given == ["ses_abc123def"], "the board reads the id, not the ref as sent"
     assert posted.json()["event"]["payload"]["session_id"] == "ses_abc123def"
     line = remote_audit_path().read_text(encoding="utf-8").splitlines()[-1]
     assert line.endswith(" as=ses_abc123def to=-"), line

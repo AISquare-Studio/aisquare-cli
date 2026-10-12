@@ -34,6 +34,7 @@ from aisquare.services.remote_server import (
     DoctorVerdict,
     NoSuchAgent,
     NoSuchProject,
+    RequestError,
     Runtime,
     Sources,
     build_app,
@@ -607,6 +608,109 @@ def test_claiming_another_projects_task_needs_no_project(
     assert isinstance(claimed, dict) and claimed["project_id"] == other.id
     assert summary == f"claimed {task.id} as=-"
     assert "another project's task" in _event_texts(remote_board_payload(other.id))
+
+
+@pytest.fixture
+def captured(two_projects: tuple[ProjectInfo, ProjectInfo], tmp_path: Path) -> ProjectInfo:
+    """A directory the hooks captured (#139), with a board of its own: never added, never
+    listed, and so no phone's to reach."""
+    root = tmp_path / "secret-captured"
+    root.mkdir()
+    project = ProjectInfo(id=project_id_for(find_project_root(root)), root=root, linked_repos=[])
+    with store_session() as store:
+        store.ensure_project(project)
+    return project
+
+
+def _refused(route: str, body: dict[str, object]) -> RequestError:
+    with pytest.raises(RequestError) as refused:
+        live_writes().handlers[route](body)
+    return refused.value
+
+
+def test_a_phone_claims_or_closes_no_task_on_a_captured_board(captured: ProjectInfo) -> None:
+    """``task/claim`` and ``task/done`` read their ref across every board: a captured
+    project's task was claimed or closed, its title and detail in the answer, and the
+    answers to ``tsk_0``, ``tsk_00`` and on told which ids were there (review of #243,
+    round 10, 5/7). Its id, an id prefix and its tail are each a ref that names nothing."""
+    task, _added = team_service.add_task(
+        "the captured task", detail="its secret detail", cwd=captured.root
+    )
+    assert task.project_id == captured.id
+    for route in ("task/claim", "task/done"):
+        for ref in (task.id, task.id[:12], task.id[-8:]):
+            refused = _refused(route, {"ref": ref})
+            assert (refused.status, refused.error) == (404, "not_found"), (route, ref)
+            assert refused.message == f"no task matches {ref!r} (the 'ref' field)"
+    with store_session() as store:
+        kept = store.get_task(task.id)
+        events = store.recent_events(captured.id, limit=10)
+    assert kept is not None and (kept.status, kept.claimed_by) == ("todo", None)
+    assert [event.kind for event in events] == ["task_added"]
+
+
+def test_a_task_ref_is_ambiguous_only_among_the_boards_a_phone_may_reach(
+    two_projects: tuple[ProjectInfo, ProjectInfo], captured: ProjectInfo
+) -> None:
+    """A prefix shared with a captured board's task was ``ambiguous_id``, which told the
+    phone that board had a task by it; it names the one task a phone may reach."""
+    from aisquare.models import TeamTask
+
+    _current, other = two_projects
+    now = datetime.now(UTC)
+    with store_session() as store:
+        for task_id, project in (("tsk_shared_a", other), ("tsk_shared_b", captured)):
+            store.upsert_task(
+                TeamTask(
+                    id=task_id, project_id=project.id, key=task_id, title=task_id,
+                    created_at=now, updated_at=now,
+                )
+            )  # fmt: skip
+    _result, summary = live_writes().handlers["task/claim"]({"ref": "tsk_shared"})
+    assert summary == "claimed tsk_shared_a as=-"
+
+
+def test_a_note_names_no_session_or_task_of_a_captured_board(captured: ProjectInfo) -> None:
+    """A note's ``as`` read every board's sessions, and the session's own board won over
+    ``project``: a note posted as a captured project's session went on that project's
+    board. Its ``task`` told a captured board's task apart from none: 400 for "another
+    project's board", 404 for no task (review of #243, round 10, 5/7)."""
+    task, _added = team_service.add_task("the captured task", cwd=captured.root)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id="ses_secret123", project_id=captured.id, role="coder",
+                started_at=T0, last_seen_at=T0,
+            )
+        )  # fmt: skip
+    for ref in ("ses_secret123", "ses_secret"):
+        refused = _refused("note", {"text": "hi", "as": ref})
+        assert (refused.status, refused.error) == (404, "not_found")
+        assert refused.message == f"no session matches {ref!r} (the 'as' field)"
+    for ref in (task.id, task.id[-8:]):
+        refused = _refused("note", {"text": "hi", "task": ref})
+        assert (refused.status, refused.error) == (404, "not_found")
+        assert refused.message == f"no task matches {ref!r} (the 'task' field)"
+    with store_session() as store:
+        events = store.recent_events(captured.id, limit=10)
+    assert [event.kind for event in events] == ["task_added"], "nothing posted there"
+
+
+def test_a_hubs_board_is_reached_through_every_project_on_it(
+    two_projects: tuple[ProjectInfo, ProjectInfo],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under ``AISQUARE_TEAM_HUB`` every project's board is the hub's, a directory nobody
+    added: its tasks and sessions are a phone's to reach, as its Board tab reads them."""
+    _current, other = two_projects
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    task, _added = team_service.add_task("the hub's task", cwd=other.root)
+    assert task.project_id not in {p.id for p in two_projects}
+    _result, summary = live_writes().handlers["task/claim"]({"ref": task.id[-8:]})
+    assert summary == f"claimed {task.id} as=-"
 
 
 # --- the socket: project panes, subscribe_board, caps ---------------------------------------

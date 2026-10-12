@@ -23,7 +23,7 @@ from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 import pytest
 from starlette.testclient import TestClient, WebSocketDenialResponse
@@ -2006,6 +2006,12 @@ def test_audit_fields_are_capped(runtime: Runtime) -> None:
     assert _audit_clean("short", 10) == "short"
 
 
+class FakeTask(NamedTuple):
+    """A task the remote found, as far as the faked board reads it: its id."""
+
+    id: str
+
+
 class FakeTeam:
     """``team_service``'s writes as the handlers call them, recorded."""
 
@@ -2033,7 +2039,9 @@ def team(monkeypatch: pytest.MonkeyPatch) -> FakeTeam:
     fake = FakeTeam()
     for name in ("add_note", "claim_task", "finish_task"):
         monkeypatch.setattr(team_service, name, getattr(fake, name))
-    monkeypatch.setattr(remote_server, "_remote_author", lambda ref: ref)  # every ref a session
+    # Every ref a session, and every task ref a task: the fake holds no board to look in.
+    monkeypatch.setattr(remote_server, "_remote_author", lambda ref, boards=None: ref)
+    monkeypatch.setattr(remote_server, "_remote_task", lambda ref, boards=None: FakeTask(ref))
     return fake
 
 

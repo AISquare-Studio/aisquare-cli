@@ -28,7 +28,7 @@ import sqlite3
 import sys
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1011,7 +1011,9 @@ class ContextStore(Protocol):
     ) -> list[PromptRecord]: ...
     def team_active(self, project_id: str) -> bool: ...
     def upsert_session(self, session: TeamSession) -> TeamSession: ...
-    def get_session(self, session_id: str) -> TeamSession | None: ...
+    def get_session(
+        self, session_id: str, *, project_ids: Collection[str] | None = None
+    ) -> TeamSession | None: ...
     def team_sessions(self, project_id: str) -> list[TeamSession]: ...
     def team_sessions_seen_since(
         self, project_id: str, since: datetime | None, *, ids: Sequence[str] = ()
@@ -1035,7 +1037,9 @@ class ContextStore(Protocol):
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
     def release_claims(self, session_id: str) -> list[TeamTask]: ...
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]: ...
-    def get_task(self, ref: str) -> TeamTask | None: ...
+    def get_task(
+        self, ref: str, *, project_ids: Collection[str] | None = None
+    ) -> TeamTask | None: ...
     def team_tasks(
         self, project_id: str, *, status: TaskStatus | None = None
     ) -> list[TeamTask]: ...
@@ -1999,15 +2003,21 @@ class SqliteStore:
         assert stored is not None  # just upserted
         return stored
 
-    def get_session(self, session_id: str) -> TeamSession | None:
+    def get_session(
+        self, session_id: str, *, project_ids: Collection[str] | None = None
+    ) -> TeamSession | None:
+        """The session ``session_id`` names, an id or an id prefix; with ``project_ids``, among
+        the sessions of those boards only, ambiguity included (:func:`_on_boards`)."""
+        scope, boards = _on_boards(project_ids)
         row = self._conn.execute(
-            f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id = ?", (session_id,)
+            f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id = ?{scope}",
+            (session_id, *boards),
         ).fetchone()
         if row is not None:
             return _row_to_session(row)
         matches = self._conn.execute(
-            f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id GLOB ? LIMIT 2",
-            (_glob_prefix(session_id),),
+            f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id GLOB ?{scope} LIMIT 2",
+            (_glob_prefix(session_id), *boards),
         ).fetchall()
         if len(matches) > 1:
             raise AmbiguousIdError(session_id)
@@ -2325,15 +2335,18 @@ class SqliteStore:
         assert row is not None  # inserted or already present
         return _row_to_task(row), created
 
-    def get_task(self, ref: str) -> TeamTask | None:
+    def get_task(self, ref: str, *, project_ids: Collection[str] | None = None) -> TeamTask | None:
+        """The task ``ref`` names, an id, an id prefix or an id tail; with ``project_ids``,
+        among the tasks of those boards only, ambiguity included (:func:`_on_boards`)."""
+        scope, boards = _on_boards(project_ids)
         row = self._conn.execute(
-            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id = ?", (ref,)
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id = ?{scope}", (ref, *boards)
         ).fetchone()
         if row is not None:
             return _row_to_task(row)
         matches = self._conn.execute(
-            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ? LIMIT 2",
-            (_glob_prefix(ref),),
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ?{scope} LIMIT 2",
+            (_glob_prefix(ref), *boards),
         ).fetchall()
         if len(matches) > 1:
             raise AmbiguousIdError(ref)
@@ -2344,8 +2357,8 @@ class SqliteStore:
         # Boards display the id *tail* (the unique random part), so tails
         # must resolve too: fall back to a suffix match.
         matches = self._conn.execute(
-            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ? LIMIT 2",
-            (f"*{_glob_escape(ref)}",),
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ?{scope} LIMIT 2",
+            (f"*{_glob_escape(ref)}", *boards),
         ).fetchall()
         if len(matches) > 1:
             raise AmbiguousIdError(ref)
@@ -3806,6 +3819,17 @@ class SqliteStore:
 
     def close(self) -> None:
         self._conn.close()
+
+
+def _on_boards(project_ids: Collection[str] | None) -> tuple[str, tuple[str, ...]]:
+    """The clause that keeps a lookup to the rows of ``project_ids``, and its values; none for
+    ``None``. A lookup kept to them is ambiguous only among them: the remote's, whose phone
+    may reach only some boards, was told by an ``ambiguous_id`` which prefixes another
+    board's tasks and sessions had (review of #243, round 10, 5/7)."""
+    if project_ids is None:
+        return "", ()
+    boards = tuple(project_ids)
+    return f" AND project_id IN ({', '.join('?' * len(boards))})", boards
 
 
 _GLOB_METACHARACTERS = str.maketrans("", "", "*?[")

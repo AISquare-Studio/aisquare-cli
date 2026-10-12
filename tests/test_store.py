@@ -264,6 +264,43 @@ def test_a_ref_with_nothing_left_once_its_glob_characters_go_names_nothing(
     assert [p.id for p in store.find_projects("prj_c*")] == ["prj_captured"]
 
 
+def test_a_task_or_session_lookup_kept_to_some_boards_finds_and_doubts_only_there(
+    store: ContextStore,
+) -> None:
+    """``project_ids`` keeps a lookup to those boards' rows, by id, prefix and tail alike,
+    and a prefix is ambiguous only among them: the remote's phone may reach only some boards
+    (review of #243, round 10, 5/7)."""
+    from aisquare.models import TeamSession, TeamTask
+
+    now = datetime.now(tz=UTC)
+    for task_id, board in (("tsk_shared_a1", PROJECT.id), ("tsk_shared_b2", "prj_captured")):
+        store.upsert_task(
+            TeamTask(
+                id=task_id, project_id=board, key=task_id, title=task_id,
+                created_at=now, updated_at=now,
+            )
+        )  # fmt: skip
+        store.upsert_session(
+            TeamSession(
+                id=task_id.replace("tsk", "ses"), project_id=board, role="coder",
+                started_at=now, last_seen_at=now,
+            )
+        )  # fmt: skip
+    mine = [PROJECT.id]
+    with pytest.raises(AmbiguousIdError):
+        store.get_task("tsk_shared")
+    task = store.get_task("tsk_shared", project_ids=mine)
+    assert task is not None and task.id == "tsk_shared_a1"
+    assert store.get_task("tsk_shared_b2", project_ids=mine) is None
+    assert store.get_task("b2", project_ids=mine) is None, "nor by its tail"
+    assert store.get_task("tsk_shared_b2", project_ids=[]) is None
+    with pytest.raises(AmbiguousIdError):
+        store.get_session("ses_shared")
+    session = store.get_session("ses_shared", project_ids=mine)
+    assert session is not None and session.id == "ses_shared_a1"
+    assert store.get_session("ses_shared_b2", project_ids=mine) is None
+
+
 def test_add_linked_repo_is_idempotent(store: ContextStore) -> None:
     updated = store.add_linked_repo(PROJECT.id, "git@github.com:acme/app.git")
     assert updated.linked_repos == ["git@github.com:acme/app.git"]

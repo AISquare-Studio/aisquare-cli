@@ -337,7 +337,11 @@ def _write_bodies(ref: str, agent_id: str) -> dict[str, list[dict[str, object]]]
     return {
         "task/claim": [{"ref": ref}, {"ref": "tsk_x", "as": ref}],
         "task/done": [{"ref": ref}, {"ref": "tsk_x", "as": ref}],
-        "note": [{"text": "hi", "project": ref}, {"text": "hi", "as": ref}],
+        "note": [
+            {"text": "hi", "project": ref},
+            {"text": "hi", "as": ref},
+            {"text": "hi", "task": ref},
+        ],
         "project/switch": [{"name": ref}],
         "project/add": [{"path": ref}],
         "project/remove": [{"ref": ref}],
@@ -363,14 +367,29 @@ def test_no_write_names_or_reaches_a_captured_directory(
     directory, and an id prefix told, stopped or switched its agents, or added and pinned it
     (review of #243, round 10, 1/7, 2/7 and 7/7). The walk names every write, so a new one
     is walked too."""
+    from aisquare.models import TeamSession
+    from aisquare.services import team as team_service
     from aisquare.services.remote_server import write_endpoint_names
 
     current, _other = two_projects
+    assert CliRunner().invoke(cli, ["team", "on"]).exit_code == 0
     _seed_agent(captured.id, "coder-1")
     agent_id = f"agt_{captured.id[-6:]}_coder-1"
+    task, _added = team_service.add_task("the captured task", cwd=captured.root)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id="ses_secret123", project_id=captured.id, role="coder",
+                started_at=T0, last_seen_at=T0,
+            )
+        )  # fmt: skip
     client = _client(runtime, live_sources(), tmp_path)
     runtime.set_allow_write(True)
-    for ref in ("*", captured.id[:12], captured.id, captured.root.name):
+    refs = (
+        *("*", captured.id[:12], captured.id, captured.root.name),
+        *(task.id, task.id[:12], task.id[-8:], "ses_secret123", "ses_secret"),
+    )
+    for ref in refs:
         bodies = _write_bodies(ref, agent_id)
         assert set(bodies) == set(write_endpoint_names())
         for name, sent in bodies.items():
@@ -387,11 +406,16 @@ def test_no_write_names_or_reaches_a_captured_directory(
     with store_session() as store:
         row = store.fleet_agent_by_label(captured.id, "coder-1", live_only=True)
     assert row is not None and row.id == agent_id, "its agent still runs"
+    with store_session() as store:
+        kept = store.get_task(task.id)
+        events = store.recent_events(captured.id, limit=10)
+    assert kept is not None and (kept.status, kept.claimed_by) == ("todo", None)
+    assert [event.kind for event in events] == ["task_added"], "nothing on its board"
 
 
-NAMES_NOTHING = {(404, "not_found"), (400, "invalid"), (409, "team_disabled")}
+NAMES_NOTHING = {(404, "not_found"), (400, "invalid")}
 """How a write refuses a ref that names nothing it may reach: 404, or 400 for a path
-``project/add`` will not take, or 409 for a board ref with the board off."""
+``project/add`` will not take."""
 
 
 # --- fleet ------------------------------------------------------------------------------

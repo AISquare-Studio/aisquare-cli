@@ -614,7 +614,9 @@ A `?project=`, a write's or an agent action's `"project"`, `switch`'s name and
 which you added, or the current one. A directory Claude Code only ran in, which
 the hooks captured and nobody added, is named by none of them, and `*` names
 nothing. A switch adds the project it names, so the current one, if you never
-added it, is switched to only where `add` would add it.
+added it, is switched to only where `add` would add it. A task's `ref`, a note's
+`task` and a board write's `as` name only a task or session on the board of a
+project the page is shown.
 
 The stream sends `{"type", "payload", "ts"}` frames, each kind when it changed:
 

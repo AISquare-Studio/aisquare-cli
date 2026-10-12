@@ -392,7 +392,7 @@ class ProjectView(TabbedContent):
         refreshes the report instead of stacking runs. Not while asq hands its
         terminal over (``handoff``).
         """
-        if handing_over(self):
+        if handing_over(self, self.run_project_doctor):
             return
         root = self.project.root
         self.run_worker(

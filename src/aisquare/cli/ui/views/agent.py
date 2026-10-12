@@ -165,7 +165,7 @@ class AgentView(Vertical):
         now = time.monotonic()
         if self._labels_asked_at is not None and now - self._labels_asked_at < LABELS_TTL:
             return
-        if handing_over(self):
+        if handing_over(self, self._refresh_labels):
             return
         self._labels_asked_at = now
         self.run_worker(

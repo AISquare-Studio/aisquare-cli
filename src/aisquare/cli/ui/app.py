@@ -45,6 +45,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.dom import DOMNode
 from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widget import Widget
@@ -481,6 +482,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._hand_off_overdue = False
         """The pending hand-over has waited ``_HAND_OFF_PATIENCE``: a second press calls it off."""
         self._hand_off_poll: Timer | None = None
+        self._owed: dict[Callable[[], object], DOMNode] = {}
+        """The starts that stood down while a hand-over waited, each with its node: run once
+        if the hand-over is called off (:meth:`owe`)."""
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
         self._accounts = accounts
@@ -663,9 +667,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """Re-read projects and agents; keep (and label) the last frame if the store is busy.
 
         Not once asq is handing the terminal over: the tick is what starts the reads
-        a hand-over waits out (``_exit_when_read``).
+        a hand-over waits out (``_exit_when_read``). Owed then (:meth:`owe`).
         """
         if self.hand_off is not None:
+            self.owe(self, self.refresh_data)
             return
         sidebar = self.sidebar
         try:
@@ -727,8 +732,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         numbers are the view's own, slower business
         (``AccountsView.refresh_usage``).
         """
-        if self._accounts is None or self.hand_off is not None:
-            return  # none to read, or asq is quitting once the reads running end
+        if self._accounts is None:
+            return
+        if self.hand_off is not None:
+            # asq quits once the reads running end. Owed as the tick, which reads them after
+            # the frame and is owed too: a call-off then reads them once, not twice.
+            self.owe(self, self.refresh_data)
+            return
         reading = self._accounts_worker
         if reading is not None and not reading.is_finished:
             self._accounts_owed = True
@@ -844,8 +854,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         ``_set_doctor_scope``, and a worker that has already left RUNNING is
         past cancelling.
         """
-        if self._doctor is None or self.hand_off is not None:
-            return  # none to run, or asq is quitting once the reads running end
+        if self._doctor is None:
+            return
+        if self.hand_off is not None:
+            self.owe(self, self.run_doctor)  # asq quits once the reads running end
+            return
         injected: DoctorRunner = self._doctor
         project = self._scoped_project()
         scope: Path | None = project.root if project is not None else None
@@ -1311,12 +1324,30 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._hand_off_poll = self.set_timer(_QUIT_POLL, self._exit_when_read)
 
     def _call_off_hand_off(self) -> None:
-        """Stay in asq: stop waiting, and let its reads start again on their schedule."""
+        """Stay in asq: stop waiting, and start what stood down meanwhile, once each.
+
+        Until round 23 a hand-over always ended in a quit, so a start that stood down
+        (``handoff.handing_over``) lost nothing. Now asq carries on, and a page left as the
+        wait found it showed the old project's doctor report under the new one's name, a
+        Settings tab with no slot to pick, Welcome's path box never judged and an empty
+        Project Doctor tab (round 24 of #257). Each owed start runs once, for a node still
+        in the app; the ticks start again on their own.
+        """
         if self._hand_off_poll is not None:
             self._hand_off_poll.stop()
         self.hand_off = None
         self._hand_off_overdue = False
         self.notify("Called off: asq carries on", timeout=4)
+        owed, self._owed = self._owed, {}
+        for start, node in owed.items():
+            if node.is_attached:
+                start()
+
+    def owe(self, node: DOMNode, start: Callable[[], object]) -> None:
+        """``start``, ``node``'s, stood down for the pending hand-over: run it if that is
+        called off. Once, however often it stood down meanwhile (a tick every two seconds):
+        a bound method is the same start each time it is read."""
+        self._owed[start] = node
 
     def _holding_the_quit(self) -> list[str]:
         """The workers a quit would cut off that still run, by name: any thread worker but

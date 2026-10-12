@@ -757,7 +757,7 @@ class ExplainabilityView(VerticalScroll):
         Not while asq hands its terminal over (``handoff``): the read resolves the
         project's destination in the store, and its credits row writes their cache.
         """
-        if handing_over(self):
+        if handing_over(self, self.refresh_status):
             return
         self.run_worker(
             partial(status_report, self.project), name=STATUS_WORKER, group=STATUS_WORKER,

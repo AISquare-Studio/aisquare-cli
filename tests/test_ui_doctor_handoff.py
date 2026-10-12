@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import dataclasses
 import os
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -626,11 +627,22 @@ def test_a_poll_queued_before_the_call_off_neither_waits_on_nor_quits(
     assert exits == [], "no quit once the read ended"
 
 
-def _starts_with_a_hand_over(pending: bool, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+Then = Callable[[ui_app.FleetApp, list[str]], Awaitable[list[str]]]
+"""A step after the starts, given the app and every start so far; it says what to return."""
+
+
+def _starts_with_a_hand_over(
+    pending: bool, monkeypatch: pytest.MonkeyPatch, *, then: Then | None = None
+) -> list[str]:
     """The workers asq's own starts begin: a project's page opened (its Explainability and
     Settings tabs read on mount, and the shell's doctor runs for it), its Doctor tab, the
     Accounts page's minute tick with a session and a signed-in slot, and Welcome's look and
-    list. With a hand-over ``pending``, held by a worker it waits for."""
+    list. With a hand-over ``pending``, held by a worker it waits for; ``then``, what to do
+    once the starts have been made, and so what to return.
+
+    asq opens on Welcome each time: a page an earlier run left selected would open with the
+    app, mounted before the hand-over, and none of its tabs would have a read to start."""
+    ui_app._remember_ui_state(ui_app.SELECTED_KEY, None)
     monkeypatch.setattr(accounts_view, "_read_credits", lambda _session: [])
     monkeypatch.setattr(accounts_service, "read_usage_with_trends", lambda _accounts: {})
     monkeypatch.setattr(explainability_view, "status_report", lambda _project: None)
@@ -673,10 +685,60 @@ def _starts_with_a_hand_over(pending: bool, monkeypatch: pytest.MonkeyPatch) -> 
         welcome.find_candidates()
         await settle_page(app, group="held")  # the tabs' mounts, which start their reads
         started = sorted(set(names[mark:]))
+        if then is not None:
+            started = await then(app, names)
         release.set()
         return started
 
     return drive(fn)
+
+
+def test_a_called_off_hand_over_begins_each_start_that_stood_down_once(
+    isolated_home: Path,
+    tmp_path: Path,
+    script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 24 of #257: until a hand-over could be called off it always ended in a quit,
+    so a start that stood down lost nothing. Called off, asq carried on with what the wait
+    had skipped: the Doctor section named the new project over the old one's report, the
+    Settings tab offered no slot, Welcome never judged its path box, the Project Doctor tab
+    stayed empty. Each start that stood down is owed and begins once on the call-off (the
+    shell's tick too, which reads the accounts after the frame), and a full look stays full;
+    one owed by a view no longer in the app does not. The control is the same steps with
+    no hand-over."""
+    monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
+    seed(tmp_path, ("prj_a", "alpha", None))
+    looks: list[bool] = []
+
+    async def call_off(app: ui_app.FleetApp, names: list[str]) -> list[str]:
+        welcome = app.query_one(welcome_view.WelcomeView)
+        welcome.look(full=False)  # Welcome's tick, after the full look asked for
+        welcome._judge()  # a keystroke in the path box
+        for _ in range(2):  # the shell's tick, and the accounts read it starts
+            app.refresh_data()
+            app.refresh_accounts()
+        app.owe(Static(), lambda: names.append("a removed view's"))
+        app.query_one(accounts_view.AccountsView)._on_screen = True  # shown again by then
+        claude = welcome.seams.claude
+
+        def asked(full: bool, root: Path | None) -> Any:
+            looks.append(full)
+            return claude(full, root)
+
+        welcome.seams = dataclasses.replace(welcome.seams, claude=asked)
+        mark = len(names)
+        app._call_off_hand_off()
+        await settle_page(app, group="held")
+        return sorted(names[mark:])
+
+    started = _starts_with_a_hand_over(False, monkeypatch)
+    owed = _starts_with_a_hand_over(True, monkeypatch, then=call_off)
+
+    assert owed == sorted(
+        [*started, ui_app.ACCOUNTS_WORKER, welcome_view.worker_name("validate")]
+    ), "each start that stood down, once, and nothing else"
+    assert looks == [True], "the look owed is the full one asked for"
 
 
 def test_no_start_on_asqs_own_schedule_begins_once_a_hand_over_is_pending(

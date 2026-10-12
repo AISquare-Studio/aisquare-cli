@@ -710,7 +710,7 @@ class AccountsView(Vertical):
         ``usage: …`` that never resolves. Not while asq hands its terminal over: the
         hand-over waits for the reading (``handoff``).
         """
-        if not self._on_screen or self.overview is None or handing_over(self):
+        if not self._on_screen or self.overview is None or handing_over(self, self.refresh_usage):
             return
         accounts = [status.account for status in self.overview.accounts if status.signed_in]
         if not accounts:
@@ -748,7 +748,7 @@ class AccountsView(Vertical):
             self.workers.cancel_group(self, CREDITS_WORKER)
             self.query_one("#aisquare-credits", Static).update("")
             self._credits_for = session
-        if session is None or not self._on_screen or handing_over(self):
+        if session is None or not self._on_screen or handing_over(self, self.refresh_credits):
             return
         self.run_worker(
             lambda: (session, _read_credits(session)),

@@ -179,7 +179,7 @@ class SettingsView(VerticalScroll):
         worker answers (:meth:`_accounts_read`). Not while asq hands its terminal
         over (``handoff``): the selects keep the bindings alone.
         """
-        if handing_over(self):
+        if handing_over(self, self._load_accounts):
             return
         self.run_worker(
             self._read_accounts,

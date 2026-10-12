@@ -273,7 +273,7 @@ class BoardPanel(Vertical):
         if len({s.account for s in sessions if s.ended_at is None and s.account}) < 2:
             return
         if handing_over(self):
-            return
+            return  # owed nothing: the board's next tick asks again
         now = time.monotonic()
         if self._labels_asked_at is not None and now - self._labels_asked_at < LABELS_TTL:
             return

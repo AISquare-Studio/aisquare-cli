@@ -762,22 +762,26 @@ ADMIN = "group:ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000050:admin:80"
     [
         (HOME_FOLDERS, False),
         (f"{BOB}:allow:read,readattr", False),
+        (f"{ADMIN}:allow,file_inherit:add_file", True),
         (f"{BOB}:allow:read,write", True),
-        (f"{ADMIN}:allow:add_file,file_inherit", True),
         (f"{HOME_FOLDERS}\n{ADMIN}:allow:list,delete_child", True),
         ("user:FFFFEEEE-DDDD-CCCC-BBBB-AAAA00000ABC:me:{own}:allow:write,delete", False),
-        (f"{ADMIN}:allow:only_inherit,file_inherit,directory_inherit,add_file,write", False),
-        (f"{ADMIN}:allow:inherited,file_inherit,add_file,write", True),
+        (f"{ADMIN}:allow,only_inherit,file_inherit,directory_inherit:add_file,write", False),
+        (f"{ADMIN}:allow,inherited,file_inherit,directory_inherit:add_file,write", True),
+        (f"{BOB}:allow,inherited:write,append", True),
+        (f"{BOB}:deny,inherited:write,append", False),
     ],
     ids=[
         "home-folders",
         "allows-a-read",
-        "allows-a-write",
         "allows-an-add",
+        "allows-a-write",
         "both",
         "own",
         "only-inherits",
         "inherited",
+        "a-file-inherited",
+        "denies-inherited",
     ],
 )
 def test_a_macos_acl_that_allows_another_account_to_change_an_entry_opens_it(
@@ -789,7 +793,10 @@ def test_a_macos_acl_that_allows_another_account_to_change_an_entry_opens_it(
     a deny, as macOS puts on each home's folders, or a right that only reads, is not; nor is
     one flagged ``only_inherit``, a right only on what is made inside the directory later
     (review of #243, round 11, 3/9). One a file inherited is its own. Read as
-    ``acl_to_text`` writes it, on any machine."""
+    ``acl_to_text`` writes it, on any machine: the flags follow the verdict, and read from
+    the rights every flagged entry was skipped, the ``allow,inherited`` write that each
+    file a build writes in a shared folder carries included (review of #243, round 12,
+    1/10)."""
     assert (
         remote_server._page_acl_text_allows_write(f"!#acl 1\n{entries.format(own=4242)}\n", 4242)
         is opened

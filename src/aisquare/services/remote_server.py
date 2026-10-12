@@ -6824,8 +6824,11 @@ def _page_darwin_acl_allows_write(path: str | Path) -> bool:
 def _page_acl_text_allows_write(text: str, own_uid: int) -> bool:
     """Whether ``text``, an ACL as macOS's ``acl_to_text`` writes it, has an entry that
     allows an account other than ``own_uid`` a right that changes the entry. Each line after
-    the header is ``tag:uuid:name:id:allow|deny:rights``, the rights and the inheritance
-    flags in one comma-separated list.
+    the header is ``tag:uuid:name:id:allow[,flag...]:right[,right...]``: the inheritance
+    flags follow the verdict, as Libc's ``acl_translate.c`` writes and reads them, and
+    ``ls -le`` shows them among the rights. Read from the rights, every flagged entry was
+    taken for a deny, a file's ``allow,inherited`` grant included, which each file a build
+    writes in a shared folder carries (review of #243, round 12, 1/10).
 
     An entry flagged ``only_inherit`` grants nothing on the entry that carries it, only on
     what is made inside it later, which carries a copy of its own and is asked about as
@@ -6835,11 +6838,11 @@ def _page_acl_text_allows_write(text: str, own_uid: int) -> bool:
         fields = line.split(":")
         if line.startswith("!#") or len(fields) < 6:
             continue
-        tag, qualifier, verdict, rights = fields[0], fields[-3], fields[-2], fields[-1]
-        if verdict != "allow" or (tag == "user" and qualifier == str(own_uid)):
+        own = fields[0] == "user" and fields[-3] == str(own_uid)
+        verdict, *flags = fields[-2].split(",")
+        if verdict != "allow" or "only_inherit" in flags or own:
             continue
-        granted = set(rights.split(","))
-        if "only_inherit" not in granted and _DARWIN_ACL_WRITES & granted:
+        if _DARWIN_ACL_WRITES.intersection(fields[-1].split(",")):
             return True
     return False
 

@@ -28,6 +28,7 @@ from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import paths
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
+from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgent
 from aisquare.services import install_route, lifecycle
 from aisquare.services.install_route import Facts
@@ -840,7 +841,7 @@ def test_each_socket_directory_is_looked_at_before_tmux_makes_it(
 
     base = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp"))
     monkeypatch.setenv("TMUX_TMPDIR", str(base))
-    directory = base / f"tmux-{os.getuid()}"
+    directory = TmuxServer("a").socket_path().parent  # tmux-<uid>, under the base
     try:
         assert lifecycle._server_listening("a", False) is True, "tmux finds no file: no answer"
         assert directory.is_dir(), "control: tmux made its directory as it looked"

@@ -136,7 +136,10 @@ a directory you cannot list, and so cannot check. `chmod -R go-w` it, or install
 with `install-page`, whose copy no other account may write. A build in a directory
 another account could change is not served either, wherever above it that directory
 is (a shared checkout's group-writable `/srv/app`, say), unless it has the sticky bit,
-as `/tmp` does. To go back to the bundled page:
+as `/tmp` does. Remote refuses to start with such a build, and asks again about each
+file as it serves it, so a build changed or put in place while Remote is on is
+refused too: the phone gets a 404 and Remote's log names the file. To go back to the
+bundled page:
 
 ```sh
 rm -rf ~/.aisquare/remote-dist

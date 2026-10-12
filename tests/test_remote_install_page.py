@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import errno
 import json
+import logging
 import os
 import shutil
 import socket
@@ -721,6 +722,103 @@ def test_a_build_in_a_directory_another_account_may_change_is_no_page_to_serve(
         assert problem is not None
         assert problem.startswith(f"{above} can be changed by another account"), problem
         assert f"in place of {root} " in problem and f"chmod go-w {above} " in problem
+
+
+def _closed(root: Path) -> Path:
+    """``root``, a build, with the modes a umask of 022 gives it, whatever this one's is."""
+    for path in (root, *root.rglob("*")):
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    return root
+
+
+_ASKED = {"index": "", "asset": "assets/app.js", "navigation": "fleet/coder-1"}
+"""What a page load asks a build for: its index, a file it loads, and a deep link, which
+the index answers."""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows keeps no group or other bits")
+def test_a_build_installed_by_hand_while_remote_is_on_is_asked_about_as_it_is_served(
+    isolated_home: Path, built: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The check ran as Remote started, and the server picks its build per request: one
+    put in ``~/.aisquare/remote-dist`` by hand while the bundled page was served, 0777 and
+    0666 as ``cp -r`` leaves a build off an exFAT drive, was served unasked (review of
+    #243, round 9, 1/6). Each file is now asked about as it is served."""
+    runtime = Runtime(remote_state_path(), remote_audit_path())
+    client = make_client(build_app(runtime))
+    assert remote_server._page_missing(None) is None
+    assert client.get(f"/r/{runtime.token}/").status_code == 200, "the bundled page"
+
+    installed = shutil.copytree(_closed(built), remote_dist_dir())
+    for path in (installed, installed / "assets"):
+        path.chmod(0o777)
+    for path in (installed / "index.html", installed / "assets" / "app.js"):
+        path.chmod(0o666)
+    with caplog.at_level(logging.WARNING, logger=remote_server.__name__):
+        answers = {
+            name: client.get(f"/r/{runtime.token}/{rel}", headers={"accept": "text/html"})
+            for name, rel in _ASKED.items()
+        }
+
+    assert {name: answer.status_code for name, answer in answers.items()} == dict.fromkeys(
+        _ASKED, 404
+    )
+    assert {answer.json()["message"] for answer in answers.values()} == {
+        remote_server.PAGE_NOT_SERVED
+    }
+    assert not any(str(isolated_home) in answer.text for answer in answers.values())
+    said = [r.getMessage() for r in caplog.records if r.name == remote_server.__name__]
+    assert len(said) == 3 and all("can be written by another account" in line for line in said)
+    assert f"remote: {installed.resolve()}/index.html can be written" in said[0]
+    assert "install the build again" in said[0]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows keeps no group or other bits")
+@pytest.mark.parametrize(
+    ("changed", "refused"),
+    [
+        ("index.html", {"index", "navigation"}),
+        ("assets", {"asset"}),
+        ("the directory above", {"index", "asset", "navigation"}),
+    ],
+    ids=["index.html", "assets", "the-directory-above"],
+)
+def test_a_dist_build_changed_in_place_while_remote_is_on_is_not_served(
+    isolated_home: Path,
+    built: Path,
+    caplog: pytest.LogCaptureFixture,
+    changed: str,
+    refused: set[str],
+) -> None:
+    """A ``serve --dist`` build checked as it started and then opened to others in place,
+    or the directory it is in, was served as it was (review of #243, round 9, 1/6). Only
+    what is served through what changed is refused."""
+    dist = _closed(built)
+    runtime = Runtime(remote_state_path(), remote_audit_path())
+    client = make_client(build_app(runtime, dist_dir=dist))
+
+    def answers() -> dict[str, int]:
+        return {
+            name: client.get(
+                f"/r/{runtime.token}/{rel}", headers={"accept": "text/html"}
+            ).status_code
+            for name, rel in _ASKED.items()
+        }
+
+    assert remote_server._page_missing(dist) is None
+    assert answers() == dict.fromkeys(_ASKED, 200)
+    opened = dist.parent if changed == "the directory above" else dist / changed
+    opened.chmod(0o666 if opened.is_file() else 0o777)
+    try:
+        with caplog.at_level(logging.WARNING, logger=remote_server.__name__):
+            after = answers()
+    finally:
+        opened.chmod(0o700 if opened == dist.parent else 0o755)
+
+    assert after == {name: 404 if name in refused else 200 for name in _ASKED}
+    said = {r.getMessage() for r in caplog.records if r.name == remote_server.__name__}
+    assert len(said) == 1 and next(iter(said)).startswith(f"remote: {opened} can be ")
+    assert "serve without --dist" in next(iter(said))
 
 
 def test_install_page_leaves_behind_what_a_server_would_not_serve(

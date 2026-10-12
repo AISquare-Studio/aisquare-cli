@@ -324,6 +324,15 @@ writing it or one that removed it. Without the directory: anyone holding the lin
 before any passphrase, and its absolute path is the machine's home and user name. The log
 names it, as :func:`_page_missing` names it to the machine's own terminal."""
 
+PAGE_NOT_SERVED = (
+    "the built page can be changed by another account on the machine, so it is not served — "
+    "the machine's log says which file, and what to do"
+)
+"""404 ``no_dist`` for a request for a file of a ``--dist`` or an installed build that another
+account may change, or that is found through a directory another account may change
+(:func:`_page_served_open_to_others`). Without the path, as :data:`NO_DIST_INDEX` is; the
+log names it, in the words :func:`_page_missing` gives the machine's own terminal."""
+
 NO_PAGE_HINT = "the bundled remote page is missing from this install — reinstall aisquare-cli"
 """Shown by the modal's status line, ``asq remote serve``'s exit, and the raise of
 ``start_remote_server()`` — one sentence, so a broken install never runs a server that
@@ -4626,6 +4635,8 @@ def build_remote_app(
     }
     unresolved = dist_dir or remote_dist_dir()
     dist = _remote_resolved(unresolved) or unresolved  # a loop: a build with no file at all
+    page_remedy = PAGE_INSTALLED_REMEDY if dist_dir is None else PAGE_DIST_REMEDY
+    page_group = _remote_private_group()
     limiter = _RateLimiter(clock)
     budget = UnlockBudget(runtime)
     cache = _Cache(ttl=tick * 0.9)
@@ -5039,7 +5050,10 @@ def build_remote_app(
         directory's absolute path, the machine's home and user name with it (sweep 4 of
         #243); the log names it now (:data:`NO_DIST_INDEX`). An installed index that went
         between the two looks at it, as ``install-page`` swaps a build in, is answered as
-        the next request will be, with the bundled page.
+        the next request will be, with the bundled page. A file of the build that another
+        account may change, or that is found through a directory another account may
+        change, is 404 ``no_dist`` too (:data:`PAGE_NOT_SERVED`), asked about as it is
+        served (:func:`_page_served_open_to_others`).
         """
         from aisquare.services import remote_page
 
@@ -5050,25 +5064,28 @@ def build_remote_app(
             bundled = remote_page.bundled_page_response(rel, request)
             return _json_error(404, "no_dist", NO_PAGE_HINT) if bundled is None else bundled
 
+        def built_file(path: Path, cache_control: str) -> Response:
+            problem = _page_served_open_to_others(dist, path, page_remedy, page_group)
+            if problem is not None:
+                log.warning("remote: %s", problem)
+                return _json_error(404, "no_dist", PAGE_NOT_SERVED)
+            return FileResponse(
+                path,
+                media_type=remote_page.build_content_type(path.name),
+                headers={"cache-control": cache_control},
+            )
+
         if dist_dir is None and not index.is_file():
             response = bundled_page()
         elif rel and (candidate := _built_page_file(dist, rel)) is not None:
-            response = FileResponse(
-                candidate,
-                media_type=remote_page.build_content_type(candidate.name),
-                headers={"cache-control": _cache_control(rel)},
-            )
+            response = built_file(candidate, _cache_control(rel))
         elif rel and not _is_navigation(rel, request.headers.get("accept", "")):
             # A file was asked for and there is no such file. Saying so is the
             # whole point: the SPA document under a .js name is a boot failure
             # with no error, and the 200 hides which build is actually installed.
             response = _json_error(404, "not_found", f"no such file in the built page: {rel}")
         elif index.is_file():
-            response = FileResponse(
-                index,
-                media_type=remote_page.build_content_type(index.name),
-                headers={"cache-control": INDEX_CACHE_CONTROL},
-            )
+            response = built_file(index, INDEX_CACHE_CONTROL)
         elif dist_dir is None:
             response = bundled_page()
         else:
@@ -6246,7 +6263,8 @@ def _page_missing(dist_dir: Path | None) -> str | None:
     that does not resolve, a symbolic link loop, is refused as such; an installed build that
     does not is no installed page, as :func:`build_app` serves it (:func:`_remote_resolved`).
     A ``--dist`` or an installed build that another account may change is refused
-    (:func:`_page_open_to_others`).
+    (:func:`_page_open_to_others`), and each file of one is asked about again as it is
+    served (:func:`_page_served_open_to_others`).
     """
     if dist_dir is not None:
         dist = _remote_resolved(dist_dir)
@@ -6254,14 +6272,10 @@ def _page_missing(dist_dir: Path | None) -> str | None:
             return PAGE_DOES_NOT_RESOLVE.format(path=dist_dir)
         if not (dist / "index.html").is_file():
             return f"no index.html in {dist}"
-        return _page_project_not_build(dist) or _page_open_to_others(
-            dist, "or install it with asq remote install-page and serve without --dist"
-        )
+        return _page_project_not_build(dist) or _page_open_to_others(dist, PAGE_DIST_REMEDY)
     installed = _remote_resolved(remote_dist_dir())
     if installed is not None and (installed / "index.html").is_file():
-        return _page_open_to_others(
-            installed, "or install the build again with asq remote install-page"
-        )
+        return _page_open_to_others(installed, PAGE_INSTALLED_REMEDY)
     from aisquare.services import remote_page
 
     return None if remote_page.bundled_page_present() else NO_PAGE_HINT
@@ -6272,6 +6286,12 @@ PAGE_DOES_NOT_RESOLVE = (
 )
 """Why a ``--dist`` or an ``install-page`` source that does not resolve is no page
 (:func:`_remote_resolved`)."""
+
+PAGE_DIST_REMEDY = "or install it with asq remote install-page and serve without --dist"
+"""The way out a refusal of a ``--dist`` build offers last (:func:`_page_open_to_others`)."""
+
+PAGE_INSTALLED_REMEDY = "or install the build again with asq remote install-page"
+"""The way out a refusal of the installed build offers last (:func:`_page_open_to_others`)."""
 
 PAGE_OPEN_TO_OTHERS = (
     "{path} can be written by another account, which could change the page that takes the "
@@ -6361,6 +6381,41 @@ def _page_open_to_others(root: Path, remedy: str) -> str | None:
             continue
         if _page_entry_open(info, own_group, above=True):
             return PAGE_PLACE_OPEN_TO_OTHERS.format(path=parent, root=root, remedy=remedy)
+    return None
+
+
+def _page_served_open_to_others(
+    dist: Path, served: Path, remedy: str, own_group: int | None
+) -> str | None:
+    """The refusal of ``served``, a file of the build at ``dist`` about to be served, when
+    another account may change it or a directory it is found through; ``None`` when none
+    may.
+
+    :func:`_page_open_to_others` is asked as Remote starts, and the server picks its build
+    for each request: an installed build that appeared, or was replaced, while Remote was
+    on, and a ``--dist`` build changed in place since, were served without it, an
+    ``index.html`` of 0666 in a 0777 directory included (review of #243, round 9, 1/6).
+    So each file is asked about as it is served, by the same rule
+    (:func:`_page_entry_open`), from where it resolves up to ``/``: a few ``lstat`` calls,
+    where the build's whole walk is one for each of its files. Once each passes, no other
+    account may change any of them, so the file opened is the one that passed.
+    """
+    import sys
+
+    if sys.platform == "win32":
+        return None
+    resolved = _remote_resolved(served)
+    if resolved is None:
+        return None
+    for path in (resolved, *resolved.parents):
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if _page_entry_open(info, own_group, above=path != dist and dist.is_relative_to(path)):
+            inside = path.is_relative_to(dist)
+            refusal = PAGE_OPEN_TO_OTHERS if inside else PAGE_PLACE_OPEN_TO_OTHERS
+            return refusal.format(path=path, root=dist, remedy=remedy)
     return None
 
 

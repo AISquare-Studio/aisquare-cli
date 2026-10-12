@@ -4903,7 +4903,6 @@ def build_remote_app(
     }
     given = None if dist_dir is None else _remote_page_root(dist_dir)
     page_remedy = PAGE_INSTALLED_REMEDY if dist_dir is None else PAGE_DIST_REMEDY
-    page_group = _remote_private_group()
     limiter = _RateLimiter(clock)
     budget = UnlockBudget(runtime)
     cache = _Cache(ttl=tick * 0.9)
@@ -5345,7 +5344,7 @@ def build_remote_app(
             return _json_error(404, "no_dist", NO_PAGE_HINT) if bundled is None else bundled
 
         def built_file(path: Path, cache_control: str) -> Response:
-            problem = _page_served_open_to_others(dist, path, page_remedy, page_group)
+            problem = _page_served_open_to_others(dist, path, page_remedy)
             if problem is not None:
                 log.warning("remote: %s", problem)
                 return _json_error(404, "no_dist", PAGE_NOT_SERVED)
@@ -6673,14 +6672,12 @@ def _page_open_to_others(root: Path, remedy: str) -> str | None:
         return None
     import stat
 
-    own_group = _remote_private_group()
-
     def refusal(path: str) -> str | None:
         try:
             info = os.lstat(path)
         except OSError:
             return None
-        if stat.S_ISLNK(info.st_mode) or not _page_entry_open(path, info, own_group):
+        if stat.S_ISLNK(info.st_mode) or not _page_entry_open(path, info):
             return None
         return _page_open_refusal(path, root, remedy, inside=True)
 
@@ -6703,14 +6700,12 @@ def _page_open_to_others(root: Path, remedy: str) -> str | None:
             info = os.lstat(parent)
         except OSError:
             continue
-        if _page_entry_open(parent, info, own_group, above=True):
+        if _page_entry_open(parent, info, above=True):
             return _page_open_refusal(parent, root, remedy, inside=False)
     return None
 
 
-def _page_served_open_to_others(
-    dist: Path, served: Path, remedy: str, own_group: int | None
-) -> str | None:
+def _page_served_open_to_others(dist: Path, served: Path, remedy: str) -> str | None:
     """The refusal of ``served``, a file of the build at ``dist`` about to be served, when
     another account may change it or a directory it is found through; ``None`` when none
     may.
@@ -6737,14 +6732,12 @@ def _page_served_open_to_others(
         except OSError:
             continue
         above = path != dist and dist.is_relative_to(path)
-        if _page_entry_open(path, info, own_group, above=above):
+        if _page_entry_open(path, info, above=above):
             return _page_open_refusal(path, dist, remedy, inside=path.is_relative_to(dist))
     return None
 
 
-def _page_entry_open(
-    path: str | Path, info: os.stat_result, own_group: int | None, *, above: bool = False
-) -> bool:
+def _page_entry_open(path: str | Path, info: os.stat_result, *, above: bool = False) -> bool:
     """Whether another account may change the file or directory at ``path``, ``info`` its
     ``lstat``: one that an account other than this one or root owns, that others may write,
     that a group may write other than this account's own (a user private group, the one
@@ -6780,11 +6773,13 @@ def _page_entry_open(
         return False
     if info.st_uid not in {os.getuid(), 0}:
         return True
-    writable = info.st_mode & stat.S_IWOTH or (
-        info.st_mode & stat.S_IWGRP and (info.st_gid != own_group or _page_posix_acl(path))
+    writable = not (above and info.st_mode & stat.S_ISVTX) and (
+        info.st_mode & stat.S_IWOTH
+        or (
+            info.st_mode & stat.S_IWGRP
+            and (_page_posix_acl(path) or info.st_gid != _remote_private_group())
+        )
     )
-    if above and info.st_mode & stat.S_ISVTX:
-        writable = False
     return bool(writable) or _page_darwin_acl_allows_write(path)
 
 
@@ -6908,12 +6903,26 @@ def _darwin_libc() -> Any:
     return libc
 
 
+@functools.cache
 def _remote_private_group() -> int | None:
     """This account's own group when no other account is in it, a user private group;
     ``None`` otherwise (macOS's ``staff``, SUSE's ``users``), or for an account with no
     entry to look it up by. An account whose primary group it is is in it too, and is never
     in its list of members (``gr_mem``), so each account's own group is asked as well
-    (review of #243, round 10, 4/7)."""
+    (review of #243, round 10, 4/7).
+
+    The account is looked up by its uid and its group by its gid, which settles any group
+    not named for this account alone. Only one that is needs the accounts listed, since no
+    lookup finds the accounts whose own group it is: once for the process, and only for an
+    entry that group may write (:func:`_page_entry_open`), never for an installed build,
+    whose copy no group may write. The list was read twice for each start, on Textual's
+    thread for the R panel's, every account of a directory that lists its accounts with it
+    (sssd's ``enumerate``, NIS) (review of #243, round 11, 4/9).
+
+    Only accounts the system lists are seen. A directory that lists none, sssd's and LDAP's
+    default, does not list this account either when it is one of its own, and its group is
+    then not taken for a private one: whoever shares it cannot be seen. A local account's
+    group that a directory account not listed has for its own is not seen."""
     import sys
 
     if sys.platform == "win32":
@@ -6928,7 +6937,10 @@ def _remote_private_group() -> int | None:
         return None
     if group.gr_name != user.pw_name or set(group.gr_mem) - {user.pw_name}:
         return None
-    others = (other for other in pwd.getpwall() if other.pw_uid != user.pw_uid)
+    accounts = pwd.getpwall()
+    if all(other.pw_uid != user.pw_uid for other in accounts):
+        return None  # its accounts are not listed, so those that share its group are not seen
+    others = (other for other in accounts if other.pw_uid != user.pw_uid)
     if any(other.pw_gid == user.pw_gid for other in others):
         return None
     return user.pw_gid

@@ -707,11 +707,11 @@ def test_a_build_entry_a_posix_acl_lets_another_account_write_is_no_page_to_serv
     assert stat.S_IMODE(changed.stat().st_mode) == (0o664 if entry == "file" else 0o775)
     problem = remote_server._page_open_to_others(built, remedy)
     assert problem is not None and problem.startswith(f"{changed} can be written by another")
-    as_served = remote_server._page_served_open_to_others(built, served, remedy, own_group)
+    as_served = remote_server._page_served_open_to_others(built, served, remedy)
     assert as_served is not None and as_served.startswith(f"{changed} can be written")
     changed.chmod(0o644 if entry == "file" else 0o755)
     assert remote_server._page_open_to_others(built, remedy) is None
-    assert remote_server._page_served_open_to_others(built, served, remedy, own_group) is None
+    assert remote_server._page_served_open_to_others(built, served, remedy) is None
 
 
 def test_a_posix_acl_is_read_from_the_entry_itself(
@@ -738,6 +738,7 @@ def test_a_posix_acl_is_read_from_the_entry_itself(
         return answer
 
     monkeypatch.setattr(os, "getxattr", getxattr)
+    monkeypatch.setattr(remote_server, "_remote_private_group", lambda: info.st_gid)
     for answer, opened in [
         (b"\x02\x00\x00\x00", True),
         (OSError(errno.ENODATA, "No data available"), False),
@@ -745,8 +746,9 @@ def test_a_posix_acl_is_read_from_the_entry_itself(
         (OSError(errno.EIO, "Input/output error"), True),
     ]:
         answers["now"] = answer
-        assert remote_server._page_entry_open(index, info, info.st_gid) is opened, answer
-    assert remote_server._page_entry_open(index, info, info.st_gid + 1) is True, "not its own"
+        assert remote_server._page_entry_open(index, info) is opened, answer
+    monkeypatch.setattr(remote_server, "_remote_private_group", lambda: info.st_gid + 1)
+    assert remote_server._page_entry_open(index, info) is True, "not its own"
 
 
 HOME_FOLDERS = "group:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C:everyone:12:deny:delete"
@@ -799,7 +801,7 @@ def test_a_macos_acl_that_allows_another_account_to_change_an_entry_opens_it(
     acl = f"!#acl 1\n{entries.format(own=os.getuid())}\n"
     monkeypatch.setattr(remote_server, "_darwin_acl_text", lambda path: acl)
     monkeypatch.setattr(sys, "platform", "darwin")
-    seen = remote_server._page_entry_open(index, index.stat(), None)
+    seen = remote_server._page_entry_open(index, index.stat())
     monkeypatch.undo()
     assert seen is opened
 
@@ -817,7 +819,7 @@ def test_a_macos_acl_that_cannot_be_read_opens_the_entry(
 
     monkeypatch.setattr(remote_server, "_darwin_acl_text", unreadable)
     monkeypatch.setattr(sys, "platform", "darwin")
-    seen = remote_server._page_entry_open(index, index.stat(), None)
+    seen = remote_server._page_entry_open(index, index.stat())
     monkeypatch.undo()
     assert seen is True
 
@@ -844,7 +846,7 @@ def test_a_build_a_macos_acl_opens_is_told_the_chmod_that_removes_the_acl(
     monkeypatch.setattr(sys, "platform", "darwin")
     remedy = remote_server.PAGE_DIST_REMEDY
     if served:
-        problem = remote_server._page_served_open_to_others(built, index, remedy, None)
+        problem = remote_server._page_served_open_to_others(built, index, remedy)
     else:
         problem = remote_server._page_open_to_others(built, remedy)
     monkeypatch.undo()
@@ -892,9 +894,66 @@ def test_a_group_that_is_another_accounts_own_is_no_private_group(
     monkeypatch.setattr(pwd, "getpwuid", lambda uid: me)
     monkeypatch.setattr(grp, "getgrgid", lambda gid: SimpleNamespace(gr_name="anmol", gr_mem=[]))
     monkeypatch.setattr(pwd, "getpwall", lambda: accounts)
-    assert remote_server._remote_private_group() == 1000
+    private_group = remote_server._remote_private_group.__wrapped__  # past the process's cache
+    assert private_group() == 1000
     accounts.append(SimpleNamespace(pw_name="build", pw_uid=1001, pw_gid=1000))
-    assert remote_server._remote_private_group() is None
+    assert private_group() is None
+
+
+def test_a_group_of_an_account_the_system_does_not_list_is_no_private_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where a directory does not list its accounts, sssd's and LDAP's default, the accounts
+    that share a directory account's group are not listed either: its group was taken for a
+    private one all the same (review of #243, round 11, 4/9). It is not, unseen."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("Windows has no groups to ask")
+    import grp
+    import pwd
+    from types import SimpleNamespace
+
+    me = SimpleNamespace(pw_name="anmol", pw_uid=1_200_001, pw_gid=1_200_001)
+    monkeypatch.setattr(os, "getuid", lambda: me.pw_uid)
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: me)
+    monkeypatch.setattr(grp, "getgrgid", lambda gid: SimpleNamespace(gr_name="anmol", gr_mem=[]))
+    monkeypatch.setattr(pwd, "getpwall", lambda: [SimpleNamespace(pw_name="root", pw_uid=0)])
+    assert remote_server._remote_private_group.__wrapped__() is None
+
+
+def test_the_accounts_are_listed_once_and_only_for_an_entry_a_group_may_write(
+    built: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``pwd.getpwall`` read every account twice for each start, on Textual's thread for the
+    R panel's, and every account of a directory that lists them (review of #243, round 11,
+    4/9). Asked for no build that no group may write, an installed one included, and once
+    for the process."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("Windows has no groups to ask")
+    import pwd
+
+    listed: list[None] = []
+    real = pwd.getpwall
+
+    def getpwall() -> list[Any]:
+        listed.append(None)
+        return real()
+
+    monkeypatch.setattr(pwd, "getpwall", getpwall)
+    remote_server._remote_private_group.cache_clear()
+    try:
+        for path in (built, *built.rglob("*")):
+            path.chmod(0o755 if path.is_dir() else 0o644)
+        remedy = remote_server.PAGE_DIST_REMEDY
+        remote_server._page_open_to_others(built, remedy)
+        remote_server._page_served_open_to_others(built, built / "index.html", remedy)
+        assert listed == [], "no entry a group may write"
+        (built / "index.html").chmod(0o664)
+        for _ in range(3):
+            remote_server._page_open_to_others(built, remedy)
+            remote_server._page_served_open_to_others(built, built / "index.html", remedy)
+        assert len(listed) <= 1, "once for the process"
+    finally:
+        remote_server._remote_private_group.cache_clear()
 
 
 @pytest.mark.skipif(not can_deny_reads(), reason="this account lists any directory (root, or NTFS)")

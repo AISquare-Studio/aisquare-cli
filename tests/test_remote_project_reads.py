@@ -713,6 +713,29 @@ def test_a_hubs_board_is_reached_through_every_project_on_it(
     assert summary == f"claimed {task.id} as=-"
 
 
+def test_a_project_ref_and_a_task_ref_are_kept_to_the_one_rule(
+    captured: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``?project=`` was kept to :func:`remote_server._remote_reachable`, and a task or
+    session ref to boards the store listed, the rule spelled a second way: changed in one,
+    the two would disagree about what a phone may reach (review of #243, round 11, 9/9).
+    A rule that lets a captured project through lets it through for both."""
+    task, _added = team_service.add_task("the captured task", cwd=captured.root)
+    with pytest.raises(NoSuchProject):
+        remote_server._resolve_project(captured.id)
+    assert _refused("task/claim", {"ref": task.id}).status == 404
+
+    def every_one(
+        projects: list[ProjectInfo], current: ProjectInfo | None = None
+    ) -> list[ProjectInfo]:
+        return list(projects)
+
+    monkeypatch.setattr(remote_server, "_remote_reachable", every_one)
+    assert remote_server._resolve_project(captured.id).id == captured.id
+    _result, summary = live_writes().handlers["task/claim"]({"ref": task.id})
+    assert summary == f"claimed {task.id} as=-"
+
+
 # --- the socket: project panes, subscribe_board, caps ---------------------------------------
 
 

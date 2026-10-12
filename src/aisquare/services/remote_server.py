@@ -568,28 +568,40 @@ def _resolve_project(ref: str | None) -> ProjectInfo:
         raise refusal(str(exc)) from exc
 
 
-def _remote_reachable(projects: list[ProjectInfo]) -> list[ProjectInfo]:
-    """Those of ``projects`` a phone may reach: one added on purpose, which ``api/projects``
-    lists, and the current one, which a read with no project reads, whether it was added or
-    only captured. The one rule for every project, task and session a phone names."""
+def _remote_reachable(
+    projects: Sequence[ProjectInfo], current: ProjectInfo | None = None
+) -> list[ProjectInfo]:
+    """Those of ``projects``, rows the store has not forgotten, a phone may reach: one added on
+    purpose, which ``api/projects`` lists, and the current one, which a read with no project
+    reads, whether it was added or only captured. The one rule for every project, task and
+    session a phone names: a project ref keeps the projects it matches by it, and the boards
+    a task or session ref is looked up on are those of the projects it keeps
+    (:func:`_remote_reachable_projects`). The current project is looked up only when one of
+    ``projects`` was not added, unless ``current`` gives it."""
     if all(project.onboarded_at is not None for project in projects):
-        return projects
-    from aisquare.services import fleet as fleet_service
+        return list(projects)
+    if current is None:
+        from aisquare.services import fleet as fleet_service
 
-    current = fleet_service.resolve_project(None).id
-    return [p for p in projects if p.onboarded_at is not None or p.id == current]
+        current = fleet_service.resolve_project(None)
+    return [p for p in projects if p.onboarded_at is not None or p.id == current.id]
 
 
 def _remote_reachable_projects() -> list[ProjectInfo]:
-    """Every project a phone may reach (:func:`_remote_reachable`): those ``api/projects``
-    lists, and the current one."""
+    """Every project a phone may reach (:func:`_remote_reachable`): of every project the
+    store has not forgotten, and the current one, those the rule keeps.
+
+    The rule was spelled a second time here, as the store's list of added projects and the
+    current one: the two agreed only while "listed" meant just what the rule says (review
+    of #243, round 11, 9/9)."""
     from aisquare.core.store import store_session
     from aisquare.services import fleet as fleet_service
 
     with store_session() as store:
-        listed = store.list_projects()
+        rows = store.list_projects(all=True)
     current = fleet_service.resolve_project(None)
-    return listed if any(p.id == current.id for p in listed) else [*listed, current]
+    held = any(p.id == current.id for p in rows)
+    return _remote_reachable(rows if held else [*rows, current], current)
 
 
 BoardProjects = dict[tuple[Path, str], ProjectInfo]

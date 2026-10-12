@@ -1312,7 +1312,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         wait found it showed the old project's doctor report under the new one's name, a
         Settings tab with no slot to pick, Welcome's path box never judged and an empty
         Project Doctor tab (round 24 of #257). Each owed start runs once, for a node still
-        in the app; the ticks start again on their own.
+        in the app; the ticks start again on their own. Each on its own: one that raises (a
+        view being remounted, its widget not there) is said, and the rest still run. In the
+        key's handler, the first to raise took asq down, the second press that keeps asq open
+        quit it with a traceback, and the starts after it never ran (round 25).
         """
         if self._hand_off_poll is not None:
             self._hand_off_poll.stop()
@@ -1321,8 +1324,17 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.notify("Called off: asq carries on", timeout=4)
         owed, self._owed = self._owed, {}
         for start, node in owed.items():
-            if node.is_attached:
+            if not node.is_attached:
+                continue
+            try:
                 start()
+            except Exception as exc:
+                self.notify(
+                    f"could not start {getattr(start, '__name__', 'a read')} again: {exc}",
+                    severity="warning",
+                    timeout=6,
+                    markup=False,
+                )
 
     def owe(self, node: DOMNode, start: Callable[[], object]) -> None:
         """``start``, ``node``'s, stood down for the pending hand-over: run it if that is

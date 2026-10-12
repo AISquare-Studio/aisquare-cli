@@ -778,6 +778,41 @@ def test_a_called_off_hand_over_begins_each_start_that_stood_down_once(
     assert looks == [True], "the look owed is the full one asked for"
 
 
+def test_an_owed_start_that_raises_is_said_and_the_rest_still_begin() -> None:
+    """Round 25 of #257: the owed starts ran in a bare loop inside the key's handler, so
+    one that raised (a view being remounted, its widget not there) took asq down on the
+    press that should keep it open, and every start after it was lost."""
+    began: list[str] = []
+    said: list[tuple[str, str | None]] = []
+
+    def refresh_data() -> None:
+        began.append("refresh_data")
+
+    def run_doctor() -> None:
+        raise LookupError("No nodes match '#doctor-report'")
+
+    def refresh_credits() -> None:
+        began.append("refresh_credits")
+
+    attached = SimpleNamespace(is_attached=True)
+    app = SimpleNamespace(
+        _hand_off_poll=None,
+        hand_off=("upgrade", "--reopen"),
+        _hand_off_overdue=True,
+        _owed={refresh_data: attached, run_doctor: attached, refresh_credits: attached},
+        notify=lambda text, *, severity="information", **_: said.append((text, severity)),
+    )
+
+    ui_app.FleetApp._call_off_hand_off(app)  # type: ignore[arg-type]
+
+    assert began == ["refresh_data", "refresh_credits"], "the starts after it still begin"
+    assert said[0] == ("Called off: asq carries on", "information")
+    assert said[1:] == [
+        ("could not start run_doctor again: No nodes match '#doctor-report'", "warning")
+    ]
+    assert app.hand_off is None and app._owed == {}
+
+
 def test_no_start_on_asqs_own_schedule_begins_once_a_hand_over_is_pending(
     isolated_home: Path,
     tmp_path: Path,

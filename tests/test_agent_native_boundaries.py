@@ -43,7 +43,7 @@ from aisquare.core.store import SqliteStore, open_store, store_session
 from aisquare.models import TeamEvent, TeamSession
 from aisquare.services import agent_launch, diagnostics, fleet, native_telemetry
 from tests.test_fleet_service import FakeTmux
-from tests.test_store import _at_version
+from tests.test_store import _dogfooded_113
 
 
 @pytest.fixture(autouse=True)
@@ -477,7 +477,7 @@ def test_all_native_sessions_share_the_maintenance_cadence(
 
 @pytest.mark.parametrize("version", [15, 16])
 def test_upgrade_gives_existing_metadata_a_full_retention_period(version: int) -> None:
-    db = _at_version(version)
+    db = _dogfooded_113(version)  # #113's own steps; the merge appended them as v26-v28
     with sqlite3.connect(db) as raw:
         raw.execute(
             "INSERT INTO team_meta (key, value) VALUES ('fleet-session:weekend', 'weekend')"

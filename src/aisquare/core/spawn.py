@@ -54,6 +54,9 @@ otherwise inherit a live identity:
   * ``services/distill.py::spawn_drain`` — a detached ``aisquare team distill``
     of our own. A background worker of ours is not an agent session and has no
     business wearing one's identity.
+  * ``services/hooks.py::_detach`` — a detached ``aisquare hook hand-over`` of
+    our own, for the same reason; it also outlives the pane whose hook started
+    it, which is the whole point of detaching it.
 
 Excluded, nothing stripped — these are not model processes at all, and
 narrowing their environment would be change without a reason:
@@ -74,7 +77,26 @@ narrowing their environment would be change without a reason:
   * ``core/editor.py::edit_text`` — the operator's ``$EDITOR``. It is theirs,
     and it should get their environment.
   * ``cli/watch.py::action_open_transcript`` — a pager/viewer on a file.
+  * ``core/paths.py::restrict_to_owner`` — ``icacls``, locking the
+    credentials file to this account on Windows. A permissions tool, not a
+    model process; it is also the seam that guards the API key, so an
+    inherited base URL is irrelevant to it either way.
+  * ``core/paths.py::_whoami_sid`` — ``whoami /user``, reading this
+    account's SID so the ``icacls`` above can name a trustee that cannot be
+    spoofed by a stray ``USER`` in the environment. Same argument as its
+    caller.
   * ``services/explainability_ops.py::install_sdk`` — ``pip install``.
+  * ``services/install_route.py::run_installer`` — ``uv tool install --force``,
+    ``aisquare upgrade`` replacing its own install. A package manager, not a
+    model process.
+  * ``services/install_route.py::run_captured`` — the NEW install after an
+    upgrade, asked ``--version`` and ``agents refresh-hooks``. Our own CLI, like
+    ``core/selfcli.py::run`` below.
+  * ``services/install_route.py::exec_replace`` — ``uv tool uninstall``, the
+    last step of ``aisquare uninstall``, which this process becomes.
+  * ``core/selfcli.py::exec_self`` — asq handing its terminal to ``aisquare
+    upgrade`` or ``uninstall`` (the Doctor view's buttons), and ``upgrade
+    --reopen`` opening asq again. Our own CLI, like ``core/selfcli.py::run``.
   * ``services/explainability_ops.py::sdk_doctor`` — the SDK's own doctor
     script. Not stripped: it needs the ``EXPLAINABILITY_*`` environment to
     diagnose the machine it is running on.
@@ -176,7 +198,7 @@ class Seam:
 #: not part of the key: they move on every edit, and a guard that fails on
 #: reformatting is a guard people learn to silence.
 SEAMS: dict[str, Seam] = {
-    "aisquare/services/native_telemetry.py::start": Seam(
+    "aisquare/services/native_telemetry.py::start_receiver": Seam(
         EXCLUDED, "local OTLP receiver; not a model process", strips_identity=True
     ),
     "aisquare/cli/launch.py::_exec": Seam(
@@ -200,6 +222,13 @@ SEAMS: dict[str, Seam] = {
     "aisquare/services/distill.py::spawn_drain": Seam(
         EXCLUDED,
         "a detached `aisquare team distill` of ours — a background worker is not an agent session",
+        strips_identity=True,
+    ),
+    "aisquare/services/hooks.py::_detach": Seam(
+        EXCLUDED,
+        "a detached `aisquare hook hand-over` of ours (#146; review of #205, finding 1) — the "
+        "worker that moves a limited agent is not an agent session, and it outlives the pane "
+        "whose hook started it",
         strips_identity=True,
     ),
     "aisquare/cli/accounts.py::_exec": Seam(
@@ -240,8 +269,37 @@ SEAMS: dict[str, Seam] = {
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"
     ),
+    "aisquare/core/paths.py::restrict_to_owner": Seam(
+        EXCLUDED, "`icacls` — locks the credentials file to this account; no model"
+    ),
+    "aisquare/core/paths.py::_whoami_sid": Seam(
+        EXCLUDED,
+        "`whoami /user` — reads THIS account's SID for the icacls trustee above. "
+        "An identity question about the operating system, not the model API",
+    ),
     "aisquare/services/explainability_ops.py::install_sdk": Seam(
         EXCLUDED, "`pip install` — reaches PyPI, never the model API"
+    ),
+    "aisquare/services/install_route.py::run_installer": Seam(
+        EXCLUDED,
+        "`uv tool install --force` for `aisquare upgrade` — a package manager reaching an "
+        "index, never the model API; not stripped, like `install_sdk`",
+    ),
+    "aisquare/services/install_route.py::run_captured": Seam(
+        EXCLUDED,
+        "the upgraded install asked `--version` and `agents refresh-hooks`: our own CLI as "
+        "a subprocess, no model process; not stripped, like `core/selfcli.py::run`",
+    ),
+    "aisquare/services/install_route.py::exec_replace": Seam(
+        EXCLUDED,
+        "`uv tool uninstall` replacing this process as the last step of `aisquare "
+        "uninstall` — a package manager, never the model API; not stripped",
+    ),
+    "aisquare/core/selfcli.py::exec_self": Seam(
+        EXCLUDED,
+        "asq handing its terminal to `aisquare upgrade`/`uninstall`, and `upgrade "
+        "--reopen` opening asq again: our own CLI replacing this process (a waited "
+        "child on Windows). Starts no model process; not stripped, like `run`",
     ),
     "aisquare/services/explainability_ops.py::sdk_doctor": Seam(
         EXCLUDED,
@@ -276,6 +334,12 @@ SEAMS: dict[str, Seam] = {
         "`git worktree add/remove/list` and `git branch --merged` for the fleet's "
         "per-coder worktrees (docs/plans/fleet-tui.md §3.5). No model process; not "
         "stripped, like the other git seams",
+    ),
+    "aisquare/core/tmux.py::_sysctl": Seam(
+        EXCLUDED,
+        "`sysctl -n kern.bootsessionuuid` (macOS) or `kern.boottime` (macOS, the BSDs), at a "
+        "fleet spawn and when uninstall, upgrade and fleet shutdown ask whether an agent may "
+        "still run; an identifier and a time, no model",
     ),
 }
 

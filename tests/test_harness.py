@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import sysconfig
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -739,6 +741,31 @@ def test_tui_session_line_renders_model_and_mismatch() -> None:
     assert rendered.count("off-ladder") == 1  # only the runner is off its ladder
 
 
+def test_watch_names_a_parked_session_and_its_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one surface an operator leaves running printed a bare dim ``limited`` (review of
+    #205, second round): now the chip, the reset and the command that moves it."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.cli.watch import _session_lines
+    from aisquare.models import TeamSession
+
+    now = datetime.now(tz=UTC)
+    parked = TeamSession(
+        id="sess-limited-1",
+        project_id="prj_watch",
+        role="coder",
+        started_at=now,
+        last_seen_at=now,
+        state="limited",
+        limit_resets_at=now + timedelta(hours=2, minutes=10),
+    )
+    moving = parked.model_copy(update={"id": "sess-switching-1", "state": "switching"})
+    rendered = _session_lines([parked, moving]).plain
+    assert "⏳ limited — `aisquare fleet switch <label>`" in rendered
+    assert "(resets in 2h" in rendered
+    assert "⇄ switching accounts" in rendered
+
+
 def test_spawn_exec_requires_claude_on_path(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1300,7 +1327,17 @@ def test_spawn_exec_dead_proxy_fails_open(
 def test_spawn_printed_launch_fails_open_through_a_real_shell(
     isolated_home: Path, tmp_path: Path
 ) -> None:
-    """A refusing trace endpoint must not stop the pasted launch from running."""
+    """THE fail-open-by-construction premise, executed for real.
+
+    The eval prefix is only safe because a refusing `explainability env`
+    writes its reason to STDERR and exits without touching stdout — the
+    substitution then contributes nothing and the agent command still runs.
+    If the refusal ever reached stdout, eval would execute the error text as
+    shell code; in that world the agent may STILL launch (`;` continues past
+    the eval), so the discriminating assert is env's empty stdout, not the
+    launch itself.
+    """
+    import os
     import subprocess
     import sys
 
@@ -1310,12 +1347,25 @@ def test_spawn_printed_launch_fails_open_through_a_real_shell(
     command = json.loads(printed.output)["command"]
     assert "launch coder --agent claude-code" in command
 
-    venv_bin = Path(sys.executable).parent
-    child_env = {**__import__("os").environ, "PATH": f"{tmp_path}:{venv_bin}:/usr/bin:/bin"}
+    # sysconfig, not `Path(sys.executable).parent`: the two coincide inside a
+    # venv (which is why the parent form survived for so long) but diverge
+    # wherever pip installs outside one — on a Windows CI runner python.exe
+    # sits in `x64\` while the console scripts land in `x64\Scripts\`, so the
+    # parent form pointed at a directory holding no `aisquare` at all.
+    scripts_dir = Path(sysconfig.get_path("scripts"))
+    aisquare_bin = scripts_dir / ("aisquare.exe" if sys.platform == "win32" else "aisquare")
+    child_env = {
+        **os.environ,
+        "PATH": os.pathsep.join([str(tmp_path), str(scripts_dir), os.environ.get("PATH", "")]),
+    }
 
-    # Premise: refusal → stderr only, stdout EMPTY, nonzero exit.
+    # Premise: refusal → stderr only, stdout EMPTY, nonzero exit. This is the
+    # discriminating half and it is pure CLI, so it runs on every platform.
     refusal = subprocess.run(
-        [str(venv_bin / "aisquare"), "explainability", "env", "coder", "--post-root"],
+        # `aisquare_bin` (this branch: sysconfig's scripts dir, `.exe` on
+        # Windows) with `--post-root` (main's): the two sides changed different
+        # halves of the same argv.
+        [str(aisquare_bin), "explainability", "env", "coder", "--post-root"],
         capture_output=True,
         text=True,
         timeout=60,
@@ -1326,13 +1376,20 @@ def test_spawn_printed_launch_fails_open_through_a_real_shell(
     assert "untraced" in refusal.stderr
 
     # End to end: the printed command runs the agent untraced via a real shell.
+    # `eval "$(...)"` is a POSIX-shell construct, so this half needs a POSIX
+    # shell rather than a POSIX *platform* — Git Bash ships one on Windows, and
+    # windows-latest has it on PATH. Skipping on `which` keeps the assertion
+    # wherever it can actually mean something.
+    shell = shutil.which("sh")
+    if shell is None:  # pragma: no cover - platform-dependent
+        pytest.skip("no POSIX shell on PATH; the eval printable is a sh construct")
     stub = tmp_path / "claude"
     stub.write_text(
         '#!/bin/sh\necho "ran base=[$ANTHROPIC_BASE_URL] argv=[$*]"\n', encoding="utf-8"
     )
     stub.chmod(0o755)
     proc = subprocess.run(
-        ["/bin/sh", "-c", command],
+        [shell, "-c", command],
         capture_output=True,
         text=True,
         timeout=60,
@@ -1355,13 +1412,25 @@ def test_spawn_printed_command_joins_each_paste_to_its_own_run(
     the same property: the agent starts on the id its Run is keyed by, and a
     second paste in the same terminal gets a DIFFERENT one.
     """
+    import os
     import re as _re
     import subprocess
-    import sys
 
     from tests.proxy_stub import healthy_proxy
 
-    venv_bin = Path(sys.executable).parent
+    # The printed command IS a POSIX-shell line — `unset`, `${VAR:+…}` and a
+    # `VAR=value cmd` prefix — so it needs a POSIX shell, not a POSIX
+    # PLATFORM. Git Bash ships one and windows-latest carries it on PATH;
+    # skipping on `which` keeps the assertion wherever it can mean anything.
+    shell = shutil.which("sh")
+    if shell is None:  # pragma: no cover - platform-dependent
+        pytest.skip("no POSIX shell on PATH; the printed spawn command is a sh construct")
+
+    # sysconfig, not `Path(sys.executable).parent`: the two coincide inside a
+    # venv and diverge wherever pip installs outside one, where the console
+    # scripts land in a sibling `Scripts/` directory — which is where the
+    # `aisquare` the pasted command resolves actually lives.
+    scripts_dir = Path(sysconfig.get_path("scripts"))
     stub = tmp_path / "claude"
     stub.write_text(
         '#!/bin/sh\necho "ARGV $*"\nprintf "HEADERS %s\\n" "$ANTHROPIC_CUSTOM_HEADERS"\n',
@@ -1374,10 +1443,13 @@ def test_spawn_printed_command_joins_each_paste_to_its_own_run(
         runner, app = _cli()
         printed = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
         command = json.loads(printed.output)["command"]
-        child_env = {**__import__("os").environ, "PATH": f"{tmp_path}:{venv_bin}:/usr/bin:/bin"}
+        child_env = {
+            **os.environ,
+            "PATH": os.pathsep.join([str(tmp_path), str(scripts_dir), os.environ.get("PATH", "")]),
+        }
         # Both pastes share a shell, but each child owns a fresh identity.
         proc = subprocess.run(
-            ["/bin/sh", "-c", f"{command}\n{command}"],
+            [shell, "-c", f"{command}\n{command}"],
             capture_output=True,
             text=True,
             timeout=120,

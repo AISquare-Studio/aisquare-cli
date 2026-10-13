@@ -22,6 +22,9 @@ PACKAGE = Path(iam.__file__).resolve().parents[1]
 READER = Path(iam.__file__).resolve()
 
 #: Existing HTTP clients outside the sign-in flow.
+#: Keyed by POSIX-style relative path, which is what `.as_posix()` below
+#: produces on every platform. `str(Path)` would render backslashes on
+#: Windows, match nothing in here, and report all four as fresh offenders.
 PRE_EXISTING_HTTP = {
     "services/ci_client.py",
     "services/explainability.py",
@@ -50,7 +53,7 @@ def test_only_the_provider_client_names_the_credential_keys() -> None:
         tree = ast.parse(module.read_text(encoding="utf-8"))
         hits = sorted({s for s in _string_constants(tree) if s.startswith("iam_")})
         if hits:
-            offenders[str(module.relative_to(PACKAGE))] = hits
+            offenders[module.relative_to(PACKAGE).as_posix()] = hits
     assert not offenders, f"iam_* credential keys are read outside services/iam.py: {offenders}"
 
 
@@ -67,7 +70,7 @@ def test_network_imports_stay_inside_functions() -> None:
     heavy = {"urllib.request", "urllib.error", "http.client", "ssl", "webbrowser", "secrets"}
     offenders: list[str] = []
     for module in _modules():
-        rel = str(module.relative_to(PACKAGE))
+        rel = module.relative_to(PACKAGE).as_posix()
         if rel in PRE_EXISTING_HTTP:
             continue
         tree = ast.parse(module.read_text(encoding="utf-8"))

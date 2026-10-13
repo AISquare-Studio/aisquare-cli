@@ -65,7 +65,9 @@ def test_connect_and_disconnect_retain_foreign_empty_groups(
     assert json.loads(path.read_text()) == foreign
 
 
-@pytest.mark.parametrize("family,binary", [("claude-code", "claude"), ("codex", "codex")])
+# Claude Code's is main's: a --config-dir that is not there is never made (a typo must not
+# get hooks; tests/test_agent_adapters.py), only the directory this shell's sessions read.
+@pytest.mark.parametrize("family,binary", [("codex", "codex")])
 def test_connect_fresh_binary_before_first_native_launch(
     family: str, binary: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -439,16 +441,18 @@ def test_account_hook_failure_keeps_the_successful_login(tmp_path: Path) -> None
     from aisquare.core.claude_accounts import default_account
     from aisquare.services import claude_accounts
 
+    # Claude Code's settings.json replaces hooks of another shape with ours (main's); one
+    # that is not a JSON object is what its connect refuses, naming why.
     settings = tmp_path / "settings.json"
-    settings.write_text('{"hooks": []}')
+    settings.write_text("[]")
     (tmp_path / ".claude.json").write_text(
         '{"oauthAccount": {"emailAddress": "fixture@example.com"}}'
     )
     status = claude_accounts.complete_sign_in(default_account({"CLAUDE_CONFIG_DIR": str(tmp_path)}))
     assert not status.hooks_installed
     assert "Signed in; hook setup failed" in status.detail
-    assert "Repair" in status.detail or "repair" in status.detail
-    assert settings.read_text() == '{"hooks": []}'
+    assert "it is not a JSON object" in status.detail
+    assert settings.read_text() == "[]"
     assert (tmp_path / ".claude.json").exists()
 
 

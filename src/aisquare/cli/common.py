@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +16,7 @@ from rich.table import Table
 
 from aisquare.core import paths
 from aisquare.core import snapshot as snapshot_core
+from aisquare.core.claude_accounts import format_reset as _format_reset
 from aisquare.core.config import AppConfig
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
@@ -28,6 +29,7 @@ from aisquare.models import (
     InjectionRecord,
     MetricsSummary,
     OnboardReport,
+    PendingRevocation,
     Pool,
     ProjectForgetReport,
     ProjectInfo,
@@ -41,9 +43,58 @@ from aisquare.models import (
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
 
 
+def refuse_conflicting_scope(every: bool, project: str | None) -> None:
+    """``--all`` and ``--project`` name different scopes; both at once is refused.
+
+    The mechanism, not one command's guard: ``--all`` used to win silently in
+    ``fleet shutdown`` (meant as one project, took every fleet down) and still
+    did in ``metrics show``/``list`` after that was patched per command (rounds
+    4 and 6 of #203). One helper, one wording, one exit code — 2, a usage
+    error, which the root group renders as ``{"error": "usage", …}`` on stdout
+    under ``--json`` (round 7: a caller that asked for JSON gets JSON or nothing).
+    """
+    if every and project is not None:
+        raise typer.BadParameter(
+            "--all and --project conflict: --all is every project, --project one project — "
+            "drop one of them",
+            param_hint="--all",
+        )
+
+
+def project_for_ref(ref: str) -> ProjectInfo:
+    """The project a ``--project`` names, by codename, name or id prefix; a usage error if none.
+
+    Exit 2, as for every usage error, and not ``fail``'s 1: ``explainability
+    status`` exits 1 for a red proxy lane and ``doctor`` for a failed check, so
+    a cutover script gating on ``$?`` read a typo'd ``--project`` as either one
+    (review of #170's follow-ups, round 1, F6). One lookup for the
+    explainability commands and ``doctor``, which carried a copy of it (F9).
+    The JSON error stays ``not_found`` or ``ambiguous_project``.
+
+    The project service is imported here, not at module scope: this module is
+    imported by every command, and the service brings the store (``sqlite3``,
+    ``hashlib``) with it, which the commands that never name a project do not
+    pay for (tests/test_import_cost_of_the_integration.py).
+    """
+    from aisquare.services import project as project_service  # lazy: see above
+
+    try:
+        return project_service.resolve(ref)
+    except KeyError:
+        fail(f"no project matches '{ref}'", error="not_found", ref=ref, exit_code=2)
+    except ValueError as exc:
+        fail(str(exc), error="ambiguous_project", ref=ref, exit_code=2)
+
+
 def local_time(value: datetime) -> datetime:
     """A stored (UTC) timestamp in the user's local timezone, for display."""
     return value.astimezone()
+
+
+# The formatter itself lives in core (``core.claude_accounts.format_reset``) so the
+# services — the board's ``limited`` line, the agent detail, doctor — render a reset
+# the same way the two account surfaces do; re-exported here, where they import it.
+format_reset = _format_reset
 
 
 def resolve_pool(user: bool, project: bool) -> Pool | None:
@@ -186,21 +237,52 @@ def _project_name(project: ProjectInfo) -> str:
     return project.root.name or project.id
 
 
-def emit_projects(projects: list[ProjectInfo], *, active_id: str | None) -> None:
+def emit_projects(
+    projects: list[ProjectInfo],
+    *,
+    active_id: str | None,
+    hidden: int = 0,
+    group_names: Mapping[str, str] | None = None,
+    filtered: str | None = None,
+) -> None:
     """Render the project list — a JSON array under ``--json``, a table otherwise.
 
     The JSON carries the same ``name`` the table shows (#83): it is derived from
     the root rather than stored on the model, and a script picking a project
-    by name had nothing to pick on.
+    by name had nothing to pick on. It also carries ``group`` (the name),
+    ``position`` and ``pinned`` (#140); the table shows a GROUP column and a
+    📌 marker only when something is grouped or pinned. ``hidden`` is how many
+    captured directories the list leaves out (#139); only an empty table
+    mentions them. ``filtered`` is what an empty table says when ``--group`` or
+    ``--pinned`` left nothing of a list that has rows: neither "nothing
+    registered" nor the captured count is true then.
     """
+    names = group_names or {}
     if get_state().json_output:
         typer.echo(
             json.dumps(
                 [
-                    {**project.model_dump(mode="json"), "name": _project_name(project)}
+                    {
+                        **project.model_dump(mode="json"),
+                        "name": _project_name(project),
+                        "group": names.get(project.group_id or "", project.group_id),
+                        "pinned": project.pinned_at is not None,
+                    }
                     for project in projects
                 ]
             )
+        )
+        return
+    if not projects and filtered:
+        stdout_console().print(filtered)
+        return
+    if not projects and hidden:
+        # "nothing registered, run init" was wrong for a machine whose hooked
+        # sessions captured directories that are simply not listed (#139).
+        noun = "directory" if hidden == 1 else "directories"
+        stdout_console().print(
+            f"No projects added yet — {hidden} captured {noun} hidden (a hooked session ran "
+            "there): aisquare project list --all; add one: aisquare project onboard <path>"
         )
         return
     if not projects:
@@ -211,10 +293,31 @@ def emit_projects(projects: list[ProjectInfo], *, active_id: str | None) -> None
     table.add_column("NAME")
     table.add_column("ID", no_wrap=True)
     table.add_column("ROOT")
+    # The column exists only when a captured row is in the list (`--all`), so
+    # the everyday table is unchanged (#139).
+    captured = any(project.onboarded_at is None for project in projects)
+    if captured:
+        table.add_column("LISTED", no_wrap=True)
+    arranged = any(project.group_id or project.pinned_at for project in projects)
+    if arranged:
+        table.add_column("GROUP", no_wrap=True)
     for project in projects:
         marker = "*" if project.id == active_id else ""
-        table.add_row(marker, project.root.name or "—", project.id, str(project.root))
+        if project.pinned_at is not None:
+            marker = (marker + "📌").strip()
+        cells = [marker, project.root.name or "—", project.id, str(project.root)]
+        if captured:
+            cells.append("captured" if project.onboarded_at is None else "yes")
+        if arranged:
+            cells.append(names.get(project.group_id or "", project.group_id or "") or "")
+        table.add_row(*cells)
     stdout_console().print(table)
+    if captured:
+        stdout_console().print(
+            "captured = a hooked session ran there; add it on purpose to list it "
+            "(aisquare project onboard <path>), or drop the stale ones: "
+            "aisquare project prune --captured-only"
+        )
 
 
 def emit_project_action(message: str, project: ProjectInfo) -> None:
@@ -225,10 +328,21 @@ def emit_project_action(message: str, project: ProjectInfo) -> None:
         stdout_console().print(message)
 
 
-def _active_note(active: ProjectInfo | None, *, changed: bool) -> str | None:
-    """One line saying where the active project went, or None when it did not move."""
+def _active_note(
+    active: ProjectInfo | None, *, changed: bool, pin_error: str | None = None
+) -> str | None:
+    """One line saying where the active project went, or None when it did not move.
+
+    A pin the state file refused is said here rather than as a failure: the
+    forget (or the sweep) is complete, and only where the pin landed is in doubt.
+    """
     if not changed:
         return None
+    if pin_error is not None:
+        return (
+            f"⚠ the pin could not be moved — {pin_error}; the active project follows your "
+            "working directory until `project switch` succeeds"
+        )
     if active is None:
         return "no projects remain — the active project follows your working directory again"
     return (
@@ -255,9 +369,21 @@ def emit_project_forget(report: ProjectForgetReport) -> None:
             "  its context entries, prompt history and board rows stay in the store, hidden "
             "— --purge deletes them; registering the root again brings them back"
         )
-    note = _active_note(report.active, changed=report.active_changed)
+    _say_keys_still_live(report.keys_still_live)
+    note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
     if note is not None:
         console.print(f"  {note}")
+
+
+def _say_keys_still_live(owed: list[PendingRevocation]) -> None:
+    """A purge whose minted keys (#142) could not be revoked yet: which, why, and who retries."""
+    if not owed:
+        return
+    from aisquare.services import destinations  # lazy: the explainability modules
+
+    stdout_console().print(
+        f"  ⚠ {destinations.describe_owed(owed)} — {destinations.REVOKE_RETRY}", markup=False
+    )
 
 
 def emit_prune(report: ProjectPruneReport) -> None:
@@ -305,7 +431,8 @@ def emit_prune(report: ProjectPruneReport) -> None:
             "  their context entries, prompt history and board rows stay in the store, hidden "
             "— --purge deletes them"
         )
-    note = _active_note(report.active, changed=report.active_changed)
+    _say_keys_still_live(report.keys_still_live)
+    note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
     if note is not None:
         console.print(f"  {note}")
 
@@ -387,29 +514,60 @@ def _hook_sites(agent: AgentInfo) -> str:
     """One cell summarising where an agent's hooks live and whether they're healthy.
 
     Parallel installs each own a config dir, so a bare yes/no would hide a dir
-    whose hooks went missing — name the broken ones explicitly.
+    whose hooks went missing — name the broken ones explicitly. A dir whose
+    settings switch every hook off is named as that, and so is one whose files
+    `agents connect` refuses, with connect's reason as the doctor gives it (the file
+    and why, or that the directory does not exist): "missing" pointed at Connect,
+    which cannot change either, and the directory alone named no file (review of
+    #257).
     """
     if not agent.sites:
         return "—"
-    broken = [site.config_dir for site in agent.sites if not site.hooks_installed]
-    if not broken:
+    off = [site.config_dir for site in agent.sites if site.hooks_off is not None]
+    down = [site for site in agent.sites if not site.hooks_installed and site.hooks_off is None]
+    missing = [site.config_dir for site in down if site.refused is None]
+    if not off and not down:
         if len(agent.sites) == 1:
             return str(agent.sites[0].config_dir)
         return f"{len(agent.sites)} dirs, all ok"
-    listed = ", ".join(str(path) for path in broken)
-    return f"{len(agent.sites) - len(broken)}/{len(agent.sites)} ok — missing in {listed}"
+    clauses = [
+        f"{what} in {', '.join(str(path) for path in dirs)}"
+        for what, dirs in (("missing", missing), ("switched off", off))
+        if dirs
+    ]
+    clauses.extend(
+        f"cannot be written in {site.config_dir}: {site.refused}"
+        + (f" — {'; or '.join(site.remedies)}" if site.remedies else "")
+        for site in down
+        if site.refused is not None
+    )
+    ok = len(agent.sites) - len(off) - len(down)
+    return f"{ok}/{len(agent.sites)} ok — {'; '.join(clauses)}"
 
 
 def emit_connected(connection: AgentConnection) -> None:
-    """Confirm an agent connection: hook install + context ingested."""
+    """Confirm an agent connection: hook install + context ingested.
+
+    Hooks installed where the settings switch every hook off are not a connection:
+    Claude Code runs none of them until that key goes, so the line says so and
+    names the file (review of #257).
+    """
     if get_state().json_output:
         typer.echo(connection.model_dump_json())
         return
-    hooks = "hooks installed" if connection.hooks_installed else "no hooks for this agent"
+    # Always installed: `connect` refuses rather than return a connection without hooks.
     noun = "entry" if connection.imported == 1 else "entries"
-    stdout_console().print(
-        f"✓ connected {connection.name} — {hooks}; imported {connection.imported} {noun}"
-    )
+    imported = f"imported {connection.imported} {noun}"
+    if connection.hooks_off is not None:
+        stdout_console().print(
+            f"hooks installed for {connection.name}, but switched off — {imported}"
+        )
+        stderr_console().print(
+            f'note: {connection.hooks_off} sets "disableAllHooks": true, so Claude Code runs '
+            "none of its hooks, aisquare's included — remove that key to turn them on"
+        )
+    else:
+        stdout_console().print(f"✓ connected {connection.name} — hooks installed; {imported}")
     if connection.detail:
         stdout_console().print(connection.detail, markup=False)
 
@@ -421,21 +579,27 @@ def emit_onboard(report: OnboardReport) -> None:
         return
     console = stdout_console()
     snapshot = report.snapshot
-    if snapshot is not None and snapshot.status == "ready":
+    if report.snapshot_note is not None:
+        # Nothing packed: off, a pack that failed and why, or a --refresh that kept
+        # the last pack -- the service's sentence, which `init` prints too.
+        console.print(f"snapshot: {report.snapshot_note}")
+    elif snapshot is not None and snapshot.status == "ready":
         line = f"✓ snapshot: {snapshot.file_count} files, {snapshot.token_count} tokens"
         if snapshot.skeleton_token_count:
             line += f" (skeleton {snapshot.skeleton_token_count} tokens)"
         console.print(line)
     elif snapshot is not None and snapshot.status == "skeleton_only":
         console.print(f"snapshot: {snapshot_core.skeleton_only_detail(snapshot)}")
-    elif snapshot is not None and snapshot.status == "too_large":
+    elif snapshot is not None and snapshot.status == "too_large" and snapshot_core.can_pack():
         # The same sentence the doctor prints (one definition, so the two never
         # disagree on the numbers), plus what to run once a remedy is in place.
+        # Where nothing can pack, no remedy can run: the verdict reads off below,
+        # as the doctor's row does.
         console.print(
             f"snapshot: {snapshot_core.too_large_detail(snapshot)} {snapshot_core.REPACK_HINT}"
         )
     else:
-        console.print("snapshot: skipped (repomix/Node not available)")
+        console.print(f"snapshot: {snapshot_core.skipped_detail()}")
     if report.seeded:
         console.print(f"seeded {len(report.seeded)} project fact(s):")
         for entry in report.seeded:
@@ -581,9 +745,14 @@ def emit_status(report: StatusReport) -> None:
     console.print(f"aisquare: {'initialized' if report.initialized else 'not initialized'}")
     console.print(f"home:     {report.home}")
     console.print(f"project:  {project.root.name or project.id} ({project.id})")
+    hidden = (
+        f" (+{report.captured_count} captured, hidden: aisquare project list --all)"
+        if report.captured_count
+        else ""
+    )
     console.print(
         f"context:  {report.user_entries} user, {report.project_entries} in this project; "
-        f"{report.project_count} project(s) registered"
+        f"{report.project_count} project(s) registered{hidden}"
     )
     console.print(f"detected: {', '.join(report.agents_detected) or 'none'}")
     console.print(f"connected: {', '.join(report.agents_connected) or 'none'}")

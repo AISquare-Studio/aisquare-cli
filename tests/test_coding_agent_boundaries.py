@@ -13,15 +13,14 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.cli.ui.views.welcome import presence_lines
 from aisquare.core import agents, harness, paths
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters.types import config_home
 from aisquare.core.config import FleetRoleSettings, RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
-from aisquare.models import TeamSession
-from aisquare.services import agent_launch, fleet, mcp_server, native_telemetry
+from aisquare.models import CheckStatus, TeamSession
+from aisquare.services import agent_launch, diagnostics, fleet, mcp_server, native_telemetry
 from tests.test_fleet_service import FakeTmux
 
 
@@ -221,7 +220,9 @@ def test_unknown_wrappers_require_a_family_before_model_flags(
 
 
 @pytest.mark.parametrize("source", ["config", "environment", "binary-conflict"])
-def test_welcome_displays_selection_errors(source: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_doctor_displays_selection_errors(source: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Welcome's tool lines, where this was first shown, became main's guided first run
+    # (Claude Code's); the doctor's coding-agent row is where a selection error shows.
     config = load_config()
     if source == "config":
         config.agents.default = "future-agent"
@@ -230,12 +231,9 @@ def test_welcome_displays_selection_errors(source: str, monkeypatch: pytest.Monk
     else:
         config.team.profiles["coder"] = RoleLaunchProfile(agent="claude-code", bin="codex")
     save_config(config)
-    message = presence_lines().plain
-    assert "coding agent:" in message and "Settings" in message
-    assert "tmux" in message and "gh" in message
-    rows = [line for line in message.splitlines() if "✓" in line or "✗" in line]
-    assert len(rows) == 3
-    assert "tmux" in rows[0] and "✗ coding agent:" in rows[1] and "gh" in rows[2]
+    rows = [check for check in diagnostics._check_other_agents() if check.name == "coding-agent"]
+    assert len(rows) == 1 and rows[0].status is CheckStatus.warn, rows
+    assert rows[0].detail and "aisquare agents use" in (rows[0].fix or ""), rows[0]
 
 
 def test_damaged_config_keeps_codex_launch_native_and_clears_parent_tracing(
@@ -387,18 +385,27 @@ def test_other_handlers_do_not_reset_aisquare_readiness(tmp_path: Path, mixed: b
     assert agents.integration_readiness("codex", tmp_path)[0] == "unverified"
 
 
-@pytest.mark.parametrize("agent", ["claude-code", "codex"])
+# Claude Code's settings.json is main's: a file that is not a JSON object is refused and
+# named (tests/test_agent_adapters.py), and hooks of another shape are replaced with ours.
+@pytest.mark.parametrize("agent", ["codex"])
 @pytest.mark.parametrize("action", ["connect", "disconnect"])
-@pytest.mark.parametrize("original", ['{"hooks": {},}', '{"hooks": []}', "[]"])
+@pytest.mark.parametrize(
+    ("original", "why"),
+    [
+        ('{"hooks": {},}', "not valid JSON"),
+        ('{"hooks": []}', "repair the file"),
+        ("[]", "not a JSON object"),
+    ],
+)
 def test_invalid_settings_are_preserved_with_an_actionable_cli_error(
-    agent: str, action: str, original: str, tmp_path: Path, runner: CliRunner
+    agent: str, action: str, original: str, why: str, tmp_path: Path, runner: CliRunner
 ) -> None:
     path = tmp_path / get_adapter(agent).settings_name
     path.write_text(original)
     result = runner.invoke(app, ["--json", "agents", action, agent, "--config-dir", str(tmp_path)])
     assert result.exit_code == 1, result.output
-    assert "agent_configuration" in result.output and str(path) in result.output
-    assert "repair" in result.output.lower()
+    assert "agent_file_unreadable" in result.output and str(path) in result.output
+    assert why in result.output.lower() or why in result.output, result.output
     assert path.read_text() == original
 
 

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from aisquare.core import harness
+from aisquare.core import harness, paths
 
 
 @dataclass(frozen=True)
@@ -84,9 +84,20 @@ def config_home(
     env: Mapping[str, str],
     explicit: Path | None = None,
 ) -> Path:
-    """Resolve against the environment the selected executable will actually use."""
+    """Resolve against the environment the selected executable will actually use.
+
+    A ``~olduser`` this machine does not have is kept as written (``paths.expand_user``),
+    so ``paths.names_no_home`` still refuses to make it; a symlink loop is not resolved.
+    Claude Code's directory, as ``core.agents`` names it, is ``core.agents._claude_home``.
+    """
     raw = explicit or env.get(adapter.home_env, "").strip() or home / adapter.home_name
-    return Path(raw).expanduser().resolve()
+    path = paths.expand_user(Path(raw))
+    if paths.names_no_home(path):
+        return path
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return path.absolute()
 
 
 @dataclass(frozen=True)

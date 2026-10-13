@@ -377,13 +377,16 @@ def test_unreadable_hook_settings_have_a_repair_diagnostic(
         )
     )
     assert check.status == CheckStatus.warn and "permission denied" in check.detail
-    assert "Repair" in (check.fix or "") and "connect" not in (check.fix or "")
+    # Claude Code's row is main's: "repair <file>", or take the hooks out (`disconnect`).
+    assert "repair" in (check.fix or "").lower() and "agents connect" not in (check.fix or "")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX filesystem semantics")
 @pytest.mark.parametrize("kind", ["fifo", "device"])
 def test_connect_rejects_special_settings_files_without_blocking(kind: str, tmp_path: Path) -> None:
     settings = tmp_path / "hooks.json"
+    if sys.platform == "win32":  # mypy narrows on this, not on the skipif that keeps it off
+        pytest.skip("no FIFOs on Windows")
     if kind == "fifo":
         os.mkfifo(settings)
     else:
@@ -409,9 +412,13 @@ def test_hook_writes_preserve_mode_and_other_hard_links(tmp_path: Path) -> None:
     os.link(settings, sibling)
     original = settings.read_bytes()
     assert agents.remove_hooks("codex", tmp_path)
-    assert sibling.read_bytes() == original
+    # A file with a second name is written in place, so both names keep one file (main's
+    # rule for a dotfiles tool that hard-links, core.agents._as_it_was): neither name keeps
+    # hooks the other has lost.
     assert settings.read_bytes() != original
-    assert settings.stat().st_ino != sibling.stat().st_ino
+    assert sibling.read_bytes() == settings.read_bytes()
+    assert settings.stat().st_ino == sibling.stat().st_ino
+    assert stat.S_IMODE(settings.stat().st_mode) == 0o644
 
 
 def test_failed_stop_releases_claim_and_cli_reports_the_actual_cost(

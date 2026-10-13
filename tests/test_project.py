@@ -176,17 +176,19 @@ def test_onboard_over_budget_keeps_a_skeleton_and_the_knob_is_what_it_measures_a
 
 
 def test_onboard_reports_a_legacy_too_large_verdict_with_its_numbers(
-    runner: CliRunner, work_dir: Path
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A snapshot.json written before ``skeleton_only`` existed: a plain `onboard` reloads it.
 
     The line names all three numbers and both knobs — ``[snapshot]`` is bracketed
     text Rich would eat with markup on, so this reads the RENDERED output — and
-    ends with the ``--refresh`` that turns the verdict into a skeleton.
+    ends with the ``--refresh`` that turns the verdict into a skeleton. On a machine
+    that can pack: where nothing can, it reads off (test_snapshot_optional_without_node.py).
     """
     from aisquare.core import snapshot
     from aisquare.core.workspace import project_id_for
 
+    monkeypatch.setattr(snapshot, "can_pack", lambda: True)
     project_id = project_id_for(work_dir.resolve())
     snapshot.snapshot_dir(project_id).mkdir(parents=True, exist_ok=True)
     verdict = Snapshot(
@@ -212,3 +214,22 @@ def test_onboard_reports_a_legacy_too_large_verdict_with_its_numbers(
         "ignore (aisquare config set snapshot.ignore '<glob>,<glob>') or a .repomixignore at "
         "the repo root. Re-pack: aisquare project onboard --refresh"
     ) in result.stdout
+
+
+def test_switch_says_so_when_the_state_file_is_not_a_json_object(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """`pin_project` used to raise the JSON error itself, which `switch` reported as
+    `ambiguous_project`; a refused pin has its own error now, and the file is left as it is."""
+    from aisquare.core import paths
+
+    runner.invoke(app, ["context", "add", "a note", "--project"])  # registers the cwd project
+    paths.ensure_home()
+    body = '["was", "a", "list"]\n'
+    paths.state_path().write_text(body)
+
+    result = runner.invoke(app, ["--json", "project", "switch", "work"])
+
+    assert result.exit_code == 1, result.output
+    assert _json(result.stdout)["error"] == "state_unwritable"
+    assert paths.state_path().read_text() == body

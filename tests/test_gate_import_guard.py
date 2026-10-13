@@ -24,10 +24,36 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import sys
 from pathlib import Path
 from types import ModuleType
 
 CONFTEST = Path(__file__).resolve().parent / "conftest.py"
+
+
+def _abs(*parts: str) -> Path:
+    """An absolute path on THIS platform, from POSIX-shaped parts.
+
+    ``Path("/repo/src")`` is absolute on POSIX and merely DRIVE-RELATIVE on
+    Windows: it carries no drive, so ``.resolve()`` inside the checker attaches
+    whichever drive the suite happens to be running from. The comparison then
+    comes out as ``N:/repo/src/aisquare/__init__.py`` against a driveless
+    ``/repo/src`` — never relative to it — so the checker reported the tree it
+    was actually grading as foreign, and the "this tree is fine" case failed.
+
+    The paths are still fictional; they are just fictional in a form the
+    running platform agrees is absolute.
+    """
+    root = Path(Path.cwd().anchor) if sys.platform == "win32" else Path("/")
+    return root.joinpath(*parts)
+
+
+#: The two fictional trees these cases are written against.
+_SRC = _abs("repo", "src")
+_FOREIGN = _abs(
+    "home", "user", ".pyenv", "versions", "3.12.3", "lib", "python3.12", "site-packages"
+)
+_ELSEWHERE = _abs("elsewhere")
 
 
 def _load_conftest() -> ModuleType:
@@ -53,21 +79,18 @@ conftest = _load_conftest()
 def test_a_foreign_package_is_reported() -> None:
     """The failure case, with the shape that actually occurs."""
     reason = conftest._foreign_package_reason(
-        Path("/home/user/.pyenv/versions/3.12.3/lib/python3.12/site-packages/aisquare/__init__.py"),
-        Path("/repo/src"),
+        _FOREIGN / "aisquare" / "__init__.py",
+        _SRC,
     )
 
     assert reason is not None
     assert "site-packages" in reason
-    assert "/repo/src" in reason
+    assert str(_SRC) in reason
 
 
 def test_this_tree_is_not_reported() -> None:
     """The passing case must actually pass, or the guard blocks every run."""
-    assert (
-        conftest._foreign_package_reason(Path("/repo/src/aisquare/__init__.py"), Path("/repo/src"))
-        is None
-    )
+    assert conftest._foreign_package_reason(_SRC / "aisquare" / "__init__.py", _SRC) is None
 
 
 def test_a_namespace_package_is_reported_rather_than_crashing() -> None:
@@ -87,12 +110,12 @@ def test_a_namespace_package_is_reported_rather_than_crashing() -> None:
     where `__file__` was None, those imports succeeded, and the pre-fix hook
     raised.
     """
-    reason = conftest._foreign_package_reason(None, Path("/repo/src"))
+    reason = conftest._foreign_package_reason(None, _SRC)
 
     assert reason is not None, "a namespace package must be refused, not crash"
     assert "namespace" in reason
     assert "sys.path" in reason
-    assert "/repo/src" in reason
+    assert str(_SRC) in reason
 
 
 def test_the_checker_accepts_the_raw_dunder_file_value() -> None:
@@ -102,11 +125,8 @@ def test_the_checker_accepts_the_raw_dunder_file_value() -> None:
     outside every test that covers it — which is exactly how the None case got
     in. This pins the contract that the checker owns the conversion.
     """
-    assert (
-        conftest._foreign_package_reason("/repo/src/aisquare/__init__.py", Path("/repo/src"))
-        is None
-    )
-    assert conftest._foreign_package_reason("/elsewhere/aisquare/__init__.py", Path("/repo/src"))
+    assert conftest._foreign_package_reason(str(_SRC / "aisquare" / "__init__.py"), _SRC) is None
+    assert conftest._foreign_package_reason(str(_ELSEWHERE / "aisquare" / "__init__.py"), _SRC)
 
 
 def test_the_reason_carries_the_fix_and_the_trap() -> None:
@@ -117,7 +137,7 @@ def test_the_reason_carries_the_fix_and_the_trap() -> None:
     `.venv` does not exist yet. Someone hitting this guard has very likely just
     typed exactly that.
     """
-    reason = conftest._foreign_package_reason(Path("/elsewhere/aisquare/__init__.py"), Path("/s"))
+    reason = conftest._foreign_package_reason(_ELSEWHERE / "aisquare" / "__init__.py", _abs("s"))
 
     assert reason is not None
     assert "venv" in reason

@@ -21,6 +21,8 @@ class ClaudeCodeAdapter:
             HookSpec("SessionEnd", "session-end"),
             HookSpec("Stop", "stop"),
             HookSpec("Notification", "notification"),
+            # Fires INSTEAD of Stop when a turn ends on an API error (#146): core.agents._HOOKS.
+            HookSpec("StopFailure", "stop-failure"),
         ),
         assigns_session_id=True,
         model_proxy=True,

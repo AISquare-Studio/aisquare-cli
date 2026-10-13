@@ -4,26 +4,46 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aisquare-cli"
-version = "0.6.0"
-description = "Portable memory layer for coding agents — persistent user and project context across sessions."
+version = "0.8.0"
+description = "One terminal over your projects and your coding agents: task a manager in plain words, and it runs the coders, testers and reviewers for you."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "AISquare", email = "anmol@aisquare.studio" }]
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["cli", "ai", "agents", "memory", "context"]
+keywords = [
+  "cli",
+  "tui",
+  "terminal",
+  "coding-agents",
+  "ai-agents",
+  "claude-code",
+  "multi-agent",
+  "agent-orchestration",
+  "agent-memory",
+  "tmux",
+  "developer-tools",
+]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 4 - Beta",
   "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  # The CLI and memory run natively, and CI tests windows-latest. The fleet UI
+  # needs tmux, so on Windows it runs inside WSL2.
+  "Operating System :: Microsoft :: Windows",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development",
   "Typing :: Typed",
 ]
 dependencies = [
   "typer>=0.26.8",
-  "rich>=13.7",
+  "rich>=14.3",  # rich.cells.split_graphemes (cli/ui/terminal) exists from 14.3.0
   "pydantic>=2.13.4",
   "tomli-w>=1.2.0",
   # Core since the fleet UI became the default surface (bare `asq` opens it —
@@ -31,6 +51,13 @@ dependencies = [
   # cli/watch.py and cli/ui/ lean on 8.2.x internals. Imported lazily, only by
   # the UI entry, so the hook path pays nothing for it.
   "textual>=8.2,<9",
+  # Windows ships no IANA time zone database, and `zoneinfo` falls back to this
+  # package for one. Without it `ZoneInfo("America/Toronto")` raises there, so a
+  # limit message's named zone was dropped for the offset in force NOW, and a
+  # weekly reset across a DST change came out an hour off: the bug round 4 of
+  # #205 fixed, back on one platform (core/claude_accounts._resolve_reset).
+  # Linux and macOS read /usr/share/zoneinfo and do not install it.
+  "tzdata; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -125,9 +152,15 @@ asq = "aisquare.cli.app:main"
 Homepage = "https://aisquare.studio"
 Repository = "https://github.com/AISquare-Studio/aisquare-cli"
 Issues = "https://github.com/AISquare-Studio/aisquare-cli/issues"
+Changelog = "https://github.com/AISquare-Studio/aisquare-cli/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aisquare"]
+
+[tool.hatch.build.targets.sdist]
+# The demo's renders (docs/demo.tape) are pictures for the README and the
+# release notes, re-rendered rather than built from; no build reads them.
+exclude = ["/docs/demo.gif", "/docs/demo/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

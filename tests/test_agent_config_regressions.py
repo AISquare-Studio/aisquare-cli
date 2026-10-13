@@ -118,7 +118,9 @@ def test_numbered_seats_do_not_inherit_base_worktrees_or_claude_flags(
         assert command[command.index("--ask-for-approval") + 1] == "on-request"
 
 
-@pytest.mark.parametrize("family,filename", [("claude-code", "CLAUDE.md"), ("codex", "AGENTS.md")])
+# Claude Code's CLAUDE.md is main's: one connect cannot read is a named refusal
+# (tests/test_agent_adapters.py), never skipped with a note.
+@pytest.mark.parametrize("family,filename", [("codex", "AGENTS.md")])
 def test_unreadable_instructions_leave_a_note_and_still_install_hooks(
     family: str,
     filename: str,
@@ -323,7 +325,7 @@ def test_native_launch_does_not_disable_tracing_for_prompts_or_unusable_config_o
     monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
     monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/codex")
     start = Mock(return_value=(["-c", "fixture.receiver=true"], "fixture receiver started"))
-    monkeypatch.setattr(native_telemetry, "start", start)
+    monkeypatch.setattr(native_telemetry, "start_receiver", start)
     execute = Mock()
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
     result = runner.invoke(app, ["launch", "coder", "--agent", "codex", "--", *args])
@@ -370,7 +372,7 @@ def test_unusable_native_config_layers_stand_down_with_the_exact_path(
     config.explainability.enabled = config.explainability.ship = True
     save_config(config)
     start = Mock()
-    monkeypatch.setattr(native_telemetry, "start", start)
+    monkeypatch.setattr(native_telemetry, "start_receiver", start)
     selected = agent_launch.resolve(agent="codex", env_overrides={"CODEX_HOME": str(tmp_path)})
     injected, note = agent_launch.telemetry_args(selected, {}, ["--profile", "work"])
     assert injected == [] and str(path) in note and layer in note
@@ -413,9 +415,12 @@ def test_profile_exporter_overrides_follow_the_selected_profile(
     assert not native_telemetry.operator_configured(tmp_path, [*overrides, "-p", "clean"])
 
 
-def test_sign_in_installs_hooks_into_a_fresh_home_despite_unreadable_instructions(
+def test_sign_in_keeps_the_login_and_names_unreadable_instructions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # An unreadable CLAUDE.md is a named refusal for Claude Code's connect (main's, in
+    # tests/test_agent_adapters.py), so the sign-in keeps the login and says why its hooks
+    # are not in; once the file reads, the same sign-in installs them.
     account = claude_accounts.default_account({"CLAUDE_CONFIG_DIR": str(tmp_path)})
     instruction = tmp_path / "CLAUDE.md"
     instruction.touch()
@@ -426,22 +431,23 @@ def test_sign_in_installs_hooks_into_a_fresh_home_despite_unreadable_instruction
             raise PermissionError("fixture: unreadable instructions")
         return read(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "open", read_text)
-    assert not accounts_service.describe(account).hooks_installed
-    assert not (tmp_path / "settings.json").exists()
-    completed = accounts_service.complete_sign_in(account)
-    assert completed.hooks_installed and (tmp_path / "settings.json").exists()
-    assert agents.hooks_installed("claude-code", tmp_path)
-    for status in (completed, accounts_service.describe(account)):
+    with monkeypatch.context() as unreadable:
+        unreadable.setattr(Path, "open", read_text)
+        unreadable.setattr(Path, "read_text", lambda path, *a, **k: read_text(path).read())
+        assert not accounts_service.describe(account).hooks_installed
+        completed = accounts_service.complete_sign_in(account)
+        described = accounts_service.describe(account)
+    assert not completed.hooks_installed and not (tmp_path / "settings.json").exists()
+    for status in (completed, described):
         assert str(instruction) in status.detail and "unreadable instructions" in status.detail
+    assert accounts_service.complete_sign_in(account).hooks_installed, "control: readable"
+    assert agents.hooks_installed("claude-code", tmp_path)
 
 
+# Claude Code's CLAUDE.md is main's: one that is not a regular file is a named refusal.
 @pytest.mark.parametrize(
     "family,filename,home_env",
-    [
-        ("claude-code", "CLAUDE.md", "CLAUDE_CONFIG_DIR"),
-        ("codex", "AGENTS.override.md", "CODEX_HOME"),
-    ],
+    [("codex", "AGENTS.override.md", "CODEX_HOME")],
 )
 def test_list_and_init_keep_failed_context_paths_and_explanations(
     family: str,
@@ -479,6 +485,8 @@ def test_list_and_init_keep_failed_context_paths_and_explanations(
 @pytest.mark.parametrize("kind", ["fifo", "device", "regular-symlink"])
 def test_context_inspection_never_opens_special_files(kind: str, tmp_path: Path) -> None:
     instruction = tmp_path / "AGENTS.md"
+    if sys.platform == "win32":  # mypy narrows on this, not on the skipif that keeps it off
+        pytest.skip("no FIFOs on Windows")
     if kind == "fifo":
         os.mkfifo(instruction)
     elif kind == "device":
@@ -571,7 +579,7 @@ def test_actual_launch_preserves_attached_options_and_native_prompt_terminators(
     monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/codex")
     start = Mock(return_value=(["-c", "fixture.receiver=true"], "receiver started"))
     execute = Mock()
-    monkeypatch.setattr(native_telemetry, "start", start)
+    monkeypatch.setattr(native_telemetry, "start_receiver", start)
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
     result = runner.invoke(app, ["launch", "coder", "--agent", "codex", "--", *args])
     assert result.exit_code == 0, result.output

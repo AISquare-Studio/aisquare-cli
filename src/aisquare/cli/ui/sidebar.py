@@ -36,13 +36,25 @@ from typing import ClassVar
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static
 
-from aisquare.models import FleetAgentStatus, ProjectInfo
+from aisquare.cli.ui.groups import (
+    DragState,
+    DropGroup,
+    DropProject,
+    GroupProjects,
+    MoveRow,
+    ToggleCollapse,
+    TogglePin,
+    UndoLayout,
+)
+from aisquare.models import FleetAgentStatus, ProjectGroup, ProjectInfo
+from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
 
 ROLE_ICON: dict[str, str] = {
     "manager": "🧭",
@@ -59,6 +71,7 @@ STATE_CHIP: dict[str, tuple[str, str]] = {
     "working": ("▶", "green"),
     "waiting": ("⏸", "yellow"),
     "attention": ("🔔", "bold red"),
+    "limited": ("⏳", "magenta"),
     "exited": ("💤", "dim"),
     "lost": ("✗", "red"),
     "unknown": ("·", "dim"),
@@ -66,8 +79,9 @@ STATE_CHIP: dict[str, tuple[str, str]] = {
 CUSTOM_ROLE_ICON = "🤖"
 """The icon for a role the table above does not know (a `team bind` role, say)."""
 
-ALIVE_STATES: frozenset[str] = frozenset({"working", "waiting", "attention", "unknown"})
-"""States that count toward the card's "agents alive" chip."""
+ALIVE_STATES: frozenset[str] = frozenset({"working", "waiting", "attention", "limited", "unknown"})
+"""States that count toward the card's "agents alive" chip — a limited agent is
+alive and parked (#146), not gone."""
 
 DOCTOR_LINES = 3
 """How many ⚠/✗ lines the Doctor section shows under its counts (§4.1)."""
@@ -106,6 +120,23 @@ class AccountsSelected(Message):
     """The Accounts section: the AISquare sign-in and the Claude Code accounts."""
 
 
+RESIZE_STEP = 4
+"""Columns one keyboard step moves the partition (#137)."""
+
+
+class ResizeSidebar(Message):
+    """The keyboard asks for the partition to move ``delta`` columns; ``None`` puts it back.
+
+    Posted by the sidebar, handled by the container that owns both it and the
+    divider (``app.Panes``): the two are siblings, and a bubbled message reaches
+    their parent, never each other.
+    """
+
+    def __init__(self, delta: int | None) -> None:
+        self.delta = delta
+        super().__init__()
+
+
 # --- pure helpers (unit-testable without a running app) -----------------------------
 
 
@@ -138,8 +169,11 @@ def agent_row_text(status: FleetAgentStatus) -> Text:
     text.append(f"{ROLE_ICON.get(agent.role, CUSTOM_ROLE_ICON)} ")
     text.append(f"{agent.label:<13} ")
     text.append(chip, style=style)
-    if status.state == "exited" and agent.exit_status is not None:
-        text.append(f"({agent.exit_status})", style="dim")
+    if status.state == "exited":
+        # 💤 alone read as "sleeping" (#138); the word says what happened.
+        text.append(" exited", style="dim")
+        if agent.exit_status is not None:
+            text.append(f"({agent.exit_status})", style="dim")
     return text
 
 
@@ -149,6 +183,9 @@ def project_title_text(project: ProjectInfo, statuses: list[FleetAgentStatus]) -
     text.append(f"🗂 {project_name(project)}")
     if project.codename:
         text.append(f"  {project.codename}", style="dim")
+    if project.onboarded_at is None:
+        # Listed only while the shell shows captured directories (#139).
+        text.append("  captured", style="dim italic")
     alive = sum(1 for s in statuses if s.state in ALIVE_STATES)
     bells = sum(1 for s in statuses if s.state == "attention")
     if alive or bells:
@@ -290,8 +327,117 @@ class Disclosure(Static):
         return None
 
 
-class ProjectTitle(Activatable):
-    """The card's header line: name, codename badge, chips. Click → Project view."""
+class DragHandle(Activatable):
+    """A row that is also a drag handle (#140): a card's title, a group header.
+
+    The HANDLE holds the mouse from the press to the release, so the whole
+    gesture comes back to it, in order: the moves and the release are handed to
+    the sidebar's drag, and a press released without motion is still the row's
+    click. It must be the handle, not the sidebar: the app turns a MouseUp over
+    the pressed widget into a Click in the same call that queues the MouseUp,
+    and routes it by the capture standing then. Held by the sidebar, every
+    Click went to the sidebar — a plain click on a title opened nothing and one
+    on a header folded nothing (review of #171, round 1; ``pilot.click`` pauses
+    between its events, so the suite never saw it).
+    """
+
+    ALLOW_SELECT: ClassVar[bool] = False
+    """A drag handle is not text, as the divider is not (``divider.py`` says why).
+
+    The screen opens a text selection on the press BEFORE it forwards it, so the
+    capture ``on_mouse_down`` takes is too late to stop it, and every move of
+    the drag extended it: a regroup left a highlight across the sidebar, and a
+    card released over an agent's pane copied the pane's rows and left them
+    standing, so the pane's next ctrl+c copied instead of interrupting the
+    agent (final review of #203, F1).
+    """
+
+    _dragged = False
+    """Whether the gesture that just ended here was a drag (so its Click is not a click)."""
+
+    def drag_state(self, sidebar: Sidebar) -> DragState | None:  # pragma: no cover - overridden
+        """What a press here would drag; ``None`` when nothing here moves (a pinned row)."""
+        raise NotImplementedError
+
+    def dragged_row(self) -> Widget:
+        """The row a drag from here moves: it dims while it moves."""
+        return self
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        self._dragged = False
+        sidebar = self._sidebar()
+        if sidebar is None:
+            return
+        if event.button == 1 and sidebar.dragging(self):
+            # Button 1 pressed while a press of it still holds a drag from here:
+            # that release was lost, on a terminal that reports no motion without
+            # a button, so no buttonless move ended the drag (``drag_over`` does
+            # where one is reported; DUPLICATE_PRESS_WINDOW is SelectionHost's
+            # side of the same case). This press reached the handle only because
+            # the handle still held the mouse. The old drag ends and snaps back,
+            # the handle lets go, and this press starts nothing: its release is a
+            # click on the row under the pointer. Re-armed here, the handle kept
+            # the mouse, the Click came to it, and a click on api opened docs
+            # (review of #171, round 2).
+            self.release_mouse()
+            sidebar.cancel_drag(self)
+            return
+        if event.button != 1 or event.shift:
+            return  # a shift+click is a mark, decided on the click
+        state = self.drag_state(sidebar)
+        if state is None:
+            return  # nothing to drag: the press stays a click
+        state.origin_y = event.screen_y
+        sidebar.begin_drag(state, self)
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        sidebar = self._sidebar()
+        if sidebar is not None:
+            sidebar.drag_over(self, event)
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        sidebar = self._sidebar()
+        if sidebar is None:
+            return
+        if event.button != 1:
+            # Only button 1 drags, so another button's release ends nothing here.
+            # Under FleetApp it arrives only as a lone click of that button: while
+            # button 1 is down, SelectionHost drops a second button's press and
+            # release at the app, before the screen sees either. Should one reach
+            # a held drag all the same, the drag goes on, and the Click the app
+            # builds from the release is no click.
+            self._dragged = sidebar.dragging(self)
+            return
+        self._dragged = sidebar.end_drag(self)
+
+    def on_click(self, event: events.Click) -> None:
+        if self._dragged:
+            # The release of a drag is not a click. Textual runs ``on_click`` of
+            # every class in the MRO, so returning alone would still let
+            # ``Activatable.on_click`` open the row: ``prevent_default`` is the stop.
+            self._dragged = False
+            event.stop()
+            event.prevent_default()
+
+    def on_unmount(self) -> None:
+        # Removed mid-drag (its project forgotten, its group deleted from a
+        # shell): Textual keeps a capture on a widget that is gone, and every
+        # later mouse event would be delivered nowhere. The drag goes with it:
+        # its release now lands on another widget, which ends no drag, so the
+        # drop mark stayed on the card under the pointer.
+        self.release_mouse()
+        sidebar = self._sidebar()
+        if sidebar is not None:
+            sidebar.cancel_drag(self)
+
+
+class ProjectTitle(DragHandle):
+    """The card's header line: name, codename badge, chips. Click → Project view.
+
+    Also the card's drag handle (#140): press and hold, move, drop on a group
+    header or between cards. A shift+click marks the card for a multi-selection
+    instead of opening it.
+    """
 
     DEFAULT_CSS = """
     ProjectTitle { width: 1fr; }
@@ -304,6 +450,38 @@ class ProjectTitle(Activatable):
 
     def message(self) -> Message:
         return ProjectSelected(self.project_id)
+
+    def drag_state(self, sidebar: Sidebar) -> DragState | None:
+        """The card, or the selection it is in — never a pinned card.
+
+        A pinned card's place is the pin order, which is ``p``'s: ``step`` calls
+        it "nothing to move", and no card or empty space is a place for it.
+        Dragged, it left its group with its card still under Pinned — nothing on
+        screen changed, and ``u`` had a step to undo (review of #171, round 1).
+        """
+        pinned = sidebar.pinned_ids()
+        if self.project_id in pinned:
+            return None
+        ids = sidebar.marked_ids()
+        if self.project_id not in ids:
+            ids = [self.project_id]
+        return DragState("project", self.project_id, [pid for pid in ids if pid not in pinned])
+
+    def dragged_row(self) -> Widget:
+        # The whole card moves, not this line of it: only the card's dimming is styled.
+        for node in self.ancestors:
+            if isinstance(node, ProjectCard):
+                return node
+        return self
+
+    def on_click(self, event: events.Click) -> None:
+        sidebar = self._sidebar()
+        if event.shift and sidebar is not None:
+            # A mark, not an open: ``prevent_default`` keeps the handlers of the
+            # base classes (which open the row) from running after this one.
+            event.stop()
+            event.prevent_default()
+            sidebar.toggle_mark(self.project_id)
 
 
 class AgentRow(Activatable):
@@ -344,6 +522,72 @@ class SpawnRow(Activatable):
         return SpawnAgent(self.project_id)
 
 
+def group_header_text(entry: GroupEntry, agents: Mapping[str, list[FleetAgentStatus]]) -> Text:
+    """``▾ 📁 frontend  3 · 🔔1`` — the disclosure, the name, and the roll-up over its members.
+
+    The roll-up sums ``ALIVE_STATES`` and the bells over EVERY member, the
+    pinned ones included (they are listed under Pinned but they are still the
+    group's), so a collapsed group still says something is running in it.
+    """
+    text = Text(no_wrap=True, overflow="ellipsis")
+    text.append("▸ " if entry.group.collapsed else "▾ ")
+    text.append(f"📁 {entry.group.name}", style="bold")
+    if entry.group.pinned_at is not None:
+        text.append(" 📌", style="dim")
+    members = [*entry.members, *entry.pinned_members]
+    statuses = [s for member in members for s in agents.get(member.id, [])]
+    alive = sum(1 for s in statuses if s.state in ALIVE_STATES)
+    bells = sum(1 for s in statuses if s.state == "attention")
+    if alive or bells:
+        text.append("  ")
+    if alive:
+        text.append(str(alive), style="bold")
+    if bells:
+        if alive:
+            text.append(" · ", style="dim")
+        text.append(f"🔔{bells}", style="bold red")
+    return text
+
+
+class GroupHeader(DragHandle):
+    """A group's line: Enter or a click folds and unfolds it; drag it to reorder groups (#140)."""
+
+    # Two rows while it is the drop target: the accent line takes one, and on a
+    # one-row header it took the only row — the name went blank under the pointer.
+    DEFAULT_CSS = """
+    GroupHeader { padding: 0 1; color: $text; background: $boost; }
+    GroupHeader.-dragging { opacity: 60%; }
+    GroupHeader.-drop-before { height: 2; border-top: solid $accent; }
+    """
+
+    def __init__(self, entry: GroupEntry, agents: Mapping[str, list[FleetAgentStatus]]) -> None:
+        super().__init__(group_header_text(entry, agents), id=f"group-{entry.group.id}")
+        self.group: ProjectGroup = entry.group
+        self.selection_key = f"group:{entry.group.id}"
+
+    def show(self, entry: GroupEntry, agents: Mapping[str, list[FleetAgentStatus]]) -> None:
+        self.group = entry.group
+        self.update(group_header_text(entry, agents))
+
+    def message(self) -> Message:
+        return ToggleCollapse(self.group.id)
+
+    def drag_state(self, sidebar: Sidebar) -> DragState | None:
+        # A pinned group keeps its pin order, as a pinned card does (``step_group``
+        # has nothing to move either): dropped, it renumbered the unpinned groups.
+        if self.group.pinned_at is not None:
+            return None
+        return DragState("group", self.group.id)
+
+
+class SectionLabel(Static):
+    """``📌 Pinned`` — a heading that is not a row (the cursor skips it)."""
+
+    DEFAULT_CSS = """
+    SectionLabel { height: 1; padding: 0 1; color: $text-muted; text-style: italic; }
+    """
+
+
 class ProjectCard(Vertical):
     """One project: header row, optional path subtitle, agent rows, spawn row.
 
@@ -356,6 +600,10 @@ class ProjectCard(Vertical):
     ProjectCard { height: auto; padding: 0 1; }
     ProjectCard.even { background: $surface; }
     ProjectCard.odd { background: $panel; }
+    ProjectCard.grouped { padding-left: 2; }
+    ProjectCard.marked #card-header { background: $secondary 30%; }
+    ProjectCard.-dragging { opacity: 60%; }
+    ProjectCard.-drop-before { border-top: solid $accent; }
     ProjectCard #card-header { height: 1; }
     ProjectCard .card-subtitle {
         height: 1; padding-left: 3; color: $text-muted;
@@ -380,6 +628,8 @@ class ProjectCard(Vertical):
         self.subtitle = subtitle
         self.notice = notice
         self.collapsed = False
+        self.scope: str | None = None
+        """The group this card is shown under, or ``None`` at the top level / under Pinned."""
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="card-header"):
@@ -523,8 +773,7 @@ class Sidebar(Vertical):
     """
 
     DEFAULT_CSS = """
-    Sidebar { width: 30; min-width: 24; border-right: solid $primary; }
-    Sidebar:focus { border-right: solid $accent; }
+    Sidebar { width: 30; min-width: 24; }
     Sidebar #fleet-header { height: 1; padding: 0 1; }
     Sidebar #fleet-title { width: 1fr; text-style: bold; }
     Sidebar #projects { height: 1fr; }
@@ -536,6 +785,31 @@ class Sidebar(Vertical):
         ("down", "cursor_down", "next"),
         ("up", "cursor_up", "previous"),
         ("enter", "activate", "open"),
+        # The partition, for terminals without mouse reporting (#137): live only
+        # while the sidebar has focus, so a pane still receives < > = as text.
+        # Out of the footer (it is full); the help screen (?) lists them.
+        Binding(
+            "greater_than_sign", f"resize({RESIZE_STEP})", "wider", show=False, key_display=">"
+        ),
+        Binding(
+            "less_than_sign", f"resize(-{RESIZE_STEP})", "narrower", show=False, key_display="<"
+        ),
+        Binding("equals_sign", "resize(None)", "reset width", show=False, key_display="="),
+        # Groups, pins and order (#140) — every gesture here has a CLI twin.
+        Binding("shift+up", "move_up", "move up", show=False),
+        Binding("shift+down", "move_down", "move down", show=False),
+        Binding("p", "toggle_pin", "pin", show=False),
+        Binding("g", "group_picker", "group", show=False),
+        # Shift+G arrives as `G` from a legacy terminal, and from the kitty
+        # protocol at the flags Textual enables (the shift is dropped when the
+        # key carries text); only a kitty report with no text is `shift+g`.
+        # Bound to `shift+g` alone, the gesture the help screen names did
+        # nothing in practically every terminal (final review of #203, F4).
+        Binding("G,shift+g", "group_marked", "group selection", show=False),
+        Binding("m", "toggle_mark", "mark", show=False),
+        Binding("space", "toggle_collapse", "fold", show=False),
+        Binding("u", "undo_layout", "undo", show=False),
+        Binding("escape", "clear_marks", "clear marks", show=False),
     ]
 
     can_focus = True
@@ -547,6 +821,13 @@ class Sidebar(Vertical):
         self._prev_states: dict[str, str] = {}
         self._cursor_key: str | None = None
         self.last_frame: tuple[list[ProjectInfo], dict[str, list[FleetAgentStatus]]] | None = None
+        self.arrangement: Arrangement | None = None
+        """The order the last frame was painted in (groups, pins, loose) — #140."""
+        self._marked: list[str] = []
+        """Project ids marked into a multi-selection (shift+click or ``m``), in marking order."""
+        self._drag: DragState | None = None
+        self._drag_source: DragHandle | None = None
+        self._drop_target: Widget | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="fleet-header"):
@@ -557,7 +838,7 @@ class Sidebar(Vertical):
         # the nearest focusable ancestor. Left focusable, this scroll would take
         # that focus and — once the list overflows — its own up/down bindings
         # would eat the arrows, so ↑/↓ scrolled the list instead of moving the
-        # cursor and the Sidebar:focus border never showed. Focus belongs to the
+        # cursor and the sidebar never read as focused. Focus belongs to the
         # Sidebar (§4.3); the cursor scrolls the list through ``scroll_visible``.
         with VerticalScroll(id="projects", can_focus=False):
             yield Static(
@@ -575,6 +856,7 @@ class Sidebar(Vertical):
         agents: dict[str, list[FleetAgentStatus]],
         *,
         notices: Mapping[str, str] | None = None,
+        groups: list[ProjectGroup] | None = None,
     ) -> None:
         """Paint one frame. Cards and rows are updated in place, keyed by id.
 
@@ -582,42 +864,324 @@ class Sidebar(Vertical):
         cost of a fleet call that failed open); it is shown as a dim line
         where the rows would be, so an empty card is never mistaken for an
         idle fleet.
+
+        The ORDER is the arrangement's (#140): a **Pinned** section, then each
+        group's header with its members indented under it (hidden while the
+        group is collapsed), then the loose projects — pins and manual order
+        from the store, nothing sorted behind the user's back. Children are
+        reconciled into that order by id, so a frame costs moves, not rebuilds.
         """
         notices = notices or {}
+        # A mark is on a card the user can see. One whose project left the list
+        # (forgotten from a shell, a captured directory hidden again with `a`)
+        # lost its highlight with its card, and the next drag, `g` or shift+g
+        # still carried it: a forgotten id refused the whole drop, and a hidden
+        # directory was moved into the group without a word (final review of
+        # #203, F5). A card folded away in its group is still listed, and keeps it.
+        listed = {project.id for project in projects}
+        self._marked = [pid for pid in self._marked if pid in listed]
+        arrangement = arrange(projects, groups or [])
+        self.arrangement = arrangement
         holder = self.query_one("#projects", VerticalScroll)
         self.query_one("#projects-empty", Static).display = not projects
-        existing = {card.project.id: card for card in holder.query(ProjectCard)}
+        existing_cards = {card.project.id: card for card in holder.query(ProjectCard)}
+        existing_headers = {header.group.id: header for header in holder.query(GroupHeader)}
+        existing_labels = {label.id: label for label in holder.query(SectionLabel)}
         names = Counter(project_name(p) for p in projects)
-        for index, project in enumerate(projects):
+        ordered: list[Widget] = []
+        stripe = 0
+
+        def card_for(project: ProjectInfo, *, scope: str | None, hidden: bool) -> None:
+            nonlocal stripe
             statuses = ordered_agents(agents.get(project.id, []))
             subtitle = short_path(project.root) if names[project_name(project)] > 1 else None
             notice = notices.get(project.id)
-            card = existing.pop(project.id, None)
+            card = existing_cards.pop(project.id, None)
             if card is None:
                 card = ProjectCard(
-                    project,
-                    statuses,
-                    subtitle=subtitle,
-                    notice=notice,
-                    id=f"card-{project.id}",
+                    project, statuses, subtitle=subtitle, notice=notice, id=f"card-{project.id}"
                 )
-                slot = index + 1  # after the (hidden) empty-state line
-                if slot < len(holder.children):
-                    holder.mount(card, before=slot)
-                else:
-                    holder.mount(card)
             else:
                 card.show(project, statuses, subtitle=subtitle, notice=notice)
-                slot = index + 1
-                if slot < len(holder.children) and holder.children[slot] is not card:
-                    holder.move_child(card, before=slot)
-            card.set_class(index % 2 == 0, "even")
-            card.set_class(index % 2 == 1, "odd")
-        for stale in existing.values():
-            stale.remove()
+            card.scope = scope
+            card.set_class(scope is not None, "grouped")
+            card.set_class(project.id in self._marked, "marked")
+            card.set_class(stripe % 2 == 0, "even")
+            card.set_class(stripe % 2 == 1, "odd")
+            card.display = not hidden
+            stripe += 1
+            ordered.append(card)
+
+        def header_for(entry: GroupEntry) -> None:
+            header = existing_headers.pop(entry.group.id, None)
+            if header is None:
+                header = GroupHeader(entry, agents)
+            else:
+                header.show(entry, agents)
+            ordered.append(header)
+            for member in entry.members:
+                card_for(member, scope=entry.group.id, hidden=entry.group.collapsed)
+
+        if arrangement.pinned:
+            label = existing_labels.pop("pinned-label", None) or SectionLabel(
+                Text("📌 Pinned"), id="pinned-label"
+            )
+            ordered.append(label)
+            for entry in arrangement.pinned:
+                if isinstance(entry, GroupEntry):
+                    header_for(entry)
+                else:
+                    card_for(entry, scope=None, hidden=False)
+        for entry in arrangement.groups:
+            header_for(entry)
+        for project in arrangement.loose:
+            card_for(project, scope=None, hidden=False)
+
+        stale: list[Widget] = [
+            *existing_cards.values(),
+            *existing_headers.values(),
+            *existing_labels.values(),
+        ]
+        for widget in stale:
+            widget.remove()
+        # Slot 0 is the (hidden) empty-state line; everything else follows the order.
+        for index, widget in enumerate(ordered):
+            slot = index + 1
+            if not widget.is_mounted:
+                if slot < len(holder.children):
+                    holder.mount(widget, before=slot)
+                else:
+                    holder.mount(widget)
+            elif slot < len(holder.children) and holder.children[slot] is not widget:
+                holder.move_child(widget, before=slot)
         self.last_frame = (projects, agents)
         self._ring_on_attention(status for statuses in agents.values() for status in statuses)
         self._apply_selection()
+
+    # --- groups, pins and order (#140) ----------------------------------------------
+
+    def marked_ids(self) -> list[str]:
+        return list(self._marked)
+
+    def pinned_ids(self) -> set[str]:
+        """The projects the frame on screen lists under Pinned."""
+        pinned = self.arrangement.pinned if self.arrangement is not None else []
+        return {entry.id for entry in pinned if isinstance(entry, ProjectInfo)}
+
+    def toggle_mark(self, project_id: str) -> None:
+        """shift+click or ``m``: add the card to (or drop it from) the multi-selection."""
+        if project_id in self._marked:
+            self._marked.remove(project_id)
+        else:
+            self._marked.append(project_id)
+        for card in self.query(ProjectCard):
+            card.set_class(card.project.id in self._marked, "marked")
+
+    def action_toggle_mark(self) -> None:
+        """``m``: shift+click's twin, on the card under the cursor (or the card of its row).
+
+        Most terminals keep Shift+click for their own text selection while an
+        app reports the mouse (kitty, the VTE terminals, Konsole, Alacritty,
+        WezTerm, xterm, Windows Terminal), so there the click never reached the
+        card and nothing could be marked: shift+g and a drag of several cards
+        had nothing to carry (final review of #203, F7).
+        """
+        target = self._cursor_target()
+        if target is not None and target[0] == "project":
+            self.toggle_mark(target[1])
+
+    def action_clear_marks(self) -> None:
+        self._marked.clear()
+        for card in self.query(ProjectCard):
+            card.remove_class("marked")
+
+    def _cursor_target(self) -> tuple[str, str] | None:
+        """``("project", id)`` or ``("group", id)`` for the row under the cursor (or selected)."""
+        key = self._cursor_key or self.selected_key
+        if not key:
+            return None
+        kind, _, ident = key.partition(":")
+        if kind == "project":
+            return ("project", ident)
+        if kind == "group":
+            return ("group", ident)
+        if kind in ("agent", "spawn"):
+            for card in self.query(ProjectCard):
+                if any(s.agent.id == ident for s in card.statuses) or (
+                    kind == "spawn" and card.project.id == ident
+                ):
+                    return ("project", card.project.id)
+        return None
+
+    def action_move_up(self) -> None:
+        self._step(-1)
+
+    def action_move_down(self) -> None:
+        self._step(1)
+
+    def _step(self, delta: int) -> None:
+        target = self._cursor_target()
+        if target is not None:
+            self.post_message(MoveRow(target[0], target[1], delta))  # type: ignore[arg-type]
+
+    def action_toggle_pin(self) -> None:
+        target = self._cursor_target()
+        if target is not None:
+            self.post_message(TogglePin(target[0], target[1]))  # type: ignore[arg-type]
+
+    def action_toggle_collapse(self) -> None:
+        target = self._cursor_target()
+        if target is None:
+            return
+        if target[0] == "group":
+            self.post_message(ToggleCollapse(target[1]))
+            return
+        # Space on a project folds its card, as the disclosure glyph does.
+        for card in self.query(ProjectCard):
+            if card.project.id == target[1]:
+                card.toggle()
+
+    def action_group_picker(self) -> None:
+        target = self._cursor_target()
+        if self._marked:
+            self.post_message(GroupProjects(list(self._marked)))
+        elif target is not None and target[0] == "project":
+            self.post_message(GroupProjects([target[1]]))
+
+    def action_group_marked(self) -> None:
+        if self._marked:
+            self.post_message(GroupProjects(list(self._marked)))
+
+    def action_undo_layout(self) -> None:
+        self.post_message(UndoLayout())
+
+    # drag and drop: press on a title or a group header, move past its row, release on a target
+
+    def begin_drag(self, state: DragState, source: DragHandle) -> None:
+        """A press on a drag handle: nothing moves until the pointer leaves the row.
+
+        The handle takes the mouse, not the sidebar (:class:`DragHandle` says why),
+        and hands every move and the release back here.
+        """
+        self._drag, self._drag_source = state, source
+        source.capture_mouse()
+
+    def dragging(self, source: DragHandle) -> bool:
+        """Is a press on ``source`` still held — its drag begun and not yet released?"""
+        return self._drag is not None and source is self._drag_source
+
+    def cancel_drag(self, source: DragHandle) -> None:
+        """``source`` went away mid-drag, or its release was lost: close its drag and clear
+        its marks; nothing moves."""
+        if not self.dragging(source):
+            return
+        self._drag, self._drag_source = None, None
+        source.dragged_row().remove_class("-dragging")
+        self._mark_drop(None)
+
+    def drag_over(self, source: DragHandle, event: events.MouseMove) -> None:
+        drag = self._drag
+        if drag is None or source is not self._drag_source:
+            return
+        if event.button == 0:
+            # A move with NO button held: the release was lost — let go outside the
+            # terminal, or dropped by the driver — and this is the first report that
+            # says so (SelectionHost ends a pane's gesture by the same rule). The drag
+            # ends here and snaps back: where the button came up is nowhere this list
+            # saw, so nowhere is a place. Left held, the card stayed dimmed, the
+            # drop mark stayed on, and the handle kept the mouse — the next press
+            # anywhere was this handle's, and a click on another title opened this
+            # one's project (review of #171, round 1).
+            source.release_mouse()
+            self.cancel_drag(source)
+            return
+        if not drag.started:
+            if abs(event.screen_y - drag.origin_y) < 1:
+                return
+            drag.started = True
+            source.dragged_row().add_class("-dragging")
+        self._mark_drop(self._target_at(event.screen_x, event.screen_y))
+
+    def end_drag(self, source: DragHandle) -> bool:
+        """The release: drop onto what is under the pointer; ``True`` when it was a drag."""
+        drag = self._drag
+        source.release_mouse()
+        if drag is None or source is not self._drag_source:
+            return False
+        self._drag, self._drag_source = None, None
+        source.dragged_row().remove_class("-dragging")
+        target = self._drop_target
+        self._mark_drop(None)
+        if not drag.started:
+            return False
+        if target is None:
+            return True  # released where nothing is a place: snap back
+        if drag.kind == "group":
+            before = target.group.id if isinstance(target, GroupHeader) else None
+            if before != drag.ident:  # dropped on itself: snap back
+                self.post_message(DropGroup(drag.ident, before=before))
+            return True
+        if isinstance(target, GroupHeader):
+            self.post_message(DropProject(drag.project_ids, scope=target.group.id, before=None))
+        elif isinstance(target, ProjectCard):
+            if target.project.id not in drag.project_ids:  # dropped on itself: snap back
+                self.post_message(
+                    DropProject(drag.project_ids, scope=target.scope, before=target.project.id)
+                )
+        else:
+            # The list's own empty space below the last row: the top level's end (ungroup).
+            self.post_message(DropProject(drag.project_ids, scope=None, before=None))
+        return True
+
+    def _target_at(self, x: int, y: int) -> Widget | None:
+        """What a release here would drop onto, or ``None`` where it would snap back.
+
+        A project drops onto a card (before it, in its scope) or a group header
+        (into that group, last); a group, onto an unpinned group's header (before
+        it). The list's own empty space below the last row is the end: the top
+        level for a project, the last group for a group. Nothing else is a place
+        — the main pane, the header, Accounts and Doctor, the Pinned label, a
+        pinned card (pin order is ``p``'s), a card for a group, the rows being
+        dragged — and a release there changes nothing. Read as "below the list",
+        a drag abandoned over the main pane ungrouped its project and moved it
+        last, and one onto a pinned card took a pinned member out of its group
+        (review of #171).
+        """
+        drag = self._drag
+        try:
+            widget, _ = self.screen.get_widget_at(x, y)
+        except Exception:
+            return None
+        if drag is None:
+            return None
+        holder = self.query_one("#projects", VerticalScroll)
+        if widget is holder:
+            return holder
+        for node in (widget, *widget.ancestors):
+            if isinstance(node, GroupHeader):
+                if drag.kind == "group" and (
+                    node.group.pinned_at is not None or node.group.id == drag.ident
+                ):
+                    return None
+                return node
+            if isinstance(node, ProjectCard):
+                if (
+                    drag.kind == "group"
+                    or node.project.pinned_at is not None
+                    or node.project.id in drag.project_ids
+                ):
+                    return None
+                return node
+        return None
+
+    def _mark_drop(self, target: Widget | None) -> None:
+        if self._drop_target is target:
+            return
+        if self._drop_target is not None:
+            self._drop_target.remove_class("-drop-before")
+        self._drop_target = target
+        if isinstance(target, ProjectCard | GroupHeader):
+            target.add_class("-drop-before")
 
     def show_notice(self, text: str | None) -> None:
         """A one-line warning above the list (a stale frame, say); ``None`` clears it."""
@@ -762,6 +1326,10 @@ class Sidebar(Vertical):
         if step >= 0:
             return ahead[0] if ahead else behind[-1]
         return behind[-1] if behind else ahead[0]
+
+    def action_resize(self, delta: int | None) -> None:
+        """Ask for the partition to move ``delta`` columns (``None``: reset); ``Panes`` answers."""
+        self.post_message(ResizeSidebar(delta))
 
     def action_cursor_down(self) -> None:
         self._move_cursor(1)

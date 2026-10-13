@@ -176,6 +176,50 @@ def test_json_stdout_is_empty_or_parseable(in_both_proxy_states: str, runner: Cl
 
 
 @pytest.mark.parametrize(
+    ("argv", "said"),
+    [
+        (
+            ["fleet", "shutdown", "--project", "alpha", "--all", "--yes"],
+            "--all and --project conflict",
+        ),
+        (["fleet", "reap", "--project", "alpha", "--all"], "--all and --project conflict"),
+        (["metrics", "show", "--project", "alpha", "--all"], "--all and --project conflict"),
+        (["metrics", "show", "--limit", "0"], "--limit"),
+        (["fleet", "ls", "--no-such-option"], "--no-such-option"),
+        (["fleet", "stop"], "Missing argument"),
+        (["fleet", "tell", "x"], "Missing argument"),
+    ],
+    ids=[
+        "shutdown-scope",
+        "reap-scope",
+        "metrics-scope",
+        "metrics-range",
+        "unknown-option",
+        "missing-argument",
+        "missing-second-argument",
+    ],
+)
+def test_every_usage_error_is_json_under_json(
+    argv: list[str], said: str, runner: CliRunner
+) -> None:
+    """The INVARIANT behind rounds 7 and 8 of #203: a caller that asked for JSON
+    gets JSON or nothing — and the JSON SAYS what stderr would have. The root
+    group rendered an unknown option alone and let a ``BadParameter`` fall
+    through to Rich prose with an EMPTY stdout (round 7); widened to every usage
+    error, it read ``error.message``, which click leaves empty on a missing
+    argument, so ``--json fleet stop`` printed ``{"message": ""}`` — the text
+    lost for both audiences (round 8). "Parseable JSON" was the loophole: the
+    message must be non-empty and name the fault."""
+    result = runner.invoke(app, ["--json", *argv])
+
+    assert result.exit_code == 2, result.output
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "usage"
+    assert payload["message"].strip(), "never an empty message"
+    assert said in payload["message"], payload["message"]
+
+
+@pytest.mark.parametrize(
     ("stdout", "is_json"),
     [
         ('{"enabled": true}', True),

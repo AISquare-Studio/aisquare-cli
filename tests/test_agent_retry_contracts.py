@@ -35,10 +35,10 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.core.orchestrator import team_project
-from aisquare.core.store import SqliteStore, store_session
+from aisquare.core.store import SCHEMA_VERSION, SqliteStore, store_session
 from aisquare.services import agent_launch, diagnostics, fleet, native_telemetry
 from tests.test_fleet_service import FakeTmux
-from tests.test_store import _at_version
+from tests.test_store import _dogfooded_113
 
 
 @pytest.fixture(autouse=True)
@@ -382,15 +382,20 @@ def test_dogfooded_schemas_reach_the_next_unused_migration(
 ) -> None:
     from aisquare.core import store as module
 
-    database = _at_version(version)
+    # #113's own steps under its own stamps; the merge appended them as v26-v28.
+    database = _dogfooded_113(version)
     monkeypatch.setattr(
         module, "_MIGRATIONS", (*module._MIGRATIONS, "CREATE TABLE next_feature (id TEXT);")
     )
     with store_session() as store:
         assert isinstance(store, SqliteStore)
-        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 18
+        assert store._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION + 1
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT * FROM next_feature").fetchall() == []
+        # The steps this line stamped 15-17, restored by the presence pass.
+        assert connection.execute("SELECT * FROM claude_account").fetchall() == []
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(team_session)")}
+        assert {"agent", "native_session_id", "limit_resets_at"} <= columns
 
 
 def test_locked_board_does_not_duplicate_spooled_or_already_shipped_events(shipping: None) -> None:
@@ -462,7 +467,8 @@ def test_recovery_clears_the_previous_receiver_diagnostic(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Native receiver is POSIX/WSL only")
-@pytest.mark.parametrize("death", [signal.SIGTERM, signal.SIGKILL])
+# SIGKILL by name, which mypy's win32 stubs lack: the test is POSIX-only (skipif above).
+@pytest.mark.parametrize("death", [signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)])
 @pytest.mark.parametrize("ship_before_retry", [False, True])
 def test_killed_receiver_prefix_is_not_republished(
     death: int,

@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import errno
+import importlib.metadata
 import json
+import os
+import shlex
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +15,8 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import agents
+from aisquare.core import agents, selfcli
+from tests.fsperms import can_deny_writes, can_symlink, unwritable
 
 
 @pytest.fixture(autouse=True)
@@ -73,8 +79,12 @@ def test_connect_unknown_agent_fails(runner: CliRunner, fake_home: Path) -> None
     assert "unknown agent" in result.output
 
 
-def test_connect_not_installed_fails(runner: CliRunner, fake_home: Path) -> None:
-    result = runner.invoke(app, ["agents", "connect", "cursor"])
+def test_connect_not_installed_fails(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The suite's agent home has no ~/.claude, and here no `claude` is on PATH either
+    # (with one, connect makes the directory: test_agent_adapters.py). Cursor, the old
+    # example here, is refused as not connectable before presence is asked.
+    monkeypatch.setattr(agents, "claude_on_path", lambda: None)
+    result = runner.invoke(app, ["agents", "connect", "claude-code"])
     assert result.exit_code == 1
     assert "not installed" in result.output
 
@@ -143,6 +153,7 @@ def test_connect_targets_an_alternate_config_dir(runner: CliRunner, fake_home: P
         "SessionEnd",
         "Stop",
         "Notification",
+        "StopFailure",
     }
     assert not (fake_home / ".claude" / "settings.json").exists()
 
@@ -172,9 +183,10 @@ def test_hook_commands_are_never_a_bare_name(
     # 1) The running executable wins, even when PATH knows nothing about it.
     fake_bin = tmp_path / "somewhere" / "aisquare"
     fake_bin.parent.mkdir(parents=True)
-    fake_bin.write_text("#!/bin/sh\n")
+    fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(fake_bin)])
     monkeypatch.setattr("aisquare.core.agents.shutil.which", lambda _: None)
+    monkeypatch.setattr(agents, "current_install", lambda: tmp_path / "no-venv" / "aisquare")
     result = runner.invoke(app, ["agents", "connect", "claude-code"])
     assert result.exit_code == 0, result.output
     settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
@@ -323,7 +335,7 @@ def test_spaced_install_path_roundtrips_through_hooks(
 
     spaced = tmp_path / "some dir" / "aisquare"
     spaced.parent.mkdir(parents=True)
-    spaced.write_text("#!/bin/sh\n")
+    spaced.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(spaced)])
     assert runner.invoke(app, ["agents", "connect", "claude-code"]).exit_code == 0
     assert agent_core.hooks_installed("claude-code") is True  # quoted path matches
@@ -334,6 +346,235 @@ def test_spaced_install_path_roundtrips_through_hooks(
     assert runner.invoke(app, ["agents", "disconnect", "claude-code"]).exit_code == 0
     settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
     assert "hooks" not in settings  # removable too
+
+
+def test_settings_json_is_written_in_utf8_as_claude_code_writes_it(
+    runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``json.dumps`` escaped every non-ASCII character, so a hook naming
+    ``~/Développement/…/aisquare`` was stored as ``D\\u00e9veloppement``, which the
+    plugin's launcher cannot read a program out of (review of #257). A lone surrogate,
+    which UTF-8 cannot hold, keeps its escape instead of costing connect a traceback."""
+    program = tmp_path / "Développement" / "aisquare"
+    program.parent.mkdir(parents=True)
+    program.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(program)])
+    settings_path = fake_home / ".claude" / "settings.json"
+    mine = '"env": {"GREETING": "café", "ODD": "\\udce9"}'
+    settings_path.write_text("{" + mine + "}", encoding="utf-8")
+
+    connected = runner.invoke(app, ["agents", "connect", "claude-code"])
+    written = settings_path.read_text(encoding="utf-8")
+    disconnected = runner.invoke(app, ["agents", "disconnect", "claude-code"])
+    left = settings_path.read_text(encoding="utf-8")
+
+    assert connected.exit_code == 0 and disconnected.exit_code == 0, connected.output
+    assert agents.hook_commands("claude-code") == [], "disconnect found every hook it wrote"
+    assert "Développement" in written and "\\u00e9" not in written, written
+    assert '"GREETING": "café"' in left and '"ODD": "\\udce9"' in left, left
+    assert json.loads(left) == {"env": {"GREETING": "café", "ODD": "\udce9"}}
+
+
+MINE = {"permissions": {"allow": ["Bash(ls)"]}, "env": {"GREETING": "café"}}
+"""Settings of the user's own, which no write of the hooks may cost them."""
+
+
+def _full_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every file opened for writing is opened, so truncated, and then the disk is full."""
+    real_open = Path.open
+
+    def opened(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        handle = real_open(self, mode, *args, **kwargs)
+        if "w" in mode:
+            handle.close()
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), str(self))
+        return handle
+
+    monkeypatch.setattr(Path, "open", opened)
+
+
+@pytest.mark.parametrize("writer", ["install_hooks", "remove_hooks"])
+def test_a_settings_write_cut_off_partway_leaves_every_setting_as_it_was(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch, writer: str
+) -> None:
+    """Rewritten in place, a write that failed after the truncate (a full disk, a kill
+    during connect or uninstall) left a settings.json that is not JSON: every surface then
+    refused it and Claude Code ran without the user's settings (round 19 of #257). It is
+    replaced now, so the file holds all of the old text or all of the new."""
+    claude = fake_home / ".claude"
+    settings_path = claude / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    if writer == "remove_hooks":
+        agents.install_hooks("claude-code", claude)
+    before = settings_path.read_bytes()
+    _full_disk(monkeypatch)
+
+    with pytest.raises(OSError, match="No space left"):
+        getattr(agents, writer)("claude-code", claude)
+
+    monkeypatch.undo()
+    assert settings_path.read_bytes() == before, "the old text, whole"
+    assert sorted(p.name for p in claude.iterdir()) == ["CLAUDE.md", "settings.json"], "no temp"
+
+
+@pytest.mark.skipif(not can_symlink(), reason="needs a symlink")
+def test_a_linked_settings_json_has_the_file_it_points_at_replaced(fake_home: Path) -> None:
+    """A dotfiles link stays a link: the file it points at gets the hooks, as save_config
+    writes a linked config.toml, rather than a new file replacing the link."""
+    dotfiles = fake_home / "dotfiles"
+    dotfiles.mkdir()
+    real = dotfiles / "claude-settings.json"
+    real.write_text(json.dumps(MINE), encoding="utf-8")
+    link = fake_home / ".claude" / "settings.json"
+    link.symlink_to(real)
+
+    agents.install_hooks("claude-code", link.parent)
+
+    assert link.is_symlink() and link.resolve() == real.resolve()
+    assert agents.hook_commands("claude-code", link.parent), "the hooks are in the linked file"
+    assert json.loads(real.read_text(encoding="utf-8"))["env"] == MINE["env"]
+    assert sorted(p.name for p in dotfiles.iterdir()) == ["claude-settings.json"], "no temp"
+
+
+@pytest.mark.skipif(not can_deny_writes(), reason="needs a folder this user cannot write")
+def test_a_settings_json_in_a_folder_that_takes_no_new_file_is_written_in_place(
+    fake_home: Path,
+) -> None:
+    """No temp can be made beside it, but the file itself may be written: the one write
+    there is, as before (round 19 of #257)."""
+    claude = fake_home / ".claude"
+    settings_path = claude / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    inode = settings_path.stat().st_ino
+
+    with unwritable(claude):
+        agents.install_hooks("claude-code", claude)
+
+    assert agents.hook_commands("claude-code", claude)
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["env"] == MINE["env"]
+    if sys.platform != "win32":
+        assert settings_path.stat().st_ino == inode, "in place"
+
+
+@pytest.mark.skipif(not can_deny_writes(), reason="needs a file this user cannot write")
+def test_a_settings_json_this_user_may_not_write_is_not_replaced(fake_home: Path) -> None:
+    """Its folder would take the temp, and the rename would replace a file its owner made
+    read-only: refused as the in-place write refused it, and left as it was."""
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    before = settings_path.read_bytes()
+    settings_path.chmod(0o444)
+    try:
+        with pytest.raises(PermissionError):
+            agents.install_hooks("claude-code", settings_path.parent)
+    finally:
+        settings_path.chmod(0o644)
+
+    assert settings_path.read_bytes() == before
+
+
+@pytest.mark.skipif(not hasattr(os, "link"), reason="needs a hard link")
+def test_a_hard_linked_settings_json_is_written_in_place_so_both_names_get_the_hooks(
+    fake_home: Path,
+) -> None:
+    """Round 20 of #257: a dotfiles tool that hard-links rather than symlinks. Renamed
+    over, the settings.json name got a new file and the other name kept the old one,
+    without the hooks; written in place, both names are the one file."""
+    dotfiles = fake_home / "dotfiles"
+    dotfiles.mkdir()
+    real = dotfiles / "claude-settings.json"
+    real.write_text(json.dumps(MINE), encoding="utf-8")
+    settings_path = fake_home / ".claude" / "settings.json"
+    os.link(real, settings_path)
+
+    agents.install_hooks("claude-code", settings_path.parent)
+
+    assert os.path.samefile(real, settings_path), "still one file"
+    assert agents.hook_commands("claude-code", settings_path.parent)
+    assert real.read_text(encoding="utf-8") == settings_path.read_text(encoding="utf-8")
+    assert sorted(p.name for p in settings_path.parent.iterdir()) == [
+        "CLAUDE.md",
+        "settings.json",
+    ], "no temp"
+
+
+@pytest.mark.parametrize("refused", [errno.EBUSY, errno.EXDEV], ids=["EBUSY", "EXDEV"])
+def test_a_settings_json_mounted_on_its_own_is_written_in_place(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch, refused: int
+) -> None:
+    """Round 20 of #257: `docker run -v ~/.claude/settings.json:…` mounts the file alone,
+    and a rename onto a mount point is refused with EBUSY (EXDEV across devices), which is
+    no PermissionError: connect, uninstall and refresh-hooks failed where the in-place
+    write had worked. The rename is refused here as the kernel refuses it."""
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    real_replace = os.replace
+
+    def replace(source: Any, destination: Any) -> None:
+        if Path(destination) == settings_path.resolve():
+            raise OSError(refused, os.strerror(refused), str(destination))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", replace)
+
+    agents.install_hooks("claude-code", settings_path.parent)
+
+    monkeypatch.undo()
+    assert agents.hook_commands("claude-code", settings_path.parent)
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["env"] == MINE["env"]
+    assert sorted(p.name for p in settings_path.parent.iterdir()) == [
+        "CLAUDE.md",
+        "settings.json",
+    ], "no temp"
+
+
+def _another_group() -> int | None:
+    """A group this user is in besides the one its new files get, if it has one."""
+    if sys.platform == "win32":  # mypy narrows on this, not on hasattr: no getegid there
+        return None
+    return next((g for g in os.getgroups() if g != os.getegid()), None)
+
+
+@pytest.mark.skipif(_another_group() is None, reason="needs a second group to give the file")
+def test_a_settings_json_of_another_group_keeps_its_group(fake_home: Path) -> None:
+    """Round 20 of #257: replaced, the file's owner and group became this user's and its
+    primary group, its mode kept but read against another group, so a file shared
+    through its group stopped being writable by that group. Written in place, it keeps
+    both; so does a file another user owns, which no test can make without root."""
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    group = _another_group()
+    assert group is not None
+    if sys.platform == "win32":  # mypy narrows on this, not on the skipif that keeps it off
+        pytest.skip("no os.chown on Windows")
+    os.chown(settings_path, -1, group)
+    inode = settings_path.stat().st_ino
+
+    agents.install_hooks("claude-code", settings_path.parent)
+
+    assert agents.hook_commands("claude-code", settings_path.parent)
+    assert settings_path.stat().st_gid == group
+    assert settings_path.stat().st_ino == inode, "in place"
+
+
+def test_a_settings_json_nobody_else_shares_is_still_replaced(fake_home: Path) -> None:
+    """The control: one name, this user's own, in a folder that takes a temp. Replaced,
+    as round 19 made it, so a write cut off partway keeps every setting."""
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(MINE), encoding="utf-8")
+    replaced: list[str] = []
+    real_replace = os.replace
+
+    def replace(source: Any, destination: Any) -> None:
+        replaced.append(str(destination))
+        real_replace(source, destination)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "replace", replace)
+        agents.install_hooks("claude-code", settings_path.parent)
+
+    assert replaced == [str(settings_path.resolve())]
+    assert agents.hook_commands("claude-code", settings_path.parent)
 
 
 def test_disconnect_warns_when_nothing_was_removed(runner: CliRunner, fake_home: Path) -> None:
@@ -474,6 +715,7 @@ def test_windows_hook_commands_are_not_posix_quoted(monkeypatch: pytest.MonkeyPa
     exe = r"C:\Python312\Scripts\aisquare.EXE"
     monkeypatch.setattr("aisquare.core.agents.sys.argv", ["pytest"])
     monkeypatch.setattr("aisquare.core.agents.shutil.which", lambda _name: exe)
+    monkeypatch.setattr(agents, "_starts", lambda program: str(program) == exe)
 
     command = agents._aisquare_command()
 
@@ -491,6 +733,7 @@ def test_windows_hook_commands_round_trip_through_the_matcher(
     """
     _win32(monkeypatch)
     monkeypatch.setattr("aisquare.core.agents.sys.argv", ["pytest"])
+    monkeypatch.setattr(agents, "_starts", lambda program: "Python312" in str(program))
     for exe in (
         r"C:\Python312\Scripts\aisquare.EXE",
         r"C:\Program Files\Python312\Scripts\asq.exe",  # a path needing quotes
@@ -525,12 +768,74 @@ def test_windows_still_ignores_third_party_hooks(monkeypatch: pytest.MonkeyPatch
         assert not agents._is_aisquare_hook_command(command), command
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a #! interpreter is a POSIX shape")
+@pytest.mark.parametrize("installed", [True, False], ids=["this-install", "none-beside-it"])
+def test_connect_run_as_a_module_never_writes_back_a_program_that_cannot_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, installed: bool
+) -> None:
+    """Every button runs the CLI as `python -P -m aisquare`, so argv0 is not a console
+    script and PATH was asked: a stale install first on it, whose Python is gone, was
+    written back, and Connect never cleared "cannot start" (review of #257). The console
+    script beside this interpreter comes first, then PATH, each only when it can start."""
+    dead = tmp_path / "stale" / "bin" / "aisquare"
+    dead.parent.mkdir(parents=True)
+    dead.write_text(f"#!{tmp_path / 'gone' / 'python3.11'}\n", encoding="utf-8")
+    dead.chmod(0o755)
+    here = tmp_path / "venv" / "bin" / "aisquare"
+    if installed:
+        here.parent.mkdir(parents=True)
+        here.write_text("#!/bin/sh\n", encoding="utf-8")
+        here.chmod(0o755)
+    monkeypatch.setattr("aisquare.core.agents.sys.platform", "linux")
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", ["/x/aisquare/__main__.py"])
+    monkeypatch.setattr(agents, "current_install", lambda: here)
+    which: dict[str, str] = {"aisquare": str(dead)}
+    monkeypatch.setattr("aisquare.core.agents.shutil.which", which.get)
+
+    command = agents._aisquare_command()
+    alive = tmp_path / "live" / "aisquare"
+    alive.parent.mkdir()
+    alive.write_text("#!/bin/sh\n", encoding="utf-8")
+    alive.chmod(0o755)
+    monkeypatch.setattr(agents, "current_install", lambda: tmp_path / "no-venv" / "aisquare")
+    which["aisquare"] = str(alive)
+    control = agents._aisquare_command()
+
+    module_form = " ".join(shlex.quote(part) for part in selfcli.argv_for([]))
+    assert command == (str(here) if installed else module_form), command
+    assert str(dead) not in command
+    assert control == str(alive), "control: a PATH program that can start is still used"
+
+
+def test_this_install_is_located_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 21 of #257: Connect's command, every hook binary's comparison, the doctor's
+    install row and each "this install is" line located the distribution and walked its
+    RECORD again, for an answer that cannot change within the process."""
+    real = importlib.metadata.distribution
+    located: list[str] = []
+
+    def distribution(name: str) -> Any:
+        located.append(name)
+        return real(name)
+
+    monkeypatch.setattr("aisquare.core.agents.importlib.metadata.distribution", distribution)
+
+    first = agents.current_install()
+    agents._aisquare_command()
+    agents._same_install(agents.HookBinary(Path("/elsewhere/bin/aisquare")))
+
+    assert agents.current_install() == first
+    assert located == ["aisquare-cli"], "located once"
+
+
 def test_posix_quoting_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     """The POSIX path must keep quoting exactly as before."""
     monkeypatch.setattr("aisquare.core.agents.sys.platform", "linux")
     exe = "/opt/my tools/bin/aisquare"
     monkeypatch.setattr("aisquare.core.agents.sys.argv", ["pytest"])
     monkeypatch.setattr("aisquare.core.agents.shutil.which", lambda _name: exe)
+    # Paths compared, not strings: on Windows str(Path(exe)) has backslashes.
+    monkeypatch.setattr(agents, "_starts", lambda program: Path(program) == Path(exe))
 
     command = agents._aisquare_command()
 
@@ -552,6 +857,6 @@ def test_connect_gives_the_context_hooks_room_for_the_ci_ceiling(
     for event in ("SessionStart", "UserPromptSubmit"):
         entry = settings["hooks"][event][0]["hooks"][0]
         assert entry["timeout"] == CONTEXT_HOOK_TIMEOUT_SECONDS, event
-    for event in ("Stop", "SessionEnd", "Notification"):
+    for event in ("Stop", "SessionEnd", "Notification", "StopFailure"):
         assert "timeout" not in settings["hooks"][event][0]["hooks"][0], event
     assert CONTEXT_HOOK_TIMEOUT_SECONDS > 60

@@ -68,7 +68,12 @@ def test_a_vanished_source_is_the_one_warning(monkeypatch: pytest.MonkeyPatch) -
     check = diagnostics._check_provenance()
 
     assert check.status is CheckStatus.warn
-    assert "/gone/main-install" in check.detail
+    # Rendered the way THIS platform writes a path: the check builds a `Path`
+    # from the URL, and `str(Path("/gone/main-install"))` is backslash-separated
+    # on Windows. Asserting the POSIX spelling would pin the separator rather
+    # than the property, which is that the operator is told which directory
+    # vanished.
+    assert str(Path("/gone/main-install")) in check.detail
     assert "NO LONGER EXISTS" in check.detail
     assert "absolute" in (check.fix or "") or "/path/to" in (check.fix or ""), (
         "the fix must show the absolute-path install form — a bare `pip install .` "

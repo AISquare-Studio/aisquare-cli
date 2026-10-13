@@ -23,6 +23,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("why",),
     ("status",),
     ("doctor",),
+    ("upgrade",),
+    ("uninstall",),
     ("log",),
     ("note",),
     ("board",),
@@ -43,11 +45,14 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "status",
             "tell",
             "stop",
+            "restart",
+            "shutdown",
             "attach",
             "reap",
             "rename",
             "pause",
             "resume",
+            "switch",
         )
     ),
     ("explainability", "status"),
@@ -56,8 +61,14 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("explainability", "disable"),
     ("explainability", "register"),
     ("explainability", "ship"),
+    ("explainability", "key"),
+    ("explainability", "workspaces"),
+    ("explainability", "studios"),
+    ("explainability", "use"),
     ("hook", "session-start"),
     ("hook", "user-prompt-submit"),
+    ("hook", "stop-failure"),
+    ("hook", "hand-over"),
     ("hook", "session-end"),
     ("hook", "stop"),
     ("hook", "notification"),
@@ -115,14 +126,41 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     *(
         (group, command)
         for group in ("project", "workspace")
-        for command in ("info", "list", "switch", "link", "onboard", "forget", "prune")
+        for command in (
+            "info",
+            "list",
+            "switch",
+            "link",
+            "onboard",
+            "forget",
+            "prune",
+            "pin",
+            "unpin",
+            "move",
+            "group",
+        )
     ),
     *(("config", command) for command in ("list", "get", "set", "redaction")),
     *(
         ("agents", command)
-        for command in ("list", "scan", "status", "connect", "disconnect", "use")
+        for command in ("list", "scan", "status", "connect", "disconnect", "use", "refresh-hooks")
     ),
-    *(("accounts", command) for command in ("list", "usage", "add", "remove", "run")),
+    *(
+        ("accounts", command)
+        for command in (
+            "list",
+            "usage",
+            "add",
+            "remove",
+            "run",
+            "default",
+            "alias",
+            "order",
+            "move",
+            "disable",
+            "enable",
+        )
+    ),
     *(("metrics", command) for command in ("show", "list")),
 }
 

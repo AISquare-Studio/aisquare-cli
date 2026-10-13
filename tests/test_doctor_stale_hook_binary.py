@@ -26,10 +26,9 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import stat
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -40,6 +39,7 @@ from aisquare.core import agents
 from aisquare.core.version import __version__
 from aisquare.models import CheckStatus
 from aisquare.services import diagnostics
+from tests.fsperms import can_symlink
 
 _REAL_PROBE = agents.hook_binary_version
 
@@ -71,7 +71,26 @@ def _hook_entry(command: str | Path, event: str, sub: str) -> dict[str, object]:
 
 
 def _fake_aisquare(path: Path, *, prints: str | None = None, exit_code: int = 0) -> Path:
-    """An executable that answers ``--version`` the way another install would."""
+    """An executable that answers ``--version`` the way another install would.
+
+    The probe RUNS this file, so on Windows it has to be something Windows can
+    run: a `.cmd`, which is the shape pip and npm use. A `#!/bin/sh` file with
+    the execute bits set is a program on POSIX and a text file there, and the
+    probe reported "version could not be read" about a binary sitting right
+    where the hook said it was.
+
+    The suffixed path is RETURNED, and every caller uses the return value, so
+    the hook command a test writes names the file that actually exists.
+    """
+    if sys.platform == "win32":
+        path = path.with_name(path.name + ".cmd")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = ["@echo off"]
+        if prints is not None:
+            lines.append(f"echo {prints}")
+        lines.append(f"exit /b {exit_code}")
+        path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+        return path
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = ["#!/bin/sh"]
     if prints is not None:
@@ -205,6 +224,86 @@ def test_a_missing_binary_is_flagged_and_nothing_is_run(
     assert check.fix == f"aisquare agents connect claude-code --config-dir {config}"
 
 
+def test_a_script_whose_interpreter_is_gone_cannot_start_and_nothing_is_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path
+) -> None:
+    """A console script whose ``#!`` Python is gone (``uv python uninstall``) exists, so it was
+    probed for a version that could only fail and graded "whose version could not be
+    read", while the plugin's launcher already counts it dead (review of #257). One
+    verdict, the launcher's (``_starts``): it cannot start, and no process is run."""
+    if os.name == "nt":
+        pytest.skip("a #! interpreter is a POSIX shape")
+    _this_install(monkeypatch, tmp_path)
+    _never_probe(monkeypatch)
+    orphan = tmp_path / "old" / "bin" / "aisquare"
+    orphan.parent.mkdir(parents=True)
+    orphan.write_text("#!/nonexistent/python3.11\nprint('never')\n", encoding="utf-8")
+    orphan.chmod(0o755)
+    config = isolated_agent_home / ".claude"
+    _write_hooks(config, str(orphan))
+    _connect(config)
+
+    verdict = agents.classify_hook_binary(agents.HookBinary(orphan))
+    check = diagnostics._check_claude_code()
+
+    assert verdict == (agents.HOOK_BINARY_MISSING, None)
+    assert check.status is CheckStatus.warn
+    assert f"{orphan}, which cannot start" in check.detail, check.detail
+    assert check.fix == f"aisquare agents connect claude-code --config-dir {config}"
+
+
+#: How each writer puts the Python in a trampoline: ``(the directory it is in, its word)``.
+#: pip double-quotes a path with a space and leaves a long one bare; uv single-quotes,
+#: an apostrophe inside as '"'"'.
+_EXEC_WORDS: dict[str, tuple[str, Callable[[str], str]]] = {
+    "pip": ("my venv", lambda path: f'"{path}"'),
+    "pip-long": ("v" * 130, str),
+    "uv": ("my venv", lambda path: f"'{path}'"),
+    "pip-apostrophe": ("Jane's venv", lambda path: f'"{path}"'),
+    "uv-apostrophe": ("Jane's venv", lambda path: "'" + path.replace("'", "'\"'\"'") + "'"),
+}
+
+
+@pytest.mark.parametrize("writer", _EXEC_WORDS)
+def test_a_trampoline_whose_python_is_gone_cannot_start_and_one_whose_python_is_there_can(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path, writer: str
+) -> None:
+    """Where the Python's path has a space or is long, pip and uv write ``#!/bin/sh`` and
+    exec it from the next line. ``/bin/sh`` is there, so a script whose Python was gone
+    "could start", and the hooks read as connected (review of #257): the Python it
+    execs is the interpreter judged. pip quotes it only for a space, so a long path with
+    none is bare, and was read as no trampoline at all; an apostrophe in uv's quotes cut
+    the path short, and in pip's made the line no trampoline (round 18)."""
+    if os.name == "nt":
+        pytest.skip("a #! interpreter is a POSIX shape")
+    _this_install(monkeypatch, tmp_path)
+    _never_probe(monkeypatch)
+    directory, word = _EXEC_WORDS[writer]
+    venv = tmp_path / directory / "bin"
+    venv.mkdir(parents=True)
+    python = venv / "python3"
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+    script = venv / "aisquare"
+    script.write_text(
+        f"#!/bin/sh\n'''exec' {word(str(python))} \"$0\" \"$@\"\n' '''\nprint('x')\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    config = isolated_agent_home / ".claude"
+    _write_hooks(config, agents._quote(str(script)))
+    _connect(config)
+
+    assert agents._starts(script) and agents.hooks_can_start("claude-code", config)
+    python.unlink()
+    verdict = agents.classify_hook_binary(agents.HookBinary(script))
+
+    assert not agents._starts(script)
+    assert not agents.hooks_can_start("claude-code", config)
+    assert verdict == (agents.HOOK_BINARY_MISSING, None)
+    assert f"{script}, which cannot start" in diagnostics._check_claude_code().detail
+
+
 def test_a_binary_that_will_not_say_its_version_is_not_trusted(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path
 ) -> None:
@@ -247,7 +346,7 @@ def test_the_python_m_fallback_shape_is_graded_by_its_interpreter(
     _connect(config)
 
     _never_probe(monkeypatch)
-    _write_hooks(config, f"{shlex.quote(sys.executable)} -m aisquare")
+    _write_hooks(config, f"{agents._quote(sys.executable)} -m aisquare")
     assert diagnostics._check_claude_code().status is CheckStatus.ok
 
     _real_probe(monkeypatch)
@@ -309,6 +408,9 @@ def test_a_sibling_dir_on_disk_is_discovered_and_labelled(
     sibling = isolated_agent_home / ".claude3"
     _write_hooks(sibling, str(current))
     # Nothing recorded, and no ~/.claude at all: before #84 this was "not detected".
+    # No `claude` on PATH either: with one, the unmade ~/.claude that sessions from this
+    # shell read is reported missing (test_agent_adapters.py).
+    monkeypatch.setattr(agents, "claude_on_path", lambda: None)
 
     check = diagnostics._check_claude_code()
 
@@ -324,6 +426,7 @@ def test_a_stale_sibling_on_disk_gets_its_own_fix_line(
     old = _fake_aisquare(tmp_path / "old" / "aisquare", prints=f"aisquare {OLD}")
     sibling = isolated_agent_home / ".claude3"
     _write_hooks(sibling, str(old))
+    monkeypatch.setattr(agents, "claude_on_path", lambda: None)  # and no ~/.claude to make
 
     check = diagnostics._check_claude_code()
 
@@ -390,6 +493,8 @@ def test_two_spellings_of_one_dir_count_once(
     config = isolated_agent_home / ".claude"
     _write_hooks(config, str(current))
     _connect(config)
+    if not can_symlink():  # pragma: no cover - a privilege CI holds and a laptop does not
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
     link = tmp_path / "claude-link"
     link.symlink_to(config, target_is_directory=True)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(link))
@@ -416,7 +521,11 @@ def test_a_recorded_dir_is_graded_even_when_the_ambient_dir_does_not_exist(
     assert check.status is CheckStatus.warn and str(recorded) in check.detail
 
 
-def test_nothing_on_disk_is_still_not_detected(isolated_agent_home: Path) -> None:
+def test_nothing_on_disk_is_still_not_detected(
+    isolated_agent_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Nothing anywhere: a `claude` on this machine's PATH would count as installed.
+    monkeypatch.setattr(agents, "claude_on_path", lambda: None)
     check = diagnostics._check_claude_code()
 
     assert check.status is CheckStatus.ok
@@ -450,8 +559,14 @@ def test_hook_binary_parses_the_shapes_connect_writes(tmp_path: Path) -> None:
     spaced = tmp_path / "with space" / "aisquare"
     python = Path(sys.executable)
 
-    assert agents.hook_binary(f"{shlex.quote(str(spaced))} hook stop") == agents.HookBinary(spaced)
-    assert agents.hook_binary(f"{shlex.quote(sys.executable)} -m aisquare hook stop") == (
+    # `agents._quote`, not `shlex.quote`: the latter is POSIX quoting, and its
+    # single quotes are not quoting to cmd.exe. `_quote` is what `connect`
+    # actually writes and the documented inverse of `_split_command`, so this
+    # asserts the real pair rather than one the product never produces.
+    assert agents.hook_binary(f"{agents._quote(str(spaced))} hook stop") == agents.HookBinary(
+        spaced
+    )
+    assert agents.hook_binary(f"{agents._quote(sys.executable)} -m aisquare hook stop") == (
         agents.HookBinary(python, module_form=True)
     )
     assert agents.hook_binary("webhook stop") is None
@@ -515,6 +630,44 @@ def test_the_suite_stub_answers_as_this_install() -> None:
 # --- review of ac7d7ec: identity, not neighbourhood; one unreadable sibling ---------------
 
 
+def test_this_install_is_the_script_its_distribution_installed_not_one_beside_its_python(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path
+) -> None:
+    """``/usr/bin/python3 -m aisquare`` (asq's Connect) runs the package from the user
+    site, where ``pip install --user`` put its script in ``~/.local/bin``; the
+    ``/usr/bin/aisquare`` beside that Python is an older ``sudo pip install``'s. Connect
+    wrote that one into the hooks, and the doctor graded it current by its path without
+    asking its version (review of #257, round 18). The RECORD names the script."""
+    if os.name == "nt":
+        pytest.skip("the system-Python-and-user-site shape is a POSIX one")
+    usr_bin = tmp_path / "usr" / "bin"
+    python = _fake_aisquare(usr_bin / "python3")
+    old = _fake_aisquare(usr_bin / "aisquare", prints=f"aisquare {OLD}")
+    user = tmp_path / "home" / ".local"
+    ours = _fake_aisquare(user / "bin" / "aisquare", prints=f"aisquare {__version__}")
+    site = user / "lib" / "python3.12" / "site-packages"
+    record = site / f"aisquare_cli-{__version__}.dist-info"
+    record.mkdir(parents=True)
+    (record / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: aisquare-cli\nVersion: {__version__}\n", encoding="utf-8"
+    )
+    (record / "RECORD").write_text(
+        "../../../bin/aisquare,,\n../../../bin/asq,,\n", encoding="utf-8"
+    )
+    monkeypatch.syspath_prepend(str(site))
+    monkeypatch.setattr(sys, "executable", str(python))
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(tmp_path / "__main__.py")])
+    _real_probe(monkeypatch)
+
+    assert agents.current_install() == ours
+    assert agents._aisquare_command() == agents._quote(str(ours)), "what Connect writes"
+    assert agents.classify_hook_binary(agents.HookBinary(ours)) == (
+        agents.HOOK_BINARY_CURRENT,
+        __version__,
+    )
+    assert agents.classify_hook_binary(agents.HookBinary(old)) == (agents.HOOK_BINARY_STALE, OLD)
+
+
 def test_two_interpreters_in_one_directory_are_two_installs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path
 ) -> None:
@@ -534,6 +687,12 @@ def test_two_interpreters_in_one_directory_are_two_installs(
 
     # The same interpreter under another name in that directory IS this install,
     # still without a process: `python3 -> python3.12`, as every venv spells it.
+    # The alias half needs a real symlink. Measured rather than assumed: the
+    # privilege is held by the CI runner and not by an ordinary Windows
+    # account, so this asserts wherever it can mean anything and says so where
+    # it cannot. Everything above this line has already been asserted.
+    if not can_symlink():  # pragma: no cover - a privilege CI holds and a laptop does not
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
     alias = bin_dir / "python3"
     alias.symlink_to(ours.name)
     _never_probe(monkeypatch)

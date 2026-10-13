@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aisquare.core import paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import SnapshotSettings, load_config
 from aisquare.core.entries import new_entry
+from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.workspace import (
     active_project,
@@ -22,12 +24,14 @@ from aisquare.models import (
     ContextEntry,
     FleetAgent,
     OnboardReport,
+    PendingRevocation,
     ProjectForgetReport,
     ProjectInfo,
     ProjectPruneReport,
     PruneCandidate,
     Snapshot,
 )
+from aisquare.services import install_route
 
 # Files at a project root that imply a fact worth seeding during onboarding.
 _ECOSYSTEM_MARKERS: tuple[tuple[str, str], ...] = (
@@ -49,19 +53,23 @@ def info() -> ProjectInfo:
         return active_project(store)
 
 
-def list_projects() -> list[ProjectInfo]:
-    """List all registered projects."""
+def list_projects(*, all: bool = False) -> list[ProjectInfo]:
+    """The projects added on purpose — or, with ``all``, the captured directories too (#139)."""
     with store_session() as store:
-        return store.list_projects()
+        return store.list_projects(all=all)
 
 
 def switch(name: str) -> ProjectInfo:
     """Pin the project matching ``name`` (a name or id prefix) as active.
 
+    Pinning is choosing it on purpose, so a captured directory is onboarded
+    too (#139): otherwise the ACTIVE project would be missing from ``project
+    list`` — no ``*`` row — and from the sidebar.
+
     Raises ``KeyError`` if nothing matches and ``ValueError`` if it is ambiguous.
     """
     with store_session() as store:
-        project = _one_match(store, name)
+        project = store.onboard_project(_one_match(store, name))
     pin_project(project.id)
     return project
 
@@ -109,10 +117,17 @@ class ProjectBusyError(Exception):
 
     def __init__(self, project: ProjectInfo, agents: list[FleetAgent]) -> None:
         labels = ", ".join(agent.label for agent in agents)
+        # `reap` is named for rows whose SERVER still answers — it refuses to end a
+        # row on a server it cannot reach, and an operator following that advice
+        # after a hand-run `tmux kill-server` reaped nothing, twice. The scoped
+        # `fleet shutdown` is the command that can, on their word.
+        # Its folder's name may hold a space or a `$`: quoted for this shell (review of #257).
+        scope = project.codename or display_name(project)
+        shutdown = install_route.command_line(["aisquare", "fleet", "shutdown", "--project", scope])
         super().__init__(
             f"{display_name(project)} has {len(agents)} live fleet agent(s): {labels} — "
-            "stop them first (aisquare fleet stop <label>), or run aisquare fleet reap "
-            "if they are already gone"
+            "stop them first (aisquare fleet stop <label>), or run aisquare fleet reap if "
+            f"they are already gone; if their tmux server is gone too, {shutdown} records them"
         )
         self.project = project
         self.agents = agents
@@ -134,7 +149,9 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
     context entries, prompt history, board rows and ended fleet-agent rows stay
     in the store, hidden — reachable again only by registering the root again.
     With ``purge`` they are deleted, and so is ``~/.aisquare/projects/<id>/``
-    (the snapshot and brain).
+    (the snapshot and brain), and a key the CLI minted for it is revoked — or,
+    when it cannot be yet, kept owed and named in the report
+    (:func:`_revoke_owed`).
 
     If the project was the ACTIVE one — pinned, or the one the working
     directory resolves to — the pin moves to the most recently touched
@@ -149,7 +166,7 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
         removed = store.purge_project(project.id) if purge else {}
         if not purge:
             store.forget_project(project.id)
-        active = _repin(store) if was_active else None
+        active, pin_error = _repin(store) if was_active else (None, None)
     return ProjectForgetReport(
         project=project,
         purged=purge,
@@ -157,24 +174,47 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
         data_dir_removed=purge and _remove_data_dir(project.id),
         active=active,
         active_changed=was_active,
+        pin_error=pin_error,
+        keys_still_live=_revoke_owed([project.id]) if purge else [],
     )
 
 
-def prune_candidates(*, missing: bool, worktrees: bool) -> list[PruneCandidate]:
+def prune_candidates(
+    *, missing: bool, worktrees: bool, captured_older_than: int | None = None
+) -> list[PruneCandidate]:
     """The registrations ``project prune`` would drop, and why — nothing is changed.
 
     ``missing``: the root is no longer a directory on disk. ``worktrees``: the
     root is a linked git worktree whose principal repository is ITSELF a
     registered project — a worktree of an unregistered repo is kept, since it
-    is the only handle on that repo's context. A live fleet agent count is
+    is the only handle on that repo's context. ``captured_older_than``: a
+    directory a session merely ran in (never added on purpose, #139) that holds
+    no context entries and was last touched more than that many days ago —
+    the scratch directories that pile up under a hooked Claude Code. Captured
+    rows are considered for the other two reasons too: a missing root is
+    missing whether or not anyone added it. A live fleet agent count is
     carried so the plan can show what will be kept and why.
     """
     with store_session() as store:
-        projects = store.list_projects()
+        projects = store.list_projects(all=True)
         by_root = {project.root: project for project in projects}
+        activity = store.project_activity() if captured_older_than is not None else {}
+        cutoff = (
+            (datetime.now(tz=UTC) - timedelta(days=captured_older_than)).isoformat()
+            if captured_older_than is not None
+            else None
+        )
         found: list[PruneCandidate] = []
         for project in projects:
             live = len(store.fleet_agents(project.id, live_only=True))
+            if (
+                cutoff is not None
+                and project.onboarded_at is None
+                and activity.get(project.id, "") < cutoff
+                and not store.entries("project", project_id=project.id)
+            ):
+                found.append(PruneCandidate(project=project, reason="captured", live_agents=live))
+                continue
             if not project.root.is_dir():
                 if missing:
                     found.append(
@@ -234,7 +274,7 @@ def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneRepor
                 store.forget_project(project_id)
             dropped.append(project_id)
         active_changed = active_id in dropped
-        active = _repin(store) if active_changed else None
+        active, pin_error = _repin(store) if active_changed else (None, None)
     if purge:
         for project_id in dropped:
             _remove_data_dir(project_id)
@@ -246,19 +286,53 @@ def prune(candidates: list[PruneCandidate], *, purge: bool) -> ProjectPruneRepor
         purged=purge,
         active=active,
         active_changed=active_changed,
+        pin_error=pin_error,
+        keys_still_live=_revoke_owed(dropped) if purge else [],
     )
 
 
-def _repin(store: ContextStore) -> ProjectInfo | None:
-    """Pin the most recently touched remaining project; clear the pin when none remain."""
+def _revoke_owed(project_ids: list[str]) -> list[PendingRevocation]:
+    """Revoke the keys the CLI minted for purged projects; the ones still live.
+
+    A purge deletes the destination row (#142) that names a minted key, and
+    ``store.purge_project`` owes the key's revocation in that same transaction.
+    The revokes happen here, after the store session has closed and after
+    every purge of a sweep — together, under one time budget
+    (``destinations.revoke_owed``): made one per project inside the loop, a
+    ``prune --purge`` held the store through a 10 s timeout per keyed project
+    (review of #172). Signed out, offline or signed in to another host, the
+    purge is still done; what is still live is reported, and stays owed for
+    the next ``use``, ``doctor --live`` or ``logout``.
+    """
+    if not project_ids:
+        return []
+    from aisquare.services import destinations, iam  # lazy: the explainability modules
+
+    return destinations.revoke_owed(iam.signed_in_quietly(), project_ids=set(project_ids)).owed
+
+
+def _repin(store: ContextStore) -> tuple[ProjectInfo | None, str | None]:
+    """Pin the most recently touched remaining project (clear the pin when none remain).
+
+    Returns the project now pinned and, when the pin could not be written, why.
+    The pin is the least important thing in a forget that has already
+    committed — with ``--purge`` the rows are gone and the data directory is
+    about to be — so a ``state.json`` that refuses it is reported in the result
+    and never raised over a purge that has already happened: raised, it told
+    the operator the command failed, left the data directory orphaned (its
+    registration gone, nothing left to name it), and a re-run said "no project
+    matches".
+    """
     remaining = store.list_projects()
-    if not remaining:
-        pin_project(None)
-        return None
-    activity = store.project_activity()
-    newest = max(remaining, key=lambda project: activity.get(project.id, ""))
-    pin_project(newest.id)
-    return newest
+    newest: ProjectInfo | None = None
+    if remaining:
+        activity = store.project_activity()
+        newest = max(remaining, key=lambda project: activity.get(project.id, ""))
+    try:
+        pin_project(None if newest is None else newest.id)
+    except StateUnwritableError as exc:
+        return None, str(exc)
+    return newest, None
 
 
 def _remove_data_dir(project_id: str) -> bool:
@@ -277,7 +351,7 @@ def link(repo: str) -> ProjectInfo:
     """Link a repository into the active project."""
     with store_session() as store:
         project = active_project(store)
-        store.ensure_project(project)
+        store.onboard_project(project)  # linking a repo is a deliberate add (#139)
         return store.add_linked_repo(project.id, repo)
 
 
@@ -293,7 +367,7 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
     facts = [fact for marker, fact in _ECOSYSTEM_MARKERS if (root / marker).exists()]
     seeded: list[ContextEntry] = []
     with store_session() as store:
-        store.ensure_project(project)
+        store.onboard_project(project)  # the deliberate add (#139)
         project_entries = store.entries("project", project_id=project.id)
         already_onboarded = any(entry.source == "onboard" for entry in project_entries)
         if not (already_onboarded and not refresh):
@@ -304,7 +378,8 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
                 seeded.append(
                     store.add(new_entry(fact, "project", project.id, ["onboarding"], "onboard"))
                 )
-    return OnboardReport(seeded=seeded, snapshot=_ensure_snapshot(project, refresh=refresh))
+    snapshot, note = _ensure_snapshot(project, refresh=refresh)
+    return OnboardReport(seeded=seeded, snapshot=snapshot, snapshot_note=note)
 
 
 def snapshot_settings() -> SnapshotSettings:
@@ -315,13 +390,21 @@ def snapshot_settings() -> SnapshotSettings:
         return SnapshotSettings()
 
 
-def _ensure_snapshot(project: ProjectInfo, *, refresh: bool) -> Snapshot | None:
-    """Generate (or reuse) the codebase snapshot; ``None`` if repomix is unavailable."""
+def _ensure_snapshot(project: ProjectInfo, *, refresh: bool) -> tuple[Snapshot | None, str | None]:
+    """Generate (or reuse) the codebase snapshot: ``(snapshot, why nothing was packed)``.
+
+    The second half is ``None`` when a pack was made or reused. Otherwise it is the
+    sentence :mod:`snapshot_core` words: the optional feature being off (no Node, or
+    a Node with no packer) is not a pack that failed, and a pack that failed says
+    why in the packer's own words. A failed ``--refresh`` rewrites nothing, so a
+    last pack agents still get is returned, with a sentence that says so.
+    """
     if snapshot_core.exists(project.id) and not refresh:
-        return snapshot_core.load(project.id)
+        return snapshot_core.load(project.id), None
     settings = snapshot_settings()
+    failure: str | None = None
     try:
-        return snapshot_core.generate(
+        packed = snapshot_core.generate(
             project.id,
             project.root,
             head=snapshot_core.head_sha(project.root),
@@ -329,6 +412,15 @@ def _ensure_snapshot(project: ProjectInfo, *, refresh: bool) -> Snapshot | None:
             ignore=settings.ignore,
         )
     except snapshot_core.RepomixUnavailableError:
-        return None
-    except (subprocess.SubprocessError, OSError):
-        return None
+        pass
+    except (subprocess.SubprocessError, OSError) as exc:
+        failure = snapshot_core.failure_reason(exc)
+    else:
+        return packed, None
+    try:
+        kept = snapshot_core.load(project.id)
+    except (OSError, ValueError):  # an unreadable snapshot.json serves no agent either
+        kept = None
+    if kept is not None and kept.status in ("ready", "skeleton_only"):
+        return kept, snapshot_core.not_refreshed_detail(kept, failure)
+    return None, snapshot_core.skipped_detail(failure)

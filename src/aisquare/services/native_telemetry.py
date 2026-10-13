@@ -388,7 +388,7 @@ def serve(
                 ready.parent.rmdir()
 
 
-def start(env: dict[str, str]) -> tuple[list[str], str]:
+def start_receiver(env: dict[str, str]) -> tuple[list[str], str]:
     """Start only for an opted-in launch. Failure costs telemetry, never launch."""
     if os.name != "posix":
         return [], "Codex native telemetry requires POSIX or WSL; native launch is available"

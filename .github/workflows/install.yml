@@ -23,6 +23,10 @@ on:
       - tests/install/**
       - tests/test_install_script_*.py
       - .github/workflows/install.yml
+      # The Claude Code plugin's launcher is POSIX sh too, checked by `static`.
+      - plugins/**
+      - .claude-plugin/**
+      - tests/test_claude_plugin.py
       # The acceptance criterion is a green `doctor`, so a change to the checks
       # can break this workflow without touching a single line of the script.
       - src/aisquare/services/diagnostics.py
@@ -66,12 +70,14 @@ jobs:
         # --shell=sh so the POSIX dialect is checked, not bash's.
         run: |
           shellcheck --shell=sh install.sh \
-            tests/install/cell.sh tests/install/cell-nonroot.sh tests/install/matrix.sh
+            tests/install/cell.sh tests/install/cell-nonroot.sh tests/install/matrix.sh \
+            plugins/claude-code/scripts/aisquare-hook
 
       - name: shfmt (format check)
         run: |
           shfmt -i 4 -ci -d install.sh \
-            tests/install/cell.sh tests/install/cell-nonroot.sh tests/install/matrix.sh
+            tests/install/cell.sh tests/install/cell-nonroot.sh tests/install/matrix.sh \
+            plugins/claude-code/scripts/aisquare-hook
 
       - name: Parse under dash and BusyBox ash
         # `sh -n` under BOTH, because bash accepts things neither does and
@@ -87,7 +93,8 @@ jobs:
         # platforms that matter most.
         run: |
           for script in install.sh tests/install/cell.sh \
-            tests/install/cell-nonroot.sh tests/install/matrix.sh; do
+            tests/install/cell-nonroot.sh tests/install/matrix.sh \
+            plugins/claude-code/scripts/aisquare-hook; do
             dash -n "$script"
             echo "dash  ok: $script"
             busybox ash -n "$script"
@@ -122,7 +129,8 @@ jobs:
               exit 1
               ;;
           esac
-          pytest -ra tests/test_install_script_is_posix.py tests/test_install_script_functions.py
+          pytest -ra tests/test_install_script_is_posix.py tests/test_install_script_functions.py \
+            tests/test_claude_plugin.py
 
   powershell:
     name: install.ps1 (parse + analyse)

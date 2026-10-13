@@ -17,6 +17,11 @@ branch is the gate:
 - ``AISQUARE_TEAM_DELTA=0``— mute the per-prompt teammate delta injection.
 - ``AISQUARE_TEAM_LEASE_MIN`` — claim lease in minutes (default 120; long
                              agentic turns only renew on prompt submit).
+- ``AISQUARE_FLEET_AGENT``  — the fleet_agent row this session runs in; set by
+                             ``fleet spawn`` on the window, read at session start
+                             to join the session to its row and brief it on the
+                             task it was spawned for. Inherited by the agent's
+                             own child processes — see ``team._assignment``.
 """
 
 from __future__ import annotations
@@ -48,6 +53,42 @@ def env_role() -> str | None:
     return role or None
 
 
+FLEET_AGENT_ENV_VAR = "AISQUARE_FLEET_AGENT"
+"""The variable that carries a fleet row's id into its window — an IDENTITY,
+which is why ``fleet spawn`` keeps it out of the tmux session environment."""
+
+
+def env_fleet_agent() -> str | None:
+    """The ``fleet_agent`` row this session runs as (``AISQUARE_FLEET_AGENT``).
+
+    ``fleet spawn`` sets it on the tmux window it starts, so the session that
+    comes up inside can be joined to the row — and told the task the row was
+    spawned for. Nothing read it before: the task was recorded on the row and
+    named the label and branch, and the agent itself was never told.
+    """
+    agent_id = os.environ.get(FLEET_AGENT_ENV_VAR, "").strip()
+    return agent_id or None
+
+
+def env_claude_pid() -> int | None:
+    """The pid of the Claude Code process running this hook (``CLAUDE_PID``), if any.
+
+    Claude Code exports it to every process it starts — hooks included — and
+    writes ITS OWN pid each time, so a hook always reads the process that fired
+    it: a nested ``claude -p`` inherits the parent's value into its environment
+    and still hands its hooks its own. Measured on Claude Code 2.1.272: a hook
+    under a fleet pane read the pane's ``#{pane_pid}`` on startup, on the
+    ``SessionEnd(clear)`` and on the ``SessionStart(clear)`` that follows it,
+    while the session id changed underneath. That is the PROCESS identity a
+    session id is not — ``/clear`` mints a new id in the same process, a nested
+    child is a new process under the same ``AISQUARE_FLEET_AGENT`` — and it is
+    what ``services.team`` binds a fleet row to. ``None`` for a binary that does
+    not export it, and for a value that is not a number.
+    """
+    raw = os.environ.get("CLAUDE_PID", "").strip()
+    return int(raw) if raw.isdigit() else None
+
+
 def delta_enabled() -> bool:
     """Whether per-prompt teammate deltas are injected (``AISQUARE_TEAM_DELTA=0`` mutes)."""
     return _flag_on("AISQUARE_TEAM_DELTA")
@@ -61,6 +102,45 @@ def lease_minutes() -> int:
     except ValueError:
         return DEFAULT_LEASE_MINUTES
     return value if value > 0 else DEFAULT_LEASE_MINUTES
+
+
+TEAM_HUB_ENV_VAR = "AISQUARE_TEAM_HUB"
+"""The hub that pins every session to one board (:func:`team_project`). ``fleet
+spawn`` sets it on every window it starts, as :func:`window_team_hub` says."""
+
+
+def window_team_hub() -> str:
+    """``AISQUARE_TEAM_HUB`` for a window this process spawns: the hub it honours, else blank.
+
+    A window inherits the tmux SERVER's environment, which was frozen when the
+    private server first started, and ``launch`` inside the window joins
+    ``team_project`` from there. The fleet UI's Explainability tab resolves the
+    same question in THIS process (``key_project``). With the hub exported in
+    one and not the other, the tab showed and attached one project's key while
+    the window's launches took another's: a 409 ``agent_not_registered`` on
+    every span, or traces in the other project's workspace (review of #170,
+    D1b round 2, B1). Set on the window, the window resolves as its spawner
+    does. The value is the hub's absolute path when this process honours one,
+    else blank. ``team_project`` reads blank as unset, and a relative value,
+    which this process ignores, becomes blank too. Blank, not absent, because
+    ``tmux -e`` can only set, and the server's retained value must not leak in
+    as ours.
+    """
+    hub = team_hub()
+    return str(hub) if hub is not None else ""
+
+
+def team_hub() -> Path | None:
+    """The hub this process honours: ``AISQUARE_TEAM_HUB`` as an absolute path, else ``None``.
+
+    :func:`team_project`'s rule without its warning: a relative value is
+    ignored. For a surface that has to say it is under a hub, such as the fleet
+    UI's Explainability tab, whose key then belongs to the hub project.
+    """
+    hub = os.environ.get(TEAM_HUB_ENV_VAR, "").strip()
+    if not hub or not Path(hub).expanduser().is_absolute():
+        return None
+    return Path(hub).expanduser().resolve()
 
 
 #: Relative hub values already reported, so a command that resolves the board
@@ -78,7 +158,7 @@ def team_project(cwd: Path | None = None) -> ProjectInfo:
     worktrees resolve to their principal checkout, so the team shares one board
     regardless of which worktree a session sits in.
     """
-    hub = os.environ.get("AISQUARE_TEAM_HUB", "").strip()
+    hub = os.environ.get(TEAM_HUB_ENV_VAR, "").strip()
     if hub and not Path(hub).expanduser().is_absolute():
         # A RELATIVE hub inverts the feature. `Path('./').resolve()` is the
         # process cwd, so "one board for sessions in several repositories"

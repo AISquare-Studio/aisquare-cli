@@ -1,0 +1,10 @@
+# The context for docs/demo/Dockerfile is the repository root, and the build
+# reads only what is re-included below. Everything else (.venv and .git above
+# all) stays out of the context. BuildKit reads this file because it sits
+# beside the Dockerfile with the Dockerfile's name.
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!src
+**/__pycache__

@@ -24,6 +24,13 @@ no-op: Claude Code keeps the default install's ``.claude.json`` at
 variable is set — so a "default" launched that way re-onboards into an empty
 config and diverges from the one the user has.
 
+**Under one of our slots, slot 1 is still the launching shell's.** An agent
+launched on slot 2 runs with both variables naming slot 2, and so does every
+hook it fires, the hand-over worker it detaches and any ``fleet spawn`` it
+runs. There the variables are the slot's, not the plain claude's: a launch
+onto a managed slot keeps the launching shell's own two beside them
+(:data:`PLAIN_VARS`), and :func:`plain_environment` reads slot 1 from those.
+
 **Both variables, always.** ``CLAUDE_CODE_TMPDIR`` goes with ``CLAUDE_CONFIG_DIR``
 because the config dir alone leaves the account on the shared scratch
 directory, where two parallel sessions collide (README, "Several accounts, one
@@ -57,11 +64,12 @@ import shutil
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from aisquare.core import agents, paths
+from aisquare.core import paths
 from aisquare.core.version import __version__
 from aisquare.models import ClaudeAccount, ClaudeIdentity
 
@@ -84,6 +92,11 @@ _SLOT_DIR = re.compile(r"^\d+$")
 _REMOVED_STAMP = "%Y%m%dT%H%M%SZ"
 
 
+def _home() -> Path:
+    """The user's home directory (indirection so tests can redirect it)."""
+    return Path.home()
+
+
 def _now() -> datetime:
     return datetime.now(tz=UTC)
 
@@ -100,8 +113,21 @@ def tmp_root() -> Path:
 
 
 def default_config_dir(env: Mapping[str, str] | None = None) -> Path:
-    """What a plain ``claude`` from this environment uses: the variable, else ``~/.claude``."""
-    return agents._claude_home(env=env)
+    """What a plain ``claude`` from this environment uses: the variable, else ``~/.claude``.
+
+    The variable as :func:`plain_environment` reads it (from ``env``, this process's
+    when ``None``), so a process running under one of our slots answers the launching
+    shell's directory, not the slot's.
+    """
+    value = plain_environment(env).get(CONFIG_DIR_VAR, "").strip()
+    if value:
+        return paths.expand_user(Path(value))  # a `~olduser/…` reads as written (sweep of #257)
+    return home_config_dir()
+
+
+def home_config_dir() -> Path:
+    """``~/.claude``: the directory a plain ``claude`` uses with ``CLAUDE_CONFIG_DIR`` unset."""
+    return _home() / ".claude"
 
 
 def default_account(env: Mapping[str, str] | None = None) -> ClaudeAccount:
@@ -118,16 +144,22 @@ def _managed(slot: int) -> ClaudeAccount:
 
 
 def managed_accounts() -> list[ClaudeAccount]:
-    """Every slot the CLI created, lowest first. Removed slots (renamed) are not slots."""
+    """Every slot the CLI created, lowest first. Removed slots (renamed) are not slots.
+
+    Asked with ``os.path.isdir`` and ``os.path.isfile``, which never raise: ``Path``'s
+    raised PermissionError on 3.11 to 3.13 for a slot linked into a folder this user
+    cannot enter, or one it may list but not enter, and every reader of the slots ended
+    in a traceback (uninstall's plan among them). Such a slot is not one of these.
+    """
     root = accounts_root()
-    if not root.is_dir():
+    if not os.path.isdir(root):
         return []
     found: list[ClaudeAccount] = []
     for child in root.iterdir():
-        if not child.is_dir() or not _SLOT_DIR.match(child.name):
+        if not _SLOT_DIR.match(child.name) or not os.path.isdir(child):
             continue
         slot = int(child.name)
-        if slot < FIRST_MANAGED_SLOT or not (child / MARKER).is_file():
+        if slot < FIRST_MANAGED_SLOT or not os.path.isfile(child / MARKER):
             continue
         found.append(_managed(slot))
     return sorted(found, key=lambda account: account.slot)
@@ -147,7 +179,7 @@ def managed_slot(config_dir: Path | str) -> int | None:
     path = Path(config_dir)
     try:
         relative = path.resolve().relative_to(accounts_root().resolve())
-    except (ValueError, OSError):
+    except (ValueError, OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11/3.12
         return None
     parts = relative.parts
     if len(parts) != 1 or not _SLOT_DIR.match(parts[0]):
@@ -157,8 +189,44 @@ def managed_slot(config_dir: Path | str) -> int | None:
 
 
 def label(account: ClaudeAccount) -> str:
-    """``default`` for slot 1, ``account N`` otherwise — what the board and the UI call it."""
-    return "default" if account.slot == DEFAULT_SLOT else f"account {account.slot}"
+    """What the board, the UI and a launch line call the slot.
+
+    The alias when the operator gave it one; else ``plain claude`` for slot 1
+    and ``account N`` for a managed slot. Slot 1 was called ``default`` until
+    #145 gave "default" a meaning of its own — the account a launch picks when
+    nothing more specific says — and a slot that is NOT the default could not
+    keep wearing the word. "Plain claude" is what it is: whatever ``claude``
+    already is in the shell ``asq`` was started from.
+    """
+    if account.alias:
+        return account.alias
+    return "plain claude" if account.slot == DEFAULT_SLOT else f"account {account.slot}"
+
+
+ALIAS_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,31}$")
+"""What an alias may look like, after lowercasing.
+
+It must START WITH A LETTER so it can never be mistaken for a slot number, and
+it cannot contain ``@`` so it can never be mistaken for an email — those are
+the two other spellings ``--account`` accepts, and a reference that could be
+read two ways is a launch that could land on two accounts. Lowercase because
+``resolve`` compares case-insensitively (as it already does for emails), and a
+name that round-trips through ``--json`` and a shell should have one spelling.
+"""
+
+
+def normalise_alias(raw: str) -> str:
+    """The stored form of an alias, or ``ValueError`` saying what is wrong with it."""
+    alias = raw.strip().lower()
+    if not alias:
+        raise ValueError("an alias cannot be empty")
+    if alias.isdigit():
+        raise ValueError(f"{raw!r} reads as a slot number — an alias must start with a letter")
+    if "@" in alias:
+        raise ValueError(f"{raw!r} reads as an email — an alias cannot contain '@'")
+    if not ALIAS_PATTERN.match(alias):
+        raise ValueError(f"{raw!r} is not a valid alias — a letter, then up to 31 of a-z 0-9 . _ -")
+    return alias
 
 
 # --- creating and removing ----------------------------------------------------------
@@ -239,14 +307,13 @@ def claude_json_path(
     slot, and a default that the environment redirects — and at ``~/.claude.json``
     for the plain default, which is where Claude Code keeps it.
     """
-    effective = os.environ if env is None else env
     if (
         account.managed
-        or effective.get(CONFIG_DIR_VAR, "").strip()
-        or account.config_dir != agents._home() / ".claude"
+        or CONFIG_DIR_VAR in plain_environment(env)
+        or account.config_dir != home_config_dir()
     ):
         return account.config_dir / ".claude.json"
-    return agents._home() / ".claude.json"
+    return _home() / ".claude.json"
 
 
 def credentials_path(account: ClaudeAccount) -> Path:
@@ -272,7 +339,12 @@ def identity(
 
 def read_identity(path: Path) -> ClaudeIdentity | None:
     """Read stable account identity without using or fingerprinting rotating tokens."""
-    data = _read_json(path)
+    return identity_in(_read_json(path))
+
+
+def identity_in(data: Mapping[str, Any] | None) -> ClaudeIdentity | None:
+    """The signed-in account a parsed ``.claude.json`` records, or ``None``: for a reader
+    that has parsed the file for something else, which can be tens of MB."""
     if data is None:
         return None
     oauth = data.get("oauthAccount")
@@ -388,11 +460,227 @@ def subscription_label(creds: ClaudeCredentials | None) -> str | None:
     return creds.subscription_type
 
 
+# --- what a usage-limit error says (#146) ----------------------------------------------------
+
+# The time is matched by a BOUNDED pattern (an optional weekday, a clock time,
+# am/pm — the shape ``_RESET_TIME`` reads) and nothing anchors the end: the
+# rendered line can carry a period, a second sentence or more lines after the
+# zone ("… (America/Toronto).\nUpgrade for more usage."), and an anchor made the
+# whole match fail, which recorded the limit with no window and no reset
+# (review of #205, finding 7).
+_LIMIT_MESSAGE = re.compile(
+    r"hit your (?P<window>[A-Za-z]+) limit"
+    r"(?:\s*·\s*resets\s+(?P<when>(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\s+)?"
+    r"\d{1,2}(?::\d{2})?\s*(?:am|pm)))?"
+    r"(?:\s*\((?P<zone>[A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)*)\))?",
+    re.IGNORECASE,
+)
+_RESET_TIME = re.compile(
+    r"^(?:(?P<day>mon|tue|wed|thu|fri|sat|sun)[a-z]*\s+)?(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?"
+    r"\s*(?P<ampm>am|pm)$",
+    re.IGNORECASE,
+)
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+@dataclass(frozen=True)
+class LimitNotice:
+    """What a Claude Code usage-limit error told us: which window, and when it lifts."""
+
+    window: str
+    """``session``, ``weekly``, ``opus``, ``sonnet``… — lowercased, as the message named it."""
+    resets_at: datetime | None
+    """The reset as an aware UTC datetime, or ``None`` when the message named no time
+    (or one this parser could not read — the raw text stays on the board event)."""
+
+
+def parse_limit_notice(text: str | None, *, now: datetime | None = None) -> LimitNotice | None:
+    """Read ``You've hit your session limit · resets 12:30am (America/Toronto)``, or ``None``.
+
+    That is the rendered text Claude Code shows — and hands a ``StopFailure``
+    hook as ``last_assistant_message`` — when a subscription's rolling allowance
+    runs out (measured in this machine's own transcripts, 2026-09-13; the errors
+    reference documents the same four shapes: session, weekly, Opus, Sonnet,
+    the weekly one with a weekday, ``resets Mon 12:00am``). The time is a clock
+    time in the zone named in parentheses, or the local zone when none is; it
+    is resolved to the next such moment at or after ``now``, on the named
+    weekday when there is one. A ``rate_limit`` that is not a usage limit —
+    ``Request rejected (429)`` from an API key, the server's own throttle —
+    does not match, and the caller treats it as a limit with no reset time.
+    """
+    if not text:
+        return None
+    match = _LIMIT_MESSAGE.search(text)
+    if match is None:
+        return None
+    window = match.group("window").lower()
+    when = (match.group("when") or "").strip()
+    if not when:
+        return LimitNotice(window, None)
+    resets_at = _resolve_reset(when, match.group("zone"), now or _now())
+    return LimitNotice(window, resets_at)
+
+
+def _resolve_reset(when: str, zone_name: str | None, now: datetime) -> datetime | None:
+    clock = _RESET_TIME.match(when.strip())
+    if clock is None:
+        return None
+    raw_hour = int(clock.group("hour"))
+    minute = int(clock.group("minute") or 0)
+    if raw_hour > 12 or minute > 59:  # `13:00pm` is no clock time; `12:30am` is 00:30
+        return None
+    hour = raw_hour % 12
+    if clock.group("ampm").lower() == "pm":
+        hour += 12
+    try:
+        zone: tzinfo = ZoneInfo(zone_name) if zone_name else _local_zone(now)
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = _local_zone(now)
+    local_now = now.astimezone(zone)
+    candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    day = clock.group("day")
+    if day is not None:
+        # `resets Mon 12:00am`: the next Monday at that time — today if it is
+        # Monday and the time is still ahead, else up to a week out.
+        wanted = _WEEKDAYS.index(day.lower()[:3])
+        ahead = (wanted - candidate.weekday()) % 7
+        candidate += timedelta(days=ahead)
+        if candidate < local_now:
+            candidate += timedelta(days=7)
+    elif candidate < local_now:
+        candidate += timedelta(days=1)
+    return candidate.astimezone(UTC)
+
+
+_LOCALTIME = Path("/etc/localtime")
+"""Where Linux and macOS keep the machine's zone: a TZif file, or a link to one."""
+
+
+def _local_zone(now: datetime) -> tzinfo:
+    """The local zone WITH its rules, so a moment days away gets the offset in force then.
+
+    ``now.astimezone().tzinfo`` is a fixed offset — the one in force NOW — and a
+    weekly reset read against it on the far side of a DST change came out an
+    hour off, and with it the board's ``⏳ limited`` line, ``format_reset`` and
+    the grace ``_derive`` gives a parked row (review of #205, fourth round). The
+    zone is ``TZ``'s when the process has one, since that is what the clock
+    itself honours, else ``/etc/localtime``'s. Only a zone neither can load —
+    a POSIX rule string in ``TZ``, a machine without the file (Windows) — falls
+    back to the offset in force now.
+    """
+    raw = os.environ.get("TZ")
+    key = raw.strip().removeprefix(":") if raw is not None else None
+    try:
+        if key is None:
+            if _LOCALTIME.is_file():
+                with _LOCALTIME.open("rb") as handle:
+                    return ZoneInfo.from_file(handle, key="localtime")
+        elif Path(key).is_absolute():  # `TZ=:/usr/share/zoneinfo/America/Toronto`
+            with Path(key).open("rb") as handle:
+                return ZoneInfo.from_file(handle, key=key)
+        elif key:  # an empty TZ is UTC, which the offset below already is
+            return ZoneInfo(key)
+    except (OSError, ValueError, ZoneInfoNotFoundError):
+        pass
+    return now.astimezone().tzinfo or UTC
+
+
+def format_reset(when: datetime | None, *, now: datetime | None = None) -> str:
+    """When a rate-limit window lifts, as a distance AND a clock time: ``in 3h 10m (18:00)``.
+
+    The ONE formatter for every surface that shows a reset — ``accounts usage``
+    / ``list --usage``, the Accounts page, the board's ``limited`` line, the
+    agent's ``limit resets …`` detail and doctor's parked-agents line — because
+    copies drifted (#152): two printed a bare ``HH:MM``, which for the seven-day
+    window can be six days away and read as tonight. It lives in core so the
+    services can call it too (review of #205, finding 9).
+
+    The rules, each chosen so nobody has to do calendar arithmetic:
+
+    - under an hour: ``in 12m`` — the clock time adds nothing;
+    - later the same LOCAL day: ``in 3h 10m (18:00)``;
+    - another day: ``in 2d 4h (Tue 02:00)`` — the weekday is what tells a
+      weekly reset from tonight's, and it is never a bare ``HH:MM`` again;
+    - already past (the endpoint's reading is a little stale): ``now``.
+
+    ``now`` is the clock to measure against; production reads the wall clock,
+    tests pass one so the midnight boundary can be pinned. Returns ``""`` for
+    ``None`` so callers can append it unconditionally.
+    """
+    if when is None:
+        return ""
+    moment = now if now is not None else datetime.now(tz=UTC)
+    # In UTC on purpose: two aware datetimes that share one tzinfo subtract by
+    # their WALL CLOCKS (Python ignores the offsets then), so a reset across a
+    # DST change would read an hour long; the endpoint's UTC stamps never hit
+    # this, a caller's zoned pair would (review of #205, second round).
+    remaining = when.astimezone(UTC) - moment.astimezone(UTC)
+    if remaining <= timedelta(0):
+        return "now"
+    total_minutes = int(remaining.total_seconds() // 60)
+    days, rest = divmod(total_minutes, 24 * 60)
+    hours, minutes = divmod(rest, 60)
+    # The clock time is shown to the nearest MINUTE. Measured against the live
+    # endpoint (2026-09-13): the same window's ``resets_at`` came back as
+    # 08:59:59.86, 09:00:00.26 and 08:59:59.62 on three calls seconds apart —
+    # it jitters across the second boundary — so a truncated ``%H:%M`` flickered
+    # between 04:59 and 05:00 from one refresh to the next. Rounding says what
+    # a person means by the time of a reset, and the distance still moves.
+    local_when = (when.astimezone() + timedelta(seconds=30)).replace(second=0, microsecond=0)
+    # Each instant in the local zone AS OF THAT INSTANT. ``astimezone()`` with no
+    # argument attaches the fixed offset in force at the value it converts, and
+    # reusing the reset's offset for ``now`` compared the two dates an hour apart
+    # across a DST change — a next-day reset printed as a bare clock time, the
+    # very drift #152 removed (review of #205, second round).
+    local_now = moment.astimezone()
+    if remaining < timedelta(hours=1):
+        return f"in {max(minutes, 1)}m"
+    if days == 0:
+        distance = f"{hours}h" if minutes == 0 else f"{hours}h {minutes:02d}m"
+    else:
+        distance = f"{days}d" if hours == 0 else f"{days}d {hours}h"
+    if local_when.date() == local_now.date():
+        return f"in {distance} ({local_when:%H:%M})"
+    return f"in {distance} ({local_when:%a %H:%M})"
+
+
 # --- launching ------------------------------------------------------------------------
 
 
 LAUNCH_VARS = (CONFIG_DIR_VAR, TMPDIR_VAR)
 """The two variables an account IS, for a launch."""
+
+PLAIN_VARS = {
+    CONFIG_DIR_VAR: "AISQUARE_PLAIN_CLAUDE_CONFIG_DIR",
+    TMPDIR_VAR: "AISQUARE_PLAIN_CLAUDE_CODE_TMPDIR",
+}
+"""Where a launch onto a managed slot keeps the launching shell's own two variables.
+
+The launch overwrites both with the slot's, and nothing started under the slot
+could otherwise tell which directory the plain claude is. A variable the shell
+did not have gets no copy.
+"""
+
+
+def plain_environment(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The plain claude's two variables as ``environ`` (default: this process's) has them.
+
+    Each one ``environ`` sets to a non-blank value, as a plain ``claude`` started
+    from it would read them, except in an environment that runs under one of
+    OUR slots: ``CLAUDE_CONFIG_DIR`` names the slot there, and both variables
+    are the slot's. The plain claude's are then the :data:`PLAIN_VARS` copies
+    the launch kept, or none when the launching shell had none (``~/.claude``).
+    Read as they stood, every hook of an agent on slot 2 took slot 2 for slot 1.
+    The automatic hand-over then read slot 2's usage under slot 1's name and
+    relaunched the limited agent on slot 2 as ``--account 1`` (review of #205,
+    sixth round).
+    """
+    source = os.environ if environ is None else environ
+    own = {var: source[var] for var in LAUNCH_VARS if source.get(var, "").strip()}
+    config_dir = own.get(CONFIG_DIR_VAR)
+    if config_dir is None or managed_slot(paths.expand_user(Path(config_dir.strip()))) is None:
+        return own
+    return {var: source[kept] for var, kept in PLAIN_VARS.items() if source.get(kept, "").strip()}
 
 
 def launch_env(account: ClaudeAccount) -> dict[str, str]:
@@ -416,22 +704,28 @@ def apply_launch_env(
 ) -> dict[str, str]:
     """Make ``env`` launch under ``account``, in place, and return it.
 
-    A managed slot sets both variables. The default slot RESTORES the shell's
-    own: each variable becomes what the launching shell had, and one the shell
-    did not have is removed — so ``--account 1`` means "the plain claude of
-    this shell" even when the role's binding had pointed the launch at another
-    directory. Without the restore a launch announced as the default ran on
-    whatever the binding said, which is the one thing the flag exists to
-    override. ``shell`` defaults to this process's environment.
+    A managed slot sets both variables, and keeps the shell's own beside them
+    under :data:`PLAIN_VARS`. The default slot RESTORES the shell's own: each
+    variable becomes what the launching shell had, and one the shell did not
+    have is removed — so ``--account 1`` means "the plain claude of this shell"
+    even when the role's binding had pointed the launch at another directory.
+    Without the restore a launch announced as the default ran on whatever the
+    binding said, which is the one thing the flag exists to override. "The
+    shell's own" is :func:`plain_environment`'s reading, so a shell that itself
+    runs under one of our slots restores the plain claude, never that slot.
+    ``shell`` defaults to this process's environment.
     """
+    plain = plain_environment(shell)
+    wanted: dict[str, str | None]
     if account.managed:
         env.update(launch_env(account))
-        return env
-    source = os.environ if shell is None else shell
-    for var in LAUNCH_VARS:
-        value = source.get(var, "")
-        if value.strip():
-            env[var] = value
-        else:
+        wanted = {kept: plain.get(var) for var, kept in PLAIN_VARS.items()}
+    else:
+        wanted = {var: plain.get(var) for var in LAUNCH_VARS}
+        wanted.update(dict.fromkeys(PLAIN_VARS.values()))  # restored in place: no copy to go stale
+    for var, value in wanted.items():
+        if value is None:
             env.pop(var, None)
+        else:
+            env[var] = value
     return env

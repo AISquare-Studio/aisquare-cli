@@ -359,6 +359,6 @@ def telemetry_args(
                 [],
                 "Codex keeps your configured exporter; AISquare native tracing is off",
             )
-        return native_telemetry.start(env)
+        return native_telemetry.start_receiver(env)
     except Exception as exc:
         return [], f"Codex launched without native telemetry: {exc}"

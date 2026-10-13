@@ -421,7 +421,10 @@ Replaces this terminal with `tmux attach` on the project's fleet session — the
 full-fidelity escape hatch. Under `--json` it prints the command it would run
 instead of running it. The session is found on the server the project's live
 agents are on, at the socket their spawns recorded (`tmux -S`), the line the
-Manager tab prints, so it works from a shell under another `TMUX_TMPDIR`.
+Manager tab prints, so it works from a shell under another `TMUX_TMPDIR`. With
+no live agent, the servers its ended agents were on are asked, the latest to
+end first: an ended manager's window lingers there and holds the session, the
+screen behind the 💤 row. Last, the socket this shell's tmux looks at.
 
 **Scope and exit codes.** `--all` and `--project` name different scopes and are
 refused together rather than one silently winning — a usage error, exit **2**,

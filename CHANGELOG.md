@@ -196,6 +196,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are left live and named, with `SIGUSR1` as the way back to their server and
   `fleet shutdown --forget` as your word that they are not running; `reap
   --json` lists them under `held`. The doctor's advice says the same.
+- `fleet attach` with no live agent finds an ended manager's lingering window
+  where its row recorded its server (`tmux -S`), the latest to end first, and
+  only then falls back to `tmux -L`. From a shell under another `TMUX_TMPDIR`,
+  the 💤 manager's last screen stood on its server while attach said "nothing
+  to attach to".
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

@@ -5486,8 +5486,11 @@ def attach_argv(project: ProjectInfo) -> list[str]:
     them. By the socket's name alone (``tmux -L``), a shell under another ``TMUX_TMPDIR``
     asks another server: one with no such session refused with "spawn manager starts
     one", which then refused for the live manager, and one with a session of that name was
-    attached to (round 29 of #257). A project with no live agent is asked where this
-    shell's tmux looks.
+    attached to (round 29 of #257). Then of the servers the project's ENDED agents were on,
+    the latest to end first: an ended manager's window lingers (``remain-on-exit``) and
+    holds the session, which is what the 💤 row's attach stands for, and by ``-L`` alone a
+    shell under another ``TMUX_TMPDIR`` did not find it (follow-up of #257). Last, where
+    this shell's tmux looks, for a session no row points at.
     """
     config = settings()
     srv = server(config)
@@ -5495,9 +5498,17 @@ def attach_argv(project: ProjectInfo) -> list[str]:
     project = ensure_codename(project)
     name = session_name(project.codename or codenames.codename_for(project.id))
     with store_session() as store:
-        live = store.fleet_agents(project.id, live_only=True)
-    addresses = dict.fromkeys(_address(agent, config) for agent in _manager_first(live))
-    for candidate in [_server_at(address, config) for address in addresses] or [srv]:
+        rows = store.fleet_agents(project.id, live_only=False)
+    live = _manager_first([agent for agent in rows if agent.ended_at is None])
+    ended = sorted(
+        (agent for agent in rows if agent.ended_at is not None),
+        key=lambda agent: agent.ended_at or agent.created_at,
+        reverse=True,
+    )
+    addresses = dict.fromkeys(
+        [*(_address(agent, config) for agent in [*live, *ended]), _Address(config.tmux_socket)]
+    )
+    for candidate in (_server_at(address, config) for address in addresses):
         if candidate.has_session(name):
             return candidate.attach_argv(name)
     raise FleetError(

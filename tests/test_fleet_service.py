@@ -6694,6 +6694,33 @@ def test_attach_argv_asks_the_server_at_the_path_the_projects_rows_recorded(
     assert fleet_service.attach_argv(project) == [*at_the_path, f"={session}"]
 
 
+def test_attach_argv_finds_an_ended_managers_lingering_window_where_its_row_recorded(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up of #257: with no live row, `fleet attach` fell back to `-L`, so an ended
+    manager whose window lingers (`remain-on-exit`) on a server under another `TMUX_TMPDIR`
+    was not found: "nothing to attach to", while the 💤 row's last screen stood there. The
+    ended rows' recorded paths are asked too, the latest to end first, and `-L` last."""
+    manager = fleet_service.spawn(project, "manager").agent
+    manager, stranger = _behind_a_stranger(tmux, project, manager, monkeypatch)
+    tmux.path = manager.socket_path  # the handle the stranger hands out for that path
+    session = f"asq-{_codename(project)}"
+    at_the_path = ["/fake/tmux", "-S", str(manager.socket_path), "attach-session", "-t"]
+    tmux.die(manager.pane_id, 0)  # the manager exited; its window lingers on its server
+    [listed] = fleet_service.list_agents(project)
+    assert listed.agent.id == manager.id and listed.agent.ended_at is not None
+    assert tmux.has_session(session) and not stranger.has_session(session)
+
+    assert fleet_service.attach_argv(project) == [*at_the_path, f"={session}"]
+
+    # A session of that name on the server `-L` reaches is asked last, not first.
+    stranger.sessions[session] = []
+    assert fleet_service.attach_argv(project) == [*at_the_path, f"={session}"]
+    # And with the lingering window gone, the fallback is still where this shell looks.
+    tmux.kill_window(manager.pane_id)
+    assert fleet_service.attach_argv(project)[:3] == ["/fake/tmux", "-L", "asq-test"]
+
+
 def test_attach_argv_refuses_when_there_is_no_session_to_attach_to(
     tmux: FakeTmux, project: ProjectInfo
 ) -> None:

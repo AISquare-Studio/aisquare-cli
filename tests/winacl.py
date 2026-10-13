@@ -146,3 +146,19 @@ r"""NT AUTHORITY\INTERACTIVE, as icacls abbreviates it."""
 def grant_other_principal(path: Path) -> None:
     """Grant a principal `restrict_to_owner` does not name, by SID."""
     _run(["icacls", str(path), "/grant", f"*{OTHER_PRINCIPAL_SID}:(R)"])
+
+
+def deny_writing(path: Path, sid: str) -> None:
+    """Deny the account with ``sid`` writing ``path``'s contents: an explicit deny ACE, by SID.
+
+    ``(W)`` is write-only access (data, append, extended attributes, attributes). It
+    leaves the read-only flag alone, so ``os.access`` still answers writable, and it
+    leaves ``DELETE``, so a rename over the file is not refused by it. Undo it with
+    :func:`undo_denials` before the test's folder is removed.
+    """
+    _run(["icacls", str(path), "/deny", f"*{sid}:(W)"])
+
+
+def undo_denials(path: Path, sid: str) -> None:
+    """Remove every deny ACE ``path`` holds for the account with ``sid``."""
+    _run(["icacls", str(path), "/remove:d", f"*{sid}"])

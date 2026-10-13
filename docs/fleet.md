@@ -658,7 +658,7 @@ answer.
 | --- | --- | --- |
 | manager | `auto` | its tool use is board and fleet CLI calls |
 | coder, tester, validator | `auto` | the classifier answers every tool call, the project's own check commands included. A project allowlist that pre-approves `make check`, `pytest`, `git` and `gh` is designed (plan §3.6) and **is not in this checkout**: nothing here writes or passes an allowed-tools list |
-| reviewer | `auto` + `--disallowedTools=Edit Write NotebookEdit` | the flag is the role's `extra_args`: it keeps Bash, which its whole cycle runs on and `--restricted` would take, and loses the tools that edit files, so a prompt injected through the PR it reads cannot edit the tree with them. Its shell is not read-only: `sed -i`, `git push` or `gh pr merge` injected through a PR meets only its briefing and `auto` mode's check of each action, and no allowlist of commands would hold (its inline comments are `gh api` calls, as a merge is, and verifying a finding runs the PR's code). Where that matters, run it with a `gh` token that cannot write the repository's contents, which can comment but not push or merge, and protect the branch. `extra_args = []` gives it every tool. A config saved by 0.6.0 or 0.7.0 holds that release's default, `extra_args = ["--restricted"]`; exactly that list loads as today's default, once: the next save writes `config_version = 1` at the top of the file, and from then on `--restricted` set there is yours and kept. A reviewer those releases started recorded the flag in its launch spec, and `fleet restart`, `fleet switch` and Restart replay today's arguments in its place, with `--disallowedTools=Edit Write NotebookEdit` beside them where they do not deny those tools: the spec cannot tell that release's default from a `--restricted` its spawn was given, so the replay errs toward the reviewer without them, and a fresh spawn gets whatever today's arguments give. One recorded since is replayed as recorded. Any other list stays as written |
+| reviewer | `auto` + `--disallowedTools=Edit Write NotebookEdit` | the flag is the role's `extra_args`: it keeps Bash, which its whole cycle runs on and `--restricted` would take, and loses the tools that edit files, so a prompt injected through the PR it reads cannot edit the tree with them. Its shell is not read-only: `sed -i`, `git push` or `gh pr merge` injected through a PR meets only its briefing and `auto` mode's check of each action, and no allowlist of commands would hold (its inline comments are `gh api` calls, as a merge is, and verifying a finding runs the PR's code). Where that matters, run it with a `gh` token that cannot write the repository's contents, which can comment but not push or merge, and protect the branch: [A reviewer that cannot push](#a-reviewer-that-cannot-push). `extra_args = []` gives it every tool. A config saved by 0.6.0 or 0.7.0 holds that release's default, `extra_args = ["--restricted"]`; exactly that list loads as today's default, once: the next save writes `config_version = 1` at the top of the file, and from then on `--restricted` set there is yours and kept. A reviewer those releases started recorded the flag in its launch spec, and `fleet restart`, `fleet switch` and Restart replay today's arguments in its place, with `--disallowedTools=Edit Write NotebookEdit` beside them where they do not deny those tools: the spec cannot tell that release's default from a `--restricted` its spawn was given, so the replay errs toward the reviewer without them, and a fresh spawn gets whatever today's arguments give. One recorded since is replayed as recorded. Any other list stays as written |
 | ui-tester | `auto` + `--chrome` | `--chrome` comes from the role, not this table: `aisquare launch ui-tester` adds it for the default `claude` binary wherever the role starts, and `--no-chrome` in `extra_args` or on the command turns it off. Its "read-only" is a briefing instruction, NOT construction — the row above says so, and the sentence in the coder/tester cell applies here too: nothing here writes or passes an allowed-tools list, so a PreToolUse allowlist (plan §3.6, not in this checkout) is what would enforce it |
 
 The mode is passed straight through to `claude` and nothing here reads its
@@ -776,6 +776,53 @@ sidebar, the board and the wake-up rules — so by default the fleet exports the
 variable as `0` into the sessions *it* starts and briefs the manager that
 `fleet spawn` is the one way to get help. Your own `claude` sessions keep
 whatever they had. `disable_native_agent_teams = false` turns this off.
+
+### A reviewer that cannot push
+
+The reviewer keeps its shell, so its briefing and `auto` mode's check of each
+action are all that stand between a prompt injected through the PR it reads and
+a `git push` or `gh pr merge`. Credentials are what can refuse them. Give the
+reviewer a GitHub token that reads the code and reviews pull requests, and
+cannot write the repository's contents:
+
+1. Create a fine-grained personal access token (GitHub → Settings → Developer
+   settings → Fine-grained tokens) for the repositories the fleet reviews, with
+   **Contents: Read-only** and **Pull requests: Read and write** (its review and
+   inline comments). Metadata is read-only and always on. If its cycle reads CI,
+   add **Commit statuses** and **Actions**, both read-only. Leave out everything
+   else, above all Contents: Read and write, Administration and Workflows.
+2. Keep it in a file only you can read:
+
+   ```sh
+   mkdir -p ~/.config/aisquare
+   (umask 077 && cat > ~/.config/aisquare/reviewer-gh-token)   # paste, then Ctrl-D
+   ```
+
+3. Bind it to the role:
+
+   ```sh
+   aisquare team bind reviewer \
+     --env-file GH_TOKEN='~/.config/aisquare/reviewer-gh-token' \
+     --env-file GITHUB_TOKEN='~/.config/aisquare/reviewer-gh-token'
+   ```
+
+   Every reviewer launch reads the file: `fleet spawn`, `fleet restart`,
+   `fleet switch`, the UI's Restart and `aisquare launch reviewer`. The token
+   goes into that session's environment alone. `gh` prefers `GH_TOKEN` to the
+   login it keeps, and `GITHUB_TOKEN` stands in for one your shell exports. The
+   token is never written to config.toml and never printed; the launch banner
+   names the two keys. When the file is missing or empty, the reviewer is
+   refused rather than started on your own credentials, and `fleet spawn` and
+   `fleet restart` refuse before a window opens or a running reviewer is
+   stopped. This is opt-in: without it, the reviewer runs on whatever `gh` and
+   `git` find, as before.
+4. **Protect the branch.** The token governs `gh`, and HTTPS pushes that go
+   through `gh`'s credential helper (`gh auth setup-git`). A push over SSH, or
+   through another credential helper, uses that credential instead. So protect
+   `main` and your release branches on GitHub: require a pull request with an
+   approving review before merging, block force pushes and deletions, and do not
+   let administrators bypass the rule. Then no push or merge from the reviewer's
+   shell lands on a protected branch, whatever credential it finds.
 
 ---
 

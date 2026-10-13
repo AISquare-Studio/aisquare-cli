@@ -1122,6 +1122,32 @@ def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_pr
     assert "coder" not in load_config().team.profiles  # nothing else bound: the table goes
 
 
+def test_settings_clearing_an_account_keeps_a_binding_that_still_reads_a_file(
+    project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Follow-up of #257: a binding is empty once its account goes only when nothing else
+    is bound, and `env_files` (`team bind --env-file`, a reviewer's GH_TOKEN) is something.
+    Read as `bin or env or args`, clearing the account dropped the token file with it."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import settings as settings_service
+
+    accounts_core.create_account()  # slot 2, under the isolated AISQUARE_HOME
+    token = tmp_path / "coder-token"
+    token.write_text("secret\n", encoding="utf-8")
+    settings_service.bind_role("coder", env_files={"GH_TOKEN": str(token)}, account="2")
+
+    async def clear(pilot: Pilot[None], host: Host) -> None:
+        host.query_one(ProjectView).active = "tab-settings"
+        await settle(pilot)
+        host.query_one("#acct-coder", Select).value = ""
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+
+    drive(project, clear)
+    profile = load_config().team.profiles["coder"]
+    assert profile.account is None and profile.env_files == {"GH_TOKEN": str(token)}
+
+
 def test_settings_save_leaves_the_bindings_it_did_not_change_as_the_file_has_them(
     project: ProjectInfo,
 ) -> None:

@@ -11115,3 +11115,32 @@ def test_a_clean_automatic_hand_over_puts_no_note_beside_switched(
     [receipt] = receipts
     assert any(note.startswith("launched as recorded") for note in receipt.notes)
     assert receipt.failures == []
+
+
+def test_a_role_whose_env_file_cannot_be_read_is_refused_before_a_window_or_a_stop(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Follow-up of #257: a reviewer bound to a `GH_TOKEN` file (`team bind --env-file`)
+    whose file cannot be read is refused by the window's `aisquare launch`, rather than
+    started on this shell's credentials. Asked by the spawn, before a window opens, and by
+    a restart, before the running agent is stopped: the window would end as it began."""
+    from aisquare.services import settings as settings_service
+
+    token = tmp_path / "reviewer-gh-token"
+    token.write_text("github_pat_x\n", encoding="utf-8")
+    settings_service.bind_role("reviewer", env_files={"GH_TOKEN": str(token)})
+    reviewer = fleet_service.spawn(project, "reviewer", worktree=False).agent
+    token.unlink()
+    started = len(tmux.spawned)
+    refusal = f"reviewer reads GH_TOKEN from {token}, which cannot be read"
+
+    with pytest.raises(FleetError, match=re.escape(refusal)):
+        fleet_service.spawn(project, "reviewer", worktree=False, label="reviewer-2")
+    with pytest.raises(FleetError, match=re.escape(refusal)):
+        fleet_service.restart(project, reviewer.label)
+
+    assert len(tmux.spawned) == started, "no window"
+    assert tmux.typed == [] and tmux.killed == [], "the running reviewer is not stopped"
+    with store_session() as store:
+        live = store.fleet_agent_by_label(project.id, reviewer.label, live_only=True)
+    assert live is not None and live.id == reviewer.id

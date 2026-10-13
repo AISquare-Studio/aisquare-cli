@@ -15,6 +15,8 @@ untouched, and no path is ever inferred, validated or invented.
 
 from __future__ import annotations
 
+import json
+import shlex
 import shutil
 from pathlib import Path
 from typing import Any
@@ -602,3 +604,166 @@ class TestTracingReadsTheBoundBinaryNotTheFlag:
         assert f"X-Pipeline-Id: {pinned}" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"], (
             "the id the agent is started on and the id the Run is filed under must be one id"
         )
+
+
+# --- a variable bound to a file: a secret no printed line or config file holds --------------
+
+TOKEN = "github_pat_reviewer_cannot_push_0123456789"
+
+
+def _token_file(tmp_path: Path, text: str = TOKEN + "\n") -> Path:
+    path = tmp_path / "secrets" / "reviewer-gh-token"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+class TestEnvFiles:
+    """`env_files`: a variable's value read from a file at every launch (follow-up of #257).
+
+    For the reviewer: a `GH_TOKEN` that cannot write the repository's contents, so a prompt
+    injected through the PR it reads cannot push or merge through `gh` (docs/fleet.md). The
+    property under test is the secret's: it reaches the agent's environment and nothing
+    that prints, and a file that cannot be read refuses the launch rather than start the
+    role on this shell's own credentials. Still nothing here knows what `GH_TOKEN` means."""
+
+    def test_the_files_text_is_the_value_and_only_its_path_may_be_shown(
+        self, tmp_path: Path
+    ) -> None:
+        token = _token_file(tmp_path)
+        _bind("reviewer", env_files={"GH_TOKEN": str(token)})
+
+        got = harness.resolve_profile("reviewer")
+
+        assert got.file_env == {"GH_TOKEN": TOKEN}, "its text, the newline dropped"
+        assert got.env_files == {"GH_TOKEN": str(token)} and got.env_sources["GH_TOKEN"] == "file"
+        assert "GH_TOKEN" not in got.env and not got.is_empty
+        assert TOKEN not in got.model_dump_json() and TOKEN not in repr(got), "never printed"
+
+    def test_the_file_wins_over_the_bindings_env_and_a_flag_wins_over_the_file(
+        self, tmp_path: Path
+    ) -> None:
+        token = _token_file(tmp_path)
+        _bind("reviewer", env={"GH_TOKEN": "a-full-token"}, env_files={"GH_TOKEN": str(token)})
+
+        bound = harness.resolve_profile("reviewer")
+        flagged = harness.resolve_profile("reviewer", env_overrides={"GH_TOKEN": "for-once"})
+
+        assert bound.file_env == {"GH_TOKEN": TOKEN} and "GH_TOKEN" not in bound.env
+        assert flagged.env["GH_TOKEN"] == "for-once" and flagged.file_env == {}
+        assert flagged.refusal is None and flagged.env_files == {}
+
+    @pytest.mark.parametrize("shape", ["missing", "empty"])
+    def test_a_file_that_cannot_be_read_refuses_the_launch(
+        self, tmp_path: Path, shape: str
+    ) -> None:
+        path = tmp_path / "gone" if shape == "missing" else _token_file(tmp_path, "\n")
+        _bind("reviewer", env_files={"GH_TOKEN": str(path)})
+
+        got = harness.resolve_profile("reviewer")
+
+        assert got.refusal is not None and got.file_env == {}
+        assert got.refusal.startswith(f"reviewer reads GH_TOKEN from {path}, which "), got.refusal
+        assert ("cannot be read" if shape == "missing" else "is empty") in got.refusal
+        assert "aisquare team bind reviewer --unset GH_TOKEN" in got.refusal
+
+    def test_launch_hands_the_value_to_the_agent_and_prints_none_of_it(
+        self, runner: CliRunner, work_dir: Path, spy: dict[str, Any], tmp_path: Path
+    ) -> None:
+        _bind("reviewer", env_files={"GH_TOKEN": str(_token_file(tmp_path))})
+
+        result = runner.invoke(app, ["launch", "reviewer"])
+
+        assert result.exit_code == 0, result.output
+        assert spy["env"]["GH_TOKEN"] == TOKEN
+        assert "GH_TOKEN" in result.output, "the key is named"
+        assert TOKEN not in result.output
+
+    def test_launch_refuses_rather_than_start_on_this_shells_credentials(
+        self,
+        runner: CliRunner,
+        work_dir: Path,
+        spy: dict[str, Any],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("GH_TOKEN", "this-shells-token-that-can-push")
+        _bind("reviewer", env_files={"GH_TOKEN": str(tmp_path / "gone")})
+
+        result = runner.invoke(app, ["--json", "launch", "reviewer"])
+
+        payload = json.loads(result.stdout)
+        assert result.exit_code == 1, result.output
+        assert payload["error"] == "env_file_unreadable", payload
+        assert payload["detail"].startswith("reviewer reads GH_TOKEN from "), payload
+        assert not spy, "nothing launched"
+
+    def test_spawns_printed_command_reads_the_file_and_holds_no_value(
+        self,
+        runner: CliRunner,
+        work_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        token = _token_file(tmp_path / "a dir")
+        _bind("reviewer", env_files={"GH_TOKEN": str(token)})
+        monkeypatch.setenv("AISQUARE_TEAM", "1")
+
+        human = runner.invoke(app, ["team", "spawn", "reviewer", "--no-probe"])
+        machine = runner.invoke(app, ["--json", "team", "spawn", "reviewer", "--no-probe"])
+
+        assert human.exit_code == 0 and machine.exit_code == 0, human.output + machine.output
+        assert f'GH_TOKEN="$(cat {shlex.quote(str(token))})"' in human.output
+        assert "GH_TOKEN [file]" in human.output
+        assert TOKEN not in human.output and TOKEN not in machine.output
+        assert json.loads(machine.stdout)["env_files"] == {"GH_TOKEN": str(token)}
+
+
+class TestBindEnvFile:
+    def test_it_stores_the_path_as_typed_and_reads_it_now(
+        self, runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SECRETS", str(_token_file(tmp_path).parent))
+
+        result = runner.invoke(
+            app, ["team", "bind", "reviewer", "--env-file", "GH_TOKEN=$SECRETS/reviewer-gh-token"]
+        )
+
+        assert result.exit_code == 0, result.output
+        profile = load_config().team.profiles["reviewer"]
+        assert profile.env_files == {"GH_TOKEN": "$SECRETS/reviewer-gh-token"}
+        assert TOKEN not in paths.config_path().read_text(encoding="utf-8")
+        assert TOKEN not in result.output
+
+    def test_a_file_it_cannot_read_is_refused_at_bind(
+        self, runner: CliRunner, work_dir: Path, tmp_path: Path
+    ) -> None:
+        result = runner.invoke(
+            app, ["--json", "team", "bind", "reviewer", "--env-file", f"GH_TOKEN={tmp_path}/no"]
+        )
+
+        assert result.exit_code == 1
+        assert json.loads(result.stdout)["error"] == "env_file_unreadable"
+        assert "reviewer" not in load_config().team.profiles, "nothing bound"
+
+    def test_a_key_lives_in_one_map_and_unset_takes_it_from_either(self, tmp_path: Path) -> None:
+        token = str(_token_file(tmp_path))
+        settings_service.bind_role(ROLE, env={"GH_TOKEN": "inline", "KEEP": "1"})
+
+        to_file = settings_service.bind_role(ROLE, env_files={"GH_TOKEN": token})
+        assert (to_file.env, to_file.env_files) == ({"KEEP": "1"}, {"GH_TOKEN": token})
+        back = settings_service.bind_role(ROLE, env={"GH_TOKEN": "inline"})
+        assert (back.env, back.env_files) == ({"KEEP": "1", "GH_TOKEN": "inline"}, {})
+        settings_service.bind_role(ROLE, env_files={"GH_TOKEN": token})
+        unset = settings_service.bind_role(ROLE, unset=["GH_TOKEN"])
+        assert (unset.env, unset.env_files) == ({"KEEP": "1"}, {})
+
+    def test_taking_the_account_away_keeps_a_binding_of_files_alone(self, tmp_path: Path) -> None:
+        """A binding whose account was its last binding goes with it; one that still reads
+        a file is not empty, and was read as empty by `bin or env or args`."""
+        settings_service.bind_role(ROLE, env_files={"GH_TOKEN": str(_token_file(tmp_path))})
+        settings_service.bind_role(ROLE, account="1")
+
+        settings_service.bind_role(ROLE, clear_account=True)
+
+        assert load_config().team.profiles[ROLE].env_files, "the file binding stays"

@@ -423,6 +423,12 @@ Set **both** variables: `CLAUDE_CONFIG_DIR` alone shares the *default* scratch
 directory with every other account, which looks isolated right up until two
 parallel sessions collide in temp. `--account` sets both for you.
 
+A value that is a secret binds with `--env-file KEY=PATH` instead: the file is
+read at every launch, so config.toml, the launch banner and `team spawn`'s
+printed command hold the path and never the value, and a file that cannot be
+read refuses the launch. The reviewer's GitHub token is what it is for (see
+[A reviewer that cannot push](fleet.md#a-reviewer-that-cannot-push)).
+
 For a one-off, `aisquare launch <role> --env KEY=VALUE` merges over the
 binding per key. Shell aliases (`alias claude1='CLAUDE_CONFIG_DIR=… claude'`)
 can **not** be passed to `--command` — an alias is not an executable — but an

@@ -58,7 +58,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from aisquare.core import spawn
 from aisquare.core.paths import aisquare_home, expand_user
@@ -1162,10 +1162,20 @@ class LaunchProfile(BaseModel):
 
     env: dict[str, str] = {}
     args: list[str] = []
-    #: Per-env-key provenance — ``flag`` or ``config``. Carried for the same
+    #: Per-env-key provenance — ``flag``, ``config`` or ``file``. Carried for the same
     #: reason the other two axes carry it: an answer without its source sends
     #: the reader hunting for who won.
     env_sources: dict[str, str] = {}
+    #: The binding's ``env_files`` this launch reads, each key to its file, expanded:
+    #: what may be shown of them. Their values are :attr:`file_env`.
+    env_files: dict[str, str] = {}
+    #: The values read from :attr:`env_files`, for the launch's environment alone: never
+    #: dumped, never in a repr, so nothing that prints a profile can print a secret.
+    file_env: dict[str, str] = Field(default_factory=dict, exclude=True, repr=False)
+    #: Why this launch may not start, when it may not: a variable the binding reads from a
+    #: file that cannot be read or holds nothing (:func:`read_env_file`). The callers
+    #: refuse it, and the fleet asks it before a window opens.
+    refusal: str | None = None
     #: Why the configured bindings could not be read, when they could not be.
     #: A launch still proceeds unbound — but silently proceeding would put a
     #: seat on the DEFAULT install while reporting success, so the caller MUST
@@ -1174,7 +1184,7 @@ class LaunchProfile(BaseModel):
 
     @property
     def is_empty(self) -> bool:
-        return not self.env and not self.args
+        return not self.env and not self.env_files and not self.args
 
 
 def expand_value(value: str) -> str:
@@ -1187,6 +1197,22 @@ def expand_value(value: str) -> str:
     profile, which is exactly the failure this whole area exists to avoid.
     """
     return os.path.expanduser(os.path.expandvars(value))
+
+
+def read_env_file(path: str) -> str:
+    """The value a binding's ``env_files`` reads from ``path``: its text, trailing newlines
+    dropped, as ``$(cat path)`` gives it. ``ValueError`` saying what is wrong with the file
+    when it cannot be read or holds nothing: an empty value would launch the role without
+    the secret it was bound to carry, as a blank ``CLAUDE_CONFIG_DIR`` would start another
+    login (:func:`expand_value`)."""
+    try:
+        value = Path(path).read_text(encoding="utf-8").rstrip("\r\n")
+    except (OSError, UnicodeDecodeError) as exc:
+        reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+        raise ValueError(f"cannot be read ({reason})") from exc
+    if not value.strip():
+        raise ValueError("is empty")
+    return value
 
 
 def parse_env_pairs(pairs: Sequence[str]) -> dict[str, str]:
@@ -1217,19 +1243,51 @@ def resolve_profile(
     the rest of the role's profile, which is what makes a one-off tweak cheap.
     Args APPEND rather than replace, because the configured ones are the role's
     standing shape and the caller's are additions to it.
+
+    A variable bound to a file (``env_files``) is read here, at every launch, into
+    :attr:`LaunchProfile.file_env`; it wins over the same key in the binding's ``env``,
+    and a flag wins over it, as a flag does over every binding. One that cannot be read
+    is the profile's :attr:`LaunchProfile.refusal`.
     """
     env: dict[str, str] = {}
     sources: dict[str, str] = {}
     args: list[str] = []
+    files: dict[str, str] = {}
     team, unreadable = _team_settings()
     profile = (team.profiles or {}).get(role) if team is not None else None
     if profile is not None:
         for key, value in (profile.env or {}).items():
             env[key] = expand_value(value)
             sources[key] = "config"
+        files = {key: expand_value(value) for key, value in (profile.env_files or {}).items()}
         args.extend(profile.args or [])
     for key, value in (env_overrides or {}).items():
         env[key] = expand_value(value)
         sources[key] = "flag"
     args.extend(extra_args or [])
-    return LaunchProfile(env=env, args=args, env_sources=sources, notice=unreadable)
+    shown: dict[str, str] = {}
+    file_env: dict[str, str] = {}
+    refusal: str | None = None
+    for key, path in files.items():
+        if sources.get(key) == "flag":
+            continue
+        try:
+            file_env[key] = read_env_file(path)
+        except ValueError as exc:
+            refusal = (
+                f"{role} reads {key} from {path}, which {exc} — not launching {role} without it. "
+                f"Fix the file, or unbind it: aisquare team bind {role} --unset {key}"
+            )
+            break
+        env.pop(key, None)
+        sources[key] = "file"
+        shown[key] = path
+    return LaunchProfile(
+        env=env,
+        args=args,
+        env_sources=sources,
+        env_files=shown,
+        file_env=file_env if refusal is None else {},
+        refusal=refusal,
+        notice=unreadable,
+    )

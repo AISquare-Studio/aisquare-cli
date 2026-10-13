@@ -188,12 +188,30 @@ class RoleLaunchProfile(BaseModel):
     the account. Written by ``team bind <role> --account`` and the Settings tab;
     ``None`` means the role expresses no preference and the project or machine
     default applies (#145).
+
+    ``env_files`` is ``env`` for a value that is a secret: each maps a variable to a FILE
+    holding its value, read at every launch (its text, trailing newlines dropped), so
+    config.toml, the launch banner and ``team spawn``'s printed command never hold it.
+    Still nothing here knows what the variable means. The reviewer's ``GH_TOKEN``, a
+    token that cannot write the repository's contents, is what it is for (docs/fleet.md);
+    a proxy's key is another. A file that cannot be read, or holds nothing, refuses the
+    launch: started without its value, a reviewer would run on this shell's own
+    credentials, and a blank one is a different login. A variable named in both maps
+    takes the file's value; ``team bind`` keeps them apart.
     """
 
     bin: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
+    env_files: dict[str, str] = Field(default_factory=dict)
     args: list[str] = Field(default_factory=list)
     account: str | None = None
+
+    @property
+    def carries_launch(self) -> bool:
+        """Whether it binds anything but its account: a writer that takes the account away
+        drops the table when this is false, rather than leave an empty one that
+        ``launch._declared_roles`` reads as a role the operator declared."""
+        return bool(self.bin or self.env or self.env_files or self.args)
 
 
 class TeamSettings(BaseModel):

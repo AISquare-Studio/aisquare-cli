@@ -401,12 +401,17 @@ def spawn(
             f"role bindings: config unreadable ({launch_profile.notice}) — launching unbound",
             err=True,
         )
+    if launch_profile.refusal is not None:
+        fail(launch_profile.refusal, error="env_file_unreadable", detail=launch_profile.refusal)
     # Put the profile's vars IN the printed command, not just in --exec's env.
     # The banner is meant to be pasted, and a printed command that silently
     # launches with different variables than the one it just reported is worse
-    # than printing nothing.
+    # than printing nothing. A variable bound to a file is read by the paste itself,
+    # `$(cat …)`: its value is a secret, which a printed line must not hold.
     for key, value in launch_profile.env.items():
         env_assignments.append(f"{key}={shlex.quote(value)}")
+    for key, path in launch_profile.env_files.items():
+        env_assignments.append(f'{key}="$(cat {shlex.quote(path)})"')
     # ONE precedence rule with `cli/launch.py`: the role's own flags
     # (`RoleProfile.default_args`) sit after the binding's args, and an explicit
     # flag or its `--no-` opt-out WINS wherever it appears — not because of
@@ -443,14 +448,14 @@ def spawn(
         )
     if binary.source != "default":
         banner = f"{banner}  ·  binary {binary.binary} [{binary.source}]"
-    if launch_profile.env:
+    if launch_profile.env or launch_profile.env_files:
         # Name the KEYS with their provenance, not the values: values are paths
         # and tokens, and a banner meant for a terminal should not be where a
         # credential path first becomes shoulder-readable. The full command
         # below carries the values for anyone who wants to paste it.
         shown = ", ".join(
             f"{key} [{launch_profile.env_sources.get(key, 'config')}]"
-            for key in sorted(launch_profile.env)
+            for key in sorted({*launch_profile.env, *launch_profile.env_files})
         )
         banner = f"{banner}  ·  env {shown}"
     command = " ".join([*env_assignments, shlex.join(argv)])
@@ -497,6 +502,7 @@ def spawn(
                     "binary": binary.binary,
                     "binary_source": binary.source,
                     "env": launch_profile.env,
+                    "env_files": launch_profile.env_files,
                     "env_sources": launch_profile.env_sources,
                     "extra_args": launch_profile.args,
                     "command": command,
@@ -535,6 +541,7 @@ def spawn(
         # ones name a directory that ought to exist is exactly the coupling
         # this design removes.
         env.update(launch_profile.env)
+        env.update(launch_profile.file_env)
         if tracing is not None and tracing.enabled:
             # Same seam as ``aisquare launch``: wire_session fails open, so a
             # dead or wrong proxy costs the trace, never the spawn. The id is
@@ -664,7 +671,7 @@ def harness_status() -> None:
         # parallel-install operator actually steers by. Keys only: the values
         # are paths and tokens and this is a terminal.
         if not launch_profile.is_empty:
-            carried = ",".join(sorted(launch_profile.env))
+            carried = ",".join(sorted({*launch_profile.env, *launch_profile.env_files}))
             extra = f"+{len(launch_profile.args)}args" if launch_profile.args else ""
             bin_note = f"{bin_note}  env={carried}{extra}"
         # ...and hid the role's own flags, the axis this matrix is read for
@@ -704,6 +711,16 @@ def bind(
             metavar="KEY=VALUE",
         ),
     ] = None,
+    env_file_pairs: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--env-file",
+            help="KEY=PATH: this role launches with KEY set to the file's text, read at each "
+            "launch and never printed (repeatable), for a secret such as the reviewer's "
+            "GH_TOKEN. PATH may use ~ and $VAR. A file that cannot be read refuses the launch.",
+            metavar="KEY=PATH",
+        ),
+    ] = None,
     extra_args: Annotated[
         list[str] | None,
         typer.Option("--arg", help="Extra argument this role launches with (repeatable)."),
@@ -711,7 +728,9 @@ def bind(
     unset: Annotated[
         list[str] | None,
         typer.Option(
-            "--unset", help="Remove one env key from this role (repeatable).", metavar="KEY"
+            "--unset",
+            help="Remove one env key, or env file, from this role (repeatable).",
+            metavar="KEY",
         ),
     ] = None,
     clear: Annotated[
@@ -751,6 +770,16 @@ def bind(
     expansion happens at launch, which is what lets one binding follow you
     across machines with different homes.
 
+    ``--env-file`` binds a variable whose value is a secret to the file holding
+    it, read at every launch, so config.toml and every printed line hold the
+    path alone. A reviewer that can comment but not push or merge::
+
+        aisquare team bind reviewer \\
+          --env-file GH_TOKEN='~/.config/aisquare/reviewer-gh-token'
+
+    The file is read now as well, so a typo fails here rather than every later
+    launch of the role.
+
     ``--account`` is the one binding the CLI DOES interpret: it names a Claude
     account the CLI owns (``aisquare accounts``), resolved at every launch by
     the same resolver ``launch --account`` and ``fleet spawn`` use, and it
@@ -770,12 +799,24 @@ def bind(
     else:
         if account is not None and clear_account:
             fail("--account and --clear-account are mutually exclusive", error="usage")
-        if not any((agent_bin, env_pairs, extra_args, unset, account, clear_account)):
+        if not any(
+            (agent_bin, env_pairs, env_file_pairs, extra_args, unset, account, clear_account)
+        ):
             fail(
-                "nothing to bind — pass --bin, --env, --arg, --unset, --account, "
+                "nothing to bind — pass --bin, --env, --env-file, --arg, --unset, --account, "
                 "--clear-account or --clear",
                 error="nothing_to_bind",
             )
+        env_files = _parse_env(env_file_pairs or [])
+        for key, typed in env_files.items():
+            # Read NOW, as --account is resolved now: a typo is a usage error rather than
+            # a binding that refuses every later launch of the role.
+            where = harness.expand_value(typed)
+            try:
+                harness.read_env_file(where)
+            except ValueError as exc:
+                message = f"--env-file {key}: {where} {exc}"
+                fail(message, error="env_file_unreadable", detail=message)
         if account is not None:
             # Resolved NOW, so a typo is a usage error rather than a binding
             # that refuses every later launch of the role.
@@ -788,6 +829,7 @@ def bind(
                 role_name,
                 agent_bin=agent_bin,
                 env=_parse_env(env_pairs or []),
+                env_files=env_files,
                 unset=unset or [],
                 args=extra_args or [],
                 account=account,
@@ -819,6 +861,7 @@ def _describe(profile: RoleLaunchProfile) -> str:
     parts = [
         f"bin={profile.bin}" if profile.bin else "",
         "  ".join(f"{key}={value}" for key, value in sorted(profile.env.items())),
+        "  ".join(f"{key}<{path}" for key, path in sorted(profile.env_files.items())),
         f"args={shlex.join(profile.args)}" if profile.args else "",
         f"account={profile.account}" if profile.account else "",
     ]

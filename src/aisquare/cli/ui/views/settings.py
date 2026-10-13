@@ -441,7 +441,7 @@ class SettingsView(VerticalScroll):
                 if profile is None:
                     continue
                 profile.account = None
-                if not (profile.bin or profile.env or profile.args):
+                if not profile.carries_launch:
                     config.team.profiles.pop(role, None)
             else:
                 if profile is None:

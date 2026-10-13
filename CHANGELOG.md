@@ -124,6 +124,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   missing. A running server re-reads
   `~/.aisquare/remote.json` when its content changes, so `allow-write`,
   `regenerate-password` and `revoke` from another shell reach it within a second.
+- **`aisquare team bind <role> --env-file KEY=PATH`: a variable whose value is
+  read from a file at every launch**, for a secret. config.toml, the launch
+  banner and `team spawn`'s printed command hold the path, never the value
+  (the printed command reads the file itself, `$(cat …)`). It is for the
+  reviewer, which keeps its shell: bound to a GitHub token that cannot write
+  the repository's contents, it can review and comment but not push or merge
+  through `gh`. [docs/fleet.md](docs/fleet.md#a-reviewer-that-cannot-push)
+  gives the token's permissions and the branch protection to pair it with, for
+  the pushes that token does not govern. It is opt-in; the reviewer's default
+  stays Bash with Edit, Write and NotebookEdit denied. A file that cannot be
+  read, or holds nothing, refuses the launch (`env_file_unreadable`) rather
+  than start the role on this shell's credentials. `fleet spawn`, `restart`
+  and `switch` refuse before a window opens or a running agent is stopped.
+  `team bind` reads the file when it binds. A key lives in `env` or
+  `env_files`, never both, and `--unset` removes it from either.
 
 ### Changed
 - **`aisquare upgrade` warns, and `aisquare uninstall` refuses, while Remote is

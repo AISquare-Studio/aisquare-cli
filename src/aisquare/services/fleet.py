@@ -1498,6 +1498,7 @@ def spawn(
     resolution = _launch_binary(
         role, binary=binary, spec=spec, claude_code=claude_code, notes=notes, bin_flag=bin_flag
     )
+    _refuse_an_env_file_it_cannot_read(role)
     role_config = role_settings(role, config)
     # Nothing up to the codename below writes the project's registration: every
     # refusal that needs no window is given first (#139). A spawn refused for its
@@ -4503,6 +4504,18 @@ def _refuse_a_replay_that_cannot_start(agent: FleetAgent, session: TeamSession |
         notes=[],
         bin_flag=False,
     )
+    _refuse_an_env_file_it_cannot_read(agent.role)
+
+
+def _refuse_an_env_file_it_cannot_read(role: str) -> None:
+    """Raise now what the window's ``aisquare launch`` would refuse: a variable ``role``'s
+    binding reads from a file that cannot be read or holds nothing
+    (``harness.resolve_profile``), such as a reviewer's ``GH_TOKEN``. Said by the spawn,
+    restart or switch, before a window opens or a running agent is stopped, rather than by
+    a window that ends as it starts."""
+    refusal = harness.resolve_profile(role).refusal
+    if refusal is not None:
+        raise FleetError(refusal)
 
 
 @dataclass

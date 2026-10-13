@@ -40,7 +40,7 @@ from aisquare.services import install_route, lifecycle
 from aisquare.services.install_route import Facts
 from tests.fsperms import can_deny_reads, can_symlink
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
-from tests.remote_elsewhere import remote_on_elsewhere
+from tests.remote_elsewhere import remote_lock, remote_on_elsewhere
 
 _EVENTS = (
     ("SessionStart", "session-start"),
@@ -97,12 +97,17 @@ def _record(*directories: Path) -> None:
     )
 
 
-def _snapshot(root: Path) -> dict[str, bytes]:
-    """Every file, directory and link under ``root``, by path — what "unchanged" means."""
+def _snapshot(root: Path, *, held: Path | None = None) -> dict[str, bytes]:
+    """Every file, directory and link under ``root``, by path — what "unchanged" means.
+
+    ``held`` is a file another descriptor holds locked (a Remote's ``remote-serve.lock``),
+    whose bytes Windows will not read meanwhile: recorded as there, not read."""
     found: dict[str, bytes] = {}
     for path in sorted(root.rglob("*")):
         if path.is_symlink():
             found[str(path)] = b"-> " + os.readlink(path).encode()
+        elif held is not None and path.is_file() and path.resolve() == held.resolve():
+            found[str(path)] = b"<held>"
         elif path.is_file():
             found[str(path)] = path.read_bytes()
         elif path.is_dir():
@@ -699,11 +704,11 @@ def test_it_refuses_while_a_remote_is_on_in_another_process_and_names_it(
     _initialised(runner, tmp_path)
     _hooked(isolated_agent_home / ".claude", tool.script)
     with remote_on_elsewhere(by=by) as named:
-        before = _snapshot(tmp_path)
+        before = _snapshot(tmp_path, held=remote_lock())
         refused = runner.invoke(app, ["--json", "uninstall", "--yes"])
         plan = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
         human = runner.invoke(app, ["uninstall", "--yes"])
-        after = _snapshot(tmp_path)
+        after = _snapshot(tmp_path, held=remote_lock())
     off = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
 
     said = " ".join(human.stderr.split())

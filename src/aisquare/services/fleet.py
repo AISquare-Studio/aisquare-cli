@@ -506,6 +506,23 @@ def _address(agent: FleetAgent, config: FleetSettings | None = None) -> _Address
     return _Address(agent.tmux_socket)
 
 
+def _where(
+    agent: FleetAgent, config: FleetSettings | None, addresses: Mapping[str, _Address] | None
+) -> _Address:
+    """``agent``'s address (:func:`_address`), from ``addresses`` when the caller worked it
+    out once for this read, by row id (:func:`list_agents`).
+
+    :func:`_address` resolves two paths (:func:`_same_socket`) and stays uncached on purpose:
+    a stale "same socket" would send ``-L`` to another server. But within ONE listing the
+    answer cannot change, and the listing asked it about five times per row — the observe,
+    the reconcile, the lingering windows, the status and its ``socket_at`` — on asq's tick
+    every two seconds (follow-up of #257).
+    """
+    if addresses is not None and (known := addresses.get(agent.id)) is not None:
+        return known
+    return _address(agent, config)
+
+
 def _server_at(address: _Address, config: FleetSettings | None = None) -> TmuxServer:
     """The server at ``address``, through :func:`server_for` so a faked factory sees it."""
     return server_for(address.name, config).at(address.path)
@@ -1173,7 +1190,10 @@ def _observe(
 
 
 def _observe_sockets(
-    agents: Sequence[FleetAgent], tmux_session: str | None, config: FleetSettings | None = None
+    agents: Sequence[FleetAgent],
+    tmux_session: str | None,
+    config: FleetSettings | None = None,
+    addresses: Mapping[str, _Address] | None = None,
 ) -> dict[_Address, _Observed | None]:
     """Server → what THAT server says about the live agents recorded on it.
 
@@ -1184,12 +1204,13 @@ def _observe_sockets(
     ``%N`` ended a live row (round 28 of #257). A ``None`` value is one server
     that could not be asked at all, which is per server and not per fleet: an
     unreachable server must not make the agents on a reachable one read as
-    gone, nor the reverse. Looked up with :func:`_view`.
+    gone, nor the reverse. Looked up with :func:`_view`. ``addresses`` is each row's
+    address as the caller worked it out once (:func:`_where`).
     """
     config = config or settings()
     groups: dict[_Address, list[FleetAgent]] = {}
     for agent in agents:
-        groups.setdefault(_address(agent, config), []).append(agent)
+        groups.setdefault(_where(agent, config, addresses), []).append(agent)
     return {
         address: _observe(_server_at(address, config), tmux_session, group)
         for address, group in groups.items()
@@ -1200,11 +1221,12 @@ def _view(
     agent: FleetAgent,
     views: Mapping[_Address, _Observed | None],
     config: FleetSettings | None = None,
+    addresses: Mapping[str, _Address] | None = None,
 ) -> _Observed | None:
     """What ``agent``'s own server said (:func:`_observe_sockets`); ``None`` when it could
     not be asked, or was not, or when the server that answered is not its own
-    (:func:`_own_view`)."""
-    return _own_view(agent, views.get(_address(agent, config)))
+    (:func:`_own_view`). ``addresses`` as for :func:`_where`."""
+    return _own_view(agent, views.get(_where(agent, config, addresses)))
 
 
 def _own_view(agent: FleetAgent, observed: _Observed | None) -> _Observed | None:
@@ -1335,7 +1357,9 @@ def _status(
     tmux_session: str | None,
     now: datetime,
     config: FleetSettings,
+    address: _Address | None = None,
 ) -> FleetAgentStatus:
+    """``address`` is the row's as the caller worked it out once (:func:`_where`)."""
     # The server's word AS GIVEN (`_observe_sockets`' view for the row's address), never
     # through `_view`: a row the answering server is not the server of is held there under
     # its id, which is the one fact that names the detail below.
@@ -1356,7 +1380,7 @@ def _status(
         detail=detail,
         session=session,
         tmux_session=tmux_session,
-        socket_at=_address(agent, config).path,
+        socket_at=(address or _address(agent, config)).path,
     )
 
 
@@ -2482,20 +2506,29 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
         agents = [a for a in agents if a.ended_at is None or a.ended_at >= cutoff]
     tmux_session = session_name(current.codename) if current.codename else None
     config = settings()
-    views = _observe_sockets(agents, tmux_session, config)
-    ended = {row.id: row for row in _end_dead_rows(agents, views, best_effort=True, config=config)}
+    # Each row's address once for this read (`_where`): asked about five times per row
+    # otherwise, each resolving two paths, on asq's tick (follow-up of #257).
+    addresses = {agent.id: _address(agent, config) for agent in agents}
+    views = _observe_sockets(agents, tmux_session, config, addresses)
+    ended = {
+        row.id: row
+        for row in _end_dead_rows(
+            agents, views, best_effort=True, config=config, addresses=addresses
+        )
+    }
     if ended:
         agents = [ended.get(agent.id, agent) for agent in agents]
     if live_only:
-        agents = _with_lingering_windows(agents, views, config)
+        agents = _with_lingering_windows(agents, views, config, addresses)
     return [
         _status(
             agent,
             sessions.get(agent.session_id) if agent.session_id else None,
-            views.get(_address(agent, config)),  # the server's word as given: `_status` reads it
+            views.get(addresses[agent.id]),  # the server's word as given: `_status` reads it
             tmux_session,
             now,
             config,
+            address=addresses[agent.id],
         )
         for agent in agents
     ]
@@ -2508,6 +2541,7 @@ def _end_dead_rows(
     best_effort: bool = False,
     nudge: bool = True,
     config: FleetSettings | None = None,
+    addresses: Mapping[str, _Address] | None = None,
 ) -> list[FleetAgent]:
     """Record every LIVE row whose observed pane is dead as ended — reap's rule, on every read.
 
@@ -2549,13 +2583,13 @@ def _end_dead_rows(
     Each row's pane is read from ITS server's view (:func:`_view`), the one at the socket
     its spawn recorded: from a shell under another ``TMUX_TMPDIR`` the server ``tmux -L``
     reaches on the same name is another, and a dead ``%N`` there ended a live row under its
-    running agent (round 28 of #257).
+    running agent (round 28 of #257). ``addresses`` as for :func:`_where`.
     """
     dead = [
         (agent, pane)
         for agent in agents
         if agent.ended_at is None
-        and (observed := _view(agent, views, config)) is not None
+        and (observed := _view(agent, views, config, addresses)) is not None
         and (pane := observed.get(agent.id)) is not None
         and pane.dead
     ]
@@ -2594,6 +2628,7 @@ def _lingering_windows(
     agents: Sequence[FleetAgent],
     views: Mapping[_Address, _Observed | None],
     config: FleetSettings | None = None,
+    addresses: Mapping[str, _Address] | None = None,
 ) -> dict[tuple[_Address, str], FleetAgent]:
     """``(server, pane id)`` → the ENDED row whose window each dead pane still is.
 
@@ -2611,11 +2646,11 @@ def _lingering_windows(
     that shows the 💤 row, ``stop`` that removes the window, ``spawn`` that
     supersedes it — so none of them takes another agent's last screen for a
     row's (review of #138: a reused id let ``stop`` kill another agent's
-    window and report success).
+    window and report success). ``addresses`` as for :func:`_where`.
     """
     owners: dict[tuple[_Address, str], FleetAgent] = {}
     for agent in agents:
-        address = _address(agent, config)
+        address = _where(agent, config, addresses)
         observed = views.get(address)
         pane = observed.get(agent.id) if observed else None
         if pane is None or not pane.dead:
@@ -2633,10 +2668,11 @@ def _with_lingering_windows(
     agents: Sequence[FleetAgent],
     views: Mapping[_Address, _Observed | None],
     config: FleetSettings | None = None,
+    addresses: Mapping[str, _Address] | None = None,
 ) -> list[FleetAgent]:
     """Every live row, plus each ended row whose window still stands (see
-    :func:`_lingering_windows`)."""
-    shown = {agent.id for agent in _lingering_windows(agents, views, config).values()}
+    :func:`_lingering_windows`). ``addresses`` as for :func:`_where`."""
+    shown = {agent.id for agent in _lingering_windows(agents, views, config, addresses).values()}
     return [agent for agent in agents if agent.ended_at is None or agent.id in shown]
 
 

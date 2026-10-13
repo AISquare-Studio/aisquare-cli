@@ -2151,6 +2151,37 @@ def test_list_agents_orders_by_creation_and_knows_the_session(
 # --- manager_of / resolve_project ------------------------------------------------------
 
 
+def test_list_agents_works_out_each_rows_address_once(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up of #257: a listing asked `_address` about five times per row — the
+    observe, the reconcile, the lingering windows, the status and its `socket_at` — each
+    resolving two paths, on asq's tick every two seconds. Once per row per listing now;
+    `_address` itself stays uncached, as a stale "same socket" would send `-L` to another
+    server. Live rows, one recorded elsewhere, and an ended row whose window lingers."""
+    manager = fleet_service.spawn(project, "manager").agent
+    elsewhere = _recorded_at(_coder(project), Path("/run/user/1000/tmux-1000/asq-test"))
+    tmux.per_path[Path("/run/user/1000/tmux-1000/asq-test")] = tmux
+    exited = _coder(project)
+    tmux.die(exited.pane_id, 0)  # ended by this listing, its window kept (💤)
+    asked: list[str] = []
+    real = fleet_service._address
+
+    def counted(agent: FleetAgent, config: FleetSettings | None = None) -> fleet_service._Address:
+        asked.append(agent.id)
+        return real(agent, config)
+
+    monkeypatch.setattr(fleet_service, "_address", counted)
+
+    listed = {status.agent.id: status for status in fleet_service.list_agents(project)}
+
+    assert {listed[manager.id].state, listed[elsewhere.id].state} == {"waiting"}
+    assert listed[exited.id].state == "exited" and listed[exited.id].agent.ended_at is not None
+    assert listed[elsewhere.id].socket_at == elsewhere.socket_path
+    assert listed[manager.id].socket_at is None
+    assert sorted(asked) == sorted([manager.id, elsewhere.id, exited.id]), "once per row"
+
+
 def test_manager_of_is_the_live_manager_or_none(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

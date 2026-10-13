@@ -201,6 +201,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   only then falls back to `tmux -L`. From a shell under another `TMUX_TMPDIR`,
   the 💤 manager's last screen stood on its server while attach said "nothing
   to attach to".
+- `fleet ls` and asq's tick work out where each agent's server is asked once
+  per row per listing, instead of about five times, each resolving two paths.
+  The answer itself is still never cached across listings: a stale "same
+  socket" would send `tmux -L` to another server.
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

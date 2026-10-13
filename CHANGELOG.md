@@ -6,6 +6,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-13
+
+**The fleet on your phone: `aisquare remote`, through your own ngrok tunnel.**
+- One server on `127.0.0.1:8750` serves a page that ships with aisquare-cli,
+  behind a secret link and a four-word passphrase. It is read-only until
+  `aisquare remote allow-write on`.
+- In `asq`, `R` opens the Remote panel: Remote on and off, the link, a QR code,
+  the passphrase, the devices, the write switch and an auto-off timer.
+- What needs you across every project is one feed, with notifications. You also
+  get each agent's live screen and conversation and the board. With writes on,
+  you can answer a prompt, tell an agent something, or stop, restart or switch it.
+- `aisquare remote serve` runs it without the UI. `status`, `allow-write`,
+  `regenerate-password`, `revoke`, `needs` and `install-page` manage it from the
+  machine.
+
+**Upgrading:**
+- From 0.8.0, run `aisquare upgrade`. It keeps your install's extras. The
+  `remote` extra is new, so to use Remote, install it as
+  [docs/remote.md](docs/remote.md) says. `aisquare remote serve` and the R panel
+  print the line for your install.
+- `segno`, a small pure-Python QR library, is a new core dependency. Every
+  upgrade installs it.
+- No store migration: the schema stays at v25.
+- Remote keeps its state in `~/.aisquare`: `remote.json` (owner-only),
+  `remote-audit.log`, `remote-needs.json` and `remote-push.json`. Each is
+  written only once Remote is used. `aisquare uninstall --purge` removes them
+  with the rest.
+- Text typed into an agent's pane, in `asq` as from the phone, now reaches tmux
+  as hex (`send-keys -H`). A trailing space or a lone `;` arrives as typed.
+
 ### Added
 - **Phone control: `aisquare remote`.** The fleet on a phone, through the
   user's own ngrok tunnel: one server on `127.0.0.1:8750` (never anything else;
@@ -3245,7 +3275,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.5.0...v0.6.0

@@ -19,7 +19,7 @@ import re
 import shutil
 import sqlite3
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
@@ -1919,10 +1919,11 @@ def _live_fleet_agents() -> tuple[tuple[_LiveRow, ...], str | None]:
         return (), str(exc) or type(exc).__name__
     finally:
         connection.close()
+    shown = _shown_as(tuple((label, root) for label, _, root, *_ in rows))
     return (
         tuple(
             (
-                f"{label} ({Path(root).name if root else 'unknown project'})",
+                shown[label, root],
                 socket_name or "asq",
                 _created(created),
                 Path(path) if path else None,
@@ -1933,6 +1934,32 @@ def _live_fleet_agents() -> tuple[tuple[_LiveRow, ...], str | None]:
         ),
         None,
     )
+
+
+def _shown_as(rows: Sequence[tuple[str, str | None]]) -> dict[tuple[str, str | None], str]:
+    """How each live row ``(label, project root)`` is named in the plan: ``<label>
+    (<folder>)``, as the refusal reads at a glance, or ``<label> (<root path>)`` where
+    that would collide.
+
+    A label names only its project's folder, and two projects can sit in folders of one
+    name (``~/work/api``, ``~/oss/api``): with a live manager each, the refusal printed
+    ``manager (api)`` twice, and ``--json``'s ``live_agents`` could not tell them apart
+    either (round 29 of #257; follow-up). A row with no project is ``unknown project``,
+    which has no root to show.
+    """
+    folders: dict[tuple[str, str], set[str]] = {}
+    for label, root in rows:
+        if root:
+            folders.setdefault((label, Path(root).name), set()).add(root)
+    shown: dict[tuple[str, str | None], str] = {}
+    for label, root in rows:
+        if not root:
+            shown[label, root] = f"{label} (unknown project)"
+        elif len(folders[label, Path(root).name]) > 1:
+            shown[label, root] = f"{label} ({root})"
+        else:
+            shown[label, root] = f"{label} ({Path(root).name})"
+    return shown
 
 
 def _created(value: object) -> datetime | None:

@@ -785,7 +785,8 @@ def test_two_rows_of_one_label_are_told_apart_by_what_their_sockets_say(
     by taking the unreached rows' labels out of the live ones', and a label names only the
     project's folder. Two projects in folders of one name, `work/api` and `oss/api`, each
     with a live manager, read "manager (api)" twice: one unreached hid the other, so the
-    refusal never said a server answers for it and `--forget` leaves it live."""
+    refusal never said a server answers for it and `--forget` leaves it live. Such rows
+    are now named by their root (the follow-up), and still told apart by their sockets."""
 
     def unusable(_self: TmuxServer) -> None:
         raise TmuxUnavailable("tmux is not installed (or not on PATH) — the fleet needs it")
@@ -805,11 +806,50 @@ def test_two_rows_of_one_label_are_told_apart_by_what_their_sockets_say(
     plan = lifecycle.uninstall_plan()
     said = " ".join(runner.invoke(app, ["uninstall", "--yes"]).stderr.split())
 
-    assert "A server answers on the socket of manager (api), so it is likely running" in said
-    assert "or, if manager (api) is not running, end its row on your word" in said
-    assert plan.live_agents == ("manager (api)", "manager (api)")
-    assert plan.listening == ("manager (api)",) and plan.unreached == ("manager (api)",)
+    work, oss = f"manager ({tmp_path / 'work' / 'api'})", f"manager ({tmp_path / 'oss' / 'api'})"
+    assert f"A server answers on the socket of {work}, so it is likely running" in said
+    assert f"or, if {oss} is not running, end its row on your word" in said
+    assert sorted(plan.live_agents) == sorted((work, oss))  # in the store's order, whichever
+    assert plan.listening == (work,) and plan.unreached == (oss,)
     assert world.events == []
+
+
+def test_rows_whose_label_and_folder_collide_are_named_by_their_root(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Follow-up of #257: the refusal showed rows as `<label> (<folder name>)`, so two
+    projects in folders of one name printed the same line, in `--json`'s `live_agents`
+    too. Where the names collide the root path is shown; every other row keeps the
+    folder, as the refusal reads at a glance."""
+    monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "answers")
+    _initialised(runner, tmp_path)
+    _live_agent(tmp_path / "work" / "api", "manager", agent_id="agt_work")
+    _live_agent(tmp_path / "oss" / "api", "manager", agent_id="agt_oss")
+    _live_agent(tmp_path / "oss" / "api", "coder-1", agent_id="agt_oss_coder")
+    _live_agent(tmp_path / "work" / "web", "manager", agent_id="agt_web")
+    _hooked(isolated_agent_home / ".claude", tool.script)
+
+    plan = lifecycle.uninstall_plan()
+    human = runner.invoke(app, ["uninstall", "--yes"])
+    machine = runner.invoke(app, ["--json", "uninstall"])  # the plan object (dry run)
+
+    named = (
+        f"manager ({tmp_path / 'work' / 'api'})",
+        f"manager ({tmp_path / 'oss' / 'api'})",
+        "coder-1 (api)",  # one coder-1 in a folder called api: no collision to resolve
+        "manager (web)",
+    )
+    assert sorted(plan.live_agents) == sorted(named)  # in the store's order, whichever
+    assert human.exit_code == 1 and world.events == []
+    said = " ".join(human.stderr.split())
+    assert all(name in said for name in named), said
+    assert machine.exit_code == 0, machine.output
+    assert sorted(_one_object(machine.stdout)["live_agents"]) == sorted(named)
 
 
 def test_a_row_shutdown_cannot_reach_is_named_with_the_way_out(

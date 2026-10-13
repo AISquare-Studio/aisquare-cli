@@ -205,6 +205,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per row per listing, instead of about five times, each resolving two paths.
   The answer itself is still never cached across listings: a stale "same
   socket" would send `tmux -L` to another server.
+- The `aisquare uninstall` and `upgrade` refusals name a running agent by its
+  project's root path when `<label> (<folder>)` would collide: two projects in
+  folders of one name (`~/work/api`, `~/oss/api`) each with a manager printed
+  `manager (api)` twice. Every other row keeps the folder. The `live_agents`
+  strings in `uninstall --json` and `upgrade --json` change the same way.
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

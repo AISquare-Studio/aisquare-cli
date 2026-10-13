@@ -382,6 +382,9 @@ def test_watch_assesses_the_agent_and_base_role(tmp_path: Path) -> None:
     assert "off-ladder" in _session_lines([row.model_copy(update={"agent": "claude-code"})]).plain
 
 
+# The receiver is POSIX/WSL only (native_telemetry.start_receiver), and on Windows its
+# owner check, os.kill(pid, 0), is CTRL_C_EVENT: it interrupted the whole test run.
+@pytest.mark.skipif(sys.platform == "win32", reason="Native receiver is POSIX/WSL only")
 def test_stalled_receiver_recovers_and_exits_with_owner(tmp_path: Path) -> None:
     directory = tmp_path / "receiver"
     directory.mkdir()

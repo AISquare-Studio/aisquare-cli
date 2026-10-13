@@ -90,7 +90,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, NoReturn
 
-from aisquare.core.atomic import Replacement, replacement
+from aisquare.core.atomic import Replacement, replacement, write_replacing
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.paths import (
     despite_windows_contention,
@@ -6368,6 +6368,15 @@ the home go, for another process's Remote to take as this one served."""
 
 SERVE_LOCK_NAME = "remote-serve.lock"
 """Beside ``remote.json``: held by the one process that serves Remote from that home."""
+SERVE_NOTE_NAME = "remote-serve.json"
+"""Beside :data:`SERVE_LOCK_NAME`: which process holds it, ``{"pid", "by", "port"}``, written by
+:func:`_claim_remote_home` once it holds the lock, so ``upgrade`` and ``uninstall`` can name the
+Remote that is on (:func:`remote_served_by`). Believed only while the lock is held: a note a
+process left as it ended names nobody, and the next claim writes its own over it."""
+SERVED_BY = {"serve": "`aisquare remote serve`", "panel": "asq's R panel"}
+"""What :data:`SERVE_NOTE_NAME`'s ``by`` names: the process that claimed the home."""
+SERVED_BY_SOMEONE = "asq's R panel, or `aisquare remote serve` in another shell"
+"""Who serves, said when the note cannot be read (:func:`remote_served_by`)."""
 CLAIM_PATIENCE_SECONDS = 0.05
 """How long a claim of the home keeps trying a lock it finds held: one that asks whether
 another process serves (:func:`remote_served_elsewhere`) holds it for a moment, and must never
@@ -6401,9 +6410,11 @@ def _remote_winding_down() -> str:
     return REMOTE_WINDING_DOWN
 
 
-def _claim_remote_home(state: Runtime) -> bool:
+def _claim_remote_home(state: Runtime, *, by: str, port: int) -> bool:
     """Hold :data:`SERVE_LOCK_NAME` for as long as this process serves Remote; ``True`` when
-    this call took it, :class:`RemoteAlreadyOn` when another process holds it.
+    this call took it, :class:`RemoteAlreadyOn` when another process holds it. Once it holds
+    it, :data:`SERVE_NOTE_NAME` says who does: ``by`` (a key of :data:`SERVED_BY`), on
+    ``port``, with this process's id.
 
     Two Remotes on one home, the TUI's and a ``serve`` on another port as the docs
     once advised, share one ``remote.json`` and every file beside it, and undo each
@@ -6448,7 +6459,49 @@ def _claim_remote_home(state: Runtime) -> bool:
         previous, _home_claim = _home_claim, (path, fd)
     if previous is not None:  # another home's, which this process serves no more
         _release_remote_claim(previous[1])
+    _note_remote_claim(path.with_name(SERVE_NOTE_NAME), by=by, port=port)
     return True
+
+
+def _note_remote_claim(note: Path, *, by: str, port: int) -> None:
+    """Say in ``note`` (:data:`SERVE_NOTE_NAME`) that this process, ``by``, serves on ``port``.
+
+    Replaced whole, so a reader never sees half of one. A note that cannot be written costs
+    the name ``upgrade`` and ``uninstall`` give it, never the claim: they still see the lock,
+    and say who may hold it (:data:`SERVED_BY_SOMEONE`)."""
+    body = json.dumps({"pid": os.getpid(), "by": by, "port": port}) + "\n"
+    try:
+        write_replacing(note, body, keep_mode=False, durable=False)
+    except OSError as exc:
+        log.warning("remote: %s could not be written (%s)", note, exc)
+
+
+def remote_served_by() -> str | None:
+    """Who serves Remote from this home in another process, named; ``None`` when no other does.
+
+    For ``upgrade``, which warns, and ``uninstall``, which refuses, while one does
+    (``services.lifecycle``): the process holding :data:`SERVE_LOCK_NAME`
+    (:func:`remote_served_elsewhere`), named by the note it wrote as it took it
+    (:data:`SERVE_NOTE_NAME`), with its port and process id; :data:`SERVED_BY_SOMEONE` when
+    that note cannot be read. Creates nothing, as neither may make the home.
+    """
+    if not remote_served_elsewhere():
+        return None
+    note = remote_state_path().with_name(SERVE_NOTE_NAME)
+    try:
+        held = json.loads(note.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return SERVED_BY_SOMEONE
+    if not isinstance(held, dict):
+        return SERVED_BY_SOMEONE
+    by, port, pid = held.get("by"), held.get("port"), held.get("pid")
+    if (
+        not isinstance(by, str)
+        or by not in SERVED_BY
+        or not all(isinstance(n, int) and not isinstance(n, bool) for n in (port, pid))
+    ):
+        return SERVED_BY_SOMEONE
+    return f"{SERVED_BY[by]} on port {port}, process {pid}"
 
 
 def remote_served_elsewhere() -> bool:
@@ -7188,7 +7241,7 @@ def start_remote_server(dist_dir: Path | None = None, port: int = DEFAULT_PORT) 
                 return state.connection_info(_server.port)
             if any(stopped.winding_down for stopped in _winding_down):
                 raise RemoteWindingDown(_remote_winding_down())
-            claimed = _claim_remote_home(state)
+            claimed = _claim_remote_home(state, by="panel", port=port)
             state.remote_coming_on()
             _remote_auto_off_missed(state)
             app = build_remote_app(state, dist_dir=dist_dir)
@@ -7619,7 +7672,7 @@ def run_foreground(
     origin = None if public_url is None else check_public_origin(public_url)
     state = runtime()
     with _lock:
-        claimed = _claim_remote_home(state)  # before anything is bound or printed
+        claimed = _claim_remote_home(state, by="serve", port=port)  # before any bind or print
     state.remote_coming_on()
     try:
         _remote_auto_off_missed(state)

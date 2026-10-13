@@ -321,6 +321,9 @@ class UpgradePlan:
     """Live fleet agents, counted as uninstall counts them (:func:`running_fleet`)."""
     fleet_error: str | None = None
     """Why the fleet's live agents could not be counted, when they could not."""
+    remote: str | None = None
+    """The Remote that is on for this home in another process, named (:func:`running_remote`);
+    ``None`` when none is."""
     pin_refused: bool = False
     """Whether :attr:`reason` is that ``--version`` cannot pick a release for this route
     (``install_route.pin_refusal``): Homebrew's, a checkout's or a local source's."""
@@ -357,6 +360,23 @@ class UpgradePlan:
             f"({', '.join(self.live_agents)}): a hook {'they fire' if count != 1 else 'it fires'} "
             "while the install is being replaced fails, and that turn's board update is lost. "
             f"To be safe, stop {'them' if count != 1 else 'it'} first: {FLEET_SHUTDOWN}"
+        )
+
+    @property
+    def remote_warning(self) -> str | None:
+        """What upgrading now costs the Remote on in another process, or ``None`` when none is.
+
+        Said, as :attr:`fleet_warning` is, rather than refused, which uninstall does: the
+        install is away only while it is replaced. Its process keeps the release it started
+        with, and what it has not imported yet it imports from the new one (follow-up of
+        #259)."""
+        if self.remote is None:
+            return None
+        return (
+            f"Remote is on ({self.remote}): while the install is being replaced, its page and "
+            f"what phones ask of it can fail, and after that it runs {self.current} over the new "
+            f"install's files until it is started again. To be safe, turn it off first: "
+            f"{REMOTE_OFF}"
         )
 
     @property
@@ -469,6 +489,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
     left: tuple[HookSite, ...] = ()
     live: tuple[str, ...] = ()
     fleet_error: str | None = None
+    remote: str | None = None
     if reason is None:
         refresh, left = refresh_sites(route.facts)
         if target is not None and lacks_refresh_hooks(target):
@@ -479,6 +500,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
             left = (*left, *(_left_by_move_back(site, target) for site in refresh))
             refresh = ()
         live, _unlistened, fleet_error = running_fleet()
+        remote = running_remote()
     return UpgradePlan(
         route=route,
         current=__version__,
@@ -493,6 +515,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         left=left,
         live_agents=live,
         fleet_error=fleet_error,
+        remote=remote,
     )
 
 
@@ -843,8 +866,8 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
         held = f"{which} is {latest}; " if pypis else ""
         notes.append(f"{held}uv picks {version} here{now}")
     notes.append(
-        f"asq and `aisquare serve` processes that were already running keep {plan.current} "
-        "until they are restarted"
+        f"asq, `aisquare serve` and `aisquare remote serve` processes that were already "
+        f"running keep {plan.current} until they are restarted"
     )
     if version is not None and lacks_refresh_hooks(version):
         # A move back to a release before `agents refresh-hooks`: the plan left every site,
@@ -997,6 +1020,10 @@ HOME_MARKERS = ("config.toml", "context.db", "agents.json")
 
 FLEET_SHUTDOWN = "aisquare fleet shutdown --all --yes"
 FLEET_FORGET = f"{FLEET_SHUTDOWN} --forget"
+REMOTE_OFF = (
+    "press Ctrl-C where `aisquare remote serve` runs, or turn Remote off in that asq's R panel"
+)
+"""How a Remote that is on in another process is turned off (:func:`running_remote`)."""
 
 
 class UninstallRefused(RuntimeError):
@@ -1097,6 +1124,9 @@ class UninstallPlan:
     where it or what a launcher cut short left beside it is there
     (:func:`_plugin_answers_there`): outside the home, so named beside it, and deleted
     with --purge (:attr:`deletes_answers`)."""
+    remote: str | None = None
+    """The Remote that is on for this home in another process, named (:func:`running_remote`);
+    ``None`` when none is. It refuses the run, as a running fleet agent does."""
 
     @property
     def package_command(self) -> str:
@@ -1220,6 +1250,16 @@ class UninstallPlan:
                 )
             return UninstallRefused(
                 f"{running} Stop them first: {FLEET_SHUTDOWN}{unreached}", error="fleet_running"
+            )
+        if self.remote is not None:
+            # Refused as the fleet is: with the package gone, nothing is left to turn it off,
+            # sign its phones out or switch its writes off, and its link and passphrase work
+            # for as long as it runs (follow-up of #259).
+            return UninstallRefused(
+                f"Remote is on ({self.remote}): with aisquare gone, nothing could turn it off, "
+                f"sign its phones out or switch its writes off, and its link and passphrase "
+                f"would work for as long as it runs. Turn it off first: {REMOTE_OFF}",
+                error="remote_on",
             )
         if self.purge and self.purge_refusal is not None:
             return UninstallRefused(
@@ -1936,6 +1976,21 @@ def running_fleet() -> tuple[tuple[str, ...], int, str | None]:
     return tuple(label for label, _ in live), unlistened, fleet_error
 
 
+def running_remote() -> str | None:
+    """The Remote on for this home in another process, named, or ``None``: an ``aisquare
+    remote serve`` in another shell or another asq's R panel, which upgrade warns about and
+    uninstall refuses for (``services.remote_server.remote_served_by``). Asked of the lock
+    the Remote holds while it is on, so it creates nothing, as the plans promise.
+
+    Imported here, not at the top: ``aisquare``'s import must not load the server
+    (tests/test_remote_stays_off_the_hook_path.py), and the plans ask once. asq's own Remote
+    is off by the time its Update or Uninstall runs this, as it stops it before handing over.
+    """
+    from aisquare.services import remote_server
+
+    return remote_server.remote_served_by()
+
+
 def plugin_answers(cache: str | None = None) -> Path:
     """The file the Claude Code plugin's launcher keeps uv's answers in.
 
@@ -2046,6 +2101,7 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         listening=tuple(label for label, answer in answers if answer == "answers"),
         plugins=_plugins(claude_dirs),
         plugin_answers=_plugin_answers_there(),
+        remote=running_remote(),
     )
 
 

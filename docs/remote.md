@@ -732,6 +732,15 @@ the same fleet UI meanwhile, the panel says the last Remote is still finishing,
 and what: the write by name, or the requests it still answers, rather than start a
 second one beside it.
 
+**`aisquare upgrade` warns, or `aisquare uninstall` refuses, while Remote is on.**
+They name the Remote that holds this home: `aisquare remote serve` in another
+shell or another asq's R panel, with its port and process id. An upgrade replaces
+the install under that server, which keeps running the old release until it is
+started again, so turn it off first. An uninstall would leave it running with no
+aisquare to turn it off, sign its phones out or switch its writes off, so it
+refuses until it is off. asq's own Remote is turned off before its Update or
+Uninstall starts.
+
 **`serve` says the port is in use.** Something else took 8750. Pass `--port` and
 give ngrok (and `status`) the same port.
 

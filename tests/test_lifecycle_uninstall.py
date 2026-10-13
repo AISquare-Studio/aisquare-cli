@@ -40,6 +40,7 @@ from aisquare.services import install_route, lifecycle
 from aisquare.services.install_route import Facts
 from tests.fsperms import can_deny_reads, can_symlink
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
+from tests.remote_elsewhere import remote_on_elsewhere
 
 _EVENTS = (
     ("SessionStart", "session-start"),
@@ -678,6 +679,38 @@ def test_it_refuses_while_fleet_agents_are_live_and_names_the_shutdown(
     assert "coder-1 (" in human.stderr, "the live agent is named"
     assert "aisquare fleet shutdown --all --yes" in human.stderr
     assert _snapshot(tmp_path) == before and world.events == []
+
+
+@pytest.mark.parametrize("by", ["serve", "panel"])
+def test_it_refuses_while_a_remote_is_on_in_another_process_and_names_it(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    by: str,
+) -> None:
+    """Follow-up of #259: an `aisquare remote serve` in another terminal, or another asq's R
+    panel, outlived the uninstall. With the package gone nothing could turn it off, sign its
+    phones out or switch its writes off, and its link and passphrase kept working. Refused
+    as live fleet agents are, naming it and the way to turn it off; nothing is touched."""
+    _initialised(runner, tmp_path)
+    _hooked(isolated_agent_home / ".claude", tool.script)
+    with remote_on_elsewhere(by=by) as named:
+        before = _snapshot(tmp_path)
+        refused = runner.invoke(app, ["--json", "uninstall", "--yes"])
+        plan = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+        human = runner.invoke(app, ["uninstall", "--yes"])
+        after = _snapshot(tmp_path)
+    off = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+
+    said = " ".join(human.stderr.split())
+    assert refused.exit_code == 1 and _one_object(refused.stdout)["error"] == "remote_on"
+    assert plan["remote"] == named and plan["refusal"]["error"] == "remote_on", plan
+    assert f"Remote is on ({named})" in said, "the Remote that is on is named"
+    assert "press Ctrl-C where `aisquare remote serve` runs" in said
+    assert after == before and world.events == [], "nothing touched"
+    assert off["remote"] is None and off["refusal"] is None, "control: once it is off"
 
 
 @pytest.mark.parametrize(

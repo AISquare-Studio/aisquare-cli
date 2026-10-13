@@ -1103,8 +1103,8 @@ def test_a_stop_that_ends_while_a_new_server_starts_leaves_it_the_home(
     monkeypatch.setattr(remote_server, "_release_remote_home", release)
     ending = threading.Thread(target=release, name="asq-test-stop-ends")
 
-    def claim_as_the_stop_ends(state: Runtime) -> bool:
-        claimed = claim(state)
+    def claim_as_the_stop_ends(state: Runtime, *, by: str, port: int) -> bool:
+        claimed = claim(state, by=by, port=port)
         ending.start()
         ending.join(0.2)  # a stop that can end here, before the server is recorded, does
         return claimed
@@ -1292,7 +1292,7 @@ def test_a_remote_whose_process_ended_holds_the_home_no_more(
             "from aisquare.services import remote_server as r\n"
             "state = r.runtime()\n"
             "with r._lock:\n"
-            "    r._claim_remote_home(state)\n"
+            "    r._claim_remote_home(state, by='serve', port=8750)\n"
             "print('serving', flush=True)\n"
             "sys.stdin.read()\n",
         ],
@@ -1318,6 +1318,60 @@ def test_a_remote_whose_process_ended_holds_the_home_no_more(
                 raise
             time.sleep(0.05)
     remote_server.stop_remote_server()
+
+
+@pytest.mark.parametrize(
+    ("by", "named"),
+    [("serve", "`aisquare remote serve`"), ("panel", "asq's R panel")],
+)
+def test_who_serves_this_home_elsewhere_is_named_by_the_note_its_claim_wrote(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, by: str, named: str
+) -> None:
+    """For `upgrade`, which warns, and `uninstall`, which refuses, while a Remote is on in
+    another process (follow-up of #259): the process holding the home's lock is named by
+    the note it wrote as it took it, with its port and id. A note that cannot be read still
+    says that someone serves, and a note whose process let the lock go names nobody."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    note = remote_state_path().with_name(remote_server.SERVE_NOTE_NAME)
+    assert remote_server.remote_served_by() is None, "nobody serves"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import os, sys\n"
+            "from aisquare.services import remote_server as r\n"
+            "state = r.runtime()\n"
+            "with r._lock:\n"
+            f"    r._claim_remote_home(state, by={by!r}, port=8751)\n"
+            "print('serving', os.getpid(), flush=True)\n"
+            "sys.stdin.read()\n",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        said, pid = holder.stdout.readline().split()
+        assert said == "serving"
+        served_by = remote_server.remote_served_by()
+        note.write_text("{", encoding="utf-8")  # cut short
+        unread = remote_server.remote_served_by()
+        note.write_text(json.dumps({"pid": 1, "by": [by], "port": 8751}), encoding="utf-8")
+        misread = remote_server.remote_served_by()
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)
+    note.write_text(json.dumps({"pid": int(pid), "by": by, "port": 8751}), encoding="utf-8")
+    # Windows lets a dead process's locks go a moment after it ends, as it gets to them.
+    deadline = time.monotonic() + 10
+    while remote_server.remote_served_elsewhere() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert served_by == f"{named} on port 8751, process {pid}"
+    assert unread == misread == remote_server.SERVED_BY_SOMEONE
+    assert remote_server.remote_served_by() is None, "its note names nobody once the lock goes"
 
 
 def test_start_without_the_extra_says_what_to_install(monkeypatch: pytest.MonkeyPatch) -> None:

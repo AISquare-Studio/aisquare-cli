@@ -126,6 +126,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `regenerate-password` and `revoke` from another shell reach it within a second.
 
 ### Changed
+- **`aisquare upgrade` warns, and `aisquare uninstall` refuses, while Remote is
+  on in another process**, as they already do for running fleet agents. Both
+  name it: `aisquare remote serve` in another shell, or another asq's R panel,
+  with its port and process id, and say how to turn it off. An upgrade replaces
+  the install under that server, which goes on running the old release. An
+  uninstall would leave it serving with nothing left to turn it off, sign its
+  phones out or switch its writes off. asq's Update and Uninstall run the same
+  checks, and asq turns its own Remote off before either starts. `--json` gains
+  `remote` in both plans, and the refusal's error is `remote_on`. To be named,
+  a Remote writes `remote-serve.json` beside its lock in `~/.aisquare`.
 - **`fleet ls --json` and `fleet status --json` carry `socket_at` on every
   agent.** 0.8.0 added it and its notes left it out. It is the path the agent's
   tmux server is asked at (`tmux -S`). It is `null` where the server is asked by

@@ -3293,7 +3293,9 @@ def test_whether_another_process_serves_this_home_is_asked_of_its_lock(
     with another_process_serves() as release:
         threading.Timer(0.01, release).start()  # a probe, holding it for a moment
         try:
-            assert remote_server._claim_remote_home(state) is True, "the probe failed a claim"
+            assert remote_server._claim_remote_home(state, by="panel", port=8750) is True, (
+                "the probe failed a claim"
+            )
             assert remote_server.remote_served_elsewhere() is False, "this process serves"
         finally:
             monkeypatch.setattr(remote_server, "_server", None)
@@ -3338,7 +3340,7 @@ def test_a_look_at_who_serves_this_home_never_overlaps_this_processs_own_claim(
     look = run("look", remote_server.remote_served_elsewhere)
     try:
         assert stalled.wait(5)
-        claim = run("claim", lambda: remote_server._claim_remote_home(state))
+        claim = run("claim", lambda: remote_server._claim_remote_home(state, by="panel", port=8750))
         time.sleep(0.2)
         assert calls == ["lock by look"], "the claim locked while a look held the lock"
         go_on.set()
@@ -3351,7 +3353,7 @@ def test_a_look_at_who_serves_this_home_never_overlaps_this_processs_own_claim(
         stalled.clear()
         remote_server._release_remote_home()
         calls.clear()
-        claim = run("claim", lambda: remote_server._claim_remote_home(state))
+        claim = run("claim", lambda: remote_server._claim_remote_home(state, by="panel", port=8750))
         assert stalled.wait(5)
         look = run("look", remote_server.remote_served_elsewhere)
         time.sleep(0.2)

@@ -171,10 +171,11 @@ def test_config_home_normalizes_only_environment_whitespace(
     agent: str, value: str, tmp_path: Path
 ) -> None:
     adapter = get_adapter(agent)
-    expected = Path(value.strip()) if value.strip() else tmp_path / adapter.home_name
+    # Resolved, as config_home resolves: a drive-less "/some/account" gains a drive on Windows.
+    expected = (Path(value.strip()) if value.strip() else tmp_path / adapter.home_name).resolve()
     assert config_home(adapter, tmp_path, {adapter.home_env: value}) == expected
     explicit = tmp_path / " intentional space "
-    assert config_home(adapter, tmp_path, {adapter.home_env: value}, explicit) == explicit
+    assert config_home(adapter, tmp_path, {adapter.home_env: value}, explicit) == explicit.resolve()
 
 
 def test_parent_agent_environment_is_cleared_by_the_shared_fixture() -> None:
@@ -404,8 +405,9 @@ def test_invalid_settings_are_preserved_with_an_actionable_cli_error(
     path.write_text(original)
     result = runner.invoke(app, ["--json", "agents", action, agent, "--config-dir", str(tmp_path)])
     assert result.exit_code == 1, result.output
-    assert "agent_file_unreadable" in result.output and str(path) in result.output
-    assert why in result.output.lower() or why in result.output, result.output
+    refusal = json.loads(result.stdout)  # parsed: a Windows path is escaped in the JSON
+    assert refusal["error"] == "agent_file_unreadable" and str(path) in refusal["detail"]
+    assert why in refusal["detail"].lower() or why in refusal["detail"], refusal
     assert path.read_text() == original
 
 

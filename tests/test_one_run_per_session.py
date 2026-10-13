@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shlex
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -1317,6 +1318,11 @@ def _printed_spawn(runner: CliRunner) -> str:
     return command
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the printed command runs `aisquare launch`, which finds the agent with "
+    "shutil.which and execs it: an sh stub is no program on Windows (tests/fakebin.py)",
+)
 def test_the_printed_spawn_command_owns_its_run_through_a_real_shell(
     runner: CliRunner, tmp_path: Path
 ) -> None:
@@ -1353,6 +1359,11 @@ def test_the_printed_spawn_command_owns_its_run_through_a_real_shell(
     assert span["attributes"]["agent.run_id"] == pipeline_id
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the printed command runs `aisquare launch`, which finds the agent with "
+    "shutil.which and execs it: an sh stub is no program on Windows (tests/fakebin.py)",
+)
 def test_the_printed_spawn_command_still_launches_when_the_gateway_refuses(
     runner: CliRunner, tmp_path: Path
 ) -> None:

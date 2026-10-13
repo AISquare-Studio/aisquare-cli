@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import sysconfig
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1121,6 +1122,11 @@ def test_spawn_print_enabled_defers_identity_to_launch(isolated_home: Path) -> N
     assert "X-Pipeline-Id" not in payload["command"]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the printed command runs `aisquare launch`, which finds the agent with "
+    "shutil.which and execs it: an sh stub is no program on Windows (tests/fakebin.py)",
+)
 def test_spawn_prelude_clears_every_marker_a_previous_paste_exported(
     isolated_home: Path,
     tmp_path: Path,
@@ -1324,6 +1330,11 @@ def test_spawn_exec_dead_proxy_fails_open(
     assert "untraced" in result.output
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the printed command runs `aisquare launch`, which finds the agent with "
+    "shutil.which and execs it: an sh stub is no program on Windows (tests/fakebin.py)",
+)
 def test_spawn_printed_launch_fails_open_through_a_real_shell(
     isolated_home: Path, tmp_path: Path
 ) -> None:
@@ -1402,6 +1413,11 @@ def test_spawn_printed_launch_fails_open_through_a_real_shell(
     assert "--session-id" not in proc.stdout
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the printed command runs `aisquare launch`, which finds the agent with "
+    "shutil.which and execs it: an sh stub is no program on Windows (tests/fakebin.py)",
+)
 def test_spawn_printed_command_joins_each_paste_to_its_own_run(
     isolated_home: Path, tmp_path: Path
 ) -> None:

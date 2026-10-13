@@ -23,6 +23,7 @@ from aisquare.core.store import store_session
 from aisquare.models import FleetAgent
 from aisquare.services import agent_events, agent_launch, hooks, mcp_server, native_telemetry, team
 from aisquare.services.agents import connect, disconnect
+from tests.fakebin import executable_fake
 
 T = TypeVar("T")
 
@@ -129,10 +130,7 @@ def test_wrappers_declare_family_and_conflicts_fail(tmp_path: Path) -> None:
 
 def test_role_path_selects_the_executable_and_probe_account(tmp_path: Path) -> None:
     directory = tmp_path / "account-bin"
-    directory.mkdir()
-    binary = directory / "claude"
-    binary.write_text("#!/bin/sh\nexit 0\n")
-    binary.chmod(0o755)
+    binary = executable_fake(directory, "claude", posix="", windows="")  # claude.cmd on Windows
     config = load_config()
     config.team.profiles["coder"] = RoleLaunchProfile(
         agent="claude-code", env={"PATH": str(directory), "CLAUDE_CONFIG_DIR": str(tmp_path / "a")}
@@ -147,7 +145,8 @@ def test_role_path_selects_the_executable_and_probe_account(tmp_path: Path) -> N
         context.env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "b")
         assert harness.account_scope() != first_account
         context.env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "a")
-        binary.write_text("#!/bin/sh\n# upgraded executable\nexit 0\n")
+        with binary.open("a", encoding="utf-8") as upgraded:  # an upgraded executable
+            upgraded.write("\n")
         assert harness.account_scope() != first_account
     finally:
         harness._PROBE_CONTEXT.reset(token)

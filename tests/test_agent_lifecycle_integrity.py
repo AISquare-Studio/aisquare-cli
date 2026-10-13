@@ -35,6 +35,7 @@ from aisquare.core.store import SqliteStore, store_session
 from aisquare.models import TeamSession
 from aisquare.services import agent_events, agent_launch, fleet, mcp_server
 from aisquare.services.agents import connect, disconnect
+from tests.fsperms import can_symlink
 from tests.test_fleet_service import FakeTmux
 
 
@@ -119,6 +120,9 @@ def test_only_the_executed_definition_can_verify_trust(
     assert disconnect("codex", tmp_path)
 
 
+@pytest.mark.skipif(
+    not can_symlink(), reason="this machine cannot create symlinks (needs privilege on Windows)"
+)
 def test_home_alias_reconnect_preserves_definition_and_observation(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()

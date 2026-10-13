@@ -88,7 +88,8 @@ def launch_identity(env: dict[str, str], selected: ResolvedAgent, hub: Path | No
         env["AISQUARE_FLEET_AGENT"] = fleet
     env["AISQUARE_LAUNCH_ID"] = str(uuid.uuid4())
     env[LAUNCH_AGENT_ENV] = selected.adapter.id
-    if selected.adapter.id != "claude-code" or selected.adapter.home_env in env:
+    # Claude Code's CLAUDE_CONFIG_DIR stays as the shell or the binding wrote it.
+    if selected.adapter.id != "claude-code":
         env[selected.adapter.home_env] = str(selected.config_dir)
     if hub is not None:
         env.setdefault("AISQUARE_TEAM_HUB", str(hub))
@@ -164,7 +165,10 @@ def resolve(
         chosen_binary,
         source,
         profile,
-        config_home(adapter, agents._home(), effective_env),
+        # Claude Code's as written (core.agents._claude_home), as every reader names it.
+        agents._claude_home(env=effective_env)
+        if adapter.id == "claude-code"
+        else config_home(adapter, agents._home(), effective_env),
     )
 
 

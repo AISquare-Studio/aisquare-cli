@@ -42,6 +42,7 @@ from aisquare.core.orchestrator import team_project
 from aisquare.core.store import SqliteStore, open_store, store_session
 from aisquare.models import TeamEvent, TeamSession
 from aisquare.services import agent_launch, diagnostics, fleet, native_telemetry
+from tests.fsperms import can_symlink
 from tests.test_fleet_service import FakeTmux
 from tests.test_store import _dogfooded_113
 
@@ -302,6 +303,9 @@ def test_capture_retry_keeps_the_durable_prefix_and_does_not_lock_the_spool(
         assert store.get_meta("native-launch:batch") is not None
 
 
+@pytest.mark.skipif(
+    not can_symlink(), reason="this machine cannot create symlinks (needs privilege on Windows)"
+)
 def test_settings_aliases_share_invalidation(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()
@@ -385,9 +389,10 @@ def test_reordered_hook_options_remain_owned_and_reconnect_without_duplicates(
     for groups in settings["hooks"].values():
         for group in groups:
             handler = group["hooks"][0]
-            parts = shlex.split(handler["command"])
+            # Split and quoted as the hook's own shell does (cmd.exe on Windows).
+            parts = agents._split_command(handler["command"])
             parts[-4:] = [*parts[-2:], *parts[-4:-2]]
-            handler["command"] = shlex.join(parts)
+            handler["command"] = " ".join(agents._quote(part) for part in parts)
             assert agents.hook_binary(handler["command"]) is not None
     path.write_text(json.dumps(settings))
     assert agents.hook_fingerprint("codex", tmp_path) == fingerprint
@@ -563,7 +568,8 @@ def test_legacy_unverified_hooks_get_a_working_reconnect_instruction(tmp_path: P
     for groups in settings["hooks"].values():
         for group in groups:
             handler = group["hooks"][0]
-            handler["command"] = shlex.join(shlex.split(handler["command"])[:-2])
+            parts = agents._split_command(handler["command"])[:-2]
+            handler["command"] = " ".join(agents._quote(part) for part in parts)
     path.write_text(json.dumps(settings))
     agent_launch.use("codex")
     check = next(
@@ -571,7 +577,8 @@ def test_legacy_unverified_hooks_get_a_working_reconnect_instruction(tmp_path: P
         for check in diagnostics._check_other_agents(tmp_path)
         if check.name == "codex" and "unverified" in check.detail
     )
-    assert check.fix and f"agents connect codex --config-dir {directory}" in check.fix
+    reconnect = f"agents connect codex --config-dir {shlex.quote(str(directory))}"
+    assert check.fix and reconnect in check.fix
     assert "/hooks" in check.detail
     assert subprocess.run(["sh", "-n", "-c", check.fix], timeout=3).returncode == 0
     agents.install_hooks("codex", directory)

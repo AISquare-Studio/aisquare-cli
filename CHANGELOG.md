@@ -187,6 +187,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `shutdown` and `reap` ended the row while its agent ran on, where nothing
   could reach it. The doctor says the same for such a row, instead of
   prescribing `reap --all` for a pane that is gone.
+- `fleet reap --server-down` no longer marks a row lost whose agent may still
+  run. tmux reports no server for a socket file taken from under a running one
+  too, and the flag marked such rows lost under their agents, on a server under
+  another `TMUX_TMPDIR` as well; only the doctor warned. It now asks each row
+  the one rule `stop`, `shutdown` and `uninstall` ask, and ends only a row
+  from another boot or one whose socket file has nothing behind it. The rest
+  are left live and named, with `SIGUSR1` as the way back to their server and
+  `fleet shutdown --forget` as your word that they are not running; `reap
+  --json` lists them under `held`. The doctor's advice says the same.
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

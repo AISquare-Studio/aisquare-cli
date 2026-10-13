@@ -833,8 +833,10 @@ def reap(
         typer.Option(
             "--server-down",
             help="The private tmux server is gone (reboot, kill-server): mark every live "
-            "row on a socket that does not answer as lost. Without it a silent server "
-            "marks nothing, because it may be alive under another TMUX_TMPDIR.",
+            "row on a socket that does not answer as lost, but for one whose agent may "
+            "still run (its socket file taken from under its server), which is left live "
+            "and named. Without it a silent server marks nothing, because it may be alive "
+            "under another TMUX_TMPDIR.",
         ),
     ] = False,
 ) -> None:
@@ -858,6 +860,7 @@ def reap(
                     "worktrees_removed": [str(p) for p in report.worktrees_removed],
                     "claims_released": list(report.claims_released),
                     "release_failures": list(report.release_failures),
+                    "held": [_row_json(row) for row in report.held],
                 }
             )
         )
@@ -865,9 +868,10 @@ def reap(
             raise typer.Exit(code=1)
         return
     console = stdout_console()
+    held = f", {len(report.held)} left live" if report.held else ""
     console.print(
         f"✓ reaped: {len(report.ended)} ended, {len(report.lost)} lost, "
-        f"{len(report.worktrees_removed)} worktrees removed"
+        f"{len(report.worktrees_removed)} worktrees removed{held}"
     )
     # Counts alone do not tell a human WHICH agent went — name them.
     for agent in report.ended:
@@ -875,6 +879,10 @@ def reap(
         console.print(f"  💤 {agent.label}{code}")
     for agent in report.lost:
         console.print(f"  ✗ {agent.label}  pane {agent.pane_id} gone")
+    for row in report.held:
+        # --server-down's word did not reach it: its agent may still run (the one rule
+        # `shutdown` and `uninstall` ask), and the reason carries the way out.
+        console.print(f"  ⚠ {row.agent.label}  LEFT LIVE — {row.reason}")
     for path in report.worktrees_removed:
         console.print(f"  🗑 {path}")
     _say_released(console, len(report.claims_released))

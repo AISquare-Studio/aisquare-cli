@@ -1317,10 +1317,11 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
         "worktrees_removed",
         "claims_released",
         "release_failures",
+        "held",
     }
     assert [a["label"] for a in payload["ended"]] == ["coder-auth"]
     assert payload["claims_released"] == []
-    assert payload["lost"] == []
+    assert payload["lost"] == [] and payload["held"] == []
     assert payload["worktrees_removed"] == [str(WORKTREE)]
 
 

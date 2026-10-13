@@ -3073,15 +3073,17 @@ def _check_fleet(
                 "aisquare fleet reap --all"
             )
             if unreached:
-                # Its server may run on, and the way back to it comes before the
-                # flag, which would end its rows as well (`reap --server-down` marks
-                # every row on a socket tmux finds no server behind).
+                # Its server may run on, and the way back to it comes first. `reap
+                # --server-down` holds such a row (the one rule, follow-up of #257);
+                # `shutdown --forget` is the word that ends it.
                 fix += (
                     "; if a server still runs behind a socket file that is gone, or behind a "
                     "socket another server took, send it SIGUSR1 (once the socket is free), "
-                    "which makes tmux create its socket again, before anything else"
+                    "which makes tmux create its socket again; reap --server-down leaves "
+                    "such rows live, and if that server is not running, end them on your "
+                    "word: aisquare fleet shutdown --all --forget"
                 )
-            if server_down or unreached:
+            if server_down:
                 # tmux says no server is there — but doctor runs in this shell and
                 # cannot see a fleet alive under another TMUX_TMPDIR, so the flag
                 # is offered with its condition, not prescribed.

@@ -1058,7 +1058,10 @@ class TmuxServer:
         from the spawning shell's asks at a path that never had a server, and
         gets the second message for a fleet that is alive elsewhere. That is why
         ``fleet reap --server-down`` stays the operator's word — this predicate
-        narrows what the word may act on, it does not replace it.
+        narrows what the word may act on, it does not replace it — and why
+        ``reap`` then asks :func:`server_may_run` of each row there: the second
+        message is also a socket file taken from under a server that runs on,
+        and such a row is held, not marked (follow-up of #257).
 
         A question that could not be put — no client, a wedged server's 30 s
         timeout, an OS refusal — is no evidence either, like :meth:`answers`.

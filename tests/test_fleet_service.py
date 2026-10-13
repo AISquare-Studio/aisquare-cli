@@ -1821,10 +1821,13 @@ def test_reap_server_down_marks_rows_on_a_silent_server_lost(
     reconciled 0 — the refusal above is correct by default and left the
     operator with no command that acted. ``--server-down`` is their word that
     the server is gone; the rows on it are then lost, and nothing else changes.
+    A reboot, here: the row is from another boot, so its agent cannot be running.
     """
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
     agent = fleet_service.spawn(project, "coder").agent
     dead = _unreachable_server()
     monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-2")
 
     assert fleet_service.reap(project).lost == [], "the default still refuses"
     report = fleet_service.reap(project, server_down=True)
@@ -1838,10 +1841,12 @@ def test_reap_server_down_only_touches_the_socket_that_is_silent(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Rows span sockets; the flag vouches for the silent one, not for all of them."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
     _settings(monkeypatch, tmux_socket="asq-old")
     on_old = _coder(project)
     _settings(monkeypatch, tmux_socket="asq-new")
     on_new = _coder(project)
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-2")  # a reboot since
     dead = _unreachable_server()
 
     def per_socket(config: FleetSettings | None = None) -> TmuxServer:
@@ -1852,6 +1857,64 @@ def test_reap_server_down_only_touches_the_socket_that_is_silent(
     assert [a.id for a in report.lost] == [on_old.id]
     with store_session() as store:
         assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [on_new.id]
+
+
+def test_reap_server_down_holds_a_row_whose_server_may_still_run(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Follow-up of #257: tmux reports no server for a socket file taken from under a
+    running server too (`error connecting to … (No such file or directory)`), and
+    `reap --server-down` marked such rows lost under their agents, on another server under
+    another `TMUX_TMPDIR` as well; only the doctor warned. The word now ends only what the
+    one rule `stop`, `shutdown` and `uninstall` ask says cannot be running: a row whose
+    socket file is gone in this boot is left live and named, with the way back to its
+    server and `fleet shutdown --forget`; a reboot, or a stale file with nothing behind
+    it, ends it as before."""
+    if not hasattr(socket, "AF_UNIX") or not hasattr(os, "getuid"):
+        pytest.skip("AF_UNIX sockets and a POSIX uid are what tmux needs: the rule asks one")
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    coder = _coder(project)
+    dead = _unreachable_server()  # tmux: `No such file or directory`, as for a taken file
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+    assert dead.listener(coder.socket_path) == "gone", "no file at the path it recorded"
+
+    report = fleet_service.reap(project, server_down=True)
+
+    assert report.lost == [] and report.ended == []
+    assert [row.agent.id for row in report.held] == [coder.id]
+    reason = report.held[0].reason
+    assert "is gone, so no tmux client can reach the server" in reason, reason
+    assert "left live: if it is, send that server SIGUSR1" in reason
+    assert "`aisquare fleet shutdown --forget` ends its row on your word" in reason
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+    assert _events(project, "agent_exited") == []
+    # The CLI says so, in both shapes.
+    human = runner.invoke(app, ["fleet", "reap", "--server-down", "-P", project.id])
+    assert human.exit_code == 0, human.output
+    assert "0 lost, 0 worktrees removed, 1 left live" in human.stdout
+    assert "⚠ coder-1  LEFT LIVE — its server's socket" in human.stdout
+    machine = runner.invoke(app, ["--json", "fleet", "reap", "--server-down", "-P", project.id])
+    assert machine.exit_code == 0, machine.output
+    payload = json.loads(machine.stdout)
+    assert [row["agent"]["id"] for row in payload["held"]] == [coder.id]
+    assert payload["held"][0]["reason"] == reason and payload["lost"] == []
+    # Negative controls: a stale socket file, nothing behind it, is a server that exited
+    # (`kill-server`), and a row from another boot cannot be running: both are lost.
+    with _socket_file(coder.tmux_socket, listening=False) as stale:
+        coder = _recorded_at(coder, stale)
+        swept = fleet_service.reap(project, server_down=True)
+    assert [a.id for a in swept.lost] == [coder.id] and swept.held == []
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+    rebooted = _coder(project)
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-2")
+    swept = fleet_service.reap(project, server_down=True)
+    assert [a.id for a in swept.lost] == [rebooted.id] and swept.held == []
 
 
 def test_server_absent_needs_tmux_to_say_so() -> None:
@@ -1896,8 +1959,10 @@ def test_reap_server_down_asks_each_socket_once_across_every_project(
     """One probe per socket per sweep — not one per project — so a server coming
     up mid-``reap --all`` cannot mark the first projects' rows lost and keep the
     rest: one command, one answer. (Review of the first version.)"""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
     here = _coder(project)
     there = fleet_service.spawn(plain_project, "coder", worktree=False).agent
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-2")  # a reboot since
     probes: list[Sequence[str]] = []
 
     def refusing(argv: Sequence[str], stdin: bytes | None) -> Completed:

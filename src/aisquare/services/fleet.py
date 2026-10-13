@@ -268,6 +268,11 @@ class ReapReport:
     raise here used to take the rest of the sweep down with it: the remaining
     agents, every later project, the worktree pass and the manager nudges, and
     a traceback instead of a report (round 5)."""
+    held: list[ShutdownRow] = field(default_factory=list)
+    """Rows ``--server-down`` left live, each with why: tmux reports no server on their
+    socket, but their agent may still be running (:func:`_hold_on_absent_server`), as the
+    one rule says — a socket file taken from under its server, a socket that could not be
+    asked. Said as ``shutdown`` says a row it left live (follow-up of #257)."""
 
 
 @dataclass(frozen=True)
@@ -3319,6 +3324,7 @@ def _unreached(
     *,
     unusable: bool = False,
     answering: bool = False,
+    forget: str = "--forget",
 ) -> tuple[SocketAnswer, str, str] | None:
     """``(what its socket said, why, what to do)`` for a row whose server did not answer
     through tmux, or could not be asked as tmux is ``unusable`` here, but whose agent may
@@ -3334,7 +3340,9 @@ def _unreached(
     ``answering`` is a row on a socket the probe found a server on: asked whether that
     server is the row's (``"another"``: it started at another time than the one the row
     recorded, which lost its socket file to it and may run on, follow-up of #257). A server
-    that is the row's is then ``None`` here: the row is stopped as any other.
+    that is the row's is then ``None`` here: the row is stopped as any other. ``forget``
+    is how the way out spells the operator's word: ``shutdown``'s own flag, or the command
+    for ``reap``.
     """
     srv = server_of(agent, config)
     answer = tmux_core.server_may_run(
@@ -3359,7 +3367,7 @@ def _unreached(
         )
     if answer == "answers":
         return answer, f"a server came up on its socket {path} after it was asked", "run this again"
-    why, way = _unreachable_why(answer, path, forget="--forget")
+    why, way = _unreachable_why(answer, path, forget=forget)
     return answer, why, way[0].lower() + way[1:]
 
 
@@ -5176,9 +5184,17 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
     non-zero for a protocol mismatch, a wedged server or, for a row from before
     v25 that recorded no socket, a socket under another ``TMUX_TMPDIR`` is not a
     dead server, and the agents behind it are alive.
-    Such a socket is then a server with no panes — the view is empty and the
-    ordinary "pane is gone → lost" branch does the rest. A missing tmux binary
-    marks nothing: that is a question that could not be put.
+    And of the rows on such a socket, only those whose agent cannot be running
+    by the one rule ``stop``, ``shutdown`` and ``uninstall`` ask
+    (:func:`~aisquare.core.tmux.server_may_run`): tmux reports no server for a
+    socket file taken from under a running one too, and the word marked those
+    rows lost under their agents, on another server under another
+    ``TMUX_TMPDIR`` as well (round 29 of #257 had only the doctor warn). The
+    rest are HELD and named on the report (:func:`_hold_on_absent_server`), and
+    ``shutdown --forget`` is the word that ends them. For the rows the word may
+    act on the socket is then a server with no panes — no view for them, and
+    the ordinary "pane is gone → lost" branch does the rest. A missing tmux
+    binary marks nothing: that is a question that could not be put.
 
     A row a hand-over is stopping (:func:`_handed_over`) is left to it, dead or
     gone, as every listing leaves it.
@@ -5186,6 +5202,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
     config = settings()
     report = ReapReport()
     absent: dict[_Address, bool] = {}
+    this_boot = tmux_core.boot_id() if server_down else None
     now = _now()
     with store_session() as store:
         if project is not None:
@@ -5216,7 +5233,14 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                                     # to a call site that has the promise.
                                     absent[address] = False
                             if absent[address]:
-                                views[address] = {}  # no server: no panes
+                                # No server, tmux says: no panes for the rows whose agent
+                                # cannot be running; the rest held, as `shutdown` holds them.
+                                views[address] = _hold_on_absent_server(
+                                    [a for a in live if _address(a, config) == address],
+                                    config,
+                                    this_boot,
+                                    report,
+                                )
                 for agent in live:
                     observed = _view(agent, views, config)
                     if observed is None:
@@ -5260,6 +5284,33 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
     for ended in report.ended:
         nudge_manager(ended.project_id, reason=f"{ended.label} exited")
     return report
+
+
+def _hold_on_absent_server(
+    agents: Sequence[FleetAgent], config: FleetSettings, this_boot: str | None, report: ReapReport
+) -> _Observed:
+    """The view ``reap --server-down`` takes of a server tmux reports absent: no pane for a
+    row whose agent cannot be running, which reads lost; every other row held, as a row of
+    a server that may run (:func:`_unreached`), with why on the report.
+
+    tmux reports no server for a socket file taken from under a running server too
+    (``error connecting to … (No such file or directory)``), and ``server_absent`` alone
+    marked such rows lost under their agents, on another server under another
+    ``TMUX_TMPDIR`` as well (round 29 of #257 had only the doctor warn). The word may end
+    only what the one rule says cannot be running
+    (:func:`~aisquare.core.tmux.server_may_run`): a row from another boot, or one whose
+    socket file is there with nothing listening. The way out names ``fleet shutdown
+    --forget``, the operator's word that ends a held row.
+    """
+    view: _Observed = {}
+    for agent in agents:
+        unreached = _unreached(
+            agent, config, this_boot, forget="`aisquare fleet shutdown --forget`"
+        )
+        if unreached is not None:
+            view[agent.id] = None
+            report.held.append(ShutdownRow(agent, f"{unreached[1]} — left live: {unreached[2]}"))
+    return view
 
 
 def _emit_exit(store: ContextStore, agent: FleetAgent, *, why: str | None = None) -> None:

@@ -305,7 +305,10 @@ no tmux client reaches that server, but it may still run, so `fleet stop` and
 second agent beside it. If the server is
 genuinely gone — a reboot, `kill-server` — `fleet reap --all --server-down` marks
 the rows on it lost; it acts only where tmux itself reports no server behind the
-socket, never on a server that is merely not answering.
+socket, never on a server that is merely not answering, and never on a row whose
+agent may still run by the rule above (its socket file gone from under its
+server in this boot, or another server on its socket): those it leaves live and
+names, and `fleet shutdown --forget` ends them on your word.
 To take a whole project's fleet down and record every row in one go, use
 `fleet shutdown`.
 
@@ -454,7 +457,14 @@ under another `TMUX_TMPDIR`. `--server-down` is the operator's word that the ser
 gone (a reboot swept `/tmp`; `kill-server`). Even with it, rows are marked lost
 only on a socket where tmux itself reports no server (`no server running on …`
 or `error connecting to … (No such file or directory)`); a protocol mismatch or
-a hung server still marks nothing, and so does a missing `tmux` binary.
+a hung server still marks nothing, and so does a missing `tmux` binary. And of
+the rows on such a socket, only those whose agent cannot be running, by the one
+rule `stop`, `shutdown` and `uninstall` ask: a row from another boot, or one
+whose socket file is there with nothing behind it. A row whose socket file was
+taken from under its server in this boot (tmux says `No such file or directory`
+for that too), or whose socket could not be asked, is **left live** and named,
+with `SIGUSR1` as the way back to its server and `fleet shutdown --forget` as
+your word that it is not running; under `--json` they are listed as `held`.
 
 `--all` and `--project` are refused together (a usage error, exit 2, JSON under
 `--json`). The claims of the rows it ends
@@ -1265,8 +1275,9 @@ aisquare fleet reap --all --server-down
 `doctor` says instead that no tmux client reaches the server, which *may still be
 running*, when the row's socket file is gone (systemd-tmpfiles or a logout
 removed it while the server ran on): send that server `SIGUSR1`, which makes
-tmux create its socket again, before anything else, as `--server-down` would
-mark its rows lost under their agents.
+tmux create its socket again. `--server-down` leaves such rows live and names
+them; once you know that server is not running, `fleet shutdown --all --forget`
+ends their rows on your word.
 
 **The server was stopped outside the CLI.** Rows read `unknown (tmux
 unavailable)` and `reap` reaps nothing — correctly: it cannot ask. Once any

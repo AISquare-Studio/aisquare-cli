@@ -159,6 +159,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shell anyway. The field is additive, and Remote's `api/fleet` carries it too,
   as it carries those agents.
 
+### Fixed
+- `fleet spawn` no longer starts a tmux server at a socket path a running
+  server lost. systemd-tmpfiles or a logout can take the socket file from
+  under the fleet's server, which runs on; `tmux -L` then found no file and
+  started a second server there, which answered for the old rows from then on,
+  while their agents kept running where nothing could reach them. A spawn
+  into that path is now refused, for every project on the socket, naming the
+  agents, `SIGUSR1` as the way back to their server, and `fleet shutdown
+  --forget` for agents that are not running. A stale socket file (the server
+  exited) and rows from another boot still get a fresh server.
+
 ### Security
 - **One choke point.** Every request and every socket handshake passes the
   token, auto-off, `Origin` (every write and socket must come from the page's

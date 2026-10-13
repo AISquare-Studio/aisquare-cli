@@ -1543,6 +1543,9 @@ def spawn(
             notes.append(f"the manager is always labelled {MANAGER_LABEL!r} (asked: {label!r})")
         else:
             notes.append(f"label {label!r} is held by a live agent — using {picked!r}")
+    # A socket path a running server lost is not one to start a server at: the agents on
+    # it would be stranded for good, and the new server would answer for their rows.
+    _refuse_a_freed_socket(srv, config)
 
     use_worktree = role_config.worktree if worktree is None else worktree
 
@@ -2037,6 +2040,54 @@ def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[st
         )
         return agent
     return current if current is not None else agent
+
+
+def _refuse_a_freed_socket(srv: TmuxServer, config: FleetSettings) -> None:
+    """Refuse to start a server at a socket path a running server lost (follow-up of #257).
+
+    ``tmux -L`` finds no file at the path and starts a server there. A live row whose
+    server said at spawn that it listened at that path, in this boot, and whose socket
+    file is gone (:func:`~aisquare.core.tmux.server_may_run`: ``"gone"``) is an agent that
+    may run on a server no tmux client reaches: systemd-tmpfiles or logind took the file
+    from under it, which the server outlives. A spawn then started a second server at the
+    freed path, which answered for the row from then on, and the agent kept running
+    where nothing could reach it again. The server is shared by every project, so every
+    project's live rows are asked, not only this one's.
+
+    Asked only when this shell's path holds no file: a server listening there is the one
+    the spawn joins, and a stale file is a server that exited, which tmux replaces.
+    """
+    try:
+        if srv.listener() != "gone":
+            return
+        here = srv.socket_path()
+    except TmuxUnavailable:
+        return  # no POSIX uid: no tmux server can exist here
+    this_boot = tmux_core.boot_id()
+    stranded: list[str] = []
+    with store_session() as store:
+        for current in store.list_projects(include_forgotten=True):
+            for agent in store.fleet_agents(current.id, live_only=True):
+                if _address(agent, config) != _Address(config.tmux_socket):
+                    continue  # asked at another path, which this spawn does not take
+                answer = tmux_core.server_may_run(
+                    srv, agent.socket_path, agent.boot_id, this_boot, agent.created_at
+                )
+                if answer == "gone":
+                    stranded.append(f"{agent.label} ({_name(current)})")
+    if not stranded:
+        return
+    one = len(stranded) == 1
+    raise FleetError(
+        f"not started: the tmux server {', '.join(stranded)} {'runs' if one else 'run'} on "
+        f"lost its socket file {here}, so no tmux client reaches it, and it may still be "
+        f"running; a spawn now would start a second server at that path and leave "
+        f"{'that agent' if one else 'those agents'} where nothing can reach "
+        f"{'it' if one else 'them'} again. If it is running, send that server SIGUSR1, which "
+        f"makes tmux create its socket again, and spawn again; if it is not, "
+        f"`aisquare fleet shutdown --forget` ends {'its row' if one else 'their rows'} on "
+        f"your word"
+    )
 
 
 def _refuse_occupied_worktree(project: ProjectInfo, worktree_dir: str, label: str) -> None:

@@ -2449,6 +2449,50 @@ def test_stop_and_restart_leave_live_a_row_whose_socket_was_taken_from_under_its
     assert ended.ended_at is not None and tmux.killed == []
 
 
+def test_spawn_refuses_to_start_a_server_at_a_socket_a_running_server_lost(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Follow-up of #257: `tmux -L` finds no file at the socket path and starts a server
+    there. A live row's server whose socket file was taken from under it (systemd-tmpfiles,
+    logind) may still run, which `stop`, `shutdown` and `uninstall` all count; a spawn
+    started a second server at the freed path, which answered for the row from then on,
+    and the agent kept running where nothing could reach it. The server is shared, so
+    another project's spawn is refused the same way. A stale file (the server exited) and
+    a row from another boot are no reason: tmux replaces the one, and nothing outlives
+    the other."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    coder = _coder(project)
+    spawned = len(tmux.spawned)
+    tmux.running = False  # no tmux client reaches the server…
+    tmux.socket_file = False  # …because its socket file is gone, not because it exited
+
+    with pytest.raises(FleetError, match=r"not started: .* lost its socket file") as refused:
+        fleet_service.spawn(project, "coder")
+    said = str(refused.value)
+    assert f"coder-1 ({project.root.name})" in said and "may still be running" in said
+    assert "SIGUSR1" in said and "`aisquare fleet shutdown --forget`" in said
+    with pytest.raises(FleetError, match="lost its socket file"):
+        fleet_service.spawn(plain_project, "manager")  # the server is every project's
+
+    assert len(tmux.spawned) == spawned and tmux.running is False, "no second server"
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+        assert store.fleet_agents(plain_project.id, live_only=False) == []
+    # Negative control: a server that exited leaves its socket file, where nothing listens,
+    # and a spawn starts a fresh server at the path, as it always did.
+    tmux.socket_file = True
+    manager = fleet_service.spawn(plain_project, "manager").agent
+    assert tmux.running and manager.pane_id in tmux.facts
+    # And a row from another boot cannot be running on any server, socket file or not.
+    tmux.socket_file = False
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-2")
+    assert fleet_service.spawn(project, "coder").agent.label == "coder-2"
+
+
 def test_stop_leaves_the_row_live_when_a_denied_socket_cannot_confirm_the_pane_died(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

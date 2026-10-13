@@ -41,18 +41,24 @@ class NativeConfigError(ValueError):
 
 
 def _read_config(path: Path, layer: str) -> dict[str, Any]:
+    problem: Exception
+    cause: BaseException
     try:
         if not stat.S_ISREG(path.stat().st_mode):
             raise ValueError("not a regular file")
         with path.open("rb") as handle:
             return tomllib.load(handle)
-    except FileNotFoundError:
-        return {}
+    except FileNotFoundError as exc:
+        # Windows says "not found" under a home that is a file, where POSIX says ENOTDIR.
+        if not os.path.lexists(path.parent) or os.path.isdir(path.parent):
+            return {}
+        problem, cause = NotADirectoryError(f"{path.parent} is not a directory"), exc
     except (OSError, ValueError, RecursionError) as exc:
-        raise NativeConfigError(
-            f"Cannot inspect Codex {layer} config {path}: {exc}. "
-            "Native telemetry configuration left unchanged."
-        ) from exc
+        problem = cause = exc
+    raise NativeConfigError(
+        f"Cannot inspect Codex {layer} config {path}: {problem}. "
+        "Native telemetry configuration left unchanged."
+    ) from cause
 
 
 def operator_configured(config_dir: Path, args: list[str]) -> bool:

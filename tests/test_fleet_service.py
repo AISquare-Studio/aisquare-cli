@@ -72,6 +72,7 @@ from aisquare.services.fleet import (
     NoSuchAgent,
 )
 from tests import fakebin
+from tests.fsperms import can_symlink
 
 PYTHON_LAUNCHER = "python3"
 """What ``pane_current_command`` reads while ``python -m aisquare launch`` is resolving."""
@@ -4140,6 +4141,28 @@ def test_a_symlink_loop_on_the_way_to_a_rows_socket_is_another_path_not_a_traceb
 
     assert listed.agent.id == coder.id and listed.state == "waiting", listed
     assert fleet_service.socket_at(coder) == looped, "asked at the path it recorded"
+
+
+def test_a_real_symlink_loop_on_the_way_to_a_rows_socket_is_another_path_on_every_python(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """The test above emulates the `RuntimeError` 3.11 and 3.12 raise. From 3.13 pathlib's
+    `resolve` raises nothing for a loop and hands back the path as far as it got, so on
+    3.13 that emulation runs code no real loop reaches. A real loop here, nothing faked:
+    whatever this Python makes of it, the row is listed and asked at the path it recorded
+    (follow-up of #257)."""
+    if os.name == "nt" or not can_symlink():
+        pytest.skip("a symlink loop is a POSIX shape; NTFS links need a privilege")
+    (tmp_path / "loop").symlink_to(tmp_path / "loop")
+    looped = tmp_path / "loop" / "tmux-1000" / "asq"
+    with pytest.raises(OSError):  # the premise: a real loop, which no stat gets through
+        looped.stat()
+    coder = _recorded_at(_coder(project), looped)
+
+    [listed] = fleet_service.list_agents(project)
+
+    assert listed.agent.id == coder.id and listed.state == "waiting", listed
+    assert listed.socket_at == fleet_service.socket_at(coder) == looped, "the path it recorded"
 
 
 def test_a_row_dead_on_its_own_server_is_ended_and_its_window_killed_there(

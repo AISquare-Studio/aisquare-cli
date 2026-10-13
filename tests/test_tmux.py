@@ -28,7 +28,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -47,6 +47,7 @@ from aisquare.core.tmux import (
     Capture,
     Completed,
     PaneFacts,
+    SocketAnswer,
     TmuxError,
     TmuxServer,
     TmuxUnavailable,
@@ -967,6 +968,49 @@ def test_a_row_with_no_boot_to_compare_is_gone_when_its_socket_is_and_it_predate
     assert may_run("unasked", before) == "unasked"
     assert may_run("gone", before, recorded_boot="b00t") == "gone", "the boot ids decide"
     assert may_run("answers", after, recorded_boot="other") is None, "another boot"
+
+
+def test_a_listener_that_started_at_another_time_is_another_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Follow-up of #257: a server that lost its socket file runs on, and the next `tmux -L`
+    starts a second server at the freed path, which answers for the row from then on. The
+    row records when its server started, and the server that answers is asked the same:
+    another time is another server, and the row's may still run. A row that recorded no
+    start, and a start that cannot be asked now, leave a listener standing as the row's."""
+    recorded = Path("/run/user/1000/tmux-1000/asq")
+    then = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    asked: list[Path | None] = []
+
+    def may_run(
+        now: datetime | TmuxError | None, started: datetime | None = then
+    ) -> SocketAnswer | None:
+        srv = TmuxServer("asq")
+
+        def started_at(self: TmuxServer) -> datetime | None:
+            asked.append(self.path)
+            if isinstance(now, TmuxError):
+                raise now
+            return now
+
+        monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "answers")
+        monkeypatch.setattr(TmuxServer, "started_at", started_at)
+        return server_may_run(srv, recorded, "b00t", "b00t", then, started)
+
+    assert may_run(then) == "answers", "the server the row was started on"
+    assert may_run(then + timedelta(minutes=5)) == "another"
+    assert may_run(then - timedelta(days=1)) == "another", "any other time"
+    assert may_run(None) == "answers", "a start tmux does not report judges nothing"
+    assert may_run(TmuxUnavailable("no tmux")) == "answers", "could not be asked: may be its"
+    assert may_run(TmuxError("Permission denied")) == "answers"
+    assert asked == [recorded] * 6, "asked at the path the row recorded, by `-S`"
+    assert may_run(then + timedelta(minutes=5), started=None) == "answers", "nothing recorded"
+    assert asked == [recorded] * 6, "and then not asked at all"
+
+    srv = TmuxServer("asq")
+    monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "gone")
+    assert server_may_run(srv, recorded, "b00t", "b00t", then, then) == "gone", "no listener"
+    assert server_may_run(srv, recorded, "0ld", "b00t", then, then) is None, "another boot"
 
 
 def test_the_boot_start_is_read_where_the_machine_says_and_kept_once_found(

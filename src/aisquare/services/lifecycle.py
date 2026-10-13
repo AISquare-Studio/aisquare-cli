@@ -1105,9 +1105,10 @@ class UninstallPlan:
     ``fleet shutdown`` can then stop none of them, and only its ``--forget`` ends their rows
     (round 27 of #257)."""
     unreached: tuple[str, ...] = ()
-    """Those of :attr:`live_agents` whose server's socket is gone or could not be asked: no
-    tmux client reaches them, so ``fleet shutdown`` leaves them live, and only its
-    ``--forget`` ends their rows (round 27 of #257)."""
+    """Those of :attr:`live_agents` whose server's socket is gone or could not be asked, or
+    has another server on it than the one they were started on: no tmux client reaches
+    them, so ``fleet shutdown`` leaves them live, and only its ``--forget`` ends their rows
+    (round 27 of #257; follow-up)."""
     listening: tuple[str, ...] = ()
     """The rest of :attr:`live_agents`: a server answers on their socket, so ``--forget``
     leaves them live. Sorted per row, never by subtracting :attr:`unreached` from
@@ -1242,11 +1243,11 @@ class UninstallPlan:
                 one = len(self.unreached) == 1
                 unreached = (
                     f"; it cannot reach {', '.join(self.unreached)}, as the socket "
-                    f"{'its' if one else 'their'} tmux server listened on is gone or could not "
-                    f"be asked. If {'it is' if one else 'they are'} still running, send that "
-                    f"server SIGUSR1, which makes tmux create its socket again, and run it "
-                    f"again; if not, end {'its row' if one else 'their rows'} on your word: "
-                    f"{FLEET_FORGET}"
+                    f"{'its' if one else 'their'} tmux server listened on is gone, could not "
+                    f"be asked, or has another server on it. If {'it is' if one else 'they are'} "
+                    f"still running, send that server SIGUSR1, which makes tmux create its "
+                    f"socket again, and run it again; if not, end "
+                    f"{'its row' if one else 'their rows'} on your word: {FLEET_FORGET}"
                 )
             return UninstallRefused(
                 f"{running} Stop them first: {FLEET_SHUTDOWN}{unreached}", error="fleet_running"
@@ -1841,13 +1842,19 @@ _LIVE_ROWS = (
     "SELECT f.label, f.tmux_socket, p.root, f.created_at, {recorded} FROM fleet_agent AS f "
     "LEFT JOIN project AS p ON p.id = f.project_id WHERE f.ended_at IS NULL"
 )
-#: The facts a row has recorded since v25 (``FleetAgent.socket_path``, ``.boot_id``), and
-#: what a store from before them answers in their place: nothing recorded.
-_RECORDED = "f.socket_path, f.boot_id"
-_NOTHING_RECORDED = "NULL, NULL"
-#: One live fleet row: ``(label (project), socket, created, socket path, boot id)``, the last
-#: two what its spawn recorded of where its server listened and in which boot, else ``None``.
-_LiveRow = tuple[str, str, datetime | None, Path | None, str | None]
+#: The facts a row has recorded since v26 (``FleetAgent.socket_path``, ``.boot_id``,
+#: ``.server_started_at``), then what a v25 store answers in their place, then a store from
+#: before them: nothing recorded. Tried in that order, so a store this plan does not migrate
+#: answers with everything it has (round 25 of #257; follow-up).
+_RECORDED = (
+    "f.socket_path, f.boot_id, f.server_started_at",
+    "f.socket_path, f.boot_id, NULL",
+    "NULL, NULL, NULL",
+)
+#: One live fleet row: ``(label (project), socket, created, socket path, boot id, server
+#: started)``, the last three what its spawn recorded of where its server listened, in which
+#: boot, and when that server started, else ``None``.
+_LiveRow = tuple[str, str, datetime | None, Path | None, str | None, datetime | None]
 
 
 def _siblings_hiding_hooks() -> list[Path]:
@@ -1896,12 +1903,14 @@ def _live_fleet_agents() -> tuple[tuple[_LiveRow, ...], str | None]:
         return (), str(exc) or type(exc).__name__
     try:
         connection.execute("PRAGMA query_only = ON")
-        try:
-            rows = connection.execute(_LIVE_ROWS.format(recorded=_RECORDED)).fetchall()
-        except sqlite3.OperationalError as exc:
-            if "no such column" not in str(exc):
-                raise
-            rows = connection.execute(_LIVE_ROWS.format(recorded=_NOTHING_RECORDED)).fetchall()
+        for recorded in _RECORDED:
+            try:
+                rows = connection.execute(_LIVE_ROWS.format(recorded=recorded)).fetchall()
+            except sqlite3.OperationalError as exc:
+                if "no such column" not in str(exc) or recorded == _RECORDED[-1]:
+                    raise
+                continue
+            break
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):
             return (), None  # a store from before the fleet: nothing can be live
@@ -1918,8 +1927,9 @@ def _live_fleet_agents() -> tuple[tuple[_LiveRow, ...], str | None]:
                 _created(created),
                 Path(path) if path else None,
                 booted or None,
+                _created(started) if started else None,
             )
-            for label, socket_name, root, created, path, booted in rows
+            for label, socket_name, root, created, path, booted, started in rows
         ),
         None,
     )
@@ -1953,8 +1963,8 @@ def _may_run(row: _LiveRow, this_boot: str | None) -> SocketAnswer | None:
     socket is gone counts until ``fleet shutdown --forget`` ends it on the operator's word,
     unless it recorded no boot and predates this one (round 28).
     """
-    _label, socket_name, created, recorded, booted = row
-    return server_may_run(TmuxServer(socket_name), recorded, booted, this_boot, created)
+    _label, socket_name, created, recorded, booted, started = row
+    return server_may_run(TmuxServer(socket_name), recorded, booted, this_boot, created, started)
 
 
 def _fleet_answers() -> tuple[tuple[tuple[str, SocketAnswer], ...], int, str | None]:

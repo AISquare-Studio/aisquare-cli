@@ -105,6 +105,7 @@ def test_a_lone_space_is_no_longer_nothing_to_do() -> None:
         pane_id = "%1"
         tmux_socket = "asq"
         socket_path: Path | None = None  # asked by the name (`fleet._address`)
+        server_started_at: datetime | None = None  # judged by its own time (`fleet._outlived`)
         created_at = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
 
     class _Store:

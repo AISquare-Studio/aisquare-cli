@@ -423,9 +423,11 @@ def _ask_boot_started() -> datetime | None:
     return datetime.fromtimestamp(int(found.group(1)), tz=UTC) if found else None
 
 
-SocketAnswer = Literal["answers", "gone", "unasked"]
+SocketAnswer = Literal["answers", "gone", "unasked", "another"]
 """What a server's socket file says when asked directly (:func:`socket_answer`): a listener
-(``"answers"``), no file there (``"gone"``), or no answer to be had (``"unasked"``)."""
+(``"answers"``), no file there (``"gone"``), or no answer to be had (``"unasked"``); and
+what :func:`server_may_run` adds, a listener that is not the server the row was started on
+(``"another"``)."""
 
 
 def socket_answer(path: Path | None) -> SocketAnswer | None:
@@ -466,10 +468,12 @@ def server_may_run(
     booted: str | None,
     this_boot: str | None,
     created: datetime | None = None,
+    started: datetime | None = None,
 ) -> SocketAnswer | None:
     """Whether the agent of a live fleet row may still be running on ``srv``, and why; ``None``
-    when it cannot be. The one rule ``upgrade``, ``uninstall`` and ``fleet shutdown`` ask, so
-    a row one of them counts as running is never one another ends as gone (round 27 of #257).
+    when it cannot be. The one rule ``upgrade``, ``uninstall``, ``fleet shutdown``, ``stop``
+    and ``reap --server-down`` ask, so a row one of them counts as running is never one
+    another ends as gone (round 27 of #257).
 
     Asked of what its spawn recorded, never inferred from the shell asking (round 25). A row
     from another boot (``booted``, against ``this_boot``) cannot be running: no process
@@ -477,6 +481,16 @@ def server_may_run(
     at ``recorded``, where the server said it listened, whatever ``TMUX_TMPDIR`` this shell
     has and wherever this tmux build keeps sockets; a row from before v25 recorded neither
     and is asked where this shell's tmux looks.
+
+    A listener there is not thereby the row's server. One that lost its socket file runs
+    on, and the next ``tmux -L`` there starts a second server at the freed path, which
+    answers for the row from then on while its agent runs where no client reaches it
+    (follow-up of #257). So the server that answers is asked when it started
+    (:meth:`TmuxServer.started_at`) and compared with ``started``, what the row's server
+    said at spawn (``FleetAgent.server_started_at``): another time is ``"another"``, which
+    ``stop`` refuses, ``shutdown`` holds until ``--forget``, and ``uninstall`` counts. A
+    row that recorded no start, or a start that cannot be asked now (no usable tmux, a
+    denied socket), leaves ``"answers"`` standing: a server listens, which may be its.
 
     With no boot to compare (a row from before v25, or a boot id that could not be had), a
     socket that is gone is explained by a reboot when the row was ``created`` before this
@@ -489,6 +503,13 @@ def server_may_run(
     if booted is not None and this_boot is not None and booted != this_boot:
         return None
     answer = srv.listener(recorded)
+    if answer == "answers" and started is not None:
+        try:
+            now = (srv if recorded is None else srv.at(recorded)).started_at()
+        except TmuxError:  # TmuxUnavailable included: a server listens, and may be the row's
+            now = None
+        if now is not None and now != started:
+            return "another"
     if answer == "gone" and (booted is None or this_boot is None) and created is not None:
         started = boot_started()
         if started is not None and created < started:

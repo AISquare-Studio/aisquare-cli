@@ -237,6 +237,7 @@ def pane(monkeypatch: pytest.MonkeyPatch) -> FakePane:
         pane_id = "%1"
         tmux_socket = "asq"
         socket_path: Path | None = None  # asked by the name (`fleet._address`)
+        server_started_at: datetime | None = None  # judged by its own time (`fleet._outlived`)
         created_at = FakePane.STARTED + timedelta(hours=1)
 
     class Store:

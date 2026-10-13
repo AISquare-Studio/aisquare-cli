@@ -2988,7 +2988,35 @@ def _check_fleet(
         for sock, agents in by_socket.items():
             listed = _fleet_labels(agents, names)
             if servers[sock].list_sessions():
-                problems.append(f"{len(agents)} recorded live but the tmux pane is gone: {listed}")
+                # The server that answers may be another than a row's: one that took the
+                # socket path from a server that lost its file and runs on, which the one
+                # rule says from the start the row recorded (follow-up of #257). Such a
+                # row is held, not a pane that is gone, and `reap` leaves it.
+                taken: list[FleetAgent] = []
+                vanished: list[FleetAgent] = []
+                for agent in agents:
+                    answer = tmux_core.server_may_run(
+                        servers[sock],
+                        agent.socket_path,
+                        agent.boot_id,
+                        this_boot,
+                        agent.created_at,
+                        agent.server_started_at,
+                    )
+                    (taken if answer == "another" else vanished).append(agent)
+                if vanished:
+                    problems.append(
+                        f"{len(vanished)} recorded live but the tmux pane is gone: "
+                        f"{_fleet_labels(vanished, names)}"
+                    )
+                if taken:
+                    unreached.extend(taken)
+                    problems.append(
+                        f"{len(taken)} recorded live but another tmux server answers on the "
+                        f"socket of the private tmux server '{sock}', not the one "
+                        f"{'it was' if len(taken) == 1 else 'they were'} started on, which may "
+                        f"still be running: {_fleet_labels(taken, names)}"
+                    )
             elif servers[sock].server_absent():
                 # tmux itself says there is no server — the one case reap's
                 # --server-down acts on, decided by the SAME predicate reap uses.
@@ -3004,7 +3032,12 @@ def _check_fleet(
                 held: list[FleetAgent] = []
                 for agent in agents:
                     answer = tmux_core.server_may_run(
-                        servers[sock], agent.socket_path, agent.boot_id, this_boot, agent.created_at
+                        servers[sock],
+                        agent.socket_path,
+                        agent.boot_id,
+                        this_boot,
+                        agent.created_at,
+                        agent.server_started_at,
                     )
                     (down if answer is None else held).append(agent)
                 if down:
@@ -3044,8 +3077,9 @@ def _check_fleet(
                 # flag, which would end its rows as well (`reap --server-down` marks
                 # every row on a socket tmux finds no server behind).
                 fix += (
-                    "; if a server still runs behind a socket file that is gone, send it "
-                    "SIGUSR1, which makes tmux create its socket again, before anything else"
+                    "; if a server still runs behind a socket file that is gone, or behind a "
+                    "socket another server took, send it SIGUSR1 (once the socket is free), "
+                    "which makes tmux create its socket again, before anything else"
                 )
             if server_down or unreached:
                 # tmux says no server is there — but doctor runs in this shell and

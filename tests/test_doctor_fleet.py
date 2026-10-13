@@ -645,6 +645,50 @@ def test_fleet_check_does_not_call_a_server_whose_socket_file_is_gone_not_runnin
     assert check.fix.endswith("aisquare fleet reap --all --server-down")
 
 
+def test_fleet_check_tells_another_server_on_a_rows_socket_from_a_pane_that_is_gone(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up of #257: a server answers on the row's socket, holds no pane of the row's,
+    and started at another time than the row recorded: it took the path from the row's
+    server, which lost its socket file and may run on. Said so, with the way back first,
+    not as a pane that is gone for `reap --all` to record. A row that recorded no start
+    is judged by its own time, as before."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "this-boot")
+    then = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    project = _seed(tmp_path / "repo")
+    coder = _agent(project.id, "coder-1", "%2").model_copy(
+        update={"boot_id": "this-boot", "server_started_at": then}
+    )
+    _seed(tmp_path / "repo", coder)
+    server = FakeServer(
+        sessions=("asq-other",),
+        panes={},
+        started=then + timedelta(minutes=5),
+        listened="answers",
+    )
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert check.status is CheckStatus.warn
+    assert "the tmux pane is gone" not in check.detail
+    assert "another tmux server answers on the socket of the private tmux server 'asq'" in (
+        check.detail
+    )
+    assert "may still be running: coder-1" in check.detail
+    assert check.fix and "SIGUSR1" in check.fix and "another server took" in check.fix
+    assert check.fix.index("SIGUSR1") < check.fix.index("--server-down"), "the way back first"
+    # Negative control: a row from before the start was recorded, on a server younger
+    # than it, is a pane that is gone, and the plain sweep records it.
+    with store_session() as store:
+        store.upsert_fleet_agent(coder.model_copy(update={"server_started_at": None}))
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert "1 recorded live but the tmux pane is gone: coder-1" in check.detail
+    assert "another tmux server" not in check.detail
+    assert check.fix and "SIGUSR1" not in check.fix
+
+
 def test_fleet_check_does_not_vouch_for_a_server_that_is_silent_but_not_absent(
     home: Path, tmp_path: Path
 ) -> None:

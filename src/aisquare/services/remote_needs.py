@@ -2849,7 +2849,7 @@ def _needs_with_board_sessions(statuses: list[FleetAgentStatus]) -> list[FleetAg
         agent.id: fleet_service._status(
             agent,
             held[agent.id],
-            fleet_service._view(agent, views, config),
+            views.get(fleet_service._address(agent, config)),  # as given: `_status` reads it
             tmux_session,
             now,
             config,

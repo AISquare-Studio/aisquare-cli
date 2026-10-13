@@ -1271,11 +1271,16 @@ mark its rows lost under their agents.
 **The server was stopped outside the CLI.** Rows read `unknown (tmux
 unavailable)` and `reap` reaps nothing — correctly: it cannot ask. Once any
 project spawns again, a new server is up on the socket and hands the old pane
-ids out afresh; the old rows then read `✗ lost` — never the state of the agent
-that got their id, whose pane the UI does not show under them either — a plain
-`reap` records them, and stopping, restarting or shutting one down ends its row
-without touching that agent. `shutdown` records them as lost on your word, at
-any point, scoped to one project or over all of them:
+ids out afresh. That server is not the old rows': every row records when its
+server started, and this one started at another time, so they read `unknown
+(another tmux server on its socket)` — never the state of the agent that got
+their id, whose pane the UI does not show under them either. From outside, a
+server killed by hand looks like one that lost its socket file and runs on, so
+`reap` leaves those rows, `stop` and `restart` refuse them, and `shutdown` leaves
+them live; once you know the old server is gone, `fleet shutdown --forget` ends
+their rows on your word. (A row started before 0.8.1 recorded no start, reads
+`✗ lost` as before, and a plain `reap` records it.) `shutdown` records them as
+lost on your word, at any point, scoped to one project or over all of them:
 
 ```sh
 aisquare fleet shutdown --project amber-otter --yes

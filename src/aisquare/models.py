@@ -977,6 +977,13 @@ class FleetAgent(BaseModel):
     boot_id: str | None = None
     """The boot it was spawned in (``core.tmux.boot_id``): a row from another boot is
     no running agent. ``None`` on rows spawned before 0.8.0, or where none is kept."""
+    server_started_at: datetime | None = None
+    """When its server started, as it said at spawn (``#{start_time}``, whole seconds):
+    the identity of the server its ``pane_id`` names, since every server numbers its
+    panes from ``%0``. A server at its socket that started at another time is not the
+    one it runs on, which lost its socket file and may run on (``core.tmux.server_may_run``,
+    ``services.fleet._outlived``). ``None`` on rows spawned before 0.8.1, or when tmux did
+    not say."""
     created_at: datetime
     ended_at: datetime | None = None
     exit_status: int | None = None

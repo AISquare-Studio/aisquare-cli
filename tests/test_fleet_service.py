@@ -776,6 +776,35 @@ def test_spawn_records_where_its_server_listens_and_in_which_boot(
     assert fleet_service.spawn(project, "coder", worktree=False).agent.socket_path is None
 
 
+def test_spawn_records_when_its_server_started(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up of #257: the identity of the server the pane id names, as the server says
+    it (``#{start_time}``), kept by the store as written. A server at the row's socket that
+    started at another time is not the one the row runs on. Not saying costs the spawn
+    nothing, and a row that recorded no start is judged by its own time, as before."""
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+
+    agent = fleet_service.spawn(project, "manager").agent
+
+    assert agent.server_started_at == tmux.started
+    with store_session() as store:
+        assert store.fleet_agent_by_label(project.id, "manager") == agent
+    assert not fleet_service._outlived(agent, tmux.started)
+    assert fleet_service._outlived(agent, tmux.started + timedelta(seconds=1))
+    assert fleet_service._outlived(agent, tmux.started - timedelta(days=1)), "any other time"
+    assert not fleet_service._outlived(agent, None), "a start tmux does not report judges nothing"
+
+    def refused() -> datetime | None:
+        raise TmuxError("tmux did not answer within 30s")
+
+    monkeypatch.setattr(tmux, "started_at", refused)  # the spawn goes on without it
+    coder = fleet_service.spawn(project, "coder", worktree=False).agent
+    assert coder.server_started_at is None
+    assert fleet_service._outlived(coder, coder.created_at + timedelta(seconds=1))
+    assert not fleet_service._outlived(coder, coder.created_at - timedelta(seconds=1))
+
+
 def test_spawn_with_an_account_carries_the_callers_environment_into_the_window(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
@@ -2434,7 +2463,7 @@ def test_stop_and_restart_leave_live_a_row_whose_socket_was_taken_from_under_its
 
     with pytest.raises(FleetError, match=r"'coder-1' was not stopped: .* is gone") as stopped:
         fleet_service.stop(project, "coder-1")
-    assert "SIGUSR1" in str(stopped.value) and "reap --server-down" in str(stopped.value)
+    assert "SIGUSR1" in str(stopped.value) and "shutdown --forget" in str(stopped.value)
     with pytest.raises(FleetError, match="is gone"):
         fleet_service.restart(project, "coder-1")
 
@@ -2491,6 +2520,76 @@ def test_spawn_refuses_to_start_a_server_at_a_socket_a_running_server_lost(
     tmux.socket_file = False
     monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-2")
     assert fleet_service.spawn(project, "coder").agent.label == "coder-2"
+
+
+def test_a_row_whose_socket_another_server_took_is_held_not_ended(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up of #257: a server that lost its socket file runs on, and the next `tmux -L`
+    there (a 0.8.0 client, a spawn into a project with no rows, a hand-run tmux) starts a
+    second server at the freed path. That server answered for the old rows from then on:
+    their panes read as gone, their socket answered, and `stop`, `shutdown` and `restart`
+    ended them under their running agents, and `reap` marked them lost. Every row records
+    when its server started, and a server at its socket that started at another time is
+    not its own: the listing holds the row as unknown, saying why; `reap` leaves it, with
+    `--server-down` too; `stop` refuses with the way out; `shutdown` leaves it live until
+    `--forget`; and nothing of the newcomer's is typed into or killed."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    session = f"asq-{_codename(project)}"
+    newcomer = FakeTmux()  # at the same path, so `-L` reaches it: the row's server is lost
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    newcomer.spawn_window(session, name="coder-1", cwd=project.root, command=["claude"])
+    assert newcomer.facts.keys() == {coder.pane_id}, "its %1 is another agent's"
+    newcomer.set_command(coder.pane_id, "claude")
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+
+    [listed] = fleet_service.list_agents(project)
+    assert (listed.state, listed.detail) == ("unknown", "another tmux server on its socket")
+    status = fleet_service.status_of(coder)
+    assert (status.state, status.detail) == ("unknown", "another tmux server on its socket")
+    _board_session(coder, "waiting")  # its hooks still fire: the board decides, as for any
+    assert fleet_service.list_agents(project)[0].state == "waiting"  # server not asked
+    assert fleet_service.reap(project).lost == [] and fleet_service.reap(project).ended == []
+    swept = fleet_service.reap(project, server_down=True)
+    assert swept.lost == [] and swept.ended == []
+    with pytest.raises(FleetError, match="another tmux server answers on its socket") as stop:
+        fleet_service.stop(project, "coder-1")
+    assert "SIGUSR1" in str(stop.value) and "shutdown --forget" in str(stop.value)
+    with pytest.raises(FleetError, match="another tmux server"):
+        fleet_service.restart(project, "coder-1")
+    plan = fleet_service.shutdown_plan(project)
+    report = fleet_service.shutdown(project)
+
+    assert "another tmux server answers on its socket" in plan.held[coder.id]
+    assert report.stopped == [] and report.recorded == []
+    assert [row.agent.id for row in report.failed] == [coder.id]
+    assert "another tmux server" in report.failed[0].reason
+    assert "--forget ends its row on your word" in report.failed[0].reason
+    assert report.incomplete_projects == [project.id]
+    assert newcomer.typed == [] and newcomer.killed == [] and newcomer.killed_sessions == []
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+    assert _events(project, "agent_exited") == []
+
+    forgotten = fleet_service.shutdown(project, forget=True)
+
+    assert [row.agent.id for row in forgotten.recorded] == [coder.id]
+    assert forgotten.recorded[0].reason.startswith(
+        "ended on your word (--forget): another tmux server answers on its socket"
+    )
+    assert newcomer.typed == [] and newcomer.killed == [], "still nothing of the newcomer's"
+    # Negative control: a row from another boot cannot be running on any server, so under
+    # the newcomer it is lost, and a stop ends it, touching nothing of the newcomer's.
+    stale = _coder(project)  # spawned on the newcomer, as the config now reaches it
+    with store_session() as store:
+        stale = store.upsert_fleet_agent(stale.model_copy(update={"boot_id": "b00t-0"}))
+    newcomer.started = newcomer.started + timedelta(minutes=1)  # the newcomer restarted
+    [listed] = fleet_service.list_agents(project)
+    assert (listed.agent.id, listed.state, listed.detail) == (stale.id, "lost", "pane gone")
+    assert fleet_service.stop(project, stale.label).agent.ended_at is not None
+    assert newcomer.killed == [] and newcomer.typed == []
 
 
 def test_stop_leaves_the_row_live_when_a_denied_socket_cannot_confirm_the_pane_died(

@@ -14,7 +14,7 @@ import os
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -638,6 +638,7 @@ def _live_agent(
     socket_path: Path | None = None,
     boot_id: str | None = None,
     agent_id: str | None = None,
+    server_started_at: datetime | None = None,
 ) -> None:
     root.mkdir(parents=True, exist_ok=True)
     project = team_project(root)
@@ -654,6 +655,7 @@ def _live_agent(
                 cwd=project.root,
                 socket_path=socket_path,
                 boot_id=boot_id,
+                server_started_at=server_started_at,
                 created_at=created_at or datetime.now(tz=UTC),
             )
         )
@@ -833,6 +835,42 @@ def test_a_row_shutdown_cannot_reach_is_named_with_the_way_out(
     assert "Stop them first: aisquare fleet shutdown --all --yes; it cannot reach coder-1 (" in said
     assert "send that server SIGUSR1" in said
     assert "end its row on your word: aisquare fleet shutdown --all --yes --forget" in said
+
+
+def test_a_row_whose_socket_another_server_took_still_counts_and_is_named_unreached(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Follow-up of #257: a server answers on the row's socket, and it is not the one the
+    row was started on, which lost its socket file to it and may run on. The row recorded
+    when its server started, so the listener is asked the same: another time counts as
+    running still, and as a row `fleet shutdown` cannot reach, so the way out is named."""
+    then = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "answers")
+    monkeypatch.setattr(TmuxServer, "started_at", lambda _self: then + timedelta(minutes=5))
+    _initialised(runner, tmp_path)
+    _live_agent(tmp_path / "repo", socket_path=tmp_path / "asq", server_started_at=then)
+    _hooked(isolated_agent_home / ".claude", tool.script)
+
+    plan = lifecycle.uninstall_plan()
+    human = runner.invoke(app, ["uninstall", "--yes"])
+
+    assert plan.live_agents == ("coder-1 (repo)",)
+    assert plan.unreached == ("coder-1 (repo)",) and plan.listening == ()
+    assert human.exit_code == 1 and world.events == []
+    said = " ".join(human.stderr.split())
+    assert "it cannot reach coder-1 (repo), as the socket its tmux server listened on" in said
+    assert "has another server on it" in said and "send that server SIGUSR1" in said
+    assert "end its row on your word: aisquare fleet shutdown --all --yes --forget" in said
+    # Negative control: the server that answers started when the row says: it is the
+    # row's, and the row is one `fleet shutdown` stops.
+    monkeypatch.setattr(TmuxServer, "started_at", lambda _self: then)
+    plan = lifecycle.uninstall_plan()
+    assert plan.listening == ("coder-1 (repo)",) and plan.unreached == ()
 
 
 @pytest.mark.parametrize("listening", [True, False], ids=["server-listening", "no-server"])

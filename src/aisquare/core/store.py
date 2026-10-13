@@ -824,6 +824,14 @@ _SCHEMA_V24 = ""
 # step, so the script is empty: they are in :data:`_PRODUCTS`; a row from before them
 # keeps NULLs, which ``services.lifecycle`` reads as nothing recorded.
 _SCHEMA_V25 = ""
+# v26 (follow-up of #257): when a fleet agent's server started, as it said at spawn
+# (``#{start_time}``): the identity of the server its pane id names. A server that
+# answers at the row's socket but started at another time took the path from a server
+# that lost its socket file and may run on, so stop, shutdown, reap and uninstall hold
+# the row instead of ending it under its agent. The column is the whole step, so the
+# script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps NULL, which
+# every reader takes as nothing recorded.
+_SCHEMA_V26 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -851,6 +859,7 @@ _MIGRATIONS = (
     _SCHEMA_V23,
     _SCHEMA_V24,
     _SCHEMA_V25,
+    _SCHEMA_V26,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -898,6 +907,7 @@ _PRODUCTS: dict[int, _Products] = {
     24: _Products(
         columns=(("fleet_agent", "socket_path", "TEXT"), ("fleet_agent", "boot_id", "TEXT"))
     ),
+    25: _Products(columns=(("fleet_agent", "server_started_at", "TEXT"),)),
 }
 
 _PROJECT_COLUMNS = "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at"
@@ -975,7 +985,7 @@ _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role,
 _FLEET_AGENT_COLUMNS = (
     "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
     "task_id, spawned_by, created_at, ended_at, exit_status, account_slot, launch_spec, "
-    "socket_path, boot_id"
+    "socket_path, boot_id, server_started_at"
 )
 _CLAUDE_ACCOUNT_COLUMNS = "slot, config_dir, alias, position, is_default, disabled, created_at"
 
@@ -1268,6 +1278,7 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         launch_spec=_launch_spec(row["launch_spec"]),
         socket_path=Path(row["socket_path"]) if row["socket_path"] else None,
         boot_id=row["boot_id"],
+        server_started_at=_maybe_dt(row["server_started_at"]),
     )
 
 
@@ -2919,13 +2930,14 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
             "ended_at = excluded.ended_at, exit_status = excluded.exit_status, "
             "account_slot = excluded.account_slot, launch_spec = excluded.launch_spec, "
-            "socket_path = excluded.socket_path, boot_id = excluded.boot_id",
+            "socket_path = excluded.socket_path, boot_id = excluded.boot_id, "
+            "server_started_at = excluded.server_started_at",
             (
                 agent.id,
                 agent.project_id,
@@ -2946,6 +2958,7 @@ class SqliteStore:
                 agent.launch_spec.model_dump_json() if agent.launch_spec is not None else None,
                 str(agent.socket_path) if agent.socket_path is not None else None,
                 agent.boot_id,
+                agent.server_started_at.isoformat() if agent.server_started_at else None,
             ),
         )
         self._conn.commit()

@@ -28,7 +28,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   print the line for your install.
 - `segno`, a small pure-Python QR library, is a new core dependency. Every
   upgrade installs it.
-- No store migration: the schema stays at v25.
+- The store migrates to schema v26 on first open, from 0.8.0's v25. The step
+  adds one column to `fleet_agent`: `server_started_at`, when each agent's
+  tmux server started, as the server said at spawn. It is the identity of the
+  server the agent's pane id names, which `stop`, `shutdown`, `reap` and
+  `uninstall` compare before ending a row (see Fixed). An agent started before
+  0.8.1 recorded none, and is judged as before. `fleet ls --json` carries the
+  field. 0.8.0 opens a v26 store as it is.
 - Remote keeps its state in `~/.aisquare`: `remote.json` (owner-only),
   `remote-audit.log`, `remote-needs.json` and `remote-push.json`. Each is
   written only once Remote is used. `aisquare uninstall --purge` removes them
@@ -169,6 +175,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   agents, `SIGUSR1` as the way back to their server, and `fleet shutdown
   --forget` for agents that are not running. A stale socket file (the server
   exited) and rows from another boot still get a fresh server.
+- A tmux server that took the socket path from a running one no longer
+  answers for that one's agents. Every spawn now records when its server
+  started (`fleet_agent.server_started_at`, schema v26), and a server at the
+  row's socket that started at another time is not the row's: `fleet ls` and
+  asq show the row as `unknown (another tmux server on its socket)`, `reap`
+  leaves it (with `--server-down` too), `fleet stop` and `restart` refuse it
+  with the way back, `fleet shutdown` leaves it live until `--forget`, and
+  `upgrade` and `uninstall` count it as running and name `--forget`. Before,
+  the newcomer's missing pane read as the row's pane gone, and `stop`,
+  `shutdown` and `reap` ended the row while its agent ran on, where nothing
+  could reach it. The doctor says the same for such a row, instead of
+  prescribing `reap --all` for a pane that is gone.
 
 ### Security
 - **One choke point.** Every request and every socket handshake passes the

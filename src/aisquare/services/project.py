@@ -69,7 +69,16 @@ def switch(name: str) -> ProjectInfo:
     Raises ``KeyError`` if nothing matches and ``ValueError`` if it is ambiguous.
     """
     with store_session() as store:
-        project = store.onboard_project(_one_match(store, name))
+        found = _one_match(store, name)
+    return switch_to(found)
+
+
+def switch_to(project: ProjectInfo) -> ProjectInfo:
+    """:func:`switch` to a project already found: added, and pinned as active. The remote's
+    ``project/switch`` finds it among the projects a phone may reach, not by
+    :func:`switch`'s lookup, which names any directory the hooks captured."""
+    with store_session() as store:
+        project = store.onboard_project(project)
     pin_project(project.id)
     return project
 
@@ -157,7 +166,13 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
     directory resolves to — the pin moves to the most recently touched
     remaining project, or is cleared when none remain; the report says which.
     """
-    project = resolve(ref)
+    return forget_project(resolve(ref), purge=purge)
+
+
+def forget_project(project: ProjectInfo, *, purge: bool = False) -> ProjectForgetReport:
+    """:func:`forget` of a project its caller resolved: the remote's ``project/remove``
+    reads its ``ref`` without the server's working directory, which :func:`resolve` would
+    read a path against."""
     with store_session() as store:
         live = store.fleet_agents(project.id, live_only=True)
         if live:

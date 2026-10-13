@@ -34,6 +34,7 @@ from typer.testing import CliRunner
 from aisquare.cli import install as install_cli
 from aisquare.cli.app import app as cli_app
 from aisquare.cli.ui import app as ui_app
+from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.sidebar import AccountsSelected, AddProject, ProjectSelected
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views import doctor as doctor_view
@@ -47,6 +48,7 @@ from aisquare.cli.ui.views.project import ProjectView
 from aisquare.core import selfcli
 from aisquare.core.state import get_state, reset_state
 from aisquare.services import claude_accounts as accounts_service
+from aisquare.services import remote_server
 from aisquare.services.install_route import LatestRelease
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
 from tests.rendered import plain
@@ -433,7 +435,7 @@ def test_the_worker_manager_hands_textual_whatever_textual_gave_it(
     seen: list[set[str]] = []
 
     def read() -> str:
-        seen.append(manager.running())
+        seen.append(manager.still_running())
         return "read"
 
     manager._new_worker(read, None, thread=True, exclusive=True, later_keyword="kept")
@@ -867,7 +869,7 @@ def test_a_read_asked_for_while_a_hand_over_waits_is_held_and_a_write_is_not() -
             assert (first.state, newest.state) == (WorkerState.PENDING, WorkerState.PENDING)
             assert first not in set(app.workers) and newest in set(app.workers)
             assert ran == ["a fix"], "the writer began; the reads are held"
-            assert app._worker_threads.running() == set(), "a held read holds no quit"
+            assert app._worker_threads.still_running() == set(), "a held read holds no quit"
 
             app.hand_off = None  # called off
             assert app._worker_threads.release() == []
@@ -949,9 +951,11 @@ def test_no_start_on_asqs_own_schedule_begins_once_a_hand_over_is_pending(
 
 
 class _FakeApp:
-    def __init__(self, hand_off: tuple[str, ...] | None) -> None:
+    def __init__(self, hand_off: tuple[str, ...] | None, remote: Any = None) -> None:
         self.hand_off = hand_off
         self.unsaved = ["the last layout could not be saved"]
+        # Off unless given: nothing for run_ui to wait for.
+        self.remote = remote if remote is not None else RemoteController()
 
     def run(self) -> None:
         return None
@@ -969,6 +973,32 @@ def test_run_ui_hands_the_terminal_over_only_when_asked(
 
     assert execs == ([hand_off] if hand_off else []), "a plain quit hands nothing over"
     assert "the last layout could not be saved" in capsys.readouterr().err, "said first"
+
+
+def test_run_ui_hands_over_only_once_remote_and_the_phones_writes_are_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Update or Uninstall with Remote on: the quit leaves Remote stopping on a thread of its
+    own (``FleetApp.on_unmount``), and ``exec_self`` replaces the process, so nothing after it
+    runs. The hand-over waits for Remote's server and ngrok to stop and for the phones' writes
+    first, or an upgrade would replace the install under a server still answering, and the
+    ngrok that no exit stopped would hold its domain."""
+    order: list[str] = []
+
+    class _Stopping:
+        def wait_until_off(self, timeout: float | None = None) -> bool:
+            order.append("remote off")
+            return True
+
+    monkeypatch.setattr(
+        ui_app, "FleetApp", lambda **_options: _FakeApp(("upgrade", "--reopen"), _Stopping())
+    )
+    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda: order.append("writes"))
+    monkeypatch.setattr(selfcli, "exec_self", lambda args: order.append(" ".join(args)))
+
+    ui_app.run_ui()
+
+    assert order == ["remote off", "writes", "upgrade --reopen"]
 
 
 # --------------------------------------------------------------------------- the exec

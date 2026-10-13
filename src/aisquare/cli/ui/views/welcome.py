@@ -308,7 +308,7 @@ class _Live:
     detail: str | None = None
 
     @property
-    def running(self) -> bool:
+    def counts_as_running(self) -> bool:
         """Seen there by the listing (``first_run.RUNNING``), or just started by this page."""
         return self.state is None or self.state in first_run.RUNNING
 
@@ -1106,8 +1106,10 @@ class WelcomeView(VerticalScroll):
     def _paint_fleet(self, *, waiting: bool) -> None:
         live = self._live()
         manager = live.get("manager")
-        manager_running = manager is not None and manager.running
-        coders = [row for row in live.values() if row.agent.role == "coder" and row.running]
+        manager_running = manager is not None and manager.counts_as_running
+        coders = [
+            row for row in live.values() if row.agent.role == "coder" and row.counts_as_running
+        ]
         up = manager_running and len(coders) >= first_run.CODERS
         ready = self._ready()
         title = Text("3  Fleet", style="bold")
@@ -1215,7 +1217,7 @@ class WelcomeView(VerticalScroll):
             if row is None:
                 continue
             shown.add(label)
-            if not row.running:
+            if not row.counts_as_running:
                 lines.append(state_line(label, row.state or "unknown", row.detail))
                 # Left out, every press met the same refusal unseen (review of F7).
                 refused = self._refusal_of(row)

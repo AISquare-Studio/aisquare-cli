@@ -27,6 +27,7 @@ from aisquare.cli import (
     launch,
     policy,
     project,
+    remote,
     root,
     serve,
     task,
@@ -153,6 +154,7 @@ app.command("board")(team.board)
 app.command("recall")(team.recall)
 launch.register(app)  # needs context_settings to forward agent args
 app.command("serve")(serve.serve)
+app.add_typer(remote.app, name="remote")
 app.add_typer(fleet.app, name="fleet")
 app.command("ui")(fleet.ui)
 app.add_typer(hook.app, name="hook", hidden=True)

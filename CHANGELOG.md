@@ -125,6 +125,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `~/.aisquare/remote.json` when its content changes, so `allow-write`,
   `regenerate-password` and `revoke` from another shell reach it within a second.
 
+### Changed
+- **`fleet ls --json` and `fleet status --json` carry `socket_at` on every
+  agent.** 0.8.0 added it and its notes left it out. It is the path the agent's
+  tmux server is asked at (`tmux -S`). It is `null` where the server is asked by
+  its socket's name (`tmux -L`): a row spawned before 0.8.0, which recorded no
+  path, or one whose recorded path is where `-L` finds that name from this
+  shell anyway. The field is additive, and Remote's `api/fleet` carries it too,
+  as it carries those agents.
+
 ### Security
 - **One choke point.** Every request and every socket handshake passes the
   token, auto-off, `Origin` (every write and socket must come from the page's

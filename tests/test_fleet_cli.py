@@ -543,6 +543,31 @@ def test_ls_json_carries_the_project_and_every_agent_with_its_state(
     assert payload["agents"][1]["agent"]["exit_status"] == 0
 
 
+def test_ls_json_names_where_each_agents_server_is_asked(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`socket_at`, which 0.8.0 added to every agent without a CHANGELOG line (0.8.1 has
+    it): the path its tmux server is asked at (`tmux -S`), or null where it is asked by
+    its socket's name (`tmux -L`). The keys each agent has are pinned with it, so one
+    added or dropped is a change the CHANGELOG has to name."""
+    at = Path("/tmp/tmux-1000/asq")
+    agents = [
+        _status(_agent("coder-auth"), "working").model_copy(update={"socket_at": at}),
+        _status(_agent("manager", "manager", pane="%1"), "waiting"),
+    ]
+    _install(monkeypatch, "list_agents", agents)
+
+    result = runner.invoke(app, ["--json", "fleet", "ls"])
+
+    assert result.exit_code == 0, result.output
+    listed = json.loads(result.stdout)["agents"]
+    assert [agent["socket_at"] for agent in listed] == [str(at), None]
+    assert all(
+        set(agent) == {"agent", "state", "detail", "session", "tmux_session", "socket_at"}
+        for agent in listed
+    ), listed
+
+
 def test_a_project_without_a_codename_has_no_session_yet(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

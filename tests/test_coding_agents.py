@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -137,7 +138,9 @@ def test_role_path_selects_the_executable_and_probe_account(tmp_path: Path) -> N
     )
     save_config(config)
     selected = agent_launch.resolve()
-    assert agent_launch.executable(selected) == str(binary)
+    # normcase: Windows' which answers in PATHEXT's case (claude.CMD for claude.cmd).
+    found = agent_launch.executable(selected)
+    assert found is not None and os.path.normcase(found) == os.path.normcase(str(binary))
     context = harness.ProbeContext(selected.binary.binary, selected.profile.env)
     token = harness._PROBE_CONTEXT.set(context)
     try:

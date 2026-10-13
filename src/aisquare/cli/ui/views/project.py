@@ -47,7 +47,7 @@ from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgentStatus, ProjectInfo
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, install_route
 from aisquare.services import fleet as fleet_service
 
 SPAWN_WORKER = "spawn-manager"
@@ -96,9 +96,16 @@ def manager_text(status: FleetAgentStatus) -> Text:
         text.append(f"  {status.session.model}", style="dim cyan")
     text.append(f"  {agent.pane_id}", style="dim")
     if status.tmux_session:
-        text.append(
-            f"  ·  tmux -L {agent.tmux_socket} attach -t ={status.tmux_session}", style="dim"
+        # Where the fleet asks its server: from a shell under another TMUX_TMPDIR, `-L`
+        # by the name reaches another server, and attaches to its session. Quoted as every
+        # printed path is: a TMUX_TMPDIR or `[fleet] tmux_socket` with a space or a `$` in
+        # it pasted as another command, or another path (round 29 of #257).
+        path = status.socket_at
+        where = ["-L", agent.tmux_socket] if path is None else ["-S", str(path)]
+        line = install_route.command_line(
+            ["tmux", *where, "attach", "-t", f"={status.tmux_session}"]
         )
+        text.append(f"  ·  {line}", style="dim")
     text.append(
         "\ntype to the manager as you would to any Claude session · F12 returns to the sidebar",
         style="dim",
@@ -196,7 +203,7 @@ class ManagerTab(Vertical):
         try:
             status = fleet_service.status_of(manager)
         except fleet_service.FleetError:
-            status = FleetAgentStatus(agent=manager)
+            status = FleetAgentStatus(agent=manager, socket_at=fleet_service.socket_at(manager))
         self.show(status)
 
     def show(
@@ -230,7 +237,9 @@ class ManagerTab(Vertical):
         pane.display = True
         if (wanted := shown_pane(status)) != pane.pane_id:
             if wanted is not None:
-                pane.server = TmuxServer(status.agent.tmux_socket)
+                # The row's own server, where its spawn said it listened: `-L` by the name
+                # alone, from another TMUX_TMPDIR, shows and types into another's %N.
+                pane.server = TmuxServer(status.agent.tmux_socket).at(status.socket_at)
             pane.attach(wanted)
 
     @on(Button.Pressed, "#start-manager")

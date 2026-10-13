@@ -522,6 +522,9 @@ def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
                     "agents": [a.model_dump(mode="json") for a in plan.agents],
                     "sessions": plan.sessions,
                     "absent_sockets": plan.absent_sockets,
+                    "held": plan.held,
+                    "lost": plan.lost,
+                    "tmux_unusable": plan.tmux_unusable,
                 }
             )
         )
@@ -530,17 +533,28 @@ def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
     if not plan.agents and not plan.sessions:
         console.print("nothing to shut down: no live agents and no fleet tmux sessions")
         return
-    console.print(
-        f"about to shut down {len(plan.agents)} agent(s) "
-        f"and kill {len(plan.sessions)} fleet session(s):"
-    )
+    if plan.tmux_unusable is not None:
+        console.print(
+            f"tmux is not usable here ({plan.tmux_unusable}), so nothing can be stopped — "
+            "with --forget each row whose socket does not answer is ended on your word:"
+        )
+    else:
+        live = f", leave {len(plan.held)} live" if plan.held else ""
+        console.print(
+            f"about to shut down {len(plan.agents) - len(plan.held)} agent(s){live} "
+            f"and kill {len(plan.sessions)} fleet session(s):"
+        )
     names = {p.id: (p.codename or p.root.name or p.id) for p in plan.projects}
     for agent in plan.agents:
         where = names.get(agent.project_id, agent.project_id)
-        if agent.tmux_socket in plan.absent_sockets:
+        if agent.id in plan.held:
+            console.print(f"  ⚠ {agent.label} · {where} — left live: {plan.held[agent.id]}")
+        elif plan.tmux_unusable is not None:
+            console.print(f"  ✗ {agent.label} · {where} — recorded lost, unchecked")
+        elif agent.id in plan.lost:
             console.print(
                 f"  ✗ {agent.label} · {where} — recorded lost "
-                f"(no server answers on '{agent.tmux_socket}')"
+                f"(no server answers on '{plan.lost[agent.id]}')"
             )
         else:
             console.print(f"  💤 {agent.label} · {where} — stopped ({agent.pane_id})")
@@ -669,6 +683,15 @@ def shutdown(
     force: Annotated[
         bool, typer.Option("--force", help="Kill every agent without a graceful /exit.")
     ] = False,
+    forget: Annotated[
+        bool,
+        typer.Option(
+            "--forget",
+            help="End on your word the rows of agents this cannot reach — a server whose "
+            "socket is gone, or no usable tmux here — instead of leaving them live or "
+            "refusing. Only for agents you know are not running.",
+        ),
+    ] = False,
 ) -> None:
     """Stop this project's agents, kill the fleet's sessions, record every row.
 
@@ -685,14 +708,18 @@ def shutdown(
     terminal it is a dry run unless --yes, and under --json without --yes it
     prints the plan and changes nothing. Board notes and tasks are kept, the
     ended rows' claims are released, and a `fleet-paused` signal is cleared.
-    Exits 1 when any row was left live or a claim release was refused, and 130
+    Each agent's server is asked at the socket its row recorded. A row whose
+    agent may still run though its server did not answer (its socket gone) is
+    left live with what to do, and with no usable tmux it refuses; `--forget`
+    ends those rows on your word, for agents you know are not running. Exits
+    1 when any row was left live or a claim release was refused, and 130
     when interrupted — with the report of how far it got either way.
     """
     refuse_conflicting_scope(every, project)
     target = None if every else _project(project)
     if not yes:
         try:
-            plan = fleet_service.shutdown_plan(target)
+            plan = fleet_service.shutdown_plan(target, forget=forget)
         except fleet_service.FleetError as exc:
             _fail_fleet(exc)
         _emit_shutdown_plan(plan)
@@ -706,18 +733,26 @@ def shutdown(
         # The prompt names BOTH numbers: a plan with no live agent and one
         # leftover session asked "Shut down 0 agents?" while the real effect —
         # killing the session — sat only in the lines above (round 8 of #203).
+        # Nor does it count a row the run leaves live (round 28 of #257).
+        ending = len(plan.agents) - len(plan.held)
         parts = []
-        if plan.agents:
-            parts.append(f"{len(plan.agents)} agent{'s' if len(plan.agents) != 1 else ''}")
+        if ending:
+            parts.append(f"{ending} agent{'s' if ending != 1 else ''}")
         if plan.sessions:
             parts.append(
                 f"{len(plan.sessions)} tmux session{'s' if len(plan.sessions) != 1 else ''}"
             )
-        if not typer.confirm(f"Shut down {' and '.join(parts)}?", default=False):
+        if not parts:
+            # Every row is left live and no session goes: the run would change nothing,
+            # and would say the fleet is not down, as this does.
+            stdout_console().print("nothing to shut down: every agent above is left live")
+            raise typer.Exit(code=1)
+        live = f", leaving {len(plan.held)} live" if plan.held else ""
+        if not typer.confirm(f"Shut down {' and '.join(parts)}{live}?", default=False):
             stdout_console().print("nothing stopped")
             return
     try:
-        report = fleet_service.shutdown(target, force=force)
+        report = fleet_service.shutdown(target, force=force, forget=forget)
     except fleet_service.FleetInterrupted as exc:
         # The operator's Ctrl-C: rows before it are down and their claims
         # released, committed as they went, so they are told how far it got —

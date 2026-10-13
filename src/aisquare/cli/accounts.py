@@ -35,6 +35,7 @@ from aisquare.models import (
     ClaudeUsage,
     ProjectInfo,
 )
+from aisquare.services import agents as agents_service
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
@@ -580,8 +581,8 @@ def add() -> None:
     )
     if not described.hooks_installed:
         console.print(
-            "  ⚠ aisquare's hooks did not install into it — "
-            f"run: aisquare agents connect claude-code --config-dir {account.config_dir}",
+            "  ⚠ aisquare's hooks did not install into it — run: "
+            + agents_service.config_dir_command("connect", "claude-code", account.config_dir),
             style="yellow",
         )
     console.print(

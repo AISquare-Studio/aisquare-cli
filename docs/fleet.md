@@ -33,7 +33,7 @@ Three ideas carry the whole feature:
 | Tool | Needed for | Minimum |
 | --- | --- | --- |
 | **`tmux`** | the fleet itself — spawning and surfacing agents | **3.2** (`new-window -e`, extended keys); **3.5+ recommended**, where shift+enter and the other extended chords reach the agent (3.3/3.4 would mistype them, so there shift+enter travels as ctrl+J — Claude Code's same newline — and the rest are refused with a warning) |
-| **`claude`** | every fleet role runs on Claude Code | 2.1.x — `--session-id`, `--permission-mode`, `--restricted`, `--effort` |
+| **`claude`** | every fleet role runs on Claude Code | 2.1.x — `--session-id`, `--permission-mode`, `--effort` |
 | `git` | worktrees for coders and reviewers | 2.20+ |
 | `gh` | *optional* — the coder opens PRs and the reviewer reviews them with it | any current release |
 | Python | the CLI | 3.11+ |
@@ -72,8 +72,10 @@ tmux can see and its row says so (`no hooks`).
 ## The first five minutes
 
 1. **Run `asq`** (or `aisquare`) in a terminal. The UI opens: the navigator on
-   the left and, until you add a project, a Welcome page on the right that
-   checks `tmux`, `claude` and `gh` are on this machine. No script ever meets a
+   the left and a Welcome page on the right that walks you to a fleet in three
+   steps: pick a project, connect Claude Code (it names the install command
+   when Claude Code is missing), then start the manager and two coders. Press
+   `w` in the sidebar to come back to it. No script ever meets a
    full-screen app, and the two ways of getting no UI differ. **In a pipe or
    with `TERM=dumb`**: the help page on stdout and exit 2, byte for byte as
    before — the same ~5 KB either way (5,159 bytes at 80 columns, measured).
@@ -82,12 +84,13 @@ tmux can see and its row says so (`no hooks`).
    `{"error": "usage", "message": "Missing command."}`. Under `--json` stdout
    belongs to a program, and ~40 lines of Rich-formatted help there would hand a
    `jq` pipeline a parse error.
-2. **Click `+` beside Fleet.** Onboarding opens on the right: browse or type a
-   directory (`~` and `$VAR` expand). When it resolves, the UI runs the
-   equivalent of `aisquare init <path>` and then `aisquare doctor` **in the
-   background, without leaving the UI or prompting**, streams the log, and the
-   project appears as a card in the navigator. Doctor warnings are listed with
-   their fixes; the fix is one click where it is a known command (Phase 2).
+2. **Or click `+` beside Fleet** (or press `+` in the sidebar). Onboarding
+   opens on the right: browse or type a directory (`~` and `$VAR` expand).
+   When it resolves, the UI runs the equivalent of `aisquare init <path>` and
+   then `aisquare doctor` **in the background, without leaving the UI or
+   prompting**, streams the log, and the project appears as a card in the
+   navigator. Doctor warnings are listed with their fixes; the fix is one click
+   where it is a known command (Phase 2).
 3. **Click the project.** The Project view opens on its **Manager** tab. Press
    *Start manager* and the manager's live Claude Code session fills the pane.
    Type your goal to it in prose, exactly as you would to any Claude session. It
@@ -145,7 +148,7 @@ tier above the work it gates.
 | **manager** | `planner` + fleet authority | intake → contracts → `fleet spawn` → steer → report. One per project. Never codes — a direct "fix this" becomes a coder spawn — never merges. | the repo root |
 | **coder** | `coder` | implements one task to its acceptance criteria; pushes and opens the PR | its own git worktree |
 | **tester** | `runner` (`tester` is the fleet's name for it; `runner` still works everywhere) | adversarial verification: runs the *full* check the contract names, tries to break the change, then `task done` with evidence or `task reopen` with the reason | the repo root. It gets no worktree of its own and **nothing moves it into the coder's** — so whoever spawns it names the branch or the tree to check, in the tester's `--prompt` or a later `fleet tell`, or its "full check" runs against an unchanged root |
-| **reviewer** | new | reads the PR as the stranger who will maintain it; findings on the PR via `gh pr review`; read-only by construction | its own worktree, `--restricted` |
+| **reviewer** | new | reads the PR as the stranger who will maintain it; findings on the PR via `gh pr review`. Launched without the tools that edit files (`--disallowedTools=Edit Write NotebookEdit`) and with its shell: Claude Code's `--restricted` removes the Bash that `gh pr diff`, `gh pr review` and its `aisquare` cycle need (0.6.0 and 0.7.0 launched it so, and it could do none of them). Its shell could still push or merge: its briefing forbids both and `auto` mode checks each action, but only the credentials it runs with can refuse them (see the table below) | its own worktree |
 | **validator** | `validator` | one final gate over the assembled deliverable before the manager says READY | the repo root |
 | **ui-tester** | new | verifies tasks titled `UI: …` in a **real browser** — Claude in Chrome, the Chrome DevTools MCP or a Playwright MCP, whichever this window has — and measures (screenshots, computed sizes, console, network) instead of eyeballing; `task done` names the branch or commit and the URL it verified, or `task reopen` carries a screenshot. With no browser tool it runs the non-browser checks and reopens the task as "not browser-verified", never passes it. **Asked to be read-only, not made read-only** — its briefing says never edit and never push, and nothing enforces that (see the permission-mode table below: no allowed-tools list is written or passed, and `--restricted` would remove the Bash its own `task done`/`task reopen` need). Launched with `--chrome` by the role itself (`RoleProfile.default_args`), on any machine, unless `--no-chrome` is given | the repo root. Like the tester it gets no worktree and **nothing moves it into the coder's** — worse here, because it fails silently: it opens the URL, sees a working page and measures the PRE-change build honestly. So whoever spawns it names the branch or tree and the URL in its `--prompt` (the manager's loop does), and its verdict says which build it measured |
 
@@ -295,7 +298,11 @@ the same contract `fleet shutdown` and `fleet reap` keep for the same fact.
 left `PATH`, a socket that is there but refuses this user (`Permission denied`)
 — the row is **left live** and the command fails saying so, rather than
 reporting `✓ stopped` over an agent that is still running. Re-run it once
-tmux answers again, or `fleet reap` after the server comes back. If the server is
+tmux answers again, or `fleet reap` after the server comes back. So is a row
+whose server's socket file is gone, the row `fleet shutdown` leaves live (below):
+no tmux client reaches that server, but it may still run, so `fleet stop` and
+`fleet restart` refuse it rather than end it, and a restart never starts a
+second agent beside it. If the server is
 genuinely gone — a reboot, `kill-server` — `fleet reap --all --server-down` marks
 the rows on it lost; it acts only where tmux itself reports no server behind the
 socket, never on a server that is merely not answering.
@@ -316,6 +323,24 @@ way `fleet stop` stops one (`/exit`, grace, kill), then the fleet's own tmux
 exit status where tmux exposed one, and rows whose socket had no server as
 *lost*, each with the reason the service gave.
 
+Each agent's server is asked at the socket its row recorded at spawn (`tmux
+-S`), as every fleet command asks it (see *The private server*), so a server
+started under another `TMUX_TMPDIR` is reached and stopped from any shell.
+Another server that `tmux -L` reaches from this shell under the same socket
+name is not the agent's, and is never asked about it: its pane ids name other
+agents.
+
+A row whose server did not answer is ended as lost only where it cannot be
+running: it started in another boot, or its socket file is there with nothing
+listening, which is what tmux leaves when its server exits. A row from before
+0.8.0 recorded no boot; it is ended where its socket file is gone and it started
+before this boot did, as a reboot clears `/tmp`. Otherwise
+its row is **left live**, with what to do, because `aisquare uninstall` asks
+the same socket and would still count it. Most often the socket file is gone
+(systemd-tmpfiles or a logout removed it while the server ran on), so no tmux
+client can reach the server: if it still runs, send that tmux server
+`SIGUSR1`, which makes tmux create its socket again, and run it again.
+
 It ends running work, so it asks first: it prints what it would end and
 confirms at a terminal (default **no**), and off a terminal it is a dry run
 unless `--yes`. Under `--json` without `--yes` it prints the plan
@@ -324,6 +349,16 @@ unless `--yes`. Under `--json` without `--yes` it prints the plan
 `--force` skips the `/exit` and kills a live pane, which means **no exit status
 is recorded for it** — a status is only ever read from a pane that already reads
 dead — and no `SessionEnd` hook runs.
+
+`--forget` is your word that the agents it cannot reach are not running: the
+rows it would leave live as above are ended as lost instead, but for a row
+whose socket answers — a server listens there, so no word ends it, and the plan
+shows it left live. Where tmux cannot be used here (removed, too old, or not
+answering for its version), every other row is ended as lost, unchecked, and
+nothing is stopped or killed: a socket is asked without tmux. Without
+`--forget` such a run refuses, because a tmux server outlives its program
+leaving `PATH`. `aisquare uninstall` names it for a row it counts as running
+that no tmux here can reach.
 
 What it kills is the fleet's own `asq-<codename>` sessions, never the server:
 `tmux kill-server` would take down every session on that socket, and the fleet's
@@ -355,8 +390,8 @@ session up, and the session the server, under a report saying the fleet is down.
 Whatever tmux will not confirm gone there is reported instead (`sessions_failed`
 or `sessions_left_up`), never assumed.
 
-It refuses rather than guess. With no usable tmux (`fleet_unavailable`), on a
-socket that cannot be ASKED whether a server is there (a wedged server's 30 s
+It refuses rather than guess. With no usable tmux (`fleet_unavailable`, unless
+`--forget`), on a socket that cannot be ASKED whether a server is there (a wedged server's 30 s
 timeout), or when run from INSIDE the fleet's own tmux server — a `fleet attach`
 pane included, where the kill would take down the process printing the report —
 nothing is touched and the message says why. The plan it asks you to confirm
@@ -381,7 +416,9 @@ aisquare fleet attach --project amber-otter
 
 Replaces this terminal with `tmux attach` on the project's fleet session — the
 full-fidelity escape hatch. Under `--json` it prints the command it would run
-instead of running it.
+instead of running it. The session is found on the server the project's live
+agents are on, at the socket their spawns recorded (`tmux -S`), the line the
+Manager tab prints, so it works from a shell under another `TMUX_TMPDIR`.
 
 **Scope and exit codes.** `--all` and `--project` name different scopes and are
 refused together rather than one silently winning — a usage error, exit **2**,
@@ -407,10 +444,13 @@ agents whose panes have vanished as lost, and removes the worktrees of ended
 agents **whose branch is merged**. It never deletes unmerged work. `--all`
 walks every project's fleet, not just this one.
 
-A tmux server that does not answer marks **nothing** by default: silence is not
-evidence that its panes are dead — the server may be alive under another
-`TMUX_TMPDIR`, wedged, or running an older binary than the client after an
-upgrade. `--server-down` is the operator's word that the server is genuinely
+Each row is asked of its own server, at the socket its spawn recorded, so a
+shell under another `TMUX_TMPDIR` reaps exactly what the spawning shell would,
+and never by another server's panes. A tmux server that does not answer marks
+**nothing** by default: silence is not evidence that its panes are dead — the
+server may be wedged, running an older binary than the client after an
+upgrade, or, for a row from before 0.8.0, which recorded no socket, alive
+under another `TMUX_TMPDIR`. `--server-down` is the operator's word that the server is genuinely
 gone (a reboot swept `/tmp`; `kill-server`). Even with it, rows are marked lost
 only on a socket where tmux itself reports no server (`no server running on …`
 or `error connecting to … (No such file or directory)`); a protocol mismatch or
@@ -592,8 +632,8 @@ form and `add` refuses outside an interactive terminal. `aisquare doctor` gains 
 and a `claude-account-bindings` line when a role or project names an account the
 machine no longer has. Accounts laid
 out some other way — a wrapper, a proxy, a directory of your own — still bind
-to a role as a launch profile (`aisquare team bind coder1 --env …`, README
-"Several accounts, one team").
+to a role as a launch profile (`aisquare team bind coder1 --env …`, see
+[Several accounts, one team](orchestration.md#several-accounts-one-team)).
 
 ---
 
@@ -611,7 +651,7 @@ answer.
 | --- | --- | --- |
 | manager | `auto` | its tool use is board and fleet CLI calls |
 | coder, tester, validator | `auto` | the classifier answers every tool call, the project's own check commands included. A project allowlist that pre-approves `make check`, `pytest`, `git` and `gh` is designed (plan §3.6) and **is not in this checkout**: nothing here writes or passes an allowed-tools list |
-| reviewer | `auto` + `--restricted` | read-only by construction |
+| reviewer | `auto` + `--disallowedTools=Edit Write NotebookEdit` | the flag is the role's `extra_args`: it keeps Bash, which its whole cycle runs on and `--restricted` would take, and loses the tools that edit files, so a prompt injected through the PR it reads cannot edit the tree with them. Its shell is not read-only: `sed -i`, `git push` or `gh pr merge` injected through a PR meets only its briefing and `auto` mode's check of each action, and no allowlist of commands would hold (its inline comments are `gh api` calls, as a merge is, and verifying a finding runs the PR's code). Where that matters, run it with a `gh` token that cannot write the repository's contents, which can comment but not push or merge, and protect the branch. `extra_args = []` gives it every tool. A config saved by 0.6.0 or 0.7.0 holds that release's default, `extra_args = ["--restricted"]`; exactly that list loads as today's default, once: the next save writes `config_version = 1` at the top of the file, and from then on `--restricted` set there is yours and kept. A reviewer those releases started recorded the flag in its launch spec, and `fleet restart`, `fleet switch` and Restart replay today's arguments in its place, with `--disallowedTools=Edit Write NotebookEdit` beside them where they do not deny those tools: the spec cannot tell that release's default from a `--restricted` its spawn was given, so the replay errs toward the reviewer without them, and a fresh spawn gets whatever today's arguments give. One recorded since is replayed as recorded. Any other list stays as written |
 | ui-tester | `auto` + `--chrome` | `--chrome` comes from the role, not this table: `aisquare launch ui-tester` adds it for the default `claude` binary wherever the role starts, and `--no-chrome` in `extra_args` or on the command turns it off. Its "read-only" is a briefing instruction, NOT construction — the row above says so, and the sentence in the coder/tester cell applies here too: nothing here writes or passes an allowed-tools list, so a PreToolUse allowlist (plan §3.6, not in this checkout) is what would enforce it |
 
 The mode is passed straight through to `claude` and nothing here reads its
@@ -698,7 +738,7 @@ extra_args = []
 [fleet.roles.reviewer]
 permission_mode = "auto"
 worktree = true
-extra_args = ["--restricted"]             # read-only by construction
+extra_args = ["--disallowedTools=Edit Write NotebookEdit"]  # a shell, no editing tools
 
 [fleet.roles.ui-tester]
 permission_mode = "auto"
@@ -885,6 +925,17 @@ config is bundled and regenerated (do not edit it): status line off,
 extended keys on so shift+enter and friends reach Claude Code, mouse off (the
 UI owns the mouse), monitor-activity on. One server for every project; one
 session per project; one window per agent.
+
+**Each agent is asked of its own server.** A spawn records the socket its
+server says it listens on, and every fleet command — `fleet ls` and the UI,
+`tell`, `stop`, `restart`, `switch`, `reap`, `shutdown`, and the doctor — asks
+the agent's server there (`tmux -S <path>`) when that is not where `tmux -L
+asq` looks from the asking shell. Under another `TMUX_TMPDIR`, `-L` reaches
+another server on the same name, or none, and every server numbers its panes
+from `%0`, so its panes would answer for the agents' ids: a dead one there read
+as a running agent's exit and ended its row. A row from before 0.8.0 recorded
+no socket and is asked by name. The Manager tab's attach line names the
+server the same way.
 
 **What the UI remembers.** The view that was open — a project, an agent, the
 Accounts page, the Doctor — comes back at the next launch if its row is still
@@ -1156,6 +1207,12 @@ gone — you rebooted, or ran `kill-server` — say so:
 ```sh
 aisquare fleet reap --all --server-down
 ```
+
+`doctor` says instead that no tmux client reaches the server, which *may still be
+running*, when the row's socket file is gone (systemd-tmpfiles or a logout
+removed it while the server ran on): send that server `SIGUSR1`, which makes
+tmux create its socket again, before anything else, as `--server-down` would
+mark its rows lost under their agents.
 
 **The server was stopped outside the CLI.** Rows read `unknown (tmux
 unavailable)` and `reap` reaps nothing — correctly: it cannot ask. Once any

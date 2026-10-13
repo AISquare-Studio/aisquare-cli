@@ -75,6 +75,18 @@ class AgentHookSite(BaseModel):
 
     config_dir: Path
     hooks_installed: bool = False
+    hooks_off: Path | None = None
+    """The directory's settings file, when it switches every hook off (``"disableAllHooks":
+    true``): Claude Code runs none of them however complete they are, so ``hooks_installed``
+    is False, and ``agents connect`` cannot change that. ``None`` otherwise."""
+    refused: str | None = None
+    """Why ``agents connect`` would refuse the directory, in its words, when its hooks are
+    not installed and it would: a settings.json that is not a JSON object or that this
+    user may not write, a CLAUDE.md it cannot read, or a recorded directory that no
+    longer exists and that connect would not make ("<dir> does not exist"). Connect can
+    only fail there, as the doctor and Welcome say. ``None`` otherwise."""
+    remedies: list[str] = Field(default_factory=list)
+    """What changes ``refused``, as Welcome and the doctor give it (``agents.remedies``)."""
 
 
 class AgentInfo(BaseModel):
@@ -699,6 +711,11 @@ class OnboardReport(BaseModel):
 
     seeded: list[ContextEntry] = Field(default_factory=list)
     snapshot: Snapshot | None = None
+    snapshot_note: str | None = None
+    """Why this run packed nothing, as ``init`` and ``onboard`` say it: off, or the
+    pack failed and why. ``None`` when a pack was made or reused. Set beside a
+    ``snapshot``, it is a ``--refresh`` that failed: that is the last pack, kept,
+    and agents still get it."""
 
 
 class ProjectForgetReport(BaseModel):
@@ -769,6 +786,10 @@ class AgentConnection(BaseModel):
     name: str
     hooks_installed: bool = False
     imported: int = 0
+    hooks_off: Path | None = None
+    """The settings file the hooks went into, when it switches every hook off
+    (``"disableAllHooks": true``): they are installed, and Claude Code runs none of them
+    until that key goes. ``agents connect`` leaves the key alone. ``None`` otherwise."""
 
 
 FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited", "lost", "unknown"]
@@ -914,6 +935,10 @@ class LaunchSpec(BaseModel):
     account_slot: int | None = None
     worktree: bool = False
     command: list[str] = Field(default_factory=list)
+    recorded_by: str | None = None
+    """The aisquare version that recorded the spec; ``None`` on one recorded before 0.8.0,
+    whose reviewer may hold that release's built-in ``--restricted``, which nobody chose
+    and a replay replaces (``services.fleet``)."""
 
 
 class FleetAgent(BaseModel):
@@ -945,6 +970,13 @@ class FleetAgent(BaseModel):
     ``None`` when nothing chose one and the window ran on whatever its shell had."""
     launch_spec: LaunchSpec | None = None
     """How it was launched (#144); ``None`` on rows spawned before the spec existed."""
+    socket_path: Path | None = None
+    """The socket its server listened on at spawn, as tmux said (``#{socket_path}``):
+    where uninstall and upgrade ask whether it may still run, whatever shell asks.
+    ``None`` on rows spawned before 0.8.0, or when tmux did not say."""
+    boot_id: str | None = None
+    """The boot it was spawned in (``core.tmux.boot_id``): a row from another boot is
+    no running agent. ``None`` on rows spawned before 0.8.0, or where none is kept."""
     created_at: datetime
     ended_at: datetime | None = None
     exit_status: int | None = None
@@ -960,3 +992,7 @@ class FleetAgentStatus(BaseModel):
     hooks" for a binary without lifecycle hooks, "pane gone"."""
     session: TeamSession | None = None
     tmux_session: str | None = None
+    socket_at: Path | None = None
+    """Where the agent's server is asked (``tmux -S``), worked out once with the listing's
+    config (``services.fleet.socket_at``); ``None`` when it is asked by its socket's name
+    (``tmux -L``). Carried so the UI's panes and attach line read it off the frame."""

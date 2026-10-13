@@ -5,6 +5,14 @@ on:
     branches: [main, "rc/**"]
   push:
     branches: [main, "rc/**"]
+  # Nightly, on the default branch: between releases nothing pushes to main, and
+  # a runner image or an unpinned dependency can still move under it. 06:40 UTC,
+  # clear of install.yml's 05:20.
+  schedule:
+    - cron: "40 6 * * *"
+  # By hand, on any branch (`gh workflow run ci.yml --ref <branch>`): a fresh
+  # baseline without a push.
+  workflow_dispatch:
 
 # Cancel superseded runs on the same branch/PR.
 concurrency:
@@ -37,12 +45,16 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: |
+            pyproject.toml
+            ci/constraints.txt
 
+      # ruff and mypy at the versions ci/constraints.txt pins, the ones
+      # `make install` puts in a local venv.
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -c ci/constraints.txt -e ".[dev]"
 
       # Linux only, and the guard is load-bearing now that `check` has a
       # windows-latest leg: `sudo apt-get` is not a thing on that runner, so an
@@ -118,12 +130,16 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: |
+            pyproject.toml
+            ci/constraints.txt
 
+      # ruff and mypy at the versions ci/constraints.txt pins, the ones
+      # `make install` puts in a local venv.
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -c ci/constraints.txt -e ".[dev]"
 
       # ONE definition of the ambient environment, and $GITHUB_ENV rather than a
       # job-level `env:` block for a measured reason: `runner.temp` is NOT
@@ -343,6 +359,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip build
           python -m build
+
+      # PyPI builds the project page from this metadata, and a release's page
+      # cannot be edited after the upload. `--strict` fails on a missing long
+      # description or content type. Ubuntu only: publish.yml builds and uploads
+      # the dists there, and this metadata does not depend on the OS. It does not
+      # render Markdown (twine treats that as "cannot fail"); the README's links
+      # are tests/test_readme_is_a_front_page.py's job.
+      - name: Check the dists' PyPI metadata (twine)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          python -m pip install twine
+          python -m twine check --strict dist/*
 
       # One Python driver instead of two shell dialects: the venv layout differs
       # (bin/ vs Scripts/) and `dist/*.whl` is a shell glob that cmd.exe does not

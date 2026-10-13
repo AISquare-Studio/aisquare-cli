@@ -19,6 +19,7 @@ import pytest
 from typer.testing import CliRunner
 
 import aisquare
+from aisquare.core import agents as agent_core
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
 from aisquare.services import ci_client
@@ -165,6 +166,17 @@ AMBIENT_ENV_VARS = (
     # second login exported would see its directory in both. The account tests
     # cleared it locally; this makes it the suite's answer rather than theirs.
     "CLAUDE_CODE_TMPDIR",
+    # Where the plugin's launcher keeps uv's answers (`lifecycle.plugin_answers`) and
+    # uv its cache (`install_route`). Left set, a test of `uninstall --purge` would
+    # plan, and delete, the developer's own answers file.
+    "XDG_CACHE_HOME",
+    # The uvx the plugin's launcher ran a hook with, which session start names to the
+    # agent (`services.hooks._log_command`). Set in a hook's own environment only.
+    "AISQUARE_PLUGIN_UVX",
+    # The build the launcher runs in place of the pinned release, which session start
+    # names to the agent too. Left set by a developer checking a wheel, the log-command
+    # tests would read their wheel where the pinned release is expected.
+    "AISQUARE_PLUGIN_FROM",
     # The copies of the shell's own two a launch onto a managed slot keeps
     # (`core.claude_accounts.PLAIN_VARS`). `plain_environment` reads them
     # whenever CLAUDE_CONFIG_DIR names a managed slot, which the account tests
@@ -364,6 +376,9 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # lru_cached, like core.insights._config), so a cached read from the previous
     # test's HOME would outlive the home it came from.
     ci_client.reset_cache()
+    # Cached once per process (core.agents.current_install), and tests change what it
+    # reads: the interpreter (sys.executable) and the distribution's RECORD on sys.path.
+    agent_core.current_install.cache_clear()
     return home
 
 
@@ -373,6 +388,18 @@ def fresh_state() -> Iterator[None]:
     reset_state()
     yield
     reset_state()
+
+
+@pytest.fixture(autouse=True)
+def fresh_file_checks() -> Iterator[None]:
+    """Forget what connect's checks said of each file (``services.agents._SAID``): a file a
+    test rewrites at the same size within one tick of the file system's clock reads as
+    unchanged, and no test may inherit another's answer."""
+    from aisquare.services import agents as agents_service
+
+    agents_service._SAID.clear()
+    yield
+    agents_service._SAID.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -413,7 +440,7 @@ def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Hooks written by ``agents connect`` under the suite name whatever
     ``_aisquare_command`` resolves: the console script beside this interpreter
-    when PATH has it, otherwise the machine's ``aisquare`` — a pyenv shim on the
+    when there is one, otherwise the machine's ``aisquare`` — a pyenv shim on the
     author's box. Which one is ambient state, and running it would grade the
     developer's PATH rather than this tree. Same shape as ``no_repomix`` below.
     Tests of the probe itself capture the real function at import and call it

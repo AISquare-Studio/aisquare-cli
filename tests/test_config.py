@@ -12,9 +12,12 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import snapshot
 from aisquare.core.config import (
+    CONFIG_VERSION,
+    REVIEWER_ARGS,
     AppConfig,
     CaptureSettings,
     ExperimentSettings,
+    FleetSettings,
     RedactionSettings,
     SnapshotSettings,
     load_config,
@@ -22,6 +25,7 @@ from aisquare.core.config import (
 )
 from aisquare.core.paths import aisquare_home, cache_dir, config_path, ensure_home, log_dir
 from aisquare.models import RedactionLevel
+from aisquare.services import settings as settings_service
 
 
 def test_load_missing_file_returns_defaults() -> None:
@@ -249,3 +253,124 @@ def test_a_config_without_an_experiment_section_still_loads(tmp_path: Path) -> N
     target = tmp_path / "config.toml"
     target.write_text('profile = "default"\n', encoding="utf-8")
     assert load_config(target).experiment.enabled is False
+
+
+_SAVED_BY_0_7_0_REVIEWER = """\
+[fleet.roles.coder]
+permission_mode = "auto"
+worktree = true
+extra_args = []
+
+[fleet.roles.reviewer]
+permission_mode = "auto"
+worktree = true
+extra_args = [
+    "--restricted",
+]
+"""
+
+
+def test_a_reviewer_saved_with_the_former_restricted_default_loads_with_a_shell(
+    tmp_path: Path,
+) -> None:
+    """0.6.0 and 0.7.0 launched the reviewer `--restricted`, which removes Bash, and any
+    `config set` wrote that default into the file. A new default alone would leave
+    every such file launching a reviewer that cannot run `gh` — this machine's did.
+    The old default is replaced by today's, so the reviewer still cannot edit files."""
+    target = tmp_path / "config.toml"
+    target.write_text(_SAVED_BY_0_7_0_REVIEWER, encoding="utf-8")
+    loaded = load_config(target)
+    reviewer = loaded.fleet.roles["reviewer"]
+    assert reviewer.extra_args == list(REVIEWER_ARGS)
+    assert reviewer.worktree is True, "only the old default goes; the rest stays as saved"
+    save_config(loaded, target)
+    saved = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert saved["fleet"]["roles"]["reviewer"]["extra_args"] == list(REVIEWER_ARGS)
+
+
+def test_the_built_in_reviewer_keeps_its_shell_and_is_denied_the_tools_that_edit() -> None:
+    """Bash is what `gh pr diff` and `gh pr review` run on; Edit, Write and NotebookEdit
+    are what a prompt injected through the PR it reads would edit the tree with. One
+    token: a separate list would swallow the next plain word on the command line."""
+    reviewer = FleetSettings().roles["reviewer"]
+    assert reviewer.extra_args == ["--disallowedTools=Edit Write NotebookEdit"]
+    assert "--restricted" not in reviewer.extra_args
+
+
+def test_the_former_reviewer_default_is_replaced_once_and_chosen_afterwards_is_kept(
+    tmp_path: Path,
+) -> None:
+    """Replaced on every load, `["--restricted"]` could not be chosen: `config set` said
+    it was saved, the fleet launched without it, and the next save erased it. The save
+    that follows the replacement records the version it reached, and from then on the
+    file's list is kept."""
+    target = tmp_path / "config.toml"
+    target.write_text(_SAVED_BY_0_7_0_REVIEWER, encoding="utf-8")
+    loaded = load_config(target)
+    assert loaded.fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
+    save_config(loaded, target)
+    assert tomllib.loads(target.read_text(encoding="utf-8"))["config_version"] == CONFIG_VERSION
+
+    chosen = load_config(target)
+    chosen.fleet.roles["reviewer"].extra_args = ["--restricted"]
+    save_config(chosen, target)
+    assert load_config(target).fleet.roles["reviewer"].extra_args == ["--restricted"]
+    save_config(load_config(target), target)  # any later save, of any key
+    assert load_config(target).fleet.roles["reviewer"].extra_args == ["--restricted"]
+
+
+def test_a_config_carries_one_version_and_no_marker_of_a_migration(tmp_path: Path) -> None:
+    """Round 23 of #257: every save wrote `migrated_reviewer_args = true` into `[fleet]`,
+    an undocumented key, and the next change to a default would have needed another. One
+    `config_version` at the top instead, with the steps in order. Only builds of this
+    release candidate wrote the marker, so no release reads it (round 26)."""
+    fresh = tmp_path / "fresh.toml"
+    save_config(AppConfig(), fresh)
+    written = fresh.read_text(encoding="utf-8")
+    assert written.startswith(f"config_version = {CONFIG_VERSION}\n"), written
+    assert "migrated_reviewer_args" not in written
+
+
+def test_a_config_a_newer_build_wrote_keeps_its_version_and_runs_no_step(tmp_path: Path) -> None:
+    """A version above this build's was written by a newer build, whose steps have run on
+    the file: none runs again here, and a save from here keeps that version, so the newer
+    build does not run them again on what this one wrote."""
+    target = tmp_path / "config.toml"
+    newer = CONFIG_VERSION + 1
+    target.write_text(f"config_version = {newer}\n{_SAVED_BY_0_7_0_REVIEWER}", encoding="utf-8")
+
+    loaded = load_config(target)
+    save_config(loaded, target)
+
+    assert loaded.fleet.roles["reviewer"].extra_args == ["--restricted"]
+    assert tomllib.loads(target.read_text(encoding="utf-8"))["config_version"] == newer
+
+
+def test_config_set_of_the_former_reviewer_default_takes_effect() -> None:
+    """Through `config set` itself, on a 0.7.0 file: what it reports is what loads."""
+    target = config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(_SAVED_BY_0_7_0_REVIEWER, encoding="utf-8")
+    key = "fleet.roles.reviewer.extra_args"
+    assert settings_service.set_value(key, "--restricted") == "--restricted"
+    assert load_config().fleet.roles["reviewer"].extra_args == ["--restricted"]
+
+
+def test_the_reviewer_default_set_by_config_set_round_trips() -> None:
+    """`config set` splits a list on commas and `config get` joins one with them, so the
+    default's tool names are apart by spaces: what `get` prints, `set` takes back whole."""
+    key = "fleet.roles.reviewer.extra_args"
+    printed = settings_service.get_value(key)
+    assert settings_service.set_value(key, printed) == printed
+    assert load_config().fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
+
+
+def test_a_reviewer_given_more_than_the_former_default_keeps_it(tmp_path: Path) -> None:
+    """Only the exact old built-in list is the stale default; a list someone wrote is theirs."""
+    target = tmp_path / "config.toml"
+    target.write_text(
+        _SAVED_BY_0_7_0_REVIEWER.replace('"--restricted",', '"--restricted", "--tools", "Bash"'),
+        encoding="utf-8",
+    )
+    reviewer = load_config(target).fleet.roles["reviewer"]
+    assert reviewer.extra_args == ["--restricted", "--tools", "Bash"]

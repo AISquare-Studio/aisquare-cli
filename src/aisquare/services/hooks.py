@@ -20,6 +20,7 @@ default agent does.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -30,9 +31,10 @@ from aisquare.core import snapshot as snapshot_core
 from aisquare.core import spawn as spawn_core
 from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
+from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import active_project
 from aisquare.models import ProjectInfo
-from aisquare.services import auto_mode, ci_augment
+from aisquare.services import auto_mode, ci_augment, install_route
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import metrics as metrics_service
@@ -477,9 +479,59 @@ def _directive(project_id: str, *, has_prompts: bool) -> str:
         ]
     if has_prompts:
         lines.append(
-            "Past user prompts here are captured — run `aisquare log` to see how the user "
-            "tends to ask, and honour that intent."
+            f"Past user prompts here are captured — run `{_log_command()}` to see how the "
+            "user tends to ask, and honour that intent."
         )
     if not lines:
         return ""
     return "<aisquare-context>\n" + "\n".join(lines) + "\n</aisquare-context>"
+
+
+#: The uvx the plugin's launcher ran this hook with, by the path it found
+#: (plugins/claude-code/scripts/aisquare-hook): ``~/.local/bin/uvx`` where PATH has none.
+PLUGIN_UVX_ENV = "AISQUARE_PLUGIN_UVX"
+
+#: What the plugin's launcher runs in place of the release it pins, when set: a wheel or a
+#: checkout, for testing a build not on PyPI yet. The hook inherits it from the launcher.
+PLUGIN_FROM_ENV = "AISQUARE_PLUGIN_FROM"
+
+
+def _log_command() -> str:
+    """``aisquare log`` as the agent's own shell can run it.
+
+    The plugin's launcher runs the hooks through ``uvx`` only where no aisquare is
+    installed, so there "run `aisquare log`" was command not found, and on that
+    route it was often the only thing session start said (review of #257). uvx
+    puts its environment's ``bin`` on the HOOK's PATH, not the agent's, so the
+    route is asked before PATH is. Elsewhere: the bare name when PATH has one, else
+    this interpreter (hooks that name a virtualenv that is not on PATH).
+
+    On that route, the uvx the launcher ran and the Python this hook runs on
+    (round 20). The launcher finds uvx in ``~/.local/bin`` or ``~/.cargo/bin`` when
+    PATH has none, the desktop app's case, where a bare ``uvx`` is command not found
+    too; and uv resolves a command with no ``--python`` on its default Python, which
+    may be outside the range the launcher asked for (3.14 on Fedora 43), so it built
+    another environment where the hook's is cached, or failed. And the requirement it ran:
+    with ``AISQUARE_PLUGIN_FROM`` set, the agent was told the pinned release, which PyPI
+    does not have before it is published, or is another build than the hooks' (round 21).
+    """
+    if install_route.runs_from_uv_cache():
+        python = f"{sys.version_info.major}.{sys.version_info.minor}"
+        requirement = os.environ.get(PLUGIN_FROM_ENV) or f"{DISTRIBUTION}=={__version__}"
+        argv = [_plugin_uvx(), "--python", python, "--from", requirement, "aisquare", "log"]
+    elif shutil.which("aisquare") is not None:
+        return "aisquare log"
+    else:
+        argv = selfcli.argv_for(["log"])
+    return install_route.command_line(argv)
+
+
+def _plugin_uvx() -> str:
+    """The uvx the launcher ran: ``uvx`` when that is the one PATH finds, else its path."""
+    ran = os.environ.get(PLUGIN_UVX_ENV, "")
+    if not ran:
+        return "uvx"
+    found = shutil.which("uvx")
+    if found is not None and os.path.realpath(found) == os.path.realpath(ran):
+        return "uvx"
+    return ran

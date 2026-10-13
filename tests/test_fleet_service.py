@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -35,7 +36,13 @@ from aisquare.cli.app import app
 from aisquare.core import codenames, paths, selfcli
 from aisquare.core import store as core_store
 from aisquare.core import tmux as tmux_core
-from aisquare.core.config import FleetRoleSettings, FleetSettings
+from aisquare.core.config import (
+    REVIEWER_ARGS,
+    FleetRoleSettings,
+    FleetSettings,
+    replacing_the_former_reviewer_default,
+    replacing_the_former_reviewer_default_first,
+)
 from aisquare.core.ids import new_agent_id, new_task_id
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, SqliteStore, store_session
@@ -44,13 +51,15 @@ from aisquare.core.tmux import (
     Completed,
     PaneFacts,
     Runner,
+    SocketAnswer,
     TmuxError,
     TmuxServer,
     TmuxUnavailable,
     WindowInfo,
 )
+from aisquare.core.version import __version__
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
-from aisquare.services import auto_mode
+from aisquare.services import auto_mode, lifecycle
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.explainability import PIPELINE_ID_ENV_VAR
@@ -123,6 +132,11 @@ class FakeTmux(TmuxServer):
         that loses a race with a server reload. It is the one state that separates
         "the kill happened" from "the kill was attempted" — which `stop` used to
         collapse into a suppressed `TmuxError` (review of #121, round 9)."""
+        self.socket_file = True
+        """Whether the socket FILE is where the server made it. tmux leaves it when its
+        server exits, so a dead server's file is stale and shows no server; False is the
+        file taken from under the server (systemd-tmpfiles, logind), which shows nothing
+        (`listener`, the rule `uninstall` asks too)."""
         self.socket_denied = False
         """The socket is THERE but this user may not open it: tmux exits 1 with
         `(Permission denied)` — the same exit code as an absent server. `reachable()`
@@ -140,6 +154,9 @@ class FakeTmux(TmuxServer):
         """Sockets that answer with a DIFFERENT server than this fake (see the
         `tmux` fixture): one gone, one healthy, which is the state `shutdown` and
         the doctor decide per socket and nothing could otherwise reproduce."""
+        self.per_path: dict[Path, TmuxServer] = {}
+        """Servers asked for at a path (``tmux -S``, :meth:`at`) that is not where ``-L``
+        reaches this one: a server started under another ``TMUX_TMPDIR``."""
         self.sessions: dict[str, list[WindowInfo]] = {}
         self.facts: dict[str, PaneFacts] = {}
         self.output_at: dict[str, datetime] = {}
@@ -376,6 +393,24 @@ class FakeTmux(TmuxServer):
         self.reachable()
         return self.started if self._read() else None
 
+    def listener(self, recorded: Path | None = None) -> SocketAnswer | None:
+        """What the socket file says, asked of it rather than of tmux (:attr:`socket_file`)."""
+        if not self.socket_file:
+            return "gone"
+        return "answers" if self.running else None
+
+    def socket_path(self) -> Path:
+        """Where this server keeps its socket, and where ``-L`` from this shell finds it."""
+        return Path("/run/fake/tmux-1000") / self.socket
+
+    def server_socket_path(self) -> Path | None:
+        """What ``#{socket_path}`` answers: where this server listens, while it runs."""
+        return self.socket_path() if self._read() else None
+
+    def at(self, path: Path | None) -> TmuxServer:
+        """The server listening at ``path`` (:attr:`per_path`), else this one."""
+        return self.per_path.get(path, self) if path is not None else self
+
     def pane_pid(self, pane_id: str) -> int | None:
         self.binary()
         if pane_id not in self.facts:
@@ -435,7 +470,9 @@ class FakeTmux(TmuxServer):
         raise TmuxError(f"error connecting to /fake/tmux-0/{self.socket}{denied}")
 
     def attach_argv(self, session: str) -> list[str]:
-        return [self.binary(), "-L", self.socket, "attach-session", "-t", f"={session}"]
+        """As the real one: ``-S`` for a handle asked for at a path, else ``-L``."""
+        where = ["-L", self.socket] if self.path is None else ["-S", str(self.path)]
+        return [self.binary(), *where, "attach-session", "-t", f"={session}"]
 
     # -- input --
     def send_keys(self, pane_id: str, *keys: str) -> None:
@@ -714,6 +751,28 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
     assert agent.pane_id == "%1" and agent.binary == "claude" and agent.spawned_by == "user"
     with store_session() as store:
         assert store.fleet_agent_by_label(project.id, "manager") == agent
+
+
+def test_spawn_records_where_its_server_listens_and_in_which_boot(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What uninstall and upgrade ask whether the row may still run (round 25 of #257): the
+    socket tmux says its server listens on, which the asking shell's ``TMUX_TMPDIR`` cannot
+    rebuild, and the boot, which no process outlives. Kept by the store as written."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+
+    agent = fleet_service.spawn(project, "manager").agent
+
+    assert agent.socket_path == Path("/run/fake/tmux-1000/asq-test")
+    assert agent.boot_id == "b00t-1"
+    with store_session() as store:
+        assert store.fleet_agent_by_label(project.id, "manager") == agent
+
+    def refused() -> Path | None:
+        raise TmuxError("tmux did not answer within 30s")
+
+    monkeypatch.setattr(tmux, "server_socket_path", refused)  # the spawn goes on without it
+    assert fleet_service.spawn(project, "coder", worktree=False).agent.socket_path is None
 
 
 def test_spawn_with_an_account_carries_the_callers_environment_into_the_window(
@@ -1021,13 +1080,27 @@ def test_spawn_permission_mode_flag_beats_role_config_beats_default(
 
 
 def test_spawn_carries_role_extra_args_then_the_callers_args(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=["--verbose"])})
     fleet_service.spawn(project, "reviewer", worktree=False, agent_args=["--model", "opus"])
     command = _command(tmux)
-    assert "--restricted" in command, "the reviewer's built-in extra arg (§3.6)"
+    assert "--verbose" in command, "the role's configured extra arg"
     assert command[-2:] == ["--model", "opus"]
-    assert command.index("--restricted") < command.index("--model")
+    assert command.index("--verbose") < command.index("--model")
+
+
+def test_the_built_in_reviewer_is_launched_with_a_shell(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """`--restricted` removed Bash, so the reviewer could run none of `aisquare task
+    next`, `gh pr diff` or `gh pr review`, and every subagent it spawned to fetch the
+    diff had no shell either (PR #257's review, run by a fleet reviewer, saw nothing).
+    """
+    fleet_service.spawn(project, "reviewer", worktree=False)
+    command = _command(tmux)
+    assert "--restricted" not in command
+    assert "--disallowedTools=Edit Write NotebookEdit" in command, "and no editing tools"
 
 
 def test_spawn_respects_a_caller_supplied_session_id(
@@ -1883,7 +1956,9 @@ def test_recent_output_is_working_and_old_output_is_waiting_without_hooks(
 ) -> None:
     agent = _coder(project, binary=sys.executable)  # no --session-id: tmux is the only source
     assert fleet_service.status_of(agent).state == "waiting", "no output yet"
-    tmux.printed(agent.pane_id, ago=ACTIVITY_WINDOW - timedelta(seconds=1))
+    # Well inside the window: tmux, and so the fake, says when in whole seconds, and a second
+    # short of the edge left a loaded runner a fraction of one (ambient leg, run 38185297691).
+    tmux.printed(agent.pane_id, ago=ACTIVITY_WINDOW / 2)
     assert fleet_service.status_of(agent).state == "working"
     tmux.printed(agent.pane_id, ago=ACTIVITY_WINDOW + timedelta(seconds=2))
     status = fleet_service.status_of(agent)
@@ -2341,6 +2416,36 @@ def test_stop_leaves_the_row_live_when_the_window_kill_was_refused_and_the_pane_
     [lingering] = fleet_service.list_agents(project)
     assert lingering.agent.id == agent.id and lingering.agent.ended_at is not None
     assert lingering.state == "exited"
+
+
+def test_stop_and_restart_leave_live_a_row_whose_socket_was_taken_from_under_its_server(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Round 29 of #257: tmux's strict reads answer "no such pane" for a socket file that is
+    gone (`error connecting to <path> (No such file or directory)`), so `fleet stop` ended
+    the row of an agent whose server ran on, which `shutdown` and `uninstall` count as
+    running. `uninstall` then went on under it, and `restart` stopped it the same way and
+    started a second agent in its worktree. Both now ask the rule those two ask."""
+    coder = _coder(project)
+    spawned = len(tmux.spawned)
+    tmux.running = False  # no tmux client reaches the server…
+    tmux.socket_file = False  # …because its socket file is gone, not because it exited
+
+    with pytest.raises(FleetError, match=r"'coder-1' was not stopped: .* is gone") as stopped:
+        fleet_service.stop(project, "coder-1")
+    assert "SIGUSR1" in str(stopped.value) and "reap --server-down" in str(stopped.value)
+    with pytest.raises(FleetError, match="is gone"):
+        fleet_service.restart(project, "coder-1")
+
+    assert len(tmux.spawned) == spawned, "no second agent in its worktree"
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+    assert _events(project, "agent_exited") == []
+    # Negative control: a server that exited leaves its socket file behind, where nothing
+    # listens, and that row's pane is gone: stopped as before.
+    tmux.socket_file = True
+    ended = fleet_service.stop(project, "coder-1").agent
+    assert ended.ended_at is not None and tmux.killed == []
 
 
 def test_stop_leaves_the_row_live_when_a_denied_socket_cannot_confirm_the_pane_died(
@@ -3762,23 +3867,298 @@ def test_shutdown_records_rows_lost_with_a_reason_when_the_server_was_killed_by_
         assert store.fleet_agents(project.id, live_only=True) == []
 
 
+@contextmanager
+def _socket_file(name: str, *, listening: bool) -> Iterator[Path]:
+    """A real socket file at ``<short dir>/tmux-<uid>/<name>``, the shape tmux makes:
+    listening, or stale, as tmux leaves it when its server exits. Under ``/tmp``, as an
+    AF_UNIX path is small (about 100 bytes). Skips where tmux cannot run."""
+    import tempfile
+
+    if not hasattr(socket, "AF_UNIX") or not hasattr(os, "getuid"):
+        pytest.skip("AF_UNIX sockets and a POSIX uid are what tmux needs")
+    base = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp"))
+    path = base / f"tmux-{os.getuid()}" / name
+    path.parent.mkdir()
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(str(path))
+        server.listen(1)
+        if not listening:
+            server.close()
+        yield path
+    finally:
+        server.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def _recorded_at(agent: FleetAgent, path: Path) -> FleetAgent:
+    """``agent`` as if its server had said, at spawn, that it listens at ``path``."""
+    with store_session() as store:
+        return store.upsert_fleet_agent(agent.model_copy(update={"socket_path": path}))
+
+
 def test_shutdown_records_rows_lost_over_the_real_tmux_wrapper(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The same absent-socket path against the REAL ``TmuxServer`` over a refusing
     runner (``_unreachable_server``), not the fake: every swallow of a non-zero exit
     is exercised, so ``answers()`` reading False here is tmux's own behaviour rather
-    than the fake's ``running`` flag agreeing with the service."""
-    coder = _coder(project)
-    dead = _unreachable_server()
-    monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+    than the fake's ``running`` flag agreeing with the service. The socket file the
+    row recorded is real and stale, as tmux leaves it, which shows no server."""
+    asked: list[list[str]] = []
 
-    report = fleet_service.shutdown(project)
+    def refusing(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        asked.append(list(argv))
+        return Completed(1, "", _UNREACHABLE)
+
+    dead = _real_server(refusing)
+    coder = _coder(project)
+    with _socket_file(coder.tmux_socket, listening=False) as stale:
+        coder = _recorded_at(coder, stale)
+        monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+
+        report = fleet_service.shutdown(project)
 
     assert [row.agent.id for row in report.recorded] == [coder.id]
+    assert report.recorded[0].reason == f"no server answered on socket '{stale}'"
     assert report.stopped == [] and report.failed == []
-    assert report.servers_absent == [coder.tmux_socket]
+    assert report.servers_absent == [coder.tmux_socket, str(stale)], "today's, and the row's"
+    assert any(argv[1:3] == ["-S", str(stale)] for argv in asked), "asked where it recorded"
     assert report.sessions_killed == [] and report.sessions_absent == []
+
+
+def test_shutdown_leaves_live_a_row_whose_socket_was_taken_from_under_its_server(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Round 27 of #257: `uninstall` counts a row whose socket file is gone as running, as
+    systemd-tmpfiles or logind can take it while the server runs on, and names `fleet
+    shutdown`. That ended the row as lost because `tmux -L` found no server, stopping
+    nothing, and the next `uninstall` went on under the running agent. Both now ask one
+    rule: the row is left live with what to do, until `--forget` is the operator's word."""
+    if not hasattr(socket, "AF_UNIX") or not hasattr(os, "getuid"):
+        pytest.skip("AF_UNIX sockets and a POSIX uid are what tmux needs: uninstall asks one")
+    coder = _coder(project)
+    tmux.running = False  # no tmux client reaches the server…
+    tmux.socket_file = False  # …because its socket file is gone, not because it exited
+
+    plan = fleet_service.shutdown_plan(project)
+    report = fleet_service.shutdown(project)
+
+    assert "is gone" in plan.held[coder.id]
+    assert report.recorded == [] and report.stopped == []
+    assert [row.agent.id for row in report.failed] == [coder.id]
+    reason = report.failed[0].reason
+    assert "is gone, so no tmux client can reach the server" in reason
+    assert "SIGUSR1" in reason and "--forget ends its row on your word" in reason
+    assert report.incomplete_projects == [project.id], "not confirmed down"
+    assert lifecycle.running_fleet()[0] != (), "uninstall still counts it: the two agree"
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+
+    forgotten = fleet_service.shutdown(project, forget=True)
+
+    assert [row.agent.id for row in forgotten.recorded] == [coder.id]
+    assert forgotten.recorded[0].reason.startswith("ended on your word (--forget): its server's")
+    assert forgotten.failed == []
+    assert fleet_service.shutdown_plan(project).agents == []
+    assert lifecycle.running_fleet()[0] == ()
+
+
+def test_shutdown_ends_a_row_from_before_v25_whose_socket_a_reboot_cleared(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 28 of #257: a 0.7.0 row recorded no boot, and a reboot clears its socket, so it
+    read "gone", which may still run: `fleet shutdown --all --yes` left it live and exited
+    1 until `--forget`. Created before this boot started, it is ended as lost."""
+    coder = _coder(project)
+    with store_session() as store:  # as 0.7.0 wrote it: neither its socket nor its boot
+        coder = store.upsert_fleet_agent(
+            coder.model_copy(update={"socket_path": None, "boot_id": None})
+        )
+    booted = coder.created_at + timedelta(minutes=5)  # this boot began after the row
+    monkeypatch.setattr(tmux_core, "boot_started", lambda: booted)
+    tmux.running = False
+    tmux.socket_file = False  # what a reboot leaves: no file at all
+
+    plan = fleet_service.shutdown_plan(project)
+    report = fleet_service.shutdown(project)
+
+    assert plan.held == {} and coder.id in plan.lost
+    assert [row.agent.id for row in report.recorded] == [coder.id] and report.failed == []
+
+
+def test_shutdown_forget_never_ends_a_row_whose_socket_answers(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 28 of #257: `--forget` ended every row its probe found no server for, and its
+    plan hid them as recorded lost. A row whose recorded socket has a server listening (one
+    that came up after tmux was asked) is one `uninstall` counts as running, so ending it
+    let the next `uninstall` go on under it. The plan shows it left live, and so is it."""
+    dead = _unreachable_server()  # tmux says no server…
+    coder = _coder(project)
+    with _socket_file(coder.tmux_socket, listening=True) as listening:  # …and one listens
+        coder = _recorded_at(coder, listening)
+        monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+
+        plan = fleet_service.shutdown_plan(project, forget=True)
+        report = fleet_service.shutdown(project, forget=True)
+        counted = lifecycle.running_fleet()[0]
+
+    assert "a server came up on its socket" in plan.held[coder.id] and plan.lost == {}
+    assert report.recorded == [] and [row.agent.id for row in report.failed] == [coder.id]
+    assert "left live, which --forget does not end as a server answers there" in (
+        report.failed[0].reason
+    )
+    assert counted != (), "uninstall counts it: the two agree"
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [coder.id]
+
+
+def test_shutdown_stops_a_row_on_the_server_at_the_path_it_recorded(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 28 of #257: a row is asked of the server at the path its spawn recorded (``tmux
+    -S``), not whatever ``tmux -L`` reaches from this shell. A shell without the spawning
+    shell's ``TMUX_TMPDIR`` reaches another server on the same name, whose ``%1`` is a
+    stranger: ``/exit`` was typed into it, or, were it younger than the row, the row was
+    ended as gone under its running agent. Its own server is stopped and its session
+    killed; the stranger is not touched."""
+    coder = _coder(project)  # its own server: `tmux`, which holds its pane
+    elsewhere = Path("/run/user/1000/tmux-1000") / coder.tmux_socket
+    coder = _recorded_at(coder, elsewhere)
+    stranger = FakeTmux()  # what `-L` reaches from this shell
+    stranger.spawn_window("asq-someone", name="manager", cwd=project.root, command=["claude"])
+    assert stranger.facts.keys() == tmux.facts.keys() == {coder.pane_id}, "the same %1"
+    stranger.per_path[elsewhere] = tmux
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: stranger)
+
+    plan = fleet_service.shutdown_plan(project)
+    report = fleet_service.shutdown(project)
+
+    assert plan.sessions == [f"{elsewhere}:asq-{_codename(project)}"] and plan.lost == {}
+    assert [a.id for a in report.stopped] == [coder.id], report
+    assert report.recorded == [] and report.failed == []
+    assert (coder.pane_id, "literal", "/exit") in tmux.typed and tmux.killed == [coder.pane_id]
+    assert report.sessions_absent == [f"{elsewhere}:asq-{_codename(project)}"], "with its window"
+    assert stranger.typed == [] and stranger.killed == [] and stranger.killed_sessions == []
+    assert not stranger.facts[coder.pane_id].dead, "the stranger runs on"
+
+
+def _behind_a_stranger(
+    tmux: FakeTmux, project: ProjectInfo, coder: FleetAgent, monkeypatch: pytest.MonkeyPatch
+) -> tuple[FleetAgent, FakeTmux]:
+    """``coder`` recorded at a path where ``tmux -L`` from this shell does not look, with its
+    own server (``tmux``) answering only there, and the stranger ``-L`` reaches instead:
+    another server on the same name, whose ``%1`` is another agent's (round 28 of #257)."""
+    elsewhere = Path("/run/user/1000/tmux-1000") / coder.tmux_socket
+    coder = _recorded_at(coder, elsewhere)
+    stranger = FakeTmux()
+    stranger.spawn_window("asq-someone", name="manager", cwd=project.root, command=["claude"])
+    assert stranger.facts.keys() == tmux.facts.keys() == {coder.pane_id}, "the same %1"
+    stranger.per_path[elsewhere] = tmux
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: stranger)
+    return coder, stranger
+
+
+def test_every_read_asks_a_row_of_the_server_at_the_path_it_recorded(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 29 of #257: after shutdown and stop, the listing (``fleet ls``, the UI's tick),
+    ``status_of``, ``tell``, a restart's probe and ``reap`` — ``--server-down`` too — still
+    asked a row's server by its socket's name (``tmux -L``). From a shell without the spawning
+    shell's ``TMUX_TMPDIR`` that is another server on the same name, and its dead ``%1`` ended
+    the row under its running agent. Each asks the server at the path the row recorded."""
+    coder, stranger = _behind_a_stranger(tmux, project, _coder(project), monkeypatch)
+    stranger.die(coder.pane_id, 1)  # the stranger's %1 has exited; the row's runs on
+    _board_session(coder, "waiting")
+    tmux.set_command(coder.pane_id, "claude")
+
+    [listed] = fleet_service.list_agents(project)
+    status = fleet_service.status_of(coder)
+    reaped = fleet_service.reap(project)
+    swept = fleet_service.reap(project, server_down=True)
+    alive = fleet_service._pane_alive(coder)
+    told = fleet_service.tell(project, coder.label, "please rebase")
+
+    assert listed.state == status.state == "waiting", (listed, status)
+    assert reaped.ended == reaped.lost == swept.ended == swept.lost == []
+    assert alive and told.delivered, told
+    assert tmux.typed == [
+        (coder.pane_id, "paste", "please rebase"),
+        (coder.pane_id, "key", "Enter"),
+    ]
+    assert stranger.typed == [] and stranger.killed == []
+    with store_session() as store:
+        row = store.get_fleet_agent(coder.id)
+    assert row is not None and row.ended_at is None, "never ended on the stranger's dead %1"
+    assert _events(project, "agent_exited") == []
+
+
+def test_a_listed_status_carries_where_its_server_is_asked(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 29 of #257: asq's panes and the Manager tab's attach line asked `socket_at(agent)`
+    on the UI thread for every open project each frame, and that reloads config.toml. The
+    listing and `status_of` work it out once, with their config, and carry it."""
+    coder, _ = _behind_a_stranger(tmux, project, _coder(project), monkeypatch)
+
+    [listed] = fleet_service.list_agents(project)
+
+    assert listed.socket_at == fleet_service.status_of(coder).socket_at == coder.socket_path
+    with store_session() as store:  # a row from before v25 is asked by its socket's name
+        named = store.upsert_fleet_agent(coder.model_copy(update={"socket_path": None}))
+    [listed] = fleet_service.list_agents(project)
+    assert listed.socket_at is None and fleet_service.status_of(named).socket_at is None
+
+
+def test_a_symlink_loop_on_the_way_to_a_rows_socket_is_another_path_not_a_traceback(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Round 29 of #257: every read compares a row's recorded socket path with this shell's
+    (`_address`), and pathlib on 3.11 and 3.12 raises `RuntimeError`, not `OSError`, for a
+    symlink loop on the way. The listing, asq's tick and every command that reads a row
+    ended in a traceback. The two now read as different paths, so the row is asked at the
+    one it recorded."""
+    looped = tmp_path / "loop" / "tmux-1000" / "asq"
+    with suppress(OSError):
+        (tmp_path / "loop").symlink_to(tmp_path / "loop")  # a loop, where links can be made
+    coder = _recorded_at(_coder(project), looped)
+    resolve = Path.resolve
+
+    def resolve_as_3_12(self: Path, strict: bool = False) -> Path:
+        if "loop" in self.parts:
+            raise RuntimeError(f"Symlink loop from {str(self)!r}")
+        return resolve(self, strict)
+
+    monkeypatch.setattr(Path, "resolve", resolve_as_3_12)
+
+    [listed] = fleet_service.list_agents(project)
+
+    assert listed.agent.id == coder.id and listed.state == "waiting", listed
+    assert fleet_service.socket_at(coder) == looped, "asked at the path it recorded"
+
+
+def test_a_row_dead_on_its_own_server_is_ended_and_its_window_killed_there(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of round 29 of #257: a row whose pane died on its OWN server, at the path
+    it recorded, is ended by the listing though ``tmux -L`` reaches a server where ``%1``
+    runs, and stopping its 💤 row removes its window from its own server
+    (``_kill_lingering_window``, ``_kill_dead``). The stranger's live ``%1`` is not touched."""
+    coder, stranger = _behind_a_stranger(tmux, project, _coder(project), monkeypatch)
+    tmux.die(coder.pane_id, 3)
+
+    [listed] = fleet_service.list_agents(project)
+    receipt = fleet_service.stop(project, coder.label)
+
+    assert listed.agent.id == coder.id and listed.state == "exited", listed
+    assert listed.agent.exit_status == 3, "its own pane's status, not the stranger's"
+    assert receipt.agent.id == coder.id and tmux.killed == [coder.pane_id]
+    assert stranger.killed == [] and not stranger.facts[coder.pane_id].dead
 
 
 def test_shutdown_defaults_to_one_project_and_all_reaches_every_project(
@@ -3855,12 +4235,73 @@ def test_shutdown_refuses_when_tmux_is_not_usable_and_touches_no_row(
     coder = _coder(project)
     tmux.installed = False
 
-    with pytest.raises(FleetUnavailable, match="tmux is not installed"):
+    with pytest.raises(FleetUnavailable, match="tmux is not installed") as refused:
         fleet_service.shutdown(project)
 
+    assert "`--forget` ends their rows on your word" in str(refused.value), "the way out"
     tmux.installed = True
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id]
     assert tmux.killed == [] and tmux.killed_sessions == []
+
+
+def test_shutdown_forget_ends_every_row_unchecked_where_tmux_is_not_usable(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Round 27 of #257: with tmux gone, a row that may still run blocked `uninstall`, and
+    the one remedy it named, `fleet shutdown`, refused without tmux. A server outlives its
+    program, so no tmux is no evidence; ``forget`` is the operator's word that the agents
+    are not running, and ends each row unchecked, stopping and killing nothing. But not a
+    row whose socket answers, which needs no tmux to ask: a server listens there, and
+    `uninstall` counts it (round 28)."""
+    coder = _coder(project)
+    tmux.installed = False  # its server runs on, and its socket answers
+
+    plan = fleet_service.shutdown_plan(project, forget=True)
+    report = fleet_service.shutdown(project, forget=True)
+
+    assert "and no usable tmux here can stop it" in plan.held[coder.id]
+    assert report.recorded == [] and [row.agent.id for row in report.failed] == [coder.id]
+    assert report.failed[0].reason.endswith(
+        "left live, which --forget does not end as a server answers there: put a usable tmux "
+        "back and run this again"
+    )
+    assert tmux.killed == [] and tmux.killed_sessions == [] and tmux.typed == []
+
+    tmux.running = False  # its server exited, leaving the socket file: nobody listens
+    plan = fleet_service.shutdown_plan(project, forget=True)
+    report = fleet_service.shutdown(project, forget=True)
+
+    assert plan.tmux_unusable is not None and "tmux is not installed" in plan.tmux_unusable
+    assert [a.id for a in plan.agents] == [coder.id] and plan.sessions == []
+    assert plan.held == {}
+    assert [row.agent.id for row in report.recorded] == [coder.id]
+    assert report.recorded[0].reason.startswith("ended on your word (--forget), unchecked: ")
+    assert report.recorded[0].agent.exit_status is None
+    assert report.stopped == [] and report.failed == [] and report.servers_absent == []
+    assert tmux.killed == [] and tmux.killed_sessions == [] and tmux.typed == []
+    with store_session() as store:
+        assert store.fleet_agents(project.id, live_only=True) == []
+
+
+def test_a_forget_plan_without_usable_tmux_names_the_rows_it_ends_as_lost(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Round 29 of #257: with tmux unusable, `shutdown(forget=True)` ends every row its plan
+    does not hold, unchecked, but the plan's `lost` stayed empty, so `fleet shutdown --forget
+    --json` printed `"lost": {}` over the rows it was about to end. It names them, with the
+    socket no tmux here could ask, and still none it leaves live."""
+    coder = _coder(project)
+    tmux.installed = False
+
+    held = fleet_service.shutdown_plan(project, forget=True)  # its socket answers: left live
+    tmux.running = False  # its server exited, leaving the socket file: nobody listens
+    plan = fleet_service.shutdown_plan(project, forget=True)
+    report = fleet_service.shutdown(project, forget=True)
+
+    assert coder.id in held.held and held.lost == {}
+    assert plan.tmux_unusable is not None and plan.held == {}
+    assert plan.lost == {coder.id: coder.tmux_socket}
+    assert [row.agent.id for row in report.recorded] == list(plan.lost)
 
 
 def test_shutdown_refuses_when_the_socket_cannot_be_asked(
@@ -4298,14 +4739,14 @@ def test_shutdown_inside_guard_keeps_commas_in_the_socket_path(
 
     monkeypatch.setenv("TMUX", f"{socket_path},4242,0")
     with pytest.raises(FleetError, match="INSIDE the fleet's own tmux server"):
-        fleet_service._refuse_from_inside(["asq,shared"], config)
+        fleet_service._refuse_from_inside([fleet_service._Address("asq,shared")], config)
 
     # the truncation the old parse produced is NOT this socket — and a different
     # comma-free socket is not either
     monkeypatch.setenv("TMUX", f"{str(socket_path).split(',')[0]},4242,0")
-    fleet_service._refuse_from_inside(["asq,shared"], config)
+    fleet_service._refuse_from_inside([fleet_service._Address("asq,shared")], config)
     monkeypatch.setenv("TMUX", "/tmp/tmux-0/somebody-elses,4242,0")
-    fleet_service._refuse_from_inside(["asq,shared"], config)
+    fleet_service._refuse_from_inside([fleet_service._Address("asq,shared")], config)
 
 
 def test_shutdown_reports_a_failed_final_scan_and_keeps_the_pause(
@@ -4822,7 +5263,9 @@ def test_a_label_reused_mid_shutdown_stops_the_snapshots_row_and_not_the_new_age
     real_probe = fleet_service._shutdown_probe
     new_ids: list[str] = []
 
-    def exit_and_reuse_the_label(*args: object, **kwargs: object) -> dict[str, bool]:
+    def exit_and_reuse_the_label(
+        *args: object, **kwargs: object
+    ) -> dict[fleet_service._Address, bool]:
         # Between the snapshot and the first row's turn: the old coder-1 exits
         # on its own (its hook ends the row) and a new coder-1 is spawned.
         with store_session() as store:
@@ -5244,7 +5687,7 @@ def test_shutdown_keeps_the_claim_of_a_row_on_a_socket_that_refused_after_the_pr
         assert store.claim_task(task.id, coder.session_id, lease)
     real_probe = fleet_service._shutdown_probe
 
-    def probe_then_refuse(*args: object, **kwargs: object) -> dict[str, bool]:
+    def probe_then_refuse(*args: object, **kwargs: object) -> dict[fleet_service._Address, bool]:
         answering = real_probe(*args, **kwargs)  # type: ignore[arg-type]
         tmux.socket_denied = True  # it answered, and only THEN refused
         return answering
@@ -5577,7 +6020,7 @@ def test_shutdown_plan_refuses_rather_than_showing_a_plan_short_of_a_session(
     coder = _coder(project)
     real_probe = fleet_service._shutdown_probe
 
-    def probe_then_deny(*args: object, **kwargs: object) -> dict[str, bool]:
+    def probe_then_deny(*args: object, **kwargs: object) -> dict[fleet_service._Address, bool]:
         answering = real_probe(*args, **kwargs)  # type: ignore[arg-type]
         tmux.socket_denied = True  # the socket stops answering right after the probe
         return answering
@@ -5999,6 +6442,25 @@ def test_attach_argv_targets_the_project_session_exactly(
     fleet_service.spawn(project, "manager")
     argv = fleet_service.attach_argv(project)
     assert argv[-3:] == ["attach-session", "-t", f"=asq-{_codename(project)}"]
+
+
+def test_attach_argv_asks_the_server_at_the_path_the_projects_rows_recorded(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 29 of #257: `fleet attach` found its server by the socket's name (`tmux -L`)
+    while the Manager tab printed `tmux -S <path>`. From a shell under another `TMUX_TMPDIR`
+    that is another server: with no session of the project's it refused, saying `spawn
+    manager` starts one, which refuses for the live manager; with one of that name it
+    attached there. It asks the server at the path the project's live rows recorded."""
+    manager = fleet_service.spawn(project, "manager").agent
+    manager, stranger = _behind_a_stranger(tmux, project, manager, monkeypatch)
+    tmux.path = manager.socket_path  # the handle the stranger hands out for that path
+    session = f"asq-{_codename(project)}"
+    at_the_path = ["/fake/tmux", "-S", str(manager.socket_path), "attach-session", "-t"]
+
+    assert fleet_service.attach_argv(project) == [*at_the_path, f"={session}"]
+    stranger.sessions[session] = []  # a session of that name on the server `-L` reaches
+    assert fleet_service.attach_argv(project) == [*at_the_path, f"={session}"]
 
 
 def test_attach_argv_refuses_when_there_is_no_session_to_attach_to(
@@ -9620,6 +10082,254 @@ def test_a_spec_that_holds_a_session_choice_does_not_replay_it(
     command = _command(tmux)
     assert _flag(command, "--resume") == str(transcript)
     assert "-c" not in command and "--continue" not in command
+
+
+def test_a_reviewer_restarted_from_a_spec_0_7_0_recorded_gets_its_shell_back(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #257, round 18: 0.6.0 and 0.7.0 recorded the reviewer's built-in
+    `--restricted` in its spec, and a restart replays the spec, not today's config, so
+    every reviewer started before the upgrade came back with no shell, every time."""
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=["--restricted"])})
+    agent = fleet_service.spawn(project, "reviewer", worktree=False).agent
+    assert agent.launch_spec is not None and agent.launch_spec.recorded_by == __version__
+    legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
+    with store_session() as store:
+        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+    # The upgrade: loading the config replaced the old default (`config.py`).
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=list(REVIEWER_ARGS))})
+
+    restarted = fleet_service.restart(project, agent.label).started
+
+    command = _command(tmux)
+    assert "--restricted" not in command
+    assert REVIEWER_ARGS[0] in command, "today's reviewer arguments in its place"
+    assert restarted.launch_spec is not None
+    assert restarted.launch_spec.extra_args == list(REVIEWER_ARGS)
+    assert restarted.launch_spec.recorded_by == __version__
+
+    # Recorded since, the same list was chosen in today's config, and is replayed.
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=["--restricted"])})
+    chosen = fleet_service.spawn(project, "reviewer", worktree=False).agent
+    _with_transcript(chosen, transcript)
+    tmux.die(chosen.pane_id, 1)
+
+    fleet_service.restart(project, chosen.label)
+
+    assert "--restricted" in _command(tmux)
+
+
+@pytest.mark.parametrize(
+    "today", [[], ["--model", "opus"]], ids=["every-tool", "model-chosen-since"]
+)
+@pytest.mark.parametrize("caller", [[], ["--add-dir", "/srv"]], ids=["alone", "then-callers"])
+def test_a_0_7_0_reviewer_is_restarted_with_the_arguments_today_s_config_gives_the_role(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    today: list[str],
+    caller: list[str],
+) -> None:
+    """Round 21 of #257: the `--restricted` a 0.7.0 spec leads with was replaced by the
+    built-in `REVIEWER_ARGS` whatever today's config gave the role, so a reviewer its
+    operator since gave `--model opus` came back without the model. Today's arguments are
+    replayed in its place. Where they do not deny the editing tools the denial goes beside
+    them, since the spec cannot tell 0.7.0's default from a `--restricted` its caller gave
+    (round 22): that is all a restart adds to a fresh spawn's."""
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=["--restricted"])})
+    agent = fleet_service.spawn(project, "reviewer", worktree=False, agent_args=caller).agent
+    assert agent.launch_spec is not None
+    legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
+    with store_session() as store:
+        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=today)})
+
+    restarted = fleet_service.restart(project, agent.label).started
+
+    assert restarted.launch_spec is not None
+    assert restarted.launch_spec.extra_args == [*today, *REVIEWER_ARGS, *caller]
+    command = _command(tmux)
+    assert "--restricted" not in command
+    assert REVIEWER_ARGS[0] in command, "without the editing tools, whoever chose --restricted"
+    fresh = fleet_service.spawn(project, "reviewer", worktree=False, agent_args=caller).agent
+    assert fresh.launch_spec is not None
+    assert fresh.launch_spec.extra_args == [*today, *caller], "a fresh spawn: today's alone"
+
+
+def test_a_0_7_0_reviewer_its_caller_locked_down_is_never_restarted_with_every_tool(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Round 22 of #257: under 0.7.0, with `extra_args = []`, `fleet spawn reviewer --
+    --restricted` recorded `["--restricted"]`, as the default did. Replaced by an empty
+    `today` alone, that reviewer of someone else's PR came back with Bash, Edit and Write.
+    The control: today's config denying the tools already, it is replayed as today's."""
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=[])})
+    agent = fleet_service.spawn(
+        project, "reviewer", worktree=False, agent_args=["--restricted"]
+    ).agent
+    assert agent.launch_spec is not None and agent.launch_spec.extra_args == ["--restricted"]
+    legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
+    with store_session() as store:
+        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+
+    restarted = fleet_service.restart(project, agent.label).started
+
+    assert restarted.launch_spec is not None
+    assert restarted.launch_spec.extra_args == list(REVIEWER_ARGS)
+    assert REVIEWER_ARGS[0] in _command(tmux), "no Edit or Write"
+    denied = [*REVIEWER_ARGS, "--model", "opus"]
+    assert replacing_the_former_reviewer_default_first(["--restricted"], denied) == denied, (
+        "control: no second denial beside today's"
+    )
+
+
+@pytest.mark.parametrize(
+    ("today", "denies"),
+    [
+        (["--disallowedTools", "Edit Write NotebookEdit"], True),
+        (["--disallowedTools", "Edit", "Write", "NotebookEdit", "--model", "opus"], True),
+        (["--disallowedTools=Edit,Write,NotebookEdit"], True),
+        (["--disallowed-tools", "NotebookEdit, Write ,Edit"], True),
+        (["--disallowedTools=Edit Write NotebookEdit WebFetch"], True),
+        (["--disallowedTools=Edit Write"], False),
+        (["--disallowedTools", "Edit", "--model", "Write", "NotebookEdit"], False),
+        (["--disallowedTools=Edit(src/**) Write NotebookEdit"], False),
+        (["--allowedTools=Edit Write NotebookEdit"], False),
+    ],
+    ids=[
+        "two-words",
+        "words-then-option",
+        "commas",
+        "kebab-flag",
+        "wider",
+        "narrower",
+        "words-end-at-an-option",
+        "edit-in-part",
+        "allowed-not-denied",
+    ],
+)
+def test_a_0_7_0_reviewer_gets_one_denial_however_todays_config_spells_it(
+    today: list[str], denies: bool
+) -> None:
+    """Round 23 of #257: today's config was taken to deny the editing tools only when it
+    held `REVIEWER_ARGS`'s one token, so a list spelled another way, or one tool wider, got
+    a second `--disallowedTools` beside it, and what the reviewer was denied rested on how
+    Claude Code combines the two. Read off the tools denied instead; a list that leaves one
+    of them out still gets the denial beside it."""
+    replayed = replacing_the_former_reviewer_default_first(["--restricted", "--x"], today)
+
+    assert replayed == ([*today, "--x"] if denies else [*today, *REVIEWER_ARGS, "--x"])
+
+
+@pytest.mark.parametrize(
+    ("role_args", "caller", "replayed"),
+    [
+        (["--restricted"], ["--model", "opus"], [*REVIEWER_ARGS, "--model", "opus"]),
+        ([], ["--model", "opus", "--restricted"], ["--model", "opus", "--restricted"]),
+    ],
+    ids=["role-default-then-callers", "callers-own-restricted"],
+)
+def test_a_0_7_0_reviewer_spawned_with_arguments_of_its_own_gets_its_shell_back(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    role_args: list[str],
+    caller: list[str],
+    replayed: list[str],
+) -> None:
+    """Round 19 of #257: a spec records the role's arguments, then the caller's, so 0.7.0's
+    `fleet spawn reviewer -- --model opus` recorded `--restricted --model opus`, and only a
+    spec of exactly `--restricted` was given today's arguments: that reviewer still came
+    back with no shell. The default leads the list; a `--restricted` the caller passed
+    after other arguments of its own is theirs, and is kept (the control)."""
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=role_args)})
+    agent = fleet_service.spawn(project, "reviewer", worktree=False, agent_args=caller).agent
+    assert agent.launch_spec is not None
+    assert agent.launch_spec.extra_args == [*role_args, *caller], "the role's, then the caller's"
+    legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
+    with store_session() as store:
+        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+    # The upgrade: loading the config replaced the old default (`config.py`).
+    migrated = replacing_the_former_reviewer_default(role_args)
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=migrated)})
+
+    restarted = fleet_service.restart(project, agent.label).started
+
+    assert restarted.launch_spec is not None
+    assert restarted.launch_spec.extra_args == replayed
+    command = _command(tmux)
+    assert _flag(command, "--model") == "opus", "the caller's own arguments are kept"
+    assert ("--restricted" in command) == ("--restricted" in replayed)
+
+
+@pytest.mark.parametrize(
+    "caller", [[], ["--add-dir", "/srv"]], ids=["config-alone", "config-then-callers"]
+)
+def test_a_0_7_0_reviewer_whose_config_chose_restricted_is_restarted_without_a_shell(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caller: list[str],
+) -> None:
+    """Round 20 of #257: a 0.7.0 config of `["--restricted", "--model", "opus"]` was written
+    by its operator, and loads as written, but the reviewer it spawned recorded the same
+    list the default and the caller's own `--model opus` did. The restart replaced the
+    leading `--restricted`, so that reviewer, kept from the shell by its config, got one
+    back, while a fresh spawn from the same config did not. Today's config still leading
+    with the flag says it was chosen."""
+    chosen = ["--restricted", "--model", "opus"]
+    assert replacing_the_former_reviewer_default(chosen) == chosen, "loading keeps it"
+    _settings(monkeypatch, roles={"reviewer": FleetRoleSettings(extra_args=chosen)})
+    agent = fleet_service.spawn(project, "reviewer", worktree=False, agent_args=caller).agent
+    assert agent.launch_spec is not None
+    legacy = agent.launch_spec.model_copy(update={"recorded_by": None})  # as 0.7.0 wrote it
+    with store_session() as store:
+        store.upsert_fleet_agent(agent.model_copy(update={"launch_spec": legacy}))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+
+    restarted = fleet_service.restart(project, agent.label).started
+
+    assert restarted.launch_spec is not None
+    assert restarted.launch_spec.extra_args == [*chosen, *caller]
+    command = _command(tmux)
+    assert "--restricted" in command
+    assert REVIEWER_ARGS[0] not in command
+    fresh = fleet_service.spawn(project, "reviewer", worktree=False, agent_args=caller).agent
+    assert fresh.launch_spec is not None
+    assert fresh.launch_spec.extra_args == restarted.launch_spec.extra_args, "as a fresh spawn"
 
 
 def test_a_replay_does_not_fall_back_onto_another_kind_of_program(

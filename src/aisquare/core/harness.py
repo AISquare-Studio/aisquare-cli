@@ -61,7 +61,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 from aisquare.core import spawn
-from aisquare.core.paths import aisquare_home
+from aisquare.core.paths import aisquare_home, expand_user
 
 if TYPE_CHECKING:  # runtime import stays lazy: config imports harness back
     from aisquare.core.config import TeamSettings
@@ -396,7 +396,7 @@ def account_scope() -> str:
     raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     if not raw:
         return "default"
-    resolved = str(Path(raw).expanduser())
+    resolved = str(expand_user(Path(raw)))  # a `~olduser/…` keys as written (#257)
     return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:12]
 
 
@@ -995,7 +995,11 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
         ]
     if role == "reviewer":
         # §3.3 — reads the PR as the stranger who will maintain it; findings on the
-        # PR through `gh pr review`; read-only (the fleet launches it --restricted).
+        # PR through `gh pr review`. `--restricted` would remove the Bash every step
+        # below needs, so the fleet launches it denied Edit, Write and NotebookEdit
+        # instead (`config.REVIEWER_ARGS`); never push and never merge are this
+        # briefing's, and the credentials its shell runs with
+        # (`config._default_fleet_roles` says why no allowlist holds it).
         return [
             f"Your standing cycle (reviewer): `aisquare task next --status review --as {sid}`;",
             "if nothing,",

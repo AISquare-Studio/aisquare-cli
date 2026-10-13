@@ -75,11 +75,14 @@ import itertools
 import os
 import re
 import shutil
+import socket as socket_module
 import subprocess
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from aisquare.core import paths
 from aisquare.core.spawn import untraced_env
@@ -311,6 +314,176 @@ def _tmux(argv: Sequence[str], stdin: bytes | None) -> Completed:
     )
 
 
+#: Where Linux names this boot: a random UUID the kernel draws as it boots.
+_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
+#: Where macOS keeps ``sysctl``, for a PATH without ``/usr/sbin`` (launchd, cron).
+_SYSCTL = ("/usr/sbin/sysctl", "/sbin/sysctl")
+#: Where Linux says when it booted (``btime``, seconds since the epoch).
+_PROC_STAT = Path("/proc/stat")
+
+
+#: This boot's identity once :func:`boot_id` has found it; ``None`` until then.
+_boot: str | None = None
+
+
+def boot_id() -> str | None:
+    """This boot's identity, or ``None`` where the machine keeps none.
+
+    No process outlives a reboot, so a fleet row recorded in another boot
+    (``FleetAgent.boot_id``) is no running agent. An identity, not a time:
+    Linux's ``btime`` is the wall clock less the time since boot, and moves
+    whenever the wall clock is stepped (a WSL2 VM resumed after the host slept,
+    NTP on a board with no clock), so rows from before the step read as from
+    before the boot (round 25 of #257). Linux draws ``boot_id`` at boot; macOS
+    keeps ``kern.bootsessionuuid``, asked of ``sysctl`` on PATH or where macOS
+    keeps it. The BSDs keep only a time, which moves the same way: ``None``.
+
+    Kept for the process once found, since the boot cannot change while it runs: on macOS
+    each question is a ``sysctl`` run, and asq asked once per spawn and again in each
+    upgrade or uninstall plan (round 26 of #257). Only once found: asq is one process that
+    spawns every agent, and a ``sysctl`` that failed or timed out once, kept, left every
+    later spawn with no boot recorded (round 28).
+    """
+    global _boot
+    if _boot is None:
+        _boot = _ask_boot_id()
+    return _boot
+
+
+def _ask_boot_id() -> str | None:
+    """:func:`boot_id`, asked of the machine."""
+    with contextlib.suppress(OSError, UnicodeDecodeError):
+        said = _BOOT_ID.read_text(encoding="ascii").strip()
+        if said:
+            return said
+    if sys.platform != "darwin":
+        return None
+    said = _sysctl("kern.bootsessionuuid")
+    return said or None
+
+
+def _sysctl(name: str) -> str | None:
+    """What ``sysctl -n <name>`` says, from ``sysctl`` on PATH or where macOS keeps it;
+    ``None`` when it cannot be asked or does not answer."""
+    sysctl = shutil.which("sysctl") or next(
+        (place for place in _SYSCTL if os.access(place, os.X_OK)), None
+    )
+    if sysctl is None:
+        return None
+    try:
+        completed = subprocess.run(
+            [sysctl, "-n", name], capture_output=True, text=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.stdout.strip() if completed.returncode == 0 else None
+
+
+#: When this boot started once :func:`boot_started` has found it; ``None`` until then.
+_booted_at: datetime | None = None
+
+
+def boot_started() -> datetime | None:
+    """When this machine booted, by the wall clock, where it says (Linux's ``btime``, the
+    ``kern.boottime`` of macOS and the BSDs); ``None`` elsewhere. Kept once found, as
+    :func:`boot_id` is.
+
+    Not an identity: it is the wall clock less the time since boot, so it moves whenever
+    the clock is stepped (a WSL2 VM resumed after the host slept, NTP on a board with no
+    clock), and a row from before the step reads as from before the boot (round 25 of
+    #257). :func:`server_may_run` asks it only for a row with no boot to compare.
+    """
+    global _booted_at
+    if _booted_at is None:
+        _booted_at = _ask_boot_started()
+    return _booted_at
+
+
+def _ask_boot_started() -> datetime | None:
+    """:func:`boot_started`, asked of the machine."""
+    with contextlib.suppress(OSError, UnicodeDecodeError, ValueError, IndexError):
+        for line in _PROC_STAT.read_text(encoding="ascii").splitlines():
+            if line.startswith("btime "):
+                return datetime.fromtimestamp(int(line.split()[1]), tz=UTC)
+    if sys.platform.startswith(("linux", "win")):
+        return None  # Linux said above, or could not; Windows keeps no tmux
+    found = re.search(r"\bsec = (\d+)", _sysctl("kern.boottime") or "")  # { sec = 17…, usec
+    return datetime.fromtimestamp(int(found.group(1)), tz=UTC) if found else None
+
+
+SocketAnswer = Literal["answers", "gone", "unasked"]
+"""What a server's socket file says when asked directly (:func:`socket_answer`): a listener
+(``"answers"``), no file there (``"gone"``), or no answer to be had (``"unasked"``)."""
+
+
+def socket_answer(path: Path | None) -> SocketAnswer | None:
+    """Whether a server may be listening on the socket at ``path``, asked of the socket
+    itself (no tmux needed), and why. ``None`` is a host with no POSIX uid, where no tmux
+    server can exist.
+
+    ``None`` only on evidence that none is, because the cost of being wrong is ending the
+    row of a running agent, or removing hooks (with ``uninstall --purge``, the home) under
+    it: a file nobody listens on. tmux leaves its socket file when its server exits (tmux
+    3.7, measured), so a stale file is that evidence. No file is not (``"gone"``):
+    something else took it while the server may run on, systemd-tmpfiles ageing out
+    ``/tmp/tmux-<uid>``, logind removing ``/run/user/<uid>`` at logout, or a private
+    ``/tmp`` (round 26 of #257). Neither is a refusal to look, a denied directory, or a
+    connect that timed out (``"unasked"``).
+    """
+    family = getattr(socket_module, "AF_UNIX", None)
+    if path is None or family is None:
+        return None  # no POSIX uid or no AF_UNIX, so no tmux server can exist here
+    probe = socket_module.socket(family, socket_module.SOCK_STREAM)
+    probe.settimeout(2.0)
+    try:
+        probe.connect(str(path))
+    except ConnectionRefusedError:
+        return None
+    except FileNotFoundError:
+        return "gone"
+    except OSError:
+        return "unasked"
+    finally:
+        probe.close()
+    return "answers"
+
+
+def server_may_run(
+    srv: TmuxServer,
+    recorded: Path | None,
+    booted: str | None,
+    this_boot: str | None,
+    created: datetime | None = None,
+) -> SocketAnswer | None:
+    """Whether the agent of a live fleet row may still be running on ``srv``, and why; ``None``
+    when it cannot be. The one rule ``upgrade``, ``uninstall`` and ``fleet shutdown`` ask, so
+    a row one of them counts as running is never one another ends as gone (round 27 of #257).
+
+    Asked of what its spawn recorded, never inferred from the shell asking (round 25). A row
+    from another boot (``booted``, against ``this_boot``) cannot be running: no process
+    outlives a reboot. Otherwise its server's socket is asked (:meth:`TmuxServer.listener`)
+    at ``recorded``, where the server said it listened, whatever ``TMUX_TMPDIR`` this shell
+    has and wherever this tmux build keeps sockets; a row from before v25 recorded neither
+    and is asked where this shell's tmux looks.
+
+    With no boot to compare (a row from before v25, or a boot id that could not be had), a
+    socket that is gone is explained by a reboot when the row was ``created`` before this
+    boot started (:func:`boot_started`): a reboot clears ``/tmp``. Without it, every row a
+    0.7.0 fleet left behind at a reboot was held until ``--forget`` (round 28). That start
+    moves with the clock, so it explains only a missing file, never a socket that answers
+    or could not be asked: a row misjudged by a stepped clock is ended only when its socket
+    is gone as well.
+    """
+    if booted is not None and this_boot is not None and booted != this_boot:
+        return None
+    answer = srv.listener(recorded)
+    if answer == "gone" and (booted is None or this_boot is None) and created is not None:
+        started = boot_started()
+        if started is not None and created < started:
+            return None
+    return answer
+
+
 def parse_version(text: str) -> tuple[int, int] | None:
     """``tmux 3.7c`` → ``(3, 7)``; ``tmux next-3.5`` → ``(3, 5)``; unparseable → ``None``."""
     match = _VERSION.search(text)
@@ -485,7 +658,7 @@ size on first attach (``TerminalPane._sync_size``), as before.
 
 
 class TmuxServer:
-    """A handle on one private tmux server (``-L socket``).
+    """A handle on one private tmux server (``-L socket``, or ``-S path``: :meth:`at`).
 
     Every method raises :class:`TmuxUnavailable` when there is no usable tmux
     and :class:`TmuxError` when a command fails, so callers decide what a
@@ -499,8 +672,12 @@ class TmuxServer:
         binary: str | None = None,
         conf: Path | None = None,
         runner: Runner | None = None,
+        path: Path | None = None,
     ) -> None:
         self.socket = socket
+        self.path = path
+        """Where this handle asks for the socket (``tmux -S``), set by :meth:`at`; ``None``
+        asks for it by name (``tmux -L``), in the directory this shell's tmux looks in."""
         self._binary = binary
         self._conf = conf
         self._runner: Runner = runner or _tmux
@@ -660,7 +837,26 @@ class TmuxServer:
 
     def argv(self, *args: str) -> list[str]:
         """The full command line for one tmux invocation on this server."""
+        if self.path is not None:
+            return [self.binary(), "-S", str(self.path), "-f", str(self.conf_path()), *args]
         return self._argv_on(self.socket, str(self.conf_path()), *args)
+
+    def at(self, path: Path | None) -> TmuxServer:
+        """This server asked for at ``path`` (``tmux -S``), the socket a recorded row's server
+        said it listened on (``FleetAgent.socket_path``); this handle when ``path`` is ``None``.
+
+        ``-L`` finds a socket by name in the directory this shell's tmux looks in. A server
+        started under another ``TMUX_TMPDIR`` is not there, and another server on the same
+        name may be, whose pane ids, numbered from ``%0`` by every server, name other agents
+        (round 28 of #257). tmux answers at a path as it does for a name, measured on 3.7c:
+        ``no server running on <path>`` for a stale file, ``error connecting to <path> (No
+        such file or directory)`` for none.
+        """
+        if path is None or path == self.path:
+            return self
+        return TmuxServer(
+            self.socket, binary=self._binary, conf=self._conf, runner=self._runner, path=path
+        )
 
     def run(self, *args: str, stdin: bytes | None = None) -> str:
         """Run one tmux command (``;`` arguments chain several) and return stdout."""
@@ -1124,13 +1320,44 @@ class TmuxServer:
 
         :class:`TmuxUnavailable` where there is no uid (Windows outside WSL):
         the fleet modules must import there (plan §3.9), but there is no tmux
-        and so no socket to point at.
+        and so no socket to point at. A handle asked for at a path (:meth:`at`)
+        answers that path.
         """
+        if self.path is not None:
+            return self.path
         getuid = getattr(os, "getuid", None)
         if getuid is None:
             raise TmuxUnavailable("no tmux socket on this platform — the fleet needs a POSIX host")
         base = os.environ.get("TMUX_TMPDIR") or "/tmp"
         return Path(base) / f"tmux-{getuid()}" / self.socket
+
+    def listener(self, recorded: Path | None = None) -> SocketAnswer | None:
+        """:func:`socket_answer` for this server's socket: at ``recorded``, the path the server
+        said it listened on (``FleetAgent.socket_path``), else at :meth:`socket_path`. Asked of
+        the socket, so it needs no tmux. Whether that path's directory is there settles
+        nothing: tmux makes it as it looks, so any probe made it there (round 24 and 25 of
+        #257)."""
+        if recorded is None:
+            try:
+                recorded = self.socket_path()
+            except TmuxUnavailable:
+                return None  # no POSIX uid: no tmux server can exist here
+        return socket_answer(recorded)
+
+    def server_socket_path(self) -> Path | None:
+        """The socket the RUNNING server listens on, as it says (``#{socket_path}``).
+
+        :meth:`socket_path` rebuilds the path from the asking shell, and a server
+        started under another ``TMUX_TMPDIR``, or by a tmux built to keep its
+        sockets elsewhere (Termux), is not there. Asked once a window is made on
+        the server and kept on the fleet row (``FleetAgent.socket_path``), so a
+        later question about the row goes to that path whatever shell asks it.
+        ``None`` when the server does not answer with an absolute path; a question
+        that could not be put raises :class:`TmuxError`.
+        """
+        completed = self._runner(self.argv("display-message", "-p", "#{socket_path}"), None)
+        said = completed.stdout.strip()
+        return Path(said) if completed.returncode == 0 and os.path.isabs(said) else None
 
     def rename_session(self, old: str, new: str) -> None:
         _require_targetable(new)

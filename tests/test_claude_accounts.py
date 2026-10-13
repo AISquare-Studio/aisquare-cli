@@ -41,6 +41,7 @@ from aisquare.models import ClaudeAccount
 from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics
 from aisquare.services import team as team_service
+from tests.fsperms import can_deny_reads, can_symlink
 
 NOW = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
 
@@ -963,6 +964,43 @@ def test_accounts_add_records_a_landed_sign_in_and_discards_one_that_did_not(
     assert [a.slot for a in core.managed_accounts()] == [2]  # slot 3 was discarded again
 
 
+def test_accounts_add_names_the_connect_to_run_quoted_for_a_slot_under_a_path_with_a_space(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Where the hooks did not install into a new slot, `accounts add` printed the connect to
+    run with the slot's directory bare: under an AISQUARE_HOME with a space, pasted, it
+    split into extra arguments (review of #257). Quoted for this shell, it runs as shown."""
+    from aisquare.services import install_route
+
+    _installed(monkeypatch)
+    monkeypatch.setattr(accounts_cli, "not_interactive_reason", lambda: None)
+    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / "aisquare home"))
+
+    def signs_in(account: ClaudeAccount, *args: Any, **kwargs: Any) -> int:
+        _sign_in(account, "two@example.com")
+        return 0
+
+    real = service.complete_sign_in
+
+    def unhooked(account: ClaudeAccount) -> Any:
+        return real(account).model_copy(update={"hooks_installed": False})
+
+    monkeypatch.setattr(service, "run_session", signs_in)
+    monkeypatch.setattr(service, "complete_sign_in", unhooked)
+    result = runner.invoke(app, ["accounts", "add"])
+    account = core.find_account(2)
+    printed = result.stderr.split("run: ", 1)[-1].splitlines()[0]
+    argv = install_route.split_line(printed)
+    again = runner.invoke(app, argv[1:])
+
+    assert result.exit_code == 0 and account is not None, result.output
+    assert " " in str(account.config_dir), "the slot is under a path with a space"
+    connect = ["aisquare", "agents", "connect", "claude-code", "--config-dir"]
+    assert argv == [*connect, str(account.config_dir)], printed
+    assert printed == install_route.command_line(argv), "quoted for this shell"
+    assert again.exit_code == 0, again.output
+
+
 def test_run_session_leaves_ctrl_c_to_the_child_and_restores_the_handler(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1084,3 +1122,28 @@ def test_launch_account_sets_the_slots_variables_over_the_binding(
     captured.clear()
     assert runner.invoke(app, ["launch", "coder", *bound]).exit_code == 0
     assert captured["env"][core.CONFIG_DIR_VAR] == "/elsewhere"
+
+
+def test_a_slot_this_user_cannot_enter_is_no_slot_and_raises_nothing(tmp_path: Path) -> None:
+    """``Path.is_dir`` and ``Path.is_file`` raised PermissionError on 3.11 to 3.13 for a slot
+    linked into a folder this user cannot enter, and for one it may list but not enter, so
+    every reader of the slots ended in a traceback, uninstall's plan among them (review of
+    #257). Neither is a slot; the slot beside them still is."""
+    if sys.platform == "win32" or not can_deny_reads() or not can_symlink():
+        pytest.skip("needs links and a folder this user cannot enter")
+    root = core.accounts_root()
+    for slot in (2, 4):
+        (root / str(slot)).mkdir(parents=True)
+        (root / str(slot) / core.MARKER).write_text(json.dumps({"slot": slot}), encoding="utf-8")
+    locked = tmp_path / "locked"
+    (locked / "x").mkdir(parents=True)
+    (root / "3").symlink_to(locked / "x", target_is_directory=True)
+    locked.chmod(0)
+    (root / "4").chmod(0o600)  # listed, never entered
+    try:
+        found = [account.slot for account in core.managed_accounts()]
+    finally:
+        locked.chmod(0o700)
+        (root / "4").chmod(0o700)
+
+    assert found == [2]

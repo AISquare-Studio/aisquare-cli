@@ -36,7 +36,7 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetSettings
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import store_session
-from aisquare.core.tmux import PaneFacts, TmuxError, TmuxServer, TmuxUnavailable
+from aisquare.core.tmux import PaneFacts, SocketAnswer, TmuxError, TmuxServer, TmuxUnavailable
 from aisquare.core.workspace import project_id_for
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, ProjectInfo, Snapshot
 from aisquare.services import diagnostics
@@ -86,9 +86,13 @@ class FakeServer(TmuxServer):
         facts_raise: bool = False,
         absent: bool = False,
         started: datetime | None = None,
+        listened: SocketAnswer | None = None,
     ) -> None:
         super().__init__(socket, conf=Path("/nonexistent/fleet-tmux.conf"))
         self._present = present
+        self._listened = listened
+        """What the socket FILE says (:meth:`listener`): ``None`` is a file nobody listens on,
+        what tmux leaves when its server exits; ``"gone"`` no file, which a server outlives."""
         self._started = started
         """What ``#{start_time}`` answers; ``None`` — tmux did not say — judges nothing."""
         self._absent = absent
@@ -100,6 +104,9 @@ class FakeServer(TmuxServer):
         self._version_raises = version_raises
         self._facts_raise = facts_raise
         self.asked: list[str] = []
+        self.per_path: dict[Path, TmuxServer] = {}
+        """Servers asked for at a path (``tmux -S``, :meth:`at`) that is not where ``-L``
+        reaches this one: a server started under another ``TMUX_TMPDIR``."""
         self.scripted: dict[tuple[str, ...], str] = {}
         """Scripted ``run`` output by argv — the fleet-terminal row's server questions (#147)."""
 
@@ -129,6 +136,10 @@ class FakeServer(TmuxServer):
         self.asked.append("server_absent")
         return self._present and self._absent
 
+    def listener(self, recorded: Path | None = None) -> SocketAnswer | None:
+        self.asked.append("listener")
+        return self._listened
+
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
         self.asked.append(f"pane_facts:{pane_id}")
         if self._facts_raise:
@@ -138,6 +149,10 @@ class FakeServer(TmuxServer):
     def started_at(self) -> datetime | None:
         self.asked.append("started_at")
         return self._started
+
+    def at(self, path: Path | None) -> TmuxServer:
+        """The server listening at ``path`` (:attr:`per_path`), else this one."""
+        return self.per_path.get(path, self) if path is not None else self
 
     def run(self, *args: str, stdin: bytes | None = None) -> str:
         self.asked.append(" ".join(args))
@@ -595,6 +610,41 @@ def test_fleet_check_warns_when_the_private_server_is_not_running(
     assert check.fix.endswith("aisquare fleet reap --all --server-down")
 
 
+def test_fleet_check_does_not_call_a_server_whose_socket_file_is_gone_not_running(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 29 of #257: tmux says "No such file or directory" for a socket file taken from
+    under a running server (systemd-tmpfiles, a logout), and `server_absent` reads that as
+    no server. The check said "is not running" and offered `reap --server-down`, which ends
+    the rows under their agents. Graded by the rule `uninstall` and `fleet shutdown` ask, a
+    row that may still run is said to, and the way back to its server comes first."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "this-boot")
+    project = _seed(tmp_path / "repo")
+    coder = _agent(project.id, "coder-1", "%2").model_copy(update={"boot_id": "this-boot"})
+    _seed(tmp_path / "repo", coder)
+    server = FakeServer(sessions=(), panes={}, absent=True, listened="gone")
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert check.status is CheckStatus.warn
+    assert "is not running" not in check.detail
+    assert "no tmux client reaches the private tmux server 'asq'" in check.detail
+    assert "may still be running: coder-1" in check.detail
+    assert check.fix and "SIGUSR1" in check.fix
+    assert check.fix.index("SIGUSR1") < check.fix.index("--server-down"), "the way back first"
+    assert "listener" in server.asked
+    # Negative control: a row from another boot cannot be running, socket file or not.
+    with store_session() as store:
+        store.upsert_fleet_agent(coder.model_copy(update={"boot_id": "an-earlier-boot"}))
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert "private tmux server 'asq' is not running: coder-1" in check.detail
+    assert "may still be running" not in check.detail
+    assert check.fix and "SIGUSR1" not in check.fix
+    assert check.fix.endswith("aisquare fleet reap --all --server-down")
+
+
 def test_fleet_check_does_not_vouch_for_a_server_that_is_silent_but_not_absent(
     home: Path, tmp_path: Path
 ) -> None:
@@ -660,6 +710,27 @@ def test_fleet_check_looks_on_the_socket_each_row_was_spawned_on(
     assert check.status is CheckStatus.ok
     assert "pane_facts:%5" in servers["asq-old"].asked
     assert "pane_facts:%5" not in servers["asq"].asked
+
+
+def test_fleet_check_asks_a_row_of_the_server_at_the_path_it_recorded(
+    home: Path, tmp_path: Path
+) -> None:
+    """Round 29 of #257: a row is asked of the server at the path its spawn recorded, as the
+    fleet asks it, not what ``tmux -L`` reaches from this shell: without the spawning shell's
+    ``TMUX_TMPDIR`` that is another server on the same name, whose dead ``%1`` read as the
+    row's agent exited and prescribed a ``reap``."""
+    project = _seed(tmp_path / "repo")
+    elsewhere = tmp_path / "elsewhere" / "tmux-1000" / "asq"  # never where `-L` looks here
+    coder = _agent(project.id, "coder-1", "%1").model_copy(update={"socket_path": elsewhere})
+    _seed(tmp_path / "repo", coder)
+    own = FakeServer(sessions=("asq-amber-otter",), panes={"%1": _facts("%1")})
+    stranger = FakeServer(sessions=("asq-someone",), panes={"%1": _facts("%1", dead=True)})
+    stranger.per_path[elsewhere] = own
+
+    check = diagnostics._check_fleet(lambda socket: stranger)
+
+    assert check.status is CheckStatus.ok, check.detail
+    assert "pane_facts:%1" in own.asked and "pane_facts:%1" not in stranger.asked
 
 
 def test_fleet_check_caps_the_labels_it_lists(home: Path, tmp_path: Path) -> None:
@@ -825,6 +896,9 @@ def test_doctor_treats_a_skeleton_only_snapshot_as_usable_and_offers_no_fix(
     monkeypatch.chdir(root)
     monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
     monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    # A machine that can pack. Where nothing can, the row also says the skeleton cannot
+    # be refreshed there (test_snapshot_optional_without_node.py), whatever is on PATH.
+    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     verdict = _skeleton_only_snapshot(_seed(root).id)
 
     check = _by_name(diagnostics.doctor())["snapshot"]
@@ -855,6 +929,9 @@ def test_doctor_reports_an_over_budget_snapshot_with_its_numbers_and_a_re_pack(
     monkeypatch.chdir(root)
     monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
     monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    # A machine that can pack. Where nothing can, the verdict reads off with no fix
+    # (test_snapshot_optional_without_node.py), whatever is on PATH.
+    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     verdict = _too_large_snapshot(_seed(root).id)
 
     check = _by_name(diagnostics.doctor())["snapshot"]
@@ -877,6 +954,9 @@ def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(
     monkeypatch.chdir(here)
     monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
     monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    # A machine that can pack, so `here`'s missing snapshot warns rather than reading
+    # off -- without a Node it is off on purpose, whatever this machine has on PATH.
+    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     # Activate the orchestrator in `there` only, with an off-ladder live session.
     monkeypatch.setenv("AISQUARE_ROLE", "runner")
     team_service.hook_session_start("sess-there-1", there, "startup", model="claude-haiku-4-5")

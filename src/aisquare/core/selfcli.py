@@ -19,6 +19,9 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
+
+from aisquare.core.state import FLAGS, RuntimeState, get_state
 
 
 @dataclass(frozen=True)
@@ -89,3 +92,51 @@ def run(
     return CliResult(
         argv=argv, returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr
     )
+
+
+def exec_self(args: Sequence[str]) -> NoReturn:
+    """Hand this terminal to ``aisquare <args>`` on THIS install, and end here.
+
+    A registered spawn seam (``core.spawn.SEAMS``), EXCLUDED: our own CLI, no
+    model process. asq's Update and Uninstall buttons come here once the UI has
+    quit (``run_ui``), and ``upgrade --reopen`` comes here to open asq again on
+    the version it just installed. POSIX replaces this process (``os.execv``),
+    so nothing of the old one keeps running, from an environment ``uv`` may be
+    replacing, and the next program owns the terminal and its exit status.
+    Windows has no such exec: its ``os.execv`` starts the program and exits at
+    once, handing the prompt back to the shell while the program still asks its
+    y/N. There the program runs as a child, waited for, and this process exits
+    with its status.
+
+    With the global flags this process was started with (:func:`global_flags`).
+    """
+    argv = argv_for([*global_flags(), *args])
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if sys.platform == "win32":
+        raise SystemExit(subprocess.call(argv))
+    os.execv(argv[0], argv)
+
+
+def global_flags() -> list[str]:
+    """The global flags this process was started with, as ``aisquare`` takes them again.
+
+    They set only the runtime state (``cli.app.main_callback``), nothing in the
+    environment, so a command :func:`exec_self` hands the terminal to lost them: after
+    ``aisquare --no-color ui``, Update printed its plan and its y/N in colour, and the
+    asq it reopened had lost ``--profile`` too, back on ``default`` (round 21 of #257).
+    ``--json`` is not one: neither asq nor ``--reopen`` hands over under it.
+
+    Every other field of the state, read through ``state.FLAGS``, the one table of the
+    flags: kept here by hand, a third list of them would drop the next flag silently
+    (round 22). Each one given goes back as itself, a value as ``--flag=VALUE`` so a
+    profile named like a flag survives.
+    """
+    state, unset = get_state(), RuntimeState()
+    flags: list[str] = []
+    for field, flag in FLAGS.items():
+        value = getattr(state, field)
+        if field == "json_output" or value == getattr(unset, field):
+            continue
+        flags.append(flag if value is True else f"{flag}={value}")
+    return flags

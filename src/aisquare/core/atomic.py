@@ -98,6 +98,11 @@ class Replacement:
         self._kept = kept
         self._durable = durable
 
+    @property
+    def temporary(self) -> Path:
+        """The temp, empty until :meth:`publish`: what the target would become, to compare."""
+        return self._temporary
+
     def publish(self, body: str) -> None:
         """Write ``body`` into the temp and rename it over the target, once.
 

@@ -39,6 +39,7 @@ from aisquare.core.selfcli import CliResult
 from aisquare.core.store import store_session
 from aisquare.core.workspace import find_project_root, git_common_root, project_id_for
 from aisquare.models import CheckStatus, DoctorCheck, ProjectInfo, SetupReport
+from aisquare.services import install_route
 
 
 class Runner(Protocol):
@@ -77,11 +78,14 @@ class PathVerdict:
     store_error: str | None = None
     """Why ``registered`` could not be read. Failing open here costs exactly one
     thing — the 'already registered' notice — and that is what this records."""
+    problem: str | None = None
+    """Why the folder cannot be used, in a caller's words, when a caller judges it further
+    (Welcome's path box: a .git it cannot look into). :func:`validate_path` never sets it."""
 
     @property
     def ok(self) -> bool:
         """Whether Onboard may run: a directory, whatever else it is or is not."""
-        return self.path is not None and self.is_dir
+        return self.path is not None and self.is_dir and self.problem is None
 
     @property
     def project_id(self) -> str | None:
@@ -96,6 +100,8 @@ class PathVerdict:
             return f"{self.path} does not exist"
         if not self.is_dir:
             return f"{self.path} is a file, not a directory"
+        if self.problem is not None:
+            return self.problem
         root = self.root if self.root is not None else self.path
         if root == self.path.resolve():
             where = f"will register {root}"
@@ -272,6 +278,16 @@ def _stderr_verdict(lines: Sequence[str]) -> str | None:
         if _EXCEPTION_LINE.match(lines[index]):
             return " ".join(lines[index:])
     return lines[-1] if lines else None
+
+
+def stderr_verdict(text: str) -> str | None:
+    """:func:`_stderr_verdict` of a child's output held as text, not a :class:`CliResult`.
+
+    ``lifecycle``'s upgrade reports what the new install's own processes said, and the
+    last line it took was the tail of a wrapped path, or a usage box's border
+    (review of #257).
+    """
+    return _stderr_verdict(_stderr_lines(CliResult(argv=[], returncode=1, stdout="", stderr=text)))
 
 
 def failure_reason(result: CliResult, step: str) -> str:
@@ -474,12 +490,18 @@ class FixCommand:
 
     @property
     def label(self) -> str:
-        return "aisquare " + " ".join(self.argv)
+        """The command as the fix it came from prints it, quoted for this shell."""
+        return install_route.command_line(["aisquare", *self.argv])
 
 
 def _argv_for(known: _KnownFix, rest: str) -> tuple[str, ...] | None:
-    """The argv for one mention, or None when the hint carries something we will not run."""
-    tokens = rest.strip().rstrip(".,:").split()
+    """The argv for one mention, or None when the hint carries something we will not run.
+    Read as the shell reads the hint (``install_route.split_line``), so a quoted
+    ``--config-dir`` is the directory itself, as a pasted command would name it."""
+    try:
+        tokens = install_route.split_line(rest.strip().rstrip(".,:"))
+    except ValueError:
+        return None
     argv = list(known.argv)
     index = 0
     while index < len(tokens):

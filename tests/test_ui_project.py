@@ -50,6 +50,7 @@ from aisquare.cli.app import app
 from aisquare.cli.ui.board import BoardPanel
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import project as project_view_module
+from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.project import ManagerTab, ProjectView
@@ -71,6 +72,7 @@ from aisquare.models import (
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services import fleet as fleet_service
+from aisquare.services import install_route
 from aisquare.services import team as team_service
 from tests.ui_workers import settle_page
 
@@ -232,6 +234,15 @@ class ScriptedServer(TmuxServer):
 
     def resize(self, pane_id: str, width: int, height: int) -> None:
         self.resizes.append((pane_id, width, height))
+
+    def at(self, path: Path | None) -> TmuxServer:
+        """This server asked for at ``path`` (``tmux -S``): scripted there too, and saying
+        where it was asked (:attr:`path`), so no real tmux is run for a recorded row."""
+        if path is None or path == self.path:
+            return self
+        there = ScriptedServer(self.socket)
+        there.path = path
+        return there
 
 
 # --- fixtures ---------------------------------------------------------------------------
@@ -421,6 +432,79 @@ def test_the_manager_pane_is_scripted_and_never_addresses_the_real_fleet(
     # The recorder is checked in this fixture's teardown; assert it here too, so
     # the failure names this test rather than an error on the way out.
     assert no_real_tmux.ran == []
+
+
+def test_the_manager_pane_asks_its_server_at_the_path_its_row_recorded(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round 29 of #257: the Manager tab's pane and its attach line, and an agent view's pane,
+    named the row's server by its socket's name (``tmux -L``). From a shell under another
+    ``TMUX_TMPDIR`` that is another server, and its ``%7`` — another agent — was shown and
+    typed into. A row recorded elsewhere is asked at its path (``tmux -S``); one from before
+    v25, by its name.
+
+    Where, the listed status says (``socket_at``, worked out with the listing's config): each
+    frame asked ``fleet_service.socket_at``, which reloaded config.toml on the UI thread for
+    every open project (round 29 of #257)."""
+    elsewhere = tmp_path / "elsewhere" / "tmux-1000" / PRIVATE_SOCKET  # not where `-L` looks
+    recorded = fake_agent(project, pane_id="%7").model_copy(update={"socket_path": elsewhere})
+    monkeypatch.setattr(fleet_service, "manager_of", lambda target: recorded)
+    monkeypatch.setattr(
+        fleet_service,
+        "status_of",
+        lambda agent: FleetAgentStatus(agent=agent, state="waiting", socket_at=elsewhere),
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host) -> TmuxServer | None:
+        await pilot.pause(0.25)  # past the 100 ms resize debounce
+        return host.query_one("#manager-pane", TerminalPane).server
+
+    server = drive(project, scenario)
+    named = fake_agent(project, pane_id="%7")
+
+    def no_config(config: object = None) -> object:
+        raise AssertionError("a frame read config.toml on the UI thread")
+
+    monkeypatch.setattr(fleet_service, "settings", no_config)
+
+    def attach_line(agent: FleetAgent, socket_at: Path | None) -> str:
+        status = FleetAgentStatus(
+            agent=agent, state="waiting", tmux_session="asq-amber-otter", socket_at=socket_at
+        )
+        return project_view_module.manager_text(status).plain
+
+    assert isinstance(server, ScriptedServer) and server.path == elsewhere, server
+    assert server.captures, "the frame came from the server at the recorded path"
+    assert f"tmux -S {elsewhere} attach -t =asq-amber-otter" in attach_line(recorded, elsewhere)
+    assert f"tmux -L {PRIVATE_SOCKET} attach -t =asq-amber-otter" in attach_line(named, None)
+    shown = FleetAgentStatus(agent=recorded, socket_at=elsewhere)
+    assert AgentView(shown, escape_key="ctrl+]").server.path == elsewhere
+    by_name = AgentView(FleetAgentStatus(agent=named), escape_key="ctrl+]")
+    assert by_name.server.path is None, "asked by its name"
+
+
+def test_the_attach_line_quotes_the_path_and_the_socket_name_it_prints(
+    project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Round 29 of #257: the Manager tab pasted the recorded socket path into its attach line
+    as it was, so a ``TMUX_TMPDIR`` with a space or a ``$`` gave a line that failed or named
+    another path, and so did a free-form ``[fleet] tmux_socket``. Quoted for this shell, it
+    reads back as the command it names."""
+    odd = tmp_path / "my $HOME" / "tmux-1000" / "asq one"
+    recorded = fake_agent(project, pane_id="%7").model_copy(
+        update={"socket_path": odd, "tmux_socket": "asq one"}
+    )
+
+    def attach_argv(socket_at: Path | None) -> list[str]:
+        status = FleetAgentStatus(
+            agent=recorded, state="waiting", tmux_session="asq-amber-otter", socket_at=socket_at
+        )
+        header = project_view_module.manager_text(status).plain.splitlines()[0]
+        return install_route.split_line(header.split("  ·  ", 1)[1])
+
+    session = ["attach", "-t", "=asq-amber-otter"]
+    assert attach_argv(odd) == ["tmux", "-S", str(odd), *session]
+    assert attach_argv(None) == ["tmux", "-L", "asq one", *session]
 
 
 def test_no_button_and_no_spawn_when_a_manager_already_runs(

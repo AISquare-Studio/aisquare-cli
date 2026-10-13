@@ -15,7 +15,7 @@ from textual.app import App
 from textual.message import Message
 from textual.worker import Worker, WorkerState
 
-from tests.ui_workers import settle_page
+from tests.ui_workers import settle_page, settle_until
 
 HELD = 0.3
 """How long a reading takes: many times one pause's idle check, which counts the
@@ -68,6 +68,33 @@ def test_a_worker_whose_starting_message_is_still_queued_is_waited_for() -> None
     queued when the test settled, so there was no worker to wait for yet, and a
     wait for the workers that existed returned with the reading still to come."""
     assert _settled_readings(Page()) == ["first"]
+
+
+def test_settle_until_reads_the_page_once_the_fact_holds_and_gives_up_quietly() -> None:
+    """``settle_until`` waits for the fact the test asserts, however late the worker that
+    makes it true starts: from a timer here, which no settle can see coming, as the
+    Accounts page's usage reading once started from a ``Show`` handled after its test
+    had settled. A fact that never holds costs the timeout, and the test's own
+    assertion is what fails."""
+
+    async def run() -> tuple[list[str], list[str], float]:
+        page = Page()
+        async with page.run_test() as pilot:
+            await pilot.pause()
+            far = page.set_timer(60, lambda: page._read("never"))
+            await settle_page(page)
+            quiet = list(page.readings)  # the control: a settle cannot see a timer coming
+            far.stop()
+            page.set_timer(HELD, lambda: page._read("late"))
+            await settle_until(page, lambda: page.readings)
+            started = time.monotonic()
+            await settle_until(page, lambda: False, timeout=HELD)
+            return quiet, list(page.readings), time.monotonic() - started
+
+    quiet, read, gave_up_after = asyncio.run(run())
+    assert quiet == []
+    assert read == ["late"]
+    assert gave_up_after >= HELD
 
 
 def test_a_worker_that_a_finished_workers_handler_starts_is_waited_for() -> None:

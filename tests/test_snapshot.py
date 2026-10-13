@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -131,6 +132,209 @@ def test_repomix_base_still_reports_when_nothing_is_installed(
     monkeypatch.setattr("aisquare.core.snapshot.shutil.which", lambda _name: None)
     with pytest.raises(snapshot.RepomixUnavailableError):
         snapshot._repomix_base()
+
+
+def _on_path(monkeypatch: pytest.MonkeyPatch, *present: str) -> None:
+    monkeypatch.setattr(
+        "aisquare.core.snapshot.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in present else None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("present", "expected"),
+    [
+        # A packer and a Node to run it on: the two ways a pack can run.
+        (("node", "repomix"), True),
+        (("node", "npx"), True),
+        (("node", "npx", "repomix"), True),
+        # Either packer alone is a `#!/usr/bin/env node` script with no Node.
+        (("repomix",), False),
+        (("npx",), False),
+        (("npx", "repomix"), False),
+        # A Node with nothing to run on it.
+        (("node",), False),
+        # The memory-only machine.
+        ((), False),
+    ],
+)
+def test_can_pack_needs_a_packer_and_a_node(
+    monkeypatch: pytest.MonkeyPatch, present: tuple[str, ...], expected: bool
+) -> None:
+    _on_path(monkeypatch, *present)
+    assert snapshot.can_pack() is expected
+
+
+def test_can_pack_starts_no_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PATH lookups only: the doctor asks it once per row, so it must stay cheap."""
+
+    def no_process(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("can_pack started a process")
+
+    monkeypatch.setattr("aisquare.core.snapshot.subprocess.run", no_process)
+    _on_path(monkeypatch, "node", "npx")
+    assert snapshot.can_pack() is True
+
+
+def _node_reads(monkeypatch: pytest.MonkeyPatch, version: tuple[int, ...] | None) -> None:
+    """What `node --version` answers, without running a node (the PATH above is fake)."""
+    monkeypatch.setattr(snapshot, "node_version", lambda: version)
+
+
+def test_a_missing_snapshot_is_off_without_node_and_failed_with_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sentences `init` and `project onboard` print when no snapshot came back."""
+    _node_reads(monkeypatch, (26, 7, 0))
+    monkeypatch.setattr(snapshot, "installed_repomix_floor", lambda: None)
+    _on_path(monkeypatch)
+    off = snapshot.skipped_detail()
+    _on_path(monkeypatch, "node")
+    no_packer = snapshot.skipped_detail()
+    _on_path(monkeypatch, "node", "repomix")
+    failed = snapshot.skipped_detail()
+    assert off == snapshot.OFF_DETAIL
+    assert failed == snapshot.FAILED_DETAIL
+    # Telling someone who has Node to install Node is the confusion this split removes:
+    # a pack that failed blames no cause, and a Node with no packer names the packer.
+    assert "Node" not in failed
+    assert no_packer == snapshot.NO_PACKER_DETAIL
+    assert "Node.js" not in no_packer and "repomix" in no_packer
+
+
+@pytest.mark.parametrize(
+    ("present", "node", "installed_floor", "named"),
+    [
+        # npx fetches the latest repomix, whose floor is MIN_NODE: Ubuntu 22.04's 12.
+        (("node", "npx"), (12, 22, 9), (16,), "Node 12.22.9 is older than repomix needs (22+)"),
+        # An installed repomix is judged by the floor it declares, higher or lower.
+        (("node", "repomix"), (22, 1, 0), (24,), "Node 22.1.0 is older than repomix needs (24+)"),
+    ],
+    ids=["npx-path", "installed-repomix"],
+)
+def test_a_node_too_old_for_the_repomix_that_ran_is_named(
+    monkeypatch: pytest.MonkeyPatch,
+    present: tuple[str, ...],
+    node: tuple[int, ...],
+    installed_floor: tuple[int, ...],
+    named: str,
+) -> None:
+    """Debian 12 and Ubuntu 22.04's packaged Node: the pack fails, and the line says why."""
+    _on_path(monkeypatch, *present)
+    _node_reads(monkeypatch, node)
+    monkeypatch.setattr(snapshot, "installed_repomix_floor", lambda: installed_floor)
+
+    detail = snapshot.skipped_detail()
+
+    assert detail.startswith(f"skipped — {named}"), detail
+    assert detail.endswith("run: aisquare doctor")
+
+
+@pytest.mark.parametrize(
+    ("present", "node", "installed_floor"),
+    [
+        # A pinned repomix that declares a LOWER floor packs on Node 18: no accusation.
+        (("node", "repomix"), (18, 19, 1), (16,)),
+        # Unreadable is not presumed old, as in the doctor's repomix row.
+        (("node", "npx"), None, None),
+    ],
+    ids=["installed-floor-met", "unreadable"],
+)
+def test_a_node_that_is_not_known_to_be_too_old_is_not_blamed(
+    monkeypatch: pytest.MonkeyPatch,
+    present: tuple[str, ...],
+    node: tuple[int, ...] | None,
+    installed_floor: tuple[int, ...] | None,
+) -> None:
+    _on_path(monkeypatch, *present)
+    _node_reads(monkeypatch, node)
+    monkeypatch.setattr(snapshot, "installed_repomix_floor", lambda: installed_floor)
+
+    assert snapshot.skipped_detail() == snapshot.FAILED_DETAIL
+
+
+#: What npm prints when ``npx`` cannot reach the registry (measured with npm 11).
+_NPM_OFFLINE = (
+    "npm error code ENOTFOUND\n"
+    "npm error syscall getaddrinfo\n"
+    "npm error errno ENOTFOUND\n"
+    "npm error network request to https://registry.npmjs.org/repomix failed, "
+    "reason: getaddrinfo ENOTFOUND registry.npmjs.org\n"
+    "npm error network This is a problem related to network connectivity.\n"
+)
+_NPM_REASON = (
+    "npm error network request to https://registry.npmjs.org/repomix failed, "
+    "reason: getaddrinfo ENOTFOUND registry.npmjs.org"
+)
+_NPX = ["/opt/node/bin/npx", "--yes", "repomix", "--style", "xml"]
+
+
+@pytest.mark.parametrize(
+    ("exc", "said"),
+    [
+        # repomix marks its own error with a cross, coloured even into a pipe in CI.
+        (
+            subprocess.CalledProcessError(
+                1,
+                ["/usr/local/bin/repomix", "--style", "xml"],
+                output="",
+                stderr="\x1b[31m✖ Invalid config schema\x1b[39m\n\n  [output.style] Invalid type\n",
+            ),
+            "Invalid config schema",
+        ),
+        # npx could not fetch repomix: npm names the cause after `reason:`.
+        (subprocess.CalledProcessError(1, _NPX, output="", stderr=_NPM_OFFLINE), _NPM_REASON),
+        # Bytes, from a caller that captured without text=True.
+        (
+            subprocess.CalledProcessError(
+                1, _NPX, stderr="✖ Unexpected error: EACCES: permission denied".encode()
+            ),
+            "Unexpected error: EACCES: permission denied",
+        ),
+        (subprocess.CalledProcessError(1, _NPX), "npx exited 1 without saying why"),
+        (subprocess.TimeoutExpired(_NPX, 600), "repomix ran longer than 600 seconds"),
+        (PermissionError(13, "Permission denied"), "[Errno 13] Permission denied"),
+    ],
+    ids=["repomix-error", "npx-offline", "bytes", "silent", "timeout", "os-error"],
+)
+def test_a_failed_pack_is_explained_in_the_packers_own_words(exc: BaseException, said: str) -> None:
+    """What ``init`` and ``project onboard`` print after "the pack failed" (review of #257).
+
+    The reason was thrown away, and the line sent people to a doctor that reads only
+    PATH and snapshot.json, so nothing anywhere said why.
+    """
+    assert snapshot.failure_reason(exc) == said
+
+
+def test_a_long_reason_is_cut_to_one_line() -> None:
+    reason = snapshot.failure_reason(
+        subprocess.CalledProcessError(1, _NPX, stderr="✖ " + "x" * 1000)
+    )
+
+    assert len(reason) == snapshot._REASON_MAX
+    assert reason.endswith("…")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in npx is a POSIX shell script")
+def test_the_reason_is_what_the_packer_wrote_to_stderr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Through the real ``_run_repomix``: the child's own stderr reaches the reason."""
+    npx = tmp_path / "npx"
+    npx.write_text(
+        "#!/bin/sh\n"
+        + "".join(f"echo '{line}' >&2\n" for line in _NPM_OFFLINE.splitlines())
+        + "exit 1\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    npx.chmod(0o755)
+    monkeypatch.setattr(snapshot, "_repomix_base", lambda: [str(npx), "--yes", "repomix"])
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        _REAL_RUN_REPOMIX(tmp_path, compress=False)
+
+    assert snapshot.failure_reason(raised.value) == _NPM_REASON
 
 
 def test_child_output_is_decoded_as_utf8_not_the_locale_codec(

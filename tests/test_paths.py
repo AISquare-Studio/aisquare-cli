@@ -206,7 +206,7 @@ def test_the_tools_run_from_system32_and_whoami_is_asked_once(
     current directory before System32's, and a fake ``whoami`` could hand the grant to
     Everyone. The SID is asked once per process, not once per restriction (review of #65,
     R8)."""
-    monkeypatch.setattr(paths, "_dacl_sddl", lambda _path: f"D:P(A;;0x12019f;;;{_ME})")
+    monkeypatch.setattr(paths, "dacl_sddl", lambda _path: f"D:P(A;;0x12019f;;;{_ME})")
     secret = tmp_path / "credentials"
     assert paths.restrict_to_owner(secret) is True
     assert paths.restrict_to_owner(secret) is True
@@ -226,9 +226,9 @@ def test_a_grant_the_call_left_behind_is_reported(
     back still grants INTERACTIVE, so the file is not owner-only and the answer is False;
     a DACL that cannot be read back is not vouched for either."""
     secret = tmp_path / "credentials"
-    monkeypatch.setattr(paths, "_dacl_sddl", lambda _path: f"D:P(A;;0x12019f;;;{_ME})(A;;FR;;;IU)")
+    monkeypatch.setattr(paths, "dacl_sddl", lambda _path: f"D:P(A;;0x12019f;;;{_ME})(A;;FR;;;IU)")
     assert paths.restrict_to_owner(secret) is False
-    monkeypatch.setattr(paths, "_dacl_sddl", lambda _path: None)
+    monkeypatch.setattr(paths, "dacl_sddl", lambda _path: None)
     assert paths.restrict_to_owner(secret) is False
 
 

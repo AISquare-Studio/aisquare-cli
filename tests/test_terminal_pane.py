@@ -3695,14 +3695,17 @@ def test_the_too_old_notice_words_an_unknown_version_rather_than_asserting_it_aw
     assert severities == ["warning"]
 
 
+@pytest.mark.parametrize("at_a_path", [False, True], ids=["another-socket", "same-name-at-a-path"])
 def test_the_too_old_notice_follows_the_pane_to_its_next_server(
-    fake: FakeTmux, tmp_path: Path
+    fake: FakeTmux, tmp_path: Path, at_a_path: bool
 ) -> None:
     """The line names a server's version, and a pane outlives its server: a
     notice deduped across servers prescribed an upgrade for the server the
     pane had LEFT while the keystroke on the new one was lost without a word
     (review of #161, round 6). The line is deduped per server — per socket,
-    as two servers always are — so the next one hears it (round 7)."""
+    as two servers always are — so the next one hears it (round 7). A server
+    asked at a path under the same socket name is another server too (round 29
+    of #257)."""
     fake.version = "tmux 3.3"
     older = FakeTmux()
     older.version = "tmux 3.4"
@@ -3716,7 +3719,11 @@ def test_the_too_old_notice_follows_the_pane_to_its_next_server(
             await pilot.pause()
             await pilot.press("ctrl+shift+enter", "ctrl+shift+enter")
             await pilot.pause()
-            pane.server = older.server(tmp_path, socket="older")
+            pane.server = (
+                older.server(tmp_path).at(tmp_path / "elsewhere" / "fake")
+                if at_a_path
+                else older.server(tmp_path, socket="older")
+            )
             pane.attach("%1")
             await pilot.pause()
             await pilot.press("ctrl+shift+enter", "ctrl+shift+enter")
@@ -3797,6 +3804,40 @@ def test_attach_re_reads_the_version_for_a_new_server(fake: FakeTmux, tmp_path: 
     modern_sent, old_sent = run(drive())
     assert modern_sent == [("S-Enter",)]  # the 3.7c server got the chord…
     assert old_sent == [("C-j",)], "…and the 3.4 one its older spelling: the version was re-read"
+
+
+def test_two_servers_on_one_socket_name_are_asked_their_versions_apart(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Round 29 of #257: the version was cached by the socket's NAME, and a pane is now
+    built as ``TmuxServer(name).at(path)``: this shell's ``-L`` server and one asked at its
+    recorded path under another ``TMUX_TMPDIR`` share the name. Whichever was asked first
+    decided the chords for both, so a 3.4 server at the path was sent ``S-Enter``, which it
+    types into the agent. Each server is asked for its own version."""
+    old = FakeTmux()
+    old.version = "tmux 3.4"
+    old.panes["%1"] = FakePane(screen=["older server, same name"])
+    elsewhere = tmp_path / "elsewhere" / "tmux-1000" / "fake"
+
+    async def drive() -> tuple[list[tuple[str, ...]], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await pilot.pause()
+            await pilot.press("shift+enter")
+            await pilot.pause()
+            modern = fake.sent()
+            pane.server = old.server(tmp_path).at(elsewhere)  # the name "fake" again
+            pane.attach("%1")
+            await pilot.pause()
+            await pilot.press("shift+enter")
+            await pilot.pause()
+            return modern, old.sent()
+
+    modern_sent, old_sent = run(drive())
+    assert modern_sent == [("S-Enter",)]  # the 3.7c server got the chord…
+    assert old_sent == [("C-j",)], "…and the 3.4 one at the path its older spelling"
 
 
 def test_the_version_is_the_running_servers_not_the_binary_on_path(

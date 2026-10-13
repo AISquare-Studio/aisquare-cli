@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from aisquare.cli.common import emit_agents, emit_connected, emit_disconnected, fail
-from aisquare.core.console import stderr_console
+from aisquare.core.console import stderr_console, stdout_console
+from aisquare.core.state import get_state
 from aisquare.services import agents as agents_service
 
 app = typer.Typer(help="Detect and connect coding agents.", no_args_is_help=True)
@@ -57,21 +59,58 @@ def connect(name: AgentName, config_dir: ConfigDir = None) -> None:
         connection = agents_service.connect(name, config_dir)
     except KeyError:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
-    except ValueError as exc:
+    except agents_service.UnsupportedAgentError as exc:
+        fail(str(exc), error="unsupported_agent", ref=name)
+    except agents_service.AgentFileUnreadableError as exc:
+        # `detail` too: under --json `fail` drops the message, and asq's Connect
+        # button shows the error with its detail, so the file is named there as well.
+        fail(str(exc), error="agent_file_unreadable", ref=name, detail=str(exc))
+    except agents_service.AgentNotInstalledError as exc:
         fail(str(exc), error="not_installed", ref=name)
     emit_connected(connection)
+    beside = agents_service.plugin_beside_note(name, config_dir)
+    if beside is not None:
+        stderr_console().print(f"note: {beside}")
 
 
 @app.command("disconnect")
 def disconnect(name: AgentName, config_dir: ConfigDir = None) -> None:
     """Disconnect an agent (its already-imported context is kept)."""
+    refusal = agents_service.access(name, config_dir).disconnect
+    if refusal is not None:
+        # Before anything is touched: hooks it cannot take out keep their record too.
+        fail(refusal.why, error="agent_file_unreadable", ref=name, detail=refusal.why)
     try:
         removed = agents_service.disconnect(name, config_dir)
     except KeyError:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
-    if not removed:
-        stderr_console().print(
-            "note: no aisquare hooks found in that config dir — if you connected "
-            "with --config-dir, disconnect with the same one"
-        )
+    except agents_service.AgentFileUnreadableError as exc:
+        fail(str(exc), error="agent_file_unreadable", ref=name, detail=str(exc))
+    for note in agents_service.disconnect_notes(name, config_dir, removed=removed):
+        stderr_console().print(f"note: {note}")
     emit_disconnected(name)
+
+
+@app.command("refresh-hooks", hidden=True)
+def refresh_hooks(name: AgentName, config_dir: ConfigDir = None) -> None:
+    """Rewrite aisquare's hooks for this version and import nothing.
+
+    Plumbing for ``aisquare upgrade``, which runs it in the NEW install for each
+    directory it re-connects. Kept hidden: ``agents connect`` is the command a
+    person types. Later releases must keep it, or an upgrade from this one
+    cannot refresh hooks.
+    """
+    try:
+        written = agents_service.refresh_hooks(name, config_dir)
+    except KeyError:
+        fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
+    except agents_service.AgentFileUnreadableError as exc:
+        fail(str(exc), error="agent_file_unreadable", ref=name, detail=str(exc))
+    except ValueError as exc:
+        fail(str(exc), error="not_installed", ref=name)
+    if not written:
+        fail(f"{name} has no hooks for aisquare to write", error="no_hooks", ref=name)
+    if get_state().json_output:
+        typer.echo(json.dumps({"name": name, "hooks_installed": True}))
+    else:
+        stdout_console().print(f"✓ hooks rewritten for {name}")

@@ -7,9 +7,13 @@ stubbed. Unknown keys in the file are ignored so old configs keep loading.
 from __future__ import annotations
 
 import codecs
+import contextlib
+import contextvars
 import errno
 import os
+import re
 import tomllib
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -250,15 +254,178 @@ def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
     ``ui-tester`` carries no ``extra_args`` here: its ``--chrome`` is the role's own
     default (``harness.ROLE_PROFILES[...].default_args``) and is added by ``launch``
     inside the window, so it applies to a hand-started ui-tester too.
+
+    ``reviewer`` carries :data:`REVIEWER_ARGS`. It was launched ``--restricted`` as
+    "read-only by construction", and Claude Code's ``--restricted`` removes Bash
+    (2.1.296: unless ``--tools`` names it, and then only the named tools remain), so
+    the reviewer could run none of ``aisquare task next``, ``gh pr diff`` or ``gh pr
+    review`` — every step of its cycle — and no subagent it spawned could either,
+    because a subagent's tools come from its session's. It kept ``Edit`` and
+    ``Write``, so it was not read-only either. It now keeps the shell and is denied
+    the tools that edit files. The shell is NOT read-only: a PR that injects
+    ``sed -i``, ``git push`` or ``gh pr merge`` meets only its briefing and the
+    ``auto`` mode's per-action classifier (round 25 of #257). No allowlist of commands
+    holds it: its inline comments are ``gh api`` POSTs, a prefix a merge shares, and
+    verifying a finding runs the PR's own code. What holds against a PR that steers
+    it is the credentials it runs with: a ``gh`` token that cannot write contents
+    cannot push or merge, and branch protection.
     """
     return {
         "manager": FleetRoleSettings(),
         "coder": FleetRoleSettings(worktree=True),
         "tester": FleetRoleSettings(),
-        "reviewer": FleetRoleSettings(worktree=True, extra_args=["--restricted"]),
+        "reviewer": FleetRoleSettings(worktree=True, extra_args=list(REVIEWER_ARGS)),
         "validator": FleetRoleSettings(),
         "ui-tester": FleetRoleSettings(),
     }
+
+
+#: The reviewer's built-in ``extra_args``: Claude Code without the tools that edit files.
+#: One token, because the flag takes a variadic list and separate words would go on
+#: swallowing whatever plain word came after them on the command line; the names apart
+#: by spaces, which Claude Code splits on as it does on commas, because ``config set``
+#: splits a list on commas and ``config get`` joins one with them.
+REVIEWER_ARGS = ("--disallowedTools=Edit Write NotebookEdit",)
+
+
+#: The reviewer's built-in ``extra_args`` in 0.6.0 and 0.7.0, which left it no shell
+#: (see ``_default_fleet_roles``). ``aisquare config set`` and the Settings page write
+#: every role out in full, so a config file either of them saved holds this list for the
+#: reviewer whether or not anyone chose it.
+_FORMER_REVIEWER_ARGS = ["--restricted"]
+
+#: The version of the config file's format this build writes, at its top as
+#: ``config_version``. A file without one was saved by 0.7.0 or earlier: version 0. Each
+#: step of :data:`_MIGRATIONS` brings a file from one version to the next as it loads, and
+#: the next save records the version reached, so a step runs once per file: what the file
+#: holds after that was written by a build that knew the step, and is kept. Not a setting,
+#: and not a field.
+CONFIG_VERSION = 1
+_VERSION_KEY = "config_version"
+
+
+def replacing_the_former_reviewer_default(args: Sequence[str]) -> list[str]:
+    """``args``, or :data:`REVIEWER_ARGS` when they are exactly 0.6.0/0.7.0's reviewer default.
+
+    For what those releases wrote in a config file and nobody chose
+    (:func:`_replace_the_former_reviewer_default`): there a longer list was chosen. A
+    launch spec is :func:`replacing_the_former_reviewer_default_first`'s.
+    """
+    return list(REVIEWER_ARGS) if list(args) == _FORMER_REVIEWER_ARGS else list(args)
+
+
+def replacing_the_former_reviewer_default_first(
+    args: Sequence[str], today: Sequence[str]
+) -> list[str]:
+    """``args`` with 0.6.0/0.7.0's reviewer default replaced by ``today`` where it leads them,
+    the rest kept: for a reviewer's launch spec those releases recorded, which a restart
+    replays (``services.fleet``). ``today`` is the reviewer's ``extra_args`` in today's
+    config, so the restart launches with the role arguments a fresh spawn does: replaced
+    by :data:`REVIEWER_ARGS` alone whatever the config said, a reviewer its operator gave
+    ``--model opus`` came back without it (round 21).
+
+    A spec records the role's ``extra_args`` followed by the caller's, so a reviewer
+    spawned with arguments of its own (``fleet spawn reviewer -- --model opus``) recorded
+    ``["--restricted", "--model", "opus"]``. Matched exactly, as a config file is, that
+    reviewer came back with no shell on every restart (round 19 of #257).
+
+    The spec alone cannot tell that default from a list the operator wrote in config,
+    ``["--restricted", "--model", "opus"]`` too, which loading keeps as written. Today's
+    config can: it has been through :func:`_replace_the_former_reviewer_default`, so a
+    ``--restricted`` still leading it was chosen, and the spec is replayed as recorded.
+    Replaced regardless, a reviewer its operator kept from the shell got one on restart
+    while a fresh spawn did not (round 20).
+
+    Nor can it tell the default from a ``--restricted`` the caller gave first (``fleet
+    spawn reviewer -- --restricted`` under ``extra_args = []``). So where ``today`` does
+    not deny the editing tools, :data:`REVIEWER_ARGS` goes in beside it: replaced by an
+    empty ``today`` alone, a reviewer its operator kept locked down came back with Bash,
+    Edit and Write (round 22). That errs toward the reviewer without them, which a fresh
+    spawn then gives every tool ``today`` does. Whether ``today`` denies them is read off
+    the tools it denies (:func:`_denied_tools`), however it spells the list: matched as
+    :data:`REVIEWER_ARGS`'s one token, a list given as two words, with commas or with one
+    tool more got a second ``--disallowedTools`` beside it (round 23).
+    """
+    args = list(args)
+    if list(today[: len(_FORMER_REVIEWER_ARGS)]) == _FORMER_REVIEWER_ARGS:
+        return args
+    if args[: len(_FORMER_REVIEWER_ARGS)] == _FORMER_REVIEWER_ARGS:
+        denied = _denied_tools(REVIEWER_ARGS) <= _denied_tools(today)
+        replacement = list(today) if denied else [*today, *REVIEWER_ARGS]
+        return [*replacement, *args[len(_FORMER_REVIEWER_ARGS) :]]
+    return args
+
+
+_DISALLOWED_TOOLS = ("--disallowedTools", "--disallowed-tools")
+"""Claude Code's flag for the tools a session may not use, in both its spellings."""
+
+
+def _denied_tools(args: Sequence[str]) -> set[str]:
+    """The tools ``args`` deny Claude Code: each value of ``--disallowedTools``, given with
+    ``=`` or as the words after the flag up to the next option, split on spaces and commas
+    as Claude Code splits it."""
+    denied: set[str] = set()
+    taking = False
+    for arg in args:
+        flag, equals, value = arg.partition("=")
+        if flag in _DISALLOWED_TOOLS:
+            taking = not equals
+            denied.update(re.split(r"[\s,]+", value))
+        elif arg.startswith("-"):
+            taking = False
+        elif taking:
+            denied.update(re.split(r"[\s,]+", arg))
+    denied.discard("")
+    return denied
+
+
+def _replace_the_former_reviewer_default(data: dict[str, Any]) -> None:
+    """A reviewer a 0.6.0 or 0.7.0 save left with exactly ``["--restricted"]`` loads with today's.
+
+    Changing the default alone fixes nothing for a config file that already holds it,
+    and every 0.6.0 or 0.7.0 save holds it. Once, not on every load: the step from
+    version 0 (:data:`_MIGRATIONS`), so the old list chosen afterwards, with ``config
+    set``, is kept like any other. Replaced on every load
+    instead, it was impossible to choose: ``config set`` reported it saved, the fleet
+    launched without it and the next save erased it (review of #257). A reviewer given
+    any other list — ``--restricted`` with more beside it included — keeps that list.
+    Read from the file's own data, before the model: a model validator would rewrite
+    every ``AppConfig`` built in memory too, ``config set``'s among them.
+    """
+    fleet = data.get("fleet")
+    if not isinstance(fleet, dict):
+        return
+    roles = fleet.get("roles")
+    reviewer = roles.get("reviewer") if isinstance(roles, dict) else None
+    if isinstance(reviewer, dict) and isinstance(reviewer.get("extra_args"), list):
+        reviewer["extra_args"] = replacing_the_former_reviewer_default(reviewer["extra_args"])
+
+
+#: The steps that bring a config file to :data:`CONFIG_VERSION`, in order: the one at
+#: index ``n`` takes a parsed file from version ``n`` to ``n + 1``, in place.
+_MIGRATIONS: tuple[Callable[[dict[str, Any]], None], ...] = (_replace_the_former_reviewer_default,)
+
+
+def _migrate(data: dict[str, Any]) -> None:
+    """Bring a parsed config file to :data:`CONFIG_VERSION`, in place: every step of
+    :data:`_MIGRATIONS` from the file's own version on. The version is taken out, not
+    being a setting."""
+    version = data.pop(_VERSION_KEY, None)
+    if not isinstance(version, int) or isinstance(version, bool) or version < 0:
+        version = 0
+    for step in _MIGRATIONS[version:]:
+        step(data)
+
+
+def _versioned(dumped: dict[str, Any]) -> dict[str, Any]:
+    """``dumped`` as a file this build writes: ``config_version`` at its top.
+
+    A higher version, which a newer build wrote and ``_keep_unknown`` kept, stays: that
+    build's steps have run on the file, and must not run again on what this one saved.
+    """
+    kept = dumped.pop(_VERSION_KEY, None)
+    newer = isinstance(kept, int) and not isinstance(kept, bool) and kept > CONFIG_VERSION
+    return {_VERSION_KEY: kept if newer else CONFIG_VERSION, **dumped}
 
 
 class FleetSettings(BaseModel):
@@ -445,17 +612,43 @@ def _parse_toml(raw: bytes) -> dict[str, Any]:
     return loaded
 
 
+_ONE_LOAD: contextvars.ContextVar[dict[Path, AppConfig] | None] = contextvars.ContextVar(
+    "_ONE_LOAD", default=None
+)
+
+
+@contextlib.contextmanager
+def one_load() -> Iterator[None]:
+    """Within it, :func:`load_config` reads and parses each file once, for readers that only
+    read: Welcome's probe, every two seconds, loaded config.toml once for the agent binding
+    and again for the coders' folder (round 25 of #257). A load that fails is not kept.
+    Never across uses."""
+    token = _ONE_LOAD.set({})
+    try:
+        yield
+    finally:
+        _ONE_LOAD.reset(token)
+
+
 def load_config(path: Path | None = None) -> AppConfig:
     """Load configuration from ``path`` (default: the standard location).
 
-    A missing file yields the built-in defaults.
+    A missing file yields the built-in defaults. Within :func:`one_load`, a file loaded
+    already is not read again.
     """
     target = path or paths.config_path()
+    loaded = _ONE_LOAD.get()
+    if loaded is not None and target in loaded:
+        return loaded[target]
     if not target.exists():
-        return AppConfig()
-
-    data = _parse_toml(despite_windows_contention(target.read_bytes))
-    return AppConfig.model_validate(data)
+        config = AppConfig()
+    else:
+        data = _parse_toml(despite_windows_contention(target.read_bytes))
+        _migrate(data)
+        config = AppConfig.model_validate(data)
+    if loaded is not None:
+        loaded[target] = config
+    return config
 
 
 def save_config(
@@ -575,7 +768,8 @@ def save_config(
                 raise
         else:
             dumped = _keep_unknown(existing, dumped, config)
-    payload = tomli_w.dumps(dumped)
+    # What this writes is this build's, at the version every step has reached (_migrate).
+    payload = tomli_w.dumps(_versioned(dumped))
 
     # Written BESIDE the target and renamed over it, never into the target
     # itself — ``core.atomic.write_replacing``, the durable-replace recipe this

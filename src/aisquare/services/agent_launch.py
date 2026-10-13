@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -166,10 +166,17 @@ def resolve(
         source,
         profile,
         # Claude Code's as written (core.agents._claude_home), as every reader names it.
-        agents._claude_home(env=effective_env)
+        _claude_home(effective_env)
         if adapter.id == "claude-code"
         else config_home(adapter, agents._home(), effective_env),
     )
+
+
+def _claude_home(env: Mapping[str, str]) -> Path:
+    """Claude Code's config dir for a launch whose environment is ``env``: the binding's or
+    this shell's ``CLAUDE_CONFIG_DIR``, else ``~/.claude``, as ``core.agents`` names it."""
+    value = env.get("CLAUDE_CONFIG_DIR", "").strip()
+    return agents._claude_home(Path(value) if value else None)
 
 
 def use(name: str, *, project: bool = False, cwd: Path | None = None) -> str:

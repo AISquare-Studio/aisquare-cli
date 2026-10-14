@@ -1013,7 +1013,7 @@ def test_settings_holds_the_nickname_and_shows_the_codename_without_a_rename(
     the machine-wide form is App settings."""
     named = project.model_copy(update={"codename": "amber-otter", "nickname": "Auth work"})
 
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, str, str, list[str]]:
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, str, str, list[str], str]:
         form = SettingsView(named, id="probe-settings")
         await host.mount(form)
         await pilot.pause()
@@ -1024,14 +1024,17 @@ def test_settings_holds_the_nickname_and_shows_the_codename_without_a_rename(
             for wid in ("#codename", "#rename-codename", "#perm-coder", "#accounts-pick")
             if form.query(wid)
         ]
-        return field.value, str(field.placeholder), line, machine
+        note = shown(form.query_one("#settings-note", Static))
+        return field.value, str(field.placeholder), line, machine, note
 
-    value, placeholder, line, machine_fields = drive(project, scenario)
+    value, placeholder, line, machine_fields, note = drive(project, scenario)
     assert value == "Auth work" and placeholder == project.root.name
     assert line == (
         "fleet id: amber-otter — tmux session asq-amber-otter, branches fleet/amber-otter/…"
     )
     assert machine_fields == [], "no codename rename, and nothing machine-wide"
+    assert "aisquare project rename sets the same" in note
+    assert "`" not in note, "the note is a Text: backticks would show as they are"
 
 
 def test_settings_saves_a_nickname_and_a_blank_one_clears_it(project: ProjectInfo) -> None:

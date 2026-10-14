@@ -107,11 +107,13 @@ class SettingsView(VerticalScroll):
             )
             yield Button("Save", id="save-nickname", variant="primary")
         yield Static(fleet_id_line(self.project), id="fleet-id")
+        # The command in bold, not in backticks: the note is a ``Text``, which shows them.
         yield Static(
-            Text(
-                "The nickname is the name every list shows; blank shows the folder name. "
-                "`aisquare project rename` sets the same. The settings for every project — "
-                "roles, the fleet, accounts — are in App settings."
+            Text.assemble(
+                "The nickname is the name every list shows; blank shows the folder name. ",
+                ("aisquare project rename", "bold"),
+                " sets the same. The settings for every project — roles, the fleet, "
+                "accounts — are in App settings.",
             ),
             id="settings-note",
         )

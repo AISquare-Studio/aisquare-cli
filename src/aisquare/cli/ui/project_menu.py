@@ -8,6 +8,7 @@ and ``[wip]`` is not markup.
 
 from __future__ import annotations
 
+import shlex
 from typing import ClassVar
 
 from rich.text import Text
@@ -19,6 +20,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, OptionList, Static
 from textual.widgets.option_list import Option
 
+from aisquare.cli.ui.sidebar import SETTINGS_ICON
 from aisquare.models import ProjectInfo
 from aisquare.services.project import display_name
 
@@ -28,7 +30,8 @@ SETTINGS = "settings"
 REMOVE = "remove"
 
 MENU_WIDTH = 26
-"""The menu's columns, its border included: it fits the narrowest sidebar beside it."""
+"""The menu's columns, its border included: it fits the narrowest sidebar beside it. The one
+source of it: the box is sized from it on mount, as it is placed."""
 
 
 class ProjectMenu(ModalScreen[str | None]):
@@ -40,9 +43,7 @@ class ProjectMenu(ModalScreen[str | None]):
 
     CSS = """
     ProjectMenu { align: left top; background: $background 20%; }
-    ProjectMenu #project-menu {
-        width: 26; height: auto; border: round $accent; background: $surface;
-    }
+    ProjectMenu #project-menu { height: auto; border: round $accent; background: $surface; }
     ProjectMenu #project-menu-title {
         height: 1; padding: 0 1; text-style: bold; text-wrap: nowrap; text-overflow: ellipsis;
     }
@@ -63,7 +64,7 @@ class ProjectMenu(ModalScreen[str | None]):
             yield OptionList(
                 Option("✎ Rename", id=RENAME),
                 Option(f"📌 {pin}", id=PIN),
-                Option("⚙ Open settings", id=SETTINGS),
+                Option(f"{SETTINGS_ICON} Open settings", id=SETTINGS),
                 Option("✗ Remove from fleet…", id=REMOVE),
                 id="project-menu-options",
             )
@@ -75,6 +76,7 @@ class ProjectMenu(ModalScreen[str | None]):
         width, rows = self.app.size
         x = max(0, min(self.near.x + 2, width - MENU_WIDTH))
         y = max(0, min(self.near.y + 1, rows - height))
+        box.styles.width = MENU_WIDTH
         box.styles.offset = (x, y)
         options.highlighted = 0
         options.focus()
@@ -117,7 +119,8 @@ class ConfirmRemove(ModalScreen[bool]):
         text = Text()
         text.append(f"Remove {display_name(self.project)} from the fleet?\n\n", style="bold")
         text.append("Its folder and history are kept; ")
-        text.append(f"aisquare project onboard {self.project.root}", style="bold")
+        # Quoted as the toast after a removal quotes it: a root with a space is one argument.
+        text.append(f"aisquare project onboard {shlex.quote(str(self.project.root))}", style="bold")
         text.append(" brings it back.")
         with Vertical(id="confirm-remove"):
             yield Static(text, id="confirm-remove-text")

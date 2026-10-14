@@ -92,9 +92,9 @@ STATUS_ICONS: dict[str, tuple[str, str, str]] = {
 """status → (glyph, style, what it means): the tasks table's one icon per state, and the
 legend the help screens print from it. Each glyph is one or two cells wide."""
 ICON_CELLS = 2
+"""The status column's width: the widest glyph, so every row's title starts at one column."""
 TASK_COLUMNS = ("#", "st", "title")
 """The tasks table: the number on the board, the status icon, the title."""
-"""The status column's width: the widest glyph, so every row's title starts at one column."""
 BOARD_KEYS: tuple[tuple[str, str], ...] = (
     ("click Enter", "a task or feed line: its full content below"),
     ("d", "the done archive · back to the open tasks"),

@@ -13,6 +13,7 @@ Click and where two at one spot become a double-click.
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,8 +24,9 @@ from textual.pilot import Pilot
 from textual.widgets import Button, OptionList, Static
 
 from aisquare.cli.ui.app import FleetApp, HelpScreen
-from aisquare.cli.ui.project_menu import ConfirmRemove, ProjectMenu
+from aisquare.cli.ui.project_menu import MENU_WIDTH, ConfirmRemove, ProjectMenu
 from aisquare.cli.ui.sidebar import (
+    SETTINGS_ICON,
     CardChips,
     CardMenuButton,
     NicknameInput,
@@ -370,6 +372,7 @@ def test_the_menu_opens_from_its_button_the_dot_key_and_a_right_click(
             labels = [
                 str(options.get_option_at_index(i).prompt) for i in range(options.option_count)
             ]
+            width = screen.query_one("#project-menu").outer_size.width
         await pilot.press("escape")
         app.sidebar.focus()
         await pilot.press("down", "down")  # past alpha's spawn row, onto beta's name
@@ -391,13 +394,20 @@ def test_the_menu_opens_from_its_button_the_dot_key_and_a_right_click(
             "still_hidden": still_hidden,
             "opened": opened,
             "labels": labels,
+            "width": width,
             "view": _view_id(app),
         }
 
     seen = drive(go)
     assert seen["hidden_before"] and seen["shown_on_selected"] and seen["still_hidden"]
     assert seen["opened"] == ["button:prj_a", "dot:prj_b", "right:prj_a"]
-    assert seen["labels"] == ["✎ Rename", "📌 Pin", "⚙ Open settings", "✗ Remove from fleet…"]
+    assert seen["labels"] == [
+        "✎ Rename",
+        "📌 Pin",
+        f"{SETTINGS_ICON} Open settings",  # the sidebar's monotone gear, not the emoji
+        "✗ Remove from fleet…",
+    ]
+    assert seen["width"] == MENU_WIDTH
     assert seen["view"] == "project-prj_a", "a right-click opens the menu, not the project"
 
 
@@ -483,6 +493,26 @@ def test_remove_asks_first_then_forgets_the_project_and_its_views_go_with_it(
     assert (seen["current"], seen["selected"]) == ("project-prj_c", "project:prj_c"), (
         "what was open on it moves to the next project in the list"
     )
+
+
+def test_remove_names_the_command_that_brings_it_back_quoted(
+    tmp_path: Path, script: Script
+) -> None:
+    """The way back is a command to copy: a root with a space is one argument in it, as in
+    the toast after the removal (``shlex.quote``)."""
+    (project,) = seed(tmp_path, ("prj_a", "my app", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        app.sidebar.open_menu("prj_a")
+        await settle(app)
+        await _menu(pilot, "remove")
+        assert isinstance(app.screen, ConfirmRemove)
+        return shown(app.screen.query_one("#confirm-remove-text", Static))
+
+    question = drive(go)
+    assert f"aisquare project onboard {shlex.quote(str(project.root))} brings it back" in (question)
+    assert "my app'" in question, "quoted: the space is inside the argument"
 
 
 def test_removing_the_last_project_shows_welcome(tmp_path: Path, script: Script) -> None:

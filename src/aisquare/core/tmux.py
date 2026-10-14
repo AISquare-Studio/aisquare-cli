@@ -116,6 +116,10 @@ CONF_NAME = "fleet-tmux.conf"
 CHECK_SOCKET_SUFFIX = "-check"
 """Where :meth:`TmuxServer.check_conf` starts its throwaway server: ``<socket>-check``."""
 _COMMAND_TIMEOUT = 30.0
+_ASK_TIMEOUT = 5.0
+"""How long a question an upgrade or uninstall plan puts to a server waits for its answer
+(:func:`asking_server`): a wedged server (it takes the connect and never answers) held the
+plan :data:`_COMMAND_TIMEOUT` per socket, where the socket's own probe gave up after 2 s."""
 
 #: The bundled server configuration. Applied with ``-f`` when the server starts
 #: (harmless afterwards). Every line has a reason: docs/plans/fleet-tui.md §3.1.
@@ -295,29 +299,31 @@ Runner = Callable[[Sequence[str], bytes | None], Completed]
 """How commands run: the real :func:`_tmux`, or a fake in tests."""
 
 
-def _tmux(argv: Sequence[str], stdin: bytes | None) -> Completed:
+def _tmux(argv: Sequence[str], stdin: bytes | None, *, timeout: float | None = None) -> Completed:
     """THE seam: run one tmux invocation with the tracing identity stripped.
 
     Every way the process can fail to run at all is mapped onto the module's
     own exceptions, so a caller that catches :class:`TmuxError` has caught
     everything: a binary that vanished between ``which`` and ``exec`` is
-    :class:`TmuxUnavailable`; a server that stops answering (``_COMMAND_TIMEOUT``)
-    or any other OS refusal is :class:`TmuxError`.
+    :class:`TmuxUnavailable`; a server that stops answering (``timeout``,
+    :data:`_COMMAND_TIMEOUT` unless given) or any other OS refusal is
+    :class:`TmuxError`.
     """
+    timeout = _COMMAND_TIMEOUT if timeout is None else timeout
     try:
         result = subprocess.run(
             list(argv),
             input=stdin,
             capture_output=True,
             env=untraced_env(),
-            timeout=_COMMAND_TIMEOUT,
+            timeout=timeout,
             check=False,
         )
     except FileNotFoundError as exc:
         raise TmuxUnavailable(f"tmux is not runnable: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
         raise TmuxError(
-            f"tmux did not answer within {_COMMAND_TIMEOUT:.0f}s: {' '.join(argv[:6])} …"
+            f"tmux did not answer within {timeout:.0f}s: {' '.join(argv[:6])} …"
         ) from exc
     except OSError as exc:
         raise TmuxError(f"could not run tmux: {exc}") from exc
@@ -770,6 +776,26 @@ line and above 110, the width Claude Code needs to open the panel ON DEMAND
 (`/diff`), so nothing is lost; a window the UI shows adopts the pane's real
 size on first attach (``TerminalPane._sync_size``), as before.
 """
+
+
+def _tmux_asking(argv: Sequence[str], stdin: bytes | None) -> Completed:
+    """:func:`_tmux`, given :data:`_ASK_TIMEOUT` (:func:`asking_server`)."""
+    return _tmux(argv, stdin, timeout=_ASK_TIMEOUT)
+
+
+def asking_server(socket: str = DEFAULT_SOCKET) -> TmuxServer:
+    """A handle on ``socket`` for what the upgrade and uninstall plans ask of it, which write
+    nothing and are put quickly.
+
+    Every command of a :class:`TmuxServer` hands tmux its conf (:meth:`TmuxServer.conf_path`),
+    which makes the aisquare home and rewrites a conf that drifted: a plan that asked a
+    server when it started (:func:`server_may_run`) could do both, as #253 kept its store
+    read from doing. This one hands tmux ``-f /dev/null`` instead: the conf is read only
+    when a server starts, and no question asked here starts one. And it waits
+    :data:`_ASK_TIMEOUT` for an answer, not :data:`_COMMAND_TIMEOUT` (round 4 of #259). A
+    handle at a recorded socket (:meth:`TmuxServer.at`) keeps both.
+    """
+    return TmuxServer(socket, conf=Path(os.devnull), runner=_tmux_asking)
 
 
 class TmuxServer:

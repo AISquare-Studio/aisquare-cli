@@ -41,13 +41,15 @@ adapter.**
   and never adds a trust-bypass flag.
 - `agents connect codex` no longer exits 1 with "can't connect … yet" (0.8.0):
   it installs the hooks. Cursor stays detection-only and still refuses.
-- Fleet launch specs (what `fleet restart`, `fleet switch` and the usage-limit
-  hand-over replay) are now checked against a digest in
-  `~/.aisquare/launch-specs/`. The run that first makes the directory records
-  the specs already in the store, so agents running across the upgrade keep
-  their launch. A spec whose digest does not match, such as one changed since
-  or recorded by another aisquare, is not replayed: the replacement starts as
-  the role resolves today, and the command says so.
+- Fleet rows (what `fleet restart`, `fleet switch` and the usage-limit
+  hand-over replay) are now checked against a seal in
+  `~/.aisquare/launch-seals/` covering the whole launch: spec, binary, agent,
+  role, worktree, directory and account. The run that first makes the
+  directory seals the rows already in the store, and marks it ready only once
+  it has, so agents running across the upgrade keep their launch. A row whose
+  seal does not match is refused, before anything is stopped, with the reason
+  (changed since, no seal recorded, or no seal could be checked); it is never
+  replayed as the role resolves today.
 - `fleet.roles.<role>.permission` is new and unset; an existing
   `permission_mode` (or Codex `sandbox` / `approval_policy` / `approve_for_me`)
   means what it did.
@@ -97,9 +99,12 @@ adapter.**
   `:read-only` for a reviewer) with the aisquare home writable and, inside it,
   what runs or chooses what runs outside the sandbox read-only: the account
   homes, the config, credentials and keys, `fleet-tmux.conf` and `agents.json`.
-  The launch specs that restart, switch and the hand-over replay stay in the
-  store, so `fleet spawn` records each one's SHA-256 in `launch-specs/`, which
-  the sandbox can only read, and only a spec whose digest matches is replayed. Its `aisquare` calls
+  The store stays writable, and nothing written there chooses what runs
+  outside the sandbox unless sealed or validated: `fleet spawn` seals each row's
+  whole launch in `launch-seals/`, which the sandbox can only read, and restart,
+  switch, the hand-over and `fleet tell`'s queue refuse a row whose seal does
+  not match; a native id goes on Codex's command line only as a UUID, and
+  `codex queue` runs only under one of Codex's own homes. Its `aisquare` calls
   succeed on the first, sandboxed attempt instead of each needing an approval,
   and a reviewer's verdict reaches the board while its worktree stays read-only.
   The fleet's tmux stays out of the sandbox's reach, so a result, question,

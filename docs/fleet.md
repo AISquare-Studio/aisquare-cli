@@ -809,10 +809,12 @@ store in the aisquare home, a board read included. The **store profile** is the
 fleet's own Codex permission profile: Codex's built-in `:workspace` or `:read-only`,
 with the aisquare home writable and, within it, the account homes, the credentials,
 the keys, the config, the fleet's tmux conf and the agent registry read-only, since
-what is written there runs, or chooses what runs, outside any sandbox. The launch
-specs a restart replays stay in the writable store, so `fleet spawn` records each
-one's digest in `launch-specs/`, which is read-only to the sandbox, and a restart
-replays only a spec whose digest matches. So a
+what is written there runs, or chooses what runs, outside any sandbox. The rows a
+restart, switch or hand-over replays stay in the writable store, so `fleet spawn`
+seals each one's whole launch (spec, binary, agent, role, worktree, account) in
+`launch-seals/`, which is read-only to the sandbox, and a row whose seal does not
+match is refused with the reason, never replayed; the native id a resume or a queue
+puts on Codex's command line is taken only as a UUID. So a
 Codex agent's board calls succeed on their first, sandboxed attempt, a reviewer's
 verdict included, while its worktree stays read-only
 ([the sandbox and the store](coding-agents.md#the-sandbox-and-the-aisquare-store)).

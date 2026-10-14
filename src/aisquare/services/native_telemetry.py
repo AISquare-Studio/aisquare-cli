@@ -100,8 +100,12 @@ def _overrides(args: list[str]) -> list[tuple[str, dict[str, Any]]]:
 def _layers(
     config_dir: Path, args: list[str], overrides: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """The user and system config of ``config_dir``'s launch, ``overrides``, and the
-    selected profile's file, in Codex's order; with the profile that selects."""
+    """The config layers ``config_dir``'s launch may read (its system and user config,
+    ``overrides`` and the selected profile's file), with the profile that selects; a
+    reader asks them all, whatever their order. Measured on 0.162.1, only ``-p`` selects
+    a profile file: a ``profile`` key in config.toml loads none, ``-c profile=`` and a
+    legacy ``[profiles.<p>]`` table beside ``-p`` refuse the launch, so reading them
+    too only ever reads more."""
     configs = [
         _read_config(SYSTEM_CONFIG, "system"),
         _read_config(config_dir / "config.toml", "user"),
@@ -154,14 +158,16 @@ def tool_shell_excludes(config_dir: Path, args: list[str], cwd: Path) -> list[st
     """The patterns the operator's config keeps out of the shells Codex's tools run in
     (``shell_environment_policy.exclude``), which the receiver's must join.
 
-    An ``exclude`` given with ``-c`` replaces the one in config (measured on 0.162.1),
-    and ours comes first: without the operator's patterns in it, every variable their
-    config kept from the tools reached them again. Every layer this launch may read is
-    asked, the project's ``.codex/config.toml`` from ``cwd`` up included (0.162.1 reads
-    it), and the patterns are their union: a superset of the list Codex applies, so a
-    pattern a higher layer dropped stays out, the safe side. ``None`` when an override
-    of the operator's own sets the list (or the whole table): it comes after ours on the
-    command line and wins, which would hand the receiver's header to every tool.
+    Ours goes in with ``-c``, which replaces the list every file layer sets (measured on
+    0.162.1: the user config's, the ``-p`` profile file's and the project's
+    ``.codex/config.toml``), so no file the operator keeps can drop the receiver's header
+    from it (review r3 of #113, finding 7). Without the operator's patterns in it, every
+    variable their config kept from the tools would reach them again, so every layer this
+    launch may read is asked, the project's from ``cwd`` up included, and the patterns are
+    their union: a superset of the list Codex applies, so a pattern a higher layer
+    dropped stays out, the safe side. ``None`` when an override of the operator's own
+    sets the list (or the whole table): it comes after ours on the command line and wins,
+    which would hand the receiver's header to every tool.
     """
     overrides = _overrides(args)
     for key, parsed in overrides:

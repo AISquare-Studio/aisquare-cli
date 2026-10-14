@@ -159,7 +159,10 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                     "name": "exec_command",
                     "namespace": "functions",
                     "arguments": json.dumps(
-                        {"cmd": f'printf "local-tool-output[%s]" "${native_telemetry.HEADERS_ENV}"'}
+                        {
+                            "cmd": 'printf "local-tool-output[%s|%s]" '
+                            f'"${native_telemetry.HEADERS_ENV}" "$OPERATOR_SECRET"'
+                        }
                     ),
                 }
             elif len(requests) == 2:
@@ -211,7 +214,15 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
         config.agents.mcp = True
         save_config(config)
         codex = agent_launch.resolve(agent="codex").adapter
-        telemetry_args, note = native_telemetry.start_receiver(env, codex)
+        # A selected profile with an exclude of its own: the receiver's, given with -c,
+        # replaces its list, and the profile's pattern joins it (review r3 of #113, 7).
+        (native_home / "p.config.toml").write_text(
+            '[shell_environment_policy]\nexclude = ["OPERATOR_SECRET"]\n', encoding="utf-8"
+        )
+        env["OPERATOR_SECRET"] = "kept-out"
+        excluded = native_telemetry.tool_shell_excludes(native_home, ["-p", "p"], workspace)
+        assert excluded == ["OPERATOR_SECRET"]
+        telemetry_args, note = native_telemetry.start_receiver(env, codex, excluded)
         assert telemetry_args, note
         # The receiver's token reaches Codex in its environment, never on its command line.
         token = env[native_telemetry.HEADERS_ENV].rpartition("%20")[2]
@@ -230,6 +241,8 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
             "--dangerously-bypass-hook-trust",
             "-c",
             "agents.enabled=false",
+            "-p",
+            "p",
             "exec",
         ]
         try:
@@ -281,7 +294,7 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
             # The receiver's token is Codex's exporter's alone: the shells its tools run in
             # never see it, where an app's OpenTelemetry SDK would send it on.
             if _sandbox_refused(binary, tmp_path) is None:  # a runner's sandbox runs none
-                assert "local-tool-output[]" in json.dumps(requests[1])
+                assert "local-tool-output[|]" in json.dumps(requests[1])
             assert token not in json.dumps(requests[1])
             assert "mcp:remote" not in json.dumps(requests[2])
             assert "unknown tool" not in json.dumps(requests[2]).lower()

@@ -862,6 +862,25 @@ def test_the_operators_own_tool_shell_exclude_or_header_leaves_native_tracing_of
     assert env[native_telemetry.HEADERS_ENV] == theirs
 
 
+def test_a_selected_profiles_tool_shell_exclude_joins_the_receivers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r3 of #113, finding 7: a ``-p`` profile file's ``exclude`` would have
+    replaced ours had the profile come after ``-c``. Measured on 0.162.1, ``-c`` replaces
+    the list every file sets, the profile's included (the live test pins it), so the
+    profile's patterns join the receiver's, as the user config's do."""
+    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    policy = '[shell_environment_policy]\nexclude = ["{}"]\n'
+    (tmp_path / "config.toml").write_text(policy.format("USER_SECRET"), encoding="utf-8")
+    (tmp_path / "p.config.toml").write_text(policy.format("PROFILE_SECRET"), encoding="utf-8")
+
+    assert native_telemetry.tool_shell_excludes(tmp_path, ["-p", "p"], tmp_path) == [
+        "USER_SECRET",
+        "PROFILE_SECRET",
+    ]
+    assert native_telemetry.tool_shell_excludes(tmp_path, [], tmp_path) == ["USER_SECRET"]
+
+
 @pytest.mark.parametrize("inherited", ["ours", "the operator's"])
 def test_a_launch_drops_only_a_receiver_header_it_inherited(
     inherited: str,

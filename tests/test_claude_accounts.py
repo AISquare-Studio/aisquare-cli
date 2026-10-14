@@ -511,6 +511,8 @@ def test_usage_says_why_when_the_endpoint_does_not_answer_properly(
     assert usage.reason is not None and expected in usage.reason
     assert usage.session_percent is None and usage.week_percent is None
     assert "sk-ant" not in usage.reason  # no reason ever carries the token
+    # Only a refused token is a log-in to do; a down or odd endpoint is not (asq's Log in).
+    assert usage.needs_login is (fetch.status == 401)
 
 
 def test_usage_never_sends_an_expired_or_missing_token(fake_home: Path) -> None:
@@ -521,6 +523,7 @@ def test_usage_never_sends_an_expired_or_missing_token(fake_home: Path) -> None:
     _sign_in(account, "two@example.com", expires_in=timedelta(minutes=-1))
     expired = service.usage(account, now=NOW, fetch=fetch)
     assert not expired.available and "expired" in (expired.reason or "")
+    assert expired.needs_login and not missing.needs_login  # no login: signed_in says so
     assert fetch.calls == []  # neither case reached the network
     _sign_in(account, "two@example.com")
     assert service.usage(account, now=NOW, fetch=fetch).available
@@ -619,6 +622,33 @@ def test_a_sign_in_lands_when_both_files_exist_and_completing_it_installs_the_ho
     assert "SessionStart" in settings["hooks"]
     assert not service.abandon_sign_in(account)  # a signed-in slot is never discarded
     assert account.config_dir.is_dir()
+
+
+def test_a_log_in_over_a_stale_token_lands_only_once_the_token_is_a_new_one(
+    fake_home: Path,
+) -> None:
+    """asq's *Log in* on an expired or rejected token: the directory is still signed in, so
+    ``sign_in_landed`` alone answered at the first poll and closed the window before Claude
+    Code had refreshed anything. Given the login it was opened over, it waits for another."""
+    account = core.create_account()
+    assert service.login_fingerprint(account) is None  # nothing stored: nothing to tell apart
+    _sign_in(account, "two@example.com", expires_in=timedelta(minutes=-5))  # expired
+    stale = service.login_fingerprint(account)
+    assert stale is not None and "sk-ant" not in stale  # a digest, never the token
+    assert service.sign_in_landed(account) is not None  # the control: signed in, as before
+    assert service.sign_in_landed(account, since=stale) is None  # but not a NEW login
+    _sign_in(account, "two@example.com")  # Claude Code refreshed it: a later expiry
+    landed = service.sign_in_landed(account, since=stale)
+    assert landed is not None and landed.email == "two@example.com"
+    # A rejected token whose expiry did not move: a new access token is a new login too.
+    rejected = service.login_fingerprint(account)
+    creds = core.credentials_path(account)
+    data = json.loads(creds.read_text())
+    data["claudeAiOauth"]["accessToken"] = "sk-ant-oat01-fresh"
+    creds.write_text(json.dumps(data))
+    assert service.sign_in_landed(account, since=rejected) is not None
+    creds.unlink()  # /logout meanwhile: no login at all lands nothing
+    assert service.sign_in_landed(account, since=rejected) is None
 
 
 def test_an_abandoned_sign_in_discards_the_fresh_slot_and_only_that(

@@ -28,6 +28,7 @@ working. It is never called from a hook or on any path a session pays for.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -1520,9 +1521,31 @@ def open_sign_in_window(
     )
 
 
-def sign_in_landed(account: ClaudeAccount) -> ClaudeIdentity | None:
-    """Who the directory is now signed in as, once Claude Code has written both files."""
+def login_fingerprint(account: ClaudeAccount) -> str | None:
+    """A digest of the stored login (its token and expiry), or ``None`` when none is readable.
+
+    So a sign-in window opened to RE-authenticate an account can tell the login
+    it was opened over from a fresh one: an expired or rejected token is still
+    a signed-in directory, and :func:`sign_in_landed` alone would answer at the
+    first poll, before the user had done anything. A digest, never the token.
+    """
+    creds = core.credentials(account)
+    if creds is None:
+        return None
+    stamp = creds.expires_at.isoformat() if creds.expires_at is not None else ""
+    return hashlib.sha256(f"{creds.access_token}\0{stamp}".encode()).hexdigest()
+
+
+def sign_in_landed(account: ClaudeAccount, *, since: str | None = None) -> ClaudeIdentity | None:
+    """Who the directory is now signed in as, once Claude Code has written both files.
+
+    ``since`` is :func:`login_fingerprint` as the window opened, for a re-auth:
+    the login lands only once the stored one is a different login (a refreshed
+    or new token), not the expired or rejected one the window was opened over.
+    """
     if not core.signed_in(account):
+        return None
+    if since is not None and login_fingerprint(account) == since:
         return None
     return core.identity(account)
 

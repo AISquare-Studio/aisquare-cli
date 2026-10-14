@@ -1250,6 +1250,22 @@ def cached_usage_with_trends(
         return {slot: (reading, None) for slot, reading in readings.items()}
 
 
+def usage_is_readable(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> bool:
+    """Whether a row's usage is this CLI's to read: signed in, with a token it can read that
+    has neither expired nor been refused (a 401).
+
+    The rows a "refreshed …" line ages from and says a try failed on (the Accounts page's
+    rule, ``views.accounts`` ``_paint_usage_age``): a row that needs a login, or whose token
+    is missing or in the macOS Keychain, says so itself, and would otherwise put "last try
+    failed" on the line every time.
+    """
+    return (
+        status.signed_in
+        and status.token_state == "ok"
+        and not (reading is not None and reading.needs_login)
+    )
+
+
 def describe_age(fetched_at: datetime, *, now: datetime | None = None) -> str:
     """``just now`` / ``3m ago`` / ``2h ago``: how old a reading is, for a "refreshed …" line."""
     minutes = max(0, int(((now or _now()) - fetched_at).total_seconds() // 60))

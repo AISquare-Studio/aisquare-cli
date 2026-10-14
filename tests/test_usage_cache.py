@@ -433,6 +433,37 @@ def test_accounts_usage_says_used_in_the_headers_and_the_json(
     assert usage["week_used_percent"] == 12.0 and usage["week_left_percent"] == 88.0
 
 
+def test_the_cli_never_calls_a_failed_read_a_refresh(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #261, m5: with the endpoint down, ``accounts usage`` and ``list --usage``
+    said "usage as of just now". They follow the Accounts page's rule: the age of the
+    oldest reading actually read, and "last try failed" for a usable row that read nothing;
+    a row that needs a login counts in neither half."""
+    _slot("work@example.com", "tok-work")
+    _slot("personal@example.com", "tok-personal")
+    monkeypatch.setattr(service, "_http_get", _unreachable)
+    for command in (["accounts", "usage"], ["accounts", "list", "--usage"]):
+        down = runner.invoke(app, command)
+        assert down.exit_code == 0, down.output
+        assert "usage as of" not in down.stdout, command
+        assert "no usage read · last try failed just now" in down.stdout, command
+
+    _slot("third@example.com", "tok-third")
+    monkeypatch.setattr(
+        service, "_http_get", _Usage({"tok-work": _payload(40), "tok-personal": 503})
+    )  # tok-third: refused (401)
+    mixed = runner.invoke(app, ["accounts", "usage", "--refresh"])
+    assert "usage as of just now · last try failed just now (percent USED" in mixed.stdout
+    monkeypatch.setattr(service, "_now", lambda: NOW + timedelta(minutes=3))
+    later = runner.invoke(app, ["accounts", "usage"])  # served: the 40 % and the 503
+    assert "usage as of 3m ago · last try failed 3m ago (percent USED" in later.stdout
+
+    refused = runner.invoke(app, ["accounts", "usage", "4"])  # needs a login: its row says so
+    assert refused.exit_code == 0, refused.output
+    assert "usage as of" not in refused.stdout and "last try" not in refused.stdout
+
+
 def test_the_managers_cycle_says_figures_are_used_and_headroom_is_left() -> None:
     cycle = " ".join(harness.role_cycle("manager", "abcd1234"))
     assert (

@@ -73,7 +73,9 @@ def _write_claude_json(
 
 
 def _trusted(account: ClaudeAccount) -> list[str]:
-    return sharing.trusted_folders(json.loads(core.claude_json_path(account).read_text()))
+    return sharing.trusted_folders(
+        json.loads(core.claude_json_path(account).read_text(encoding="utf-8"))
+    )
 
 
 def _git(*args: str, cwd: Path) -> None:
@@ -140,8 +142,9 @@ def test_in_a_checkout_the_root_and_the_folders_up_to_it_trust_it_and_nothing_ab
     assert scope.key == root
     assert scope.covering == (root, _key(sub), _key(repo / "src"))
     assert _key(tmp_path / "parent") not in scope.covering
-    # Control: the same folder outside git is covered by that parent.
-    shutil.rmtree(repo / ".git")
+    # Control: the same folder outside git is covered by that parent. The .git is moved
+    # aside, not removed: Windows refuses to unlink git's read-only object files.
+    (repo / ".git").rename(tmp_path / "git-set-aside")
     assert _key(tmp_path / "parent") in sharing.trust_scope(sub).covering
 
 
@@ -186,7 +189,7 @@ def test_a_grant_changes_the_one_value_and_every_other_byte_stays(
     folder = tmp_path / "work"
     folder.mkdir()
     path = _write_claude_json(second, "two@x.dev", trusted=(str(tmp_path / "older"),))
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     data["projects"][str(tmp_path / "older")]["hasTrustDialogAccepted"] = False
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     before = path.read_bytes()
@@ -197,7 +200,7 @@ def test_a_grant_changes_the_one_value_and_every_other_byte_stays(
     data["projects"][str(tmp_path / "older")]["hasTrustDialogAccepted"] = True
     data["projects"][str(folder)] = {"hasTrustDialogAccepted": True}
     assert path.read_text(encoding="utf-8") == json.dumps(data, indent=2, ensure_ascii=False)
-    after = json.loads(path.read_text())
+    after = json.loads(path.read_text(encoding="utf-8"))
     assert after["oauthAccount"] == json.loads(before)["oauthAccount"]  # the login, untouched
     assert after["userID"] == "user-2"
     assert not path.with_name(".claude.json.lock").exists()  # the lock was let go
@@ -253,7 +256,7 @@ def test_a_linked_claude_json_is_written_through_and_stays_a_link(
     path.symlink_to(kept)
     sharing.grant_trust(path, str(tmp_path))
     assert path.is_symlink()
-    assert sharing.trusted_folders(json.loads(kept.read_text())) == [str(tmp_path)]
+    assert sharing.trusted_folders(json.loads(kept.read_text(encoding="utf-8"))) == [str(tmp_path)]
 
 
 # --- a launch shares the trust -------------------------------------------------------------------
@@ -271,7 +274,7 @@ def test_a_launch_on_account_3_gets_the_trust_account_2_gave_and_says_so(
     folder.mkdir()
     key = _key(folder)
     _write_claude_json(second, "two@x.dev", trusted=(key,))
-    before = json.loads(core.claude_json_path(third).read_text())
+    before = json.loads(core.claude_json_path(third).read_text(encoding="utf-8"))
     monkeypatch.chdir(folder)
 
     result = runner.invoke(app, ["launch", "coder", "--account", "3"])
@@ -279,7 +282,7 @@ def test_a_launch_on_account_3_gets_the_trust_account_2_gave_and_says_so(
     assert result.exit_code == 0, result.output
     assert launched["env"][core.CONFIG_DIR_VAR] == str(third.config_dir)
     assert _trusted(third) == [key]
-    after = json.loads(core.claude_json_path(third).read_text())
+    after = json.loads(core.claude_json_path(third).read_text(encoding="utf-8"))
     assert after["projects"].pop(key) == {"hasTrustDialogAccepted": True}
     assert after == before  # nothing else changed
     assert f"{key} is trusted on account 2 — now on account 3 too" in result.stderr

@@ -866,9 +866,9 @@ def _record_sample(
 
 
 def _token_fingerprint(account: ClaudeAccount, now: datetime | None = None) -> str | None:
-    """Which login a reading belongs to: a fingerprint of the token :func:`usage` would
-    send (never the token), or ``None`` when it would send none — no credentials file, or,
-    given ``now``, a token already expired at ``now``.
+    """Which login a reading belongs to: the :func:`login_fingerprint` of the token
+    :func:`usage` would send, or ``None`` when it would send none — no credentials file,
+    or, given ``now``, a token already expired at ``now``.
 
     Read when the reading is recorded, a few milliseconds after the fetch sent it: a
     token swapped in between is a race no surface could act on.
@@ -876,7 +876,7 @@ def _token_fingerprint(account: ClaudeAccount, now: datetime | None = None) -> s
     creds = core.credentials(account)
     if creds is None or (now is not None and creds.expired(now)):
         return None
-    return hashlib.sha256(creds.access_token.encode()).hexdigest()[:16]
+    return _login_digest(creds)
 
 
 def usage_trend(
@@ -1568,8 +1568,11 @@ def login_fingerprint(account: ClaudeAccount) -> str | None:
     first poll, before the user had done anything. A digest, never the token.
     """
     creds = core.credentials(account)
-    if creds is None:
-        return None
+    return _login_digest(creds) if creds is not None else None
+
+
+def _login_digest(creds: core.ClaudeCredentials) -> str:
+    """:func:`login_fingerprint` of credentials already read (the usage cache's key too)."""
     stamp = creds.expires_at.isoformat() if creds.expires_at is not None else ""
     return hashlib.sha256(f"{creds.access_token}\0{stamp}".encode()).hexdigest()
 

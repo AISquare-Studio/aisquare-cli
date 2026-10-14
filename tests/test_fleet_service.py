@@ -3135,6 +3135,9 @@ def test_every_path_that_decides_a_held_rows_fate_gives_the_one_verdict(
 
     monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
     monkeypatch.setattr(lifecycle, "boot_id", lambda: "b00t-1")
+    # Uninstall asks whether `fleet shutdown` could reach the fleet: here it can, as it
+    # does through the fake, whether or not this machine has a usable tmux (Windows: none).
+    monkeypatch.setattr(TmuxServer, "require", lambda _self: None)
     tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
     coder = _coder(project)
     if shape == "another":

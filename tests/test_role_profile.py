@@ -770,7 +770,9 @@ class TestEnvFiles:
             assert paste() == (0, f"[{TOKEN}]", ""), encoding
         token.write_bytes(b"\xef\xbb\xbf\n")  # a mark and nothing else: empty, both ways
         assert harness.resolve_profile("reviewer").refusal is not None
-        assert paste()[:2] == (1, "")
+        status, out, err = paste()  # `${KEY:?}`'s status is the shell's: 1 in bash, 2 in dash
+        assert (status != 0, out) == (True, ""), "a mark alone starts nothing"
+        assert "GH_TOKEN: its file is empty or cannot be read" in err
         token.write_text("\n", encoding="utf-8")
         status, out, err = paste()
         assert (status != 0, out) == (True, ""), "an emptied file starts nothing"

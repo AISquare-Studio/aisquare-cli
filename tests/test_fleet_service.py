@@ -6827,6 +6827,34 @@ def test_attach_argv_asks_no_server_by_the_name_alone_when_a_live_row_recorded_i
     assert fleet_service.attach_argv(project)[:3] == ["/fake/tmux", "-L", "asq-test"]
 
 
+def test_attach_argv_resolves_each_recorded_server_once_however_many_rows_ended_on_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 1: attach worked out where every row the project ever had is
+    asked (`_address`, two paths resolved each), and rows are never deleted. Rows that
+    recorded one server are one question, asked in the order the rows give."""
+    manager = fleet_service.spawn(project, "manager").agent
+    with store_session() as store:
+        ended = store.end_fleet_agent(manager.id, exit_status=0)
+        for n in range(40):
+            store.upsert_fleet_agent(
+                ended.model_copy(update={"id": f"agt_old_{n}", "label": f"coder-{n}"})
+            )
+        assert len(store.fleet_agents(project.id, live_only=False)) == 41
+        assert store.fleet_agents(project.id, live_only=True) == []
+    resolved: list[str] = []
+    address = fleet_service._address
+
+    def counted(agent: FleetAgent, config: FleetSettings | None = None) -> object:
+        resolved.append(agent.id)
+        return address(agent, config)
+
+    monkeypatch.setattr(fleet_service, "_address", counted)
+
+    assert fleet_service.attach_argv(project)[-1] == f"=asq-{_codename(project)}"
+    assert len(resolved) == 1, resolved
+
+
 def test_attach_argv_refuses_when_there_is_no_session_to_attach_to(
     tmux: FakeTmux, project: ProjectInfo
 ) -> None:

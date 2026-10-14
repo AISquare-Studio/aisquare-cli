@@ -5588,7 +5588,12 @@ def attach_argv(project: ProjectInfo) -> list[str]:
     recorded = any(agent.socket_path is not None for agent in live)
     if recorded:
         ended = [agent for agent in ended if agent.socket_path is not None]
-    addresses = dict.fromkeys(_address(agent, config) for agent in [*live, *ended])
+    # One row per server it recorded before each is resolved (two paths, `_same_socket`):
+    # rows are never deleted, and a long-lived project has hundreds that ended on one.
+    distinct: dict[tuple[str, Path | None], FleetAgent] = {}
+    for agent in [*live, *ended]:
+        distinct.setdefault((agent.tmux_socket, agent.socket_path), agent)
+    addresses = dict.fromkeys(_address(agent, config) for agent in distinct.values())
     if not recorded:
         addresses[_Address(config.tmux_socket)] = None
     for candidate in (_server_at(address, config) for address in addresses):

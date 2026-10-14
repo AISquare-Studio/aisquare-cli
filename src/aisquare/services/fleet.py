@@ -1381,6 +1381,7 @@ def _status(
         session=session,
         tmux_session=tmux_session,
         socket_at=(address or _address(agent, config)).path,
+        held=held,
     )
 
 

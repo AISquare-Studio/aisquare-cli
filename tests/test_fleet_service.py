@@ -2645,8 +2645,10 @@ def test_a_row_whose_socket_another_server_took_is_held_not_ended(
     assert (listed.state, listed.detail) == ("unknown", "another tmux server on its socket")
     status = fleet_service.status_of(coder)
     assert (status.state, status.detail) == ("unknown", "another tmux server on its socket")
+    assert listed.held and status.held, "said, so no view shows the newcomer's %1 under it"
     _board_session(coder, "waiting")  # its hooks still fire: the board decides, as for any
-    assert fleet_service.list_agents(project)[0].state == "waiting"  # server not asked
+    [fresh] = fleet_service.list_agents(project)  # server not asked
+    assert fresh.state == "waiting" and fresh.held, "held whatever the board says"
     assert fleet_service.reap(project).lost == [] and fleet_service.reap(project).ended == []
     swept = fleet_service.reap(project, server_down=True)
     assert swept.lost == [] and swept.ended == []
@@ -2684,6 +2686,7 @@ def test_a_row_whose_socket_another_server_took_is_held_not_ended(
     newcomer.started = newcomer.started + timedelta(minutes=1)  # the newcomer restarted
     [listed] = fleet_service.list_agents(project)
     assert (listed.agent.id, listed.state, listed.detail) == (stale.id, "lost", "pane gone")
+    assert not listed.held
     assert fleet_service.stop(project, stale.label).agent.ended_at is not None
     assert newcomer.killed == [] and newcomer.typed == []
 

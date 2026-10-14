@@ -216,9 +216,10 @@ class ManagerTab(Vertical):
         """Render ``status`` — the pane when there is a manager, the button when not.
 
         ``exited`` is the ended manager row the snapshot still lists (#138); it
-        only changes what the header above the button says. A ``lost`` manager
-        keeps its header and gets no pane (:func:`~aisquare.cli.ui.views.agent.shown_pane`):
-        after a reboot its id is the next server's, most often ANOTHER project's
+        only changes what the header above the button says. A ``lost`` manager, or one
+        held as another server's, keeps its header and gets no pane
+        (:func:`~aisquare.cli.ui.views.agent.shown_pane`): after a reboot or a
+        ``kill-server`` its id is the next server's, most often ANOTHER project's
         manager, and this tab showed that one and typed into it.
         """
         self.status = status

@@ -4049,6 +4049,7 @@ def _status(
     task_id: str | None = "tsk_0123456789abcdef",
     exit_status: int | None = None,
     state: str = "working",
+    held: bool = False,
 ) -> FleetAgentStatus:
     agent = FleetAgent(
         id="fa_1",
@@ -4061,7 +4062,7 @@ def _status(
         created_at=datetime.now(UTC),
         exit_status=exit_status,
     )
-    return FleetAgentStatus.model_validate({"agent": agent, "state": state})
+    return FleetAgentStatus.model_validate({"agent": agent, "state": state, "held": held})
 
 
 def test_header_text_carries_every_field_as_data() -> None:
@@ -4219,6 +4220,52 @@ def test_agent_view_shows_and_types_into_no_pane_for_a_lost_row(
     assert lost_at_build == []  # nothing typed anywhere
     assert working == [_literal_argv("y")]  # the control: a row that is there gets the key
     assert turned_lost is None and lost_later == working  # detached, and deaf, once lost
+
+
+def test_agent_view_shows_and_types_into_no_pane_for_a_row_held_as_another_servers(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of #259, round 1: a row that recorded its server's start is not ``lost`` under
+    the next server on its socket but held (``FleetAgentStatus.held``), and reads its
+    board's state while that is fresh. Its id is the next server's all the same, here the
+    fake's ``%1``: told by the state word alone, the view showed that agent's screen under
+    the row's ``working`` header and typed into it. The same row not held is the control."""
+    server = fake.server(tmp_path)
+
+    class ViewHost(App[None]):
+        def compose(self) -> ComposeResult:
+            yield AgentView(
+                _status(state="working", held=True), server=server, escape_key="f12", id="held"
+            )
+
+    async def drive() -> tuple[str | None, list[list[tuple[str, ...]]], str | None]:
+        host = ViewHost()
+        async with host.run_test(size=(60, 8)) as pilot:
+            view = host.query_one("#held", AgentView)
+            view.pane.focus()
+            await pilot.pause()
+            await pilot.press("y", "enter")
+            await pilot.pause()
+            built_held = view.pane.pane_id
+            typed = [fake.sent()]
+            view.refresh_status(_status(state="working"))
+            await wait_until(pilot, lambda: view.pane.frames >= 1)
+            await pilot.press("y")
+            await pilot.pause()
+            typed.append(fake.sent())
+            view.refresh_status(_status(state="unknown", held=True))
+            await pilot.pause()
+            await pilot.press("x", "enter")
+            await pilot.pause()
+            typed.append(fake.sent())
+            return built_held, typed, view.pane.pane_id
+
+    built_held, typed, turned_held = run(drive())
+    assert built_held is None, "no pane for a row held as another server's"
+    held_at_build, own, held_later = typed
+    assert held_at_build == []  # nothing typed anywhere
+    assert own == [_literal_argv("y")]  # the control: the row's own pane gets the key
+    assert turned_held is None and held_later == own  # detached, and deaf, once held
 
 
 # --- mouse buttons (#148) ---------------------------------------------------------------------

@@ -87,7 +87,8 @@ def header_text(status: FleetAgentStatus, labels: Mapping[int, str] | None = Non
 
 
 def shown_pane(status: FleetAgentStatus) -> str | None:
-    """The pane a view of ``status`` shows and types into — ``None`` for a ``lost`` row.
+    """The pane a view of ``status`` shows and types into — ``None`` for a ``lost`` row, and
+    for one the listing held as another server's.
 
     ``lost`` is the listing's word for a live row it found no pane of its own
     for, and one way to be lost leaves ANOTHER agent's pane under the row's
@@ -100,8 +101,14 @@ def shown_pane(status: FleetAgentStatus) -> str | None:
     #203 final-round fixes, F1). The other way to be lost, a pane that is
     simply gone, has nothing to show either. ``unknown`` — tmux could not be
     asked — keeps the pane: that is no verdict about it.
+
+    A row that recorded its server's start is not ``lost`` under the next server but held
+    (``FleetAgentStatus.held``), and reads its board's state while that is fresh, then
+    ``unknown``: its id is the next server's all the same, so it gets no pane either. Told
+    by the state word alone, the tabs showed and typed into another agent's pane under it
+    (review of #259, round 1).
     """
-    return None if status.state == "lost" else status.agent.pane_id
+    return None if status.state == "lost" or status.held else status.agent.pane_id
 
 
 STOP_WORKER = "agent-stop"
@@ -209,8 +216,8 @@ class AgentView(Vertical):
     def refresh_status(self, status: FleetAgentStatus) -> None:
         """New facts about the same agent: redraw the header, re-attach on a new pane.
 
-        Detached from a row that turned ``lost`` (:func:`shown_pane`), whose id may
-        name another agent's pane by now.
+        Detached from a row that turned ``lost`` or was held as another server's
+        (:func:`shown_pane`), whose id may name another agent's pane by now.
         """
         self.status = status
         if not self.is_mounted:

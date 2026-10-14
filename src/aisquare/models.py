@@ -1003,3 +1003,8 @@ class FleetAgentStatus(BaseModel):
     """Where the agent's server is asked (``tmux -S``), worked out once with the listing's
     config (``services.fleet.socket_at``); ``None`` when it is asked by its socket's name
     (``tmux -L``). Carried so the UI's panes and attach line read it off the frame."""
+    held: bool = False
+    """The listing held the row as another server's (``services.fleet.ANOTHER_SERVER``): a
+    server answers at its socket, and it is not the one the row was started on, which may
+    run on where no client reaches it. Whatever the board says of its state, its pane id
+    is no pane of its own there: that server numbers its panes from ``%0`` again."""

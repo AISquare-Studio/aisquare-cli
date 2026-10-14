@@ -763,7 +763,7 @@ def _trust_report(
         console = stdout_console()
         if scope is not None:
             head = f"{scope.key} on every account"
-            if scope.key != str(scope.folder):
+            if scope.key != claude_sharing.project_key(scope.folder):
                 head += f" (it covers {scope.folder})"
         else:
             head = "every trusted folder on every account"

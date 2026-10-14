@@ -37,8 +37,13 @@ CURSOR = "\u276f"
 # --- helpers -------------------------------------------------------------------------------------
 
 
+def _key(path: Path) -> str:
+    """``path`` as Claude Code keys it: resolved, and with ``/`` on Windows too."""
+    return sharing.project_key(Path(os.path.realpath(path)))
+
+
 def _write_claude_json(
-    account: ClaudeAccount, email: str, *, trusted: tuple[Path, ...] = ()
+    account: ClaudeAccount, email: str, *, trusted: tuple[str, ...] = ()
 ) -> Path:
     """A ``.claude.json`` as Claude Code writes one: two-space JSON, no newline at the end."""
     path = core.claude_json_path(account)
@@ -54,13 +59,13 @@ def _write_claude_json(
         "hasCompletedOnboarding": True,
         "tipsHistory": {"memory-command": 18},
         "projects": {
-            str(folder): {
+            key: {
                 "allowedTools": [],
                 "mcpServers": {},
                 "hasTrustDialogAccepted": True,
                 "lastCost": 0.25,
             }
-            for folder in trusted
+            for key in trusted
         },
     }
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -118,9 +123,9 @@ def test_outside_git_the_folder_or_any_ancestor_trusts_it(tmp_path: Path) -> Non
     folder.mkdir(parents=True)
     scope = sharing.trust_scope(folder)
     real = Path(os.path.realpath(folder))
-    assert scope.key == str(real)  # what a yes there records
-    assert scope.covering == tuple(str(p) for p in (real, *real.parents))
-    assert scope.covering[-1] == str(Path(real.anchor))
+    assert scope.key == _key(folder)  # what a yes there records
+    assert scope.covering == tuple(sharing.project_key(p) for p in (real, *real.parents))
+    assert scope.covering[-1] == sharing.project_key(Path(real.anchor))
 
 
 def test_in_a_checkout_the_root_and_the_folders_up_to_it_trust_it_and_nothing_above(
@@ -131,24 +136,34 @@ def test_in_a_checkout_the_root_and_the_folders_up_to_it_trust_it_and_nothing_ab
     sub = repo / "src" / "pkg"
     sub.mkdir(parents=True)
     scope = sharing.trust_scope(sub)
-    root = os.path.realpath(repo)
+    root = _key(repo)
     assert scope.key == root
-    assert scope.covering == (root, str(Path(root) / "src" / "pkg"), str(Path(root) / "src"))
-    assert os.path.realpath(tmp_path / "parent") not in scope.covering
+    assert scope.covering == (root, _key(sub), _key(repo / "src"))
+    assert _key(tmp_path / "parent") not in scope.covering
     # Control: the same folder outside git is covered by that parent.
     shutil.rmtree(repo / ".git")
-    assert os.path.realpath(tmp_path / "parent") in sharing.trust_scope(sub).covering
+    assert _key(tmp_path / "parent") in sharing.trust_scope(sub).covering
 
 
 def test_a_worktree_is_trusted_as_its_main_checkout_inside_or_outside_it(tmp_path: Path) -> None:
     repo = _repo(tmp_path / "repo")
     _git("worktree", "add", "-q", "-b", "inside", str(repo / ".wt" / "x"), cwd=repo)
     _git("worktree", "add", "-q", "-b", "outside", str(tmp_path / "elsewhere"), cwd=repo)
-    root = os.path.realpath(repo)
+    root = _key(repo)
     for worktree in (repo / ".wt" / "x", tmp_path / "elsewhere"):
         scope = sharing.trust_scope(worktree)
         assert scope.key == root  # what a yes in the worktree records
-        assert scope.covering == (root, os.path.realpath(worktree))
+        assert scope.covering == (root, _key(worktree))
+
+
+def test_on_windows_a_key_is_spelled_with_forward_slashes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Claude Code's path normaliser turns every backslash into ``/`` on Windows, so its
+    ``projects`` keys read ``C:/Users/me/work``; an entry spelled the native way is none."""
+    native = Path("C:\\Users\\me\\work")  # a Windows path's text, built on any platform
+    monkeypatch.setattr(sharing.os, "name", "nt")
+    assert sharing.project_key(native) == "C:/Users/me/work"
+    monkeypatch.setattr(sharing.os, "name", "posix")
+    assert sharing.project_key(native) == str(native)  # elsewhere, the path as it is
 
 
 @pytest.mark.skipif(not can_symlink(), reason="needs symlinks")
@@ -157,8 +172,8 @@ def test_a_folder_reached_through_a_link_is_trusted_by_its_real_path(tmp_path: P
     real.mkdir()
     (tmp_path / "link").symlink_to(real, target_is_directory=True)
     scope = sharing.trust_scope(tmp_path / "link")
-    assert scope.key == os.path.realpath(real)
-    assert str(tmp_path / "link") not in scope.covering
+    assert scope.key == _key(real)
+    assert sharing.project_key(tmp_path / "link") not in scope.covering
 
 
 # --- the one write into .claude.json -------------------------------------------------------------
@@ -170,7 +185,7 @@ def test_a_grant_changes_the_one_value_and_every_other_byte_stays(
     _plain, second, _third = three
     folder = tmp_path / "work"
     folder.mkdir()
-    path = _write_claude_json(second, "two@x.dev", trusted=(tmp_path / "older",))
+    path = _write_claude_json(second, "two@x.dev", trusted=(str(tmp_path / "older"),))
     data = json.loads(path.read_text())
     data["projects"][str(tmp_path / "older")]["hasTrustDialogAccepted"] = False
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -254,8 +269,8 @@ def test_a_launch_on_account_3_gets_the_trust_account_2_gave_and_says_so(
     plain, second, third = three
     folder = tmp_path / "work"
     folder.mkdir()
-    key = os.path.realpath(folder)
-    _write_claude_json(second, "two@x.dev", trusted=(Path(key),))
+    key = _key(folder)
+    _write_claude_json(second, "two@x.dev", trusted=(key,))
     before = json.loads(core.claude_json_path(third).read_text())
     monkeypatch.chdir(folder)
 
@@ -289,10 +304,10 @@ def test_a_parents_trust_is_copied_as_the_parents_entry(
     parent = tmp_path / "code"
     child = parent / "notes" / "today"
     child.mkdir(parents=True)
-    _write_claude_json(second, "two@x.dev", trusted=(Path(os.path.realpath(parent)),))
+    _write_claude_json(second, "two@x.dev", trusted=(_key(parent),))
     notes = service.share_for_launch(child, account=third)
-    assert _trusted(third) == [os.path.realpath(parent)]
-    assert notes == [f"{os.path.realpath(parent)} is trusted on account 2 — now on account 3 too"]
+    assert _trusted(third) == [_key(parent)]
+    assert notes == [f"{_key(parent)} is trusted on account 2 — now on account 3 too"]
 
 
 def test_no_account_trusts_the_folder_so_nothing_is_written(
@@ -301,7 +316,7 @@ def test_no_account_trusts_the_folder_so_nothing_is_written(
     _plain, second, third = three
     folder = _repo(tmp_path / "repo")
     # Account 2 trusts the folder ABOVE the repository, which Claude Code does not honour.
-    _write_claude_json(second, "two@x.dev", trusted=(Path(os.path.realpath(tmp_path)),))
+    _write_claude_json(second, "two@x.dev", trusted=(_key(tmp_path),))
     before = core.claude_json_path(third).read_bytes()
     assert service.share_for_launch(folder, account=third) == []
     assert core.claude_json_path(third).read_bytes() == before
@@ -317,7 +332,7 @@ def test_a_damaged_target_costs_the_trust_with_a_note_never_the_launch(
     _plain, second, third = three
     folder = tmp_path / "work"
     folder.mkdir()
-    _write_claude_json(second, "two@x.dev", trusted=(Path(os.path.realpath(folder)),))
+    _write_claude_json(second, "two@x.dev", trusted=(_key(folder),))
     core.claude_json_path(third).write_text("{not json", encoding="utf-8")
     monkeypatch.chdir(folder)
     result = runner.invoke(app, ["launch", "coder", "--account", "3"])
@@ -338,7 +353,7 @@ def test_with_share_trust_off_a_launch_writes_nothing(
     _plain, second, third = three
     folder = tmp_path / "work"
     folder.mkdir()
-    _write_claude_json(second, "two@x.dev", trusted=(Path(os.path.realpath(folder)),))
+    _write_claude_json(second, "two@x.dev", trusted=(_key(folder),))
     config = load_config()
     config.accounts.share_trust = False
     save_config(config)
@@ -349,7 +364,7 @@ def test_with_share_trust_off_a_launch_writes_nothing(
     config.accounts.share_trust = True
     save_config(config)
     assert service.share_for_launch(folder, account=third) != []
-    assert _trusted(third) == [os.path.realpath(folder)]
+    assert _trusted(third) == [_key(folder)]
 
 
 # --- the question on screen ----------------------------------------------------------------------
@@ -379,8 +394,8 @@ def test_accounts_trust_trusts_the_repository_on_every_account_at_once(
     repo = _repo(tmp_path / "repo")
     sub = repo / "docs"
     sub.mkdir()
-    root = os.path.realpath(repo)
-    _write_claude_json(second, "two@x.dev", trusted=(Path(root),))
+    root = _key(repo)
+    _write_claude_json(second, "two@x.dev", trusted=(root,))
 
     result = runner.invoke(app, ["--json", "accounts", "trust", str(sub)])
 
@@ -419,15 +434,15 @@ def test_accounts_trust_sync_copies_every_trusted_folder_everywhere(
     a.mkdir()
     b.mkdir()
     gone = tmp_path / "removed-since"
-    _write_claude_json(plain, "one@x.dev", trusted=(Path(os.path.realpath(a)),))
-    _write_claude_json(second, "two@x.dev", trusted=(Path(os.path.realpath(b)), gone))
+    _write_claude_json(plain, "one@x.dev", trusted=(_key(a),))
+    _write_claude_json(second, "two@x.dev", trusted=(_key(b), str(gone)))
 
     result = runner.invoke(app, ["--json", "accounts", "trust", "--sync"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["folders_gone"] == 1
-    real_a, real_b = os.path.realpath(a), os.path.realpath(b)
+    real_a, real_b = _key(a), _key(b)
     assert sorted(_trusted(third)) == sorted([real_a, real_b])
     assert sorted(_trusted(plain)) == sorted([real_a, real_b])
     assert sorted(_trusted(second)) == sorted([real_b, str(gone), real_a])

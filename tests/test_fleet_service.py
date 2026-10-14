@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import socket
 import sqlite3
@@ -12360,7 +12361,7 @@ def test_a_spawn_shares_the_folder_trust_into_the_account_it_picks_and_says_so(
 ) -> None:
     """Account 2 said yes to the repository; a coder spawned on account 3 in a worktree of it
     starts without the question, and the receipt — the manager's view — says why."""
-    root = os.path.realpath(project.root)
+    root = claude_sharing.project_key(Path(os.path.realpath(project.root)))
     _signed_in(accounts_core.default_account(), "one@x.dev")
     second, third = accounts_core.create_account(), accounts_core.create_account()
     _signed_in(second, "two@x.dev", trusted=(root,))
@@ -12389,7 +12390,7 @@ def test_an_agent_at_the_trust_question_needs_the_human_until_it_is_answered(
 
     assert status.state == "attention"
     assert status.detail is not None and status.detail.startswith(TRUST_PROMPT)
-    assert f"aisquare accounts trust {agent.cwd}" in status.detail
+    assert f"aisquare accounts trust {shlex.quote(str(agent.cwd))}" in status.detail
     assert fleet_service.status_of(agent).detail == status.detail
     # `fleet tell` files a board note instead of typing: Enter there picks "No, exit".
     told = fleet_service.tell(project, agent.label, "start on the task")
@@ -12437,7 +12438,8 @@ def test_spawn_never_types_its_prompt_into_the_trust_question(
     assert tmux.typed == []
     assert receipt.prompt_typed is False
     note = next(n for n in receipt.notes if "folder-trust question" in n)
-    assert "NOT typed" in note and f"aisquare accounts trust {receipt.agent.cwd}" in note
+    assert "NOT typed" in note
+    assert f"aisquare accounts trust {shlex.quote(str(receipt.agent.cwd))}" in note
     assert clock.now >= PROMPT_TIMEOUT, "waited for a human to answer it first"
 
 

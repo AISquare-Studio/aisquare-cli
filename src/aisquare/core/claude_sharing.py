@@ -95,11 +95,18 @@ def trust_scope(folder: Path) -> TrustScope:
     real = Path(os.path.realpath(folder))
     top = _git_top(real)
     if top is None:
-        return TrustScope(real, str(real), tuple(str(p) for p in (real, *real.parents)))
+        return TrustScope(real, project_key(real), tuple(map(project_key, (real, *real.parents))))
     canonical = _canonical_root(top)
     walk = [real, *(parent for parent in real.parents if parent.is_relative_to(top))]
-    covering = dict.fromkeys([str(canonical), *(str(p) for p in walk)])
-    return TrustScope(real, str(canonical), tuple(covering))
+    covering = dict.fromkeys(map(project_key, [canonical, *walk]))
+    return TrustScope(real, project_key(canonical), tuple(covering))
+
+
+def project_key(path: Path) -> str:
+    """``path`` as Claude Code spells a ``projects`` key: with ``/`` on Windows too, where
+    its path normaliser turns every ``\\`` into one."""
+    text = str(path)
+    return text.replace("\\", "/") if os.name == "nt" else text
 
 
 def _git_top(folder: Path) -> Path | None:

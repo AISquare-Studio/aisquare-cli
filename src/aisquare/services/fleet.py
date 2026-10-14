@@ -256,6 +256,12 @@ class ReapReport:
     ended: list[FleetAgent] = field(default_factory=list)
     lost: list[FleetAgent] = field(default_factory=list)
     worktrees_removed: list[Path] = field(default_factory=list)
+    worktrees_kept: list[tuple[Path, str]] = field(default_factory=list)
+    """An ended agent's worktree left in place, with why: uncommitted changes, or commits
+    found nowhere but there (:func:`_remove_finished_worktrees`)."""
+    branches_deleted: list[str] = field(default_factory=list)
+    """The ``fleet/…`` branches of removed worktrees, deleted once their tip was found on
+    the default branch or a remote-tracking one."""
     claims_released: list[str] = field(default_factory=list)
     """Task ids the ended and lost rows' board sessions still held, returned to
     the pool — the same count ``shutdown`` reports, where ``reap`` used to
@@ -948,20 +954,47 @@ def _default_branch(root: Path) -> str:
     return "HEAD"
 
 
-def _merged_branches(root: Path) -> set[str]:
-    """Branch names already merged into the default branch."""
-    merged = _git(root, "branch", "--merged", _default_branch(root), "--format=%(refname:short)")
-    if merged.returncode != 0:
-        return set()
-    return {line.strip() for line in merged.stdout.splitlines() if line.strip()}
+#: The prefix of every branch :func:`branch_name` makes: the only branches reap deletes.
+_FLEET_BRANCH_PREFIX = "fleet/"
 
 
-def _remove_merged_worktrees(store: ContextStore, project: ProjectInfo, report: ReapReport) -> None:
-    """Remove the worktrees of ENDED agents whose branch is merged — never unmerged work.
+def _pushed(root: Path, rev: str, default: str) -> bool:
+    """Whether commit ``rev`` is on the default branch or on any remote-tracking branch:
+    pushed somewhere, so the worktree is not where it lives alone."""
+    if _git(root, "merge-base", "--is-ancestor", rev, default).returncode == 0:
+        return True
+    remote = _git(root, "for-each-ref", "--contains", rev, "--format=%(refname)", "refs/remotes")
+    return remote.returncode == 0 and bool(remote.stdout.strip())
 
-    A dirty worktree makes ``git worktree remove`` refuse, and that refusal is
-    honoured: uncommitted changes are unmerged work too. A tree a live agent
-    still sits in (a respawn reused it) is never touched.
+
+def _why_kept(root: Path, tree: Path, default: str) -> str | None:
+    """Why ``tree`` must stay — what in it exists only there — or ``None`` when nothing does."""
+    status = _git(tree, "status", "--porcelain")
+    if status.returncode != 0:
+        return f"git status failed there ({status.stderr.strip() or status.returncode})"
+    if status.stdout.strip():
+        return "uncommitted changes"
+    head = _git(tree, "rev-parse", "--verify", "--quiet", "HEAD")
+    if head.returncode != 0 or not head.stdout.strip():
+        return "no commit to check"
+    if not _pushed(root, head.stdout.strip(), default):
+        return "commits on no remote branch yet — push them, then reap again"
+    return None
+
+
+def _remove_finished_worktrees(
+    store: ContextStore, project: ProjectInfo, report: ReapReport
+) -> None:
+    """Remove the worktree of each ENDED agent that holds nothing found only there.
+
+    Nothing only there: the tree is clean (no uncommitted change, no untracked file that
+    is not ignored) and its HEAD is on the default branch or on ANY remote-tracking
+    branch — pushed somewhere. Merged into the default branch was the rule, and a
+    coder that pushes onto an integration branch (``push HEAD:feat/…``) never was:
+    its worktrees stayed for good, 15 of them and 1.2 GB on one night. Each tree kept
+    is on the report with why. Then its ``fleet/…`` branch is deleted when its tip is
+    pushed the same way; no other branch is. A tree a live agent still sits in (a
+    respawn reused it) is never touched.
     """
     root = project.root
     if not is_git_project(root):
@@ -978,20 +1011,35 @@ def _remove_merged_worktrees(store: ContextStore, project: ProjectInfo, report: 
     }
     try:
         branches = _worktree_branches(root)
-        merged = _merged_branches(root)
+        default = _default_branch(root)
     except FleetError:
         return  # no git here: nothing can be removed safely, so nothing is
-    removed: set[Path] = set()
+    seen: set[Path] = set()
     for agent in candidates:
         path = agent.cwd.resolve()
-        if path in in_use or path in removed:
+        if path in in_use or path in seen:
             continue
+        seen.add(path)
+        try:
+            kept = _why_kept(root, agent.cwd, default)
+        except FleetError as exc:
+            kept = f"git could not be asked ({exc})"
+        if kept is None:
+            removal = _git(root, "worktree", "remove", str(agent.cwd))
+            if removal.returncode != 0:
+                kept = f"git worktree remove refused: {removal.stderr.strip() or 'no reason'}"
+        if kept is not None:
+            report.worktrees_kept.append((agent.cwd, kept))
+            continue
+        report.worktrees_removed.append(agent.cwd)
         branch = branches.get(path)
-        if branch is None or branch not in merged:
-            continue
-        if _git(root, "worktree", "remove", str(agent.cwd)).returncode == 0:
-            removed.add(path)
-            report.worktrees_removed.append(agent.cwd)
+        if (
+            branch is not None
+            and branch.startswith(_FLEET_BRANCH_PREFIX)
+            and _pushed(root, f"refs/heads/{branch}", default)
+            and _git(root, "branch", "-D", branch).returncode == 0
+        ):
+            report.branches_deleted.append(branch)
 
 
 # --- what tmux knows about a pane -----------------------------------------------------
@@ -4551,7 +4599,7 @@ def shutdown(
     The one place a row may be ended without tmux confirming its pane died. Every
     other path — ``stop``, ``reap`` — refuses that: a server that cannot be reached
     is not evidence of a dead pane, and ending a live agent's row hides it from
-    every listing and hands its worktree to ``_remove_merged_worktrees``. Here the
+    every listing and hands its worktree to ``_remove_finished_worktrees``. Here the
     ambiguity is resolved by the operator, not by inference: they have ordered the
     fleet DOWN. Measured 2026-09-10 without this command — the operator ran ``tmux
     -L asq kill-server`` by hand (the only off switch they had), every manager
@@ -5525,7 +5573,7 @@ def _handoff_prompt(
 
 
 def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> ReapReport:
-    """Record dead panes as ended, mark vanished panes lost, remove merged worktrees.
+    """Record dead panes as ended, mark vanished panes lost, remove finished worktrees.
 
     When tmux cannot be asked nothing is marked: absence of evidence is not a
     dead pane, and an unreachable tmux must not end rows whose processes may
@@ -5642,7 +5690,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                             _count_release(report, ended, released, failed)
                             report.ended.append(ended)
                             _emit_exit(store, ended)
-            _remove_merged_worktrees(store, current, report)
+            _remove_finished_worktrees(store, current, report)
     for ended in report.ended:
         nudge_manager(ended.project_id, reason=f"{ended.label} exited")
     return report

@@ -484,6 +484,10 @@ def stop(
     else:
         console = stdout_console()
         console.print(f"✓ stopped {agent.label} ({agent.id})")
+        if agent.worktree:
+            console.print(
+                "  · run `aisquare fleet reap` to remove its worktree once its work is pushed"
+            )
         _say_released(console, len(released))
         # The work the stop returned to the pool is the one thing the next agent
         # inherits from this one; here the receipt carries the tasks, so they are
@@ -851,10 +855,13 @@ def reap(
         ),
     ] = False,
 ) -> None:
-    """Record exited agents, mark vanished panes lost, remove merged worktrees.
+    """Record exited agents, mark vanished panes lost, remove finished worktrees.
 
-    This project by default, `--all` for every project — never both. Exits 1
-    when a released claim could not be given back to the board.
+    A finished worktree is an ended agent's tree that is clean and whose commits
+    are on the default branch or pushed to any remote branch; its `fleet/…` branch
+    goes with it. A tree with uncommitted changes or unpushed commits is kept, and
+    named with why. This project by default, `--all` for every project — never
+    both. Exits 1 when a released claim could not be given back to the board.
     """
     refuse_conflicting_scope(every, project)
     target = None if every else _project(project)
@@ -869,6 +876,11 @@ def reap(
                     "ended": [a.model_dump(mode="json") for a in report.ended],
                     "lost": [a.model_dump(mode="json") for a in report.lost],
                     "worktrees_removed": [str(p) for p in report.worktrees_removed],
+                    "worktrees_kept": [
+                        {"path": str(path), "reason": reason}
+                        for path, reason in report.worktrees_kept
+                    ],
+                    "branches_deleted": list(report.branches_deleted),
                     "claims_released": list(report.claims_released),
                     "release_failures": list(report.release_failures),
                     "held": [_row_json(row) for row in report.held],
@@ -896,6 +908,10 @@ def reap(
         console.print(f"  ⚠ {row.agent.label}  LEFT LIVE — {row.reason}")
     for path in report.worktrees_removed:
         console.print(f"  🗑 {path}")
+    for branch in report.branches_deleted:
+        console.print(f"  🗑 branch {branch}")
+    for path, reason in report.worktrees_kept:
+        console.print(f"  ⚠ kept {path} — {reason}")
     _say_released(console, len(report.claims_released))
     for failure in report.release_failures:
         console.print(f"  ⚠ claims of {failure}")

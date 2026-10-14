@@ -1791,7 +1791,7 @@ def test_an_unreachable_tmux_server_is_not_read_as_every_pane_gone(
     unreachable server is exactly that — though nothing raises: its non-zero exit
     reaches ``_observe`` as an empty answer, which used to read as "every pane is
     gone". ``reap`` then ended every live row as ``lost`` for processes that are
-    still running, and ``_remove_merged_worktrees`` — the same pass, now seeing
+    still running, and ``_remove_finished_worktrees`` — the same pass, now seeing
     ``ended_at`` set — removed their clean worktrees out from under them. A stale
     socket path is all it takes (a /tmp sweep, or a ``TMUX_TMPDIR`` that differs
     between the spawning shell and the reaping one).
@@ -7130,6 +7130,99 @@ def test_reap_removes_a_merged_worktree_and_keeps_an_unmerged_one(
     assert report.worktrees_removed == [merged.cwd]
     assert not merged.cwd.exists() and unmerged.cwd.exists()
     assert fleet_service.reap(project).worktrees_removed == []
+
+
+def _remote(project: ProjectInfo, tmp_path: Path) -> Path:
+    """A bare remote for the project's repo, ``origin``, with ``main`` pushed to it."""
+    bare = tmp_path / "remote.git"
+    _git("init", "-q", "--bare", str(bare), cwd=tmp_path)
+    _git("remote", "add", "origin", str(bare), cwd=project.root)
+    _git("push", "-q", "origin", "main", cwd=project.root)
+    return bare
+
+
+def _commit(tree: Path, name: str) -> None:
+    (tree / name).write_text(f"{name}\n", encoding="utf-8")
+    _git("add", name, cwd=tree)
+    _git("commit", "-q", "-m", name, cwd=tree)
+
+
+def test_reap_removes_a_worktree_pushed_to_any_remote_branch_and_its_fleet_branch(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """A coder that pushes onto an integration branch (``push HEAD:feat/…``) never merges
+    into the default branch, and reap kept every such tree: 15 worktrees and 1.2 GB on one
+    night. Pushed anywhere, with nothing uncommitted, the tree holds nothing found only
+    there — it goes, and its ``fleet/…`` branch with it."""
+    _remote(project, tmp_path)
+    pushed = fleet_service.spawn(project, "coder", label="coder-pushed").agent
+    _commit(pushed.cwd, "feature.txt")
+    _git("push", "-q", "origin", "HEAD:feat/integration", cwd=pushed.cwd)
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=pushed.cwd)
+    assert branch.startswith("fleet/"), branch
+    fleet_service.stop(project, "coder-pushed", force=True)
+    on_main = _git("branch", "--list", "--merged", "main", branch, cwd=project.root)
+    assert on_main == "", "the premise: the commit is not on main"
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [pushed.cwd] and not pushed.cwd.exists()
+    assert report.branches_deleted == [branch]
+    assert _git("branch", "--list", branch, cwd=project.root) == ""
+    assert report.worktrees_kept == []
+    assert _git("rev-parse", "origin/feat/integration", cwd=project.root), "the work is safe"
+
+
+def test_reap_keeps_a_worktree_with_unpushed_commits_or_uncommitted_changes_and_says_why(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    _remote(project, tmp_path)
+    unpushed = fleet_service.spawn(project, "coder", label="coder-unpushed").agent
+    _commit(unpushed.cwd, "local.txt")
+    dirty = fleet_service.spawn(project, "coder", label="coder-dirty").agent
+    (dirty.cwd / "scratch.txt").write_text("wip\n", encoding="utf-8")  # untracked, not ignored
+    branches = {
+        agent.label: _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+        for agent in (unpushed, dirty)
+    }
+    for label in branches:
+        fleet_service.stop(project, label, force=True)
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [] and report.branches_deleted == []
+    kept = dict(report.worktrees_kept)
+    assert kept[unpushed.cwd] == "commits on no remote branch yet — push them, then reap again"
+    assert kept[dirty.cwd] == "uncommitted changes"
+    assert unpushed.cwd.exists() and dirty.cwd.exists()
+    for branch in branches.values():
+        assert _git("branch", "--list", branch, cwd=project.root), f"{branch} kept"
+
+    # Pushed, the next reap takes it; the dirty one is still kept.
+    _git("push", "-q", "origin", "HEAD:feat/later", cwd=unpushed.cwd)
+    again = fleet_service.reap(project)
+    assert again.worktrees_removed == [unpushed.cwd]
+    assert again.branches_deleted == [branches["coder-unpushed"]]
+    assert dict(again.worktrees_kept) == {dirty.cwd: "uncommitted changes"}
+
+
+def test_reap_deletes_only_a_fleet_branch(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """An agent that switched its tree to a branch of its own and pushed it: the tree goes,
+    as nothing is only there, and the branch stays — reap deletes the ``fleet/…`` branches
+    it made, never another."""
+    _remote(project, tmp_path)
+    agent = fleet_service.spawn(project, "coder", label="coder-own").agent
+    _git("switch", "-q", "-c", "my-own", cwd=agent.cwd)
+    _commit(agent.cwd, "mine.txt")
+    _git("push", "-q", "origin", "HEAD:my-own", cwd=agent.cwd)
+    fleet_service.stop(project, "coder-own", force=True)
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [agent.cwd] and report.branches_deleted == []
+    assert _git("branch", "--list", "my-own", cwd=project.root)
 
 
 def test_reap_never_removes_a_live_agents_worktree(

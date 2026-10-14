@@ -457,8 +457,14 @@ aisquare fleet reap --all --server-down
 
 Records agents whose panes have died as ended (with their exit code), marks
 agents whose panes have vanished as lost, and removes the worktrees of ended
-agents **whose branch is merged**. It never deletes unmerged work. `--all`
-walks every project's fleet, not just this one.
+agents **that hold nothing found only there**: a clean tree whose commits are on
+the default branch or pushed to **any** remote branch (an integration branch
+counts), and then that tree's `fleet/…` branch, once its tip is pushed the same
+way. A tree with uncommitted changes or unpushed commits is kept and named, with
+why (`worktrees_kept` under `--json`, beside `worktrees_removed` and
+`branches_deleted`); push it, and the next `reap` removes it. `fleet stop` says
+so for an agent that had a worktree. `--all` walks every project's fleet, not
+just this one.
 
 Each row is asked of its own server, at the socket its spawn recorded, so a
 shell under another `TMUX_TMPDIR` reaps exactly what the spawning shell would,
@@ -1357,8 +1363,9 @@ aisquare doctor
 
 **Rows say `✗ lost`, or windows outlive their rows.** The tmux server was
 killed, or a pane vanished. `reap` reconciles both directions — dead panes are
-recorded as ended with their exit code, vanished panes as lost, and worktrees
-whose branch is merged are removed; unmerged work is never deleted:
+recorded as ended with their exit code, vanished panes as lost, and ended
+agents' worktrees that are clean and pushed are removed; uncommitted or
+unpushed work is never deleted:
 
 ```sh
 aisquare fleet reap

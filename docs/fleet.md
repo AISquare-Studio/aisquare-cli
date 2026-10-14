@@ -464,8 +464,9 @@ agents whose panes have vanished as lost, and removes the worktrees of ended
 agents **that hold nothing found only there**: a clean tree whose commits are on
 the default branch or pushed to **any** remote branch (an integration branch
 counts), and then that tree's `fleet/…` branch, once its tip is pushed the same
-way. A tree with uncommitted changes or unpushed commits is kept and named, with
-why (`worktrees_kept` under `--json`, beside `worktrees_removed` and
+way. A tree with uncommitted changes, an untracked file that is not ignored
+(even under `status.showUntrackedFiles=no`), or unpushed commits is kept and
+named, with why (`worktrees_kept` under `--json`, beside `worktrees_removed` and
 `branches_deleted`); push it, and the next `reap` removes it. `fleet stop` says
 so for an agent that had a worktree. `--all` walks every project's fleet, not
 just this one.

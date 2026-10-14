@@ -969,8 +969,12 @@ def _pushed(root: Path, rev: str, default: str) -> bool:
 
 
 def _why_kept(root: Path, tree: Path, default: str) -> str | None:
-    """Why ``tree`` must stay — what in it exists only there — or ``None`` when nothing does."""
-    status = _git(tree, "status", "--porcelain")
+    """Why ``tree`` must stay — what in it exists only there — or ``None`` when nothing does.
+
+    Untracked files are asked for by name: ``status.showUntrackedFiles=no`` hides them
+    from a plain ``status``, and ``git worktree remove`` honours it too, so the tree read
+    clean and the file went with it."""
+    status = _git(tree, "status", "--porcelain", "--untracked-files=normal")
     if status.returncode != 0:
         return f"git status failed there ({status.stderr.strip() or status.returncode})"
     if status.stdout.strip():

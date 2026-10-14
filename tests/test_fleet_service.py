@@ -7230,6 +7230,43 @@ def test_reap_keeps_a_worktree_with_unpushed_commits_or_uncommitted_changes_and_
     assert dict(again.worktrees_kept) == {dirty.cwd: "uncommitted changes"}
 
 
+@pytest.mark.parametrize("where", ["repo config", "global config"])
+def test_reap_keeps_an_untracked_file_that_status_show_untracked_files_hides(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+) -> None:
+    """``status.showUntrackedFiles=no`` (common in big repos and dotfile setups) hides an
+    untracked file from a plain ``git status --porcelain``, and ``git worktree remove``
+    honours it too: the tree read clean, was pushed, and reap deleted the file. Reap asks
+    for untracked files whatever the config says."""
+    _remote(project, tmp_path)
+    if where == "repo config":
+        _git("config", "status.showUntrackedFiles", "no", cwd=project.root)
+    else:
+        config = tmp_path / "gitconfig"
+        config.write_text("[status]\n\tshowUntrackedFiles = no\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    agent = fleet_service.spawn(project, "coder", label="coder-hidden").agent
+    _commit(agent.cwd, "f.txt")
+    _git("push", "-q", "origin", "HEAD:feat/x", cwd=agent.cwd)
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=agent.cwd)
+    precious = agent.cwd / "precious.txt"
+    precious.write_text("only here\n", encoding="utf-8")  # untracked, not ignored
+    assert _git("status", "--porcelain", cwd=agent.cwd) == "", "the premise: git hides it"
+    fleet_service.stop(project, "coder-hidden", force=True)
+
+    report = fleet_service.reap(project)
+
+    assert report.worktrees_removed == [] and report.branches_deleted == []
+    assert dict(report.worktrees_kept) == {agent.cwd: "uncommitted changes"}
+    assert precious.read_text(encoding="utf-8") == "only here\n"
+    assert _git("branch", "--list", branch, cwd=project.root), f"{branch} kept"
+
+
 def test_reap_deletes_only_a_fleet_branch(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
 ) -> None:

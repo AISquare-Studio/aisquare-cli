@@ -71,13 +71,15 @@ jobs:
         run: |
           shellcheck --shell=sh install.sh \
             tests/install/cell.sh tests/install/cell-nonroot.sh tests/install/matrix.sh \
-            plugins/claude-code/scripts/aisquare-hook
+            plugins/claude-code/scripts/aisquare-hook \
+            plugins/codex/scripts/aisquare-hook
 
       - name: shfmt (format check)
         run: |
           shfmt -i 4 -ci -d install.sh \
             tests/install/cell.sh tests/install/cell-nonroot.sh tests/install/matrix.sh \
-            plugins/claude-code/scripts/aisquare-hook
+            plugins/claude-code/scripts/aisquare-hook \
+            plugins/codex/scripts/aisquare-hook
 
       - name: Parse under dash and BusyBox ash
         # `sh -n` under BOTH, because bash accepts things neither does and
@@ -94,7 +96,8 @@ jobs:
         run: |
           for script in install.sh tests/install/cell.sh \
             tests/install/cell-nonroot.sh tests/install/matrix.sh \
-            plugins/claude-code/scripts/aisquare-hook; do
+            plugins/claude-code/scripts/aisquare-hook \
+            plugins/codex/scripts/aisquare-hook; do
             dash -n "$script"
             echo "dash  ok: $script"
             busybox ash -n "$script"

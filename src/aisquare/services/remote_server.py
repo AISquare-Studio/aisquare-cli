@@ -6241,6 +6241,11 @@ def _remote_quit_now(undone: str | None = None) -> NoReturn:
     (``remote_push.push_drain``), which runs here instead, for
     :data:`REMOTE_QUIT_PUSH_SECONDS` at most, so the farewell an auto-off sent still
     goes out; one more Ctrl-C ends that wait too.
+
+    Every ngrok this process started is signalled first
+    (``ngrok_tunnel.end_every_tunnel_now``): the fleet UI's Ctrl-C stopped only the one of
+    the Remote turning off, and one a start had spawned on the writer's thread after the
+    turn-off took its tunnel ran on (review of #259, remote focus, 4/12).
     """
     import sys
 
@@ -6249,6 +6254,9 @@ def _remote_quit_now(undone: str | None = None) -> NoReturn:
         os._exit(130)
     _quitting = True
     try:
+        tunnels = sys.modules.get("aisquare.services.ngrok_tunnel")  # loaded by all that start one
+        if tunnels is not None:
+            tunnels.end_every_tunnel_now()
         left = remote_writes_running()
         if left:
             _remote_say(

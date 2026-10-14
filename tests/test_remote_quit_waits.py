@@ -542,6 +542,27 @@ def test_a_quit_at_once_still_lets_a_farewell_in_flight_arrive(
     assert arrived.is_set() and quit_now == [130]
 
 
+def test_a_quit_at_once_ends_every_ngrok_this_process_started(
+    said: list[str], quit_now: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, remote focus, 4/12: a Ctrl-C in the fleet UI's quit wait stopped only
+    the ngrok of the Remote turning off (``stop_tunnel_now``). One a start had spawned on
+    the writer's thread after the turn-off took its tunnel is in ``ngrok_tunnel._LIVE``,
+    and nothing signalled it before ``os._exit``."""
+    from aisquare.services import ngrok_tunnel
+
+    signalled: list[str] = []
+
+    class Spawned:
+        def signal_now(self) -> None:
+            signalled.append("ngrok")
+
+    monkeypatch.setattr(ngrok_tunnel, "_LIVE", {Spawned()})
+    with pytest.raises(SystemExit):
+        remote_server._remote_quit_now()
+    assert signalled == ["ngrok"] and quit_now == [130]
+
+
 def test_a_push_that_does_not_arrive_holds_a_quit_at_once_for_moments_at_most(
     said: list[str],
     quit_now: list[int],

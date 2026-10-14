@@ -409,6 +409,86 @@ def test_an_ngrok_group_that_ignores_the_terminate_is_killed_whole(
                 os.kill(pid, signal.SIGKILL)
 
 
+@pytest.mark.parametrize("tied", [True, False], ids=["tied", "the control: as before"])
+def test_an_ngrok_ends_with_the_process_that_started_it_however_that_ends(
+    tmp_path: Path, tied: bool
+) -> None:
+    """Review of #259, remote focus, 4/12: ngrok runs in a group of its own, and only a hangup
+    or a SIGTERM of the fleet UI ended it. After a ``kill -9``, the OOM killer or a crash in
+    C it ran on, the public link pointed at a ``127.0.0.1`` port any account could bind,
+    and the static domain held. Its parent (``popen_tied``) ends its group once the fleet
+    UI is gone, SIGKILLing what ignored the SIGTERM. The stand-in ignores it, and so does
+    the child it forks into the group."""
+    if sys.platform == "win32":  # an `if`, not a skipif: mypy's platform check reads only this
+        pytest.skip("process groups are POSIX")
+    pids = tmp_path / "pids"
+    body = (
+        "import os, signal\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        "    time.sleep(60)\n"
+        "    os._exit(0)\n"
+        f"open({str(pids)!r}, 'w').write(str(os.getpid()) + ' ' + str(child))\n"
+        f"print({json.dumps(json.dumps(STARTED))}, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    command = ngrok_printing(tmp_path, body)
+    fleet_ui = tmp_path / "fleet-ui.py"
+    fleet_ui.write_text(
+        "import subprocess, sys, time\n"
+        "from aisquare.services import ngrok_tunnel\n"
+        "ngrok_tunnel.STOP_SECONDS = 0.5\n"
+        f"popen = ngrok_tunnel.popen_tied if {tied!r} else subprocess.Popen\n"
+        f"tunnel = ngrok_tunnel.NgrokTunnel(8750, command={command!r}, popen=popen)\n"
+        "assert tunnel.start_tunnel() is None\n"
+        "print(tunnel.wait_for_url(10), flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    ui = subprocess.Popen([sys.executable, str(fleet_ui)], stdout=subprocess.PIPE, text=True)
+    started: list[int] = []
+    try:
+        assert ui.stdout is not None
+        assert ui.stdout.readline().strip() == STARTED["url"]
+        started = [int(pid) for pid in pids.read_text().split()]
+        ui.kill()
+        ui.wait(10)
+        if tied:
+            assert all(gone(pid) for pid in started), "ngrok outlived the fleet UI"
+        else:
+            assert not any(gone(pid, 1.0) for pid in started), "the control"
+    finally:
+        with contextlib.suppress(OSError):
+            ui.kill()
+        for pid in started:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def test_the_tied_parent_ends_as_ngrok_ended_its_code_or_its_signal(tmp_path: Path) -> None:
+    """What reads ngrok's exit (the reason a tunnel never came, ``_exit_sentence``) reads the
+    parent's: it is ngrok's code, or the signal that ended ngrok."""
+    if sys.platform == "win32":
+        pytest.skip("the parent runs where there are process groups")
+    script = tmp_path / "exits.py"
+    script.write_text(
+        "import os, sys\nif sys.argv[1] == 'kill':\n    os.kill(os.getpid(), 9)\n"
+        "sys.exit(int(sys.argv[1]))\n"
+    )
+    for argument, code in (("0", 0), ("3", 3), ("kill", -signal.SIGKILL)):
+        ran = ngrok_tunnel.popen_tied(
+            [sys.executable, str(script), argument], stdout=subprocess.PIPE, text=True
+        )
+        assert ran.wait(10) == code, argument
+    missing = ngrok_tunnel.popen_tied(
+        [str(tmp_path / "no-such-ngrok")], stdout=subprocess.PIPE, text=True
+    )
+    out, _ = missing.communicate(timeout=10)
+    assert missing.returncode == 1
+    said = ngrok_tunnel.parse_log_line(out.splitlines()[0]).error
+    assert said is not None and said.startswith("could not start ") and "No such file" in said
+
+
 def test_a_url_its_listener_could_not_take_never_ends_the_log_reader(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

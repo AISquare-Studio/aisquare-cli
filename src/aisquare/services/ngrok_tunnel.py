@@ -112,6 +112,47 @@ READER_JOIN_SECONDS = 1.0
 """How long stopping waits, once ngrok's group is gone, for the log reader to see its end."""
 _OWN_GROUP: dict[str, Any] = {} if sys.platform == "win32" else {"process_group": 0}
 """Popen's word for a process group of ngrok's own: POSIX only, and the fleet UI runs there."""
+_TIED = """\
+import json, os, signal, subprocess, sys, threading
+
+def end(signum):
+    if os.getpgrp() == os.getpid():
+        os.killpg(0, signum)
+    else:
+        child.send_signal(signum)
+
+def gone():
+    try:
+        while os.read(0, 512):
+            pass
+    except OSError:
+        pass
+    end(signal.SIGTERM)
+    try:
+        child.wait(timeout=%(stop)r)
+    except subprocess.TimeoutExpired:
+        end(signal.SIGKILL)
+
+signal.signal(signal.SIGTERM, lambda signum, frame: None)
+try:
+    child = subprocess.Popen(sys.argv[1:], stdin=subprocess.DEVNULL)
+except OSError as exc:
+    print(json.dumps({"lvl": "eror", "err": f"could not start {sys.argv[1]}: {exc}"}), flush=True)
+    sys.exit(1)
+threading.Thread(target=gone, daemon=True).start()
+code = child.wait()
+if code < 0:
+    for name in ("SIGTERM", "SIGINT", "SIGPIPE"):
+        signal.signal(getattr(signal, name), signal.SIG_DFL)
+    os.kill(os.getpid(), -code)
+sys.exit(code if code >= 0 else 128 - code)
+"""
+"""What runs ngrok on POSIX (:func:`popen_tied`): its parent, in its group, until the pipe on
+its stdin ends, which it does once this process is gone, however it went. Then it SIGTERMs
+the group, and SIGKILLs what is left of it after :data:`STOP_SECONDS`; ngrok alone, should
+it not lead a group of its own (never the group of whoever started it). A SIGTERM to it
+alone waits for ngrok, whose exit, code or signal, it ends with: stopping signals the
+group."""
 
 COMMAND_LINE_TUNNEL = "command_line"
 """ngrok's name, in its log and its API, for the tunnel ``ngrok http`` asks for."""
@@ -387,6 +428,30 @@ def _own_group(process: subprocess.Popen[str]) -> int | None:
         return None
 
 
+def popen_tied(command: list[str], **kwargs: Any) -> subprocess.Popen[str]:
+    """``subprocess.Popen(command, **kwargs)``, ``command`` run by a parent that ends its process
+    group once this process is gone (:data:`_TIED`), where there are groups (POSIX).
+
+    ngrok runs in a group of its own (:data:`_OWN_GROUP`), and only a hangup or a SIGTERM
+    of the fleet UI's ended it (``remote_control.ngrok_ends_with``): after a ``kill -9``,
+    the OOM killer or a crash in C, it ran on, the public link still pointed at a
+    ``127.0.0.1`` port nobody held, which any account on the machine could bind and be
+    handed the phones' next requests, their cookie and the token in their path, with its
+    own page to ask for the passphrase; and it kept the static domain, so the next
+    Remote's ngrok could not have it (ERR_NGROK_334). An idle ngrok logs nothing, so the
+    pipe of its log closing never reached it (review of #259, remote focus, 4/12). The
+    parent's stdin is a pipe this process alone holds the other end of, which the kernel
+    closes with it. The parent is Python, this one, isolated (``-I``): nothing of the
+    working directory, the environment's ``PYTHON*`` or the user's site is imported. Where
+    there is none to run (``sys.executable`` empty), ngrok runs as before.
+    """
+    if sys.platform == "win32" or not sys.executable:
+        return subprocess.Popen(command, **kwargs)
+    kwargs["stdin"] = subprocess.PIPE
+    tied = [sys.executable, "-I", "-c", _TIED % {"stop": STOP_SECONDS}, *command]
+    return subprocess.Popen(tied, **kwargs)
+
+
 _LIVE: set[NgrokTunnel] = set()
 """Every tunnel whose ngrok is up, or not yet seen to end with all of its group: what
 :func:`end_every_tunnel_now` signals. Changed under :data:`_LIVE_LOCK`; read without it."""
@@ -536,7 +601,7 @@ class NgrokTunnel:
         *,
         binary: str = "ngrok",
         which: Callable[[str], str | None] = shutil.which,
-        popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
+        popen: Callable[..., subprocess.Popen[str]] = popen_tied,
         command: Sequence[str] | None = None,
         api_off: bool = False,
         configs: Callable[[], list[Path] | None] = api_off_configs,
@@ -641,7 +706,8 @@ class NgrokTunnel:
         of the log reader, which ended without a word, and the panel waited out its 15 s
         while ngrok ran on with nobody draining its log. In a process group of its own,
         for stopping (:meth:`stop_tunnel`), with nothing to read from the terminal the
-        fleet UI holds.
+        fleet UI holds, and by :func:`popen_tied` unless a test hands its own ``popen``: so
+        it ends with this process, however that ends.
         """
         return self._popen(
             command,

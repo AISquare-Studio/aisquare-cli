@@ -108,7 +108,10 @@ auto-off; a `kill` (SIGTERM) or a closed terminal (SIGHUP, unless it runs under
 started beside it then too, as `serve` says on its way out: left up, ngrok hands
 the phones' requests, their cookies with them, to whatever takes port 8750 next,
 and any account on the machine can. (The panel stops its own
-ngrok first, once the phones heard Remote is off, and lets go of the port after.) A
+ngrok first, once the phones heard Remote is off, and lets go of the port after.
+Its ngrok ends with the fleet UI however that ends, a `kill -9` or the OOM killer
+too: on Linux and macOS it runs under a small parent that ends it, and anything
+it started, once the UI is gone.) A
 Ctrl-C while a phone's write is still running (a restart or switch can take 40
 seconds) says which, and waits for it: cut short, it can leave the agent down. A
 second Ctrl-C quits at once and leaves it unfinished, giving a notification still on
@@ -548,7 +551,11 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   stopping. Closing the UI or stopping `serve` with Ctrl-C does not; expiry
   bounds them. Either, once the auto-off time has come, is auto-off. A Remote that
   ended with no way out at all (killed, or a fleet UI ended by a signal) has its
-  auto-off run when Remote next comes on, if its time came meanwhile.
+  auto-off run when Remote next comes on, if its time came meanwhile. Its ngrok
+  does not outlive it, so nothing reaches `127.0.0.1:8750` through the link while
+  Remote is gone; but nothing signed the phones out either, so their cookies open
+  the next Remote. Turn Remote off in the panel, or run
+  `aisquare remote revoke --all`, to sign them out.
 - **Auto-off** is enforced by the server itself: past the deadline every request
   is a 404, and within half a minute Remote turns off, phones signed out, even
   on a machine that slept through the deadline. With writes on, a phone can

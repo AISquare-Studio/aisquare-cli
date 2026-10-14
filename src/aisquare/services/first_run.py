@@ -1240,8 +1240,9 @@ def start_on_agent(
     """:func:`start_fleet` on the agent step 2 showed for ``project`` (:func:`fleet_agent`).
 
     Each role Welcome starts gets that agent, unless the role is bound to an agent
-    of its own (``team bind <role> --agent``: a mixed team), which ``fleet.spawn``
-    then takes from the binding. An agent no one chose (the one installed, see
+    or an executable of its own (``team bind <role> --agent``/``--bin``,
+    ``AISQUARE_BIN_<ROLE>``: a mixed team), which ``fleet.spawn`` then resolves from
+    the binding. An agent no one chose (the one installed, see
     :class:`AgentChoice`) is saved as the user default first, so the coders the
     manager spawns later, and every launch after, land on it too; a save that fails
     costs the default, never the start, and the manager's step says so.
@@ -1258,7 +1259,13 @@ def start_on_agent(
         bound = {role for role, p in config_core.load_config().team.profiles.items() if p.agent}
     except Exception:  # a config that will not parse binds nothing; spawn says why
         bound = set()
-    agents = {role: choice.agent for role in (FLEET_ROLE, CODER_ROLE) if role not in bound}
+    # A role's own executable decides its family too: `team bind coder --bin claude`
+    # under a Codex default is Claude Code's coder, not a Codex one.
+    agents = {
+        role: choice.agent
+        for role in (FLEET_ROLE, CODER_ROLE)
+        if role not in bound and harness.resolve_binary(role).source == "default"
+    }
     started = start_fleet(project, manager=manager, coders=coders, on_step=on_step, agents=agents)
     if not notes or not started.steps:
         return started

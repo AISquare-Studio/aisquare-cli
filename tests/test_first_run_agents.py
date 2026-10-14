@@ -261,6 +261,25 @@ def test_a_role_bound_to_its_own_agent_keeps_it(
     assert all(agent is None for role, agent in agents if role == "coder"), agents
 
 
+@pytest.mark.parametrize("binding", ["config", "role-env"])
+def test_a_role_bound_to_its_own_executable_keeps_its_family(
+    binding: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_launch.use("codex")
+    if binding == "config":
+        config = load_config()
+        config.team.profiles["coder"] = RoleLaunchProfile(bin="claude")
+        save_config(config)
+    else:
+        monkeypatch.setenv("AISQUARE_BIN_CODER", "claude")
+    spawns = _start(tmp_path, on_path("claude", "codex"), monkeypatch)
+    agents = [(role, kwargs.get("agent")) for role, kwargs in spawns.calls]
+    assert agents[0] == ("manager", "codex")
+    assert all(agent is None for role, agent in agents if role == "coder"), agents
+    # So fleet.spawn resolves the coder from its binding, as Claude Code's.
+    assert agent_launch.resolve("coder", cwd=tmp_path).adapter.id == "claude-code"
+
+
 def test_claude_codes_fleet_saves_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     spawns = _start(tmp_path, on_path("claude", "codex"), monkeypatch)
     assert {kwargs.get("agent") for _role, kwargs in spawns.calls} == {"claude-code"}

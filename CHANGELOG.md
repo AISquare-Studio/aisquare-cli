@@ -7,7 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 **A quieter `asq`: projects you can name, one ⚙ Settings, and an Accounts page
-that reads at a glance.**
+that reads at a glance. A folder trusted on one Claude account is trusted on
+all of them, and the fleet cleans up the worktrees it made.**
 - A project has a nickname, which you rename in place on its card. The card's
   **⋯** menu holds *Rename*, *Pin*, *Open settings* and *Remove from fleet…*.
 - The sidebar is your projects, then **⚙ Settings** (App settings, Accounts,
@@ -23,6 +24,12 @@ that reads at a glance.**
 - Your `config.toml` holds only what you changed. New launches go where there
   is room (`pick = "headroom"`), and an agent that hits its limit moves
   (`on_limit = "switch"`). `aisquare config reset` puts every setting back.
+- A launch copies a folder's trust from the Claude account that gave it, so an
+  agent on another account no longer stops at "trust this folder?".
+- `fleet reap` removes a finished agent's worktree, and its `fleet/…` branch,
+  once its work is pushed to any branch, and keeps and names one that holds
+  work found nowhere else. The manager stops and reaps agents whose work is
+  done.
 
 **Upgrading:**
 - From 0.8.1, run `aisquare upgrade`.
@@ -236,6 +243,25 @@ that reads at a glance.**
 - A launch on a machine with no signed-in account no longer prints `headroom:
   no enabled, signed-in account to pick from` every time. A hand-over still
   says it.
+- **`fleet reap` removes an ended agent's worktree once nothing in it is found
+  only there.** The rule was "its branch is merged into the default branch", so
+  a tree pushed to an integration branch (`push HEAD:feat/…`) was never
+  removed. A tree now goes when it is clean and its commits are on the default
+  branch or pushed to **any** remote branch. Its `fleet/…` branch is then
+  deleted, once its tip is pushed the same way; reap never deleted a branch
+  before, and deletes no other. A tree with uncommitted changes, an untracked
+  file that is not ignored, or unpushed commits is kept and named with why;
+  push it, and the next `reap` removes it. `--json` adds `worktrees_kept` and
+  `branches_deleted` beside `worktrees_removed`. A live agent's tree is never
+  touched, as before.
+- **`fleet stop` says** that `fleet reap` removes the agent's worktree once its
+  work is pushed, for an agent that had one.
+- **The role cycles clean up.** The manager's cycle says to stop (`fleet stop`)
+  and reap (`fleet reap`) an agent whose task is done with no queued task that
+  fits it, and to reap again when the validator's gate is PASS. Coder, tester,
+  runner, reviewer, validator and ui-tester are told to remove the scratch
+  worktrees and temp dirs they made before they finish or go idle, never the
+  worktree they were spawned in, which is reap's.
 
 ### Fixed
 - `b` on the board brings the tasks column back however often it is pressed.

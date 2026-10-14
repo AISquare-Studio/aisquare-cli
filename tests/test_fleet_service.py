@@ -3270,6 +3270,34 @@ def test_every_path_that_decides_a_held_rows_fate_gives_the_one_verdict(
     assert lifecycle.running_fleet()[0] == ()
 
 
+@pytest.mark.parametrize("said", ["unasked", "gone"])
+def test_a_row_on_a_socket_tmux_reached_is_held_only_as_another_servers(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    said: str,
+) -> None:
+    """Review of #259, round 5: on a socket tmux had just reached, a row that recorded its
+    server's start was held for any answer of its socket but `answers`: a connect that timed
+    out on a busy server (`unasked`), or a file removed since (`gone`). Held, it spared no
+    session, so the kill phase killed its agent with the session while the report said
+    `left live`, and `--forget` recorded lost a row whose socket tmux answered on. Only
+    `another` holds it there; any other answer stops it as any row, plan and run alike."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    monkeypatch.setattr(tmux, "listener", lambda recorded=None: said)
+
+    for forget in (False, True):
+        coder = _coder(project)
+        assert coder.server_started_at == tmux.started, "asked whether it is another's"
+        plan = fleet_service.shutdown_plan(project, forget=forget)
+        report = fleet_service.shutdown(project, forget=forget)
+
+        assert _planned_ends(plan) == _ends(report) == {coder.id: "stop"}, (forget, plan, report)
+        assert [agent.exit_status for agent in report.stopped] == [0], "its own /exit"
+
+
 def test_every_path_that_types_into_or_shows_a_pane_refuses_a_held_rows_id(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -3612,8 +3612,12 @@ def _unreached(
 
     ``answering`` is a row on a socket the probe found a server on: asked whether that
     server is the row's (``"another"``: it started at another time than the one the row
-    recorded, which lost its socket file to it and may run on, follow-up of #257). A server
-    that is the row's is then ``None`` here: the row is stopped as any other. ``forget``
+    recorded, which lost its socket file to it and may run on, follow-up of #257). Any other
+    answer is then ``None`` here and the row is stopped as any other: tmux reached that
+    server, so a socket that read ``"unasked"`` (a connect that timed out on a busy server)
+    or ``"gone"`` (its file removed since) holds no agent out of reach (review of #259,
+    round 5): held, the row spared no session, so the kill phase ended its agent while the
+    report said it was left live. ``forget``
     is how the way out spells the operator's word: ``shutdown``'s own flag, or the command
     for ``reap``. ``reads`` is the caller's for every row it asks, so rows on one server ask
     it once (:class:`~aisquare.core.tmux.SocketReads`).
@@ -3628,7 +3632,7 @@ def _unreached(
         agent.server_started_at,
         reads=reads,
     )
-    if answer is None or (answering and answer == "answers"):
+    if answer is None or (answering and answer != "another"):
         return None
     try:
         path = agent.socket_path or srv.socket_path()

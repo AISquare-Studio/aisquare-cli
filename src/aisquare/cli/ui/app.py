@@ -1715,6 +1715,7 @@ def _writing_workers() -> dict[str, str]:
         explainability,
         onboard,
         project,
+        settings,
         welcome,
     )
 
@@ -1726,6 +1727,7 @@ def _writing_workers() -> dict[str, str]:
         welcome.worker_name("manager"): "a manager start",
         welcome.worker_name("coders"): "the coders' start",
         project.SPAWN_WORKER: "a manager start",
+        settings.NICKNAME_WORKER: "a project's rename",
         agent.STOP_WORKER: "an agent's stop",
         agent.RESTART_WORKER: "an agent's restart",
         explainability.SAVE_WORKER: "Explainability's setup",
@@ -1752,9 +1754,9 @@ def _waited_reads() -> dict[str, str]:
     from aisquare.cli.ui.views import (
         accounts,
         agent,
+        app_settings,
         doctor,
         explainability,
-        settings,
         welcome,
     )
 
@@ -1767,7 +1769,7 @@ def _waited_reads() -> dict[str, str]:
         agent.LABELS_WORKER: "an agent's account names",
         board.LABELS_WORKER: "a board's account names",
         explainability.STATUS_WORKER: "Explainability's status",
-        settings.ACCOUNTS_WORKER: "the Settings tab's accounts",
+        app_settings.ACCOUNTS_WORKER: "App settings' accounts",
         welcome.worker_name("look"): "Welcome's checks",
         welcome.worker_name("candidates"): "Welcome's folder list",
         welcome.worker_name("validate"): "Welcome's folder check",

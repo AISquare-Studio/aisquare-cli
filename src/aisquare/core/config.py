@@ -192,7 +192,7 @@ class RoleLaunchProfile(BaseModel):
     resolved at launch by the one account resolver
     (``services.claude_accounts.choose``), after ``env``, so a binding that
     carries both a hand-written ``CLAUDE_CONFIG_DIR`` and an ``account`` runs on
-    the account. Written by ``team bind <role> --account`` and the Settings tab;
+    the account. Written by ``team bind <role> --account`` and App settings;
     ``None`` means the role expresses no preference and the project or machine
     default applies (#145).
 

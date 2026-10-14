@@ -1,0 +1,394 @@
+"""App settings, driven headless: the machine-wide form, its writes, and Reset all.
+
+Moved here from the project's Settings tab, which now holds only the project's own
+nickname (tests/test_ui_project.py). What each test asserts is the artefact: the
+bytes ``config.toml`` holds after Save, the backup Reset all keeps.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import tomllib
+from collections.abc import Callable, Coroutine
+from pathlib import Path
+from typing import Any, TypeVar
+
+import pytest
+from textual.app import App, ComposeResult
+from textual.notifications import SeverityLevel
+from textual.pilot import Pilot
+from textual.widgets import Button, Input, Select, Static
+
+from aisquare.cli.ui.views.app_settings import AppSettingsView, ConfirmReset
+from aisquare.core import paths
+from aisquare.core.config import load_config, save_config
+from aisquare.services import fleet as fleet_service
+from tests.ui_workers import settle_page
+
+T = TypeVar("T")
+
+
+class AppHost(App[None]):
+    """A bare app around one ``AppSettingsView`` that records every notification."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.notices: list[tuple[str, str]] = []
+
+    def compose(self) -> ComposeResult:
+        yield AppSettingsView(id="app-settings")
+
+    def notify(
+        self,
+        message: str,
+        *,
+        title: str = "",
+        severity: SeverityLevel = "information",
+        timeout: float | None = None,
+        markup: bool = True,
+    ) -> None:
+        self.notices.append((message, severity))
+        super().notify(message, title=title, severity=severity, timeout=timeout, markup=markup)
+
+
+def drive(scenario: Callable[[Pilot[None], AppHost], Coroutine[Any, Any, T]]) -> T:
+    """Run ``scenario`` against a mounted App settings view and return what it observed."""
+
+    async def run() -> T:
+        host = AppHost()
+        async with host.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            return await scenario(pilot, host)
+
+    return asyncio.run(run())
+
+
+async def settle(pilot: Pilot[None]) -> None:
+    """Let the page go quiet: every worker of ours done, nothing queued."""
+    await settle_page(pilot.app)
+
+
+def _config_toml() -> dict[str, Any]:
+    return tomllib.loads(paths.config_path().read_text(encoding="utf-8"))
+
+
+def test_the_view_is_titled_app_settings_and_holds_no_project_field() -> None:
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[str, list[str]]:
+        title = str(host.query_one("#settings-title", Static).render())
+        missing = [wid for wid in ("#codename", "#nickname") if host.query(wid)]
+        return title, missing
+
+    title, project_fields = drive(scenario)
+    assert title == "App settings"
+    assert project_fields == []
+
+
+def test_settings_saves_a_changed_permission_mode_to_config_toml() -> None:
+    assert not paths.config_path().exists()  # nothing written before the user saves
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> list[tuple[str, str]]:
+        await pilot.pause()
+        host.query_one("#perm-coder", Select).value = "plan"
+        host.query_one("#worktree-dir", Input).value = ".fleet-trees"
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return host.notices
+
+    notices = drive(scenario)
+    assert any(m.startswith("✓ settings saved") for m, _ in notices), notices
+    fleet_on_disk = _config_toml()["fleet"]
+    on_disk = fleet_on_disk["roles"]
+    assert on_disk["coder"]["permission_mode"] == "plan"  # the bytes, not the widget
+    assert "worktree" not in on_disk["coder"]  # at its default, which the file does not repeat
+    assert load_config().fleet.roles["coder"].worktree is True  # untouched fields survive
+    assert "manager" not in on_disk  # only the changed role changed
+    assert fleet_on_disk["worktree_dir"] == ".fleet-trees"  # the worktree root (§4.2)
+    assert "escape_key" not in fleet_on_disk  # an untouched fleet field keeps its default
+    assert load_config().fleet.escape_key == "f12"
+    assert load_config().fleet.roles["coder"].permission_mode == "plan"
+
+
+def test_settings_rejects_a_bad_agent_cap_and_writes_nothing() -> None:
+    async def scenario(pilot: Pilot[None], host: AppHost) -> list[tuple[str, str]]:
+        await pilot.pause()
+        host.query_one("#max-agents", Input).value = "0"
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return host.notices
+
+    notices = drive(scenario)
+    assert any("at least 1" in m and severity == "error" for m, severity in notices), notices
+    assert not paths.config_path().exists()  # a refused form never reaches the writer
+
+
+def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_profile() -> None:
+    """The select beside each role is `team bind <role> --account` with a mouse (#145)."""
+    from aisquare.core import claude_accounts as accounts_core
+
+    accounts_core.create_account()  # slot 2, under the isolated AISQUARE_HOME
+
+    async def scenario(
+        pilot: Pilot[None], host: AppHost
+    ) -> tuple[list[str], list[tuple[str, str]]]:
+        await settle(pilot)  # the slots arrive from a worker
+        select = host.query_one("#acct-coder", Select)
+        labels = [str(label) for label, _value in select._options]
+        select.value = "2"
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return labels, host.notices
+
+    labels, notices = drive(scenario)
+    assert any(m.startswith("✓ settings saved") for m, _ in notices), notices
+    assert labels[0] == "(no account binding)"
+    assert any(label.startswith("2 · account 2") for label in labels), labels
+    assert load_config().team.profiles["coder"].account == "2"  # the binding's one home
+    assert _config_toml()["team"]["profiles"]["coder"]["account"] == "2"  # the bytes
+    assert "manager" not in load_config().team.profiles  # an untouched role gains no profile
+
+    async def clear(pilot: Pilot[None], host: AppHost) -> str | None:
+        await settle(pilot)
+        select = host.query_one("#acct-coder", Select)
+        shown_value = select.value
+        select.value = ""
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return str(shown_value)
+
+    shown_value = drive(clear)
+    assert shown_value == "2"  # the form opened on what the file held
+    assert "coder" not in load_config().team.profiles  # nothing else bound: the table goes
+
+
+def test_settings_clearing_an_account_keeps_a_binding_that_still_reads_a_file(
+    tmp_path: Path,
+) -> None:
+    """Follow-up of #257: a binding is empty once its account goes only when nothing else
+    is bound, and `env_files` (`team bind --env-file`, a reviewer's GH_TOKEN) is something.
+    Read as `bin or env or args`, clearing the account dropped the token file with it."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import settings as settings_service
+
+    accounts_core.create_account()  # slot 2, under the isolated AISQUARE_HOME
+    token = tmp_path / "coder-token"
+    token.write_text("secret\n", encoding="utf-8")
+    settings_service.bind_role("coder", env_files={"GH_TOKEN": str(token)}, account="2")
+
+    async def clear(pilot: Pilot[None], host: AppHost) -> None:
+        await settle(pilot)
+        host.query_one("#acct-coder", Select).value = ""
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+
+    drive(clear)
+    profile = load_config().team.profiles["coder"]
+    assert profile.account is None and profile.env_files == {"GH_TOKEN": str(token)}
+
+
+def test_settings_save_leaves_the_bindings_it_did_not_change_as_the_file_has_them() -> None:
+    """Final review of #203, accounts F3: Save wrote every role's account select back, so a
+    binding changed since the tab was read was reverted by a save of any other field. The
+    sharp case is ``accounts remove``, run from the Accounts page of the same app: it clears
+    a binding to a slot that had no login, so the next ``add`` into that slot is not
+    inherited by the role, and the kept-alive tab put the number straight back."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import claude_accounts as accounts_service
+    from aisquare.services import settings as settings_service
+
+    removed = accounts_core.create_account()  # slot 2, never signed in
+    accounts_core.create_account()  # slot 3
+    settings_service.bind_role("coder", account="2")
+    settings_service.bind_role("tester", account="2")
+
+    async def scenario(
+        pilot: Pilot[None], host: AppHost
+    ) -> tuple[list[str], list[tuple[str, str]]]:
+        await settle(pilot)  # the form holds coder → 2 and tester → 2
+        notes: list[str] = []
+        accounts_service.remove(removed, notes=notes)  # the Accounts page's Remove
+        settings_service.bind_role("reviewer", account="3")  # `team bind` in another shell
+        host.query_one("#acct-tester", Select).value = "3"  # the one change made here
+        host.query_one("#max-agents", Input).value = "7"
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return notes, host.notices
+
+    notes, notices = drive(scenario)
+    assert any(m.startswith("✓ settings saved") for m, _ in notices), notices
+    assert any("role coder was bound to slot 2" in note for note in notes), notes
+    profiles = load_config().team.profiles
+    assert "coder" not in profiles or profiles["coder"].account is None  # the clear stands
+    assert profiles["reviewer"].account == "3"  # the other shell's binding stands
+    assert profiles["tester"].account == "3"  # what the operator changed here lands
+    assert load_config().fleet.max_agents_per_project == 7
+    assert accounts_core.create_account().slot == 2  # the slot the stale "2" would have named
+
+
+def test_the_settings_form_reads_its_file_once_and_the_slots_off_the_ui_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #205, fourth round: the constructor read ``config.toml`` three times —
+    ``[fleet]``, ``[accounts]``, the bindings — and listed the accounts, a store open, a
+    directory scan and maybe a reconcile write, on the event loop. One read of the file;
+    the slots come from a thread worker, and the select keeps what it showed meanwhile."""
+    import threading
+
+    from aisquare.cli.ui.views import app_settings as settings_view
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import claude_accounts as accounts_service
+    from aisquare.services import settings as settings_service
+
+    accounts_core.create_account()  # slot 2
+    settings_service.bind_role("coder", account="2")
+    loads: list[str] = []
+    for module in (settings_view, fleet_service, accounts_service, settings_service):
+        real_load = module.load_config
+
+        def counted(real: Any = real_load, name: str = module.__name__) -> Any:
+            loads.append(name)
+            return real()
+
+        monkeypatch.setattr(module, "load_config", counted)
+    listed: list[str] = []
+    real_list = accounts_service.list_accounts
+
+    def list_accounts() -> Any:
+        listed.append(threading.current_thread().name)
+        return real_list()
+
+    monkeypatch.setattr(accounts_service, "list_accounts", list_accounts)
+
+    form = AppSettingsView()
+    assert len(loads) == 1 and listed == []  # the constructor reads the file once, lists nothing
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[list[str], str]:
+        await settle(pilot)
+        select = host.query_one("#acct-coder", Select)
+        return [str(label) for label, _value in select._options], str(select.value)
+
+    labels, value = drive(scenario)
+    assert listed and threading.main_thread().name not in listed
+    assert any(label.startswith("2 · account 2") for label in labels), labels
+    assert value == "2"  # the binding, shown before the slots arrived and after
+    assert form.accounts.pick == "headroom" and form.fleet.escape_key == "f12"
+
+
+def test_a_slot_removed_between_two_reads_falls_back_to_the_binding_on_the_form() -> None:
+    """The slots arrive from a worker, so a select can hold a slot an earlier answer offered
+    and the next one does not: set as its value, the select refuses it and the handler
+    raises. It falls back to what the file binds instead."""
+    import shutil
+
+    from aisquare.core import claude_accounts as accounts_core
+
+    accounts_core.create_account()  # slot 2
+    third = accounts_core.create_account()  # slot 3, removed below
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[str, list[str]]:
+        await settle(pilot)
+        select = host.query_one("#acct-coder", Select)
+        select.value = "3"
+        shutil.rmtree(third.config_dir)
+        host.query_one(AppSettingsView)._load_accounts()
+        await settle(pilot)
+        return str(select.value), [str(value) for _label, value in select._options]
+
+    value, offered = drive(scenario)
+    assert value == ""  # nothing bound: "no account binding"
+    assert "3" not in offered and "2" in offered
+
+
+def test_settings_saves_the_accounts_section_and_rejects_a_bad_line() -> None:
+    """`[accounts]` (#146) on the same form, through the same one writer."""
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> list[tuple[str, str]]:
+        await pilot.pause()
+        host.query_one("#accounts-pick", Select).value = "default"
+        host.query_one("#accounts-switch-at", Input).value = "70"
+        host.query_one("#accounts-on-limit", Select).value = "wait"
+        host.query_one("#accounts-wait-minutes", Input).value = "5"
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return host.notices
+
+    notices = drive(scenario)
+    assert any(m.startswith("✓ settings saved") for m, _ in notices), notices
+    on_disk = _config_toml()["accounts"]
+    assert on_disk == {
+        "pick": "default",
+        "switch_at": 70,
+        "on_limit": "wait",
+        "wait_if_reset_within_minutes": 5,
+    }
+    assert load_config().accounts.pick == "default"
+
+    async def bad(pilot: Pilot[None], host: AppHost) -> tuple[str, list[tuple[str, str]]]:
+        await pilot.pause()
+        shown_pick = str(host.query_one("#accounts-pick", Select).value)
+        host.query_one("#accounts-switch-at", Input).value = "250"
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return shown_pick, host.notices
+
+    shown_pick, notices = drive(bad)
+    assert shown_pick == "default"  # the form opened on what the file holds
+    assert any("between 1 and 100" in m and sev == "error" for m, sev in notices), notices
+    assert load_config().accounts.switch_at == 70  # a refused form never reaches the writer
+
+
+def test_reset_all_asks_first_then_keeps_a_backup_and_shows_the_defaults() -> None:
+    """Reset all is a dialog first: Cancel changes nothing; Reset all moves the file aside to a
+    backup it names, and the form shows the defaults."""
+    config = load_config()
+    config.fleet.max_agents_per_project = 9
+    config.accounts.pick = "default"
+    save_config(config)
+    before = paths.config_path().read_bytes()
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> dict[str, object]:
+        seen: dict[str, object] = {}
+        host.query_one("#reset-settings", Button).press()
+        await settle(pilot)
+        seen["asked"] = isinstance(host.screen, ConfirmReset)
+        seen["explained"] = str(host.screen.query_one("#reset-explained", Static).render())
+        host.screen.query_one("#reset-cancel", Button).press()
+        await settle(pilot)
+        seen["after_cancel"] = paths.config_path().read_bytes()
+        host.query_one("#reset-settings", Button).press()
+        await settle(pilot)
+        host.screen.query_one("#reset-confirm", Button).press()
+        await settle(pilot)
+        seen["form"] = (
+            host.query_one("#max-agents", Input).value,
+            str(host.query_one("#accounts-pick", Select).value),
+        )
+        seen["notices"] = host.notices
+        return seen
+
+    seen = drive(scenario)
+    assert seen["asked"] is True
+    assert "config.toml.bak-" in str(seen["explained"]), "the dialog names the backup it keeps"
+    assert seen["after_cancel"] == before, "Cancel changes nothing"
+    assert not paths.config_path().exists(), "every setting is its default now"
+    backups = sorted(paths.config_path().parent.glob("config.toml.bak-*"))
+    assert len(backups) == 1 and backups[0].read_bytes() == before, "the file kept, unchanged"
+    defaults = load_config()
+    assert seen["form"] == (str(defaults.fleet.max_agents_per_project), defaults.accounts.pick)
+    notices = seen["notices"]
+    assert isinstance(notices, list)
+    assert any(str(backups[0]) in m for m, _ in notices), notices
+
+
+def test_reset_all_with_nothing_changed_says_so() -> None:
+    assert not paths.config_path().exists()
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> list[tuple[str, str]]:
+        host.query_one("#reset-settings", Button).press()
+        await settle(pilot)
+        host.screen.query_one("#reset-confirm", Button).press()
+        await settle(pilot)
+        return host.notices
+
+    notices = drive(scenario)
+    assert any("at its default already" in m for m, _ in notices), notices
+    assert not list(paths.config_path().parent.glob("config.toml.bak-*"))

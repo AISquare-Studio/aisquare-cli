@@ -40,7 +40,6 @@ from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views import doctor as doctor_view
 from aisquare.cli.ui.views import explainability as explainability_view
 from aisquare.cli.ui.views import onboard as onboard_view
-from aisquare.cli.ui.views import settings as settings_view
 from aisquare.cli.ui.views import welcome as welcome_view
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.core import selfcli
@@ -936,7 +935,6 @@ def test_no_start_on_asqs_own_schedule_begins_once_a_hand_over_is_pending(
     assert started == sorted(
         {
             explainability_view.STATUS_WORKER,
-            settings_view.ACCOUNTS_WORKER,
             ui_app._DOCTOR_WORKER,  # the shell's, for the project now chosen
             accounts_view.USAGE_WORKER,
             accounts_view.CREDITS_WORKER,

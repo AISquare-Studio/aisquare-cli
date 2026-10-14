@@ -28,8 +28,8 @@ from aisquare.cli.ui import app as ui_app
 from aisquare.cli.ui import board
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views import agent as agent_view
+from aisquare.cli.ui.views import app_settings as app_settings_view
 from aisquare.cli.ui.views import explainability as explainability_view
-from aisquare.cli.ui.views import settings as settings_view
 from aisquare.cli.ui.views import welcome as welcome_view
 from aisquare.core import paths
 from aisquare.core.store import store_session
@@ -193,7 +193,7 @@ def test_the_accounts_readers_write_the_store_so_update_waits_for_them(fake_home
     readers = {
         accounts_view.USAGE_WORKER,
         ui_app.ACCOUNTS_WORKER,
-        settings_view.ACCOUNTS_WORKER,
+        app_settings_view.ACCOUNTS_WORKER,
         board.LABELS_WORKER,
         agent_view.LABELS_WORKER,
     }

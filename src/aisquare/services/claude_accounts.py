@@ -404,7 +404,7 @@ def choose(
         accounts default           the machine default
         (nothing)                  the launch environment is left untouched
 
-    ``launch``, ``fleet spawn`` and the Settings tab all ask here and nowhere
+    ``launch``, ``fleet spawn`` and App settings all ask here and nowhere
     else — tests/test_one_account_resolver.py pins that — because the whole
     point of a default is that every surface agrees on it.
 

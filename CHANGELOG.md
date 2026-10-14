@@ -17,6 +17,9 @@ adapter.**
 - On a machine with Codex alone, every step has a Codex path:
   `install.sh --agent codex`, Welcome, a manager and two coders on Codex,
   restart, switch, tell, stop, accounts and usage limits.
+- What each Claude Code feature does on Codex, as observed in a live smoke test
+  and the live tests on the real Codex 0.162.1, is
+  [the parity matrix](docs/coding-agents.md#parity-with-claude-code).
 - [Adding a terminal agent](docs/coding-agents.md#adding-a-terminal-agent):
   one adapter file and one registration line, held to a conformance suite
   that a synthetic third agent passes.
@@ -62,20 +65,45 @@ adapter.**
   account resume the thread the agent's first hook bound (`codex … resume
   <thread>`); a switch onto another account starts fresh with the hand-off
   prompt. `fleet stop` types `/exit`, so Codex's own `SessionEnd` releases the
-  claims. `fleet tell` to a busy Codex agent queues the message for its next
-  turn with `codex queue`. `/clear` keeps the row and moves the claims to the new
+  claims. `fleet tell` types into a waiting Codex agent and queues the message
+  for a busy one's next turn with `codex queue`. An agent that has had no prompt
+  yet (asq Welcome's coders) is typed into once its pane shows Codex's empty
+  prompt, never into its folder-trust or hook-review dialog. Every line the fleet
+  types is one paste with its Enter a moment later, since Codex keeps an Enter
+  inside a burst of keys as text, so a waiting Codex manager is woken like a
+  Claude Code one. `/clear` keeps the row and moves the claims to the new
   thread, and a `codex exec` a tool starts never takes its parent's row.
   `fleet spawn` gives a Codex role its `[agents.models.codex]` model and effort,
   a ui-tester on Codex gets no `--chrome`, and asq's pane sends shift+Enter to
   Codex as ctrl+J, its newline.
+- **🔔 on Codex means the human is asked.** An approval the human answers
+  ("Codex needs your approval") and a `request_user_input` ring the bell; one
+  Codex's automatic reviewer decides under `--approve-for-me` does not, read
+  from the session's rollout because Codex's hook payload is the same for both.
+  The bell holds while Codex redraws its approval view, until the command runs,
+  Esc, `Stop` or the next prompt.
+- **Codex's sandbox reaches the board.** The fleet runs a sandboxed Codex agent
+  under a permission profile of its own, `aisquare`: Codex's `:workspace` (or
+  `:read-only` for a reviewer) with the aisquare home writable and, inside it,
+  the account homes, credentials and config read-only. Its `aisquare` calls
+  succeed on the first, sandboxed attempt instead of each needing an approval,
+  and a reviewer's verdict reaches the board while its worktree stays read-only.
+  A `--sandbox` in a role's own native arguments replaces the profile. See
+  [the sandbox and the store](docs/coding-agents.md#the-sandbox-and-the-aisquare-store).
 - **One permission per role, for every agent.** `fleet.roles.<role>.permission`
   and `fleet spawn` / `fleet restart --permission-mode` take `WRITE:APPROVALS`
   (`workspace:auto`, `read_only:auto`, `full:never`, …), which each agent's
   adapter maps to its own flags; Settings offers it per role and shows what
-  each agent would be passed. See [the table](docs/fleet.md#one-permission-for-every-agent).
+  each agent would be passed. On Codex, `ask` hands approvals to the human
+  (`approvals_reviewer = "user"`) and `auto` to Codex's reviewer, pinned on
+  every spawn, restart and resume, so `fleet restart <label> --permission-mode
+  workspace:ask` brings Codex's approval prompt into the pane. See
+  [the table](docs/fleet.md#one-permission-for-every-agent).
 - **asq for Codex.** Welcome's step 2 is the agent the manager will launch on,
   Codex where it is the only one installed, with its version, sign-in, Connect
-  and the `/hooks` trust step; with both installed it offers *Use Claude Code* /
+  and the `/hooks` trust step. It reads the hooks in the home of the account the
+  manager launches on (a `codex-accounts/<n>` slot when one is the default), and
+  Connect installs them there. With both installed it offers *Use Claude Code* /
   *Use Codex*. Doctor has a row per Codex home (partial, stale, hooks off,
   unverified, plugin route) with one-click Connect and *Sign in account N*.
   Settings and the spawn dialog show each role's agent, account and the flags
@@ -94,6 +122,13 @@ adapter.**
   name, which `tests/test_no_agent_literals.py` enforces;
   `tests/test_adapter_contract.py` runs every case for Claude Code, Codex and a
   synthetic third agent.
+- **Codex's native telemetry.** With `explainability.enabled` and
+  `explainability.ship`, Codex exports its own OTLP logs to a per-launch
+  loopback receiver, which `explainability ship` replays through the SDK. The
+  receiver's token reaches Codex in its environment
+  (`OTEL_EXPORTER_OTLP_LOGS_HEADERS`), never on its command line, where `ps`
+  would show it. An exporter you configured in the account home the launch runs
+  on is kept and AISquare stands down.
 - `aisquare upgrade` re-connects Codex's hooks in every connected Codex home and
   Codex account home, and says when Codex asks for them to be reviewed again;
   `aisquare uninstall` takes them out and names each Codex MCP server and plugin
@@ -106,11 +141,11 @@ adapter.**
 
 - Codex reasoning levels (`minimal` to `ultra`) pass to Codex unchanged; the
   shared name `ultracode` becomes Codex's `max`, with a note. Codex fleet roles
-  run `--approve-for-me` by default (Codex's own reviewer, in the
-  workspace-write sandbox) and reviewers `--sandbox read-only
-  --ask-for-approval on-request`; `fleet.roles.<role>.approve_for_me = false`
-  turns it off. Codex's approval policies are `on-request` and `never`, as in
-  0.162.1.
+  run `--approve-for-me` by default (Codex's own reviewer, in the store
+  profile over `:workspace`); reviewers run `--ask-for-approval on-request`
+  with that same reviewer in the profile over `:read-only` (`read_only:auto`).
+  `fleet.roles.<role>.approve_for_me = false` turns it off. Codex's approval
+  policies are `on-request` and `never`, as in 0.162.1.
 - `fleet spawn --agent codex` forwards Codex's own `-c KEY=VALUE` and `-a`;
   on `launch`, `-a` stays AISquare's `--account` and its help says so.
 - Harden coding-agent argument ownership, native effort mapping, and inherited
@@ -135,6 +170,18 @@ adapter.**
 - Launch metadata cleanup is rate-limited across processes. Existing metadata
   gets a full retention period on upgrade; active bindings and durable board
   history remain available.
+
+### Fixed
+
+- A store this process may not write (a sandbox, or a directory without write
+  permission) is no longer called damaged. 0.8.0 answered with "Move it aside
+  and re-create: mv context.db context.db.broken", which loses the board's
+  history from a file that was whole. Now the message says to leave the store
+  where it is and names the directory that cannot be written.
+- The hand-off prompt of a `fleet switch` or `fleet restart` quotes the
+  session's newest five board entries that are not for the human. It used to
+  quote the newest five of any kind, so a run of 🔔 `attention` or `notice`
+  lines could push the agent's own work out of it.
 
 ## [0.8.0] - 2026-10-12
 

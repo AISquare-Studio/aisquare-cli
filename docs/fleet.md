@@ -120,7 +120,7 @@ its row says so (`no hooks`).
 4. **Watch the agents appear**, indented under the project, each with a role
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
-   bell), **⏳ limited** (parked on a Claude usage limit, with the reset time),
+   bell), **⏳ limited** (parked on a usage limit, Claude Code's or Codex's, with the reset time),
    **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
    session; click into the pane and every key you type goes to it. `＋ spawn
    agent` on a project starts one of your own (Phase 4): its dialog is `aisquare

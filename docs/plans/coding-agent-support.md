@@ -317,9 +317,9 @@ outside the adapter package (25 such branches were removed). The guide is
 | Installation and instructions | `--config-dir`, profile and ambient `CODEX_HOME`, then `~/.codex`; the effective global `AGENTS.override.md` / `AGENTS.md` imported to the user pool; project files left to Codex. |
 | Lifecycle | Eight Codex events in `CODEX_HOME/hooks.json`, foreign entries kept, atomic writes, owned entries removed on disconnect and uninstall. Status separates configured, `unverified` (awaiting `/hooks` trust) and observed; AISquare never writes trust. Hooks switched off (`[features] hooks = false`) are named, not counted as connected. |
 | Identity | Launch and fleet tokens bind the native thread at its first hook. A Codex agent's own hooks are told from a nested child's by `CODEX_THREAD_ID`, which Codex sets only in its tools' shells (measured); `/clear`, `/resume` and hand-overs move the row and its claims. |
-| Launch and permissions | `PermissionIntent` (`WRITE:APPROVALS`) per role, mapped by each adapter; Codex's `--approve-for-me` is the `workspace:auto` counterpart of Claude Code's `auto`. Native flags stay an escape hatch. |
+| Launch and permissions | `PermissionIntent` (`WRITE:APPROVALS`) per role, mapped by each adapter; Codex's `--approve-for-me` is the `workspace:auto` counterpart of Claude Code's `auto`, and `ask` pins Codex's approvals on the human on every spawn, restart and resume. A sandboxed Codex runs under the fleet's own permission profile, which keeps the aisquare store writable and the account homes, credentials and config in it read-only. Native flags stay an escape hatch. |
 | Models | Per-agent pins (`[agents.models.<agent>]`) at `team spawn` and `fleet spawn`. Claude Code keeps its ladder and probe, now keyed to the selected executable and account; Codex has no AISquare probe, so availability is Codex's to settle and no paid request is made. |
-| Fleet control | Spawn, attach, pause, resume, reap and worktrees unchanged; `fleet stop` types the adapter's exit command; `fleet restart` and a same-home switch resume the bound thread (`codex … resume <id>`); `fleet tell` types into a waiting Codex and queues for a busy one with `codex queue`, else files a board note. |
+| Fleet control | Spawn, attach, pause, resume, reap and worktrees unchanged; `fleet stop` types the adapter's exit command; `fleet restart` and a same-home switch resume the bound thread (`codex … resume <id>`); `fleet tell` types into a waiting Codex, queues for a busy one with `codex queue`, types into one that has had no prompt yet once its screen shows the empty prompt, and otherwise files a board note. Every typed line, the manager's wake-up nudge included, is a paste with its Enter apart. |
 | MCP and CI | `agents.mcp = true` adds the stdio server per launch, never written to Codex's config; MCP calls adopt the launch's board session. The CI contract runs in the shared hook services both agents' events go through. |
 | Setup and release | `install.sh --agent codex` (or `both`), `install.ps1` via `AISQUARE_INSTALL_AGENT`, `init --agent codex`, `upgrade` and `uninstall` for Codex homes, Welcome, Doctor, Settings and the spawn dialog. A CI cell installs Codex alone on `debian:12` and reaches a doctor whose only amber row is the trust step. |
 | Accounts (beyond the plan) | Numbered Codex slots on Claude Code's ladder, identity from `auth.json` read locally, usage from the account's own rollouts (offline), limit detection and the `on_limit = "switch"` hand-over. |
@@ -333,6 +333,15 @@ refuses it beside `--sandbox` or `--ask-for-approval`, and in `full` scope.
 Approval policy `untrusted` is gone in 0.162.1. `codex queue` is used only as
 measured on 0.162.1, against a busy interactive session. A Codex thread lives
 under its `CODEX_HOME`, so a switch onto another account starts fresh.
+"Gate automated input on confirmed readiness" needed the screen as well as the
+hooks: Codex fires no hook before its first prompt, so its idle footer (`? for
+shortcuts`) is what shows a never-prompted agent is ready. Its approval dialogs
+are as quiet as its prompt. The plan did not foresee two more things. Codex's
+tool sandbox could not open the aisquare store, so every board call needed an
+escalation; the fleet now defines a permission profile of its own. And Codex
+fires `PermissionRequest` for the approvals its automatic reviewer decides as
+well as the human's, with the same payload, so attention is read from the
+session's rollout.
 
 **Not shipped, or not evidenced:**
 
@@ -358,6 +367,12 @@ under its `CODEX_HOME`, so a switch onto another account starts fresh.
   (Claude Code 2.1.299 for the mixed team, at 273652fc) passed 16 of its 18
   items. The two that failed were the attention chip (set for approvals
   Codex's own reviewer decides, missed for a real one) and waking a waiting
-  Codex manager. It filed eight defects, the sandbox's reach to the store
-  among them; the parity matrix in [coding agents](../coding-agents.md)
-  records what they became.
+  Codex manager. It filed eight defects, and all eight were fixed on the
+  branch: the sandbox's reach to the store, the bell for auto-reviewed
+  approvals, a real approval read as working, `workspace:ask` kept on a
+  restart, tell before a first prompt, the manager's wake-up, Welcome's hooks
+  home, and the OTLP token on Codex's command line. Each fix but Welcome's has
+  a live test on the real Codex 0.162.1 (loopback provider); the Welcome fix
+  has unit tests only. The smoke itself has not been run again since. The
+  [parity matrix](../coding-agents.md#parity-with-claude-code) states, per
+  feature, what was observed and by which source.

@@ -7,7 +7,8 @@ model options, permission options and MCP configuration.
 
 Codex compatibility is tested against **CLI 0.162.1**. Use this version or a
 newer compatible release; older releases may lack the required hooks and flags
-(`--approve-for-me`). Cursor
+(`--approve-for-me`). What each Claude Code feature does on Codex, as observed
+live, is in [Parity with Claude Code](#parity-with-claude-code). Cursor
 remains a detection-only legacy entry. No Gemini or Antigravity adapter ships
 with this change.
 
@@ -207,6 +208,55 @@ Codex plugin with its `codex plugin remove`. `--purge` refuses while either
 would start aisquare again, as it does for Claude Code's. MCP servers added only
 for a launch (`agents.mcp = true`, `-c mcp_servers.aisquare…`) are never written
 to a file, so there is nothing to remove.
+
+## Parity with Claude Code
+
+Each Claude Code feature AISquare offers, and what it does on Codex, as observed.
+Two sources. The first is a live smoke test by the team's tester: Codex 0.162.1,
+signed in, beside Claude Code 2.1.299, with temporary homes kept out of `/tmp`
+(where every sandbox may write), at `273652fc`. It passed 16 of its 18 items and
+filed eight defects. The second is the fix for each of those defects, with the
+live test on the real Codex 0.162.1 that now covers it. Those tests are in
+`tests/test_codex_native.py`, run against a loopback provider: *live hooks* is
+`test_real_codex_hooks_resume_and_usage`, *live panes* is
+`test_real_codex_panes_take_a_told_line_before_any_hook_and_the_managers_nudge`, and
+*live sandbox* is `test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_human`.
+The live sandbox test passes on a Linux machine. On GitHub's runners it skips,
+because their bwrap may not bring up loopback, so CI's Codex job does not
+evidence those rows. *Smoke N* is the smoke's item N. The smoke itself has not been run again since the
+fixes.
+
+| Feature | Claude Code | Codex 0.162.1, as observed | Evidence |
+|---------|-------------|----------------------------|----------|
+| Install and connect | `install.sh` installs Claude Code, `init` writes its hooks into `settings.json`, and they run at once. | The same commands with `--agent codex`, and the hooks go into `CODEX_HOME/hooks.json`. **Differs:** Codex runs no hook until you trust it in `/hooks`. `agents status codex` reads `unverified` until then and `observed` after. | Smoke 1 |
+| Welcome: a manager and two coders | Step 2 is Claude Code; step 3 starts the fleet. | The same on Codex: step 2 shows its version, the manager's account signed in, and connected. It reads the hooks in the home of the account the manager launches on (`~/.aisquare/codex-accounts/<n>` when a slot is the default), and Connect installs them there. **Differs:** on its first start, Codex asks in the manager's pane to trust the folder and review the eight hooks. | Smoke 2. Account home: `4df3fd44`, unit tests (no live rerun) |
+| Context at session start | `SessionStart` hook context | Same: the Codex manager quoted its "You are team session … (role: manager)" line. | Smoke 3; live hooks |
+| Prompt capture (`aisquare log`) | `UserPromptSubmit` | Same, with `source=codex`. | Smoke 4; live hooks |
+| ▶ working / ⏸ waiting | From its hooks | Same, from Codex's hooks. | Smoke 5 |
+| 🔔 attention | `Notification`: a permission prompt or a question | 🔔 for an approval the human answers ("Codex needs your approval") and for `request_user_input`. None for one Codex's automatic reviewer decides under `--approve-for-me`. **Differs:** Codex fires `PermissionRequest` with the same payload for both, so the reviewer is read from the session's rollout. Codex also redraws its approval view every second, so the bell holds until `PostToolUse`, Esc, `Stop` or the next prompt. | Smoke 5 failed both ways (seven false bells for one task; a real approval read working). Fixed in `3b11964c` and `182f70e7`. Live sandbox: a reviewed escalation rang no bell, and attention held for 3.6 s of redraws, then working after `y` |
+| ⏳ limited and `on_limit = "switch"` | The `StopFailure` hook. Claude Code's own wait-and-continue runs at the reset. | **Differs:** Codex has no `StopFailure`. The limit is read off the rollout at `Stop` and `Interrupt`, and nothing continues at the reset. | Synthetic rollouts only: no real limit was available, so not exercised live |
+| Manager continuation | The `Stop` hook's "keep going" decision | Same: "Blocked by hook: 1 board update(s)…", and the manager went on. | Smoke 6 |
+| Waking a waiting manager | The nudge is typed into its prompt. | Same. Every line the fleet types is now a bracketed paste with its Enter 0.2 s later. **Differs:** Codex reads a burst of keys as a paste and keeps an Enter inside it as text. A manager whose hooks went stale is nudged only when its pane shows the empty prompt. | Smoke 6 failed (three nudges left unsent in the composer). Fixed in `6ee17ee3`. Live panes: a waiting manager runs the nudge a coder's task review sends |
+| `fleet tell` | Typed when it is waiting, else a board note | Typed when its hooks say waiting. **Differs:** a busy agent's message is queued with `codex queue` and runs as its next turn (`✓ queued for its next turn`); Claude Code has no queue. Before its first prompt (no hook yet), the message is typed when the pane is quiet and shows `? for shortcuts`. At the folder-trust or hook-review dialog, which is as quiet, it is a board note, so the dialog stays the human's. | Smoke 7 (typed, then queued; a never-prompted agent got only a note). That case was fixed in `47c9f23b`. Live panes: "reply ok" told before any hook ran, and the hook review was left alone. Live hooks: queue |
+| `fleet stop` | Types `/exit`; `SessionEnd` releases the claims. | Same: `/exit`, with its Enter apart, and exit 0. Codex's `SessionEnd` ended the session 0.5 s before the fleet's `agent_exited`. | Smoke 8; live hooks |
+| `fleet restart`, Restart | `claude --resume <transcript>` | Same outcome: `codex <options> resume <thread> -- <continue line>`. It quoted its question and answer from before the restart, and its claim was kept. | Smoke 9; live hooks |
+| `/clear` | Row and claims move to the new session. | Same: the row and the claim moved, and the new thread knew its claim. **Differs:** Codex fires no `SessionEnd` for the thread it leaves; the new thread's `SessionStart` (clear) comes with its first prompt. | Smoke 10; live hooks |
+| Accounts and usage | Numbered slots; usage from the endpoint Claude Code's `/usage` reads | The same slots, on one ladder (`~/.aisquare/codex-accounts/<n>`), with doctor rows. **Differs:** usage is read offline from the account's own rollouts (49 % of 5 h and 8 % of the week in the smoke). It is only as fresh as the last turn, and has no *to the limit* trend. | Smoke 11 |
+| `fleet switch` to another account | Resumes the session on the new account. | **Differs:** a Codex thread lives under its `CODEX_HOME`, so the agent starts fresh with the hand-off prompt (which got through the new home's folder-trust dialog) and its claim moves. A switch onto the same home resumes. | Smoke 12 |
+| Claim, review, done | Board tasks | Same: a Codex coder claimed a task and sent it to review, and a Codex tester marked it done. | Smoke 13 |
+| Board calls from inside the agent | No sandbox: `aisquare` runs as the user. | Same since `e8436fa3`: a sandboxed fleet Codex runs under the fleet's `aisquare` permission profile, and its board calls succeed on the first, sandboxed attempt. **Differs:** Codex sandboxes its tools. A pick in its own `/permissions`, or a `codex` started by hand, uses its own sandbox ([the sandbox and the store](#the-sandbox-and-the-aisquare-store)). | Filed by the smoke: every call needed an escalation. Live sandbox: a note and a task claim succeeded sandboxed |
+| Who answers approvals (`ask` / `auto` / `never`) | `--permission-mode manual` / `auto` / `dontAsk` | Same intent. `ask` puts Codex's "Would you like to run the following command?" in the pane, and `auto` is `--approve-for-me`. **Differs:** the reviewer is pinned on every spawn, restart and resume (`approvals_reviewer`), because a resumed thread otherwise keeps its own. `full:auto` is refused. | Filed by the smoke: a restart onto `ask` kept the automatic reviewer. Fixed in `e8436fa3`. Live sandbox: `fleet restart --permission-mode workspace:ask` brought the prompt |
+| Read-only reviewer | `--disallowedTools=Edit Write NotebookEdit`; its shell can still write | **Differs, and is stricter:** the store profile over `:read-only` with Codex's reviewer (`read_only:auto`). The worktree is read-only to the sandbox, and its verdict still reaches the board. | Live sandbox: the reviewer posted its verdict |
+| MCP (`agents.mcp = true`) | AISquare's stdio server per launch | Same: Codex called `aisquare.team_board` and `aisquare.note_add`, and the note landed on the hook-bound row. | Smoke 14; live hooks |
+| Explainability | Model traffic through the explainability proxy | **Differs:** Codex exports its own OTLP logs to a per-launch loopback receiver, which the SDK replays. The smoke spooled 58 native events: token counts and tool names, no tool arguments. The receiver's token reaches Codex in its environment, never its command line. There is no gateway for OpenAI Responses traffic. | Smoke 15. Token: `6efabab1`, where a scan of every `/proc/*/cmdline` found it 0 times. Live hooks |
+| A team on both agents | Claude Code manager | Codex coder: each quoted the other's note from context, and a Codex `--kind result` woke the Claude Code manager. | Smoke 16 |
+| Upgrade and uninstall | Re-connects, or removes, the hooks. | The same for every Codex home and account home. `uninstall` names the `codex mcp remove` / `codex plugin remove` commands. **Differs:** a changed hook definition needs a new `/hooks` review. | Smoke 17 |
+| Doctor | Claude Code rows | Same on a Codex-only home with no `claude` on PATH: exit 0, Codex `observed`. | Smoke 18 |
+| Model and effort per role | Its ladder, with an availability probe | **Differs:** pins in `[agents.models.codex]` and no AISquare probe. Levels pass unchanged, and `ultracode` becomes `max`. | Live hooks: each level reached the provider |
+| The ui-tester's browser | `--chrome` | **Differs:** no `--chrome`. The doctor names Codex's own `browser_use` feature and browser plugin. | Unit tests; not exercised live |
+| shift+Enter in asq's pane | A newline | **Differs:** sent as ctrl+J, Codex's newline (Codex submits on shift+Enter). | Measured on 0.162.1; unit tests |
+| Native sub-agent teams off | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0` | `-c agents.enabled=false` | The launch line on a real Codex manager |
+| Plugin route | `claude plugin` | Same: `codex plugin add aisquare@aisquare-cli`. It stands down while `hooks.json` runs aisquare's hooks ([the Codex plugin](codex-plugin.md)). | Real Codex 0.162.1 with a local marketplace; not in the smoke |
 
 ## Codex accounts
 
@@ -558,21 +608,27 @@ AISQUARE_TEST_CODEX=1 .venv/bin/python -m pytest tests/test_codex_native.py
 The CI Codex job installs the pinned compatible binary and runs
 `python -m tests.run_codex_native` on each PR, alongside the existing Claude
 and shared regression suite. This runner checks the exact binary version and
-requires the native fixture to execute and pass; an all-skipped run fails.
+requires the native fixture to execute and pass; an all-skipped run fails. The
+sandbox test probes Codex's sandbox first (`codex sandbox -- true`). Where bwrap
+may not bring up loopback, as on GitHub's runners, it skips and names the
+refusal. Any other probe failure fails it.
 The ambient CI jobs also export parent-agent identity and a populated
 `CODEX_HOME`, which the shared test fixtures must isolate.
 
 It covers native hook context, prompt capture, exec/resume identity, tool and
-MCP calls, usage export, interactive fleet startup with `--approve-for-me`, tell,
-resize, a graceful stop (Codex's own `SessionEnd` releases the claim) and the
-effort levels that reach the provider.
+MCP calls, usage export, interactive fleet startup with `--approve-for-me`, tell
+(typed, queued with `codex queue`, and typed before the first hook), the manager's
+wake-up nudge, resize, restart with the thread's history, `/clear`, a graceful
+stop (Codex's own `SessionEnd` releases the claim), board calls from inside the
+sandbox, the bell only for a human's approval, a restart onto `workspace:ask`, and
+the effort levels that reach the provider.
 Owned test hooks use Codex's automation trust flag only inside this fixture.
 No production credentials or paid model calls are used. Common tests also
 cover config preservation, mixed agents, a synthetic third adapter, migration,
 concurrent callbacks, manager continuation, CI, MCP, redaction and SDK replay.
-Live ChatGPT/API-key authentication and delivery to a deployed gateway require
-release smoke tests with those services; loopback tests do not claim that
-external validation.
+The live smoke behind [Parity with Claude Code](#parity-with-claude-code) ran
+with a signed-in ChatGPT login. API-key logins and delivery to a deployed
+gateway have not been run, and the loopback tests do not claim them.
 
 To add another terminal agent, follow [Adding a terminal agent](#adding-a-terminal-agent).
 

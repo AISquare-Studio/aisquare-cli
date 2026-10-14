@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from aisquare.cli.ui.views.welcome import claude_text
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.config import RoleLaunchProfile, load_config, save_config
@@ -25,6 +26,7 @@ from aisquare.core.selfcli import CliResult
 from aisquare.models import ProjectInfo
 from aisquare.services import agent_launch, first_run, onboarding
 from aisquare.services import agents as agents_service
+from aisquare.services import claude_accounts as accounts_service
 from tests.test_codex_accounts import _sign_in
 from tests.test_codex_plugin_route import install as plugin_install
 from tests.test_first_run import Spawns
@@ -146,6 +148,41 @@ def test_signed_in_is_the_managers_accounts_login(codex_home: Path) -> None:
     assert state.account == accounts_core.label(accounts_core.default_account(agent="codex"))
     # The periodic look leaves the login out.
     assert first_run.probe_fleet(which=on_path("codex"), sign_in=False).signed_in is None
+
+
+def test_the_hooks_are_read_in_the_home_of_the_account_the_manager_runs_on(
+    codex_home: Path,
+) -> None:
+    """t8 smoke: with the machine's Codex default on slot 2, step 2 read the plain ~/.codex
+    and said connected while slot 2, where the manager starts, had no hooks at all."""
+    _connect(codex_home)
+    slot = accounts_core.create_account("codex")
+    _sign_in(slot.config_dir, "dev@example.com")
+    accounts_service.set_default(str(slot.slot))
+
+    bare = first_run.probe_fleet(which=on_path("codex"))
+    assert bare.home == slot.config_dir and not bare.connected and not bare.ready
+    assert bare.signed_in is True and bare.account_slot == slot.slot
+    step_two = claude_text(bare, platform="linux").plain
+    assert f"not connected — Connect installs aisquare's hooks in {slot.config_dir}" in step_two
+    assert first_run.connect_fix("codex", bare.home).argv[-2:] == (
+        "--config-dir",
+        str(slot.config_dir),
+    )
+    (slot.config_dir / "config.toml").write_text("[features]\nhooks = false\n", encoding="utf-8")
+    off = first_run.probe_fleet(which=on_path("codex"), sign_in=False)
+    assert off.switch is not None and str(slot.config_dir / "config.toml") in off.switch
+
+    (slot.config_dir / "config.toml").unlink()
+    _connect(slot.config_dir)
+    hooked = first_run.probe_fleet(which=on_path("codex"), sign_in=False)
+    assert hooked.home == slot.config_dir and hooked.connected and hooked.trust_pending
+    assert f"aisquare's hooks in {slot.config_dir}" in claude_text(hooked, platform="linux").plain
+    # Control: with no Codex default, the manager runs on the plain home, read as before.
+    agents_service.disconnect("codex", slot.config_dir)
+    accounts_service.set_default(None, agent="codex")
+    plain = first_run.probe_fleet(which=on_path("codex"))
+    assert plain.home == codex_home and plain.connected and plain.account_slot == 0
 
 
 def test_claude_code_is_still_probed_its_own_way() -> None:

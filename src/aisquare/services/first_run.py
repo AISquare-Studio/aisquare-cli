@@ -537,14 +537,15 @@ def _probe_agent(
     the doctor's row for it reads (``core.agents``). Starts no process; never raises.
 
     The binary and home are the ones the manager's launch would use
-    (``agent_launch.resolve`` with this agent). Connected is aisquare's full hook set
-    in that home (``integration_readiness``), naming programs that can start; a
-    switch that turns every hook off (in its config or the manager's arguments) is
-    named instead, and a home whose hook file cannot be read is a refusal Connect
-    cannot change. Trust is the agent's own step (Codex: ``unverified`` until the
-    user trusts the hooks in ``/hooks`` and one runs). Signed in is the login of the
-    account the manager would launch on (``claude_accounts.choose``), read from its
-    files, never over the network.
+    (``agent_launch.resolve`` with this agent): the home of the account it would
+    launch on (``claude_accounts.choose``), which the launch sets over the binding's
+    and the shell's, else theirs. Connected is aisquare's full hook set in that home
+    (``integration_readiness``), naming programs that can start; a switch that turns
+    every hook off (in its config or the manager's arguments) is named instead, and a
+    home whose hook file cannot be read is a refusal Connect cannot change. Trust is
+    the agent's own step (Codex: ``unverified`` until the user trusts the hooks in
+    ``/hooks`` and one runs). Signed in is that account's login, read from its files,
+    never over the network.
     """
     problems: list[str] = []
     home: Path | None
@@ -559,6 +560,18 @@ def _probe_agent(
     except Exception as exc:  # the launch would refuse too; the rest is still worth reading
         problems.append(f"could not read the agent binding: {_why(exc)}")
         wanted, home = adapter.binary, agent_core.ambient_hook_dir(adapter.id)
+    chosen: ClaudeAccount | None = None
+    answered = adapter.accounts is not None
+    if answered:
+        try:
+            chosen = _manager_choice(adapter.id, cwd)
+        except Exception as exc:  # the launch would refuse too (a binding to a removed slot)
+            problems.append(f"could not read the manager's account: {_why(exc)}")
+            answered = False
+    if chosen is not None:
+        # The manager runs on this account's home, whatever the binding or the shell
+        # name (`claude_accounts.apply_launch_env`): its hooks are the ones it gets.
+        home = chosen.config_dir
     try:
         binary = which(wanted)
     except Exception as exc:
@@ -597,11 +610,11 @@ def _probe_agent(
     signed: bool | None = None
     account: str | None = None
     slot: int | None = None
-    if sign_in and binary is not None and adapter.accounts is not None:
+    if sign_in and binary is not None and answered:
+        login = chosen if chosen is not None else accounts_core.default_account(agent=adapter.id)
         try:
-            chosen = _manager_account(adapter.id, cwd)
-            signed = accounts_core.signed_in(chosen)
-            account, slot = accounts_core.label(chosen), chosen.slot
+            signed = accounts_core.signed_in(login)
+            account, slot = accounts_core.label(login), login.slot
         except Exception as exc:
             problems.append(f"could not read the sign-in: {_why(exc)}")
     return ClaudeState(
@@ -635,17 +648,16 @@ def _agent_version(adapter: AgentAdapter, binary: str) -> str | None:
     return agent_core.hook_binary_version([binary, *adapter.version_args], timeout=5.0)
 
 
-def _manager_account(agent: str, cwd: Path | None) -> ClaudeAccount:
+def _manager_choice(agent: str, cwd: Path | None) -> ClaudeAccount | None:
     """The account the manager's launch in ``cwd`` would run on: the one resolver's answer
-    (``claude_accounts.choose``: a binding, the project's default, the machine's), else the
-    agent's plain home. The store is asked only when there is one: on a machine that never
-    ran aisquare, the shell's first refresh makes it."""
-    if paths.db_path().exists():
-        project = orchestrator.team_project(cwd) if cwd is not None else None
-        chosen = accounts_service.choose(None, role=FLEET_ROLE, project=project, agent=agent)
-        if chosen.account is not None:
-            return chosen.account
-    return accounts_core.default_account(agent=agent)
+    (``claude_accounts.choose``: a binding, the project's default, the machine's); ``None``
+    when nothing chooses, and the launch keeps the binding's or the shell's home. The store
+    is asked only when there is one: on a machine that never ran aisquare, the shell's
+    first refresh makes it."""
+    if not paths.db_path().exists():
+        return None
+    project = orchestrator.team_project(cwd) if cwd is not None else None
+    return accounts_service.choose(None, role=FLEET_ROLE, project=project, agent=agent).account
 
 
 def sign_in_slot(state: ClaudeState) -> int:

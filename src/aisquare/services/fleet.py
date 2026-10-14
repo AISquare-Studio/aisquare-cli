@@ -5212,12 +5212,15 @@ def _refuse_a_permission_the_agent_cannot_take(
     agent: FleetAgent, session: TeamSession | None, mode: str | None
 ) -> None:
     """Raise when the agent ``agent``'s replacement would run refuses ``mode`` — before
-    anything is stopped. The agent is the one whose hook joined the row's session, else
-    the one the row was spawned as; one this install does not know is ``spawn``'s to
+    anything is stopped. The agent is the one the replacement runs
+    (:func:`_replayed_agent`), the row's before its session's: asked of the session's
+    first, a Codex row bound to a session another agent's hook wrote had a mode checked
+    for that agent, the original stopped, and the mode handed to a Codex that refused it
+    (review r2 of #113, finding 8). One this install does not know is ``spawn``'s to
     refuse."""
     if not mode:
         return
-    adapter = recorded_adapter(_family(session) or agent.agent)
+    adapter = recorded_adapter(_replayed_agent(agent, session))
     if adapter is None:
         return
     why: str | None = None

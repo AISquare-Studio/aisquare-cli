@@ -955,6 +955,32 @@ def test_a_restart_refuses_a_permission_the_rows_agent_cannot_take_before_stoppi
     assert spec is not None and spec.permission_mode == "workspace:ask"
 
 
+def test_a_restart_checks_the_permission_against_the_agent_its_replacement_runs(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+) -> None:
+    """Review r2 of #113, finding 8: the check asked the agent whose hook wrote the row's
+    session, the replacement runs the row's own. A Codex row whose session another
+    agent's hook wrote (a Claude Code mode passes there) was stopped for a Codex
+    replacement that refused the mode."""
+    codex, _ = codex_agent
+    codex.start("thread-one")
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        store._conn.execute(
+            "UPDATE team_session SET agent = 'claude-code' WHERE id = ?",
+            (codex.board_id("thread-one"),),
+        )
+        store._conn.commit()
+    spawned = len(tmux.spawned)
+
+    with pytest.raises(fleet_service.FleetError, match="nothing was stopped"):
+        fleet_service.restart(codex.project, codex.agent.label, permission_mode="auto")
+
+    assert tmux.typed == [] and codex.agent.pane_id not in tmux.killed
+    assert len(tmux.spawned) == spawned
+
+
 def test_the_settings_line_shows_one_permission_for_every_agent() -> None:
     settings = FleetRoleSettings(permission="workspace:auto")
     line = launch_line("coder", "codex", settings).plain

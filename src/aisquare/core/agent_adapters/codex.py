@@ -667,17 +667,16 @@ class CodexAdapter:
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return ["-c", "agents.enabled=false"], {}
 
-    def telemetry_args(self, endpoint: str, authorization: str) -> list[str]:
+    def telemetry_args(self, endpoint: str) -> list[str]:
         """Codex's own OTLP/HTTP log exporter (asynchronous; no model routing or auth
-        change), without the user's prompts."""
+        change), without the user's prompts. Its headers come from the launch environment:
+        0.162.1's exporter sends OTLP's ``OTEL_EXPORTER_OTLP_LOGS_HEADERS`` (measured)."""
         config = "otel.exporter.otlp-http"
         return [
             "-c",
             f"{config}.endpoint={json.dumps(endpoint)}",
             "-c",
             f'{config}.protocol="json"',
-            "-c",
-            f"{config}.headers.Authorization={json.dumps(authorization)}",
             "-c",
             "otel.log_user_prompt=false",
         ]

@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -707,3 +708,84 @@ def test_errno_classifier_is_portable_and_does_not_guess_unknown_errors(
     assert outbox.temporary_write_error(OSError(errno.ENOSPC, "disk full"))
     assert not outbox.temporary_write_error(OSError("unknown cause"))
     assert not outbox.temporary_write_error(OSError(errno.EACCES, "permissions"))
+
+
+def _endpoint(argv: list[str]) -> str:
+    key = "otel.exporter.otlp-http.endpoint="
+    return str(next(json.loads(arg.removeprefix(key)) for arg in argv if arg.startswith(key)))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Native receiver is POSIX/WSL only")
+def test_the_receivers_token_is_in_the_launch_environment_never_on_a_command_line(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shipping: None,
+) -> None:
+    """t8 smoke: the token was Codex's `-c otel.exporter.otlp-http.headers.Authorization=`,
+    which every local user reads in ps; a process's environment is its owner's alone."""
+    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    children: list[tuple[subprocess.Popen[bytes], list[str]]] = []
+    popen = subprocess.Popen
+
+    def receiver(argv: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
+        child = popen(argv, **kwargs)
+        if "--ready" in argv:
+            children.append((child, argv))
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", receiver)
+    execute = Mock()
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    try:
+        result = runner.invoke(app, ["launch", "coder", "--agent", "codex"])
+        assert result.exit_code == 0, result.output
+        assert "native telemetry enabled" in result.output, result.output
+        _, argv, env = execute.call_args.args
+        name, _, value = env[native_telemetry.HEADERS_ENV].partition("=")
+        authorization = urllib.parse.unquote(value)
+        token = authorization.removeprefix("Bearer ")
+        assert name == "Authorization" and token.startswith(native_telemetry.TOKEN_PREFIX)
+        ((_, receiver_argv),) = children
+        assert not any(token in arg for arg in [*argv, *receiver_argv])
+
+        def post(headers: dict[str, str]) -> int:
+            request = urllib.request.Request(
+                _endpoint(argv), data=json.dumps(_payload()).encode(), headers=headers
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    return int(response.status)
+            except urllib.error.HTTPError as exc:
+                with exc:
+                    return exc.code
+
+        assert post({}) == 403
+        assert post({"Authorization": authorization}) == 200
+        spooled = [json.loads(path.read_text()) for path in outbox.pending()]
+        assert any(record.get("kind") == "native_event" for record in spooled)
+    finally:
+        for child, _ in children:
+            child.send_signal(signal.SIGINT)  # its own cleanup: the ready file and its folder
+            child.wait(timeout=10)
+
+
+@pytest.mark.parametrize("inherited", ["ours", "the operator's"])
+def test_a_launch_drops_only_a_receiver_header_it_inherited(
+    inherited: str,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch from a traced Codex's tool shell inherits its receiver's header: it is that
+    launch's secret, and an exporter of the operator's would send it in place of theirs."""
+    value = {
+        "ours": f"Authorization=Bearer%20{native_telemetry.TOKEN_PREFIX}AbC-12_x",
+        "the operator's": "Authorization=Bearer%20theirs,x-tenant=7",
+    }[inherited]
+    monkeypatch.setenv(native_telemetry.HEADERS_ENV, value)
+    execute = Mock()
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    result = runner.invoke(app, ["launch", "coder", "--agent", "codex"])
+    assert result.exit_code == 0, result.output
+    env = execute.call_args.args[2]
+    assert env.get(native_telemetry.HEADERS_ENV) == (None if inherited == "ours" else value)

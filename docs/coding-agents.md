@@ -505,7 +505,9 @@ the native row. External clients retain their project-scoped virtual identity.
 
 With both `explainability.enabled` and `explainability.ship` enabled, Codex
 exports native OTLP JSON logs to a per-launch, authenticated loopback receiver on
-POSIX/WSL. It spools allowlisted, redacted event metadata. Existing
+POSIX/WSL. The receiver's bearer token reaches Codex in its launch environment
+(`OTEL_EXPORTER_OTLP_LOGS_HEADERS`), never on its command line, which every local
+user can read. It spools allowlisted, redacted event metadata. Existing
 `asq explainability ship` delivery replays model, tool and decision spans
 through the SDK under the same run binding. User-configured native OTEL
 exporters in the effective account home, selected profile, system config or
@@ -640,7 +642,7 @@ attributes and config layers, which a second telemetry agent extends there).
 | `role_defaults(role, binary, args)` | The flags a role needs on this agent wherever it starts (Claude Code's ui-tester `--chrome`), less what `args` says. |
 | `browser_tools(home)` | The browser the agent brings itself, as the doctor's browser-tools line names it (Codex's `browser_use` feature and bundled browser plugin); `None` where the doctor finds it another way. |
 | `mcp_args`, `context_files`, `disable_native_teams` | AISquare's MCP server for this session; the instruction files it reads; the arguments and environment that keep its own sub-agent teams off. |
-| `telemetry_args(endpoint, authorization)` | Its OpenTelemetry exporter, with `native_telemetry`. |
+| `telemetry_args(endpoint)` | Its OpenTelemetry exporter, with `native_telemetry`. The receiver's `Authorization` is never an argument: it reaches the agent in `OTEL_EXPORTER_OTLP_LOGS_HEADERS`. |
 
 `AgentCapabilities` holds the rest as flags, each documented in `types.py` with the
 service that reads it: `pid_env` (the variable that hands a hook the agent's own pid,

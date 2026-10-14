@@ -419,7 +419,7 @@ def test_resume_exit_mcp_context_teams_and_telemetry(adapter: AgentAdapter, tmp_
     assert files and all(path.parent == tmp_path for path in files)
     args, env = adapter.disable_native_teams()
     assert args or env, "the fleet keeps the agent's own sub-agent teams off"
-    telemetry = adapter.telemetry_args("http://127.0.0.1:9/v1/logs", "Bearer t")
+    telemetry = adapter.telemetry_args("http://127.0.0.1:9/v1/logs")
     if adapter.capabilities.native_telemetry:
         assert any("127.0.0.1:9" in arg for arg in telemetry)
     else:

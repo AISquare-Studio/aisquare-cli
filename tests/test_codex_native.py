@@ -175,6 +175,9 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
         codex = agent_launch.resolve(agent="codex").adapter
         telemetry_args, note = native_telemetry.start_receiver(env, codex)
         assert telemetry_args, note
+        # The receiver's token reaches Codex in its environment, never on its command line.
+        token = env[native_telemetry.HEADERS_ENV].rpartition("%20")[2]
+        assert token and not any(token in arg for arg in telemetry_args)
         # Only this test's owned hook definitions are trusted by this flag.
         base = [
             binary,

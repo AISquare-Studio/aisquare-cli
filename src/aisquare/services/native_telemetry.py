@@ -18,17 +18,19 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sqlite3
 import stat
 import subprocess
 import tempfile
 import time
 import tomllib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, MutableMapping
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from aisquare.core import insights, orchestrator, outbox, paths, selfcli, spawn
 from aisquare.core.agent_adapters.types import AgentAdapter, option_values
@@ -38,6 +40,13 @@ from aisquare.core.store import store_session
 
 MAX_BYTES = 2_000_000
 SYSTEM_CONFIG = Path("/etc/codex/config.toml")
+HEADERS_ENV = "OTEL_EXPORTER_OTLP_LOGS_HEADERS"
+"""OTLP's headers variable for the logs exporter, where the receiver's ``Authorization``
+rides: a process's environment is its owner's to read (``/proc/<pid>/environ``), its
+argv every local user's. Codex 0.162.1's otlp-http exporter sends it, and prefers it to
+the general ``OTEL_EXPORTER_OTLP_HEADERS`` (both measured)."""
+TOKEN_PREFIX = "aisquare-otlp-"
+_OWN_HEADERS = re.compile(rf"Authorization=Bearer%20{TOKEN_PREFIX}[A-Za-z0-9_-]+")
 _config_stamp: tuple[object, ...] | None = None
 
 
@@ -319,7 +328,7 @@ def serve(
     import secrets
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    token = secrets.token_urlsafe(32)
+    token = TOKEN_PREFIX + secrets.token_urlsafe(32)
 
     class Handler(BaseHTTPRequestHandler):
         timeout = 0.5
@@ -399,6 +408,14 @@ def serve(
                 ready.parent.rmdir()
 
 
+def disown_headers(env: MutableMapping[str, str]) -> None:
+    """Drop a receiver's header this launch inherited: a launch from a traced agent's tool
+    shell carries that agent's (:data:`HEADERS_ENV`), which authenticates its receiver,
+    never this one's, and would replace an exporter's own headers. Only ever ours."""
+    if _OWN_HEADERS.fullmatch(env.get(HEADERS_ENV, "")):
+        del env[HEADERS_ENV]
+
+
 def start_receiver(env: dict[str, str], adapter: AgentAdapter) -> tuple[list[str], str]:
     """Start only for an opted-in launch. Failure costs telemetry, never launch."""
     if os.name != "posix":
@@ -436,7 +453,8 @@ def start_receiver(env: dict[str, str], adapter: AgentAdapter) -> tuple[list[str
         state = json.loads(ready.read_text())
         # Native exporter does asynchronous delivery. No model routing or auth changes.
         endpoint = f"http://127.0.0.1:{state['port']}/v1/logs"
-        args = adapter.telemetry_args(endpoint, "Bearer " + state["token"])
+        args = adapter.telemetry_args(endpoint)
+        env[HEADERS_ENV] = "Authorization=" + quote("Bearer " + state["token"], safe="")
         env["AISQUARE_PIPELINE_ID"] = env["AISQUARE_LAUNCH_ID"]
         env["AISQUARE_TRACE_AGENT_NAME"] = "aisquare-" + env.get("AISQUARE_ROLE", "coder")
         return (

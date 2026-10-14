@@ -387,11 +387,12 @@ def telemetry_args(
     env: dict[str, str],
     raw_args: list[str] | None = None,
 ) -> tuple[list[str], str]:
+    from aisquare.services import native_telemetry
+
+    native_telemetry.disown_headers(env)
     adapter = selected.adapter
     if not adapter.capabilities.native_telemetry:
         return [], ""
-    from aisquare.services import native_telemetry
-
     try:
         settings = load_config().explainability
         if not settings.enabled:

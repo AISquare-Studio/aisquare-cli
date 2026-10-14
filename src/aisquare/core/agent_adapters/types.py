@@ -536,10 +536,12 @@ class AgentAdapter(Protocol):
         """Arguments and environment that keep the agent's own sub-agent teams off."""
         ...
 
-    def telemetry_args(self, endpoint: str, authorization: str) -> list[str]:
+    def telemetry_args(self, endpoint: str) -> list[str]:
         """Arguments exporting the agent's OpenTelemetry logs to ``endpoint`` (OTLP/HTTP
-        JSON, ``Authorization: <authorization>``); ``[]`` without ``native_telemetry``.
-        Whether the operator configured an exporter of their own, which is kept, is
+        JSON); ``[]`` without ``native_telemetry``. Never the receiver's ``Authorization``:
+        argv is every local user's to read, so the header rides in the launch environment
+        (``services.native_telemetry.HEADERS_ENV``). Whether the operator configured an
+        exporter of their own, which is kept, is
         ``services.native_telemetry.operator_configured`` (Codex's config layers)."""
         ...
 

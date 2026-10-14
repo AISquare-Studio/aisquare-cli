@@ -37,7 +37,7 @@ from textual.content import Content
 from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widget import Widget
-from textual.widgets import Button, Checkbox, Input, OptionList, Static, Switch
+from textual.widgets import Button, Checkbox, Input, OptionList, Static, Switch, Tabs
 from textual.widgets._toast import Toast
 from textual.worker import Worker, WorkerState
 
@@ -2066,6 +2066,52 @@ def test_help_opens_from_the_board_and_explains_every_task_icon(
     for glyph, _style, meaning in STATUS_ICONS.values():
         assert glyph in board and meaning in board, meaning
     assert "done archive" in board and "drag a line to resize" in board
+
+
+def test_help_from_the_board_opens_at_its_section_with_every_icon_in_view(
+    tmp_path: Path, script: Script
+) -> None:
+    """At 160x45 the help's top and the board's icon legend do not fit on one screen, and
+    from the board the legend sat ~45 lines down, below the fold (validator of PR #261,
+    NIT 2). From the board — its tasks, or the tab row on it — the help opens with the
+    Board section at its top, every icon painted; from the sidebar it opens at its top."""
+    from aisquare.cli.ui.board import STATUS_ICONS
+    from tests.test_ui_remote import painted
+
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> list[str]:
+        app = fleet_app(pilot)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)
+        view = app.current_view()
+        assert isinstance(view, ProjectView)
+        view.active = "tab-board"
+        await settle(app)
+        seen: list[str] = []
+        for widget in (view.query_one("#tasks"), view.query_one(Tabs), app.sidebar):
+            widget.focus()
+            await pilot.pause()
+            await pilot.press("question_mark")
+            await settle(app)
+            assert isinstance(app.screen, HelpScreen)
+            seen.append("\n".join(painted(app)))
+            await pilot.press("escape")
+            await settle(app)
+        return seen
+
+    *from_the_board, from_the_sidebar = drive(go, size=(160, 45))
+    meanings = [meaning for _glyph, _style, meaning in STATUS_ICONS.values()]
+    for screen in from_the_board:
+        assert "Board (a project's Board tab" in screen
+        assert all(meaning in screen for meaning in meanings), screen
+        # The heading is the box's first row: the key line right above it is scrolled off.
+        # Its line in the text was not its row on screen — keys above it wrap (8 at 160x45).
+        assert "this help — from anywhere" not in screen, screen
+    assert "aisquare fleet — keys" in from_the_sidebar
+    assert not all(meaning in from_the_sidebar for meaning in meanings), (
+        "the premise: from the top, the legend is below the fold"
+    )
 
 
 def test_keyboard_cursor_walks_the_rows_and_enter_activates(tmp_path: Path, script: Script) -> None:

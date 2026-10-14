@@ -47,6 +47,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.css.query import NoMatches
 from textual.dom import DOMNode
+from textual.geometry import Region
 from textual.message import Message
 from textual.notifications import SeverityLevel
 from textual.screen import ModalScreen, Screen
@@ -57,7 +58,7 @@ from textual.worker import Worker, WorkerState, WorkType
 from textual.worker_manager import WorkerManager
 
 from aisquare.cli.ui.autosave import Autosave
-from aisquare.cli.ui.board import board_help
+from aisquare.cli.ui.board import BoardPanel, board_help
 from aisquare.cli.ui.divider import Divider, floor_of
 from aisquare.cli.ui.groups import (
     DropGroup,
@@ -231,7 +232,8 @@ class RemoteNews(Message):
 
 
 class HelpScreen(ModalScreen[None]):
-    """The keys, in one place. Esc, q or ? closes."""
+    """The keys, in one place. Esc, q or ? closes; opened from the board, it shows the
+    Board section first — the icon legend sat ~45 lines down, below the fold."""
 
     CSS = """
     HelpScreen { align: center middle; }
@@ -244,10 +246,12 @@ class HelpScreen(ModalScreen[None]):
         ("q", "close_help", "close"),
         ("question_mark", "close_help", "close"),
     ]
+    BOARD_HEADING: ClassVar[str] = "Board (a project's Board tab, and aisquare board -w)"
 
-    def __init__(self, escape_key: str) -> None:
+    def __init__(self, escape_key: str, *, at_board: bool = False) -> None:
         super().__init__()
         self.escape_key = escape_key
+        self.at_board = at_board
 
     def compose(self) -> ComposeResult:
         text = Text()
@@ -280,7 +284,7 @@ class HelpScreen(ModalScreen[None]):
         ):
             text.append(f"  {key:<11}", style="bold cyan")
             text.append(f" {what}\n")
-        text.append("\nBoard (a project's Board tab, and aisquare board -w)\n", style="bold")
+        text.append(f"\n{self.BOARD_HEADING}\n", style="bold")
         text.append_text(board_help())
         text.append("\nAccounts (⚙ Settings ▸ Accounts)\n", style="bold")
         text.append(f"  {'F2 dblclick':<11}", style="bold cyan")
@@ -318,6 +322,22 @@ class HelpScreen(ModalScreen[None]):
         text.append("\nEsc closes this", style="dim")
         with VerticalScroll(id="helpbox"):
             yield Static(text)
+
+    def on_mount(self) -> None:
+        if self.at_board:
+            # Once laid out: until then the box has nothing to scroll.
+            self.call_after_refresh(self._show_the_board)
+
+    def _show_the_board(self) -> None:
+        """Scroll the Board heading to the top. It is found among the lines as laid out:
+        keys above it wrap at the box's width, and its line in the text was rows short."""
+        box = self.query_one("#helpbox", VerticalScroll)
+        keys = box.query_one(Static)
+        lines = keys.render_lines(Region(0, 0, keys.size.width, keys.size.height))
+        row = next(
+            (y for y, line in enumerate(lines) if line.text.startswith(self.BOARD_HEADING)), 0
+        )
+        box.scroll_to(y=row, animate=False)
 
     def action_close_help(self) -> None:
         self.dismiss(None)
@@ -887,7 +907,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     # --- help / refresh ---------------------------------------------------------------
 
     def action_help(self) -> None:
-        self.push_screen(HelpScreen(self.escape_key))
+        self.push_screen(HelpScreen(self.escape_key, at_board=self._focus_on_the_board()))
+
+    def _focus_on_the_board(self) -> bool:
+        """Whether the focus is on a project's Board tab — its table, or the tab row on it."""
+        for node in self.focused.ancestors_with_self if self.focused is not None else ():
+            if isinstance(node, BoardPanel):
+                return True
+            if isinstance(node, ProjectView):
+                return node.active == "tab-board"
+        return False
 
     def action_refresh_now(self) -> None:
         """The fleet, now. Not the doctor: it runs at start, when its page opens, after a fix

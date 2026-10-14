@@ -403,7 +403,7 @@ def test_summarise_names_the_worst_thing_first() -> None:
     assert no_aisquare.line.plain == "1 Claude · AISquare: sign in"
 
     missing = summarise(_overview(installed=False), None)
-    assert missing.line is not None and missing.line.plain == "⚠ Claude Code not installed"
+    assert missing.line is not None and missing.line.plain == "⚠ no coding agent installed"
 
     unreadable = summarise(None, None, session_known=False)
     assert unreadable.aisquare is None
@@ -661,7 +661,8 @@ def test_without_claude_code_the_page_says_how_to_install_and_add_is_disabled() 
     claude, disabled, title, detail = drive(go, overview=overview)
     assert "Claude Code is not installed" in claude and core.INSTALL_COMMAND in claude
     assert disabled
-    assert title == "Accounts  ✗ AISquare" and detail == "⚠ Claude Code not installed"
+    # Neither agent is here (the overview has no Codex install): nothing to sign in with.
+    assert title == "Accounts  ✗ AISquare" and detail == "⚠ no coding agent installed"
 
 
 def test_usage_is_fetched_only_for_signed_in_slots_and_painted_into_their_rows(

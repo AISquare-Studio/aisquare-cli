@@ -407,20 +407,39 @@ def summarise(
     aisquare: bool | None = (session is not None) if session_known else None
     if overview is None:
         return AccountsSummary(aisquare, Text("accounts unreadable", style="yellow"))
-    if not overview.claude.installed:
-        return AccountsSummary(aisquare, Text("⚠ Claude Code not installed", style="yellow"))
-    claude = [status for status in overview.accounts if status.account.agent == core.AGENT]
-    signed = [status for status in claude if status.signed_in]
-    unsigned = [status for status in overview.accounts if not status.signed_in]
-    line = Text(f"{len(signed)} Claude", style="dim", no_wrap=True, overflow="ellipsis")
-    for agent in other_agents():
+    # Every agent here, Claude Code or not: a Codex-only machine is not missing anything.
+    here = {
+        agent
+        for agent in core.account_agents()
+        if (overview.claude.installed if agent == core.AGENT else _installed(overview, agent))
+    }
+    if not here:
+        return AccountsSummary(aisquare, Text("⚠ no coding agent installed", style="yellow"))
+    line = Text(no_wrap=True, overflow="ellipsis")
+    signed: list[ClaudeAccountStatus] = []
+    for agent in core.account_agents():
         theirs = [
             status
             for status in overview.accounts
             if status.account.agent == agent and status.signed_in
         ]
-        if theirs:
-            line.append(f" · {len(theirs)} {core.agent_label(agent)}", style="dim")
+        signed += theirs
+        # Claude Code's count as it always was; another agent's once it has a login, or
+        # when it is the agent here (a Codex-only machine reads "0 Codex", not nothing).
+        if agent == core.AGENT:
+            shown = agent in here
+        else:
+            shown = bool(theirs) or (agent in here and core.AGENT not in here)
+        if shown:
+            name = "Claude" if agent == core.AGENT else core.agent_label(agent)
+            line.append(" · " if line.plain else "", style="dim")
+            line.append(f"{len(theirs)} {name}", style="dim")
+    # A slot of an agent that is not here has nothing to sign in with.
+    unsigned = [
+        status
+        for status in overview.accounts
+        if not status.signed_in and status.account.agent in here
+    ]
     if unsigned:
         line.append(" · ", style="dim")
         line.append(f"⚠ #{unsigned[0].account.slot} no login", style="yellow")
@@ -429,6 +448,11 @@ def summarise(
     elif signed and signed[0].identity is not None:
         line.append(f" · {signed[0].identity.email}", style="dim")
     return AccountsSummary(aisquare, line)
+
+
+def _installed(overview: AccountsOverview, agent: str) -> bool:
+    found = overview.installs.get(agent)
+    return found is not None and found.installed
 
 
 def _host(url: str) -> str:

@@ -359,7 +359,7 @@ EXIT_KEYS = frozenset({"C-c", "C-d"})
 SEND_KEYS_LOCK_WAIT_SECONDS = 2.0
 """How long a send-keys waits for its agent's action lock (:func:`remote_agent_lock`), counted
 from when the request reached the server, its wait for a thread of the write pool included
-(:func:`_remote_keys_turn`). Keys tapped in a burst, or sent again together
+(:func:`remote_agent_held`). Keys tapped in a burst, or sent again together
 after a reconnect, wait out the milliseconds each other's tmux calls take; an action holds
 the lock for seconds (an interrupt's wait for the prompt, a stop's grace, a restart), and keys
 that would land in the middle of it are 409 ``busy`` instead."""
@@ -2486,52 +2486,67 @@ def _remote_facts_refusal(agent: FleetAgent, facts: PaneFacts | None) -> str | N
     return PANE_OUTLIVED if fleet_service._runs_the_agent(facts) else PANE_NOT_AGENT
 
 
-def _remote_keys_row(target: ProjectInfo, label: str, pin: str | None) -> FleetAgent:
-    """The live row holding ``label`` (:func:`_remote_live_row`), which keys pinned to
-    ``pin`` (``send-keys``' ``agent_id``) go to only when it is that row: 409 ``stale``
-    otherwise, ``current`` naming the row that holds the label now, or none.
+def remote_turn_row(target: ProjectInfo, label: str, *, live_only: bool) -> FleetAgent | None:
+    """The newest row holding ``label`` in ``target``, only a live one with ``live_only``: the
+    row a write's turn at an agent reads, before its lock and under it
+    (:func:`remote_agent_turn`)."""
+    from aisquare.core.store import store_session
 
-    A pinned key that finds no live row is ``stale`` as well, as a pinned action is
-    (``remote_actions.action_gone``): in the gap of a restart's hand-over, after the old
-    row ended and before the new one was made, it was 404 ``no_such_agent``, and the page
-    left the agent's screen for the fleet it was about to come back to (merge of round 5
-    of #243). Unpinned, it is still ``no_such_agent``.
-    """
-    try:
-        agent = _remote_live_row(target, label)
-    except NoSuchAgent:
-        if pin is None:
-            raise
+    with store_session() as store:
+        return store.fleet_agent_by_label(target.id, label, live_only=live_only)
+
+
+def remote_stale(
+    target: ProjectInfo, label: str, current: FleetAgent | None, *, done: str
+) -> RequestError:
+    """409 ``stale``: the label is not the agent the phone pinned, ``current`` says who holds it
+    now, or none, and ``done`` what was done all the same."""
+    if current is None:
         said = f"there is no agent {label!r} in {target.root.name or target.id} now"
-        raise RequestError(
-            409, "stale", f"{said} — nothing was sent", current={"agent_id": None}
-        ) from None
-    if pin is not None and agent.id != pin:
-        raise RequestError(
-            409,
-            "stale",
-            f"{label!r} is another agent now ({agent.id}) — nothing was sent",
-            current={"agent_id": agent.id},
-        )
-    return agent
+    else:
+        said = f"{label!r} is another agent now ({current.id})"
+    return RequestError(
+        409,
+        "stale",
+        f"{said} — {done}",
+        current={"agent_id": None if current is None else current.id},
+    )
+
+
+def _remote_turn_pinned(
+    target: ProjectInfo, label: str, pin: str | None, *, live_only: bool, done: str
+) -> FleetAgent:
+    """The row :func:`remote_turn_row` reads, which a write pinned to ``pin`` (the body's
+    ``agent_id``) acts on only when it is that row: 409 ``stale`` otherwise
+    (:func:`remote_stale`).
+
+    A pinned write that finds no row is ``stale`` as well: in the gap of a restart's
+    hand-over, after the old row ended and before the new one was made, it was 404
+    ``no_such_agent``, and the page left the agent's screen for the fleet it was about to
+    come back to (merge of round 5 of #243). Unpinned it is :class:`NoSuchAgent` for a live
+    row, and 404 ``no_such_agent`` naming ``fleet ls --all`` for any row.
+    """
+    row = remote_turn_row(target, label, live_only=live_only)
+    if row is None and pin is None:
+        where = target.root.name or target.id
+        if live_only:
+            raise NoSuchAgent(f"no live agent {label!r} in {where}")
+        said = f"no agent {label!r} in {where} — `aisquare fleet ls --all` shows every row"
+        raise RequestError(404, "no_such_agent", said)
+    if row is None or (pin is not None and row.id != pin):
+        raise remote_stale(target, label, row, done=done)
+    return row
 
 
 @contextlib.contextmanager
-def _remote_keys_turn(
-    target: ProjectInfo, label: str, pin: str | None = None
-) -> Iterator[FleetAgent]:
-    """Hold the agent's action lock while keys go to its pane; the row, read under it and
-    judged against ``pin`` there (:func:`_remote_keys_row`).
+def remote_agent_held(
+    project_id: str, label: str, *, wait: float | None = None, nothing: str | None = None
+) -> Iterator[None]:
+    """Hold the agent's action lock (:func:`remote_agent_lock`) for the block: at once, or 409
+    ``busy`` while another action has it; with ``wait``, within that many seconds of when the
+    request reached the server (:data:`_WRITE_ARRIVED`). ``nothing`` says, in a refusal, what
+    was not done for it.
 
-    :func:`remote_agent_lock` is the one lock for every action on one agent, and keys
-    typed while an action is half done land in the middle of it: in an Interrupt &
-    tell between its Escape and its paste, which then submits them and the tell as one
-    message, or between a stop's ``/exit`` and its Enter. So keys wait for their turn,
-    up to :data:`SEND_KEYS_LOCK_WAIT_SECONDS`, and are 409 ``busy`` after that, as a
-    second action is. A label no row holds makes no lock: the registry is process-wide
-    and never shrinks, and a label is whatever a body says.
-
-    The wait counts from when the request reached the server (:data:`_WRITE_ARRIVED`).
     Counted from when a thread was free to run it, keys tapped in a burst during an
     action waited their 2 s each in turn, a pool's worth at a time, and the last ones
     took the lock when the action let it go, seconds after their taps: typed into the
@@ -2542,23 +2557,55 @@ def _remote_keys_turn(
     showed by then, the replacement a restart had started when that action was on it
     (review of #243, round 3).
     """
-    _remote_keys_row(target, label, pin)
-    lock = remote_agent_lock(target.id, label)
-    arrived = _WRITE_ARRIVED.get()
-    wait = SEND_KEYS_LOCK_WAIT_SECONDS
-    if arrived is not None:
-        wait -= time.monotonic() - arrived
-    if wait <= 0:
-        busy = f"the machine was busy with other actions for {SEND_KEYS_LOCK_WAIT_SECONDS:g} s"
-        raise RequestError(409, "busy", f"{busy} — nothing was sent to {label}")
-    if not lock.acquire(timeout=wait):
-        raise RequestError(
-            409, "busy", f"another action on {label} is still running — nothing was sent"
-        )
+    lock = remote_agent_lock(project_id, label)
+    if wait is None:
+        held = lock.acquire(blocking=False)
+    else:
+        arrived = _WRITE_ARRIVED.get()
+        left = wait if arrived is None else wait - (time.monotonic() - arrived)
+        if left <= 0:
+            busy = f"the machine was busy with other actions for {wait:g} s"
+            raise RequestError(409, "busy", f"{busy} — {nothing} to {label}")
+        held = lock.acquire(timeout=left)
+    if not held:
+        busy = f"another action on {label} is still running"
+        raise RequestError(409, "busy", busy if nothing is None else f"{busy} — {nothing}")
     try:
-        yield _remote_keys_row(target, label, pin)
+        yield
     finally:
         lock.release()
+
+
+@contextlib.contextmanager
+def remote_agent_turn(
+    target: ProjectInfo,
+    label: str,
+    pin: str | None = None,
+    *,
+    live_only: bool,
+    done: str,
+    wait: float | None = None,
+) -> Iterator[FleetAgent]:
+    """A write's turn at one agent: the row holding ``label`` read and judged against ``pin``
+    (:func:`_remote_turn_pinned`), the agent's lock held (:func:`remote_agent_held`), and the
+    row read and judged again under it, which the block acts on. ``live_only``: only a live
+    row is one (keys; an action may act on an ended one). ``done``: what a refusal says was
+    done, and, for a write that waits (``wait``), what a busy one was not.
+
+    The label must name a row before a lock is made for it: the lock registry is
+    process-wide and never shrinks, and a label is whatever a body says. The pin is
+    checked under the lock, against the row read there: a second request that passed an
+    earlier read while the first one replaced the row must not act on the replacement.
+
+    One turn for the actions and ``send-keys``: each wrote its own lock, re-read and pin,
+    and a fix to one, how a pinned row that ended reads say, had to be found and made
+    again in the others (review of #259, round 6, 8/10). The quick answers take the lock
+    alone (``remote_needs._needs_answer_now``): they re-derive the agent's whole state
+    under it, not a row.
+    """
+    _remote_turn_pinned(target, label, pin, live_only=live_only, done=done)
+    with remote_agent_held(target.id, label, wait=wait, nothing=None if wait is None else done):
+        yield _remote_turn_pinned(target, label, pin, live_only=live_only, done=done)
 
 
 def _live_panes(label: str, project: str | None = None, history: int = 0) -> dict[str, object]:
@@ -3185,7 +3232,7 @@ class _ExitKeyGuard:
     A press counts once it was sent (:meth:`exit_keys_sent`), not as it is let through: a
     send that failed (400 ``write_failed``) reached no pane, and the tap that followed was
     refused as a second press of a Ctrl-C never delivered (review of #259, round 6, 5/10).
-    The check and the send run in one turn of the agent's lock (``_remote_keys_turn``), so
+    The check and the send run in one turn of the agent's lock (``remote_agent_turn``), so
     no other press comes between them.
     """
 
@@ -3483,7 +3530,7 @@ def live_writes() -> Writes:
         pane, and the double Ctrl-C. The pane must be running the agent, and be the
         row's own: after a tmux restart the row's pane id names another agent's pane
         (409 ``not_agent``, as the actions and quick answers refuse it). The pane is
-        judged and typed into under the agent's action lock (:func:`_remote_keys_turn`).
+        judged and typed into under the agent's action lock (:func:`remote_agent_turn`).
         Once a byte may have reached the pane, a failure is still audited: the trail
         exists for what a device did to a live agent, finished or not.
 
@@ -3498,7 +3545,7 @@ def live_writes() -> Writes:
         ``agent_id`` pins the keys to the row whose screen they were typed at, which a
         pane frame and a transcript page name: once another row holds the label, or none
         does, nothing is sent (409 ``stale``, ``current`` naming that row or none,
-        :func:`_remote_keys_row`), as for every other write that types into an agent.
+        :func:`remote_agent_turn`), as for every other write that types into an agent.
         Unpinned, a key tapped at the prompt the
         phone showed went into the replacement a ``fleet restart`` or a usage-limit
         hand-over had started since, neither of which takes the agent's lock: into its
@@ -3533,7 +3580,19 @@ def live_writes() -> Writes:
         summary = (
             f"{label}@{target.id} text={len(text or '')}ch keys={_audit_keys(keys)} enter={enter}"
         )
-        with _remote_keys_turn(target, label, pin) as agent:
+        # Keys wait for their turn: keys typed while an action is half done land in the
+        # middle of it, in an Interrupt & tell between its Escape and its paste, which then
+        # submits them and the tell as one message, or between a stop's `/exit` and its
+        # Enter. Past the wait they are 409 `busy`, as a second action is.
+        turn = remote_agent_turn(
+            target,
+            label,
+            pin,
+            live_only=True,
+            done="nothing was sent",
+            wait=SEND_KEYS_LOCK_WAIT_SECONDS,
+        )
+        with turn as agent:
             server = fleet_service.server_of(agent)
             refusal = _remote_pane_refusal(server, agent)
             if refusal is not None:

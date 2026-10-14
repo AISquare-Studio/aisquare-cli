@@ -3571,13 +3571,10 @@ def _needs_answer_now(
     agent writes its result (review of #259, remote focus, 2/12).
     """
     from aisquare.services import fleet as fleet_service
-    from aisquare.services.remote_server import RequestError, _audit_keys, remote_agent_lock
+    from aisquare.services.remote_server import RequestError, _audit_keys, remote_agent_held
 
     label = item.agent or ""
-    lock = remote_agent_lock(project.id, label)
-    if not lock.acquire(blocking=False):
-        raise RequestError(409, "busy", f"another action on {label} is still running")
-    try:
+    with remote_agent_held(project.id, label):
         try:
             snap = needs_agent_now(project, label)
         except fleet_service.NoSuchAgent:
@@ -3606,8 +3603,6 @@ def _needs_answer_now(
             raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} failed") from None
         watcher.needs_answered(item.id)
         return {"answered": item.id, "agent": label, "project": project.id, "sent": True}, summary
-    finally:
-        lock.release()
 
 
 def needs_routes(kit: RemoteKit) -> list[BaseRoute]:

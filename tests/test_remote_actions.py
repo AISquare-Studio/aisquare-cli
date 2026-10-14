@@ -3397,17 +3397,19 @@ def test_a_switch_leaves_alone_the_replacement_that_took_the_label_after_the_loc
     "That agent is gone." on the phone (sweep 4 of #243)."""
     _row(project, ended=True)
     stopped = _fleet_switch_itself(monkeypatch, AccountChoice(_account(3), "headroom", []))
-    newest_row = remote_actions.action_newest_row
+    newest_row = remote_server.remote_turn_row
     reads: list[str | None] = []
 
-    def handed_on_after_the_locks_read(target: ProjectInfo, label: str) -> FleetAgent | None:
-        row = newest_row(target, label)
+    def handed_on_after_the_locks_read(
+        target: ProjectInfo, label: str, *, live_only: bool
+    ) -> FleetAgent | None:
+        row = newest_row(target, label, live_only=live_only)
         reads.append(None if row is None else row.id)
         if len(reads) == 2:  # the read under the lock: the replacement is recorded just after
             _row(project, "agt_new", minute=1)
         return row
 
-    monkeypatch.setattr(remote_actions, "action_newest_row", handed_on_after_the_locks_read)
+    monkeypatch.setattr(remote_server, "remote_turn_row", handed_on_after_the_locks_read)
     response = phone.post("agent/switch", **PINNED)
     assert reads == ["agt_one", "agt_one"], "the pin held under the lock"
     assert stopped == [] and pane.sent == [], "the replacement was not stopped"

@@ -24,7 +24,7 @@ from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness, orchestrator, outbox, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
-from aisquare.core.agent_adapters.types import AgentAdapter
+from aisquare.core.agent_adapters.types import AgentAdapter, PluginInstall
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.keys import EXTENDED_MINIMUM
@@ -1324,13 +1324,13 @@ def _refused_fix(
     return "; or ".join(agents_service.remedies("claude-code", directory, refusal, also=also))
 
 
-def _disconnect_fix(directory: Path, lead: str) -> str:
+def _disconnect_fix(directory: Path, lead: str, agent: str = claude_accounts_core.AGENT) -> str:
     """``lead`` and the disconnect that takes aisquare's hooks out of ``directory``, or,
     where disconnect would refuse it (``agents_service.access``), that refusal and its
     remedy: a fix never names a command that would refuse (review of #257)."""
-    refusal = agents_service.access("claude-code", directory).disconnect
+    refusal = agents_service.access(agent, directory).disconnect
     if refusal is None:
-        return f"{lead}{agents_service.config_dir_command('disconnect', 'claude-code', directory)}"
+        return f"{lead}{agents_service.config_dir_command('disconnect', agent, directory)}"
     return f"{lead}{refusal.why}"
 
 
@@ -3458,6 +3458,69 @@ def _launch_hooks_off(adapter: AgentAdapter, cwd: Path | None) -> list[DoctorChe
     ]
 
 
+def _plugin_install(adapter: AgentAdapter, directory: Path) -> PluginInstall | None:
+    """The aisquare plugin ``directory`` installed for ``adapter``, where it runs here."""
+    plugin = agent_core.plugin_of(adapter.id)
+    return plugin.installed(directory) if plugin is not None else None
+
+
+def _plugin_route_checks(
+    adapter: AgentAdapter, directory: Path, install: PluginInstall
+) -> list[DoctorCheck]:
+    """The plugin route's row for ``directory``, which installed aisquare's plugin for
+    ``adapter`` (Codex's; Claude Code's is ``_check_claude_code``): ``plugin``, ``hooks``
+    or both, as that row grades them.
+
+    Beside hooks of ours whose program can start, the plugin's launcher stands down, so
+    nothing doubles, but the two routes drift apart (the plugin pins its own release),
+    and keeping one is the operator's choice: a warning whose fix is not a button. Beside
+    hooks whose program is gone, the plugin runs in their place, and those hooks fail on
+    every event. Alone, it runs what its launcher finds (``_plugin_runner``) once its
+    hooks are trusted, which installing it does not do.
+    """
+    label = agent_core.plugin_label(install)
+    where = f"{label} in {directory}"
+    if agent_core.hook_commands(adapter.id, directory):
+        if agent_core.plugin_stands_down(adapter.id, directory):
+            plugin = agent_core.plugin_of(adapter.id)
+            remove = plugin.command("remove", directory) if plugin is not None else ""
+            return [
+                _warn(
+                    adapter.id,
+                    f"{adapter.label}: runs aisquare two ways in {directory} — "
+                    f"{adapter.settings_name} hooks and {label}, whose hooks stand down "
+                    "while those are installed; keep one",
+                    _disconnect_fix(directory, "keep the plugin: ", adapter.id)
+                    + f" (or keep the hooks: {remove})",
+                )
+            ]
+        return [
+            _warn(
+                adapter.id,
+                f"{adapter.label}: {adapter.settings_name} hooks in {directory} name an "
+                "aisquare that does not exist or cannot start, so they fail on every event "
+                f"and {label} runs in their place",
+                _disconnect_fix(directory, "remove them, and the plugin runs alone: ", adapter.id),
+            )
+        ]
+    if not install.trusted:
+        # The same step as hooks.json's unverified row, in the same opening words: install.sh
+        # leaves exactly that to the user, and reads the row by them.
+        return [
+            _warn(
+                adapter.id,
+                f"{adapter.label}: unverified in {directory} — {label} has hooks "
+                f"{adapter.label} has not trusted, so it runs none of them; installing a plugin "
+                "trusts none of its hooks",
+                _trust_fix(adapter, directory),
+            )
+        ]
+    runs, problem, fix = _plugin_runner(install.version)
+    if problem is not None:
+        return [_warn(adapter.id, f"{adapter.label}: {where} {problem}", fix or "")]
+    return [_ok(adapter.id, f"{adapter.label}: connected through {where}, which runs {runs}")]
+
+
 @agent_core.inspection_snapshot()
 def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
     from aisquare.core.agent_adapters import adapters
@@ -3503,6 +3566,7 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
             or site.recorded
             or site.hooks_installed
             or site.binary_state is not None
+            or _plugin_install(adapter, path) is not None
         }
         if info is None or (not info.detected and not sites):
             checks.append(_ok(adapter.id, f"{adapter.label} not detected on this machine"))
@@ -3537,6 +3601,14 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                     )
                 )
                 continue
+            install = _plugin_install(adapter, directory)
+            if install is not None:
+                checks.extend(_plugin_route_checks(adapter, directory, install))
+                if not agent_core.plugin_stands_down(adapter.id, directory):
+                    # The plugin is the route that runs here, alone or in place of hooks
+                    # that cannot start: its row is the directory's. Beside working
+                    # hooks, which it leaves every event to, those are graded too.
+                    continue
             if site and site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT):
                 checks.append(_warn(adapter.id, "; ".join(_hook_binary_problems([site])), fix))
                 continue

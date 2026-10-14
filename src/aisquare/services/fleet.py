@@ -1264,9 +1264,9 @@ def _derive(
     *,
     observed: bool,
     now: datetime,
-    unasked: str = "tmux unavailable",
+    held: bool = False,
 ) -> tuple[FleetAgentState, str | None]:
-    """State from the board first, tmux second (§5.1) — with one honest exception.
+    """State from the board first, tmux second (§5.1) — with two honest exceptions.
 
     A dead or vanished pane is a hard fact no board row can contradict: a
     process that has exited cannot be waiting, however recently its hooks
@@ -1275,8 +1275,15 @@ def _derive(
     first; then a fresh ``team_session`` row (not ended, seen within
     ``_STALE_AFTER``) decides between working, waiting and attention; then
     recent output (:data:`ACTIVITY_WINDOW`) means working; and when tmux cannot
-    be asked at all the answer is ``unknown``, never a guess, with ``unasked`` as
-    the reason: the caller's word for why the row's server was not heard.
+    be asked at all the answer is ``unknown``, never a guess.
+
+    So is another server at the row's socket (``held``, :func:`_observe`): it reads
+    ``unknown`` whatever its board says, saying why (:data:`ANOTHER_SERVER`). Its agent is
+    one no tmux client reaches, if it runs at all, and its pane id there is another
+    agent's. Derived from a fresh board, it read a healthy ``waiting`` with no reason for
+    half an hour, under which ``fleet tell`` typed into that other agent, needs-you
+    pushed prompts every answer to was refused, and a held manager counted as one that
+    takes its coders' questions (review of #259, round 2).
     """
     if agent.ended_at is not None:
         return "exited", _exit_detail(agent.exit_status)
@@ -1286,6 +1293,8 @@ def _derive(
         if pane.dead:
             return "exited", _exit_detail(pane.dead_status)
     hooks = "no hooks" if agent.session_id is None else None
+    if held:
+        return "unknown", ANOTHER_SERVER if hooks is None else f"{ANOTHER_SERVER}; {hooks}"
     if session is not None and session.ended_at is None:
         fresh = now - session.last_seen_at <= _team()._STALE_AFTER
         board_state = _BOARD_STATES.get(session.state)
@@ -1332,6 +1341,7 @@ def _derive(
         # what it is" (models.py). A missing board join is a second, smaller
         # fact: reported after the reason, never instead of it — an operator
         # told only "no hooks" reads a healthy fleet with an odd binary.
+        unasked = "tmux unavailable"
         return "unknown", unasked if hooks is None else f"{unasked}; {hooks}"
     busy = pane.last_output is not None and now - pane.last_output <= ACTIVITY_WINDOW
     return ("working" if busy else "waiting"), hooks
@@ -1355,8 +1365,9 @@ def _limit_detail(until: datetime | None, now: datetime) -> str:
 
 
 ANOTHER_SERVER = "another tmux server on its socket"
-"""A held row's detail (:func:`_observe`): a server answers at its socket, and it is not
-the one the row was started on, which may run on where no client reaches it."""
+"""A held row's detail (:func:`_observe`), whose state is ``unknown`` whatever its board
+says (:func:`_derive`): a server answers at its socket, and it is not the one the row was
+started on, which may run on where no client reaches it."""
 
 
 def _status(
@@ -1371,18 +1382,11 @@ def _status(
     """``address`` is the row's as the caller worked it out once (:func:`_where`)."""
     # The server's word AS GIVEN (`_observe_sockets`' view for the row's address), never
     # through `_view`: a row the answering server is not the server of is held there under
-    # its id, which is the one fact that names the detail below.
+    # its id, which is the one fact that decides its state and detail below.
     held = _held_by_another(agent, observed)
     observed = _own_view(agent, observed)
     pane = observed.get(agent.id) if observed is not None else None
-    state, detail = _derive(
-        agent,
-        session,
-        pane,
-        observed=observed is not None,
-        now=now,
-        unasked=ANOTHER_SERVER if held else "tmux unavailable",
-    )
+    state, detail = _derive(agent, session, pane, observed=observed is not None, now=now, held=held)
     return FleetAgentStatus(
         agent=agent,
         state=state,
@@ -2771,10 +2775,10 @@ def tell(
     agent it showed, and a replacement that took the label since (a manager's
     restart or switch, in another process) is refused, not typed into.
 
-    And the pane must be the row's own (:func:`_its_agent`): a row whose server lost its
-    socket to another reads its board's ``waiting`` while that is fresh, and its pane id
-    on the server that answers there is another agent's. Pasted into, that agent got the
-    text and an Enter (review of #259, round 2).
+    And the pane must be the row's own (:func:`_its_agent`): on the server that took a row's
+    socket, its pane id is another agent's. A held row read its board's ``waiting`` while
+    that was fresh, and pasted into, that agent got the text and an Enter (review of #259,
+    round 2).
     """
     with store_session() as store:
         agent = _live_agent(store, project, label, agent_id=agent_id)

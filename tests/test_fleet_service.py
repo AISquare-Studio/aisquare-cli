@@ -2682,9 +2682,10 @@ def test_a_row_whose_socket_another_server_took_is_held_not_ended(
     status = fleet_service.status_of(coder)
     assert (status.state, status.detail) == ("unknown", "another tmux server on its socket")
     assert listed.held and status.held, "said, so no view shows the newcomer's %1 under it"
-    _board_session(coder, "waiting")  # its hooks still fire: the board decides, as for any
-    [fresh] = fleet_service.list_agents(project)  # server not asked
-    assert fresh.state == "waiting" and fresh.held, "held whatever the board says"
+    _board_session(coder, "waiting")  # its hooks may still fire: the board does not decide
+    [fresh] = fleet_service.list_agents(project)
+    assert (fresh.state, fresh.detail) == ("unknown", "another tmux server on its socket")
+    assert fresh.held, "held whatever the board says"
     reaped = fleet_service.reap(project)
     swept = fleet_service.reap(project, server_down=True)
     assert reaped.lost == reaped.ended == swept.lost == swept.ended == []
@@ -2733,6 +2734,48 @@ def test_a_row_whose_socket_another_server_took_is_held_not_ended(
     assert not listed.held
     assert fleet_service.stop(project, stale.label).agent.ended_at is not None
     assert newcomer.killed == [] and newcomer.typed == []
+
+
+@pytest.mark.parametrize("board", ["waiting", "working", "attention"])
+def test_a_held_row_reads_unknown_saying_why_whatever_its_fresh_board_says(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    board: str,
+) -> None:
+    """Review of #259, round 2: the held reason reached a row only once its board went stale.
+    While the board was fresh (30 minutes: a killed agent fires no SessionEnd) the row read
+    its board's state with no detail, so `fleet ls`, asq's header and the phone showed a
+    healthy `waiting` that no tab gave a pane and every action refused, `tell` typed into
+    the agent that got its id, and a held manager counted as one taking its coders'
+    questions. Held, it reads `unknown`, saying why, whatever its board says."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
+    tmux.started = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    coder = _coder(project)
+    _board_session(coder, board)
+    newcomer = FakeTmux()
+    newcomer.started = tmux.started + timedelta(minutes=5)
+    newcomer.spawn_window("asq-elsewhere", name="manager", cwd=project.root, command=["claude"])
+    newcomer.set_command(coder.pane_id, "claude")
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: newcomer)
+
+    [listed] = fleet_service.list_agents(project)
+    status = fleet_service.status_of(coder)
+
+    for said in (listed, status):
+        assert (said.state, said.detail, said.held) == (
+            "unknown",
+            "another tmux server on its socket",
+            True,
+        ), said
+    told = fleet_service.tell(project, "coder-1", "please rebase")
+    assert not told.delivered and told.how.startswith("it is unknown — filed as board note")
+    assert newcomer.typed == []
+    # Negative control: on its own server the same fresh board decides, as for any row.
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+    [own] = fleet_service.list_agents(project)
+    assert (own.state, own.held) == (board, False)
 
 
 def test_with_no_boot_id_a_row_from_before_the_boot_is_lost_not_held_by_the_next_server(

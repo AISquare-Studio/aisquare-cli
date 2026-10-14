@@ -261,9 +261,11 @@ State is **derived, never stored**: a fresh board session row wins (working ·
 waiting · attention · limited — the last one trusted until the reset it names
 has passed, since a parked agent fires no hook); otherwise tmux's facts (a dead
 pane → exited with its code; activity → working; else waiting); no pane at all → lost; `· unknown`
-when neither source can answer. The detail beside the chip says why when that
-is not obvious — an exit code, `no hooks` for a binary without our lifecycle
-hooks, `pane gone`.
+when neither source can answer. A row whose socket another tmux server answers on
+reads `unknown (another tmux server on its socket)` whatever its board says (see
+*The server was stopped outside the CLI*). The detail beside the chip says why
+when that is not obvious — an exit code, `no hooks` for a binary without our
+lifecycle hooks, `pane gone`.
 
 ### `fleet tell`
 

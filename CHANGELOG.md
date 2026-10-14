@@ -166,9 +166,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   path, or one whose recorded path is where `-L` finds that name from this
   shell anyway. The field is additive, and Remote's `api/fleet` carries it too,
   as it carries those agents. They carry `held` too, `true` for a row held as
-  another tmux server's (see Fixed): its state is its board's while that is
-  fresh, then `unknown`, and its pane id is no pane of its own, so asq shows
-  none under it.
+  another tmux server's (see Fixed): its state is `unknown` whatever its board
+  says, and its pane id is no pane of its own, so asq shows none under it.
 
 ### Fixed
 - `fleet spawn` no longer starts a tmux server at a socket path a running

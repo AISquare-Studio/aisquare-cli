@@ -121,14 +121,22 @@ that never opt in see nothing.
 ### Tasks: idempotent, atomic, dependency-aware
 
 ```sh
-aisquare task add "wire auth" --role coder        # idempotent — safe to re-emit
-aisquare task add "ship it" --needs tsk_01k…      # held until its dependency is done
+aisquare task add "wire auth" --role coder        # idempotent — safe to re-emit (#1)
+aisquare task add "ship it" --needs 1             # held until #1 is done
 aisquare task next --role coder --claim --as <id> # atomic claim — exactly one winner; a
                                                   # fleet agent's own assigned task comes first
-aisquare task review tsk_01k… --note "how to verify" --as <id>
-aisquare task reopen tsk_01k… --reason "fails on py3.11" --as <id>
+aisquare task review 1 --note "how to verify" --as <id>
+aisquare task reopen '#1' --reason "fails on py3.11" --as <id>
 aisquare note "JWT it is" --kind decision --as <id>
 ```
+
+Every task has a **number on its board** — `#1`, `#2`, … in the order tasks
+were added to that project — shown beside its id on the board, in `task list`,
+`task show` and every receipt (`✓ claimed: #12 tsk_01k… [doing] …`). Any task
+command, `--needs`, `--task` and the MCP task tools take `12` or `#12` for the
+caller's board (the `--as` session's, else the directory's), or the id as
+before. `#12` is only ever a number: if this board has no task #12 it says so
+rather than matching some other task's id.
 
 Claims are single-`UPDATE` atomic (race-tested), leased (default 120
 minutes), and renewed by the session's own lifecycle hooks — so a dead

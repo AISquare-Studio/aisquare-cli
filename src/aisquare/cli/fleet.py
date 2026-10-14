@@ -166,7 +166,8 @@ def spawn(
         typer.Option("--label", "-l", help="Agent label (default: <role>-<task> or <role>-<n>)."),
     ] = None,
     task: Annotated[
-        str | None, typer.Option("--task", help="Board task this agent is for (id or prefix).")
+        str | None,
+        typer.Option("--task", help="Board task this agent is for (#12, 12, or id prefix)."),
     ] = None,
     worktree: Annotated[
         bool | None,

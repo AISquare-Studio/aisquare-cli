@@ -1425,9 +1425,11 @@ def _task_for(store: ContextStore, project: ProjectInfo, task_id: str | None) ->
     if task_id is None:
         return None
     try:
-        task = store.get_task(task_id)
+        task: TeamTask | None = _team().find_task(store, task_id, project.id)  # `12`, `#12`
     except AmbiguousIdError as exc:
         raise FleetError(f"task {task_id!r} is ambiguous — use more of the id") from exc
+    except _team().NoSuchTaskNumber as exc:
+        raise FleetError(str(exc)) from exc
     if task is None:
         raise FleetError(f"no task matches {task_id!r}")
     if task.project_id != project.id:

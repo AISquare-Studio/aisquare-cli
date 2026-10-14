@@ -156,6 +156,8 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
         # NOT retryable (no such table, readonly, disk full): a distinct code,
         # with the real cause preserved for --json callers.
         fail(f"context store error: {exc}", error="store_error", detail=str(exc))
+    if isinstance(exc, team_service.NoSuchTaskNumber):
+        fail(str(exc), error="not_found", ref=f"#{exc.number}")  # never looked for elsewhere
     if isinstance(exc, KeyError):
         missing = ref if ref is not None else str(exc)
         fail(f"nothing matches '{missing}'", error="not_found", ref=missing)
@@ -930,7 +932,8 @@ def log(
         str | None, typer.Option("--kind", help="Only this kind (note, decision, task_done, …).")
     ] = None,
     task: Annotated[
-        str | None, typer.Option("--task", help="Only events about this task (id prefix).")
+        str | None,
+        typer.Option("--task", help="Only events about this task (#12, 12, or id prefix)."),
     ] = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -1240,7 +1243,7 @@ def note(
     text: Annotated[str, typer.Argument(help="The note/decision/question/result to share.")],
     as_session: SessionRef = None,
     task: Annotated[
-        str | None, typer.Option("--task", help="Task this note is about (id prefix).")
+        str | None, typer.Option("--task", help="Task this note is about (#12, 12, or id prefix).")
     ] = None,
     to: Annotated[
         str | None, typer.Option("--to", help="Address a role (planner/coder/runner/…).")

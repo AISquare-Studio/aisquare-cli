@@ -663,6 +663,9 @@ def harness_status() -> None:
                 # them a role bound with `--env-file GH_TOKEN=…` showed no GH_TOKEN
                 # here, while the text matrix named it (review of #259, round 1).
                 "env_files": launch_profile.env_files,
+                # Why the role will not launch, when it will not: a file-bound key whose
+                # file cannot be read (review of #259, round 3). `null` otherwise.
+                "refusal": launch_profile.refusal,
                 "extra_args": launch_profile.args,
                 # The role's OWN flags, the third axis of "what will this role
                 # launch with". Without it the matrix reported `extra_args: []`
@@ -712,6 +715,8 @@ def harness_status() -> None:
             f"→ {pinned or resolution.model} [{source}]{bin_note}",
             markup=False,
         )
+        if launch_profile.refusal is not None:
+            console.print(f"  ⚠ {launch_profile.refusal}", markup=False)
     if interference:
         console.print(f"⚠ env overrides model selection: {', '.join(interference)}", markup=False)
     console.print(

@@ -800,6 +800,34 @@ class TestEnvFiles:
         assert row["env_files"] == {"GH_TOKEN": str(token)} and "GH_TOKEN" not in row["env"]
         assert "env=GH_TOKEN" in human.output
         assert TOKEN not in human.output and TOKEN not in machine.output
+        assert row["refusal"] is None
+
+    def test_team_harness_names_a_binding_whose_file_is_gone_and_that_the_role_will_not_launch(
+        self, runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review of #259, round 3: with the reviewer's GH_TOKEN file deleted,
+        `resolve_profile` stopped before it named the key, so `team harness` showed no
+        `env=GH_TOKEN`, `--json` `"env_files": {}`, and neither said the role cannot launch:
+        the command an operator runs to see what a role launches with was silent about the
+        binding that refuses it. The key is named with its path, and the refusal said."""
+        gone = tmp_path / "secrets" / "gone"
+        token = _token_file(tmp_path)
+        _bind("reviewer", env_files={"GH_TOKEN": str(gone), "GITHUB_TOKEN": str(token)})
+        monkeypatch.setenv("AISQUARE_TEAM", "1")
+
+        human = runner.invoke(app, ["team", "harness"])
+        machine = runner.invoke(app, ["--json", "team", "harness"])
+
+        assert human.exit_code == 0 and machine.exit_code == 0, human.output + machine.output
+        row = {row["role"]: row for row in json.loads(machine.stdout)["roles"]}["reviewer"]
+        assert row["env_files"] == {"GH_TOKEN": str(gone), "GITHUB_TOKEN": str(token)}
+        assert row["refusal"].startswith(f"reviewer reads GH_TOKEN from {gone}, which cannot")
+        said = " ".join(human.output.split())
+        assert "env=GH_TOKEN,GITHUB_TOKEN" in said
+        assert f"⚠ reviewer reads GH_TOKEN from {gone}, which cannot be read" in said
+        assert TOKEN not in human.output and TOKEN not in machine.output
+        launched = harness.resolve_profile("reviewer")
+        assert launched.file_env == {}, "a refused launch carries none of the secrets"
 
 
 class TestBindEnvFile:

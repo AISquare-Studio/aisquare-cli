@@ -1167,7 +1167,8 @@ class LaunchProfile(BaseModel):
     #: the reader hunting for who won.
     env_sources: dict[str, str] = {}
     #: The binding's ``env_files`` this launch reads, each key to its file, expanded:
-    #: what may be shown of them. Their values are :attr:`file_env`.
+    #: what may be shown of them, one that cannot be read included (:attr:`refusal`).
+    #: Their values are :attr:`file_env`.
     env_files: dict[str, str] = {}
     #: The values read from :attr:`env_files`, for the launch's environment alone: never
     #: dumped, never in a repr, so nothing that prints a profile can print a secret.
@@ -1271,6 +1272,14 @@ def resolve_profile(
     for key, path in files.items():
         if sources.get(key) == "flag":
             continue
+        # Shown whether or not it can be read: a binding that cannot be is what keeps the
+        # role from launching, and `team harness` showed the role as bound to nothing
+        # (review of #259, round 3).
+        env.pop(key, None)
+        sources[key] = "file"
+        shown[key] = path
+        if refusal is not None:
+            continue  # the first refusal decides; no other secret is read for it
         if not Path(path).is_absolute():
             # Read against whatever directory each launch runs in: the bind's shell read it,
             # the fleet's pre-check read asq's, and the window's `launch` its worktree's, where
@@ -1280,7 +1289,7 @@ def resolve_profile(
                 f"look for in its own working directory — not launching {role} without it. "
                 f"Bind it by its full path: aisquare team bind {role} --env-file {key}=<path>"
             )
-            break
+            continue
         try:
             file_env[key] = read_env_file(path)
         except ValueError as exc:
@@ -1288,10 +1297,6 @@ def resolve_profile(
                 f"{role} reads {key} from {path}, which {exc} — not launching {role} without it. "
                 f"Fix the file, or unbind it: aisquare team bind {role} --unset {key}"
             )
-            break
-        env.pop(key, None)
-        sources[key] = "file"
-        shown[key] = path
     return LaunchProfile(
         env=env,
         args=args,

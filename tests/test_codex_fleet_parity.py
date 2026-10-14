@@ -44,7 +44,14 @@ from aisquare.core.config import (
 )
 from aisquare.core.keys import Drop, Translation, translate
 from aisquare.core.store import SqliteStore, store_session
-from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
+from aisquare.models import (
+    ClaudeAccount,
+    FleetAgent,
+    FleetAgentStatus,
+    ProjectInfo,
+    TeamSession,
+    TeamTask,
+)
 from aisquare.services import agent_events, agent_launch, auto_mode, diagnostics
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
@@ -960,3 +967,30 @@ def test_a_codex_row_on_a_codex_slot_restarts_on_that_slot(
 
     assert receipt.started.account_slot == slot.slot and receipt.started.agent == "codex"
     assert _flag(_command(tmux), "--account") == str(slot.slot)
+
+
+def test_a_switch_resumes_only_onto_the_home_the_thread_ran_under(tmp_path: Path) -> None:
+    """A Codex thread lives under its CODEX_HOME: a target on that home resumes it, any
+    other starts fresh (``capabilities.resumes_across_homes``)."""
+    home, other = tmp_path / "codex-a", tmp_path / "codex-b"
+    home.mkdir()
+    other.mkdir()
+    now = datetime.now(UTC)
+    session = TeamSession(
+        id="s",
+        project_id="prj",
+        role="coder",
+        started_at=now,
+        last_seen_at=now,
+        agent="codex",
+        account=str(home),
+    )
+
+    def account(where: Path) -> ClaudeAccount:
+        return ClaudeAccount(slot=7, config_dir=where, managed=True, agent="codex")
+
+    assert fleet_service._same_home(session, account(home))
+    assert fleet_service._same_home(session, account(home / "." / ""))
+    assert not fleet_service._same_home(session, account(other))
+    assert not fleet_service._same_home(None, account(home))
+    assert not get_adapter("codex").capabilities.resumes_across_homes

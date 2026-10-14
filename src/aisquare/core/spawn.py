@@ -111,6 +111,9 @@ Excluded, the fleet's own plumbing (docs/plans/fleet-tui.md §3.4):
   * ``services/fleet.py::_git`` — ``git worktree`` (add, remove, list) and the
     branch queries behind ``fleet reap`` (§3.5); no model, not stripped, like
     the other git seams.
+  * ``services/ngrok_tunnel.py::popen_tied`` — the R panel's ngrok, under the
+    parent that ends it with this process; a tunnel to ``127.0.0.1``, no model,
+    not stripped.
 
 Checked and NOT a seam, recorded so the next reader does not re-derive it:
   * ``services/project.py`` — catches ``subprocess.SubprocessError`` but starts
@@ -328,6 +331,12 @@ SEAMS: dict[str, Seam] = {
         "`sysctl -n kern.bootsessionuuid` (macOS) or `kern.boottime` (macOS, the BSDs), at a "
         "fleet spawn and when uninstall, upgrade and fleet shutdown ask whether an agent may "
         "still run; an identifier and a time, no model",
+    ),
+    "aisquare/services/ngrok_tunnel.py::popen_tied": Seam(
+        EXCLUDED,
+        "the R panel's ngrok, run by a small Python parent (`-I`) that ends its process "
+        "group once this process is gone. A tunnel to 127.0.0.1, never the model API; not "
+        "stripped, like `tmux attach`",
     ),
 }
 

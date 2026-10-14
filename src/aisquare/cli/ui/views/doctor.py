@@ -5,7 +5,11 @@ fix for each, and where the fix is one of our own commands it is one click
 (``services.onboarding.fix_commands`` decides which — everything else stays
 text). A click runs ``apply_fix`` in a thread worker with the project's cwd,
 then re-runs the doctor and posts :class:`DoctorRefreshed` so the shell and the
-sidebar's Doctor section can follow. The UI process never changes directory.
+sidebar's Doctor section can follow. The UI process never changes directory. A
+slot's sign-in (``aisquare accounts run <n>``, ``… login`` for Codex) needs the
+agent's own terminal, so its button (*Sign in account N*) runs nothing here: it
+posts ``AccountsSelected(sign_in=n)``, and the Accounts page opens that sign-in in
+its pane and records the account when it lands.
 
 asq's own Doctor (``machine=True``, never the Onboard or Project copies) also
 carries Update and Uninstall. Both hand the terminal over rather than run in
@@ -27,6 +31,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Button, Static
 
+from aisquare.cli.ui.sidebar import AccountsSelected
 from aisquare.core import selfcli
 from aisquare.models import CheckStatus, DoctorCheck
 from aisquare.services import install_route, onboarding
@@ -247,8 +252,12 @@ class DoctorView(VerticalScroll):
             # segment on screen and read as a different directory (measured:
             # ``Content.from_text`` turns ``/home/me/[archive]/repo`` into
             # ``/home/me//repo``). Same rule for the tooltip; it carries the hint.
-            button = Button(Text(fix.label), variant="warning", id=button_id)
+            slot = fix.sign_in_slot
+            label = f"Sign in account {slot}" if slot is not None else fix.label
+            button = Button(Text(label), variant="warning", id=button_id)
             tooltip = Text(fix.source)
+            if slot is not None:
+                tooltip.append(f"\nOpens the Accounts page with {fix.label} in its pane.")
             if fix.scope == "project" and self.cwd is None:
                 button.disabled = True
                 tooltip.append("\n(select a project first — this runs in its root)")
@@ -274,6 +283,11 @@ class DoctorView(VerticalScroll):
         if fix is None:
             return
         event.stop()
+        if fix.sign_in_slot is not None:
+            # The agent's own login needs a terminal: the Accounts page opens it in its
+            # pane and records the account when it lands; the report follows its refresh.
+            self.post_message(AccountsSelected(sign_in=fix.sign_in_slot))
+            return
         if self.busy:
             return
         self.busy = True

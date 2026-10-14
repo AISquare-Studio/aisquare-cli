@@ -3405,6 +3405,21 @@ def _check_fleet(
         )
 
 
+def _trust_fix(adapter: AgentAdapter, directory: Path) -> str:
+    """How the user trusts aisquare's hooks in ``directory``: in the agent itself, started on
+    that home (Codex's ``/hooks``). Not a command a button can run, and not Connect, which
+    writes the hooks and cannot trust them."""
+    ambient = agent_core.ambient_hook_dir(adapter.id)
+    run = adapter.binary
+    if ambient is None or agent_core._dir_key(ambient) != agent_core._dir_key(directory):
+        run = f"{adapter.home_env}={shlex.quote(str(directory))} {adapter.binary}"
+    return (
+        f"Start {run}, type /hooks, and trust aisquare's hooks there (in asq, the manager's "
+        f"pane does it); {adapter.label} runs them only once trusted, and this row reads "
+        "observed after one runs"
+    )
+
+
 def _launch_hooks_off(adapter: AgentAdapter, cwd: Path | None) -> list[DoctorCheck]:
     """Roles whose own launch arguments switch the agent's hooks off (``--disable hooks``,
     ``-c features.hooks=false``, a profile that does), where its config alone does not.
@@ -3533,25 +3548,33 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                 continue
             if state in {"configured", "observed"}:
                 checks.append(_ok(adapter.id, f"{adapter.label}: {state} in {directory}"))
-            else:
-                if state == "unverified":
-                    detail = ". ".join(
-                        filter(
-                            None,
-                            [
-                                detail.rstrip(". "),
-                                "After reconnecting, review /hooks in Codex and start a session",
-                            ],
-                        )
-                    )
+            elif state == "unverified":
+                # Installed, and the agent runs them only once the user trusts them: the
+                # one step no command takes (install.sh reads this row's opening words).
                 checks.append(
                     _warn(
                         adapter.id,
-                        f"{adapter.label}: {state} in {directory}"
-                        + (f". {detail}" if detail else ""),
-                        fix,
+                        f"{adapter.label}: unverified in {directory}"
+                        + (f". {detail.rstrip('. ')}" if detail else ""),
+                        _trust_fix(adapter, directory),
                     )
                 )
+            else:
+                missing = agent_core._missing_events(adapter.id, directory, reconciled=False)
+                every = [hook.event for hook in adapter.capabilities.hooks]
+                if agent_core.hook_commands(adapter.id, directory) and missing != every:
+                    # Some of aisquare's hooks, from an install that knew fewer events: they
+                    # run, and the events they lack never reach the board.
+                    said = (
+                        f"{adapter.label}: partial in {directory} — aisquare's hooks are "
+                        f"missing for {', '.join(missing)}"
+                    )
+                else:
+                    said = (
+                        f"{adapter.label}: {state} in {directory} — aisquare's hooks are not "
+                        f"installed there"
+                    )
+                checks.append(_warn(adapter.id, said + (f". {detail}" if detail else ""), fix))
         checks.extend(_launch_hooks_off(adapter, cwd))
     if selected is None:
         return checks

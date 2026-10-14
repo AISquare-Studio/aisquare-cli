@@ -79,20 +79,21 @@
       "payload": {
         "session_id": "019a5c2e-7b1d-7f30-9c4e-codex",
         "turn_id": "turn-2",
+        "transcript_path": "/home/dev/.codex/sessions/2026/10/14/rollout-019a5c2e.jsonl",
         "cwd": "/repo",
         "hook_event_name": "PermissionRequest",
-        "tool_name": "shell",
+        "model": "gpt-5.5-codex",
+        "permission_mode": "default",
+        "tool_name": "Bash",
         "tool_input": {
-          "command": [
-            "git",
-            "push"
-          ]
+          "command": "git push",
+          "description": "push the branch"
         }
       },
       "expect": {
         "kind": "attention",
         "session_id": "019a5c2e-7b1d-7f30-9c4e-codex",
-        "message": "Codex needs user input"
+        "message": "Codex needs your approval"
       }
     },
     "PreToolUse": {

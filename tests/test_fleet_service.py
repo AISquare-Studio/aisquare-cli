@@ -8684,6 +8684,44 @@ def test_restart_hands_off_the_session_s_own_entries_on_a_busy_board(
     assert "chatter" not in prompt
 
 
+def test_a_hand_off_quotes_the_sessions_entries_and_never_the_humans_bells(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """t8 smoke: a Codex coder's ``fleet switch`` hand-off began "The previous session's
+    last board entries: - attention: Codex needs user input - attention: …", its newest
+    five all bells. Bells and notices are the human board's (``HUMAN_BOARD_KINDS``),
+    never an agent's context, and the session's own work is quoted past them."""
+    agent = _coder(project)
+    _with_transcript(agent, tmp_path / "missing.jsonl")  # named, not on disk
+    with store_session() as store:
+        team_service._emit(
+            store, project.id, "note", "halfway through the router", session_id=agent.session_id
+        )
+        for n in range(8):
+            for kind in ("attention", "notice"):
+                team_service._emit(
+                    store, project.id, kind, f"{kind} {n}", session_id=agent.session_id
+                )
+    original_spawn = tmux.spawn_window
+
+    def ready_spawn(*args: Any, **kwargs: Any) -> WindowInfo:
+        window = original_spawn(*args, **kwargs)
+        tmux.set_command(window.pane_id, "claude")
+        return window
+
+    monkeypatch.setattr(tmux, "spawn_window", ready_spawn)
+
+    fleet_service.restart(project, agent.label)
+
+    [prompt] = [text for _pane, kind, text in tmux.typed if kind == "paste"]
+    assert "- note: halfway through the router" in prompt
+    assert "attention" not in prompt and "notice" not in prompt
+
+
 def test_a_restart_whose_courtesy_event_cannot_be_written_still_reports_the_restart(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

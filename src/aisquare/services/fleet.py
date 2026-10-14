@@ -4607,14 +4607,7 @@ def switch(
         # its closed task until its next briefing, and switching one always lost it
         # (review of #203, final round, FLEET-3).
         task = _task_for(store, project, agent.task_id)
-        # The session's own newest entries (oldest first), not the project's last
-        # 60 filtered down: on a busy board those all belonged to other agents
-        # and the prompt lost its "last board entries" (review of #205, third round).
-        recent = (
-            store.filtered_events(project.id, session_id=agent.session_id, limit=_HANDOFF_NOTES)
-            if agent.session_id is not None
-            else []
-        )
+        recent = _handoff_events(store, project, agent)
     _require_role(agent.role)  # `spawn`'s first refusal, before the stop as the task's
     current = _account_slot_of(agent, session)
     notes: list[str] = []
@@ -5064,13 +5057,7 @@ def restart(
             task = _task_for(store, project, agent.task_id)
         except FleetError as exc:
             raise FleetError(f"cannot restart {label!r}: {exc}") from exc
-        # The session's own newest entries, as `switch` reads them: the project's
-        # last 60 filtered down lost them on a busy board (review of #205, third round).
-        recent = (
-            store.filtered_events(project.id, session_id=agent.session_id, limit=_HANDOFF_NOTES)
-            if agent.session_id is not None
-            else []
-        )
+        recent = _handoff_events(store, project, agent)
     # `spawn`'s refusals for the binary and the account, asked here for the same
     # reason. The account is resolved as `switch` resolves its target — the row's
     # slot, else the one its session ran under, whose number outlives a removed
@@ -5397,6 +5384,24 @@ def _resume_prompt(agent: FleetAgent, reason: str | None) -> str:
 
 _HANDOFF_NOTES = 5
 _HANDOFF_DETAIL = 600
+_HANDOFF_SCAN = 60
+"""How many of the session's newest entries the hand-off reads for its
+:data:`_HANDOFF_NOTES`, the human board's among them."""
+
+
+def _handoff_events(
+    store: ContextStore, project: ProjectInfo, agent: FleetAgent
+) -> list[TeamEvent]:
+    """The board entries a hand-off prompt quotes: the session's own newest (oldest first),
+    not the project's last 60 filtered down, which on a busy board all belonged to other
+    agents (review of #205, third round); and less its bells and notices, which are the
+    human's and never an agent's (``team.HUMAN_BOARD_KINDS``): three "attention" lines
+    of Codex's took the whole tail."""
+    if agent.session_id is None:
+        return []
+    events = store.filtered_events(project.id, session_id=agent.session_id, limit=_HANDOFF_SCAN)
+    human = _team().HUMAN_BOARD_KINDS
+    return [event for event in events if event.kind not in human][-_HANDOFF_NOTES:]
 
 
 def _handoff_prompt(

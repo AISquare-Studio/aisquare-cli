@@ -448,6 +448,44 @@ def test_no_limit_without_one_this_turn_or_once_it_has_lifted(home: Path) -> Non
     assert codex.limit_from_transcript(home / "missing.jsonl", now=NOW) is None
 
 
+def _turn_context(reviewer: str | None) -> dict[str, Any]:
+    payload = {"approval_policy": "on-request", "sandbox_policy": {"type": "workspace-write"}}
+    if reviewer is not None:
+        payload["approvals_reviewer"] = reviewer
+    return {"timestamp": NOW.isoformat(), "type": "turn_context", "payload": payload}
+
+
+def test_the_reviewer_is_the_one_the_rollout_names_last(home: Path) -> None:
+    """Who answers an approval, as 0.162.1 records it: each turn's ``turn_context``, and a
+    ``thread_settings_applied`` event when ``/permissions`` changes it mid-thread."""
+    rollouts = home / "rollouts"
+    auto = _rollout(rollouts, [_turn_context("auto_review"), _event("task_started")], name="a")
+    assert codex.approvals_reviewer(auto) == "auto_review"
+    switched = _rollout(
+        rollouts,
+        [
+            _turn_context("auto_review"),
+            _event("thread_settings_applied", thread_settings={"approvals_reviewer": "user"}),
+        ],
+        name="switched",
+    )
+    assert codex.approvals_reviewer(switched) == "user"
+    resumed = _rollout(
+        rollouts,
+        [
+            _turn_context("user"),
+            _event("thread_settings_applied", thread_settings={"approvals_reviewer": "user"}),
+            _turn_context("auto_review"),
+            _event("task_started"),
+        ],
+        name="resumed",
+    )
+    assert codex.approvals_reviewer(resumed) == "auto_review"
+    assert codex.approvals_reviewer(_rollout(rollouts, [_turn_context(None)], name="n")) is None
+    assert codex.approvals_reviewer(_rollout(rollouts, [_event("task_started")], name="e")) is None
+    assert codex.approvals_reviewer(home / "missing.jsonl") is None
+
+
 # --------------------------------------------------------------------------- the adapter slot
 
 

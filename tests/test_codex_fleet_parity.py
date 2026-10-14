@@ -15,6 +15,7 @@ test here runs with a stale one in the environment, which must decide nothing.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -626,6 +627,55 @@ def test_a_waiting_codex_manager_is_woken_with_the_enter_apart(
     tmux.screens[manager.pane_id] = IDLE_PROMPT
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
     assert len(typed) == 4
+
+
+# --- who answers an approval decides the bell (t8 smoke, lane A) -------------------------
+
+#: A PermissionRequest as 0.162.1 sends it, the same whoever answers it (measured).
+APPROVAL = {
+    "turn_id": "turn-1",
+    "model": "gpt-test",
+    "permission_mode": "default",
+    "tool_name": "Bash",
+    "tool_input": {"command": "aisquare note hi", "description": "post the board note"},
+}
+
+
+def _turn_under(codex: Codex, native: str, reviewer: str) -> None:
+    """The turn Codex opens in its rollout for ``native``, answered by ``reviewer``."""
+    path = codex.home / "sessions" / f"rollout-{native}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    context = {"approval_policy": "on-request", "approvals_reviewer": reviewer}
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "turn_context", "payload": context}) + "\n")
+    codex.hook("UserPromptSubmit", native, turn_id="turn-1", prompt="post a note")
+
+
+def _state(codex: Codex) -> str:
+    return fleet_service.status_of(_row(codex.agent.id)).state
+
+
+def test_an_approval_codex_reviews_itself_rings_no_bell(
+    codex_agent: tuple[Codex, TeamTask],
+) -> None:
+    """Under ``--approve-for-me`` Codex's own reviewer answers every escalation and no
+    prompt reaches the pane, yet the hook fires all the same: 7 false bells for one small
+    task in the t8 smoke. A human-reviewed request still rings, once."""
+    codex, _ = codex_agent
+    codex.start("thread-one")
+    _turn_under(codex, "thread-one", "auto_review")
+
+    codex.hook("PermissionRequest", "thread-one", **APPROVAL)
+    codex.hook("PostToolUse", "thread-one", turn_id="turn-1", tool_name="Bash")
+
+    assert _state(codex) == "working"
+    assert _events(codex.project, "attention") == []
+
+    _turn_under(codex, "thread-one", "user")  # /permissions → Ask for approval
+    codex.hook("PermissionRequest", "thread-one", **APPROVAL)
+
+    assert _state(codex) == "attention"
+    assert _events(codex.project, "attention") == ["Codex needs your approval"]
 
 
 # --- a replacement runs the row's own agent (review r1 of #113, finding 1) ---------------

@@ -400,6 +400,28 @@ def limit_from_transcript(path: Path, *, now: datetime | None = None) -> LimitNo
     return LimitNotice("usage", None)
 
 
+def approvals_reviewer(path: Path) -> str | None:
+    """Who answers the session's approval requests, as its rollout last recorded it:
+    ``user`` (the human, in the pane) or ``auto_review`` (Codex's automatic reviewer,
+    ``--approve-for-me``), or ``None`` when the rollout cannot be read or names none.
+
+    The newest of the ``turn_context`` each turn opens with and a ``thread_settings_applied``
+    event (a ``/permissions`` change) decides: measured on 0.162.1, the PermissionRequest
+    hook's payload is the same for both reviewers and only the rollout tells them apart.
+    """
+    for record in _records_from_end(path):
+        if record.get("type") == "turn_context":
+            settings: Mapping[str, Any] = _payload(record)
+        elif _is_event(record, "thread_settings_applied"):
+            applied = _payload(record).get("thread_settings")
+            settings = applied if isinstance(applied, dict) else {}
+        else:
+            continue
+        reviewer = settings.get("approvals_reviewer")
+        return reviewer if _has(reviewer) else None
+    return None
+
+
 class CodexAccounts:
     """Codex's answers to the accounts slot (``core.agent_adapters.types.AgentAccounts``)."""
 

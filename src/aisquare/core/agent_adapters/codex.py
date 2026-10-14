@@ -33,7 +33,7 @@ from aisquare.core.agent_adapters.types import (
     store_dir,
     store_read_only,
 )
-from aisquare.core.codex_accounts import CodexAccounts
+from aisquare.core.codex_accounts import CodexAccounts, approvals_reviewer
 
 #: ``model_reasoning_effort`` levels Codex names (0.162.1). Which of them a model
 #: takes is Codex's to say, so another level is passed through with a note.
@@ -306,7 +306,15 @@ class CodexAdapter:
     def decode_event(self, payload: Mapping[str, Any]) -> AgentEvent | None:
         """Codex's command hook protocol: one ``aisquare hook codex`` for every event,
         named by ``hook_event_name``. A payload without a session id, or with one past
-        256 characters, is not one of ours."""
+        256 characters, is not one of ours.
+
+        A ``PermissionRequest`` is ``attention`` only when the human answers it: Codex
+        fires it for its automatic reviewer's requests too (``--approve-for-me``, no
+        prompt in the pane) with the same payload, so the session's rollout says which
+        (:func:`~aisquare.core.codex_accounts.approvals_reviewer`); one it cannot read
+        rings the bell, as a request nobody answers is worse than a false one.
+        Measured on 0.162.1: PreToolUse comes before it, and PostToolUse (allowed),
+        Interrupt (Esc) or Stop after."""
         native = payload_text(payload, "session_id")
         event = payload_text(payload, "hook_event_name")
         kind = _EVENTS.get(event or "")
@@ -314,6 +322,14 @@ class CodexAdapter:
             return None
         if event == "PreToolUse" and payload.get("tool_name") != "request_user_input":
             return None
+        transcript = payload_text(payload, "transcript_path")
+        if (
+            event == "PermissionRequest"
+            and transcript is not None
+            and approvals_reviewer(Path(transcript)) == REVIEWERS["auto"]
+        ):
+            return None
+        asks = "your approval" if event == "PermissionRequest" else "user input"
         return AgentEvent(
             kind,  # type: ignore[arg-type]
             native,
@@ -324,7 +340,7 @@ class CodexAdapter:
             source=payload_text(payload, "source") if kind == "session_start" else None,
             stop_hook_active=bool(payload.get("stop_hook_active")),
             turn_id=payload_text(payload, "turn_id"),
-            message=f"{self.label} needs user input" if kind == "attention" else None,
+            message=f"{self.label} needs {asks}" if kind == "attention" else None,
         )
 
     def encode_reply(self, kind: EventKind, reply: str | None) -> str:

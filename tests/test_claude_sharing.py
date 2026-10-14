@@ -259,6 +259,33 @@ def test_a_linked_claude_json_is_written_through_and_stays_a_link(
     assert sharing.trusted_folders(json.loads(kept.read_text(encoding="utf-8"))) == [str(tmp_path)]
 
 
+@pytest.mark.skipif(not can_symlink(), reason="needs symlinks")
+def test_a_linked_claude_json_is_locked_by_the_name_claude_code_locks_it_by(
+    three: tuple[ClaudeAccount, ...], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final gate NIT 4: ``proper-lockfile`` resolves the file before it names the lock, so
+    Claude Code locks a linked .claude.json as ``<the file it points at>.lock``. Locked as
+    ``<the link>.lock``, a write here and a session saving through the link each held a
+    lock of its own, and the later save dropped the entry."""
+    _plain, second, _third = three
+    path = core.claude_json_path(second)
+    kept = tmp_path / "dotfiles" / "claude2.json"
+    kept.parent.mkdir()
+    path.rename(kept)
+    path.symlink_to(kept)
+    held = kept.with_name("claude2.json.lock")
+    held.mkdir()  # a session saving through the link right now
+    monkeypatch.setattr(sharing, "LOCK_WAIT_SECONDS", 0.0)
+    before = kept.read_bytes()
+    with pytest.raises(sharing.SharingError, match="lock"):
+        sharing.grant_trust(path, str(tmp_path))
+    assert kept.read_bytes() == before and held.is_dir()  # its lock is its own
+    assert not path.with_name(".claude.json.lock").exists()  # none under the link's name
+    held.rmdir()
+    assert sharing.grant_trust(path, str(tmp_path)) == [str(tmp_path)]
+    assert not held.exists() and not path.with_name(".claude.json.lock").exists()
+
+
 # --- a launch shares the trust -------------------------------------------------------------------
 
 

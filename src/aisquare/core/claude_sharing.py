@@ -238,9 +238,12 @@ def _config_lock(path: Path) -> Iterator[None]:
     write and then re-reads the file with the entry in it, rather than both writing what
     each read. A lock older than :data:`LOCK_STALE_SECONDS` is a dead process's and is
     taken over, as ``proper-lockfile`` does; a live one is waited for, up to
-    :data:`LOCK_WAIT_SECONDS`.
+    :data:`LOCK_WAIT_SECONDS`. Named after the file's resolved path, as ``proper-lockfile``
+    names it by default (``realpath: true``): a linked ``.claude.json`` is locked beside
+    the file it points at, under the one name Claude Code locks it by.
     """
-    lock = path.with_name(path.name + ".lock")
+    real = Path(os.path.realpath(path))
+    lock = real.with_name(real.name + ".lock")
     deadline = _monotonic() + LOCK_WAIT_SECONDS
     while True:
         try:

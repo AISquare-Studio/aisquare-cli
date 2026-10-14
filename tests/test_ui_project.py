@@ -2,8 +2,8 @@
 
 Everything the view reaches for outside the store is monkeypatched at the
 module the view imports — ``services.fleet`` for the manager, the two
-explainability services for the tracing tab, ``ProjectView(doctor=…)`` for the
-Doctor tab — so no test starts tmux, dials a gateway or depends on ``claude``.
+explainability services for the tracing tab — so no test starts tmux, dials a
+gateway or depends on ``claude``.
 What each test asserts is the artefact the claim is about: the spawn call the
 button made, the bytes ``config.toml`` holds after Save, the rows the board
 table shows for THIS project and not another.
@@ -73,7 +73,6 @@ from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.tmux import Capture, Completed, PaneFacts, TmuxServer
 from aisquare.models import (
-    CheckStatus,
     DoctorCheck,
     FleetAgent,
     FleetAgentStatus,
@@ -81,10 +80,10 @@ from aisquare.models import (
     TeamEvent,
     TeamSession,
 )
+from aisquare.services import diagnostics, install_route
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services import fleet as fleet_service
-from aisquare.services import install_route
 from aisquare.services import team as team_service
 from tests.ui_workers import settle_page
 
@@ -96,34 +95,17 @@ default (``models.py``) and the developer's real fleet — see the module
 docstring."""
 
 
-def _stub_checks() -> list[DoctorCheck]:
-    return [DoctorCheck(name="stub", status=CheckStatus.ok, detail="no doctor was asked for")]
-
-
 class Host(App[None]):
     """A bare app around one ``ProjectView`` that records every notification."""
 
-    def __init__(
-        self,
-        project: ProjectInfo,
-        *,
-        doctor: Callable[[Path], list[DoctorCheck]] | None = None,
-        refresh_seconds: float = 60.0,
-    ) -> None:
+    def __init__(self, project: ProjectInfo, *, refresh_seconds: float = 60.0) -> None:
         super().__init__()
         self._project = project
-        # Never the real ``diagnostics.doctor``: it probes git, tmux and claude.
-        self._doctor = doctor if doctor is not None else (lambda root: _stub_checks())
         self._refresh_seconds = refresh_seconds
         self.notices: list[tuple[str, str]] = []
 
     def compose(self) -> ComposeResult:
-        yield ProjectView(
-            self._project,
-            id="project",
-            refresh_seconds=self._refresh_seconds,
-            doctor=self._doctor,
-        )
+        yield ProjectView(self._project, id="project", refresh_seconds=self._refresh_seconds)
 
     def notify(
         self,
@@ -142,13 +124,12 @@ def drive(
     project: ProjectInfo,
     scenario: Callable[[Pilot[None], Host], Coroutine[Any, Any, T]],
     *,
-    doctor: Callable[[Path], list[DoctorCheck]] | None = None,
     refresh_seconds: float = 60.0,
 ) -> T:
     """Run ``scenario`` against a mounted Project view and return what it observed."""
 
     async def run() -> T:
-        host = Host(project, doctor=doctor, refresh_seconds=refresh_seconds)
+        host = Host(project, refresh_seconds=refresh_seconds)
         async with host.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             return await scenario(pilot, host)
@@ -358,24 +339,26 @@ def _config_toml() -> dict[str, Any]:
 # --- the tabs -----------------------------------------------------------------------------
 
 
-def test_project_view_has_the_five_tabs_with_their_widgets(project: ProjectInfo) -> None:
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[int, list[str], str]:
+def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo) -> None:
+    """Manager, Board, Explainability, Settings: no Doctor tab — the doctor is the app's page."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[int, list[str], str, int]:
         view = host.query_one(ProjectView)
         for pane_id, widget_type in (
             ("#tab-manager", ManagerTab),
             ("#tab-board", BoardPanel),
-            ("#tab-doctor", DoctorView),
             ("#tab-explainability", ExplainabilityView),
             ("#tab-settings", SettingsView),
         ):
             assert view.query_one(pane_id).query_one(widget_type)
         ids = [pane.id or "" for pane in view.query("TabPane")]
-        return view.tab_count, ids, view.active
+        return view.tab_count, ids, view.active, len(view.query(DoctorView))
 
-    count, ids, active = drive(project, scenario)
-    assert count == 5
+    count, ids, active, doctors = drive(project, scenario)
+    assert count == 4
     assert ids == list(ProjectView.TAB_IDS)
     assert active == "tab-manager"  # the manager first: that is where the goal goes
+    assert doctors == 0
 
 
 # --- the Manager tab ----------------------------------------------------------------------
@@ -771,9 +754,7 @@ class TwoProjects(App[None]):
     def compose(self) -> ComposeResult:
         with ContentSwitcher(initial="project-b"):
             for project, view_id in zip(self._projects, ("project-a", "project-b"), strict=True):
-                yield ProjectView(
-                    project, id=view_id, refresh_seconds=60.0, doctor=lambda root: _stub_checks()
-                )
+                yield ProjectView(project, id=view_id, refresh_seconds=60.0)
 
 
 def test_a_board_line_resizes_its_own_project_board_and_restores_in_the_tab(
@@ -944,57 +925,34 @@ def test_the_feed_keeps_its_last_lines_and_forgets_the_rest(
     assert "line 11" in frozen and "line 6" not in frozen  # …and select mode agrees
 
 
-# --- the Doctor tab -------------------------------------------------------------------------
+# --- no doctor here ------------------------------------------------------------------------
 
 
-def test_the_doctor_tab_runs_this_projects_checks_when_it_is_opened(project: ProjectInfo) -> None:
-    """It was a scaffold nothing filled: ``(no checks yet)``, forever, in every project."""
-    roots: list[Path] = []
+def test_a_project_view_runs_no_doctor_whatever_tab_is_opened(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The doctor runs at start and when its page opens, never per project or per tab: the
+    project view's own Doctor tab used to run it on every activation."""
+    runs: list[Path | None] = []
 
-    def doctor(root: Path) -> list[DoctorCheck]:
-        roots.append(root)
-        return [
-            DoctorCheck(
-                name="tmux",
-                status=CheckStatus.warn,
-                detail="tmux 3.7c, no fleet server",
-                fix="aisquare fleet spawn manager",
-            )
-        ]
+    def doctor(*, cwd: Path | None = None) -> list[DoctorCheck]:
+        runs.append(cwd)
+        return []
 
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, Path | None, str, Path | None]:
+    monkeypatch.setattr(diagnostics, "doctor", doctor)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
         view = host.query_one(ProjectView)
-        report = host.query_one("#project-doctor", DoctorView)
-        before = shown(report.query_one("#doctor-report", Static))
-        cwd_before = report.cwd
-        view.active = "tab-doctor"
-        await settle(pilot)
-        return before, cwd_before, shown(report.query_one("#doctor-report", Static)), report.cwd
+        opened = []
+        for tab in (*ProjectView.TAB_IDS, "tab-manager"):
+            view.active = tab
+            await settle(pilot)
+            opened.append(view.active)
+        return opened
 
-    before, cwd_before, after, cwd = drive(project, scenario, doctor=doctor)
-    assert "(no checks yet)" in before  # the negative: nothing runs before the tab is opened
-    assert roots == [project.root]  # this project's root, not the UI process's cwd
-    assert "tmux 3.7c, no fleet server" in after and "(no checks yet)" not in after
-    assert "aisquare fleet spawn manager" in after  # the fix line, under its check
-    # The fixes run in the project, from the moment the tab exists — not only
-    # once a report has landed in it.
-    assert cwd_before == project.root == cwd
-
-
-def test_a_crashed_project_doctor_is_a_report_not_a_traceback(project: ProjectInfo) -> None:
-    """The control for the wiring above: the tab survives a doctor that raises."""
-
-    def doctor(root: Path) -> list[DoctorCheck]:
-        raise RuntimeError("git rev-parse exploded")
-
-    async def scenario(pilot: Pilot[None], host: Host) -> str:
-        host.query_one(ProjectView).active = "tab-doctor"
-        await settle(pilot)
-        return shown(host.query_one("#doctor-report", Static))
-
-    report = drive(project, scenario, doctor=doctor)
-    assert "the checks crashed: RuntimeError: git rev-parse exploded" in report
-    assert "aisquare doctor" in report  # …and says how to see the traceback
+    opened = drive(project, scenario)
+    assert opened == [*ProjectView.TAB_IDS, "tab-manager"], "the premise: every tab was opened"
+    assert runs == []
 
 
 # --- the Settings tab -----------------------------------------------------------------------

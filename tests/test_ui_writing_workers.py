@@ -29,7 +29,6 @@ from aisquare.cli.ui import board
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views import agent as agent_view
 from aisquare.cli.ui.views import explainability as explainability_view
-from aisquare.cli.ui.views import project as project_view
 from aisquare.cli.ui.views import settings as settings_view
 from aisquare.cli.ui.views import welcome as welcome_view
 from aisquare.core import paths
@@ -204,9 +203,9 @@ def test_the_accounts_readers_write_the_store_so_update_waits_for_them(fake_home
 def test_the_doctor_reads_the_slots_and_writes_the_store_so_update_waits_for_it(
     fake_home: Path,
 ) -> None:
-    """Round 20 of #257: the shell's and a project tab's Doctor were listed as runs that
-    only read, but once the store exists the accounts' checks list the slots, which adds a
-    registry row for a slot that has none, as the accounts' readers do."""
+    """Round 20 of #257: the shell's Doctor (and a project tab's, which has since gone) was
+    listed as a run that only reads, but once the store exists the accounts' checks list the
+    slots, which adds a registry row for a slot that has none, as the accounts' readers do."""
     account = _slot("work@example.com", "tok-work")
     with store_session() as store:
         assert store.claude_accounts() == []
@@ -215,8 +214,7 @@ def test_the_doctor_reads_the_slots_and_writes_the_store_so_update_waits_for_it(
 
     with store_session() as store:
         assert account.slot in {row.slot for row in store.claude_accounts()}, "reconciled"
-    doctors = {ui_app._DOCTOR_WORKER, project_view.DOCTOR_WORKER}
-    assert doctors <= WAITED, doctors - WAITED
+    assert ui_app._DOCTOR_WORKER in WAITED
 
 
 def test_welcomes_folder_check_opens_the_store_so_update_waits_for_it(tmp_path: Path) -> None:

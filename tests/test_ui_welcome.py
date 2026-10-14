@@ -35,7 +35,13 @@ from textual.widgets import Button, Input, Static
 
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import FleetApp
-from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, DoctorSection, ProjectSelected
+from aisquare.cli.ui.sidebar import (
+    AccountsSelected,
+    AgentSelected,
+    DoctorSection,
+    DoctorSelected,
+    ProjectSelected,
+)
 from aisquare.cli.ui.views import welcome
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.onboard import ProjectOnboarded
@@ -1559,7 +1565,8 @@ def test_the_sidebars_doctor_answers_for_the_project_step_one_chose(
     warned "hooks are missing" under a step 2 that said connected, and its Connect would
     have installed them for every repository (review of #257). While Welcome is shown the
     Doctor answers for its project; once Choose another clears it, for the folder asq
-    started in; on another page, for the project that page shows."""
+    started in; on another page, for the project that page shows. None of those runs the
+    checks — only start-up did — and opening the Doctor page runs them for that scope."""
     alpha = ProjectInfo(id="prj_alpha", root=tmp_path / "alpha", onboarded_at=T0)
     beta = ProjectInfo(id="prj_beta", root=tmp_path / "beta", onboarded_at=T0)
     with store_session() as store:
@@ -1578,26 +1585,34 @@ def test_the_sidebars_doctor_answers_for_the_project_step_one_chose(
     monkeypatch.setattr(diagnostics, "doctor", doctor)
 
     async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[Any]:
-        seen: list[Any] = [(app.doctor_scope, asked[-1])]
+        seen: list[Any] = [(app.doctor_scope, list(asked))]
         first_candidate(page).press()  # Use alpha
         await settle_page(app)
-        seen.append((app.doctor_scope, asked[-1]))
+        seen.append((app.doctor_scope, list(asked)))
         app.post_message(ProjectSelected(beta.id))  # beta, clicked in the sidebar
         await settle_page(app)
-        seen.append((app.doctor_scope, asked[-1]))
+        seen.append((app.doctor_scope, list(asked)))
         await app.action_welcome()  # `w`
         await settle_page(app)
-        seen.append((app.doctor_scope, asked[-1]))
+        seen.append((app.doctor_scope, list(asked)))
         await press(pilot, page, "welcome-change")
-        seen.append((app.doctor_scope, asked[-1]))
+        seen.append((app.doctor_scope, list(asked)))
+        first_candidate(page).press()  # Use alpha again, then open the Doctor page
+        await settle_page(app)
+        app.post_message(DoctorSelected(None))
+        await settle_page(app)
+        seen.append((app.doctor_scope, list(asked)))
         return seen
 
-    start, chosen, elsewhere, back, cleared = in_shell(machine, go, doctor=diagnostics.doctor)
-    assert start == (None, None), "control: nothing chosen, the folder asq started in"
-    assert chosen == (alpha.id, alpha.root)
-    assert elsewhere == (beta.id, beta.root), "another page's project, as before"
-    assert back == (alpha.id, alpha.root), "back on Welcome, the project step 2 is about"
-    assert cleared == (None, None)
+    start, chosen, elsewhere, back, cleared, opened = in_shell(
+        machine, go, doctor=diagnostics.doctor
+    )
+    assert start == (None, [None]), "control: nothing chosen, the folder asq started in"
+    assert chosen == (alpha.id, [None]), "the scope follows step 1; the checks do not run"
+    assert elsewhere == (beta.id, [None]), "another page's project, as before"
+    assert back == (alpha.id, [None]), "back on Welcome, the project step 2 is about"
+    assert cleared == (None, [None])
+    assert opened == (alpha.id, [None, alpha.root]), "the page runs them, for that project"
 
 
 def test_step_one_reads_the_shells_frame_not_a_second_store_open(

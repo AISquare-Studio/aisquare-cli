@@ -577,7 +577,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """Why the newest refresh kept the previous frame, or ``None`` when it did not."""
         self.doctor_checks: list[DoctorCheck] = []
         self.doctor_scope: str | None = None
-        """The project the Doctor section is about; ``None`` = global checks."""
+        """The project the doctor answers for when it NEXT runs — the one most recently
+        selected; ``None`` = global checks. Selecting changes it and runs nothing."""
+        self._doctor_root: Path | None = None
+        """The root the report on screen — or the run under way — is about: the cwd its
+        project fixes run in. Set only when a run starts, never by a selection."""
         self._doctor_worker: Worker[Any] | None = None
         """The newest doctor run; an older one's result is not ours to paint."""
         self._theme_restored = False
@@ -614,8 +618,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.show_captured = _ui_state(SHOW_CAPTURED_KEY) == "1"
         self.refresh_data()
         self.set_interval(self.refresh_seconds, self.refresh_data)
-        self.run_doctor()
-        self._restore_selection()
+        # The doctor runs ONCE at start, about the project the restored view shows;
+        # a restored Doctor page runs it itself, as opening it does.
+        if not self._restore_selection():
+            self.run_doctor()
         # wait=False here and below: a Remote that stops runs down on a thread of its own,
         # since stopping uvicorn and ngrok froze the fleet UI for seconds (r3 review of #243).
         self.remote.restore(wait=False)
@@ -624,7 +630,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     # --- what was open (#144) ---------------------------------------------------------
 
-    def _restore_selection(self) -> None:
+    def _restore_selection(self) -> bool:
         """Reopen the view that was open when the UI last ran, if its row is still there.
 
         Read from the store's ``ui_state`` (v18), never from a file the UI
@@ -632,29 +638,37 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         shares it. A remembered agent whose row has left the frame falls back
         to its project; a project that is gone falls back to the welcome view,
         and the memory is dropped rather than retried every launch.
+
+        The doctor's scope is set here, not when the posted selection lands, so
+        the one run at start is about the restored project. Whether the Doctor
+        page is the view reopened is the answer: opening it runs the checks.
         """
         remembered = _ui_state(SELECTED_KEY)
         if not remembered or self.snapshot is None:
-            return
+            return False
         kind, _, ident = remembered.partition(":")
         if kind == "agent":
             project_id, _, agent_id = ident.partition("/")
             if self.snapshot.agent(project_id, agent_id) is not None:
+                self._set_doctor_scope(project_id)
                 self.post_message(AgentSelected(project_id, agent_id))
-                return
+                return False
             if self.snapshot.project(project_id) is not None:
+                self._set_doctor_scope(project_id)
                 self.post_message(ProjectSelected(project_id))
-                return
+                return False
         elif kind == "project" and self.snapshot.project(ident) is not None:
+            self._set_doctor_scope(ident)
             self.post_message(ProjectSelected(ident))
-            return
+            return False
         elif kind == "accounts":
             self.post_message(AccountsSelected())
-            return
+            return False
         elif kind == "doctor":
             self.post_message(DoctorSelected(ident or None))
-            return
+            return True
         _remember_ui_state(SELECTED_KEY, None)
+        return False
 
     def _remember_selection(self, value: str | None) -> None:
         _remember_ui_state(SELECTED_KEY, value)
@@ -771,8 +785,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.push_screen(HelpScreen(self.escape_key))
 
     def action_refresh_now(self) -> None:
+        """The fleet, now. Not the doctor: it runs at start, when its page opens, after a fix
+        and from its Re-run button — seconds of git/tmux/claude probing per run."""
         self.refresh_data()
-        self.run_doctor()
 
     def action_toggle_captured(self) -> None:
         """Show, or hide again, the captured directories the sidebar leaves out (#139).
@@ -946,43 +961,39 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     # --- doctor -------------------------------------------------------------------------
 
     def _scoped_project(self) -> ProjectInfo | None:
-        """The project the Doctor section is about, or ``None`` for the global checks.
+        """The project the next doctor run is about, or ``None`` for the global checks.
 
-        One place for it: the run needs its root as the doctor's ``cwd``, and the
-        views need the same root as the cwd their project-scoped fix buttons run
-        in — the two must never disagree.
+        One place for it: :meth:`run_doctor` takes its root as the doctor's ``cwd``
+        and keeps the same root as :attr:`_doctor_root`, the cwd the report's
+        project-scoped fix buttons run in — the two must never disagree.
         """
         snapshot = self.snapshot
         if snapshot is None or not self.doctor_scope:
             return None
         return snapshot.project(self.doctor_scope)
 
-    def _scope_root(self) -> Path | None:
-        """The root the Doctor section's checks and fixes belong to right now."""
-        project = self._scoped_project()
-        return project.root if project is not None else None
-
     def run_doctor(self) -> None:
-        """Run the checks off the UI thread; ``on_worker_state_changed`` paints them.
+        """Run the checks for :attr:`doctor_scope` off the UI thread; the worker state paints them.
 
-        The result carries the SCOPE it was run for, and the newest run is
-        remembered. Without both, a report that finished while the user was
-        selecting another project was painted as the new scope's: the filter was
-        the worker NAME alone and ``show_doctor`` re-reads ``_scoped_project()``
-        at paint time, so the old project's findings were handed the new
-        project's root and a one-click project fix would have run in the wrong
-        one — the hazard ``show_doctor``'s own comment warns about. Reachable
-        because ``on_project_selected`` awaits ``add_content`` before
-        ``_set_doctor_scope``, and a worker that has already left RUNNING is
-        past cancelling.
+        Called at start, when the Doctor page opens, after a one-click fix and
+        from the page's Re-run button — nowhere else: a run is seconds of
+        git/tmux/claude probing, and selecting a project or pressing ``r`` must
+        not pay for it.
+
+        The result carries the SCOPE it was run for, the newest run is
+        remembered, and :attr:`_doctor_root` — what the report's fixes run in —
+        moves only here. Without all three, a report that finished after the
+        scope had changed was painted with the new scope's root, and a one-click
+        project fix would have run in the wrong project.
         """
         if self._doctor is None:
             return
         injected: DoctorRunner = self._doctor
         project = self._scoped_project()
         scope: Path | None = project.root if project is not None else None
+        self._doctor_root = scope
         # An injected fake keeps its own signature and stays global; it is still
-        # tagged with the scope its report is ABOUT, which is what the tab and
+        # tagged with the scope its report is ABOUT, which is what the page and
         # the fix buttons are keyed on.
         runner: Callable[[], _DoctorReport] = lambda: (scope, injected())  # noqa: E731
         if project is not None and self._doctor is diagnostics.doctor:
@@ -1025,25 +1036,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return  # a superseded run: the newest one owns the section
         if event.state is WorkerState.SUCCESS:
             report = _doctor_report(event.worker.result)
-            if report is None or report[0] != self._scope_root():
-                return  # a report about a scope the user has left is not ours to paint
+            if report is None or report[0] != self._doctor_root:
+                return  # a report about a scope the newest run left is not ours to paint
             self.show_doctor(report[1])
         elif event.state is WorkerState.ERROR:
             self.show_doctor_failure(f"{type(event.worker.error).__name__}: {event.worker.error}")
 
     def show_doctor(self, checks: list[DoctorCheck]) -> None:
+        """Paint a report about :attr:`_doctor_root` on the Doctor page and in the sidebar."""
         self.doctor_checks = checks
-        project = self._scoped_project()
-        root = project.root if project is not None else None
-        self._feed_doctor(self.query_one("#doctor", DoctorView), checks, root)
-        # The scoped project's own Doctor tab shows the same report. Only that
-        # project's: another open ProjectView's tab must not be handed a report
-        # about a different root — its fixes would run in the wrong one.
-        if project is not None:
-            for view in self.query(ProjectView):
-                if view.project.id == project.id:
-                    for tab in view.query(DoctorView):
-                        self._feed_doctor(tab, checks, root)
+        self._feed_doctor(self.query_one("#doctor", DoctorView), checks, self._doctor_root)
         counts = {status: 0 for status in CheckStatus}
         for check in checks:
             counts[check.status] += 1
@@ -1323,10 +1325,22 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.refresh_accounts()
 
     async def on_doctor_selected(self, event: DoctorSelected) -> None:
+        """Open the Doctor page and run the checks — opening it is what asks for them.
+
+        About ``event.project_id``, or, when that is ``None``, the project most
+        recently selected (the machine's checks when there is none).
+        """
+        scope = event.project_id if event.project_id is not None else self.doctor_scope
         await self._show("doctor")
         self.sidebar.select("doctor")
-        self.doctor_scope = event.project_id
-        self._remember_selection(f"doctor:{event.project_id or ''}")
+        self._set_doctor_scope(scope)
+        self._remember_selection(f"doctor:{scope or ''}")
+        self.run_doctor()
+
+    def on_doctor_view_rerun(self, event: DoctorView.Rerun) -> None:
+        """The Doctor page's Re-run: the checks again, for :attr:`doctor_scope` — the scope
+        the page's report is about, since opening the page is what last set it."""
+        event.stop()
         self.run_doctor()
 
     async def on_project_onboarded(self, event: ProjectOnboarded) -> None:
@@ -1510,19 +1524,21 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         one about another root — the Onboard view's, for the project it just
         registered — means our own report is stale, so we re-run ours.
         """
-        if event.cwd == self._scope_root():
+        if event.cwd == self._doctor_root:
             self.show_doctor(list(event.checks))
         else:
             self.run_doctor()
 
     def _set_doctor_scope(self, project_id: str | None) -> None:
-        changed = project_id != self.doctor_scope
+        """Remember the project the doctor answers for next — and run nothing.
+
+        The report on screen stays the one it is, with the root it was run in
+        (:attr:`_doctor_root`), so its fixes never run in the project just
+        selected; the next run — opening the page, Re-run, a fix — is about
+        this one.
+        """
         self.doctor_scope = project_id
         self.sidebar.set_doctor_scope(project_id)
-        if changed:
-            # The counts, the report and the fixes' cwd are all about the scope:
-            # a new one makes what is on screen a report about another project.
-            self.run_doctor()
 
     # --- for tests and callers --------------------------------------------------------
 
@@ -1594,7 +1610,6 @@ def _waited_reads() -> dict[str, str]:
         agent,
         doctor,
         explainability,
-        project,
         settings,
         welcome,
     )
@@ -1603,7 +1618,6 @@ def _waited_reads() -> dict[str, str]:
         _DOCTOR_WORKER: "the doctor's checks",
         ACCOUNTS_WORKER: "the accounts' read",
         doctor.ROUTE_WORKER: "how aisquare was installed",
-        project.DOCTOR_WORKER: "a project's checks",
         accounts.USAGE_WORKER: "the accounts' usage",
         accounts.CREDITS_WORKER: "the workspaces' credits",
         agent.LABELS_WORKER: "an agent's account names",

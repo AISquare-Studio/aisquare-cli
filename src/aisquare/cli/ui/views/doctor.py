@@ -7,11 +7,13 @@ text). A click runs ``apply_fix`` in a thread worker with the project's cwd,
 then re-runs the doctor and posts :class:`DoctorRefreshed` so the shell and the
 sidebar's Doctor section can follow. The UI process never changes directory.
 
-asq's own Doctor (``machine=True``, never the Onboard or Project copies) also
-carries Update and Uninstall. Both hand the terminal over rather than run in
-here: the view posts :class:`DoctorView.HandOff`, the app quits, and ``run_ui``
-hands this terminal to ``aisquare upgrade --reopen`` or ``aisquare uninstall``,
-which show their plan and ask y/N themselves. An upgrade must not run under the
+asq's own Doctor (``machine=True``, never the Onboard copy) also carries a
+Re-run button — the shell runs the checks at start, when the page opens and
+after a fix, and this is the way to ask again — and Update and Uninstall.
+Those two hand the terminal over rather than run in here: the view posts
+:class:`DoctorView.HandOff`, the app quits, and ``run_ui`` hands this terminal
+to ``aisquare upgrade --reopen`` or ``aisquare uninstall``, which show their
+plan and ask y/N themselves. An upgrade must not run under the
 UI it replaces, and asq comes back after it.
 """
 
@@ -129,12 +131,16 @@ class DoctorView(VerticalScroll):
 
     DEFAULT_CSS = """
     DoctorView { padding: 1 2; }
+    DoctorView #doctor-rerun { margin-bottom: 1; }
     DoctorView #doctor-status { height: auto; margin-top: 1; }
     DoctorView #doctor-fixes { height: auto; }
     DoctorView #doctor-fixes Button { margin: 1 1 0 0; }
     DoctorView #doctor-machine { height: auto; margin-top: 1; }
     DoctorView #doctor-machine Button { margin: 0 1 0 0; }
     """
+
+    class Rerun(Message):
+        """Re-run: the shell runs the checks again for the scope this report is about."""
 
     class HandOff(Message):
         """Update or Uninstall: quit asq and run ``aisquare <args>`` in this terminal."""
@@ -165,8 +171,14 @@ class DoctorView(VerticalScroll):
         self.fixes: dict[str, FixCommand] = {}
         """Button id → the fix it runs, for the report currently shown."""
         self.busy = False
+        self._rerunning = False
+        """Re-run was pressed and no report has arrived since: the status line says so."""
 
     def compose(self) -> ComposeResult:
+        if self.machine:
+            rerun = Button("Re-run checks", id="doctor-rerun")
+            rerun.tooltip = "Run every check again now"
+            yield rerun
         yield Static("", id="doctor-report")
         yield Static("", id="doctor-status")
         yield Vertical(id="doctor-fixes")
@@ -221,6 +233,10 @@ class DoctorView(VerticalScroll):
         if cwd is not None:
             self.cwd = cwd
         self.checks = list(checks)
+        if self._rerunning:
+            self._rerunning = False
+            if self.is_mounted:
+                self._set_status(Text(""))
         if self.is_mounted:
             self._redraw()
 
@@ -264,6 +280,12 @@ class DoctorView(VerticalScroll):
     # ---------------------------------------------------------------- the click
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if self.machine and event.button.id == "doctor-rerun":
+            event.stop()
+            self._rerunning = True
+            self._set_status(Text("… running the checks again", style="dim"))
+            self.post_message(self.Rerun())
+            return
         hand_off = HAND_OFFS.get(event.button.id or "") if self.machine else None
         if hand_off is not None:
             # The app decides: it refuses while ANY Doctor view's fix is still writing.

@@ -42,6 +42,7 @@ from textual.widgets._toast import Toast
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui import app as app_mod
+from aisquare.cli.ui import app as ui_app
 from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HelpScreen, Panes
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.divider import WIDEST_ASK, Divider, cells
@@ -977,20 +978,22 @@ def _fix_buttons(view: DoctorView) -> list[tuple[str, bool]]:
     return [(str(b.label), b.disabled) for b in view.query("#doctor-fixes Button").results(Button)]
 
 
-def test_the_selected_projects_root_arms_its_project_scoped_fixes(
+def test_the_doctor_page_arms_project_fixes_for_the_project_it_ran_for(
     tmp_path: Path, script: Script
 ) -> None:
     """§0 item 4: a project fix is one click. Without a cwd every one renders disabled.
 
-    ``DoctorView`` disables ``scope == "project"`` fixes when ``cwd is None``,
-    so the shell must hand it the scoped project's root — and the project's own
-    Doctor tab the same report and the same root.
+    ``DoctorView`` disables ``scope == "project"`` fixes when ``cwd is None``, so
+    the shell hands it the root its report was run in. Selecting a project runs
+    nothing and arms nothing — the report on the page is still the machine's —
+    and opening the page runs the checks for that project, armed in its root.
     """
     projects = seed(tmp_path, ("prj_a", "alpha", None))
+    Buttons = list[tuple[str, bool]]
 
     async def go(
         pilot: Pilot[None],
-    ) -> tuple[list[tuple[str, bool]], Path | None, list[tuple[str, bool]], Path | None, str]:
+    ) -> tuple[Buttons, Path | None, Buttons, Path | None, Buttons, Path | None, int]:
         app = fleet_app(pilot)
         await settle(app)
         await pilot.pause()
@@ -1000,31 +1003,37 @@ def test_the_selected_projects_root_arms_its_project_scoped_fixes(
         await pilot.pause()
         await settle(app)
         await pilot.pause()
-        view = app.current_view()
-        assert isinstance(view, ProjectView)
-        tab = view.query_one(DoctorView)
+        selected = (_fix_buttons(shell_doctor), shell_doctor.cwd)
+        await pilot.click(app.query_one(DoctorSection))
+        await pilot.pause()
+        await settle(app)
+        await pilot.pause()
         return (
             *globally,
+            *selected,
             _fix_buttons(shell_doctor),
             shell_doctor.cwd,
-            shown(tab.query_one("#doctor-report", Static)),
+            len(app.query(DoctorView)),
         )
 
     checks = [SNAPSHOT_WARN, CONNECT_WARN]
-    global_buttons, global_cwd, scoped_buttons, scoped_cwd, tab_report = drive(
-        go, doctor=lambda: list(checks)
+    global_buttons, global_cwd, selected_buttons, selected_cwd, page_buttons, page_cwd, views = (
+        drive(go, doctor=lambda: list(checks))
     )
-    assert global_cwd is None
-    assert global_buttons == [
+    refused = [
         ("aisquare project onboard --refresh", True),  # no project: correctly refused
         ("aisquare agents connect claude-code", False),
     ]
-    assert scoped_cwd == projects[0].root
-    assert scoped_buttons == [
-        ("aisquare project onboard --refresh", False),  # a project IS selected: armed
+    assert global_cwd is None and global_buttons == refused
+    assert selected_cwd is None and selected_buttons == refused, (
+        "selecting a project leaves the machine's report — and its refusals — as they were"
+    )
+    assert page_cwd == projects[0].root
+    assert page_buttons == [
+        ("aisquare project onboard --refresh", False),  # run for the project: armed
         ("aisquare agents connect claude-code", False),
     ]
-    assert "⚠ snapshot: no codebase snapshot" in tab_report  # the project's own tab is fed
+    assert views == 1, "the project page has no Doctor tab of its own"
 
 
 def test_a_doctor_refreshed_message_updates_the_sidebar_counts(
@@ -1074,6 +1083,82 @@ def test_a_doctor_refreshed_message_updates_the_sidebar_counts(
     assert "⚠ 1" in rerun  # …and shows what OUR doctor says, not the foreign report's ✓ 0
 
 
+def test_the_doctor_runs_at_start_and_then_only_when_asked(tmp_path: Path, script: Script) -> None:
+    """The human: the doctor "is not continuously running but runs just once when the app
+    starts and then again when someone opens it". Selecting projects, switching a project's
+    tabs and the refresh tick never run it; opening its page, its Re-run button and a fix
+    reported from another root each run it once."""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
+    calls: list[int] = []
+
+    def doctor() -> list[DoctorCheck]:
+        calls.append(1)
+        return []
+
+    async def go(pilot: Pilot[None]) -> dict[str, int]:
+        app = fleet_app(pilot)
+        await settle(app)
+        seen = {"start": len(calls)}
+        for card in ("prj_a", "prj_b", "prj_a"):
+            await pilot.click(card_for(app, card).query_one(ProjectTitle))
+            await settle(app)
+            view = app.current_view()
+            assert isinstance(view, ProjectView)
+            for tab in (*ProjectView.TAB_IDS, "tab-manager"):
+                view.active = tab
+                await settle(app)
+        app.refresh_data()  # what the refresh tick runs
+        app.refresh_data()
+        await settle(app)
+        seen["selecting"] = len(calls)
+        await pilot.click(app.query_one(DoctorSection))
+        await settle(app)
+        seen["opened"] = len(calls)
+        await pilot.click("#doctor-rerun")
+        await settle(app)
+        seen["rerun"] = len(calls)
+        app.post_message(DoctorRefreshed([], tmp_path / "elsewhere"))  # a fix in another root
+        await settle(app)
+        seen["fixed"] = len(calls)
+        return seen
+
+    assert drive(go, doctor=doctor) == {
+        "start": 1,
+        "selecting": 1,
+        "opened": 2,
+        "rerun": 3,
+        "fixed": 4,
+    }
+
+
+@pytest.mark.parametrize("remembered", ["project:prj_a", "doctor:prj_a"])
+def test_the_one_run_at_start_is_about_the_project_asq_reopens(
+    tmp_path: Path, script: Script, remembered: str
+) -> None:
+    """At start the doctor ran for the machine, then again for the project the restored view
+    selected: two runs, the first thrown away. Now one, about that project — and a reopened
+    Doctor page's own run is that one."""
+    projects = seed(tmp_path, ("prj_a", "alpha", None))
+    ui_app._remember_ui_state(ui_app.SELECTED_KEY, remembered)
+    calls: list[int] = []
+
+    def doctor() -> list[DoctorCheck]:
+        calls.append(1)
+        return []
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, int, Path | None]:
+        app = fleet_app(pilot)
+        await settle(app)
+        await pilot.pause()
+        await settle(app)
+        return app.content.current, len(calls), app.query_one("#doctor", DoctorView).cwd
+
+    current, count, cwd = drive(go, doctor=doctor)
+    assert current == ("project-prj_a" if remembered.startswith("project") else "doctor")
+    assert count == 1
+    assert cwd == projects[0].root
+
+
 class SpyApp(FleetApp):
     """The shell plus the doctor ``Worker`` objects its handler was told about.
 
@@ -1097,14 +1182,12 @@ def test_a_doctor_report_is_painted_only_in_the_scope_it_ran_for(
 ) -> None:
     """A report finished in project A must never be painted with project B's root.
 
-    ``show_doctor`` re-reads the scope at PAINT time and the worker filter was
-    the name alone, so a SUCCESS queued across a selection change (reachable:
-    ``on_project_selected`` awaits ``add_content`` before ``_set_doctor_scope``,
-    and a worker past RUNNING is past cancelling) handed the old project's
-    findings to the new project's ``DoctorView.cwd`` — a one-click project fix
-    would then have run in the wrong root, the hazard ``show_doctor``'s own
-    comment warns about. Replaying that queued message IS the race, without
-    racing.
+    ``show_doctor`` re-read the scope at PAINT time and the worker filter was
+    the name alone, so a SUCCESS queued across a change of scope handed the old
+    project's findings to the new project's ``DoctorView.cwd`` — a one-click
+    project fix would then have run in the wrong root. The scope changes when
+    the Doctor page opens for another project, and a worker past RUNNING is
+    past cancelling. Replaying that queued message IS the race, without racing.
     """
     projects = seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
     alpha, beta = projects
@@ -1120,13 +1203,14 @@ def test_a_doctor_report_is_painted_only_in_the_scope_it_ran_for(
             await pilot.pause()
             await settle(app)
             await pilot.pause()
-            await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
-            await settle(app)
-            await pilot.pause()
-            stale = app.doctor_runs[-1]  # the run whose scope is alpha
-            await pilot.click(card_for(app, "prj_b").query_one(ProjectTitle))
-            await settle(app)
-            await pilot.pause()
+            for card in ("prj_a", "prj_b"):
+                await pilot.click(card_for(app, card).query_one(ProjectTitle))
+                await settle(app)
+                await pilot.click(app.query_one(DoctorSection))  # the page, for that project
+                await settle(app)
+                await pilot.pause()
+                if card == "prj_a":
+                    stale = app.doctor_runs[-1]  # the run whose scope is alpha
             view = app.query_one("#doctor", DoctorView)
             report = view.query_one("#doctor-report", Static)
             painted = shown(report)
@@ -1146,7 +1230,7 @@ def test_a_doctor_report_is_painted_only_in_the_scope_it_ran_for(
             return stale.result, painted, after_replay, wiped, shown(report), view.cwd
 
     tagged, painted, after_replay, wiped, repainted, cwd = asyncio.run(run())
-    assert runs == ["run-1", "run-2", "run-3"]  # mount (global), alpha, beta
+    assert runs == ["run-1", "run-2", "run-3"]  # mount (global), alpha's page, beta's page
     assert isinstance(tagged, tuple), "the result must carry the scope it ran for"
     assert tagged[0] == alpha.root and [c.name for c in tagged[1]] == ["run-2"]
     assert "run-3" in painted and "run-2" not in painted  # beta's report is on screen
@@ -2388,10 +2472,12 @@ def test_r_refreshes_from_the_sidebar_but_is_forwarded_from_a_pane(
     assert keys == ["r"]
 
 
-def test_r_re_runs_the_doctor_and_a_only_re_reads_the_list(tmp_path: Path, script: Script) -> None:
-    """`r` is "refresh now" — the fleet AND the doctor. #139's `a` action was first
-    inserted between the two calls and took the doctor run with it, so `r` re-read
-    the store only and `a`, which changes nothing the doctor looks at, re-ran it."""
+def test_r_refreshes_the_fleet_and_neither_r_nor_a_runs_the_doctor(
+    tmp_path: Path, script: Script
+) -> None:
+    """`r` is "refresh now" — the fleet. The doctor runs at start, when its page opens,
+    after a fix and from its Re-run button: seconds of probing a key press must not cost.
+    `a` changes which cards are shown, not what the doctor finds."""
     seed(tmp_path, ("prj_a", "alpha", None))
     calls: list[int] = []
 
@@ -2399,24 +2485,33 @@ def test_r_re_runs_the_doctor_and_a_only_re_reads_the_list(tmp_path: Path, scrip
         calls.append(1)
         return []
 
-    async def go(pilot: Pilot[None]) -> tuple[int, int, int]:
+    async def go(pilot: Pilot[None]) -> tuple[int, int, int, int]:
         app = fleet_app(pilot)
         await settle(app)
+        reads: list[int] = []
+        read = app.refresh_data
+
+        def counted() -> None:
+            reads.append(1)
+            read()
+
+        app.refresh_data = counted  # type: ignore[method-assign]
         app.sidebar.focus()
         at_mount = len(calls)
         await pilot.press("r")
         await pilot.pause()
         await settle(app)
-        after_r = len(calls)
+        after_r, reads_after_r = len(calls), len(reads)
         await pilot.press("a")
         await pilot.pause()
         await settle(app)
-        return at_mount, after_r, len(calls)
+        return at_mount, reads_after_r, after_r, len(calls)
 
-    at_mount, after_r, after_a = drive(go, doctor=doctor)
+    at_mount, fleet_reads, after_r, after_a = drive(go, doctor=doctor)
     assert at_mount == 1
-    assert after_r == 2, "r re-runs the doctor"
-    assert after_a == 2, "a changes which cards are shown, not what the doctor finds"
+    assert fleet_reads >= 1, "r re-read the fleet"
+    assert after_r == 1, "r does not run the doctor"
+    assert after_a == 1, "nor does a"
 
 
 # --- theme -------------------------------------------------------------------------

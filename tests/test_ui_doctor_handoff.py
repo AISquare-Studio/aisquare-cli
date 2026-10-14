@@ -40,11 +40,9 @@ from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views import doctor as doctor_view
 from aisquare.cli.ui.views import explainability as explainability_view
 from aisquare.cli.ui.views import onboard as onboard_view
-from aisquare.cli.ui.views import project as project_view
 from aisquare.cli.ui.views import settings as settings_view
 from aisquare.cli.ui.views import welcome as welcome_view
 from aisquare.cli.ui.views.doctor import DoctorView
-from aisquare.cli.ui.views.project import ProjectView
 from aisquare.core import selfcli
 from aisquare.core.state import get_state, reset_state
 from aisquare.services import claude_accounts as accounts_service
@@ -173,8 +171,9 @@ def test_only_asqs_own_doctor_is_machine_wide_and_no_doctor_may_be_busy(
     script: Any,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With a project's tab and Onboard really open, so the negative half has copies to see.
-    Update quits only when no Doctor view anywhere still has a fix writing."""
+    """With a project's page and Onboard really open, so the negative half has a copy to see
+    (a project page has no Doctor of its own). Update quits only when no Doctor view anywhere
+    still has a fix writing."""
     monkeypatch.setattr("aisquare.cli.ui.views.doctor._update_refusal", _never_refused)
     seed(tmp_path, ("prj_a", "alpha", None))
 
@@ -185,9 +184,9 @@ def test_only_asqs_own_doctor_is_machine_wide_and_no_doctor_may_be_busy(
         await app.on_add_project(AddProject())
         await settle_page(app)
         doctors = {str(view.id): view.machine for view in app.query(DoctorView)}
-        project = next(v for v in app.query(DoctorView) if v.id == "project-doctor")
+        onboard = next(v for v in app.query(DoctorView) if v.id == "onboard-doctor")
         release = threading.Event()
-        project.run_worker(
+        onboard.run_worker(
             lambda: release.wait(10), name=doctor_view.FIX_WORKER, thread=True, exit_on_error=False
         )  # its fix, still writing
         app.query_one("#doctor-update", Button).press()
@@ -201,8 +200,8 @@ def test_only_asqs_own_doctor_is_machine_wide_and_no_doctor_may_be_busy(
 
     doctors, while_busy, after = drive(fn)
 
-    assert doctors == {"doctor": True, "project-doctor": False, "onboard-doctor": False}
-    assert while_busy is None, "a project tab's fix is still writing"
+    assert doctors == {"doctor": True, "onboard-doctor": False}
+    assert while_busy is None, "the Onboard view's fix is still writing"
     assert after == ("upgrade", "--reopen"), "control: with no fix running it quits"
 
 
@@ -714,8 +713,7 @@ def _starts_with_a_hand_over(
             assert app.hand_off == ("upgrade", "--reopen")
         mark = len(names)
         await app.on_project_selected(ProjectSelected("prj_a"))
-        project = app.query_one(ProjectView)
-        project.run_project_doctor()
+        app.run_doctor()  # what opening the Doctor page, or its Re-run, asks for
         accounts = app.query_one(accounts_view.AccountsView)
         accounts._on_screen = True
         accounts.session = SimpleNamespace(source="file")  # type: ignore[assignment]
@@ -940,7 +938,6 @@ def test_no_start_on_asqs_own_schedule_begins_once_a_hand_over_is_pending(
             explainability_view.STATUS_WORKER,
             settings_view.ACCOUNTS_WORKER,
             ui_app._DOCTOR_WORKER,  # the shell's, for the project now chosen
-            project_view.DOCTOR_WORKER,
             accounts_view.USAGE_WORKER,
             accounts_view.CREDITS_WORKER,
             welcome_view.worker_name("look"),

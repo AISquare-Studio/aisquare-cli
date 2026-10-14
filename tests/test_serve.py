@@ -288,7 +288,7 @@ def test_remote_success_results_stay_plain_tool_results(work_dir: Path) -> None:
     assert not result.is_error
     block = result.content[0]
     assert isinstance(block, TextContent)
-    assert block.text.startswith("created: tsk_")
+    assert block.text.startswith("created: #1 tsk_")  # the board number, then the id
 
 
 def test_virtual_session_is_scoped_per_project(

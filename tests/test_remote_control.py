@@ -1736,8 +1736,10 @@ def test_the_switches_survive_a_restart_of_the_tui_next_to_the_theme_key() -> No
     assert not second.running
     second.restore()
     assert second.running
-    assert server.allow_write_calls == [True], "a restart does not write the switch again"
-    assert second.write_actions_allowed() is True
+    # Back read-only (review of #259, remote focus, 11/12): the switch is written off once,
+    # and the human switches it on again if they want it.
+    assert server.allow_write_calls == [True, False]
+    assert second.write_actions_allowed() is False
 
 
 def test_a_switch_saves_its_own_key_and_never_the_other_tuis_start_of_day() -> None:
@@ -2244,7 +2246,7 @@ def test_a_remote_that_does_not_come_back_at_start_is_news() -> None:
     heard = heard_news(no_ngrok)
     no_ngrok.restore()
     assert no_ngrok.running
-    assert heard == [(f"Remote is on, but phones cannot reach it — {INSTALL_HINT}", True)]
+    assert heard[1:] == [(f"Remote is on, but phones cannot reach it — {INSTALL_HINT}", True)]
     no_ngrok.turn_off()
 
     back = RemoteController(
@@ -2255,7 +2257,57 @@ def test_a_remote_that_does_not_come_back_at_start_is_news() -> None:
     assert back._waiter is not None
     back._waiter.join(5)
     back.turn_off()
-    assert back.running is False and heard == [], "a Remote back as it was, and turned off, is none"
+    assert back.running is False and len(heard) == 1, "back on, and nothing else to say"
+    assert heard[0][0].startswith("Remote is back on from the last session — read-only")
+
+
+def test_a_remote_a_tui_start_brings_back_comes_back_read_only_and_says_so() -> None:
+    """Review of #259, remote focus, 11/12: a restore came back as it was left, publicly
+    tunnelled with writes on, and only a failure was news: a Remote left on with writes on
+    and auto-off Never was reachable from the internet with writes on after ``asq`` or
+    ``aisquare upgrade --reopen`` started, and a human who forgot was never told. It comes
+    back with writes off, and the notice says so and when auto-off comes, as trouble when
+    it never does. A press brings writes back."""
+    clock = datetime(2026, 10, 14, 9, 0, tzinfo=UTC)
+    server = fake_server()
+    server.allow_write = True
+    never = RemoteController(
+        server=server,
+        tunnel_factory=fake_tunnel_factory(url="x"),
+        state=RemoteState(remote_enabled=True, auto_off_minutes=None),
+        now=lambda: clock,
+    )
+    heard = heard_news(never)
+    never.restore()
+    assert never.running and server.allow_write is False
+    assert never.write_actions_allowed() is False
+    said = "Remote is back on from the last session — writes turned off (R turns them on)"
+    assert heard[0] == (f"{said} · auto-off never", True)
+    never.set_allow_write(True)
+    assert server.allow_write is True, "the human switches them on again"
+    never.turn_off()
+
+    timed = RemoteController(
+        server=server,
+        tunnel_factory=fake_tunnel_factory(url="x"),
+        state=RemoteState(remote_enabled=True, auto_off_minutes=60),
+        now=lambda: clock,
+    )
+    heard = heard_news(timed)
+    timed.restore()
+    assert timed.auto_off_at is not None
+    from aisquare.cli.ui.views.remote import _auto_off_time
+
+    ends = _auto_off_time(timed.auto_off_at, clock)
+    assert heard[0] == (f"{said} · auto-off {ends}", False)
+    timed.turn_off()
+
+    pressed = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    server.allow_write = True
+    heard = heard_news(pressed)
+    pressed.turn_on()  # a press is the human's own: the switch is as they left it, no notice
+    assert server.allow_write is True and heard == []
+    pressed.turn_off()
 
 
 def test_a_remote_another_process_serves_is_no_news_at_start_and_keeps_the_saved_switch() -> None:

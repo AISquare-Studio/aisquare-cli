@@ -68,9 +68,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   holds the write switch (off by default) and an auto-off timer (30/60/120
   minutes or Never). Whether Remote is on and the timer live in `state.json`
   beside the theme; the write switch is the server's, in `remote.json`, the one
-  `asq remote allow-write` sets, so a TUI start never changes it. No
-  ngrok outlives the UI, a Remote that was on comes back on at the next start,
-  and a dead ngrok is restarted within 30 s. With `AISQUARE_REMOTE_NGROK_URL`
+  `asq remote allow-write` sets. No ngrok outlives the UI, however it ends. A
+  Remote that was on comes back on at the next start, with writes off and a
+  notice that it is back and when auto-off comes; a dead ngrok is restarted
+  within 30 s. With `AISQUARE_REMOTE_NGROK_URL`
   set, ngrok runs on that static domain (`--url=`), so the link survives.
 - **`asq remote serve [--port] [--auto-off MINUTES] [--public-url URL] [--dist DIR]`**,
   for a machine without the UI open. Auto-off defaults to 60 minutes (`0` is

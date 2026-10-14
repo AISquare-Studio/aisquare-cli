@@ -407,6 +407,9 @@ class RemoteController:
                 return
             self.message = None
             self.save_problem = None  # the deadline's write put the whole state
+        if restoring:
+            back, unbounded = self._restored_read_only()
+            self._remote_news(back, trouble=unbounded)
         self.call_back(functools.partial(self._save_started, info))
         tunnel = self._watched_tunnel()
         failure = tunnel.start_tunnel()
@@ -434,6 +437,34 @@ class RemoteController:
             target=self._await_url, args=(tunnel,), name="ngrok-url", daemon=True
         )
         self._waiter.start()
+
+    def _restored_read_only(self) -> tuple[str, bool]:
+        """A Remote a TUI start brought back, with writes off: the news that says so, and
+        whether it is trouble (no auto-off). On the writer's thread, its deadline written.
+
+        It came back as it was left, writes on included, and publicly tunnelled, and only a
+        failure was news: a Remote left on with writes on and auto-off Never was reachable
+        from the internet with writes on after ``asq`` or ``aisquare upgrade --reopen``
+        started, and a human who forgot was never told (review of #259, remote focus,
+        11/12). Writes come back on only when the human switches them on again. A switch
+        ``remote.json`` would not take is off in the server all the same, and the status
+        line says it was not saved.
+        """
+        from aisquare.cli.ui.views.remote import _auto_off_time
+
+        try:
+            was_on = bool(self._server.remote_allow_write())
+        except Exception:  # cannot tell: off all the same
+            was_on = True
+        if was_on:
+            try:
+                self._server.set_allow_write(False)
+            except Exception as exc:
+                self.save_problem = f"write actions could not be saved to remote.json — {exc}"
+        writes = "writes turned off (R turns them on)" if was_on else "read-only"
+        at = self.auto_off_at
+        ends = "never" if at is None else _auto_off_time(at, _aware(self._now()))
+        return f"Remote is back on from the last session — {writes} · auto-off {ends}", at is None
 
     def _start_failed(self) -> None:
         """A start the switch asked for failed: the saved switch is off too, as the panel shows

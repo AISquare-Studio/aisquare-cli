@@ -692,16 +692,24 @@ def test_the_modal_state_survives_a_restart_of_the_tui() -> None:
         app = pilot.app
         assert isinstance(app, FleetApp)
         assert app.remote.running, "a Remote that was on comes back on at the next start"
+        await written(pilot)
+        # Back read-only, and said so: writes come back on only when switched on again
+        # (review of #259, remote focus, 11/12).
+        assert any(
+            line.startswith("Remote is back on from the last session — writes turned off")
+            for line in toasts(app)
+        )
         modal = await open_panel(pilot)
         assert modal.query_one("#remote-on", Switch).value is True
-        assert modal.query_one("#remote-allow-write", Switch).value is True
+        assert modal.query_one("#remote-allow-write", Switch).value is False
         assert modal.query_one("#remote-auto-off", Select).value == 120
-        assert shown(modal.query_one("#remote-write-hint", Static)) == "writes reach the fleet"
+        assert shown(modal.query_one("#remote-write-hint", Static)) == READ_ONLY_REASON
+        assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
         # The persisted token is the same one, so the link the phone kept still works.
         assert remote_server.runtime().token in shown(modal.query_one("#remote-link", Static))
         modal.query_one("#remote-allow-write", Switch).toggle()
         await written(pilot)
-        assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
+        assert json.loads(paths.remote_state_path().read_text())["allow_write"] is True
 
     drive(second, tunnel=missing_ngrok)
     # Leaving the TUI ends the processes but keeps the switch for the next restore.

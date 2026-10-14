@@ -85,8 +85,11 @@ authtoken put back while Remote is on brings the phones back with no off and on,
 which would sign every one out. An ngrok missing when Remote came on is looked
 for each minute too, so one installed meanwhile starts within the minute. A link
 ngrok announces late (a network still coming up) is shown, and used for
-notifications, as soon as it comes. With the
-panel closed, a notice says when a Remote that was on could not come back on as
+notifications, as soon as it comes. A Remote that was on when the UI last
+closed comes back on as it starts, with writes off: a notice says it is back,
+and when auto-off comes (or that it never does, as a warning); switch writes on
+again in the panel if you want them. With the
+panel closed, a notice also says when a Remote that was on could not come back on as
 the UI started, when phones cannot reach it (ngrok missing or not up, and once it
 is up after all), when ngrok came back on a new link, and when auto-off turned
 Remote off. A Remote another `serve` or fleet UI has on is not news: the panel
@@ -211,8 +214,9 @@ aisquare remote allow-write off
 
 The R panel's **Allow write actions** switch sets the same value. There is one
 write switch, the server's own, in `~/.aisquare/remote.json`: the shell and the
-panel both set it there, whether Remote is on or off, so they always agree and
-starting the TUI never changes it. The page's READ-ONLY sentence names both.
+panel both set it there, whether Remote is on or off, so they always agree. The
+one change the TUI makes on its own: a Remote it brings back at its start comes
+back with writes off. The page's READ-ONLY sentence names both.
 Switching writes off, signing a phone out, or turning Remote off in the panel or
 by auto-off, also stops what that phone sent and the machine has not started
 yet: a write waiting behind a restart is refused, not run. One already running

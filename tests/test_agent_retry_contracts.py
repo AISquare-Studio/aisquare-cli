@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import os
@@ -109,8 +110,19 @@ def receiver(tmp_path: Path, shipping: None) -> Iterator[Callable[[dict[str, Any
                 data=json.dumps(payload).encode(),
                 headers={"Authorization": f"Bearer {state['token']}"},
             )
+            # A hang guard, not a latency contract (the receiver is POSIX-only; 512
+            # records take 0.17 s on Linux). A request's receipts and board work is
+            # fixed, but it spools a file per record: three recovery stats, a create
+            # and a rename. On a Windows runner a 512-record request outran a flat
+            # 5 s, then answered 200 to the closed socket (WinError 10053).
+            records = sum(
+                len(scope.get("logRecords") or [])
+                for resource in payload.get("resourceLogs") or []
+                for scope in (resource or {}).get("scopeLogs") or []
+                if isinstance(scope, dict)
+            )
             try:
-                with urllib.request.urlopen(request, timeout=5) as response:
+                with urllib.request.urlopen(request, timeout=5 + 0.02 * records) as response:
                     return int(response.status)
             except urllib.error.HTTPError as exc:
                 with exc:
@@ -617,6 +629,26 @@ def test_bad_attributes_do_not_discard_valid_neighboring_records(
     payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][256]["attributes"] = malformed
     assert receiver(payload) == 200
     assert len(outbox.pending()) == 512
+
+
+def test_a_receiver_request_opens_the_receipts_once_whatever_its_size(
+    receiver: Callable[[dict[str, Any]], int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The receiver fixture's time budget grows per record on this premise: the
+    # receipts' connection, schema check, retention delete and commit do not.
+    opened = 0
+    receipts = outbox._receipts
+
+    @contextlib.contextmanager
+    def counted() -> Iterator[sqlite3.Connection]:
+        nonlocal opened
+        opened += 1
+        with receipts() as connection:
+            yield connection
+
+    monkeypatch.setattr(outbox, "_receipts", counted)
+    assert receiver(_payload(512)) == 200
+    assert opened == 1 and len(outbox.pending()) == 512
 
 
 @pytest.mark.parametrize(

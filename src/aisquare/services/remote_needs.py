@@ -3492,6 +3492,7 @@ def _needs_send(agent: FleetAgent, keys: Sequence[str], text: str, enter: bool) 
 
 def _needs_answer_now(
     kit: RemoteKit,
+    watcher: RemoteNeedsWatcher,
     device: Device,
     item: NeedsItem,
     project: ProjectInfo,
@@ -3508,6 +3509,13 @@ def _needs_answer_now(
     typing (:meth:`RemoteKit.kit_write_still_allowed`): the re-derivation came between
     them and the keys. A tmux that fails mid-answer is a 503 whose ``audit`` says it was
     tried, as part of it may have reached the pane.
+
+    The card leaves ``watcher``'s feed as soon as the keys are typed, here on the write
+    thread (:meth:`RemoteNeedsWatcher.needs_answered`). It left once the audit line was written,
+    after an await a scan could publish in: the answered card back on every page with
+    live buttons, pushed if its window had just closed, and a question's or a plan's
+    second tap typed again, those cards being current with no ``attention`` until the
+    agent writes its result (review of #259, remote focus, 2/12).
     """
     from aisquare.services import fleet as fleet_service
     from aisquare.services.remote_server import RequestError, _audit_keys, remote_agent_lock
@@ -3543,6 +3551,7 @@ def _needs_answer_now(
         except Exception as exc:
             said = f"tmux could not type it: {exc}"
             raise RequestError(503, "fleet_unavailable", said, audit=f"{summary} failed") from None
+        watcher.needs_answered(item.id)
         return {"answered": item.id, "agent": label, "project": project.id, "sent": True}, summary
     finally:
         lock.release()
@@ -3633,7 +3642,7 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
             return kit.kit_refuse(400, "not_answerable", why)
 
         def answer_now(_named: dict[str, Any]) -> tuple[dict[str, object], str]:
-            return _needs_answer_now(kit, device, item, project, keys, text, enter)
+            return _needs_answer_now(kit, watcher, device, item, project, keys, text, enter)
 
         tracked = _remote_write_tracked("needs/answer", answer_now)
         try:
@@ -3645,7 +3654,6 @@ def needs_routes(kit: RemoteKit) -> list[BaseRoute]:
                 await asyncio.to_thread(kit.kit_audit, device, "needs/answer", exc.audit)
             raise
         await asyncio.to_thread(kit.kit_audit, device, "needs/answer", summary)
-        watcher.needs_answered(item.id)
         return JSONResponse(result)
 
     return [

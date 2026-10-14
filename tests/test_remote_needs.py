@@ -5612,6 +5612,42 @@ def test_an_answered_card_leaves_the_feed_at_once_as_a_dismissed_one_does(
         watcher.stop_watching()
 
 
+def test_an_answered_card_is_gone_before_its_audit_line_is_written(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, remote focus, 2/12: the card left the feed only once the audit line
+    was written, an await after the keys: a scan that published in between put the answered
+    card back on every page with its buttons live, and before the push sender, and a second
+    tap on a question or a plan typed its keys again. It leaves as the keys are typed."""
+    monkeypatch.setattr(remote_needs, "NEEDS_RESCAN_AFTER_ANSWER", 30.0)
+    live.runtime.set_allow_write(True)
+    card = live.card("permission")
+    watcher = live.app.kit.lane_state["needs"]
+    heard: list[list[str]] = []
+    live.app.kit.needs_listeners.append(lambda items, at: heard.append([i.id for i in items]))
+    audit = live.app.kit.kit_audit
+    during: list[list[str]] = []
+
+    def scanned_meanwhile(device: Any, endpoint: str, summary: str) -> None:
+        if endpoint == "needs/answer":
+            watcher.scan_needs_now()  # the watcher's tick, as the line is being written
+            during.append([item.id for item in watcher.needs_items_now()])
+        audit(device, endpoint, summary)
+
+    monkeypatch.setattr(live.app.kit, "kit_audit", scanned_meanwhile)
+    try:
+        body = {"id": card["id"], "keys": ["1"]}
+        response = live.client.post(live.url("needs/answer"), json=body)
+        assert response.status_code == 200, response.text
+        assert live.tmux.typed == [("keys", "%7", "1")]
+        assert len(during) == 1 and during[0], "the scan published the rest of the feed"
+        assert card["id"] not in during[0], "not the answered card again"
+        assert heard and card["id"] not in heard[-1], "nor handed to the push sender"
+        assert live.audit()[-1].endswith("keys=[1] text=0ch enter=False")
+    finally:
+        watcher.stop_watching()
+
+
 def test_an_answered_prompt_still_up_comes_back_with_the_first_scan_begun_after_the_answer(
     runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

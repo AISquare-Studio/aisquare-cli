@@ -1990,10 +1990,17 @@ def _needs_unheard(
     gone, a row reads working, waiting or attention for the board's stale window
     (30 minutes), and ``limited`` until its reset: ``fleet_down``, every live row
     ``unknown``, came that late, under cards for agents tmux had taken with it. A
-    row reads ``unknown`` only when the listing could not ask its server, since a
+    row reads ``unknown`` when the listing could not ask its server, since a
     row it could ask reads its pane (``lost`` once it is gone, ``exited`` once it
     is dead), so one such row says its server did not answer and one of those says
     it did. A server whose live rows all read from the board is asked.
+
+    Save one: a row held as another server's (``FleetAgentStatus.held``) reads ``unknown``
+    once its board goes stale, but its server answered, which is how the listing knew it
+    for another's, so it says the server was heard, as ``lost`` and ``exited`` do. Read by
+    its state word, one held row after a ``kill-server`` and a respawn made every healthy
+    row on the new server ``unknown``: their prompts left the phone, and ``fleet_down``
+    said tmux was not answering while it was (review of #259, round 1).
 
     A server is a socket's name and the path its rows' spawns recorded (``socket_at``), as
     the listing groups them (``fleet._observe_sockets``): by the name alone, a shell under
@@ -2002,11 +2009,14 @@ def _needs_unheard(
     live = [status for status in statuses if status.agent.ended_at is None]
     servers: dict[tuple[str, Path | None], set[str]] = {}
     for status in live:
-        servers.setdefault(_needs_server(status), set()).add(status.state)
+        servers.setdefault(_needs_server(status), set()).add(
+            "held" if status.held else status.state
+        )
     silent: set[tuple[str, Path | None]] = set()
     for server in sorted(servers, key=lambda server: (server[0], str(server[1] or ""))):
         states = servers[server]
-        if "unknown" in states or (not states & {"lost", "exited"} and not answers(*server)):
+        heard = states & {"lost", "exited", "held"}
+        if "unknown" in states or (not heard and not answers(*server)):
             silent.add(server)
     return [
         status.model_copy(
@@ -2228,14 +2238,16 @@ def _needs_fleet_down(
     """Every live row of the project derives ``unknown``: its tmux is not answering.
 
     ``statuses`` has been through :func:`_needs_unheard`, so a fresh board row on a
-    server that is gone reads ``unknown`` too. The subject is the first scan that
-    saw it, so it is one item until the condition clears and a new one if it comes
-    back. The watcher keeps that sighting on disk, so a restart of Remote, and
-    ``asq remote needs``, give the same outage the same id.
+    server that is gone reads ``unknown`` too. A row held as another server's
+    (``FleetAgentStatus.held``) is not counted: a server answered at its socket, so it is
+    no sign that tmux does not. The subject is the first scan that saw it, so it is one
+    item until the condition clears and a new one if it comes back. The watcher keeps
+    that sighting on disk, so a restart of Remote, and ``asq remote needs``, give the
+    same outage the same id.
     """
     from aisquare.services.remote_server import _iso_seconds
 
-    live = [status for status in statuses if status.agent.ended_at is None]
+    live = [status for status in statuses if status.agent.ended_at is None and not status.held]
     if not live or any(status.state != "unknown" for status in live):
         return []
     key = _needs_memory_key(project.id, "fleet_down")

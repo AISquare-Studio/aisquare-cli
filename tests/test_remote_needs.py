@@ -1412,6 +1412,30 @@ def test_two_servers_on_one_socket_name_are_asked_apart() -> None:
     assert fleet.probed == [str(elsewhere)], "asked at the path coder-2's spawn recorded"
 
 
+def test_a_row_held_as_another_servers_does_not_silence_the_server_that_answered() -> None:
+    """Review of #259, round 1: after a `kill-server` and a respawn, the old row recorded
+    another server's start and is held (`fleet.ANOTHER_SERVER`), `unknown` once its board
+    goes stale, on the same socket as the new server's healthy rows. Read by its state
+    word it said that server did not answer: every row there turned `unknown / tmux
+    unavailable`, coder-2's permission prompt left the phone, and `fleet_down` said tmux
+    was not answering. A held row's server answered; on its own it is no outage either."""
+    old, new = _row("coder-1"), _row("coder-2")
+    stale = _session(old, state="working", seen=NOW - timedelta(hours=1))
+    held = fleet_service._status(old, stale, {old.id: None}, None, NOW, FleetSettings())
+    assert (held.state, held.detail, held.held) == ("unknown", fleet_service.ANOTHER_SERVER, True)
+    fleet = Fleet(agents=[held, _status(new, "attention", _session(new, state="attention"))])
+
+    assert [(item.kind, item.agent) for item in _scan(fleet)] == [("permission", "coder-2")]
+    assert fleet.probed == [], "the held row says its server answered"
+    fleet.agents = [held]
+    assert _scan(fleet) == [], "no `tmux is not answering` for a server that answered"
+    assert fleet.probed == []
+    # The control: the same row unknown because its server could not be asked.
+    unasked = fleet_service._status(old, stale, None, None, NOW, FleetSettings())
+    fleet.agents = [unasked, _status(new, "attention", _session(new, state="attention"))]
+    assert [item.kind for item in _scan(fleet)] == ["fleet_down"]
+
+
 def _on_a_dead_tmux() -> Fleet:
     """Three rows the real ``fleet._derive`` reads from the board with tmux not asked at all
     (``observed=False``): two sessions seen seconds ago, and one parked on a limit."""

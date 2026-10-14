@@ -87,6 +87,35 @@ def test_a_nickname_is_one_line(work_dir: Path, given: str) -> None:
     assert _stored(project).nickname is None
 
 
+@pytest.mark.parametrize(
+    "given",
+    ["evil‮gnp.exe", "zero​width", "byte﻿order"],
+    ids=["right-to-left override", "zero-width space", "byte-order mark"],
+)
+def test_a_nickname_has_no_invisible_formatting_characters(work_dir: Path, given: str) -> None:
+    """Category Cf, as an account's alias refuses it: ``evil<RLO>gnp.exe`` listed as
+    ``evilexe.png``, and a zero-width space made two names that print alike."""
+    project = _added(work_dir)
+    with pytest.raises(ValueError, match="no invisible formatting characters"):
+        project_service.set_nickname(project, given)
+    assert _stored(project).nickname is None
+
+
+def test_bytes_the_terminal_could_not_decode_are_refused_in_words(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """Python hands undecodable argv bytes over as lone surrogates, and the store's UTF-8
+    encode raised ``'utf-8' codec can't encode character '\\udce9'``, which ``rename``
+    printed as its reason."""
+    project = _added(work_dir)
+    with pytest.raises(ValueError, match="could not decode"):
+        project_service.set_nickname(project, "caf\udce9")
+    result = runner.invoke(app, ["project", "rename", "caf\udce9"])
+    assert result.exit_code == 1
+    assert "could not decode" in result.output and "codec" not in result.output
+    assert _stored(project).nickname is None
+
+
 def test_a_forgotten_project_is_not_renamed(work_dir: Path) -> None:
     project = _added(work_dir)
     project_service.forget_project(project)

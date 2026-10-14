@@ -262,8 +262,16 @@ async def open_accounts(pilot: Pilot[None]) -> AccountsView:
 
 async def press(pilot: Pilot[None], selector: str) -> None:
     """Click a row's button as a person would: the table scrolls sideways when the page is
-    narrower than it, so the button is scrolled into view first."""
+    narrower than it, so the button is scrolled into view first.
+
+    Once the table has stopped moving. A frame that disables the focused button (*Default*,
+    on the row that became the default) moves the focus along the row, and Textual scrolls
+    the table to it smoothly. A click aimed mid-scroll pressed down on the button and let go
+    over its neighbour, so nothing was pressed: on windows-latest the ▼ never moved its slot
+    (CI run 38571988017; reproduced with Textual's idle check reading a 15.6 ms CPU clock).
+    """
     button = fleet_app(pilot).query_one(selector, Button)
+    await pilot.wait_for_scheduled_animations()
     button.scroll_visible(animate=False, immediate=True)
     await pilot.pause()
     await pilot.click(button)
@@ -271,12 +279,22 @@ async def press(pilot: Pilot[None], selector: str) -> None:
 
 async def rename(pilot: Pilot[None], slot: int) -> None:
     """Double-click the slot's name, as a person opens its field (scrolled into view first:
-    a button pressed at the far end of the table scrolls it sideways)."""
-    name = fleet_app(pilot).query_one(f"#account-name-{slot}", accounts_view.NameCell)
+    a button pressed at the far end of the table scrolls it sideways, once the table has
+    stopped moving, as in :func:`press`), and wait until the field has the focus: keys
+    typed before it did went to the row (``ork`` for ``work``, every message held 20 ms).
+    The settle waits for no worker, since a test may be holding one on purpose."""
+    app = fleet_app(pilot)
+    name = app.query_one(f"#account-name-{slot}", accounts_view.NameCell)
+    await pilot.wait_for_scheduled_animations()
     name.scroll_visible(animate=False, immediate=True)
     await pilot.pause()
     await pilot.double_click(name)
-    await pilot.pause()
+    alias = app.query_one(f"#account-alias-{slot}", accounts_view.AliasInput)
+    await settle_until(app, lambda: app.focused is alias, group=_NO_WORKER)
+
+
+_NO_WORKER = "no worker"
+"""A group no worker is in: a settle passed it waits for the messages alone."""
 
 
 def row(view: AccountsView, slot: int) -> AccountRow:
@@ -2394,8 +2412,12 @@ def test_a_rename_waits_its_turn_behind_an_arrange_write_still_running(
     def set_default(ref: str | None, *, project: Any = None) -> None:
         order.append(f"default {ref}: start")
         default_in.set()
-        release.wait(timeout=5)
-        order.append(f"default {ref}: end")
+        # Held until the test lets go (its ``finally``), however slow the runner. Held 5 s, it
+        # ended by itself on windows-latest while the name was still being typed, and the
+        # rename wrote behind it before the test looked (CI run 38571988017). The bound only
+        # keeps a broken test from hanging, and says so.
+        let_go = release.wait(timeout=60)
+        order.append(f"default {ref}: end" if let_go else f"default {ref}: gave up after 60 s")
 
     def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
         order.append(f"alias {ref} {alias}")

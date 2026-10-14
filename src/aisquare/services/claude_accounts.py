@@ -286,8 +286,9 @@ def resolve(ref: str | int) -> ClaudeAccount:
     """A slot by number, by alias, or by the email it is signed in as.
 
     The three spellings cannot collide: a slot is all digits, an email has an
-    ``@``, and an alias starts with a letter and has no ``@``
-    (``core.normalise_alias``). Lookups are case-insensitive.
+    ``@``, and an alias is never all digits and has no ``@``
+    (``core.normalise_alias``). Lookups are case-insensitive, an alias's
+    included: ``Work`` is stored as typed and ``--account work`` finds it.
     """
     accounts, note = _read_arranged()
     return _resolve_in(accounts, ref, note=note)
@@ -310,7 +311,7 @@ def _resolve_in(
         return account
     wanted = text.lower()
     if "@" not in wanted:
-        by_alias = next((a for a in accounts if a.alias == wanted), None)
+        by_alias = next((a for a in accounts if _same_alias(a.alias, text)), None)
         if by_alias is not None:
             return by_alias
     for account in accounts:
@@ -324,6 +325,11 @@ def _resolve_in(
         f"no Claude account is called {text!r} — not a slot, an alias or a signed-in email"
         f"{detail}; see: aisquare accounts"
     )
+
+
+def _same_alias(alias: str | None, typed: str) -> bool:
+    """Whether ``typed`` names ``alias``: an alias keeps its case, and is matched without it."""
+    return alias is not None and alias.casefold() == typed.strip().casefold()
 
 
 def slot_labels(store: ContextStore | None = None) -> dict[int, str]:
@@ -577,12 +583,24 @@ def machine_default() -> ClaudeAccount | None:
 
 
 def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
-    """Name a slot (``None`` unnames it). The name must be free and well-formed."""
+    """Name a slot (``None`` unnames it). The name must be free and well-formed.
+
+    Free whatever its case: the store's unique index compares the stored
+    text, and ``Work`` beside ``work`` would be two slots that ``--account
+    work`` cannot tell apart, so another slot's name in any case is taken.
+    """
     account = resolve(ref)
     normalised = core.normalise_alias(alias) if alias is not None else None
     try:
         with store_session() as store:
-            _arranged(store)
+            arranged = _arranged(store)
+            if normalised is not None and any(
+                other.slot != account.slot and _same_alias(other.alias, normalised)
+                for other in arranged
+            ):
+                raise AccountsError(
+                    f"the alias {normalised!r} is already taken — see: aisquare accounts"
+                )
             try:
                 store.set_claude_account_alias(account.slot, normalised)
             except sqlite3.IntegrityError as exc:
@@ -1581,7 +1599,7 @@ def _retarget_bindings(
         return
     for role, ref in sorted(bindings.items()):
         typed = ref.strip()
-        if typed != str(slot) and (alias is None or typed.lower() != alias):
+        if typed != str(slot) and not _same_alias(alias, typed):
             continue
         named = f"slot {slot}" if typed == str(slot) else f"alias {typed!r} (slot {slot})"
         try:

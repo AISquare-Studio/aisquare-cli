@@ -1730,9 +1730,8 @@ def test_the_fields_hint_is_the_one_the_cli_gives(
     helped = runner.invoke(cli_app, ["accounts", "alias", "--help"])
     assert helped.exit_code == 0, helped.output
     assert f"The name: {core.ALIAS_HINT}" in helped.output
-    assert core.ALIAS_HINT == "a letter, then up to 31 of a-z 0-9 . _ -"
-    with pytest.raises(ValueError, match=re.escape(core.ALIAS_HINT)):
-        core.normalise_alias("has space")
+    assert core.ALIAS_HINT == "any name up to 64 characters, not only digits, no @"
+    assert core.normalise_alias("  Has Space ") == "Has Space"  # free text, trimmed, case kept
 
 
 def test_rename_opens_one_focused_field_prefilled_with_the_alias() -> None:
@@ -1827,8 +1826,8 @@ def test_a_blank_name_clears_the_alias(fake_home: Path, monkeypatch: pytest.Monk
 
 @pytest.mark.parametrize(
     "typed",
-    ["123", "me@example.com", "has space", "-dash", "a" + "b" * 32, "Work"],
-    ids=["digits", "email", "space", "not-a-letter-first", "33-long", "taken"],
+    ["123", "me@example.com", "a" + "b" * 64, "Work", "WORK"],
+    ids=["digits", "email", "65-long", "taken", "taken-in-another-case"],
 )
 def test_a_name_the_service_refuses_is_said_and_the_field_stays_open_to_correct_it(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch, typed: str

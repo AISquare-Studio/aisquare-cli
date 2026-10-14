@@ -466,7 +466,11 @@ def alias(
     name: Annotated[str | None, typer.Argument(help=f"The name: {core.ALIAS_HINT}")] = None,
     clear: Annotated[bool, typer.Option("--clear", help="Remove the slot's alias.")] = False,
 ) -> None:
-    """Name an account (`work`, `personal`) so --account and the board can say it."""
+    """Name an account (`work`, `"Work laptop"`) so --account and the board can say it.
+
+    Any text up to 64 characters, its case kept and matched without it; quote a
+    name with spaces, here and in --account.
+    """
     if name is None and not clear:
         fail("pass a name, or --clear", error="usage")
     try:

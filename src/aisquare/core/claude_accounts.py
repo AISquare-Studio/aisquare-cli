@@ -62,6 +62,7 @@ import os
 import re
 import shutil
 import sys
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
@@ -202,31 +203,35 @@ def label(account: ClaudeAccount) -> str:
     return "plain claude" if account.slot == DEFAULT_SLOT else f"account {account.slot}"
 
 
-ALIAS_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,31}$")
-"""What an alias may look like, after lowercasing.
-
-It must START WITH A LETTER so it can never be mistaken for a slot number, and
-it cannot contain ``@`` so it can never be mistaken for an email — those are
-the two other spellings ``--account`` accepts, and a reference that could be
-read two ways is a launch that could land on two accounts. Lowercase because
-``resolve`` compares case-insensitively (as it already does for emails), and a
-name that round-trips through ``--json`` and a shell should have one spelling.
-"""
-ALIAS_HINT = "a letter, then up to 31 of a-z 0-9 . _ -"
-""":data:`ALIAS_PATTERN` in words: ``aisquare accounts alias``'s help, its error, asq's Rename."""
+ALIAS_MAX = 64
+"""The longest alias, in characters, after trimming."""
+ALIAS_HINT = "any name up to 64 characters, not only digits, no @"
+"""``normalise_alias``'s rules in words: ``accounts alias --help`` and asq's name field."""
 
 
 def normalise_alias(raw: str) -> str:
-    """The stored form of an alias, or ``ValueError`` saying what is wrong with it."""
-    alias = raw.strip().lower()
+    """The stored form of an alias — trimmed, its case kept — or ``ValueError`` saying why not.
+
+    Free text, because a name is the operator's to choose ("anything I want"):
+    ``Work laptop`` is as good as ``work``. Two rules keep it from shadowing the
+    other spellings ``--account`` takes, since a reference that could be read
+    two ways is a launch that could land on two accounts: it is never all
+    digits (a slot number) and has no ``@`` (an email). No control
+    characters, so it stays one line on every surface that prints it. The
+    case is kept as typed and compared without it (``services.claude_accounts``
+    refuses ``WORK`` beside ``work``, and resolves either spelling).
+    """
+    alias = raw.strip()
     if not alias:
         raise ValueError("an alias cannot be empty")
+    if len(alias) > ALIAS_MAX:
+        raise ValueError(f"{raw!r} is {len(alias)} characters — an alias is at most {ALIAS_MAX}")
     if alias.isdigit():
-        raise ValueError(f"{raw!r} reads as a slot number — an alias must start with a letter")
+        raise ValueError(f"{raw!r} reads as a slot number — an alias cannot be only digits")
     if "@" in alias:
         raise ValueError(f"{raw!r} reads as an email — an alias cannot contain '@'")
-    if not ALIAS_PATTERN.match(alias):
-        raise ValueError(f"{raw!r} is not a valid alias — {ALIAS_HINT}")
+    if any(unicodedata.category(char) == "Cc" for char in alias):
+        raise ValueError(f"{raw!r} has a control character — an alias is one line of text")
     return alias
 
 

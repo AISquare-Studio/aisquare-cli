@@ -1322,10 +1322,16 @@ def test_routes_are_built_only_from_ids_that_validate(node_report: dict[str, Any
 
 
 def test_safe_url_opens_only_this_origin_or_an_ngrok_page(node_report: dict[str, Any]) -> None:
+    """Off this origin, only an ngrok host under this page's own ``/r/<token>/`` path: a free
+    ngrok URL that changed keeps it. Any ``/r/`` in the path was taken, and anyone can have
+    an ngrok host, so a forged push's tap opened ``attacker.ngrok-free.app/phish/r/``, a
+    look-alike page asking for the passphrase (review of #259, remote focus, 10/12)."""
     safe = node_report["safeUrl"]
     own = "https://own.example/r/t/#/n/ny_0123456789abcdef"
     assert safe[own] == own
     assert safe["https://x.ngrok-free.app/r/t/"] == "https://x.ngrok-free.app/r/t/"
+    moved = "https://y.ngrok.app/r/t/#/n/ny_0123456789abcdef"
+    assert safe[moved] == moved
     for refused in (
         "https://evil.example/r/t/",
         "http://x.ngrok-free.app/r/t/",
@@ -1334,8 +1340,12 @@ def test_safe_url_opens_only_this_origin_or_an_ngrok_page(node_report: dict[str,
         "https://u:p@x.ngrok.app/r/t/",
         "https://x.ngrok.io/no-token-path",
         "not a url",
+        "https://attacker.ngrok-free.app/phish/r/",
+        "https://attacker.ngrok-free.app/r/other/",
+        "https://x.ngrok-free.app/r/t",
     ):
         assert safe[refused] is None, refused
+    assert node_report["safeUrlNoScope"] is None, "no scope to hold it to: nothing off-origin"
     assert tuple(node_report["suffixes"]) == NGROK_SUFFIXES
 
 

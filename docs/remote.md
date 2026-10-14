@@ -566,7 +566,9 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   for the tunnel the panel asked for, to Remote's own port, or `--public-url`
   named: never what a request or ngrok's local API says, since anyone on the
   machine can answer on that API's port before your ngrok does, or start a tunnel
-  of their own through it.
+  of their own through it. And the phone opens a tap's link only on the page's
+  own address, or under its own `/r/<token>/` on an ngrok host (a free URL that
+  changed): anyone can have an ngrok host, so no other path on one is opened.
 - **ngrok's inspector and local API are off.** Left on, ngrok keeps every request
   and answer on its local web interface (`127.0.0.1:4040`), which asks for no
   password: the passphrase you unlock with, every device's cookie, the token and

@@ -2,28 +2,29 @@
  *
  * It shows Web Push notifications and opens the card a click names. Nothing
  * else: there is no fetch handler, so the page is never served from a cache
- * and is never stale. A click opens only this origin, or an ngrok host's
- * /r/ path (the link after a free ngrok URL changed): a forged push can
- * never send the phone anywhere else. */
+ * and is never stale. A click opens only this origin, or this scope's path
+ * on an ngrok host (the link after a free ngrok URL changed): a forged push
+ * can never send the phone anywhere else, another's ngrok host included. */
 "use strict";
 
 const NGROK_SUFFIXES = [".ngrok-free.app", ".ngrok.app", ".ngrok.io", ".ngrok-free.dev", ".ngrok.dev"];
 
-/* The URL when it is safe to open, else null: this worker's own origin, or
- * https on an ngrok host (the suffix with its dot) under an /r/ path. */
-function safeUrl(url, ownOrigin) {
+/* The URL when it is safe to open, else null: the origin of this worker's
+ * scope, or https on an ngrok host (the suffix with its dot) under its path. */
+function safeUrl(url, scope) {
   let parsed;
+  let home;
   try {
     parsed = new URL(String(url));
+    home = new URL(scope || self.registration.scope);
   } catch (error) {
     return null;
   }
-  const own = ownOrigin || (typeof self === "object" && self && self.location ? self.location.origin : "");
-  if (own && parsed.origin === own) return parsed.toString();
+  if (parsed.origin === home.origin) return parsed.toString();
   if (parsed.protocol !== "https:" || parsed.username || parsed.password) return null;
   const host = parsed.hostname.toLowerCase();
   const ngrok = NGROK_SUFFIXES.some((suffix) => host.endsWith(suffix));
-  return ngrok && parsed.pathname.indexOf("/r/") >= 0 ? parsed.toString() : null;
+  return ngrok && parsed.pathname.startsWith(home.pathname) ? parsed.toString() : null;
 }
 
 /* renotify: a push that replaces one still shown under its tag alerts again.

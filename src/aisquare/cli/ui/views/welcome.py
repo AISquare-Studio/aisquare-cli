@@ -1381,9 +1381,9 @@ class WelcomeView(VerticalScroll):
                 )
             else:
                 status.append(
-                    f"\nOpen the manager and answer {self._agent_name()}'s question about "
-                    f"trusting this folder{self._hooks_review()}; then "
-                    f"{self.escape_key.upper()} and w bring you back here to start the coders.",
+                    f"\nOpen the manager and {self._folder_question()}{self._hooks_review()}; "
+                    f"then {self.escape_key.upper()} and w bring you back here to start the "
+                    "coders.",
                     style="dim",
                 )
         if up:
@@ -1536,6 +1536,12 @@ class WelcomeView(VerticalScroll):
                 "trust aisquare's hooks, which it runs only once trusted"
             )
         return f"{name} asks once whether you trust this folder"
+
+    def _folder_question(self) -> str:
+        """What step 3 asks the user to answer in the manager's pane, as the demo waits for it."""
+        if self.claude is None or self.claude.agent == accounts_core.AGENT:
+            return "answer Claude Code's question about trusting this folder"
+        return f"answer {self.claude.label}'s question about trusting this folder"
 
     def _hooks_review(self) -> str:
         if self.claude is not None and self.claude.trust_pending:

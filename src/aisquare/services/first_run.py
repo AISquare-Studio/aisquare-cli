@@ -665,9 +665,20 @@ def sign_in_slot(state: ClaudeState) -> int:
     return plain.slot
 
 
-def choose_agent(agent: str) -> None:
-    """Save ``agent`` as the user default (``aisquare agents use``): step 2's pick."""
-    agent_launch.use(agent)
+class AgentNotSaved(RuntimeError):
+    """``agents use`` did not save the default agent; the message is the CLI's own."""
+
+
+def choose_agent(agent: str, *, run: Runner = selfcli.run) -> None:
+    """Save ``agent`` as the user default: ``aisquare --json agents use <agent>``, step 2's
+    pick. The command, not its function: a config write is the CLI's to make and to report
+    (tests/test_config_writes_stay_in_the_cli.py), as Connect is ``agents connect``."""
+    try:
+        result = run(["--json", "agents", "use", agent], cwd=None)
+    except Exception as exc:
+        raise AgentNotSaved(f"could not run aisquare agents use {agent}: {_why(exc)}") from exc
+    if not result.ok:
+        raise AgentNotSaved(onboarding.failure_reason(result, f"agents use {agent}"))
 
 
 def connect_fix(agent: str = accounts_core.AGENT, home: Path | None = None) -> FixCommand:
@@ -1223,6 +1234,7 @@ def start_on_agent(
     coders: int = CODERS,
     which: Callable[[str], str | None] = shutil.which,
     on_step: Callable[[FleetStep], None] | None = None,
+    run: Runner = selfcli.run,
 ) -> FleetStart:
     """:func:`start_fleet` on the agent step 2 showed for ``project`` (:func:`fleet_agent`).
 
@@ -1237,7 +1249,7 @@ def start_on_agent(
     notes: tuple[str, ...] = ()
     if choice.inferred:
         try:
-            choose_agent(choice.agent)
+            choose_agent(choice.agent, run=run)
             notes = (f"{agent_label(choice.agent)} is now your default coding agent",)
         except Exception as exc:
             notes = (f"could not save {choice.agent} as your default agent: {_why(exc)}",)

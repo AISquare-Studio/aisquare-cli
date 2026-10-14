@@ -1487,6 +1487,8 @@ def _writing_workers() -> dict[str, str]:
         onboard.ONBOARD_WORKER: "a folder's setup",
         welcome.worker_name("onboard"): "a folder's setup",
         welcome.worker_name("connect"): "Connect",
+        welcome.worker_name("choose"): "the default agent's save",
+        welcome.worker_name("sign-in"): "a sign-in's start",
         welcome.worker_name("manager"): "a manager start",
         welcome.worker_name("coders"): "the coders' start",
         project.SPAWN_WORKER: "a manager start",
@@ -1518,6 +1520,7 @@ def _waited_reads() -> dict[str, str]:
         explainability,
         project,
         settings,
+        spawn,
         welcome,
     )
 
@@ -1535,6 +1538,7 @@ def _waited_reads() -> dict[str, str]:
         welcome.worker_name("look"): "Welcome's checks",
         welcome.worker_name("candidates"): "Welcome's folder list",
         welcome.worker_name("validate"): "Welcome's folder check",
+        spawn.FACTS_WORKER: "the spawn dialog's choices",
     }
 
 
